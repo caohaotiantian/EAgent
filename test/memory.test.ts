@@ -176,3 +176,43 @@ test("compaction does not mutate the persistent transcript", async () => {
   const first = agent.messages[0]!.content[0]!;
   assert.ok(first.type === "text" && first.text === "q0");
 });
+
+test("/memory prints config and cache status, /compact folds older messages", async () => {
+  const { agent, host, commands } = makeHarness({
+    responder: (req: CompletionRequest) =>
+      /summar/i.test(req.systemPrompt) ? { text: "SUMMARY" } : { text: "ok" },
+    fallback: "allow",
+  });
+  await host.use("memory", activate);
+
+  // Seed a long transcript so there is something to compact.
+  const seed: Message[] = [];
+  for (let i = 0; i < 10; i++) seed.push({ role: "user", content: [{ type: "text", text: `m${i}` }] });
+  agent.load(seed);
+
+  const mem = async (args: string) => {
+    const out: string[] = [];
+    await commands.get("memory")!.run({ agent, args, print: (l) => out.push(l) });
+    return out;
+  };
+  let out = await mem("");
+  assert.match(out.join("\n"), /threshold=\d+ keepRecent=\d+/);
+  assert.match(out.join("\n"), /cached summary: none/);
+
+  // Force a compaction, then the cache should be reported as present.
+  const cout: string[] = [];
+  await commands.get("compact")!.run({ agent, args: "", print: (l) => cout.push(l) });
+  assert.match(cout.join("\n"), /Compacted \d+ message/);
+
+  out = await mem("");
+  assert.match(out.join("\n"), /cached summary: yes/);
+});
+
+test("/compact with too few messages reports nothing to compact", async () => {
+  const { agent, host, commands } = makeHarness({ fallback: "allow" });
+  await host.use("memory", activate);
+  agent.load([{ role: "user", content: [{ type: "text", text: "just one" }] }]);
+  const out: string[] = [];
+  await commands.get("compact")!.run({ agent, args: "", print: (l) => out.push(l) });
+  assert.match(out.join("\n"), /Nothing to compact/);
+});
