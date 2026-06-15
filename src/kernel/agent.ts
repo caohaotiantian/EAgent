@@ -148,6 +148,10 @@ export class Agent {
     let reason: StopReason = "end_turn";
 
     await this.hooks.emit("agent_start", { input: userMessage });
+    // The user's message is a completed message appended to the transcript, so
+    // it emits `message` like any other — observers (journal, renderers) see
+    // every message uniformly.
+    await this.hooks.emit("message", { message: userMessage });
     try {
       for (let turn = 1; turn <= this.maxTurns; turn++) {
         this.drainInto(this.#steering, this.#messages);

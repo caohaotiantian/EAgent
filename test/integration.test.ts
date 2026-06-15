@@ -24,6 +24,7 @@ import self from "../src/extensions/self.js";
 import web from "../src/extensions/web.js";
 import checkpoint from "../src/extensions/checkpoint.js";
 import introspect from "../src/extensions/introspect.js";
+import journal from "../src/extensions/journal.js";
 import { makeHarness } from "./helpers.js";
 
 type Activate = Parameters<ReturnType<typeof makeHarness>["host"]["use"]>[1];
@@ -45,6 +46,7 @@ const EXTENSIONS: [string, Activate][] = [
   ["web", web],
   ["checkpoint", checkpoint],
   ["introspect", introspect],
+  ["journal", journal],
 ];
 
 async function loadAll(): Promise<ReturnType<typeof makeHarness>> {
@@ -72,7 +74,7 @@ test("the combined tool surface is present", async () => {
 test("the combined command surface is present", async () => {
   const h = await loadAll();
   const names = new Set(h.commands.list().map((c) => c.name));
-  for (const expected of ["tools", "skills", "mcp", "code", "agents", "memory", "plan", "save", "pkg-list", "trace", "usage", "context", "limits", "self", "fetch", "checkpoints", "describe", "apropos"]) {
+  for (const expected of ["tools", "skills", "mcp", "code", "agents", "memory", "plan", "save", "pkg-list", "trace", "usage", "context", "limits", "self", "fetch", "checkpoints", "describe", "apropos", "journal", "resume"]) {
     assert.ok(names.has(expected), `command /${expected} should be registered`);
   }
 });

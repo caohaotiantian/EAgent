@@ -51,7 +51,11 @@ that provider automatically (override with `--provider`):
 ```bash
 ANTHROPIC_API_KEY=sk-... node dist/cli.js -m claude-fable-5
 OPENAI_API_KEY=sk-...    node dist/cli.js -p openai -m gpt-4o
+GEMINI_API_KEY=...       node dist/cli.js -p gemini -m gemini-2.0-flash
 ```
+
+Any OpenAI-compatible endpoint works through the OpenAI provider — e.g. a local
+Ollama: `OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama node dist/cli.js -p openai -m llama3`.
 
 Interactive session commands: `/help`, `/tools`, `/skills`, `/extensions`,
 `/reload`, `/caps`, `/model`, `/provider`, `/clear`, `/quit`.
@@ -178,6 +182,7 @@ offline tests, and gates privileged work behind a capability.
 | `web`         | capability-gated HTTP access (`fetch_url`), size-bounded | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword (`describe_tool` tool) | `/describe`, `/apropos` | — |
+| `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
 `{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
