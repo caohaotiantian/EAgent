@@ -132,6 +132,28 @@ e.hook("transformContext", (messages) => [systemNote, ...messages]);
 where memory strategies, plan-mode approvals, safety gates, and context
 engineering plug in — without touching the loop.
 
+## Built-in extensions
+
+Everything below is an extension — none of it is in the kernel, and any of it can
+be replaced or removed. Each is a single file under `src/extensions/`, ships with
+offline tests, and gates privileged work behind a capability.
+
+| Extension     | What it adds | Commands | Capability |
+| ------------- | ------------ | -------- | ---------- |
+| `core-tools`  | `read`, `write`, `edit`, `bash` | `/tools` | `fs:read`, `fs:write`, `shell:exec` |
+| `skills`      | LLM-authored skills via `SKILL.md` with progressive disclosure | `/skills` | `skill:read`, `skill:write` |
+| `mcp`         | Model Context Protocol client (stdio, newline-delimited JSON-RPC 2.0); registers each server's tools as `mcp__<server>__<tool>` | `/mcp` | `mcp:call` |
+| `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary (scrubbed env, timeout) | `/code` | `code:exec` |
+| `subagents`   | `spawn_agent` runs isolated child agents in single / parallel / chain modes | `/agents` | `agent:spawn` |
+| `memory`      | context compaction via `transformContext` (cached branch summaries) + `remember`/`recall` scratchpad | `/compact`, `/memory` | — |
+| `planmode`    | human-in-the-loop approval gate before mutating tools run | `/plan` | — |
+| `session`     | save / load / handoff for transcripts (file-based memory) | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
+| `packages`    | install extensions from `path:` / `git:` / `npm:` sources (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
+
+The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
+`{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
+with `EAGENT_SKILLS_DIR`).
+
 ## Capabilities: the one thing pi omits
 
 pi runs extensions in-process with full privileges and tells you to containerize.
@@ -200,10 +222,11 @@ suite runs offline and why you can explore the agent with no API key.
 ```
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock (deterministic) and anthropic (fetch + SSE, no SDK)
-src/extensions/  core-tools (read/write/edit/bash), skills (SKILL.md)
+src/extensions/  core-tools, skills, mcp, codeact, subagents, memory,
+                 planmode, session, packages — all riding the ExtensionAPI
 src/cli.ts       the terminal host: interactive REPL + batch + one-shot
 examples/        a worked example extension (clock & guardrails)
-test/            36 tests covering every primitive, offline
+test/            the full suite, every primitive and extension, offline
 ```
 
 ## License

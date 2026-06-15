@@ -23,7 +23,7 @@ export type { Decision, AuditEntry, CapabilityOptions } from "./capabilities.js"
 export { validate } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
 export { ExtensionHost } from "./extension.js";
-export type { ExtensionAPI, ActivateFn, ExtensionHostOptions } from "./extension.js";
+export type { ExtensionAPI, ActivateFn, Deactivate, ExtensionHostOptions } from "./extension.js";
 export { CommandRegistry } from "./commands.js";
 export type { Command, CommandContext } from "./commands.js";
 export {
