@@ -63,7 +63,10 @@ export interface ExtensionAPI {
   reload(): Promise<void>;
 }
 
-export type ActivateFn = (api: ExtensionAPI) => void | Disposable | Promise<void | Disposable>;
+/** What an extension may return: nothing, a `Disposable`, or a deactivate
+ *  function — synchronously or as a promise. All are run on unload/reload. */
+export type Deactivate = Disposable | (() => void);
+export type ActivateFn = (api: ExtensionAPI) => Deactivate | void | Promise<Deactivate | void>;
 
 interface LoadedExtension {
   id: string;

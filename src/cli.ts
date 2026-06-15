@@ -24,6 +24,13 @@ import { AnthropicProvider } from "./providers/anthropic.js";
 import { MockProvider } from "./providers/mock.js";
 import coreTools from "./extensions/core-tools.js";
 import skills from "./extensions/skills.js";
+import mcp from "./extensions/mcp.js";
+import codeact from "./extensions/codeact.js";
+import subagents from "./extensions/subagents.js";
+import memory from "./extensions/memory.js";
+import planmode from "./extensions/planmode.js";
+import session from "./extensions/session.js";
+import packages from "./extensions/packages.js";
 
 interface Args {
   model?: string;
@@ -104,9 +111,18 @@ async function main(): Promise<void> {
     store: new FileBackend(join(homedir(), ".eagent", "state")),
   });
 
-  // Built-ins ride the same activation path as any other extension.
+  // Built-ins ride the same activation path as any other extension. Each is
+  // inert until used (plan mode off, no MCP servers, capabilities gated), so
+  // loading them all by default is safe and shows the whole system.
   await host.use("core-tools", coreTools);
   await host.use("skills", skills);
+  await host.use("mcp", mcp);
+  await host.use("codeact", codeact);
+  await host.use("subagents", subagents);
+  await host.use("memory", memory);
+  await host.use("planmode", planmode);
+  await host.use("session", session);
+  await host.use("packages", packages);
   await host.discover([
     join(process.cwd(), ".eagent", "extensions"),
     join(homedir(), ".eagent", "extensions"),
