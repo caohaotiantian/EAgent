@@ -45,11 +45,12 @@ node dist/cli.js -e "hello"
 printf '/tools\n/uptime\n/quit\n' | node dist/cli.js --ext examples/extensions/clock.ts
 ```
 
-For a live model, set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`)
-and the CLI uses the real Anthropic provider automatically:
+For a live model, set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and the CLI selects
+that provider automatically (override with `--provider`):
 
 ```bash
 ANTHROPIC_API_KEY=sk-... node dist/cli.js -m claude-fable-5
+OPENAI_API_KEY=sk-...    node dist/cli.js -p openai -m gpt-4o
 ```
 
 Interactive session commands: `/help`, `/tools`, `/skills`, `/extensions`,
@@ -233,7 +234,8 @@ See `docs/EXTENSIONS.md` for the full extension author's guide.
 
 ```
 src/kernel/      the seven primitives + public barrel (index.ts)
-src/providers/   mock (deterministic) and anthropic (fetch + SSE, no SDK)
+src/providers/   mock (deterministic), anthropic + openai (fetch + SSE, no SDK,
+                 shared retry/usage plumbing in http.ts)
 src/extensions/  core-tools, skills, mcp, codeact, subagents, memory,
                  planmode, session, packages — all riding the ExtensionAPI
 src/cli.ts       the terminal host: interactive REPL + batch + one-shot

@@ -21,14 +21,15 @@ Initial release.
   extension host (discovery, activation, the `ExtensionAPI`, hot reload via
   `jiti`), and the command registry (user-facing slash commands).
 - **Providers** — `MockProvider`, a scriptable deterministic LLM that keeps the
-  whole suite offline; and `AnthropicProvider`, a real Messages-API client over
-  `fetch` and SSE with retries on 429/5xx/network errors and token-usage
-  accounting (no SDK, no extra dependency).
+  whole suite offline; and two real `fetch` + SSE clients with no SDK,
+  `AnthropicProvider` (Messages API) and `OpenAIProvider` (Chat Completions and
+  compatible endpoints), sharing retry/backoff and token-usage plumbing
+  (`providers/http.ts`); retries cover 429/5xx/network errors.
 - **Built-in extensions**, each riding the `ExtensionAPI`, capability-gated, and
   shipped with offline tests:
-  - `core-tools` — `read`, `write`, `edit`, `bash`.
+  - `core-tools` — `read`, `write`, `edit` (confined to a workspace root), `bash`.
   - `skills` — LLM-authored skills via `SKILL.md` with progressive disclosure.
-  - `mcp` — a Model Context Protocol client over stdio.
+  - `mcp` — a Model Context Protocol client over stdio and Streamable HTTP.
   - `codeact` — code-as-action execution in a subprocess boundary.
   - `subagents` — isolated child agents (single / parallel / chain).
   - `memory` — context compaction plus a `remember`/`recall` scratchpad.
