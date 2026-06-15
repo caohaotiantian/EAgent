@@ -7,14 +7,22 @@
  * to vouch for. So we speak to them the way Emacs speaks to a subprocess — at
  * arm's length, over a pipe — rather than loading them into our address space.
  *
- * The transport is MCP's stdio framing: JSON-RPC 2.0 messages, one compact JSON
- * object per line, newline-terminated (NOT the LSP `Content-Length` framing).
- * We spawn each configured server, perform the `initialize` / `initialized`
- * handshake, enumerate its tools, and surface each one into EAgent under a
- * namespaced name (`mcp__<server>__<tool>`). Calling such a tool is privileged:
- * it reaches outside the kernel, so it is gated behind the `mcp:call`
- * capability. On unload every subprocess is killed, returning us to a clean
- * slate — the same precise teardown a hot reload depends on.
+ * Two transports are supported, chosen per server config:
+ *
+ *   - stdio: we spawn the server and exchange MCP's newline-delimited JSON-RPC
+ *     2.0 framing (one compact JSON object per line — NOT the LSP
+ *     `Content-Length` framing) over its pipes.
+ *   - Streamable HTTP (MCP 2025): we POST a single JSON-RPC message per request
+ *     to a configured `url`, accepting either an `application/json` reply or an
+ *     SSE (`text/event-stream`) stream from which we read the matching response.
+ *     A `Mcp-Session-Id` handed back on initialize is echoed on later calls.
+ *
+ * Either way we perform the `initialize` / `initialized` handshake, enumerate
+ * the server's tools, and surface each one into EAgent under a namespaced name
+ * (`mcp__<server>__<tool>`). Calling such a tool is privileged: it reaches
+ * outside the kernel, so it is gated behind the `mcp:call` capability. On unload
+ * every connection is torn down, returning us to a clean slate — the same
+ * precise teardown a hot reload depends on.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -24,12 +32,26 @@ import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { JSONSchema } from "../kernel/types.js";
 
-/** A server entry as found in `EAGENT_MCP_SERVERS`. */
-interface ServerDef {
+/** A stdio server entry as found in `EAGENT_MCP_SERVERS`. */
+interface StdioServerDef {
   name: string;
   command: string;
   args?: string[];
   env?: Record<string, string>;
+}
+
+/** An HTTP (Streamable HTTP) server entry as found in `EAGENT_MCP_SERVERS`. */
+interface HttpServerDef {
+  name: string;
+  url: string;
+  headers?: Record<string, string>;
+}
+
+/** A server entry: stdio (has `command`) or HTTP (has `url`). */
+type ServerDef = StdioServerDef | HttpServerDef;
+
+function isHttpDef(def: ServerDef): def is HttpServerDef {
+  return typeof (def as HttpServerDef).url === "string";
 }
 
 /** A tool as described by an MCP server's `tools/list`. */
@@ -48,27 +70,40 @@ interface McpCallResult {
 const PROTOCOL_VERSION = "2024-11-05";
 
 /**
- * One connected MCP server: owns the subprocess, the line reader, and the
- * JSON-RPC id→promise correlation table.
+ * The narrow contract every transport satisfies. The connect/register logic
+ * (handshake, tool enumeration, proxying) is written once against this and so is
+ * identical whether we are talking to a subprocess or an HTTP endpoint.
  */
-class McpConnection {
-  readonly name: string;
+interface Transport {
+  /** Send a JSON-RPC request and await its correlated response result. */
+  request(method: string, params: unknown): Promise<unknown>;
+  /** Send a JSON-RPC notification (no id, no response expected). */
+  notify(method: string, params?: unknown): Promise<void>;
+  /** Tear down the transport, rejecting anything still pending. */
+  close(): void;
+}
+
+/**
+ * stdio transport: owns the subprocess, the line reader, and the JSON-RPC
+ * id→promise correlation table.
+ */
+class StdioTransport implements Transport {
+  readonly #name: string;
   readonly #child: ChildProcess;
   readonly #rl: Interface;
   readonly #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   #nextId = 1;
   #closed = false;
-  tools: McpTool[] = [];
 
-  constructor(def: ServerDef) {
-    this.name = def.name;
+  constructor(def: StdioServerDef) {
+    this.#name = def.name;
     this.#child = spawn(def.command, def.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...def.env },
     });
     // A spawn failure (bad command) surfaces asynchronously; reject everything.
     this.#child.on("error", (err) => this.#failAll(err));
-    this.#child.on("exit", () => this.#failAll(new Error(`MCP server "${this.name}" exited`)));
+    this.#child.on("exit", () => this.#failAll(new Error(`MCP server "${this.#name}" exited`)));
     // Server logs/diagnostics go to stderr; we deliberately ignore them.
     this.#child.stderr?.resume();
 
@@ -76,21 +111,8 @@ class McpConnection {
     this.#rl.on("line", (line) => this.#onLine(line));
   }
 
-  /** Run the handshake and load the tool list. Throws if the server misbehaves. */
-  async start(): Promise<void> {
-    await this.request("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: "eagent", version: "0.1" },
-    });
-    this.notify("notifications/initialized");
-    const listed = (await this.request("tools/list", {})) as { tools?: McpTool[] } | undefined;
-    this.tools = listed?.tools ?? [];
-  }
-
-  /** Send a JSON-RPC request and await its correlated response. */
   request(method: string, params: unknown): Promise<unknown> {
-    if (this.#closed) return Promise.reject(new Error(`MCP server "${this.name}" is closed`));
+    if (this.#closed) return Promise.reject(new Error(`MCP server "${this.#name}" is closed`));
     const id = this.#nextId++;
     const payload = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
@@ -99,13 +121,12 @@ class McpConnection {
     });
   }
 
-  /** Send a JSON-RPC notification (no id, no response expected). */
-  notify(method: string, params?: unknown): void {
-    if (this.#closed) return;
-    this.#write({ jsonrpc: "2.0", method, params: params ?? {} });
+  notify(method: string, params?: unknown): Promise<void> {
+    if (!this.#closed) this.#write({ jsonrpc: "2.0", method, params: params ?? {} });
+    return Promise.resolve();
   }
 
-  dispose(): void {
+  close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#rl.close();
@@ -114,7 +135,7 @@ class McpConnection {
     } catch {
       // already gone
     }
-    this.#failAll(new Error(`MCP server "${this.name}" disposed`));
+    this.#failAll(new Error(`MCP server "${this.#name}" disposed`));
   }
 
   #write(message: unknown): void {
@@ -143,6 +164,138 @@ class McpConnection {
     if (this.#pending.size === 0) return;
     for (const waiter of this.#pending.values()) waiter.reject(err);
     this.#pending.clear();
+  }
+}
+
+/**
+ * Streamable HTTP transport (MCP 2025). Each request is a self-contained POST:
+ * we send one JSON-RPC message and read one JSON-RPC response back, accepting
+ * either an `application/json` body or an SSE stream whose `data:` payloads
+ * carry the response. The `Mcp-Session-Id` from initialize, if any, is echoed
+ * on every subsequent request.
+ */
+class HttpTransport implements Transport {
+  readonly #name: string;
+  readonly #url: string;
+  readonly #headers: Record<string, string>;
+  #sessionId: string | undefined;
+  #nextId = 1;
+  #closed = false;
+
+  constructor(def: HttpServerDef) {
+    this.#name = def.name;
+    this.#url = def.url;
+    this.#headers = def.headers ?? {};
+  }
+
+  async request(method: string, params: unknown): Promise<unknown> {
+    if (this.#closed) throw new Error(`MCP server "${this.#name}" is closed`);
+    const id = this.#nextId++;
+    const res = await this.#post({ jsonrpc: "2.0", id, method, params });
+    if (!res.ok) {
+      throw new Error(`MCP HTTP ${method} failed: ${res.status} ${res.statusText}`);
+    }
+    // initialize hands back a session id we must carry on later requests.
+    const session = res.headers.get("mcp-session-id");
+    if (session) this.#sessionId = session;
+
+    const msg = await this.#readResponse(res, id);
+    if (msg.error) throw new Error(msg.error.message ?? "MCP error");
+    return msg.result;
+  }
+
+  async notify(method: string, params?: unknown): Promise<void> {
+    if (this.#closed) return;
+    // Notifications carry no id and expect a 202/empty acknowledgement.
+    const res = await this.#post({ jsonrpc: "2.0", method, params: params ?? {} });
+    // Drain any body so the socket can be reused; we ignore the content.
+    await res.body?.cancel().catch(() => {});
+  }
+
+  close(): void {
+    this.#closed = true;
+  }
+
+  #post(message: unknown): Promise<Response> {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...this.#headers,
+    };
+    if (this.#sessionId) headers["mcp-session-id"] = this.#sessionId;
+    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message) });
+  }
+
+  /** Read one JSON-RPC response from either a JSON body or an SSE stream. */
+  async #readResponse(
+    res: Response,
+    id: number,
+  ): Promise<{ id?: unknown; result?: unknown; error?: { message?: string } }> {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/event-stream")) {
+      const text = await res.text();
+      return this.#parseSse(text, id);
+    }
+    // Default to JSON: one JSON-RPC response object in the body.
+    return (await res.json()) as { id?: unknown; result?: unknown; error?: { message?: string } };
+  }
+
+  /** Pull the JSON-RPC response matching `id` out of an SSE stream body. */
+  #parseSse(text: string, id: number): { id?: unknown; result?: unknown; error?: { message?: string } } {
+    // SSE events are separated by blank lines; data may span multiple `data:` lines.
+    for (const block of text.split(/\r?\n\r?\n/)) {
+      const data = block
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).replace(/^ /, ""))
+        .join("\n");
+      if (!data) continue;
+      let msg: { id?: unknown; result?: unknown; error?: { message?: string } };
+      try {
+        msg = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (msg.id === id) return msg;
+    }
+    throw new Error(`MCP HTTP server "${this.#name}" returned no response for request ${id}`);
+  }
+}
+
+/**
+ * One connected MCP server: pairs a transport with the cached tool list. The
+ * transport choice (stdio vs HTTP) is the only thing that varies; the handshake
+ * and tool enumeration below are transport-agnostic.
+ */
+class McpConnection {
+  readonly name: string;
+  readonly #transport: Transport;
+  tools: McpTool[] = [];
+
+  constructor(def: ServerDef) {
+    this.name = def.name;
+    this.#transport = isHttpDef(def) ? new HttpTransport(def) : new StdioTransport(def);
+  }
+
+  /** Run the handshake and load the tool list. Throws if the server misbehaves. */
+  async start(): Promise<void> {
+    await this.#transport.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "eagent", version: "0.1" },
+    });
+    await this.#transport.notify("notifications/initialized");
+    const listed = (await this.#transport.request("tools/list", {})) as { tools?: McpTool[] } | undefined;
+    this.tools = listed?.tools ?? [];
+  }
+
+  /** Proxy a JSON-RPC request to the underlying transport. */
+  request(method: string, params: unknown): Promise<unknown> {
+    return this.#transport.request(method, params);
+  }
+
+  dispose(): void {
+    this.#transport.close();
   }
 }
 
@@ -230,15 +383,13 @@ function parseServers(warn: (msg: string) => void, raw: string | undefined): Ser
   }
   const out: ServerDef[] = [];
   for (const entry of parsed) {
-    if (
-      entry &&
-      typeof entry === "object" &&
-      typeof (entry as ServerDef).name === "string" &&
-      typeof (entry as ServerDef).command === "string"
-    ) {
-      out.push(entry as ServerDef);
+    const e = entry as Partial<StdioServerDef & HttpServerDef> | null;
+    if (e && typeof e === "object" && typeof e.name === "string" && typeof e.url === "string") {
+      out.push(entry as HttpServerDef);
+    } else if (e && typeof e === "object" && typeof e.name === "string" && typeof e.command === "string") {
+      out.push(entry as StdioServerDef);
     } else {
-      warn("Skipping MCP server entry missing string name/command.");
+      warn("Skipping MCP server entry missing string name with command or url.");
     }
   }
   return out;

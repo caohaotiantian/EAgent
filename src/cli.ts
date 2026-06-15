@@ -21,6 +21,7 @@ import { ExtensionHost } from "./kernel/extension.js";
 import { FileBackend } from "./kernel/store.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
+import { OpenAIProvider } from "./providers/openai.js";
 import { MockProvider } from "./providers/mock.js";
 import coreTools from "./extensions/core-tools.js";
 import skills from "./extensions/skills.js";
@@ -31,6 +32,8 @@ import memory from "./extensions/memory.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
+import trace from "./extensions/trace.js";
+import contextFiles from "./extensions/context-files.js";
 
 interface Args {
   model?: string;
@@ -85,7 +88,17 @@ async function main(): Promise<void> {
   };
 
   const anthropic = new AnthropicProvider();
-  const useAnthropic = anthropic.configured && args.provider !== "mock";
+  const openai = new OpenAIProvider();
+  // Pick a default provider: an explicit --provider wins if usable; otherwise
+  // prefer a configured live provider, falling back to the offline mock.
+  const defaultProvider = selectProvider(args.provider, {
+    anthropic: anthropic.configured,
+    openai: openai.configured,
+  });
+  const live = defaultProvider !== "mock";
+  const defaultModel =
+    defaultProvider === "anthropic" ? "claude-fable-5" : defaultProvider === "openai" ? "gpt-4o" : "mock";
+
   const capabilities = new CapabilityManager({
     ui,
     grant: ["fs:read", "fs:write", "skill:read"],
@@ -97,12 +110,13 @@ async function main(): Promise<void> {
     ui,
     logger,
     capabilities,
-    model: args.model ?? (useAnthropic ? "claude-fable-5" : "mock"),
-    provider: args.provider ?? (useAnthropic ? "anthropic" : "mock"),
+    model: args.model ?? defaultModel,
+    provider: defaultProvider,
   });
 
-  agent.providers.register(new MockProvider(), { default: !useAnthropic });
-  if (useAnthropic) agent.providers.register(anthropic, { default: true });
+  agent.providers.register(new MockProvider(), { default: defaultProvider === "mock" });
+  if (anthropic.configured) agent.providers.register(anthropic, { default: defaultProvider === "anthropic" });
+  if (openai.configured) agent.providers.register(openai, { default: defaultProvider === "openai" });
 
   const host = new ExtensionHost({
     agent,
@@ -123,6 +137,8 @@ async function main(): Promise<void> {
   await host.use("planmode", planmode);
   await host.use("session", session);
   await host.use("packages", packages);
+  await host.use("trace", trace);
+  await host.use("context-files", contextFiles);
   await host.discover([
     join(process.cwd(), ".eagent", "extensions"),
     join(homedir(), ".eagent", "extensions"),
@@ -134,7 +150,21 @@ async function main(): Promise<void> {
 
   wireRendering(agent);
 
-  banner(agent, host, useAnthropic);
+  // Ctrl-C aborts the in-flight turn rather than killing the process; a second
+  // press at an idle prompt exits.
+  if (rl) {
+    rl.on("SIGINT", () => {
+      if (agent.running) {
+        agent.stop();
+        console.log(C.yellow("\n⏹ interrupted"));
+      } else {
+        console.log();
+        rl.close();
+      }
+    });
+  }
+
+  banner(agent, host, live);
 
   if (args.eval !== undefined) {
     await runTurn(agent, args.eval);
@@ -296,7 +326,7 @@ function registerHostCommands(commands: CommandRegistry, host: ExtensionHost, ag
   });
   commands.register({
     name: "provider",
-    description: "Get or set the active provider (mock|anthropic).",
+    description: "Get or set the active provider (mock|anthropic|openai).",
     run: (ctx) => {
       const name = ctx.args.trim();
       if (name) {
@@ -314,6 +344,20 @@ function registerHostCommands(commands: CommandRegistry, host: ExtensionHost, ag
       ctx.print(C.dim("Transcript cleared (start a new topic)."));
     },
   });
+}
+
+/** Resolve which provider to default to given the user's flag and what's configured. */
+function selectProvider(
+  requested: string | undefined,
+  configured: { anthropic: boolean; openai: boolean },
+): string {
+  if (requested === "mock") return "mock";
+  if (requested === "anthropic" && configured.anthropic) return "anthropic";
+  if (requested === "openai" && configured.openai) return "openai";
+  if (requested && requested !== "anthropic" && requested !== "openai") return requested;
+  if (configured.anthropic) return "anthropic";
+  if (configured.openai) return "openai";
+  return "mock";
 }
 
 function banner(agent: Agent, host: ExtensionHost, live: boolean): void {
