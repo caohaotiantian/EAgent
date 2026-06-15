@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multimodal image support: an `image` content block (inline base64 or URL),
+  mapped to Anthropic and OpenAI multimodal formats, plus an `imageMessage`
+  helper. The kernel treats images opaquely; text-only providers account for
+  them.
+- `introspect` extension — self-documentation à la Emacs `describe-function` /
+  `apropos`: `/describe <name>`, `/apropos <keyword>`, and a `describe_tool`
+  tool so the agent can inspect its own surface.
+
 - `web` extension — capability-gated HTTP access (`fetch_url`, `/fetch`) behind
   `net:fetch`, with response-size bounds. Fills the previously-unused `net:fetch`
   capability.

@@ -33,7 +33,29 @@ export interface ToolResultBlock {
   isError?: boolean;
 }
 
-export type ContentBlock = TextBlock | ToolCallBlock | ToolResultBlock;
+/**
+ * An image, supplied either inline (base64 in `data`) or by reference (`url`).
+ * Providers map it to their own multimodal format; text-only providers and the
+ * mock simply account for it. The kernel treats it opaquely.
+ */
+export interface ImageBlock {
+  type: "image";
+  /** MIME type, e.g. "image/png" (required for base64 data). */
+  mimeType: string;
+  /** Base64-encoded bytes (no `data:` prefix). Use this or `url`. */
+  data?: string;
+  /** A URL to the image, as an alternative to inline `data`. */
+  url?: string;
+}
+
+export type ContentBlock = TextBlock | ToolCallBlock | ToolResultBlock | ImageBlock;
+
+/** Build a user message carrying an image (plus optional caption text). */
+export function imageMessage(image: Omit<ImageBlock, "type">, caption?: string): Message {
+  const content: ContentBlock[] = [{ type: "image", ...image }];
+  if (caption) content.unshift({ type: "text", text: caption });
+  return { role: "user", content };
+}
 
 /**
  * A message in the running transcript.

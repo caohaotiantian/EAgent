@@ -104,6 +104,31 @@ test("maps EAgent messages to the OpenAI wire format", async () => {
   assert.equal(toolMsg.content, "2");
 });
 
+test("maps image content blocks to OpenAI's image_url array form", async () => {
+  let captured: any;
+  const provider = new OpenAIProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "caption" }, { type: "image", mimeType: "image/jpeg", data: "ZZZZ" }] },
+        ],
+      }),
+    ),
+  );
+  const userMsg = captured.messages.find((m: any) => m.role === "user" && Array.isArray(m.content));
+  assert.ok(userMsg, "user message should use array content when an image is present");
+  assert.equal(userMsg.content[0].type, "text");
+  assert.equal(userMsg.content[1].type, "image_url");
+  assert.equal(userMsg.content[1].image_url.url, "data:image/jpeg;base64,ZZZZ");
+});
+
 test("retries on 429 then succeeds", async () => {
   let calls = 0;
   const provider = new OpenAIProvider({

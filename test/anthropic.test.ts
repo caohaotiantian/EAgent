@@ -115,6 +115,31 @@ test("maps EAgent messages to the Anthropic wire format", async () => {
   assert.equal(captured.messages[1].content[0].type, "tool_use");
 });
 
+test("maps image content blocks to Anthropic's image source format", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    cache: false,
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "what is this?" }, { type: "image", mimeType: "image/png", data: "AAAA" }] },
+        ],
+      }),
+    ),
+  );
+  const content = captured.messages[0].content;
+  assert.equal(content[0].type, "text");
+  assert.equal(content[1].type, "image");
+  assert.deepEqual(content[1].source, { type: "base64", media_type: "image/png", data: "AAAA" });
+});
+
 test("marks the system prompt and tools as cacheable by default", async () => {
   let captured: any;
   const provider = new AnthropicProvider({

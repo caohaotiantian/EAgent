@@ -113,6 +113,7 @@ function estimateMessage(m: Message): number {
     if (b.type === "text") n += estimateTokens(b.text);
     else if (b.type === "tool_call") n += estimateTokens(JSON.stringify(b.arguments)) + 4;
     else if (b.type === "tool_result") n += estimateTokens(b.content);
+    else if (b.type === "image") n += 768; // a flat, plausible per-image cost
   }
   return n;
 }

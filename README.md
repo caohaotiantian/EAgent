@@ -177,6 +177,7 @@ offline tests, and gates privileged work behind a capability.
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions at runtime | `/self` | `self:read`, `self:extend` |
 | `web`         | capability-gated HTTP access (`fetch_url`), size-bounded | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
+| `introspect`  | self-documentation: describe any tool/command, search by keyword (`describe_tool` tool) | `/describe`, `/apropos` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
 `{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
