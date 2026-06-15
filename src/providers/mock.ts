@@ -76,7 +76,13 @@ export class MockProvider implements Provider {
 
     const stopReason: StopReason = (turn.toolCalls?.length ?? 0) > 0 ? "tool_use" : "end_turn";
     const message: Message = { role: "assistant", content };
-    yield { type: "done", message, stopReason };
+    // A deterministic, rough token estimate (~4 chars/token) so usage tracking
+    // is exercised offline. Real providers report exact counts.
+    const usage = {
+      inputTokens: estimateTokens(req.systemPrompt) + req.messages.reduce((n, m) => n + estimateMessage(m), 0),
+      outputTokens: estimateTokens(turn.text ?? ""),
+    };
+    yield { type: "done", message, stopReason, usage };
   }
 
   private nextTurn(req: CompletionRequest): MockTurn {
@@ -95,6 +101,20 @@ function echo(messages: Message[]): string {
     if (t && t.type === "text") return `(mock) you said: ${t.text}`;
   }
   return "(mock) hello";
+}
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function estimateMessage(m: Message): number {
+  let n = 0;
+  for (const b of m.content) {
+    if (b.type === "text") n += estimateTokens(b.text);
+    else if (b.type === "tool_call") n += estimateTokens(JSON.stringify(b.arguments)) + 4;
+    else if (b.type === "tool_result") n += estimateTokens(b.content);
+  }
+  return n;
 }
 
 function chunkText(text: string, size = 24): string[] {

@@ -27,6 +27,9 @@ import {
   type ToolResult,
   type ToolResultBlock,
   type UI,
+  type Usage,
+  ZERO_USAGE,
+  addUsage,
 } from "./types.js";
 import { validate } from "./validate.js";
 
@@ -71,6 +74,7 @@ export class Agent {
   readonly #followUps: Message[] = [];
   #running = false;
   #abort: AbortController | undefined;
+  #usage: Usage = { ...ZERO_USAGE };
 
   constructor(opts: AgentOptions = {}) {
     this.hooks = opts.hooks ?? new HookBus();
@@ -91,6 +95,11 @@ export class Agent {
 
   get running(): boolean {
     return this.#running;
+  }
+
+  /** Cumulative token usage across every model call this agent has made. */
+  get usage(): Usage {
+    return { ...this.#usage };
   }
 
   /** The capability-limited handle exposed to tools/extensions. */
@@ -227,15 +236,19 @@ export class Agent {
 
     let message: Message | undefined;
     let stopReason: StopReason = "end_turn";
+    let usage: Usage = { ...ZERO_USAGE };
     for await (const ev of provider.stream(req)) {
       if (ev.type === "text_delta") {
         await this.hooks.emit("text_delta", { text: ev.text });
       } else if (ev.type === "done") {
         message = ev.message;
         stopReason = ev.stopReason;
+        if (ev.usage) usage = ev.usage;
       }
     }
     if (!message) throw new Error(`provider "${provider.name}" stream ended without a "done" event`);
+    this.#usage = addUsage(this.#usage, usage);
+    await this.hooks.emit("usage", { usage, cumulative: { ...this.#usage } });
     return { message, stopReason };
   }
 

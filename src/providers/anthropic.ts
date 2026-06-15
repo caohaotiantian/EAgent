@@ -17,6 +17,7 @@ import type {
   StopReason,
   StreamEvent,
   ToolSpec,
+  Usage,
 } from "../kernel/types.js";
 
 export interface AnthropicOptions {
@@ -24,6 +25,10 @@ export interface AnthropicOptions {
   baseUrl?: string;
   version?: string;
   maxTokens?: number;
+  /** Max retry attempts on 429/5xx/network errors. Default 3. */
+  maxRetries?: number;
+  /** Injectable `fetch` for testing and proxies. Defaults to global fetch. */
+  fetch?: typeof fetch;
 }
 
 export class AnthropicProvider implements Provider {
@@ -32,12 +37,16 @@ export class AnthropicProvider implements Provider {
   readonly #baseUrl: string;
   readonly #version: string;
   readonly #maxTokens: number;
+  readonly #maxRetries: number;
+  readonly #fetch: typeof fetch;
 
   constructor(opts: AnthropicOptions = {}) {
     this.#apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? "";
     this.#baseUrl = (opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com").replace(/\/$/, "");
     this.#version = opts.version ?? "2023-06-01";
     this.#maxTokens = opts.maxTokens ?? 4096;
+    this.#maxRetries = opts.maxRetries ?? 3;
+    this.#fetch = opts.fetch ?? globalThis.fetch;
   }
 
   get configured(): boolean {
@@ -56,27 +65,14 @@ export class AnthropicProvider implements Provider {
       stream: true,
     };
 
-    const res = await fetch(`${this.#baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.#apiKey,
-        "anthropic-version": this.#version,
-      },
-      body: JSON.stringify(body),
-      signal: req.signal,
-    });
-
-    if (!res.ok || !res.body) {
-      const detail = await safeText(res);
-      throw new Error(`Anthropic API error ${res.status}: ${detail}`);
-    }
+    const res = await this.fetchWithRetry(req.signal, body);
 
     // Assemble blocks as they stream in.
     const blocks = new Map<number, { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; json: string }>();
     let stopReason: StopReason = "end_turn";
+    const usage: Usage = { inputTokens: 0, outputTokens: 0 };
 
-    for await (const event of parseSSE(res.body)) {
+    for await (const event of parseSSE(res.body!)) {
       const data = event.data;
       if (!data || data === "[DONE]") continue;
       let parsed: AnthropicStreamEvent;
@@ -87,6 +83,14 @@ export class AnthropicProvider implements Provider {
       }
 
       switch (parsed.type) {
+        case "message_start": {
+          // Initial usage (input tokens, and any already-known output tokens).
+          if (parsed.message?.usage) {
+            usage.inputTokens = parsed.message.usage.input_tokens ?? 0;
+            usage.outputTokens = parsed.message.usage.output_tokens ?? 0;
+          }
+          break;
+        }
         case "content_block_start": {
           const cb = parsed.content_block;
           if (cb.type === "text") blocks.set(parsed.index, { type: "text", text: "" });
@@ -107,6 +111,7 @@ export class AnthropicProvider implements Provider {
         }
         case "message_delta": {
           if (parsed.delta.stop_reason) stopReason = mapStopReason(parsed.delta.stop_reason);
+          if (parsed.usage?.output_tokens !== undefined) usage.outputTokens = parsed.usage.output_tokens;
           break;
         }
         default:
@@ -130,8 +135,68 @@ export class AnthropicProvider implements Provider {
       }
     }
 
-    yield { type: "done", message: { role: "assistant", content }, stopReason };
+    yield { type: "done", message: { role: "assistant", content }, stopReason, usage };
   }
+
+  /**
+   * POST the request, retrying transient failures (429 and 5xx, plus network
+   * errors) with exponential backoff. Honors a `retry-after` header when the
+   * server provides one, and gives up after `maxRetries` attempts or if the
+   * caller aborts. 4xx other than 429 are non-retryable and surface immediately.
+   */
+  private async fetchWithRetry(signal: AbortSignal, body: unknown): Promise<Response> {
+    let attempt = 0;
+    for (;;) {
+      let res: Response;
+      try {
+        res = await this.#fetch(`${this.#baseUrl}/v1/messages`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": this.#apiKey,
+            "anthropic-version": this.#version,
+          },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (err) {
+        if (signal.aborted || attempt >= this.#maxRetries) throw err;
+        await backoff(attempt++, null, signal);
+        continue;
+      }
+
+      if (res.ok && res.body) return res;
+
+      const retryable = res.status === 429 || res.status >= 500;
+      if (!retryable || attempt >= this.#maxRetries) {
+        throw new Error(`Anthropic API error ${res.status}: ${await safeText(res)}`);
+      }
+      await backoff(attempt++, res.headers.get("retry-after"), signal);
+    }
+  }
+}
+
+/** Wait `2^attempt` seconds (jittered), or a server-provided `retry-after`. */
+async function backoff(attempt: number, retryAfter: string | null, signal: AbortSignal): Promise<void> {
+  let ms: number;
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    ms = Number.isFinite(seconds) ? seconds * 1000 : 1000;
+  } else {
+    ms = Math.min(2 ** attempt * 1000, 16000) + Math.floor(Math.random() * 250);
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("aborted"));
+    };
+    if (signal.aborted) return onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 // -- wire-format mapping ----------------------------------------------------
@@ -222,8 +287,14 @@ async function safeText(res: Response): Promise<string> {
 
 // -- minimal stream-event typings -------------------------------------------
 
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
 type AnthropicStreamEvent =
+  | { type: "message_start"; message?: { usage?: AnthropicUsage } }
   | { type: "content_block_start"; index: number; content_block: { type: "text" } | { type: "tool_use"; id: string; name: string } }
   | { type: "content_block_delta"; index: number; delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string } }
-  | { type: "message_delta"; delta: { stop_reason?: string } }
-  | { type: "message_start" | "message_stop" | "content_block_stop" | "ping" };
+  | { type: "message_delta"; delta: { stop_reason?: string }; usage?: AnthropicUsage }
+  | { type: "message_stop" | "content_block_stop" | "ping" };

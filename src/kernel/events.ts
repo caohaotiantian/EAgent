@@ -6,7 +6,7 @@
  * (intervene): a value threaded through handlers that may transform or veto.
  */
 
-import type { Message, StopReason, ToolCallBlock, ToolResult } from "./types.js";
+import type { Message, StopReason, ToolCallBlock, ToolResult, Usage } from "./types.js";
 
 export type KernelEvents = {
   /** A fresh extension runtime has come up (also fired after a reload). */
@@ -28,6 +28,9 @@ export type KernelEvents = {
 
   tool_start: { call: ToolCallBlock };
   tool_end: { call: ToolCallBlock; result: ToolResult };
+
+  /** Token usage for the just-finished model call, plus the running total. */
+  usage: { usage: Usage; cumulative: Usage };
 
   error: { error: unknown; where: string };
 };
