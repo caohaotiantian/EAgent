@@ -17,8 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events as tokens arrive, not just a final `message`.
 - `limits` gains an opt-in per-run **token budget** (`maxTokensPerRun`, default
   off) that blocks further tool calls once the run's token usage is exceeded.
+- `journal` extension — durable, append-only conversation journaling (opt-in via
+  `/journal on` or `EAGENT_JOURNAL`) with `/resume` for crash recovery across
+  processes.
 
 ### Changed
+
+- The agent now emits a `message` event for the user's message too, so every
+  message in the transcript is observed uniformly (journal, renderers).
 
 - Hardening: a failed extension activation now rolls back its partial
   registrations (no half-wired tools/hooks), and a failing built-in is logged

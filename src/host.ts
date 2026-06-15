@@ -41,6 +41,7 @@ import self from "./extensions/self.js";
 import web from "./extensions/web.js";
 import checkpoint from "./extensions/checkpoint.js";
 import introspect from "./extensions/introspect.js";
+import journal from "./extensions/journal.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -61,6 +62,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["web", web],
   ["checkpoint", checkpoint],
   ["introspect", introspect],
+  ["journal", journal],
 ];
 
 export interface AgentHostOptions {
