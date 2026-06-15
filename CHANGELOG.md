@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `web` extension — capability-gated HTTP access (`fetch_url`, `/fetch`) behind
+  `net:fetch`, with response-size bounds. Fills the previously-unused `net:fetch`
+  capability.
+- `checkpoint` extension — git-backed workspace snapshots taken before mutating
+  tools run, with `/checkpoint`, `/checkpoints`, and `/rollback`.
+- HTTP server front end (`src/server.ts`, `eagent-serve` / `npm run serve`):
+  `GET /health` and a streaming `POST /run` (JSONL), reusing the shared host.
+- `src/host.ts` — shared `createAgentHost` wiring used by every front end, so
+  the canonical built-in extension list has one home (CLI no longer duplicates
+  it).
+
 - `self` extension — the agent authors and hot-loads its own TypeScript
   extensions at runtime (`write_extension`/`read_extension`/`reload_extension`),
   gated behind the `self:extend` capability. The Emacs ideal, realized.
