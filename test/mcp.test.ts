@@ -1,0 +1,111 @@
+/**
+ * Tests for the MCP client extension.
+ *
+ * We need a real subprocess to exercise the stdio transport honestly, so we
+ * write a tiny self-contained MCP server to a temp `.mjs` file and point the
+ * extension at it via `EAGENT_MCP_SERVERS`. The fixture speaks newline-delimited
+ * JSON-RPC 2.0 and implements just enough of the protocol (initialize, the
+ * initialized notification, tools/list, tools/call for an `echo` tool) to prove
+ * the handshake, tool registration, invocation, and the `/mcp` command.
+ */
+
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, test } from "node:test";
+
+import activate from "../src/extensions/mcp.js";
+import { makeHarness } from "./helpers.js";
+
+const FIXTURE_SERVER = `
+import { createInterface } from "node:readline";
+
+const rl = createInterface({ input: process.stdin });
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+
+rl.on("line", (line) => {
+  const t = line.trim();
+  if (!t) return;
+  let msg;
+  try { msg = JSON.parse(t); } catch { return; }
+  const { id, method, params } = msg;
+  if (method === "initialize") {
+    send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } } });
+  } else if (method === "notifications/initialized") {
+    // no reply
+  } else if (method === "tools/list") {
+    send({ jsonrpc: "2.0", id, result: { tools: [ { name: "echo", description: "echo text", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } } ] } });
+  } else if (method === "tools/call") {
+    const args = (params && params.arguments) || {};
+    send({ jsonrpc: "2.0", id, result: { content: [ { type: "text", text: "echo: " + args.text } ] } });
+  } else if (typeof id === "number") {
+    send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } });
+  }
+});
+`;
+
+let dir: string;
+let fixturePath: string;
+
+before(() => {
+  dir = mkdtempSync(join(tmpdir(), "eagent-mcp-"));
+  fixturePath = join(dir, "fixture-server.mjs");
+  writeFileSync(fixturePath, FIXTURE_SERVER);
+  process.env.EAGENT_MCP_SERVERS = JSON.stringify([
+    { name: "fixture", command: "node", args: [fixturePath] },
+  ]);
+});
+
+after(() => {
+  delete process.env.EAGENT_MCP_SERVERS;
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("registers the server's tool after the handshake", async () => {
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  await host.use("mcp", activate);
+  try {
+    assert.ok(agent.tools.has("mcp__fixture__echo"), "expected mcp__fixture__echo to be registered");
+  } finally {
+    await host.dispose();
+  }
+});
+
+test("calling the MCP tool returns the server's textual result", async () => {
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__fixture__echo", arguments: { text: "hi" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  await host.use("mcp", activate);
+  try {
+    await agent.run("please echo");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    assert.ok(toolMsg, "expected a tool-role message in the transcript");
+    const block = toolMsg!.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.match(block.content, /echo: hi/);
+    assert.ok(!block.isError, "result should not be an error");
+  } finally {
+    await host.dispose();
+  }
+});
+
+test("the /mcp command lists the connected server", async () => {
+  const { host, commands } = makeHarness({ fallback: "allow" });
+  await host.use("mcp", activate);
+  try {
+    const cmd = commands.get("mcp");
+    assert.ok(cmd, "expected an /mcp command to be registered");
+    const lines: string[] = [];
+    await cmd!.run({ agent: {} as never, args: "", print: (l) => lines.push(l) });
+    const output = lines.join("\n");
+    assert.match(output, /fixture/);
+    assert.match(output, /1 tool/);
+  } finally {
+    await host.dispose();
+  }
+});
