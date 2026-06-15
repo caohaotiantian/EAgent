@@ -1,6 +1,6 @@
 {
   "name": "eagent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A minimalist AI agent with a tiny stable core and Emacs-grade extensibility. Everything is a hot-reloadable extension.",
   "type": "module",
   "license": "MIT",
@@ -35,7 +35,8 @@
     "./providers/mock": "./dist/providers/mock.js",
     "./providers/anthropic": "./dist/providers/anthropic.js",
     "./providers/openai": "./dist/providers/openai.js",
-    "./providers/gemini": "./dist/providers/gemini.js"
+    "./providers/gemini": "./dist/providers/gemini.js",
+    "./providers/cassette": "./dist/providers/cassette.js"
   },
   "files": [
     "dist",
@@ -48,6 +49,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/cli.ts",
     "serve": "node --import tsx src/server.ts",
     "start": "node dist/cli.js"
