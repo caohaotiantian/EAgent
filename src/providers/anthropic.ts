@@ -206,6 +206,12 @@ function toAnthropicMessages(messages: Message[]): unknown[] {
       content: m.content.map((b) => {
         if (b.type === "text") return { type: "text", text: b.text };
         if (b.type === "tool_call") return { type: "tool_use", id: b.id, name: b.name, input: b.arguments };
+        if (b.type === "image") {
+          const source = b.url
+            ? { type: "url", url: b.url }
+            : { type: "base64", media_type: b.mimeType, data: b.data ?? "" };
+          return { type: "image", source };
+        }
         return { type: "text", text: "" };
       }),
     });

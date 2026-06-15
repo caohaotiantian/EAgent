@@ -36,6 +36,7 @@ const EXPECTED_EXPORTS = [
   "validate",
   "combine",
   "text",
+  "imageMessage",
   "matchPattern",
   "setHandlerErrorReporter",
   // Usage accounting.

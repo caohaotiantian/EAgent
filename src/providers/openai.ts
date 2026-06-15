@@ -163,6 +163,19 @@ function toOpenAIMessages(systemPrompt: string, messages: Message[]): unknown[] 
       out.push(msg);
       continue;
     }
+    // User messages with images use OpenAI's array content form.
+    const images = m.content.filter((b): b is Extract<ContentBlock, { type: "image" }> => b.type === "image");
+    if (images.length > 0) {
+      const parts: unknown[] = [];
+      const t = textOf(m);
+      if (t) parts.push({ type: "text", text: t });
+      for (const img of images) {
+        const url = img.url ?? `data:${img.mimeType};base64,${img.data ?? ""}`;
+        parts.push({ type: "image_url", image_url: { url } });
+      }
+      out.push({ role: "user", content: parts });
+      continue;
+    }
     out.push({ role: "user", content: textOf(m) });
   }
   return out;
