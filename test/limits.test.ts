@@ -203,12 +203,49 @@ test("/limits rejects bad values and unknown keys without throwing", async () =>
   const cmd = commands.get("limits")!;
 
   const out = await runCommand(cmd, agent, "maxToolOutputBytes=-5 bogus=1 maxToolCallsPerRun=abc nope");
-  assert.ok(out.some((l) => l.includes("must be a positive number")), "rejects non-positive value");
+  assert.ok(out.some((l) => l.includes('"maxToolOutputBytes" must be a number')), "rejects non-positive value");
   assert.ok(out.some((l) => l.includes('unknown key "bogus"')), "rejects unknown key");
-  assert.ok(out.some((l) => l.includes("must be a positive number")), "rejects non-numeric value");
+  assert.ok(out.some((l) => l.includes('"maxToolCallsPerRun" must be a number')), "rejects non-numeric value");
   assert.ok(out.some((l) => l.includes("(expected key=value)")), "rejects bare token");
 
   // Bad input left the config at defaults.
   assert.ok(out.some((l) => l === "maxToolOutputBytes=16384"), "config unchanged after bad input");
   assert.ok(out.some((l) => l === "maxToolCallsPerRun=100"), "config unchanged after bad input");
+});
+
+test("a token budget blocks further tool calls once exceeded", async () => {
+  const { agent, host, commands } = makeHarness({
+    responder: [{ toolCalls: [{ name: "probe" }] }, { text: "done" }],
+    fallback: "allow",
+  });
+  await host.use("limits", activateLimits);
+
+  let ran = 0;
+  agent.tools.register(
+    defineTool({ name: "probe", description: "", execute: () => ({ content: (++ran).toString() }) }),
+  );
+
+  // A 1-token budget is exhausted by the first turn's usage (the mock reports
+  // hundreds of input tokens), so the turn's tool call is blocked.
+  await runCommand(commands.get("limits")!, agent, "maxTokensPerRun=1");
+  await agent.run("go");
+
+  assert.equal(ran, 0, "the tool must not run once the token budget is exceeded");
+  const results = toolResults(agent.messages);
+  assert.match(results.at(-1)!.content, /token budget/i);
+});
+
+test("the token budget is disabled by default (0)", async () => {
+  const { agent, host, commands } = makeHarness({
+    responder: [{ toolCalls: [{ name: "probe" }] }, { text: "done" }],
+    fallback: "allow",
+  });
+  await host.use("limits", activateLimits);
+  let ran = 0;
+  agent.tools.register(defineTool({ name: "probe", description: "", execute: () => ({ content: String(++ran) }) }));
+
+  const out = await runCommand(commands.get("limits")!, agent, "");
+  assert.ok(out.some((l) => l.startsWith("maxTokensPerRun=0")), "token budget defaults to disabled");
+  await agent.run("go");
+  assert.equal(ran, 1, "with the budget disabled the tool runs normally");
 });

@@ -1,0 +1,176 @@
+/**
+ * A provider for Google's Gemini (Generative Language API), over `fetch` and
+ * SSE with no SDK. It is the third real provider, and the most different in
+ * shape — Gemini uses `contents`/`parts`, `model` (not `assistant`) roles, and
+ * correlates tool results by function *name* rather than a call id. Mapping all
+ * of that onto EAgent's neutral message model (and back) is the real test of
+ * whether the `Provider` abstraction holds; it does.
+ *
+ * Configuration by environment:
+ *   GEMINI_API_KEY    (or GOOGLE_API_KEY)
+ *   GEMINI_BASE_URL   (optional; defaults to the v1beta endpoint)
+ */
+
+import type {
+  CompletionRequest,
+  ContentBlock,
+  Message,
+  Provider,
+  StopReason,
+  StreamEvent,
+  ToolSpec,
+  Usage,
+} from "../kernel/types.js";
+import { fetchWithRetry, parseSSE } from "./http.js";
+
+export interface GeminiOptions {
+  apiKey?: string;
+  baseUrl?: string;
+  maxTokens?: number;
+  maxRetries?: number;
+  fetch?: typeof fetch;
+}
+
+export class GeminiProvider implements Provider {
+  readonly name = "gemini";
+  readonly #apiKey: string;
+  readonly #baseUrl: string;
+  readonly #maxTokens: number;
+  readonly #maxRetries: number;
+  readonly #fetch: typeof fetch;
+
+  constructor(opts: GeminiOptions = {}) {
+    this.#apiKey = opts.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
+    this.#baseUrl = (opts.baseUrl ?? process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/$/, "");
+    this.#maxTokens = opts.maxTokens ?? 4096;
+    this.#maxRetries = opts.maxRetries ?? 3;
+    this.#fetch = opts.fetch ?? globalThis.fetch;
+  }
+
+  get configured(): boolean {
+    return this.#apiKey.length > 0;
+  }
+
+  async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
+    if (!this.#apiKey) throw new Error("GeminiProvider: GEMINI_API_KEY is not set");
+
+    const body: Record<string, unknown> = {
+      contents: toGeminiContents(req.messages),
+      generationConfig: { maxOutputTokens: this.#maxTokens },
+    };
+    if (req.systemPrompt) body.systemInstruction = { parts: [{ text: req.systemPrompt }] };
+    if (req.tools.length) body.tools = [{ functionDeclarations: req.tools.map(toGeminiTool) }];
+
+    const res = await fetchWithRetry({
+      url: `${this.#baseUrl}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse`,
+      headers: { "x-goog-api-key": this.#apiKey },
+      body,
+      signal: req.signal,
+      fetchImpl: this.#fetch,
+      maxRetries: this.#maxRetries,
+      describe: (status, detail) => `Gemini API error ${status}: ${detail}`,
+    });
+
+    let text = "";
+    const toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] = [];
+    let stopReason: StopReason = "end_turn";
+    const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+
+    for await (const event of parseSSE(res.body!)) {
+      if (!event.data) continue;
+      let parsed: GeminiChunk;
+      try {
+        parsed = JSON.parse(event.data) as GeminiChunk;
+      } catch {
+        continue;
+      }
+      if (parsed.usageMetadata) {
+        usage.inputTokens = parsed.usageMetadata.promptTokenCount ?? usage.inputTokens;
+        usage.outputTokens = parsed.usageMetadata.candidatesTokenCount ?? usage.outputTokens;
+      }
+      const candidate = parsed.candidates?.[0];
+      if (!candidate) continue;
+      for (const part of candidate.content?.parts ?? []) {
+        if (typeof part.text === "string") {
+          text += part.text;
+          yield { type: "text_delta", text: part.text };
+        } else if (part.functionCall) {
+          const id = `call_${part.functionCall.name}_${toolCalls.length}`;
+          const args = (part.functionCall.args ?? {}) as Record<string, unknown>;
+          toolCalls.push({ id, name: part.functionCall.name, arguments: args });
+          yield { type: "tool_call", id, name: part.functionCall.name, arguments: args };
+        }
+      }
+      if (candidate.finishReason) stopReason = mapFinishReason(candidate.finishReason);
+    }
+
+    if (toolCalls.length > 0) stopReason = "tool_use";
+    const content: ContentBlock[] = [];
+    if (text) content.push({ type: "text", text });
+    for (const tc of toolCalls) content.push({ type: "tool_call", id: tc.id, name: tc.name, arguments: tc.arguments });
+
+    yield { type: "done", message: { role: "assistant", content }, stopReason, usage };
+  }
+}
+
+// -- wire-format mapping ----------------------------------------------------
+
+function toGeminiTool(spec: ToolSpec): unknown {
+  return { name: spec.name, description: spec.description, parameters: spec.parameters };
+}
+
+function toGeminiContents(messages: Message[]): unknown[] {
+  // Gemini correlates a function response by name, not id, so resolve each
+  // tool_result's call name from the tool_call that produced it.
+  const idToName = new Map<string, string>();
+  for (const m of messages) {
+    for (const b of m.content) if (b.type === "tool_call") idToName.set(b.id, b.name);
+  }
+
+  const out: unknown[] = [];
+  for (const m of messages) {
+    if (m.role === "system") continue; // carried via systemInstruction
+    if (m.role === "tool") {
+      const parts = m.content
+        .filter((b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result")
+        .map((b) => ({
+          functionResponse: { name: idToName.get(b.toolCallId) ?? b.toolCallId, response: { result: b.content } },
+        }));
+      out.push({ role: "user", parts });
+      continue;
+    }
+    const role = m.role === "assistant" ? "model" : "user";
+    const parts: unknown[] = [];
+    for (const b of m.content) {
+      if (b.type === "text") parts.push({ text: b.text });
+      else if (b.type === "tool_call") parts.push({ functionCall: { name: b.name, args: b.arguments } });
+      else if (b.type === "image") {
+        if (b.data) parts.push({ inlineData: { mimeType: b.mimeType, data: b.data } });
+        else if (b.url) parts.push({ fileData: { mimeType: b.mimeType, fileUri: b.url } });
+      }
+    }
+    out.push({ role, parts });
+  }
+  return out;
+}
+
+function mapFinishReason(reason: string): StopReason {
+  switch (reason) {
+    case "STOP":
+      return "end_turn";
+    case "MAX_TOKENS":
+      return "max_tokens";
+    default:
+      return "stop";
+  }
+}
+
+// -- minimal stream-chunk typings -------------------------------------------
+
+interface GeminiChunk {
+  candidates?: {
+    content?: { role?: string; parts?: { text?: string; functionCall?: { name: string; args?: Record<string, unknown> } }[] };
+    finishReason?: string;
+  }[];
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+}

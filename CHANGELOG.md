@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Google **Gemini** provider (`GeminiProvider`) — a third real `fetch`+SSE
+  provider, mapping EAgent's neutral messages onto Gemini's `contents`/`parts`
+  model (including name-correlated function responses and image `inlineData`).
+  Auto-selected from `GEMINI_API_KEY`/`GOOGLE_API_KEY`.
+- Token streaming: the HTTP server and CLI `--json` mode now emit `text_delta`
+  events as tokens arrive, not just a final `message`.
+- `limits` gains an opt-in per-run **token budget** (`maxTokensPerRun`, default
+  off) that blocks further tool calls once the run's token usage is exceeded.
+
 - Multimodal image support: an `image` content block (inline base64 or URL),
   mapped to Anthropic and OpenAI multimodal formats, plus an `imageMessage`
   helper. The kernel treats images opaquely; text-only providers account for

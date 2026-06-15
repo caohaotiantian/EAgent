@@ -151,6 +151,7 @@ async function streamRun(
   }
 
   const subs = [
+    agent.hooks.on("text_delta", ({ text }) => write({ type: "text_delta", text })),
     agent.hooks.on("message", ({ message }) => write({ type: "message", role: message.role, content: message.content })),
     agent.hooks.on("tool_start", ({ call }) => write({ type: "tool_start", name: call.name, arguments: call.arguments })),
     agent.hooks.on("tool_end", ({ call, result }) =>

@@ -272,8 +272,8 @@ See `docs/EXTENSIONS.md` for the full extension author's guide.
 
 ```
 src/kernel/      the seven primitives + public barrel (index.ts)
-src/providers/   mock (deterministic), anthropic + openai (fetch + SSE, no SDK,
-                 shared retry/usage plumbing in http.ts)
+src/providers/   mock (deterministic), anthropic + openai + gemini (fetch + SSE,
+                 no SDK, shared retry/usage plumbing in http.ts)
 src/extensions/  core-tools, skills, mcp, codeact, subagents, memory,
                  planmode, session, packages — all riding the ExtensionAPI
 src/cli.ts       the terminal host: interactive REPL + batch + one-shot

@@ -55,7 +55,7 @@ Usage: eagent [options]
 Options:
   -e, --eval <text>      Run one turn with <text> and exit (non-interactive)
   -m, --model <name>     Model to use (e.g. claude-fable-5, gpt-4o)
-  -p, --provider <name>  Provider: anthropic | openai | mock
+  -p, --provider <name>  Provider: anthropic | openai | gemini | mock
       --ext <path>       Load an extra extension file (repeatable)
       --yolo             Auto-grant capabilities (no approval prompts)
       --json             Emit lifecycle events as JSONL (programmatic mode)
@@ -230,6 +230,7 @@ function wireJsonRendering(agent: Agent): void {
   const emit = (obj: unknown): void => {
     process.stdout.write(JSON.stringify(obj) + "\n");
   };
+  agent.hooks.on("text_delta", ({ text }) => emit({ type: "text_delta", text }));
   agent.hooks.on("message", ({ message }) => emit({ type: "message", role: message.role, content: message.content }));
   agent.hooks.on("tool_start", ({ call }) => emit({ type: "tool_start", id: call.id, name: call.name, arguments: call.arguments }));
   agent.hooks.on("tool_end", ({ call, result }) =>
@@ -314,7 +315,7 @@ function registerHostCommands(commands: CommandRegistry, host: ExtensionHost, ag
   });
   commands.register({
     name: "provider",
-    description: "Get or set the active provider (mock|anthropic|openai).",
+    description: "Get or set the active provider (mock|anthropic|openai|gemini).",
     run: (ctx) => {
       const name = ctx.args.trim();
       if (name) {

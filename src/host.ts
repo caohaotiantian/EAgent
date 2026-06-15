@@ -22,6 +22,7 @@ import { FileBackend } from "./kernel/store.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAIProvider } from "./providers/openai.js";
+import { GeminiProvider } from "./providers/gemini.js";
 import { MockProvider } from "./providers/mock.js";
 
 import coreTools from "./extensions/core-tools.js";
@@ -95,14 +96,22 @@ export interface AgentHost {
 export async function createAgentHost(opts: AgentHostOptions = {}): Promise<AgentHost> {
   const anthropic = new AnthropicProvider();
   const openai = new OpenAIProvider();
+  const gemini = new GeminiProvider();
   const defaultProvider = selectProvider(opts.provider, {
     anthropic: anthropic.configured,
     openai: openai.configured,
+    gemini: gemini.configured,
   });
   const live = defaultProvider !== "mock";
   const model =
     opts.model ??
-    (defaultProvider === "anthropic" ? "claude-fable-5" : defaultProvider === "openai" ? "gpt-4o" : "mock");
+    (defaultProvider === "anthropic"
+      ? "claude-fable-5"
+      : defaultProvider === "openai"
+        ? "gpt-4o"
+        : defaultProvider === "gemini"
+          ? "gemini-2.0-flash"
+          : "mock");
 
   const capabilities = new CapabilityManager({
     ui: opts.ui,
@@ -122,6 +131,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   agent.providers.register(new MockProvider(), { default: defaultProvider === "mock" });
   if (anthropic.configured) agent.providers.register(anthropic, { default: defaultProvider === "anthropic" });
   if (openai.configured) agent.providers.register(openai, { default: defaultProvider === "openai" });
+  if (gemini.configured) agent.providers.register(gemini, { default: defaultProvider === "gemini" });
 
   const host = new ExtensionHost({
     agent,
@@ -145,13 +155,16 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
 /** Resolve which provider to default to given the user's flag and what's configured. */
 export function selectProvider(
   requested: string | undefined,
-  configured: { anthropic: boolean; openai: boolean },
+  configured: { anthropic: boolean; openai: boolean; gemini: boolean },
 ): string {
   if (requested === "mock") return "mock";
   if (requested === "anthropic" && configured.anthropic) return "anthropic";
   if (requested === "openai" && configured.openai) return "openai";
-  if (requested && requested !== "anthropic" && requested !== "openai") return requested;
+  if (requested === "gemini" && configured.gemini) return "gemini";
+  const known = ["anthropic", "openai", "gemini", "mock"];
+  if (requested && !known.includes(requested)) return requested;
   if (configured.anthropic) return "anthropic";
   if (configured.openai) return "openai";
+  if (configured.gemini) return "gemini";
   return "mock";
 }
