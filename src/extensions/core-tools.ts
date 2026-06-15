@@ -9,6 +9,7 @@
 
 import { exec } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
@@ -16,11 +17,35 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 
 const execAsync = promisify(exec);
 
+/** The directory the file tools are confined to: `$EAGENT_WORKSPACE` or cwd. */
+function workspaceRoot(): string {
+  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+}
+
+/**
+ * Resolve `p` and assert it stays inside `root`. Rejecting `../` escapes and
+ * absolute paths that point elsewhere keeps the agent's file access scoped to
+ * the project — defense in depth on top of the `fs:*` capabilities.
+ */
+function confine(root: string, p: string): string {
+  const abs = isAbsolute(p) ? resolve(p) : resolve(root, p);
+  const rel = relative(root, abs);
+  if (rel !== "" && (rel === ".." || rel.startsWith(`..${sep()}`) || isAbsolute(rel))) {
+    throw new Error(`path "${p}" is outside the workspace root (${root})`);
+  }
+  return abs;
+}
+
+function sep(): string {
+  return process.platform === "win32" ? "\\" : "/";
+}
+
 export default function activate(e: ExtensionAPI): void {
   e.grantCapability("fs:read");
   e.grantCapability("fs:write");
   // shell:exec is intentionally NOT auto-granted: bash should prompt/deny by
   // default unless the host policy opts in.
+  const root = workspaceRoot();
 
   e.registerTool(
     defineTool({
@@ -37,7 +62,12 @@ export default function activate(e: ExtensionAPI): void {
         required: ["path"],
       },
       execute: (args) => {
-        const path = String(args.path);
+        let path: string;
+        try {
+          path = confine(root, String(args.path));
+        } catch (err) {
+          return fail((err as Error).message);
+        }
         let lines: string[];
         try {
           lines = readFileSync(path, "utf8").split("\n");
@@ -67,7 +97,12 @@ export default function activate(e: ExtensionAPI): void {
         required: ["path", "content"],
       },
       execute: (args) => {
-        const path = String(args.path);
+        let path: string;
+        try {
+          path = confine(root, String(args.path));
+        } catch (err) {
+          return fail((err as Error).message);
+        }
         try {
           writeFileSync(path, String(args.content));
         } catch (err) {
@@ -94,7 +129,12 @@ export default function activate(e: ExtensionAPI): void {
         required: ["path", "old", "new"],
       },
       execute: (args) => {
-        const path = String(args.path);
+        let path: string;
+        try {
+          path = confine(root, String(args.path));
+        } catch (err) {
+          return fail((err as Error).message);
+        }
         let content: string;
         try {
           content = readFileSync(path, "utf8");

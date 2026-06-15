@@ -119,10 +119,26 @@ export interface ToolContext {
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop" | "error";
 
+/** Token accounting for a completion. Providers report it; the agent sums it. */
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
+
+export function addUsage(a: Usage, b: Usage): Usage {
+  return { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens };
+}
+
+export function totalTokens(u: Usage): number {
+  return u.inputTokens + u.outputTokens;
+}
+
 export type StreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
-  | { type: "done"; message: Message; stopReason: StopReason };
+  | { type: "done"; message: Message; stopReason: StopReason; usage?: Usage };
 
 export interface CompletionRequest {
   systemPrompt: string;

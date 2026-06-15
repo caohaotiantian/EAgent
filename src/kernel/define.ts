@@ -8,16 +8,24 @@
 
 import type { JSONSchema, Tool, ToolContext, ToolResult } from "./types.js";
 
-export interface ToolDefinition {
+export interface ToolDefinition<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
   description: string;
   parameters?: JSONSchema;
   executionMode?: "parallel" | "sequential";
   capabilities?: string[];
-  execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> | ToolResult;
+  execute(args: TArgs, ctx: ToolContext): Promise<ToolResult> | ToolResult;
 }
 
-export function defineTool(def: ToolDefinition): Tool {
+/**
+ * Construct a well-formed `Tool`. The optional type parameter lets authors type
+ * their `execute` arguments (the kernel still validates at runtime against the
+ * JSON Schema); it is purely an authoring convenience and defaults to an open
+ * record, so untyped usage keeps working unchanged.
+ */
+export function defineTool<TArgs extends Record<string, unknown> = Record<string, unknown>>(
+  def: ToolDefinition<TArgs>,
+): Tool {
   return {
     spec: {
       name: def.name,
@@ -26,7 +34,7 @@ export function defineTool(def: ToolDefinition): Tool {
     },
     executionMode: def.executionMode,
     capabilities: def.capabilities,
-    execute: async (args, ctx) => def.execute(args, ctx),
+    execute: async (args, ctx) => def.execute(args as TArgs, ctx),
   };
 }
 
