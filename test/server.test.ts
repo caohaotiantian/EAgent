@@ -53,6 +53,37 @@ test("POST /run streams lifecycle events as JSONL", async () => {
   });
 });
 
+test("a session id makes /run accumulate conversation history", async () => {
+  await withServer(async (base) => {
+    const run = async (input: string) => {
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input, session: "s1" }),
+      });
+      return (await res.text())
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as { type: string; role?: string; content?: { type: string; text?: string }[] });
+    };
+    await run("first message");
+    const second = await run("second message");
+    // The replayed history means the provider saw more than one user turn;
+    // health should report one tracked session.
+    const done = second.at(-1) as { type: string; session?: string };
+    assert.equal(done.session, "s1");
+
+    const health = await (await fetch(`${base}/health`)).json();
+    assert.equal((health as { sessions: number }).sessions, 1);
+
+    // Deleting the session forgets it.
+    const del = await fetch(`${base}/sessions/s1`, { method: "DELETE" });
+    assert.equal(del.status, 200);
+    const health2 = await (await fetch(`${base}/health`)).json();
+    assert.equal((health2 as { sessions: number }).sessions, 0);
+  });
+});
+
 test("POST /run rejects a missing input", async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/run`, {

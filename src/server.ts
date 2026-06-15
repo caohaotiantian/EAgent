@@ -7,26 +7,38 @@
  * framework — and reuses `createAgentHost`, so it loads exactly the same
  * extensions as the CLI.
  *
- *   GET  /health        → { ok, model, extensions }
- *   POST /run           → streams lifecycle events as JSONL (one per line)
- *                         body: { "input": "your message" }
+ *   GET    /health          → { ok, model, extensions, sessions }
+ *   POST   /run             → streams lifecycle events as JSONL (one per line)
+ *                             body: { input: string, session?: string }
+ *   DELETE /sessions/:id     → forget a conversation
  *
- * Each `/run` is one turn against a shared agent. Run with `eagent-serve`
- * (or `npm run serve`); set `PORT` to choose the port (default 8787).
+ * A `session` id makes `/run` calls accumulate into one conversation; without
+ * it, each call is a fresh, stateless turn. The agent runs one turn at a time
+ * (a second concurrent `/run` gets 409) — a deliberate simplicity for a minimal
+ * server; front a pool of these for real concurrency.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { Agent } from "./kernel/agent.js";
-import type { Logger } from "./kernel/types.js";
+import type { Message, Logger } from "./kernel/types.js";
 import { createAgentHost, type AgentHostOptions } from "./host.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
 }
 
+export interface HttpServer {
+  server: ReturnType<typeof createServer>;
+  agent: Agent;
+  extensions: string[];
+  model: string;
+  /** Tear down the extension host (call on shutdown). */
+  close(): Promise<void>;
+}
+
 /** Build the agent host and return a configured (but not yet listening) server. */
-export async function createHttpServer(opts: ServeOptions = {}) {
+export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpServer> {
   const logger: Logger = opts.logger ?? {
     debug: () => {},
     info: (...a) => console.error("·", ...a),
@@ -36,54 +48,108 @@ export async function createHttpServer(opts: ServeOptions = {}) {
   const built = await createAgentHost({ ...opts, logger, yolo: opts.yolo ?? true });
   await built.agent.hooks.emit("session_start", {});
 
+  // Per-conversation transcripts, replayed into the shared agent on each turn.
+  const sessions = new Map<string, Message[]>();
+  let busy = false;
+
   const server = createServer((req, res) => {
-    handle(req, res, built.agent, built.host.list()).catch((err) => {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    });
+    route(req, res, built.agent, built.host.list(), sessions, {
+      get busy() {
+        return busy;
+      },
+      set busy(v) {
+        busy = v;
+      },
+    }).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
   });
-  return { server, agent: built.agent, extensions: built.host.list(), model: built.model };
+
+  return {
+    server,
+    agent: built.agent,
+    extensions: built.host.list(),
+    model: built.model,
+    close: () => built.host.dispose(),
+  };
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, agent: Agent, extensions: string[]): Promise<void> {
+interface Lock {
+  busy: boolean;
+}
+
+async function route(
+  req: IncomingMessage,
+  res: ServerResponse,
+  agent: Agent,
+  extensions: string[],
+  sessions: Map<string, Message[]>,
+  lock: Lock,
+): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
   if (req.method === "GET" && url.pathname === "/health") {
-    sendJson(res, 200, { ok: true, model: agent.model, extensions });
+    sendJson(res, 200, { ok: true, model: agent.model, extensions, sessions: sessions.size });
+    return;
+  }
+
+  if (req.method === "DELETE" && url.pathname.startsWith("/sessions/")) {
+    const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
+    const existed = sessions.delete(id);
+    sendJson(res, existed ? 200 : 404, { deleted: existed, session: id });
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/run") {
     const body = await readBody(req);
     let input: string;
+    let session: string | undefined;
     try {
-      input = String((JSON.parse(body) as { input?: unknown }).input ?? "");
+      const parsed = JSON.parse(body) as { input?: unknown; session?: unknown };
+      input = String(parsed.input ?? "");
+      session = parsed.session === undefined ? undefined : String(parsed.session);
     } catch {
-      sendJson(res, 400, { error: "invalid JSON body; expected { input: string }" });
+      sendJson(res, 400, { error: "invalid JSON body; expected { input: string, session?: string }" });
       return;
     }
     if (!input) {
       sendJson(res, 400, { error: "missing 'input'" });
       return;
     }
-    if (agent.running) {
-      sendJson(res, 409, { error: "agent is busy" });
+    if (lock.busy) {
+      sendJson(res, 409, { error: "agent is busy; retry shortly" });
       return;
     }
-    await streamRun(res, agent, input);
+    lock.busy = true;
+    try {
+      await streamRun(res, agent, input, sessions, session);
+    } finally {
+      lock.busy = false;
+    }
     return;
   }
 
-  sendJson(res, 404, { error: "not found", routes: ["GET /health", "POST /run"] });
+  sendJson(res, 404, { error: "not found", routes: ["GET /health", "POST /run", "DELETE /sessions/:id"] });
 }
 
 /** Run one turn, streaming lifecycle events to the client as JSONL. */
-async function streamRun(res: ServerResponse, agent: Agent, input: string): Promise<void> {
+async function streamRun(
+  res: ServerResponse,
+  agent: Agent,
+  input: string,
+  sessions: Map<string, Message[]>,
+  session: string | undefined,
+): Promise<void> {
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   const write = (obj: unknown): void => {
     res.write(JSON.stringify(obj) + "\n");
   };
 
-  // Subscribe for the duration of this run, then dispose to avoid leaks.
+  // Replay this session's transcript so the turn has its conversation history.
+  agent.clear();
+  if (session) {
+    const history = sessions.get(session);
+    if (history && history.length) agent.load(history.map((m) => ({ ...m })));
+  }
+
   const subs = [
     agent.hooks.on("message", ({ message }) => write({ type: "message", role: message.role, content: message.content })),
     agent.hooks.on("tool_start", ({ call }) => write({ type: "tool_start", name: call.name, arguments: call.arguments })),
@@ -94,7 +160,8 @@ async function streamRun(res: ServerResponse, agent: Agent, input: string): Prom
   ];
   try {
     const { reason } = await agent.run(input);
-    write({ type: "done", reason, usage: agent.usage });
+    if (session) sessions.set(session, agent.messages.map((m) => ({ ...m })));
+    write({ type: "done", reason, session, usage: agent.usage });
   } catch (err) {
     write({ type: "error", message: err instanceof Error ? err.message : String(err) });
   } finally {
@@ -120,10 +187,20 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? 8787);
-  const { server, model, extensions } = await createHttpServer({ port });
-  server.listen(port, () => {
-    console.error(`eagent server listening on http://localhost:${port} (model=${model}, ${extensions.length} extensions)`);
+  const http = await createHttpServer({ port });
+  http.server.listen(port, () => {
+    console.error(`eagent server on http://localhost:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
   });
+
+  // Graceful shutdown: stop accepting connections, tear down the host, exit.
+  const shutdown = async (signal: string) => {
+    console.error(`\n${signal} received, shutting down…`);
+    await new Promise<void>((resolve) => http.server.close(() => resolve()));
+    await http.close();
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 // Run as a CLI only when invoked directly, not when imported by a test.

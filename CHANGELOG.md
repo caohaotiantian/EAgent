@@ -15,7 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `checkpoint` extension — git-backed workspace snapshots taken before mutating
   tools run, with `/checkpoint`, `/checkpoints`, and `/rollback`.
 - HTTP server front end (`src/server.ts`, `eagent-serve` / `npm run serve`):
-  `GET /health` and a streaming `POST /run` (JSONL), reusing the shared host.
+  `GET /health`, a streaming `POST /run` (JSONL) with optional multi-turn
+  `session` continuity, `DELETE /sessions/:id`, a one-at-a-time concurrency
+  lock, and graceful SIGTERM/SIGINT shutdown.
+- Deployment & docs: a non-root, workspace-confined `Dockerfile` (+
+  `.dockerignore`) following `SECURITY.md`, `ARCHITECTURE.md` (the full design),
+  and `CONTRIBUTING.md`.
 - `src/host.ts` — shared `createAgentHost` wiring used by every front end, so
   the canonical built-in extension list has one home (CLI no longer duplicates
   it).
