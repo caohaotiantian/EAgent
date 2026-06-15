@@ -9,8 +9,11 @@ import { test } from "node:test";
 import { createHttpServer } from "../src/server.js";
 import { silentLogger } from "./helpers.js";
 
-async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
-  const { server } = await createHttpServer({ provider: "mock", logger: silentLogger });
+async function withServer(
+  fn: (base: string) => Promise<void>,
+  opts: { token?: string; maxBodyBytes?: number } = {},
+): Promise<void> {
+  const { server } = await createHttpServer({ provider: "mock", logger: silentLogger, ...opts });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
@@ -93,6 +96,48 @@ test("POST /run rejects a missing input", async () => {
     });
     assert.equal(res.status, 400);
   });
+});
+
+test("a configured token gates mutating routes but not /health", async () => {
+  await withServer(
+    async (base) => {
+      // /health is open.
+      assert.equal((await fetch(`${base}/health`)).status, 200);
+      // /run without a token is rejected.
+      const noauth = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "hi" }),
+      });
+      assert.equal(noauth.status, 401);
+      await noauth.text();
+      // /run with the correct bearer token succeeds.
+      const ok = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer secret" },
+        body: JSON.stringify({ input: "hi" }),
+      });
+      assert.equal(ok.status, 200);
+      await ok.text();
+    },
+    { token: "secret" },
+  );
+});
+
+test("an oversized request body is rejected with 413", async () => {
+  await withServer(
+    async (base) => {
+      const big = "x".repeat(200);
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: big }),
+      });
+      assert.equal(res.status, 413);
+      await res.text();
+    },
+    { maxBodyBytes: 50 },
+  );
 });
 
 test("unknown routes 404 with the route list", async () => {
