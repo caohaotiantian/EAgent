@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `limits` gains an opt-in per-run **token budget** (`maxTokensPerRun`, default
   off) that blocks further tool calls once the run's token usage is exceeded.
 
+### Changed
+
+- Hardening: a failed extension activation now rolls back its partial
+  registrations (no half-wired tools/hooks), and a failing built-in is logged
+  and skipped at startup rather than aborting the whole agent. New resilience
+  tests cover provider errors mid-stream, streams that end without a `done`
+  event, activation-failure cleanup, and a full write→read→edit scenario.
+
 - Multimodal image support: an `image` content block (inline base64 or URL),
   mapped to Anthropic and OpenAI multimodal formats, plus an `imageMessage`
   helper. The kernel treats images opaquely; text-only providers account for

@@ -208,10 +208,17 @@ export class ExtensionHost {
       unloadExtension: (id) => host.unload(id),
     };
 
-    const activate = spec.origin.kind === "inline" ? spec.origin.activate : await this.importFile(spec.origin.path);
-    const returned = await activate(api);
-    if (typeof returned === "function") disposables.push({ dispose: returned as () => void });
-    else if (returned && typeof returned === "object" && "dispose" in returned) disposables.push(returned);
+    try {
+      const activate = spec.origin.kind === "inline" ? spec.origin.activate : await this.importFile(spec.origin.path);
+      const returned = await activate(api);
+      if (typeof returned === "function") disposables.push({ dispose: returned as () => void });
+      else if (returned && typeof returned === "object" && "dispose" in returned) disposables.push(returned);
+    } catch (err) {
+      // Activation failed partway: undo whatever it managed to register so a
+      // failed extension leaves no half-wired tools/hooks behind, then rethrow.
+      combine(...disposables).dispose();
+      throw err;
+    }
 
     this.#loaded.set(spec.id, { id: spec.id, origin: spec.origin, teardown: combine(...disposables) });
   }

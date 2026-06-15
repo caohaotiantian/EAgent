@@ -179,6 +179,43 @@ test("declared tool capabilities are enforced", async () => {
   assert.match((toolMsg.content[0] as { content: string }).content, /denied/i);
 });
 
+test("a provider error is surfaced as an error event and rethrown", async () => {
+  const { agent } = makeHarness();
+  agent.providers.register(
+    {
+      name: "mock",
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        throw new Error("provider exploded");
+      },
+    },
+    { default: true },
+  );
+  let errored = false;
+  agent.hooks.on("error", () => {
+    errored = true;
+  });
+  await assert.rejects(() => agent.run("go"), /provider exploded/);
+  assert.equal(errored, true, "an error event should fire");
+  assert.equal(agent.running, false, "the agent must not be left in a running state");
+});
+
+test("a stream that ends without a done event is an error, not a hang", async () => {
+  const { agent } = makeHarness();
+  agent.providers.register(
+    {
+      name: "mock",
+      async *stream() {
+        yield { type: "text_delta", text: "partial" } as const;
+        // never yields a "done" event
+      },
+    },
+    { default: true },
+  );
+  await assert.rejects(() => agent.run("go"), /without a "done"/);
+  assert.equal(agent.running, false);
+});
+
 test("unknown tools yield an error result, not a crash", async () => {
   const { agent } = makeHarness({
     responder: [{ toolCalls: [{ name: "ghost" }] }, { text: "recovered" }],

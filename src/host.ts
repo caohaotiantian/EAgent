@@ -140,7 +140,14 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     store: new FileBackend(opts.storeRoot ?? join(homedir(), ".eagent", "state")),
   });
 
-  for (const [id, activate] of BUILTIN_EXTENSIONS) await host.use(id, activate);
+  // A failing built-in must not take down the whole agent: log and skip it.
+  for (const [id, activate] of BUILTIN_EXTENSIONS) {
+    try {
+      await host.use(id, activate);
+    } catch (err) {
+      (opts.logger ?? console).error?.(`extension "${id}" failed to activate:`, err);
+    }
+  }
 
   const dirs = opts.discoverDirs ?? [
     join(process.cwd(), ".eagent", "extensions"),
