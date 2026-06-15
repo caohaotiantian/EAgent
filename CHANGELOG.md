@@ -7,74 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-15
+
+A large capability release: two more real providers, multimodality, four front
+ends, self-authoring extensions, durability, and production hardening — all
+while the kernel stayed minimal (a guard test enforces it).
+
 ### Added
 
-- Google **Gemini** provider (`GeminiProvider`) — a third real `fetch`+SSE
-  provider, mapping EAgent's neutral messages onto Gemini's `contents`/`parts`
-  model (including name-correlated function responses and image `inlineData`).
-  Auto-selected from `GEMINI_API_KEY`/`GOOGLE_API_KEY`.
-- Token streaming: the HTTP server and CLI `--json` mode now emit `text_delta`
-  events as tokens arrive, not just a final `message`.
-- `limits` gains an opt-in per-run **token budget** (`maxTokensPerRun`, default
-  off) that blocks further tool calls once the run's token usage is exceeded.
-- `journal` extension — durable, append-only conversation journaling (opt-in via
-  `/journal on` or `EAGENT_JOURNAL`) with `/resume` for crash recovery across
-  processes.
-- `prompts` extension — saved prompt templates / macros with `$1 $2 $*`
-  substitution (`/prompt-save`, `/prompt`, `/prompts`, `/prompt-remove`).
-- Server hardening: optional bearer-token auth (`EAGENT_TOKEN`) on mutating
-  routes (`/health` stays open), and a request-body size cap (default 1 MiB,
-  413 on exceed).
+- **Providers:** OpenAI and Google **Gemini** providers (`fetch`+SSE, no SDK),
+  joining Anthropic and the mock; shared retry/backoff/SSE/usage plumbing in
+  `providers/http.ts`. Anthropic prompt caching with cache-token accounting.
+  Record/replay **cassettes** (`RecordingProvider`/`ReplayProvider`) for
+  deterministic offline testing of real-model behavior.
+- **Multimodality:** an `image` content block (base64 or URL) with an
+  `imageMessage` helper, mapped to each provider's format.
+- **Front ends:** an HTTP server (`eagent-serve`) with `/health`, streaming
+  `POST /run`, multi-turn `session` continuity, `DELETE /sessions/:id`, a
+  concurrency lock, graceful shutdown, optional bearer-token auth
+  (`EAGENT_TOKEN`), and a request-body cap. CLI `--json`, `--help`, `--version`,
+  and token streaming.
+- **Extensions:** `mcp` HTTP transport; `subagents`, `memory`, `planmode`,
+  `session`, `packages`, `trace`, `context-files`, `limits` (output truncation +
+  tool-call & token budgets), `self` (the agent authors/hot-loads its own
+  TypeScript), `web` (capability-gated HTTP), `checkpoint` (git rollback),
+  `introspect` (self-documentation), `journal` (durable runs + `/resume`), and
+  `prompts` (saved templates).
+- **API:** `ExtensionAPI.loadExtension`/`unloadExtension` for first-class
+  dynamic/self-authored extensions; `defineTool<TArgs>` typing.
+- **Tooling & docs:** GitHub Actions CI, `Dockerfile`, `ARCHITECTURE.md`,
+  `docs/EXTENSIONS.md`, `CONTRIBUTING.md`, `SECURITY.md`, worked examples, a
+  kernel-minimalism guard test, and `npm run test:coverage`.
 
 ### Changed
 
-- The agent now emits a `message` event for the user's message too, so every
-  message in the transcript is observed uniformly (journal, renderers).
-
-- Hardening: a failed extension activation now rolls back its partial
-  registrations (no half-wired tools/hooks), and a failing built-in is logged
-  and skipped at startup rather than aborting the whole agent. New resilience
-  tests cover provider errors mid-stream, streams that end without a `done`
-  event, activation-failure cleanup, and a full write→read→edit scenario.
-
-- Multimodal image support: an `image` content block (inline base64 or URL),
-  mapped to Anthropic and OpenAI multimodal formats, plus an `imageMessage`
-  helper. The kernel treats images opaquely; text-only providers account for
-  them.
-- `introspect` extension — self-documentation à la Emacs `describe-function` /
-  `apropos`: `/describe <name>`, `/apropos <keyword>`, and a `describe_tool`
-  tool so the agent can inspect its own surface.
-
-- `web` extension — capability-gated HTTP access (`fetch_url`, `/fetch`) behind
-  `net:fetch`, with response-size bounds. Fills the previously-unused `net:fetch`
-  capability.
-- `checkpoint` extension — git-backed workspace snapshots taken before mutating
-  tools run, with `/checkpoint`, `/checkpoints`, and `/rollback`.
-- HTTP server front end (`src/server.ts`, `eagent-serve` / `npm run serve`):
-  `GET /health`, a streaming `POST /run` (JSONL) with optional multi-turn
-  `session` continuity, `DELETE /sessions/:id`, a one-at-a-time concurrency
-  lock, and graceful SIGTERM/SIGINT shutdown.
-- Deployment & docs: a non-root, workspace-confined `Dockerfile` (+
-  `.dockerignore`) following `SECURITY.md`, `ARCHITECTURE.md` (the full design),
-  and `CONTRIBUTING.md`.
-- `src/host.ts` — shared `createAgentHost` wiring used by every front end, so
-  the canonical built-in extension list has one home (CLI no longer duplicates
-  it).
-
-- `self` extension — the agent authors and hot-loads its own TypeScript
-  extensions at runtime (`write_extension`/`read_extension`/`reload_extension`),
-  gated behind the `self:extend` capability. The Emacs ideal, realized.
-- `limits` extension — resource guardrails (tool-output truncation, per-run
-  tool-call budgets) implemented purely as hooks.
-- `ExtensionAPI.loadExtension` / `unloadExtension` — load extensions at runtime
-  through the host's tracked loader (enables dynamic and self-authored
-  extensions as first-class citizens).
-- Anthropic prompt caching (system + tools marked cacheable) and cache-token
-  usage accounting.
-- CLI `--json` mode (lifecycle events as JSONL on stdout, diagnostics on
-  stderr) and `--help`/`--version`.
-- A kernel-minimalism guard test that pins the public surface and a line
-  ceiling on the core.
+- The shared `createAgentHost` wiring (`src/host.ts`) backs every front end, so
+  the built-in extension list has one home.
+- The agent emits a `message` event for the user's message too, so every
+  transcript message is observed uniformly.
+- Filesystem tools are confined to a workspace root; token usage is accounted
+  and surfaced via a `usage` event.
+- Hardening: failed activations roll back partial registrations, a failing
+  built-in is skipped at startup, and resilience is covered by tests
+  (provider errors mid-stream, no-`done` streams, activation cleanup, an
+  end-to-end write→read→edit scenario, SSE split-chunk parsing).
 
 ## [0.1.0] - 2026-06-15
 
@@ -108,5 +84,6 @@ Initial release.
   - `trace` — observability over the lifecycle events.
   - `context-files` — project context files injected into the prompt.
 
-[Unreleased]: https://github.com/caohaotiantian/eagent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/caohaotiantian/eagent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/caohaotiantian/eagent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/caohaotiantian/eagent/releases/tag/v0.1.0
