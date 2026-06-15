@@ -72,6 +72,12 @@ export default function activate(e: ExtensionAPI): Disposable {
   const active = new Map<string, Disposable[]>();
 
   const packagesDir = resolvePackagesDir();
+  // We load packages through our own jiti + recording shim rather than the
+  // ExtensionAPI's `loadExtension`, on purpose: a package is a CHILD of the
+  // manager. Scoping its registrations to us means `/pkg-remove` and reloading
+  // the manager tear the package down with it. `loadExtension` (used by the
+  // `self` extension) instead creates an independent, host-level peer — the
+  // right choice there, the wrong lifecycle here.
   const jiti = createJiti(pathToFileURL(join(process.cwd(), "pkg.host.ts")).href, {
     moduleCache: false,
     fsCache: true,
@@ -331,6 +337,8 @@ function makeShim(e: ExtensionAPI, collected: Disposable[]): ExtensionAPI {
     agent: e.agent,
     commands: e.commands,
     reload: () => e.reload(),
+    loadExtension: (path: string) => e.loadExtension(path),
+    unloadExtension: (id: string) => e.unloadExtension(id),
   };
 }
 

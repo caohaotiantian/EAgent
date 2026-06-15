@@ -36,6 +36,8 @@ import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
 import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
+import limits from "./extensions/limits.js";
+import self from "./extensions/self.js";
 
 interface Args {
   model?: string;
@@ -45,10 +47,11 @@ interface Args {
   extensions: string[];
   help: boolean;
   version: boolean;
+  json: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { yolo: false, extensions: [], help: false, version: false };
+  const args: Args = { yolo: false, extensions: [], help: false, version: false, json: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--model" || a === "-m") args.model = argv[++i];
@@ -58,6 +61,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--ext") args.extensions.push(argv[++i]!);
     else if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--version" || a === "-v") args.version = true;
+    else if (a === "--json") args.json = true;
   }
   return args;
 }
@@ -72,6 +76,7 @@ Options:
   -p, --provider <name>  Provider: anthropic | openai | mock
       --ext <path>       Load an extra extension file (repeatable)
       --yolo             Auto-grant capabilities (no approval prompts)
+      --json             Emit lifecycle events as JSONL (programmatic mode)
   -h, --help             Show this help and exit
   -v, --version          Print the version and exit
 
@@ -110,14 +115,15 @@ async function main(): Promise<void> {
       const answer = (await rl.question(`${C.yellow("?")} ${q} ${C.dim("[y/N]")} `)).trim().toLowerCase();
       return answer === "y" || answer === "yes";
     },
-    notify: (m) => console.log(C.dim(`· ${m}`)),
+    notify: (m) => console.error(C.dim(`· ${m}`)),
   };
 
+  // Diagnostics go to stderr so stdout stays clean (essential for --json mode).
   const logger: Logger = {
     debug: () => {},
-    info: (...a) => console.log(C.dim(["·", ...a].join(" "))),
-    warn: (...a) => console.log(C.yellow(["!", ...a].join(" "))),
-    error: (...a) => console.log(C.red(["✗", ...a].join(" "))),
+    info: (...a) => console.error(C.dim(["·", ...a].join(" "))),
+    warn: (...a) => console.error(C.yellow(["!", ...a].join(" "))),
+    error: (...a) => console.error(C.red(["✗", ...a].join(" "))),
   };
 
   const anthropic = new AnthropicProvider();
@@ -172,6 +178,8 @@ async function main(): Promise<void> {
   await host.use("packages", packages);
   await host.use("trace", trace);
   await host.use("context-files", contextFiles);
+  await host.use("limits", limits);
+  await host.use("self", self);
   await host.discover([
     join(process.cwd(), ".eagent", "extensions"),
     join(homedir(), ".eagent", "extensions"),
@@ -181,7 +189,8 @@ async function main(): Promise<void> {
   registerHostCommands(commands, host, agent);
   await agent.hooks.emit("session_start", {});
 
-  wireRendering(agent);
+  if (args.json) wireJsonRendering(agent);
+  else wireRendering(agent);
 
   // Ctrl-C aborts the in-flight turn rather than killing the process; a second
   // press at an idle prompt exits.
@@ -197,7 +206,7 @@ async function main(): Promise<void> {
     });
   }
 
-  banner(agent, host, live);
+  if (!args.json) banner(agent, host, live);
 
   if (args.eval !== undefined) {
     await runTurn(agent, args.eval);
@@ -283,6 +292,21 @@ function wireRendering(agent: Agent): void {
   agent.hooks.on("error", ({ error, where }) => {
     console.log(C.red(`✗ ${where}: ${error instanceof Error ? error.message : String(error)}`));
   });
+}
+
+/** Programmatic mode: emit one JSON object per lifecycle event to stdout. */
+function wireJsonRendering(agent: Agent): void {
+  const emit = (obj: unknown): void => {
+    process.stdout.write(JSON.stringify(obj) + "\n");
+  };
+  agent.hooks.on("message", ({ message }) => emit({ type: "message", role: message.role, content: message.content }));
+  agent.hooks.on("tool_start", ({ call }) => emit({ type: "tool_start", id: call.id, name: call.name, arguments: call.arguments }));
+  agent.hooks.on("tool_end", ({ call, result }) =>
+    emit({ type: "tool_end", id: call.id, name: call.name, isError: result.isError ?? false, content: result.content }),
+  );
+  agent.hooks.on("usage", ({ usage, cumulative }) => emit({ type: "usage", usage, cumulative }));
+  agent.hooks.on("agent_end", ({ reason }) => emit({ type: "agent_end", reason, usage: agent.usage }));
+  agent.hooks.on("error", ({ error, where }) => emit({ type: "error", where, message: error instanceof Error ? error.message : String(error) }));
 }
 
 async function runTurn(agent: Agent, input: string): Promise<void> {
