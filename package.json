@@ -34,7 +34,8 @@
     "./server": "./dist/server.js",
     "./providers/mock": "./dist/providers/mock.js",
     "./providers/anthropic": "./dist/providers/anthropic.js",
-    "./providers/openai": "./dist/providers/openai.js"
+    "./providers/openai": "./dist/providers/openai.js",
+    "./providers/gemini": "./dist/providers/gemini.js"
   },
   "files": [
     "dist",

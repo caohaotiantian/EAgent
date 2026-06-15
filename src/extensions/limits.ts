@@ -25,16 +25,20 @@ import type { ToolDecision } from "../kernel/events.js";
 const DEFAULT_MAX_TOOL_OUTPUT_BYTES = 16384;
 /** Cap on how many tool calls a single `agent.run` may make. */
 const DEFAULT_MAX_TOOL_CALLS_PER_RUN = 100;
+/** Token budget per run; 0 means disabled (opt-in, unlike the others). */
+const DEFAULT_MAX_TOKENS_PER_RUN = 0;
 
 interface LimitsConfig {
   maxToolOutputBytes: number;
   maxToolCallsPerRun: number;
+  maxTokensPerRun: number;
 }
 
 /** The store keys the config is persisted under. */
 const KEYS = {
   maxToolOutputBytes: "maxToolOutputBytes",
   maxToolCallsPerRun: "maxToolCallsPerRun",
+  maxTokensPerRun: "maxTokensPerRun",
 } as const;
 
 export default function activate(e: ExtensionAPI): () => void {
@@ -44,6 +48,8 @@ export default function activate(e: ExtensionAPI): () => void {
    * a reload (the budget is "this run", not "ever").
    */
   let toolCallsThisRun = 0;
+  /** Tokens consumed in this run, summed from the `usage` event. */
+  let tokensThisRun = 0;
 
   /**
    * Read a positive-integer config value from the store, falling back to its
@@ -58,9 +64,18 @@ export default function activate(e: ExtensionAPI): () => void {
     return fallback;
   };
 
+  /** Like `readPositiveInt` but allows 0 (used to *disable* an opt-in cap). */
+  const readNonNegativeInt = (key: string, fallback: number): number => {
+    const raw = e.store.get<unknown>(key);
+    const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+    if (typeof n === "number" && Number.isFinite(n) && n >= 0) return Math.floor(n);
+    return fallback;
+  };
+
   const config = (): LimitsConfig => ({
     maxToolOutputBytes: readPositiveInt(KEYS.maxToolOutputBytes, DEFAULT_MAX_TOOL_OUTPUT_BYTES),
     maxToolCallsPerRun: readPositiveInt(KEYS.maxToolCallsPerRun, DEFAULT_MAX_TOOL_CALLS_PER_RUN),
+    maxTokensPerRun: readNonNegativeInt(KEYS.maxTokensPerRun, DEFAULT_MAX_TOKENS_PER_RUN),
   });
 
   // --- 1. Tool-output truncation ------------------------------------------
@@ -92,18 +107,31 @@ export default function activate(e: ExtensionAPI): () => void {
   // Reset the counter at the start of every run, then count and gate each call.
   const offReset = e.on("agent_start", () => {
     toolCallsThisRun = 0;
+    tokensThisRun = 0;
+  });
+
+  // Track tokens consumed this run so the budget can stop a runaway agent.
+  const offUsage = e.on("usage", ({ usage }) => {
+    tokensThisRun += usage.inputTokens + usage.outputTokens;
   });
 
   const offBudget = e.hook("beforeToolCall", (decision: ToolDecision): ToolDecision => {
     try {
       if (decision.block) return decision; // already vetoed by another guard
-      const max = config().maxToolCallsPerRun;
-      toolCallsThisRun += 1;
-      if (toolCallsThisRun > max) {
+      const cfg = config();
+      if (cfg.maxTokensPerRun > 0 && tokensThisRun > cfg.maxTokensPerRun) {
         return {
           ...decision,
           block: true,
-          reason: `tool-call budget (${max}) exceeded for this run`,
+          reason: `token budget (${cfg.maxTokensPerRun}) exceeded for this run`,
+        };
+      }
+      toolCallsThisRun += 1;
+      if (toolCallsThisRun > cfg.maxToolCallsPerRun) {
+        return {
+          ...decision,
+          block: true,
+          reason: `tool-call budget (${cfg.maxToolCallsPerRun}) exceeded for this run`,
         };
       }
       return decision;
@@ -130,13 +158,15 @@ export default function activate(e: ExtensionAPI): () => void {
           }
           const key = pair.slice(0, eq);
           const value = pair.slice(eq + 1);
-          if (key !== KEYS.maxToolOutputBytes && key !== KEYS.maxToolCallsPerRun) {
+          if (key !== KEYS.maxToolOutputBytes && key !== KEYS.maxToolCallsPerRun && key !== KEYS.maxTokensPerRun) {
             ctx.print(`limits: unknown key "${key}"`);
             continue;
           }
+          // maxTokensPerRun accepts 0 (disabled); the others require positive.
+          const min = key === KEYS.maxTokensPerRun ? 0 : 1;
           const n = Number(value);
-          if (!Number.isFinite(n) || n <= 0) {
-            ctx.print(`limits: "${key}" must be a positive number (got "${value}")`);
+          if (!Number.isFinite(n) || n < min) {
+            ctx.print(`limits: "${key}" must be a number >= ${min} (got "${value}")`);
             continue;
           }
           e.store.set(key, Math.floor(n));
@@ -145,12 +175,14 @@ export default function activate(e: ExtensionAPI): () => void {
       const cfg = config();
       ctx.print(`maxToolOutputBytes=${cfg.maxToolOutputBytes}`);
       ctx.print(`maxToolCallsPerRun=${cfg.maxToolCallsPerRun}`);
+      ctx.print(`maxTokensPerRun=${cfg.maxTokensPerRun}${cfg.maxTokensPerRun === 0 ? " (disabled)" : ""}`);
       ctx.print(`toolCallsThisRun=${toolCallsThisRun}`);
+      ctx.print(`tokensThisRun=${tokensThisRun}`);
     },
   });
 
   return () => {
-    for (const d of [offCommand, offBudget, offReset, offTruncate]) {
+    for (const d of [offCommand, offBudget, offUsage, offReset, offTruncate]) {
       try {
         d.dispose();
       } catch {
