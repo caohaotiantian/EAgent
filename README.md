@@ -63,10 +63,19 @@ for embedding:
 ```bash
 npm run serve                 # POST /run streams JSONL; GET /health
 curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
+# Pass a session id to keep a multi-turn conversation:
+curl -s localhost:8787/run -d '{"input":"and now in one line","session":"abc"}'
 ```
 
 All four share one wiring (`src/host.ts`), so they load exactly the same
-extensions.
+extensions. To run sandboxed (the posture `SECURITY.md` recommends), there is a
+`Dockerfile` (non-root, workspace-confined):
+
+```bash
+docker build -t eagent . && docker run -p 8787:8787 -v "$PWD:/workspace" eagent
+```
+
+See `ARCHITECTURE.md` for the full design and `CONTRIBUTING.md` to hack on it.
 
 ## The seven primitives
 

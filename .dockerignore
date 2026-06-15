@@ -1,0 +1,11 @@
+# Keep the build context minimal. NOTE: src/ is intentionally NOT ignored —
+# extensions are loaded as TypeScript from src/ via jiti at runtime.
+node_modules
+dist
+.git
+test
+examples
+.eagent
+*.log
+.github
+docs
