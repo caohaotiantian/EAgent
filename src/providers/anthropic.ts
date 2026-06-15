@@ -30,6 +30,8 @@ export interface AnthropicOptions {
   maxRetries?: number;
   /** Injectable `fetch` for testing and proxies. Defaults to global fetch. */
   fetch?: typeof fetch;
+  /** Mark the system prompt and tools as cacheable. Default true. */
+  cache?: boolean;
 }
 
 export class AnthropicProvider implements Provider {
@@ -40,6 +42,7 @@ export class AnthropicProvider implements Provider {
   readonly #maxTokens: number;
   readonly #maxRetries: number;
   readonly #fetch: typeof fetch;
+  readonly #cache: boolean;
 
   constructor(opts: AnthropicOptions = {}) {
     this.#apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? "";
@@ -48,6 +51,7 @@ export class AnthropicProvider implements Provider {
     this.#maxTokens = opts.maxTokens ?? 4096;
     this.#maxRetries = opts.maxRetries ?? 3;
     this.#fetch = opts.fetch ?? globalThis.fetch;
+    this.#cache = opts.cache ?? true;
   }
 
   get configured(): boolean {
@@ -57,12 +61,26 @@ export class AnthropicProvider implements Provider {
   async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
     if (!this.#apiKey) throw new Error("AnthropicProvider: ANTHROPIC_API_KEY is not set");
 
+    // Prompt caching: the system prompt and tool definitions are the large,
+    // stable prefix of every turn, so marking them `ephemeral` lets Anthropic
+    // reuse a cached prefix and bill subsequent turns at a fraction of the
+    // input cost. We mark the system block and the final tool (a cache
+    // breakpoint covers everything before it).
+    const tools = req.tools.map(toAnthropicTool);
+    if (this.#cache && tools.length > 0) {
+      (tools[tools.length - 1] as Record<string, unknown>).cache_control = { type: "ephemeral" };
+    }
+    const system =
+      this.#cache && req.systemPrompt
+        ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
+        : req.systemPrompt;
+
     const body = {
       model: req.model,
       max_tokens: this.#maxTokens,
-      system: req.systemPrompt,
+      system,
       messages: toAnthropicMessages(req.messages),
-      tools: req.tools.map(toAnthropicTool),
+      tools,
       stream: true,
     };
 
@@ -85,10 +103,13 @@ export class AnthropicProvider implements Provider {
 
       switch (parsed.type) {
         case "message_start": {
-          // Initial usage (input tokens, and any already-known output tokens).
-          if (parsed.message?.usage) {
-            usage.inputTokens = parsed.message.usage.input_tokens ?? 0;
-            usage.outputTokens = parsed.message.usage.output_tokens ?? 0;
+          // Initial usage. Cached and freshly-created prefix tokens are still
+          // input tokens for accounting; fold them in.
+          const u = parsed.message?.usage;
+          if (u) {
+            usage.inputTokens =
+              (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+            usage.outputTokens = u.output_tokens ?? 0;
           }
           break;
         }
@@ -210,6 +231,8 @@ function mapStopReason(reason: string): StopReason {
 interface AnthropicUsage {
   input_tokens?: number;
   output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 }
 
 type AnthropicStreamEvent =

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `self` extension — the agent authors and hot-loads its own TypeScript
+  extensions at runtime (`write_extension`/`read_extension`/`reload_extension`),
+  gated behind the `self:extend` capability. The Emacs ideal, realized.
+- `limits` extension — resource guardrails (tool-output truncation, per-run
+  tool-call budgets) implemented purely as hooks.
+- `ExtensionAPI.loadExtension` / `unloadExtension` — load extensions at runtime
+  through the host's tracked loader (enables dynamic and self-authored
+  extensions as first-class citizens).
+- Anthropic prompt caching (system + tools marked cacheable) and cache-token
+  usage accounting.
+- CLI `--json` mode (lifecycle events as JSONL on stdout, diagnostics on
+  stderr) and `--help`/`--version`.
+- A kernel-minimalism guard test that pins the public surface and a line
+  ceiling on the core.
+
 ## [0.1.0] - 2026-06-15
 
 Initial release.

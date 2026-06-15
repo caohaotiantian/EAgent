@@ -61,6 +61,16 @@ export interface ExtensionAPI {
   /** Request a hot reload of this extension. Treat as terminal: code after the
    *  await runs in the old runtime. */
   reload(): Promise<void>;
+
+  /**
+   * Load another extension from a file at runtime (via the host's jiti loader)
+   * and return its id. This is the seam for dynamic, self-authored, and
+   * package-installed extensions: they are loaded through the same tracked path
+   * as built-ins, so `unloadExtension`/`reload` work on them uniformly.
+   */
+  loadExtension(path: string): Promise<string>;
+  /** Tear down a runtime-loaded extension by id. */
+  unloadExtension(id: string): Promise<void>;
 }
 
 /** What an extension may return: nothing, a `Disposable`, or a deactivate
@@ -194,6 +204,8 @@ export class ExtensionHost {
       agent: host.agent,
       commands: host.commands,
       reload: () => host.reload(spec.id),
+      loadExtension: (path) => host.loadFile(path),
+      unloadExtension: (id) => host.unload(id),
     };
 
     const activate = spec.origin.kind === "inline" ? spec.origin.activate : await this.importFile(spec.origin.path);

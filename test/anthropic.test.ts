@@ -85,6 +85,7 @@ test("maps EAgent messages to the Anthropic wire format", async () => {
   let captured: any;
   const provider = new AnthropicProvider({
     apiKey: "test",
+    cache: false,
     fetch: async (_url, init) => {
       captured = JSON.parse(String(init?.body));
       return sseResponse(TEXT_EVENTS);
@@ -112,6 +113,42 @@ test("maps EAgent messages to the Anthropic wire format", async () => {
   assert.equal(toolMsg.content[0].tool_use_id, "t1");
   // The assistant tool call becomes a tool_use block.
   assert.equal(captured.messages[1].content[0].type, "tool_use");
+});
+
+test("marks the system prompt and tools as cacheable by default", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({ tools: [{ name: "a", description: "", parameters: { type: "object" } }, { name: "b", description: "", parameters: { type: "object" } }] }),
+    ),
+  );
+  // System becomes a cacheable block array.
+  assert.ok(Array.isArray(captured.system));
+  assert.deepEqual(captured.system[0].cache_control, { type: "ephemeral" });
+  // Only the last tool carries the cache breakpoint.
+  assert.equal(captured.tools[0].cache_control, undefined);
+  assert.deepEqual(captured.tools[1].cache_control, { type: "ephemeral" });
+});
+
+test("caching can be disabled", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    cache: false,
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(provider.stream(req()));
+  assert.equal(typeof captured.system, "string", "system stays a plain string when caching is off");
 });
 
 test("throws on a non-retryable error status", async () => {

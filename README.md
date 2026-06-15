@@ -152,6 +152,8 @@ offline tests, and gates privileged work behind a capability.
 | `packages`    | install extensions from `path:` / `git:` / `npm:` sources (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
 | `trace`       | observability: per-run span tree, metrics, and token usage, all from the event bus | `/trace`, `/usage`, `/trace-save` | — |
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them (per-project instructions) | `/context`, `/context-reload` | — |
+| `limits`      | resource guardrails: tool-output truncation and per-run tool-call budgets, via hooks | `/limits` | — |
+| `self`        | the agent authors and hot-loads its **own** TypeScript extensions at runtime | `/self` | `self:read`, `self:extend` |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
 `{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
@@ -227,6 +229,18 @@ suite runs offline and why you can explore the agent with no API key.
 - **Filesystem confinement.** `read`/`write`/`edit` are scoped to a workspace
   root (`$EAGENT_WORKSPACE` or cwd), rejecting `../` escapes — defense in depth
   over the `fs:*` capabilities.
+- **Prompt caching.** The Anthropic provider marks the stable system+tools
+  prefix as cacheable, so multi-turn runs are billed at a fraction of the input
+  cost.
+- **Programmatic mode.** `eagent --json -e "…"` emits lifecycle events as JSONL
+  on stdout (diagnostics go to stderr), for embedding in other programs.
+- **The agent extends itself.** With the `self` extension (and `self:extend`
+  granted), the agent can write a real TypeScript extension and load it live —
+  the Emacs ideal, all the way down. Guarded hard, because in-process code is
+  full-authority; see `SECURITY.md`.
+- **A minimalism guard.** A test pins the kernel's public surface and a line
+  ceiling, so the core cannot grow by accident — new capability is an
+  extension, by construction.
 
 See `docs/EXTENSIONS.md` for the full extension author's guide.
 
