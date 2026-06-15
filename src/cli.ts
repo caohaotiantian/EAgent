@@ -9,10 +9,12 @@
  * can explore everything offline.
  */
 
+import { readFileSync } from "node:fs";
 import { createInterface, type Interface } from "node:readline/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { stdin, stdout } from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { Agent } from "./kernel/agent.js";
 import { CapabilityManager } from "./kernel/capabilities.js";
@@ -41,10 +43,12 @@ interface Args {
   eval?: string;
   yolo: boolean;
   extensions: string[];
+  help: boolean;
+  version: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { yolo: false, extensions: [] };
+  const args: Args = { yolo: false, extensions: [], help: false, version: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--model" || a === "-m") args.model = argv[++i];
@@ -52,9 +56,28 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--eval" || a === "-e") args.eval = argv[++i];
     else if (a === "--yolo") args.yolo = true;
     else if (a === "--ext") args.extensions.push(argv[++i]!);
+    else if (a === "--help" || a === "-h") args.help = true;
+    else if (a === "--version" || a === "-v") args.version = true;
   }
   return args;
 }
+
+const USAGE = `EAgent — a minimalist agent with a tiny core and Emacs-grade extensibility
+
+Usage: eagent [options]
+
+Options:
+  -e, --eval <text>      Run one turn with <text> and exit (non-interactive)
+  -m, --model <name>     Model to use (e.g. claude-fable-5, gpt-4o)
+  -p, --provider <name>  Provider: anthropic | openai | mock
+      --ext <path>       Load an extra extension file (repeatable)
+      --yolo             Auto-grant capabilities (no approval prompts)
+  -h, --help             Show this help and exit
+  -v, --version          Print the version and exit
+
+With no API key, EAgent runs the deterministic offline mock provider.
+Live providers are selected automatically from ANTHROPIC_API_KEY / OPENAI_API_KEY.
+Interactive commands: type /help inside the session.`;
 
 const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -67,6 +90,16 @@ const C = {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.help) {
+    console.log(USAGE);
+    return;
+  }
+  if (args.version) {
+    console.log(await readVersion());
+    return;
+  }
+
   const interactive = Boolean(stdin.isTTY) && args.eval === undefined;
   const rl = interactive ? createInterface({ input: stdin, output: stdout }) : undefined;
 
@@ -344,6 +377,17 @@ function registerHostCommands(commands: CommandRegistry, host: ExtensionHost, ag
       ctx.print(C.dim("Transcript cleared (start a new topic)."));
     },
   });
+}
+
+/** Read this package's version from package.json (one level up from src or dist). */
+async function readVersion(): Promise<string> {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version?: string };
+    return `eagent ${pkg.version ?? "unknown"}`;
+  } catch {
+    return "eagent unknown";
+  }
 }
 
 /** Resolve which provider to default to given the user's flag and what's configured. */
