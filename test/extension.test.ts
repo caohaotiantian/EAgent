@@ -32,6 +32,20 @@ test("unloading an extension disposes every registration", async () => {
   assert.equal(host.has("demo"), false);
 });
 
+test("a failed activation leaves no half-wired registrations", async () => {
+  const { agent, host, commands } = makeHarness();
+  await assert.rejects(() =>
+    host.use("boom", (e: ExtensionAPI) => {
+      e.registerTool(defineTool({ name: "ghost_tool", description: "", execute: () => ({ content: "" }) }));
+      e.registerCommand({ name: "ghost_cmd", description: "", run: () => {} });
+      throw new Error("activation failed");
+    }),
+  );
+  assert.equal(agent.tools.has("ghost_tool"), false, "partial tool registration must be undone");
+  assert.equal(commands.get("ghost_cmd"), undefined, "partial command registration must be undone");
+  assert.equal(host.has("boom"), false);
+});
+
 test("reload tears down the old version and brings up a fresh one", async () => {
   const { host, agent } = makeHarness();
   let activations = 0;
