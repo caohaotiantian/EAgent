@@ -56,6 +56,18 @@ OPENAI_API_KEY=sk-...    node dist/cli.js -p openai -m gpt-4o
 Interactive session commands: `/help`, `/tools`, `/skills`, `/extensions`,
 `/reload`, `/caps`, `/model`, `/provider`, `/clear`, `/quit`.
 
+There are four front ends to the same kernel: an **interactive REPL**, a
+**one-shot** run (`-e`), a **batch** mode (piped stdin), and an **HTTP server**
+for embedding:
+
+```bash
+npm run serve                 # POST /run streams JSONL; GET /health
+curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
+```
+
+All four share one wiring (`src/host.ts`), so they load exactly the same
+extensions.
+
 ## The seven primitives
 
 | Primitive            | File                       | Responsibility |
@@ -154,6 +166,8 @@ offline tests, and gates privileged work behind a capability.
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them (per-project instructions) | `/context`, `/context-reload` | — |
 | `limits`      | resource guardrails: tool-output truncation and per-run tool-call budgets, via hooks | `/limits` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions at runtime | `/self` | `self:read`, `self:extend` |
+| `web`         | capability-gated HTTP access (`fetch_url`), size-bounded | `/fetch` | `net:fetch` |
+| `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
 `{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override

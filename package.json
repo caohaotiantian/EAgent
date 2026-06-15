@@ -25,10 +25,13 @@
     "url": "https://github.com/caohaotiantian/eagent/issues"
   },
   "bin": {
-    "eagent": "./dist/cli.js"
+    "eagent": "./dist/cli.js",
+    "eagent-serve": "./dist/server.js"
   },
   "exports": {
     ".": "./dist/kernel/index.js",
+    "./host": "./dist/host.js",
+    "./server": "./dist/server.js",
     "./providers/mock": "./dist/providers/mock.js",
     "./providers/anthropic": "./dist/providers/anthropic.js",
     "./providers/openai": "./dist/providers/openai.js"
@@ -45,6 +48,7 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/cli.ts",
+    "serve": "node --import tsx src/server.ts",
     "start": "node dist/cli.js"
   },
   "dependencies": {

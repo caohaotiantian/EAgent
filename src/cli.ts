@@ -11,33 +11,15 @@
 
 import { readFileSync } from "node:fs";
 import { createInterface, type Interface } from "node:readline/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { Agent } from "./kernel/agent.js";
-import { CapabilityManager } from "./kernel/capabilities.js";
-import { CommandRegistry } from "./kernel/commands.js";
-import { ExtensionHost } from "./kernel/extension.js";
-import { FileBackend } from "./kernel/store.js";
+import type { Agent } from "./kernel/agent.js";
+import type { CommandRegistry } from "./kernel/commands.js";
+import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
-import { AnthropicProvider } from "./providers/anthropic.js";
-import { OpenAIProvider } from "./providers/openai.js";
-import { MockProvider } from "./providers/mock.js";
-import coreTools from "./extensions/core-tools.js";
-import skills from "./extensions/skills.js";
-import mcp from "./extensions/mcp.js";
-import codeact from "./extensions/codeact.js";
-import subagents from "./extensions/subagents.js";
-import memory from "./extensions/memory.js";
-import planmode from "./extensions/planmode.js";
-import session from "./extensions/session.js";
-import packages from "./extensions/packages.js";
-import trace from "./extensions/trace.js";
-import contextFiles from "./extensions/context-files.js";
-import limits from "./extensions/limits.js";
-import self from "./extensions/self.js";
+import { createAgentHost } from "./host.js";
 
 interface Args {
   model?: string;
@@ -126,65 +108,14 @@ async function main(): Promise<void> {
     error: (...a) => console.error(C.red(["✗", ...a].join(" "))),
   };
 
-  const anthropic = new AnthropicProvider();
-  const openai = new OpenAIProvider();
-  // Pick a default provider: an explicit --provider wins if usable; otherwise
-  // prefer a configured live provider, falling back to the offline mock.
-  const defaultProvider = selectProvider(args.provider, {
-    anthropic: anthropic.configured,
-    openai: openai.configured,
-  });
-  const live = defaultProvider !== "mock";
-  const defaultModel =
-    defaultProvider === "anthropic" ? "claude-fable-5" : defaultProvider === "openai" ? "gpt-4o" : "mock";
-
-  const capabilities = new CapabilityManager({
-    ui,
-    grant: ["fs:read", "fs:write", "skill:read"],
-    fallback: args.yolo ? "allow" : "ask",
-  });
-
-  const commands = new CommandRegistry();
-  const agent = new Agent({
+  const { agent, host, commands, live } = await createAgentHost({
     ui,
     logger,
-    capabilities,
-    model: args.model ?? defaultModel,
-    provider: defaultProvider,
+    yolo: args.yolo,
+    provider: args.provider,
+    model: args.model,
+    extraExtensions: args.extensions,
   });
-
-  agent.providers.register(new MockProvider(), { default: defaultProvider === "mock" });
-  if (anthropic.configured) agent.providers.register(anthropic, { default: defaultProvider === "anthropic" });
-  if (openai.configured) agent.providers.register(openai, { default: defaultProvider === "openai" });
-
-  const host = new ExtensionHost({
-    agent,
-    commands,
-    logger,
-    store: new FileBackend(join(homedir(), ".eagent", "state")),
-  });
-
-  // Built-ins ride the same activation path as any other extension. Each is
-  // inert until used (plan mode off, no MCP servers, capabilities gated), so
-  // loading them all by default is safe and shows the whole system.
-  await host.use("core-tools", coreTools);
-  await host.use("skills", skills);
-  await host.use("mcp", mcp);
-  await host.use("codeact", codeact);
-  await host.use("subagents", subagents);
-  await host.use("memory", memory);
-  await host.use("planmode", planmode);
-  await host.use("session", session);
-  await host.use("packages", packages);
-  await host.use("trace", trace);
-  await host.use("context-files", contextFiles);
-  await host.use("limits", limits);
-  await host.use("self", self);
-  await host.discover([
-    join(process.cwd(), ".eagent", "extensions"),
-    join(homedir(), ".eagent", "extensions"),
-  ]);
-  for (const path of args.extensions) await host.loadFile(path);
 
   registerHostCommands(commands, host, agent);
   await agent.hooks.emit("session_start", {});
@@ -412,20 +343,6 @@ async function readVersion(): Promise<string> {
   } catch {
     return "eagent unknown";
   }
-}
-
-/** Resolve which provider to default to given the user's flag and what's configured. */
-function selectProvider(
-  requested: string | undefined,
-  configured: { anthropic: boolean; openai: boolean },
-): string {
-  if (requested === "mock") return "mock";
-  if (requested === "anthropic" && configured.anthropic) return "anthropic";
-  if (requested === "openai" && configured.openai) return "openai";
-  if (requested && requested !== "anthropic" && requested !== "openai") return requested;
-  if (configured.anthropic) return "anthropic";
-  if (configured.openai) return "openai";
-  return "mock";
 }
 
 function banner(agent: Agent, host: ExtensionHost, live: boolean): void {

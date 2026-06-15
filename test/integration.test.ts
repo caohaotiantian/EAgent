@@ -21,6 +21,8 @@ import trace from "../src/extensions/trace.js";
 import contextFiles from "../src/extensions/context-files.js";
 import limits from "../src/extensions/limits.js";
 import self from "../src/extensions/self.js";
+import web from "../src/extensions/web.js";
+import checkpoint from "../src/extensions/checkpoint.js";
 import { makeHarness } from "./helpers.js";
 
 type Activate = Parameters<ReturnType<typeof makeHarness>["host"]["use"]>[1];
@@ -39,6 +41,8 @@ const EXTENSIONS: [string, Activate][] = [
   ["context-files", contextFiles],
   ["limits", limits],
   ["self", self],
+  ["web", web],
+  ["checkpoint", checkpoint],
 ];
 
 async function loadAll(): Promise<ReturnType<typeof makeHarness>> {
@@ -58,7 +62,7 @@ test("every built-in extension activates together without conflict", async () =>
 test("the combined tool surface is present", async () => {
   const h = await loadAll();
   const names = new Set(h.agent.tools.list().map((t) => t.spec.name));
-  for (const expected of ["read", "write", "edit", "bash", "run_code", "spawn_agent", "skill_create", "remember", "recall", "write_extension"]) {
+  for (const expected of ["read", "write", "edit", "bash", "run_code", "spawn_agent", "skill_create", "remember", "recall", "write_extension", "fetch_url"]) {
     assert.ok(names.has(expected), `tool ${expected} should be registered`);
   }
 });
@@ -66,7 +70,7 @@ test("the combined tool surface is present", async () => {
 test("the combined command surface is present", async () => {
   const h = await loadAll();
   const names = new Set(h.commands.list().map((c) => c.name));
-  for (const expected of ["tools", "skills", "mcp", "code", "agents", "memory", "plan", "save", "pkg-list", "trace", "usage", "context", "limits", "self"]) {
+  for (const expected of ["tools", "skills", "mcp", "code", "agents", "memory", "plan", "save", "pkg-list", "trace", "usage", "context", "limits", "self", "fetch", "checkpoints"]) {
     assert.ok(names.has(expected), `command /${expected} should be registered`);
   }
 });
