@@ -19,6 +19,7 @@ import type {
   ToolSpec,
   Usage,
 } from "../kernel/types.js";
+import { fetchWithRetry, parseSSE } from "./http.js";
 
 export interface AnthropicOptions {
   apiKey?: string;
@@ -144,59 +145,17 @@ export class AnthropicProvider implements Provider {
    * server provides one, and gives up after `maxRetries` attempts or if the
    * caller aborts. 4xx other than 429 are non-retryable and surface immediately.
    */
-  private async fetchWithRetry(signal: AbortSignal, body: unknown): Promise<Response> {
-    let attempt = 0;
-    for (;;) {
-      let res: Response;
-      try {
-        res = await this.#fetch(`${this.#baseUrl}/v1/messages`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": this.#apiKey,
-            "anthropic-version": this.#version,
-          },
-          body: JSON.stringify(body),
-          signal,
-        });
-      } catch (err) {
-        if (signal.aborted || attempt >= this.#maxRetries) throw err;
-        await backoff(attempt++, null, signal);
-        continue;
-      }
-
-      if (res.ok && res.body) return res;
-
-      const retryable = res.status === 429 || res.status >= 500;
-      if (!retryable || attempt >= this.#maxRetries) {
-        throw new Error(`Anthropic API error ${res.status}: ${await safeText(res)}`);
-      }
-      await backoff(attempt++, res.headers.get("retry-after"), signal);
-    }
+  private fetchWithRetry(signal: AbortSignal, body: unknown): Promise<Response> {
+    return fetchWithRetry({
+      url: `${this.#baseUrl}/v1/messages`,
+      headers: { "x-api-key": this.#apiKey, "anthropic-version": this.#version },
+      body,
+      signal,
+      fetchImpl: this.#fetch,
+      maxRetries: this.#maxRetries,
+      describe: (status, detail) => `Anthropic API error ${status}: ${detail}`,
+    });
   }
-}
-
-/** Wait `2^attempt` seconds (jittered), or a server-provided `retry-after`. */
-async function backoff(attempt: number, retryAfter: string | null, signal: AbortSignal): Promise<void> {
-  let ms: number;
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    ms = Number.isFinite(seconds) ? seconds * 1000 : 1000;
-  } else {
-    ms = Math.min(2 ** attempt * 1000, 16000) + Math.floor(Math.random() * 250);
-  }
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new Error("aborted"));
-    };
-    if (signal.aborted) return onAbort();
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 // -- wire-format mapping ----------------------------------------------------
@@ -243,45 +202,6 @@ function mapStopReason(reason: string): StopReason {
       return "max_tokens";
     default:
       return "stop";
-  }
-}
-
-// -- SSE parsing ------------------------------------------------------------
-
-interface SSEMessage {
-  event?: string;
-  data: string;
-}
-
-async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEMessage> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buffer.indexOf("\n\n")) !== -1) {
-      const raw = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const msg: SSEMessage = { data: "" };
-      const dataLines: string[] = [];
-      for (const line of raw.split("\n")) {
-        if (line.startsWith("event:")) msg.event = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-      }
-      msg.data = dataLines.join("\n");
-      yield msg;
-    }
-  }
-}
-
-async function safeText(res: Response): Promise<string> {
-  try {
-    return await res.text();
-  } catch {
-    return res.statusText;
   }
 }
 

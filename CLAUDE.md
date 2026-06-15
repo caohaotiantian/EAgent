@@ -1,0 +1,72 @@
+# CLAUDE.md
+
+Orientation for an AI agent working in this repository.
+
+## What this is
+
+EAgent is a minimalist AI-agent kernel: a tiny, stable core plus an
+Emacs-grade extension surface. The bet is that a small, observable, malleable
+core beats a big one — new behavior is always an extension, never a fork.
+
+## Architecture
+
+The kernel is **seven primitives and nothing more**, all under `src/kernel/`:
+
+| Primitive        | File                | Responsibility |
+| ---------------- | ------------------- | -------------- |
+| Hook bus         | `hooks.ts`          | Lifecycle events (observe) + filter hooks (intervene). |
+| Tool registry    | `registry.ts`       | Register/shadow/dispose tools; later wins, disposing restores. |
+| Provider         | `types.ts`          | The LLM abstraction: a request → a stream of events. |
+| Agent loop       | `agent.ts`          | Turns, streaming, guarded/ordered tool dispatch, steering, follow-up. |
+| Capability layer | `capabilities.ts`   | Per-capability grant/deny/ask, wildcards, audit log. |
+| Extension host   | `extension.ts`      | Discovery, activation, `ExtensionAPI`, hot reload via `jiti`. |
+| Command registry | `commands.ts`       | User-facing slash commands. |
+
+**Everything else is an extension** — even the four "built-in" tools
+(`read`, `write`, `edit`, `bash`) live in `src/extensions/core-tools.ts`. The
+kernel ships with zero opinions about tools, memory, prompts, or sub-agents.
+
+## Key commands
+
+```bash
+npm test         # node:test via tsx; runs offline against MockProvider (no API key)
+npm run typecheck
+npm run build    # tsc -> dist/
+npm run dev      # node --import tsx src/cli.ts  (interactive REPL)
+```
+
+`npm test` (and the whole suite) runs offline: `MockProvider`
+(`src/providers/mock.ts`) is a scriptable, deterministic LLM, so no network and
+no `ANTHROPIC_API_KEY` are required. Keep it that way.
+
+## Where things live
+
+- `src/kernel/` — the seven primitives + public barrel (`index.ts`).
+- `src/providers/` — `mock` (deterministic) and `anthropic` (fetch + SSE, with
+  retries and usage accounting; no SDK).
+- `src/extensions/` — `core-tools`, `skills`, `mcp`, `codeact`, `subagents`,
+  `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`.
+- `src/cli.ts` — the terminal host: interactive REPL, batch, one-shot.
+- `test/` — the full offline suite, one file per primitive/extension.
+- `examples/extensions/` — worked example extensions.
+- `docs/EXTENSIONS.md` — the extension author's guide.
+
+## House conventions
+
+- **ESM + NodeNext.** Always use `.js` import specifiers even when importing a
+  `.ts` file (e.g. `import { defineTool } from "../kernel/define.js"`). This is
+  required by `module: NodeNext` and `verbatimModuleSyntax`.
+- **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
+  `noImplicitOverride`, `noFallthroughCasesInSwitch` are all on. No `any`
+  cop-outs; model the types.
+- **Zero runtime dependencies except `jiti`.** Do not add npm dependencies.
+  Providers use the global `fetch`; nothing pulls in an SDK.
+- **Tests use `node:test` run via `tsx`**, and must run offline. Every
+  extension is capability-gated and ships with tests.
+- **Capabilities are the security vocabulary.** Privileged tools declare
+  `capabilities: [...]` (e.g. `fs:read`, `shell:exec`) and the dispatcher
+  enforces them before `execute` runs.
+
+When adding an extension: register through the `ExtensionAPI`, track every
+registration (the host does this for you so reload is clean), gate side effects
+behind a capability, and add an offline test.

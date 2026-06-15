@@ -1,0 +1,402 @@
+# Writing EAgent extensions
+
+Almost everything in EAgent is an extension. The kernel is seven primitives;
+tools, memory, prompts, sub-agents, MCP, and even the four "built-in" tools
+(`read`, `write`, `edit`, `bash`) are extensions riding a single stable surface,
+the `ExtensionAPI`. This guide is the practical reference for authoring one.
+
+The API is defined in [`src/kernel/extension.ts`](../src/kernel/extension.ts);
+the tool helpers in [`src/kernel/define.ts`](../src/kernel/define.ts); the hook
+contract in [`src/kernel/events.ts`](../src/kernel/events.ts). When in doubt,
+those files are the source of truth.
+
+## The shape of an extension
+
+An extension is a module with a **default-exported activation function**. It
+receives the `ExtensionAPI` and registers tools, hooks, commands, or providers
+on it.
+
+```ts
+import { defineTool, ok } from "eagent";
+import type { ExtensionAPI } from "eagent";
+
+export default function activate(e: ExtensionAPI) {
+  e.registerTool(
+    defineTool({
+      name: "ping",
+      description: "Reply with pong.",
+      execute: () => ok("pong"),
+    }),
+  );
+}
+```
+
+The activation function may be **async**. It may return nothing, a
+**deactivate function** (`() => void`), or a **`Disposable`** (`{ dispose() }`);
+whatever it returns runs on unload and before every reload, alongside the
+automatic teardown of everything it registered.
+
+```ts
+export default async function activate(e: ExtensionAPI) {
+  const handle = await openSomething();
+  return () => handle.close(); // runs on unload/reload
+}
+```
+
+Every registration call (`registerTool`, `on`, `hook`, `registerCommand`,
+`registerProvider`) returns a `Disposable` and is **tracked by the host**, so a
+reload tears the old version down precisely and brings the new one up — the
+"clean swap" that makes live redefinition safe. You rarely need to dispose
+those by hand; return a deactivate only for resources the host can't see
+(timers, sockets, file handles).
+
+## The `ExtensionAPI` surface
+
+This is the entire public surface, copied from `src/kernel/extension.ts`:
+
+```ts
+interface ExtensionAPI {
+  readonly id: string;
+
+  registerTool(tool: Tool): Disposable;
+  registerProvider(provider: Provider, opts?: { default?: boolean }): Disposable;
+  registerCommand(command: Command): Disposable;
+
+  on<K extends keyof KernelEvents>(event: K, handler: EventHandler<KernelEvents[K]>): Disposable;
+  hook<K extends keyof KernelFilters>(
+    point: K,
+    handler: FilterHandler<KernelFilters[K]["value"], KernelFilters[K]["context"]>,
+  ): Disposable;
+
+  /** Declare a capability this extension's tools are allowed to use. */
+  grantCapability(pattern: string): void;
+
+  /** Namespaced persistent state for this extension. */
+  readonly store: Store;
+  readonly log: Logger;
+  /** The running agent (registries, hooks, capabilities, transcript). */
+  readonly agent: Agent;
+  /** The command registry, for introspection. */
+  readonly commands: CommandRegistry;
+
+  /** Request a hot reload of this extension. Treat as terminal: code after the
+   *  await runs in the old runtime. */
+  reload(): Promise<void>;
+}
+```
+
+| Member | Purpose |
+| ------ | ------- |
+| `id` | The extension's id (the filename without extension, or the id passed to `host.use`). Used to namespace the `store` and prefix the `log`. |
+| `registerTool(tool)` | Register a `Tool` the model can call. A later registration shadows an earlier same-named one; disposing restores the prior. |
+| `registerProvider(provider, opts?)` | Register an LLM `Provider`; pass `{ default: true }` to make it the default. |
+| `registerCommand(command)` | Register a user-facing slash command. |
+| `on(event, handler)` | Subscribe to a lifecycle **event** (observe). |
+| `hook(point, handler)` | Install a **filter hook** (intervene): transform or veto a threaded value. |
+| `grantCapability(pattern)` | Declare an authority this extension's tools may use without prompting (`"fs:read"`, `"net:*"`). |
+| `store` | Per-extension persistent key/value state, namespaced by `id`. |
+| `log` | A `Logger` whose output is prefixed with `[id]`. |
+| `agent` | The running `Agent` — its registries, hook bus, capability manager, and transcript. |
+| `commands` | The `CommandRegistry`, for introspection. |
+| `reload()` | Request a hot reload of *this* extension. Terminal: code after the `await` runs in the old runtime. |
+
+## Defining tools
+
+`defineTool` is a thin, typed constructor — no schema inference, because the
+JSON Schema is exactly what the model sees, so it stays explicit. Pair it with
+the `ok` / `fail` result helpers.
+
+```ts
+import { defineTool, ok, fail } from "eagent";
+
+e.registerTool(
+  defineTool({
+    name: "word_count",
+    description: "Count words in a piece of text.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The text to count words in." },
+      },
+      required: ["text"],
+    },
+    execute: (args) => {
+      const text = String(args.text ?? "");
+      if (!text.trim()) return fail("text is empty");
+      return ok(String(text.trim().split(/\s+/).length));
+    },
+  }),
+);
+```
+
+The full `ToolDefinition` (`src/kernel/define.ts`):
+
+| Field | Meaning |
+| ----- | ------- |
+| `name` | The tool name the model calls. |
+| `description` | What it does — written for the model. |
+| `parameters?` | A JSON-Schema object for the arguments (defaults to `{ type: "object", properties: {} }`). |
+| `executionMode?` | `"parallel"` (default) or `"sequential"`. One sequential tool forces its whole batch to run in order. |
+| `capabilities?` | Capabilities the tool needs, enforced before `execute` runs (see below). |
+| `execute(args, ctx)` | The body. May be sync or async; returns a `ToolResult`. |
+
+- `ok(content, details?)` builds a successful result. `content` is the
+  model-legible text; `details` is a structured payload for renderers/telemetry
+  and is never sent to the model.
+- `fail(content, details?)` builds an error result (`isError: true`).
+
+The second argument to `execute`, `ctx: ToolContext`, gives you
+`ctx.toolCallId`, `ctx.signal` (an `AbortSignal`), `ctx.require(cap)`,
+`ctx.progress(chunk)`, `ctx.ui`, `ctx.agent`, and `ctx.log`.
+
+## The capability model
+
+A capability is a dotted authority string. Privileged tools declare what they
+need; the dispatcher enforces it **before the tool body runs**.
+
+```ts
+e.registerTool(
+  defineTool({
+    name: "fetch",
+    description: "HTTP GET a URL and return the body.",
+    capabilities: ["net:fetch"], // enforced automatically before execute()
+    parameters: {
+      type: "object",
+      properties: { url: { type: "string" } },
+      required: ["url"],
+    },
+    execute: async (args) => ok(await (await fetch(String(args.url))).text()),
+  }),
+);
+```
+
+Declaring `capabilities: [...]` on a tool means the kernel calls
+`ctx.require(cap)` for each one before invoking `execute`; if any is denied it
+throws a `CapabilityError` and the body never runs. You can also call
+`await ctx.require("net:fetch")` yourself inside `execute` for a finer-grained
+or conditional check.
+
+Decisions come from an ordered policy: an explicit **deny** wins, then an
+explicit **grant**, otherwise the fallback (**ask** the human by default, or
+`allow`/`deny` for automated/locked-down runs). Patterns support a trailing
+wildcard segment: `fs:*`, `*`. Every check is recorded in an audit log you can
+inspect with `/caps`.
+
+Use `e.grantCapability("net:fetch")` (or a wildcard like `"fs:*"`) in your
+activation function to declare that your extension's tools should be allowed
+that authority without prompting. The dotted names in use across the project:
+
+| Capability | Used by |
+| ---------- | ------- |
+| `fs:read` | `core-tools` (read/edit), `session` |
+| `fs:write` | `core-tools` (write/edit), `session` |
+| `shell:exec` | `core-tools` (bash) |
+| `code:exec` | `codeact` (run JS/Python) |
+| `net:fetch` | network tools |
+| `skill:write` | `skills` (authoring a `SKILL.md`) |
+| `mcp:call` | `mcp` (calling a remote MCP tool) |
+| `agent:spawn` | `subagents` |
+| `pkg:install` | `packages` |
+
+## Lifecycle events (observe)
+
+Subscribe with `e.on(event, handler)`. These are notifications; handlers cannot
+change anything. From `src/kernel/events.ts`:
+
+| Event | Payload | Fires when |
+| ----- | ------- | ---------- |
+| `session_start` | `{}` | A fresh extension runtime has come up (also after a reload). |
+| `session_shutdown` | `{}` | The runtime is tearing down (also before a reload). |
+| `reload` | `{ id? }` | A hot reload occurred. |
+| `agent_start` | `{ input }` | A run begins. |
+| `agent_end` | `{ reason }` | A run ends (with its `StopReason`). |
+| `turn_start` | `{ turn }` | A turn begins. |
+| `turn_end` | `{ turn }` | A turn ends. |
+| `message` | `{ message }` | A completed message was appended to the transcript. |
+| `text_delta` | `{ text }` | Incremental assistant text during streaming. |
+| `tool_start` | `{ call }` | A tool call is about to run. |
+| `tool_end` | `{ call, result }` | A tool call finished. |
+| `usage` | `{ usage, cumulative }` | Token usage for the just-finished model call, plus the running total. |
+| `error` | `{ error, where }` | Something threw. |
+
+```ts
+e.on("tool_end", ({ call, result }) => {
+  e.log.info(`${call.name} -> ${result.isError ? "error" : "ok"}`);
+});
+```
+
+## Filter hooks (intervene)
+
+Install with `e.hook(point, handler)`. A filter hook threads a value through
+your handler, which returns the (possibly transformed) value. There are exactly
+three, and they are the seams where memory, plan-mode approvals, safety gates,
+and context engineering plug in without touching the loop.
+
+### `transformContext`
+
+Reshape the message list just before it reaches the model — compaction, memory,
+RAG, a system note. **Return a new array; do not mutate the transcript in
+place.**
+
+```ts
+e.hook("transformContext", (messages /*, { turn, model } */) => [
+  {
+    role: "system",
+    content: [{ type: "text", text: `The current time is ${new Date().toISOString()}.` }],
+    meta: { ephemeral: true },
+  },
+  ...messages,
+]);
+```
+
+### `beforeToolCall`
+
+Approve, rewrite, or veto a tool call before it runs. The threaded value is a
+`ToolDecision` (`{ block, reason?, arguments }`); the context carries the
+`call`. Return a refined decision — block it, or rewrite `arguments`.
+
+```ts
+e.hook("beforeToolCall", (decision, { call }) => {
+  if (call.name !== "bash") return decision;
+  const command = String(call.arguments.command ?? "");
+  if (/\brm\s+-rf\s+[~/]/.test(command)) {
+    return { ...decision, block: true, reason: "refusing to delete from a root or home path" };
+  }
+  return decision;
+});
+```
+
+### `afterToolCall`
+
+Transform a tool's `ToolResult` before it is appended to the transcript —
+redaction, truncation, annotation.
+
+```ts
+e.hook("afterToolCall", (result, { call }) => {
+  if (result.content.length <= 4000) return result;
+  return { ...result, content: result.content.slice(0, 4000) + "\n…(truncated)" };
+});
+```
+
+## Per-extension state, logging, and namespacing
+
+Each extension gets its own namespaced persistent `store` (keyed by the
+extension `id`). This is the explicit fix for Emacs's global-mutable-state
+mistake: state is scoped, not global. A reload preserves the store; a teardown
+does not wipe it.
+
+```ts
+const runs = (e.store.get<number>("activations") ?? 0) + 1;
+e.store.set("activations", runs);
+```
+
+The `store` interface is `get<T>(key, fallback?)`, `set(key, value)`,
+`delete(key)`, `keys()`. Backing is in-memory in tests and JSON-file-backed in
+the CLI (`~/.eagent/state/<id>.json`).
+
+The `log` is a `Logger` (`debug`/`info`/`warn`/`error`) whose every line is
+prefixed with `[<id>]`, so output from different extensions stays attributable.
+
+## Discovery and hot reload
+
+The CLI discovers extension files, in order, from:
+
+1. `.eagent/extensions/` in the current working directory (project-local), then
+2. `~/.eagent/extensions/` (user-global).
+
+Files are loaded directly via **jiti** with **no build step** — drop a `.ts`
+(or `.js`/`.mjs`/`.tsx`) file in one of those directories and it is picked up on
+the next start. Files and directories beginning with `_` or `.` are skipped, and
+on an id collision the later (more specific) directory wins. You can also load a
+file explicitly with `--ext path/to/ext.ts`.
+
+`/reload` re-imports and re-activates extensions. Because every registration is
+a tracked `Disposable`, reload tears the old version down cleanly (running any
+returned deactivate) before bringing the new one up. The host emits
+`session_shutdown`, swaps, then emits `reload` and `session_start`.
+
+**Caveat:** `e.reload()` (and the `reload()` API member) is terminal. The reload
+swaps the runtime out from under you, so any code after `await e.reload()` runs
+in the *old*, now-disposed runtime. Treat the await as the end of the function.
+
+## A complete worked example
+
+A single file with a tool, a guard hook, and a command — copy-pasteable. (When
+authoring inside this repo, import from the relative `src/kernel/*.js` paths as
+the example under `examples/extensions/` does; when authoring against the
+published package, import from `"eagent"`.)
+
+```ts
+// .eagent/extensions/notes.ts — auto-discovered, then `/reload`
+import { defineTool, ok, fail } from "eagent";
+import type { ExtensionAPI } from "eagent";
+
+export default function activate(e: ExtensionAPI) {
+  e.log.info("notes extension activated");
+
+  // 1. A small, focused tool that persists to the per-extension store.
+  e.registerTool(
+    defineTool({
+      name: "note",
+      description: "Append a short note to a persistent scratchpad.",
+      parameters: {
+        type: "object",
+        properties: { text: { type: "string", description: "The note to save." } },
+        required: ["text"],
+      },
+      execute: (args) => {
+        const text = String(args.text ?? "").trim();
+        if (!text) return fail("note text is empty");
+        const notes = e.store.get<string[]>("notes") ?? [];
+        notes.push(text);
+        e.store.set("notes", notes);
+        return ok(`Saved note #${notes.length}.`);
+      },
+    }),
+  );
+
+  // 2. A guard: block writes to anything that looks like a dotfile.
+  e.hook("beforeToolCall", (decision, { call }) => {
+    if (call.name !== "write") return decision;
+    if (/(^|\/)\.[^/]+$/.test(String(call.arguments.path ?? ""))) {
+      return { ...decision, block: true, reason: "writing dotfiles is disabled by the notes extension" };
+    }
+    return decision;
+  });
+
+  // 3. A user-facing command to read the scratchpad back.
+  e.registerCommand({
+    name: "notes",
+    description: "Print saved notes.",
+    run: (ctx) => {
+      const notes = e.store.get<string[]>("notes") ?? [];
+      ctx.print(notes.length ? notes.map((n, i) => `${i + 1}. ${n}`).join("\n") : "(no notes yet)");
+    },
+  });
+
+  // 4. Optional cleanup, run on unload/reload.
+  return () => e.log.info("notes extension deactivated");
+}
+```
+
+See [`examples/extensions/clock.ts`](../examples/extensions/clock.ts) for the
+in-repo worked example, and `src/extensions/` for the real built-ins.
+
+## Best practices
+
+- **Keep tools small and capability-gated.** One tool, one job. Declare every
+  privileged authority in `capabilities: [...]` (and `grantCapability` only what
+  the host should auto-allow) so the dispatcher — not your code — is the gate.
+- **Don't mutate the transcript in `transformContext`.** Return a *new* array.
+  The messages you receive are the live transcript; build a derived list instead
+  of editing it in place. Mark injected, non-persistent messages with
+  `meta: { ephemeral: true }` so other extensions can recognize them.
+- **Return a deactivate to clean up.** Anything the host can't see — timers,
+  sockets, watchers, child processes — should be torn down in a returned
+  deactivate function or `Disposable`, so reloads stay clean.
+- **Scope state to the `store`.** Use the namespaced `store` for persistence
+  rather than module-level globals; it survives reloads and stays attributable
+  to your extension.
+- **Treat `reload()` as terminal.** Do no work after `await e.reload()`.
+- **Test offline.** The suite runs against `MockProvider` with no network or API
+  key; keep new extensions and their tests offline too.

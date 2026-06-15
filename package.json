@@ -4,13 +4,34 @@
   "description": "A minimalist AI agent with a tiny stable core and Emacs-grade extensibility. Everything is a hot-reloadable extension.",
   "type": "module",
   "license": "MIT",
+  "author": "caohaotiantian",
+  "keywords": [
+    "agent",
+    "llm",
+    "ai",
+    "extensible",
+    "emacs",
+    "mcp",
+    "anthropic",
+    "tools",
+    "kernel"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caohaotiantian/eagent.git"
+  },
+  "homepage": "https://github.com/caohaotiantian/eagent#readme",
+  "bugs": {
+    "url": "https://github.com/caohaotiantian/eagent/issues"
+  },
   "bin": {
     "eagent": "./dist/cli.js"
   },
   "exports": {
     ".": "./dist/kernel/index.js",
     "./providers/mock": "./dist/providers/mock.js",
-    "./providers/anthropic": "./dist/providers/anthropic.js"
+    "./providers/anthropic": "./dist/providers/anthropic.js",
+    "./providers/openai": "./dist/providers/openai.js"
   },
   "files": [
     "dist",
@@ -21,6 +42,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/cli.ts",
     "start": "node dist/cli.js"

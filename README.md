@@ -149,6 +149,8 @@ offline tests, and gates privileged work behind a capability.
 | `planmode`    | human-in-the-loop approval gate before mutating tools run | `/plan` | — |
 | `session`     | save / load / handoff for transcripts (file-based memory) | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
 | `packages`    | install extensions from `path:` / `git:` / `npm:` sources (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
+| `trace`       | observability: per-run span tree, metrics, and token usage, all from the event bus | `/trace`, `/usage`, `/trace-save` | — |
+| `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them (per-project instructions) | `/context`, `/context-reload` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
 `{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
@@ -216,6 +218,16 @@ suite runs offline and why you can explore the agent with no API key.
 - **Scoped state.** Each extension gets a namespaced persistent `store` — the
   explicit fix for Emacs's global-mutable-state mistake.
 - **Stable API discipline.** One typed `ExtensionAPI`; additive, never broken.
+- **Token accounting.** Providers report `Usage` on every completion; the agent
+  sums it and emits a `usage` event (see `/usage`).
+- **Resilient networking.** The Anthropic provider retries 429/5xx and network
+  errors with exponential backoff (honoring `retry-after`), and its `fetch` is
+  injectable for testing.
+- **Filesystem confinement.** `read`/`write`/`edit` are scoped to a workspace
+  root (`$EAGENT_WORKSPACE` or cwd), rejecting `../` escapes — defense in depth
+  over the `fs:*` capabilities.
+
+See `docs/EXTENSIONS.md` for the full extension author's guide.
 
 ## Layout
 
