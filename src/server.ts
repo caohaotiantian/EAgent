@@ -26,7 +26,15 @@ import { createAgentHost, type AgentHostOptions } from "./host.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
+  /** Require `Authorization: Bearer <token>` on mutating routes. Defaults to
+   *  `EAGENT_TOKEN`; when unset, the server is open (suitable only for trusted
+   *  local use — see SECURITY.md). */
+  token?: string;
+  /** Max request body size in bytes (default 1 MiB). */
+  maxBodyBytes?: number;
 }
+
+const DEFAULT_MAX_BODY = 1024 * 1024;
 
 export interface HttpServer {
   server: ReturnType<typeof createServer>;
@@ -48,6 +56,9 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   const built = await createAgentHost({ ...opts, logger, yolo: opts.yolo ?? true });
   await built.agent.hooks.emit("session_start", {});
 
+  const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
+  const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+
   // Per-conversation transcripts, replayed into the shared agent on each turn.
   const sessions = new Map<string, Message[]>();
   let busy = false;
@@ -60,7 +71,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
       set busy(v) {
         busy = v;
       },
-    }).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
+    }, { token, maxBody }).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
   });
 
   return {
@@ -76,6 +87,11 @@ interface Lock {
   busy: boolean;
 }
 
+interface Security {
+  token: string;
+  maxBody: number;
+}
+
 async function route(
   req: IncomingMessage,
   res: ServerResponse,
@@ -83,11 +99,19 @@ async function route(
   extensions: string[],
   sessions: Map<string, Message[]>,
   lock: Lock,
+  security: Security,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
+  // /health is always open (for liveness probes); everything else needs auth
+  // when a token is configured.
   if (req.method === "GET" && url.pathname === "/health") {
-    sendJson(res, 200, { ok: true, model: agent.model, extensions, sessions: sessions.size });
+    sendJson(res, 200, { ok: true, model: agent.model, extensions, sessions: sessions.size, auth: security.token ? "required" : "open" });
+    return;
+  }
+
+  if (security.token && !authorized(req, security.token)) {
+    sendJson(res, 401, { error: "unauthorized; provide Authorization: Bearer <token>" });
     return;
   }
 
@@ -99,7 +123,13 @@ async function route(
   }
 
   if (req.method === "POST" && url.pathname === "/run") {
-    const body = await readBody(req);
+    let body: string;
+    try {
+      body = await readBody(req, security.maxBody);
+    } catch {
+      sendJson(res, 413, { error: `request body exceeds ${security.maxBody} bytes` });
+      return;
+    }
     let input: string;
     let session: string | undefined;
     try {
@@ -171,14 +201,36 @@ async function streamRun(
   }
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
+    let size = 0;
+    let tooBig = false;
     req.setEncoding("utf8");
-    req.on("data", (c) => (data += c));
-    req.on("end", () => resolve(data));
+    req.on("data", (c: string) => {
+      if (tooBig) return; // stop accumulating, but keep draining the socket
+      size += Buffer.byteLength(c);
+      if (size > maxBytes) {
+        tooBig = true;
+        reject(new Error("body too large"));
+        return;
+      }
+      data += c;
+    });
+    req.on("end", () => {
+      if (!tooBig) resolve(data);
+    });
     req.on("error", reject);
   });
+}
+
+/** Constant-time-ish bearer check (length first, then compare). */
+function authorized(req: IncomingMessage, token: string): boolean {
+  const header = req.headers.authorization ?? "";
+  const prefix = "Bearer ";
+  if (!header.startsWith(prefix)) return false;
+  const provided = header.slice(prefix.length);
+  return provided.length === token.length && provided === token;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

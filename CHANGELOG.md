@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `journal` extension — durable, append-only conversation journaling (opt-in via
   `/journal on` or `EAGENT_JOURNAL`) with `/resume` for crash recovery across
   processes.
+- `prompts` extension — saved prompt templates / macros with `$1 $2 $*`
+  substitution (`/prompt-save`, `/prompt`, `/prompts`, `/prompt-remove`).
+- Server hardening: optional bearer-token auth (`EAGENT_TOKEN`) on mutating
+  routes (`/health` stays open), and a request-body size cap (default 1 MiB,
+  413 on exceed).
 
 ### Changed
 

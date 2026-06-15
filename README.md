@@ -71,6 +71,9 @@ curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
 curl -s localhost:8787/run -d '{"input":"and now in one line","session":"abc"}'
 ```
 
+The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
+`Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
+
 All four share one wiring (`src/host.ts`), so they load exactly the same
 extensions. To run sandboxed (the posture `SECURITY.md` recommends), there is a
 `Dockerfile` (non-root, workspace-confined):
@@ -183,6 +186,7 @@ offline tests, and gates privileged work behind a capability.
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword (`describe_tool` tool) | `/describe`, `/apropos` | — |
 | `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
+| `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompts`, `/prompt-remove` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
 `{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
