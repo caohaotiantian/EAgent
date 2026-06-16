@@ -18,11 +18,12 @@
  * server; front a pool of these for real concurrency.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { Agent } from "./kernel/agent.js";
 import type { Message, Logger } from "./kernel/types.js";
-import { createAgentHost, type AgentHostOptions } from "./host.js";
+import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
@@ -58,6 +59,17 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
 
   const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+
+  // No token means /run and DELETE /sessions are unauthenticated, and the agent
+  // is built with yolo (every capability auto-granted, including shell:exec).
+  // That is fine for trusted localhost use but a sharp edge if exposed, so warn
+  // loudly. `main()` binds 127.0.0.1 by default to keep it off-box.
+  if (!token) {
+    logger.warn(
+      "EAGENT_TOKEN not set — /run and DELETE /sessions are UNAUTHENTICATED and run tools with full capabilities. " +
+        "Set EAGENT_TOKEN, and do not expose this server beyond localhost.",
+    );
+  }
 
   // Per-conversation transcripts, replayed into the shared agent on each turn.
   const sessions = new Map<string, Message[]>();
@@ -169,9 +181,19 @@ async function streamRun(
   session: string | undefined,
 ): Promise<void> {
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
+  let closed = false;
   const write = (obj: unknown): void => {
+    if (closed) return; // don't write to a destroyed socket
     res.write(JSON.stringify(obj) + "\n");
   };
+  // If the client disconnects mid-turn, abort the agent so it stops streaming
+  // to a dead socket (and frees the single-flight lock) instead of running the
+  // whole turn to completion and wasting tokens/side effects.
+  const onClose = (): void => {
+    closed = true;
+    if (agent.running) agent.stop();
+  };
+  res.on("close", onClose);
 
   // Replay this session's transcript so the turn has its conversation history.
   agent.clear();
@@ -196,8 +218,9 @@ async function streamRun(
   } catch (err) {
     write({ type: "error", message: err instanceof Error ? err.message : String(err) });
   } finally {
+    res.off("close", onClose);
     for (const s of subs) s.dispose();
-    res.end();
+    if (!closed) res.end();
   }
 }
 
@@ -224,13 +247,18 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   });
 }
 
-/** Constant-time-ish bearer check (length first, then compare). */
+/**
+ * Constant-time bearer check. Both sides are hashed to a fixed-length digest
+ * and compared with `timingSafeEqual`, so neither the token's length nor its
+ * contents leak through comparison timing.
+ */
 function authorized(req: IncomingMessage, token: string): boolean {
   const header = req.headers.authorization ?? "";
   const prefix = "Bearer ";
   if (!header.startsWith(prefix)) return false;
-  const provided = header.slice(prefix.length);
-  return provided.length === token.length && provided === token;
+  const provided = createHash("sha256").update(header.slice(prefix.length)).digest();
+  const expected = createHash("sha256").update(token).digest();
+  return timingSafeEqual(provided, expected);
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -239,10 +267,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 async function main(): Promise<void> {
+  loadEnvFile();
   const port = Number(process.env.PORT ?? 8787);
+  // Bind loopback by default so an unauthenticated server is not reachable
+  // off-box. Set EAGENT_HOST=0.0.0.0 to expose it deliberately (use a token).
+  const host = process.env.EAGENT_HOST ?? "127.0.0.1";
   const http = await createHttpServer({ port });
-  http.server.listen(port, () => {
-    console.error(`eagent server on http://localhost:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
+  http.server.listen(port, host, () => {
+    console.error(`eagent server on http://${host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
   });
 
   // Graceful shutdown: stop accepting connections, tear down the host, exit.

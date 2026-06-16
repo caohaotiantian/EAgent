@@ -45,6 +45,17 @@ test("ignores event: and comment lines, keeping data", async () => {
   assert.deepEqual(data, ['{"x":1}']);
 });
 
+test("parses events delimited and split by CRLF line endings", async () => {
+  // A proxy emitting CRLF must not stall the parser (regression: indexOf("\n\n")).
+  const data = await collect(streamOf(["data: a\r\n\r\n", "data: b\r\n\r\n"]));
+  assert.deepEqual(data, ["a", "b"]);
+});
+
+test("strips only a single leading space from data, preserving the rest", async () => {
+  const data = await collect(streamOf(["data:  two leading spaces\n\n"]));
+  assert.deepEqual(data, [" two leading spaces"]);
+});
+
 test("fetchWithRetry aborts cleanly during backoff", async () => {
   const controller = new AbortController();
   const fetchImpl = (async () =>

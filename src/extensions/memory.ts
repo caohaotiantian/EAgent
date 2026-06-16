@@ -42,6 +42,24 @@ interface SummaryCache {
   /** How many leading messages this summary covers. */
   coveredCount: number;
   summaryText: string;
+  /** Content fingerprint of the covered prefix; guards against transcript swaps. */
+  fingerprint: string;
+}
+
+/**
+ * A cheap content fingerprint of a message prefix. Sampling characters keeps it
+ * fast for large messages while staying sensitive to content, so a cached
+ * summary is never reused for a different conversation after `/load`,
+ * `/handoff`, or `clear()` replaces the transcript.
+ */
+function fingerprint(messages: Message[]): string {
+  let h = 5381;
+  for (const m of messages) {
+    h = (Math.imul(h, 33) ^ m.role.charCodeAt(0)) | 0;
+    const t = textOf(m);
+    for (let i = 0; i < t.length; i += 17) h = (Math.imul(h, 33) ^ t.charCodeAt(i)) | 0;
+  }
+  return `${messages.length}:${(h >>> 0).toString(36)}`;
 }
 
 export default function activate(e: ExtensionAPI): void {
@@ -82,11 +100,22 @@ export default function activate(e: ExtensionAPI): void {
    */
   async function summaryFor(older: Message[], keepRecent: number, force: boolean): Promise<string> {
     const cache = e.store.get<SummaryCache>(CACHE_KEY);
-    const stale = !cache || older.length - cache.coveredCount >= keepRecent;
-    if (!force && cache && !stale) return cache.summaryText;
+    // The cache is valid only if the prefix it covers still matches the current
+    // transcript by content — not just by count — so a swapped-in conversation
+    // of similar length can't be served the previous one's summary.
+    const valid =
+      !!cache &&
+      cache.coveredCount <= older.length &&
+      fingerprint(older.slice(0, cache.coveredCount)) === cache.fingerprint;
+    const stale = !valid || older.length - cache!.coveredCount >= keepRecent;
+    if (!force && valid && !stale) return cache!.summaryText;
 
     const summaryText = await summarize(older);
-    e.store.set(CACHE_KEY, { coveredCount: older.length, summaryText } satisfies SummaryCache);
+    e.store.set(CACHE_KEY, {
+      coveredCount: older.length,
+      summaryText,
+      fingerprint: fingerprint(older),
+    } satisfies SummaryCache);
     return summaryText;
   }
 

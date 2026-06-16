@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
-import type { Message } from "../kernel/types.js";
+import { isMessage, type Message } from "../kernel/types.js";
 
 export default function activate(e: ExtensionAPI): () => void {
   e.grantCapability("fs:read");
@@ -44,14 +44,31 @@ export default function activate(e: ExtensionAPI): () => void {
   const off = e.on("message", ({ message }) => append(message));
 
   const readJournal = (): Message[] => {
+    let text: string;
     try {
-      return readFileSync(journalPath(), "utf8")
-        .split("\n")
-        .filter((l) => l.trim().length > 0)
-        .map((l) => JSON.parse(l) as Message);
+      text = readFileSync(journalPath(), "utf8");
     } catch {
       return [];
     }
+    // Parse line by line and skip only the unparseable lines (typically a single
+    // truncated final append after a crash). A write-ahead log that throws away
+    // everything on one bad line would defeat its own purpose — recover what we
+    // can. Entries must also be well-formed messages so a corrupt-but-valid-JSON
+    // line can't crash a later turn.
+    const out: Message[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        e.log.warn("journal: skipping unparseable line during resume");
+        continue;
+      }
+      if (isMessage(parsed)) out.push(parsed);
+      else e.log.warn("journal: skipping malformed (non-message) entry during resume");
+    }
+    return out;
   };
 
   const offJournal = e.registerCommand({

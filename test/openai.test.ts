@@ -148,3 +148,44 @@ test("throws on a non-retryable error", async () => {
   const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => new Response("bad", { status: 400 }) });
   await assert.rejects(() => collect(provider.stream(req())), /OpenAI API error 400/);
 });
+
+test("sends max_tokens by default and max_completion_tokens when configured", async () => {
+  let byDefault: any;
+  const p1 = new OpenAIProvider({
+    apiKey: "t",
+    fetch: async (_u, init) => {
+      byDefault = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(p1.stream(req()));
+  assert.equal(byDefault.max_tokens, 4096);
+  assert.equal(byDefault.max_completion_tokens, undefined);
+
+  let configured: any;
+  const p2 = new OpenAIProvider({
+    apiKey: "t",
+    maxTokensParam: "max_completion_tokens",
+    fetch: async (_u, init) => {
+      configured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(p2.stream(req()));
+  assert.equal(configured.max_completion_tokens, 4096);
+  assert.equal(configured.max_tokens, undefined);
+});
+
+test("synthesizes distinct ids for parallel same-name calls when the endpoint omits ids", async () => {
+  const chunks = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "f", arguments: "{}" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, function: { name: "f", arguments: "{}" } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+  ];
+  const provider = new OpenAIProvider({ apiKey: "t", fetch: async () => sse(chunks) });
+  const ids = (await collect(provider.stream(req())))
+    .filter((e) => e.type === "tool_call")
+    .map((e) => (e as { id: string }).id);
+  assert.equal(ids.length, 2);
+  assert.notEqual(ids[0], ids[1], "two parallel same-name calls must not collide on a synthesized id");
+});

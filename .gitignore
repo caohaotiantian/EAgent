@@ -3,3 +3,6 @@ dist/
 *.log
 .eagent/
 .DS_Store
+.env
+.env.*
+!.env.example

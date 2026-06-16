@@ -74,8 +74,12 @@ export default function activate(e: ExtensionAPI): void {
         } catch (err) {
           return fail(`Cannot read ${path}: ${(err as Error).message}`);
         }
-        const start = args.offset ? Math.max(0, Number(args.offset) - 1) : 0;
-        const end = args.limit ? start + Number(args.limit) : lines.length;
+        // Guard against negative/fractional/NaN offset & limit, which would
+        // otherwise produce a surprising empty or reversed slice silently.
+        const offset = Number(args.offset);
+        const limit = Number(args.limit);
+        const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) - 1 : 0;
+        const end = Number.isFinite(limit) && limit > 0 ? start + Math.floor(limit) : lines.length;
         const slice = lines.slice(start, end);
         const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(5)}  ${l}`).join("\n");
         return ok(numbered, { path, lineCount: lines.length });
@@ -165,6 +169,10 @@ export default function activate(e: ExtensionAPI): void {
       name: "bash",
       description: "Run a shell command and return its combined stdout/stderr.",
       capabilities: ["shell:exec"],
+      // NOTE: unlike read/write/edit, the shell is NOT path-confined — a command
+      // can reach anything the process can. Granting shell:exec is therefore
+      // equivalent to full host filesystem access; the fs:* scoping does not
+      // apply here. We at least default the cwd to the workspace root.
       // A sequential tool: shell side effects should not interleave with peers.
       executionMode: "sequential",
       parameters: {
@@ -180,6 +188,7 @@ export default function activate(e: ExtensionAPI): void {
         const timeout = Number(args.timeout ?? 120000);
         try {
           const { stdout, stderr } = await execAsync(command, {
+            cwd: root,
             timeout,
             signal: ctx.signal,
             maxBuffer: 8 * 1024 * 1024,

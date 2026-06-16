@@ -104,7 +104,10 @@ export class GeminiProvider implements Provider {
       if (candidate.finishReason) stopReason = mapFinishReason(candidate.finishReason);
     }
 
-    if (toolCalls.length > 0) stopReason = "tool_use";
+    // Tool calls mean the turn intends to call tools — but don't clobber a
+    // genuine max_tokens truncation (a turn can be cut off mid-function-call);
+    // preserve that signal so the loop can surface it.
+    if (toolCalls.length > 0 && stopReason === "end_turn") stopReason = "tool_use";
     const content: ContentBlock[] = [];
     if (text) content.push({ type: "text", text });
     for (const tc of toolCalls) content.push({ type: "tool_call", id: tc.id, name: tc.name, arguments: tc.arguments });
@@ -134,7 +137,12 @@ function toGeminiContents(messages: Message[]): unknown[] {
       const parts = m.content
         .filter((b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result")
         .map((b) => ({
-          functionResponse: { name: idToName.get(b.toolCallId) ?? b.toolCallId, response: { result: b.content } },
+          functionResponse: {
+            name: idToName.get(b.toolCallId) ?? b.toolCallId,
+            // Gemini has no standard error field; surface failures under `error`
+            // so the model can distinguish them from successful results.
+            response: b.isError ? { error: b.content } : { result: b.content },
+          },
         }));
       out.push({ role: "user", parts });
       continue;

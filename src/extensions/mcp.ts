@@ -70,13 +70,23 @@ interface McpCallResult {
 const PROTOCOL_VERSION = "2024-11-05";
 
 /**
+ * Per-request liveness bound for the HTTP transport. A misbehaving server that
+ * accepts a POST but never answers (or holds an SSE stream open forever) must
+ * not block activation or an agent turn indefinitely.
+ */
+const HTTP_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
  * The narrow contract every transport satisfies. The connect/register logic
  * (handshake, tool enumeration, proxying) is written once against this and so is
  * identical whether we are talking to a subprocess or an HTTP endpoint.
  */
 interface Transport {
-  /** Send a JSON-RPC request and await its correlated response result. */
-  request(method: string, params: unknown): Promise<unknown>;
+  /**
+   * Send a JSON-RPC request and await its correlated response result. An
+   * optional `signal` lets a caller (e.g. an aborted agent turn) cancel it.
+   */
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
   /** Send a JSON-RPC notification (no id, no response expected). */
   notify(method: string, params?: unknown): Promise<void>;
   /** Tear down the transport, rejecting anything still pending. */
@@ -111,12 +121,28 @@ class StdioTransport implements Transport {
     this.#rl.on("line", (line) => this.#onLine(line));
   }
 
-  request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (this.#closed) return Promise.reject(new Error(`MCP server "${this.#name}" is closed`));
+    if (signal?.aborted) return Promise.reject(new Error(`MCP request to "${this.#name}" aborted`));
     const id = this.#nextId++;
     const payload = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const onAbort = (): void => {
+        if (this.#pending.delete(id)) reject(new Error(`MCP request to "${this.#name}" aborted`));
+      };
+      // Wrap so settling the request also detaches the abort listener — no leak
+      // whether the response arrives, the server exits, or the caller aborts.
+      this.#pending.set(id, {
+        resolve: (v) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(v);
+        },
+        reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(err);
+        },
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.#write(payload);
     });
   }
@@ -188,10 +214,10 @@ class HttpTransport implements Transport {
     this.#headers = def.headers ?? {};
   }
 
-  async request(method: string, params: unknown): Promise<unknown> {
+  async request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (this.#closed) throw new Error(`MCP server "${this.#name}" is closed`);
     const id = this.#nextId++;
-    const res = await this.#post({ jsonrpc: "2.0", id, method, params });
+    const res = await this.#post({ jsonrpc: "2.0", id, method, params }, signal);
     if (!res.ok) {
       throw new Error(`MCP HTTP ${method} failed: ${res.status} ${res.statusText}`);
     }
@@ -216,14 +242,33 @@ class HttpTransport implements Transport {
     this.#closed = true;
   }
 
-  #post(message: unknown): Promise<Response> {
+  #post(message: unknown, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
       ...this.#headers,
     };
     if (this.#sessionId) headers["mcp-session-id"] = this.#sessionId;
-    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message) });
+
+    // Bound every request with a timeout, and also honor a caller's abort, by
+    // driving one AbortController from both. (Manual rather than
+    // AbortSignal.timeout/any so it types cleanly under lib ES2023.)
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error(`MCP HTTP request to "${this.#name}" timed out after ${HTTP_REQUEST_TIMEOUT_MS}ms`)),
+      HTTP_REQUEST_TIMEOUT_MS,
+    );
+    const onCallerAbort = (): void => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message), signal: controller.signal }).finally(
+      () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onCallerAbort);
+      },
+    );
   }
 
   /** Read one JSON-RPC response from either a JSON body or an SSE stream. */
@@ -286,12 +331,17 @@ class McpConnection {
     });
     await this.#transport.notify("notifications/initialized");
     const listed = (await this.#transport.request("tools/list", {})) as { tools?: McpTool[] } | undefined;
-    this.tools = listed?.tools ?? [];
+    // MCP servers are foreign code we don't vouch for; don't trust the shape of
+    // their enumeration. Keep only entries with a non-empty string name (a bad
+    // entry would otherwise register as `mcp__srv__undefined`).
+    this.tools = (listed?.tools ?? []).filter(
+      (t): t is McpTool => Boolean(t) && typeof (t as McpTool).name === "string" && (t as McpTool).name.length > 0,
+    );
   }
 
   /** Proxy a JSON-RPC request to the underlying transport. */
-  request(method: string, params: unknown): Promise<unknown> {
-    return this.#transport.request(method, params);
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+    return this.#transport.request(method, params, signal);
   }
 
   dispose(): void {
@@ -325,14 +375,18 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
           name: `mcp__${def.name}__${toolName}`,
           description: tool.description ?? `MCP tool "${toolName}" from server "${def.name}".`,
           capabilities: ["mcp:call"],
-          parameters: tool.inputSchema ?? { type: "object", properties: {} },
+          parameters:
+            tool.inputSchema && typeof tool.inputSchema === "object"
+              ? tool.inputSchema
+              : { type: "object", properties: {} },
           execute: async (args, ctx) => {
             await ctx.require("mcp:call");
             try {
-              const result = (await connection.request("tools/call", {
-                name: toolName,
-                arguments: args,
-              })) as McpCallResult | undefined;
+              const result = (await connection.request(
+                "tools/call",
+                { name: toolName, arguments: args },
+                ctx.signal,
+              )) as McpCallResult | undefined;
               const content = (result?.content ?? [])
                 .filter((c) => typeof c.text === "string")
                 .map((c) => c.text)

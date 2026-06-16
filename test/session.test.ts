@@ -134,3 +134,22 @@ test("load tolerates an invalid (non-JSON) session file", async () => {
   const lines = await run("load", path);
   assert.match(lines.join("\n"), /Failed to load session/);
 });
+
+test("load rejects a session whose messages contain a malformed entry", async () => {
+  const { dir, run } = await setup();
+  const path = join(dir, "malformed.json");
+  // Valid JSON and a valid envelope, but the second entry is not a well-formed
+  // Message (missing `content`) — it must fail loudly at load, not crash later.
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      savedAt: "x",
+      model: "mock",
+      messages: [{ role: "user", content: [{ type: "text", text: "ok" }] }, { role: "user" }],
+    }),
+    "utf8",
+  );
+  const lines = await run("load", path);
+  assert.match(lines.join("\n"), /malformed entry/);
+});

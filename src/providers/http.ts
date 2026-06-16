@@ -13,7 +13,12 @@ export interface SSEMessage {
   data: string;
 }
 
-/** Parse a `ReadableStream` of SSE bytes into `{ event?, data }` messages. */
+/**
+ * Parse a `ReadableStream` of SSE bytes into `{ event?, data }` messages.
+ * Tolerates both LF and CRLF line endings (the spec permits CRLF, and some
+ * proxies emit it): events are split on a blank line and the `data:` field is
+ * de-prefixed by a single optional space, per the SSE spec.
+ */
 export async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEMessage> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -22,15 +27,18 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buffer.indexOf("\n\n")) !== -1) {
-      const raw = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
+    let m: RegExpExecArray | null;
+    while ((m = /\r?\n\r?\n/.exec(buffer)) !== null) {
+      const raw = buffer.slice(0, m.index);
+      buffer = buffer.slice(m.index + m[0].length);
       const msg: SSEMessage = { data: "" };
       const dataLines: string[] = [];
-      for (const line of raw.split("\n")) {
+      for (const line of raw.split(/\r?\n/)) {
         if (line.startsWith("event:")) msg.event = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        // Per the SSE spec, strip only a single leading space after the colon
+        // (not all whitespace), so payloads with significant edge whitespace
+        // survive. Trailing \r is already gone from the CRLF-aware line split.
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
       }
       msg.data = dataLines.join("\n");
       yield msg;
@@ -86,7 +94,13 @@ export async function backoff(attempt: number, retryAfter: string | null, signal
   let ms: number;
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    ms = Number.isFinite(seconds) ? seconds * 1000 : 1000;
+    if (Number.isFinite(seconds)) {
+      ms = seconds * 1000;
+    } else {
+      // Retry-After may be an HTTP-date instead of delta-seconds (RFC 7231).
+      const at = Date.parse(retryAfter);
+      ms = Number.isFinite(at) ? Math.max(0, at - Date.now()) : 1000;
+    }
   } else {
     ms = Math.min(2 ** attempt * 1000, 16000) + Math.floor(Math.random() * 250);
   }

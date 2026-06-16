@@ -12,7 +12,9 @@
  * not stop a request to a link-local or internal address (e.g. cloud metadata
  * endpoints). That residual risk is intentionally left to the capability gate
  * and host network policy rather than re-implemented here — see the comment in
- * `validateUrl` below.
+ * `validateUrl` below. Because we follow redirects, the final URL is not the one
+ * validated, so any caller-side hostname allowlisting can be defeated by a 302:
+ * treat granting `net:fetch` as full internal-network egress.
  */
 
 import { defineTool, fail, ok } from "../kernel/define.js";
@@ -195,7 +197,9 @@ export default function activate(e: ExtensionAPI): void {
       }
       try {
         const res = await fetch(url, { method: "GET", redirect: "follow" });
-        const raw = await res.text();
+        // Use the same byte-capped reader as the tool so /fetch can't buffer a
+        // multi-GB or unbounded stream into memory.
+        const raw = res.body ? (await readCapped(res.body, DEFAULT_MAX_BYTES)).text : await res.text();
         const preview = raw.length > 500 ? `${raw.slice(0, 500)}…` : raw;
         ctx.print(`${res.status} ${res.statusText}\n${preview}`);
       } catch (err) {
