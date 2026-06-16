@@ -42,11 +42,19 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
 ## Where things live
 
 - `src/kernel/` — the seven primitives + public barrel (`index.ts`).
-- `src/providers/` — `mock` (deterministic) and `anthropic` (fetch + SSE, with
-  retries and usage accounting; no SDK).
+- `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
+  (all `fetch` + SSE, no SDK), shared `http.ts` plumbing, and `cassette`
+  (record/replay). All read config from `process.env`.
 - `src/extensions/` — `core-tools`, `skills`, `mcp`, `codeact`, `subagents`,
-  `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`.
+  `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
+  `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
+  `flow-guard` (compositional capability policy — blocks read→egress chains),
+  `integrity` (sweeps all tool descriptions for poisoning/hidden instructions).
+- `src/host.ts` — shared wiring reused by both front ends: provider selection,
+  `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
+  and the canonical builtin extension set.
 - `src/cli.ts` — the terminal host: interactive REPL, batch, one-shot.
+- `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `DELETE /sessions/:id`).
 - `test/` — the full offline suite, one file per primitive/extension.
 - `examples/extensions/` — worked example extensions.
 - `docs/EXTENSIONS.md` — the extension author's guide.

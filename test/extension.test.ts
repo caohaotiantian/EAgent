@@ -67,6 +67,28 @@ test("reload tears down the old version and brings up a fresh one", async () => 
   assert.equal(activations, 2);
 });
 
+test("a later same-id activation tears down the earlier one (later wins, no leak)", async () => {
+  const { host, agent } = makeHarness();
+  const fired: string[] = [];
+  await host.use("dup", (e: ExtensionAPI) => {
+    e.registerTool(defineTool({ name: "dup_v1", description: "", execute: () => ({ content: "v1" }) }));
+    e.on("turn_start", () => {
+      fired.push("v1");
+    });
+  });
+  // Re-activate under the same id (the discover() "later wins" collision path).
+  await host.use("dup", (e: ExtensionAPI) => {
+    e.registerTool(defineTool({ name: "dup_v2", description: "", execute: () => ({ content: "v2" }) }));
+    e.on("turn_start", () => {
+      fired.push("v2");
+    });
+  });
+  assert.equal(agent.tools.has("dup_v1"), false, "the earlier tool must be removed, not just shadowed");
+  assert.ok(agent.tools.has("dup_v2"));
+  await agent.hooks.emit("turn_start", { turn: 1 });
+  assert.deepEqual(fired, ["v2"], "the earlier extension's hook must not still fire");
+});
+
 test("session lifecycle events fire around a reload", async () => {
   const { host, agent } = makeHarness();
   const events: string[] = [];

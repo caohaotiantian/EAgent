@@ -7,10 +7,11 @@
  * so the working tree can be rolled back to a known-good point. pi ships a
  * git-checkpoint hook for exactly this; here it stays an extension.
  *
- * The mechanism is `git stash create`, which writes a dangling commit that
- * captures the current working tree and index WITHOUT touching either — a
- * pure, side-effect-free snapshot. We record each snapshot's SHA in the
- * extension store and restore from it with `git checkout <sha> -- .`. The
+ * The mechanism is `git stash create`, which writes a commit that captures the
+ * current working tree and index WITHOUT touching either — a pure snapshot of
+ * the workspace. We anchor that commit under `refs/eagent/checkpoints/<id>` so
+ * `git gc` cannot prune it, record its SHA in the extension store, and restore
+ * from it with `git checkout <sha> -- .`. The
  * `beforeToolCall` filter auto-snapshots before any tool declaring a mutating
  * capability (`fs:write`, `shell:exec`, `code:exec`) runs, and never blocks.
  *
@@ -30,6 +31,8 @@ const MUTATING_CAPABILITIES = new Set(["fs:write", "shell:exec", "code:exec"]);
 const LIST_KEY = "checkpoints";
 /** Keep at most this many snapshots; the oldest are dropped. */
 const MAX_CHECKPOINTS = 50;
+/** Ref namespace anchoring snapshot commits so `git gc` cannot prune them. */
+const REF_PREFIX = "refs/eagent/checkpoints/";
 
 /** A recorded restorable point in the workspace's history. */
 interface Checkpoint {
@@ -67,10 +70,15 @@ export default function activate(e: ExtensionAPI): void {
 
   const list = (): Checkpoint[] => e.store.get<Checkpoint[]>(LIST_KEY, []) ?? [];
 
-  /** Append a checkpoint, capping the stored list to the most recent N. */
+  /** Append a checkpoint, capping the stored list to the most recent N and
+   *  deleting the git refs of any snapshots that fall off the end. */
   const record = (cp: Checkpoint): void => {
-    const next = [...list(), cp];
-    e.store.set(LIST_KEY, next.slice(-MAX_CHECKPOINTS));
+    const all = [...list(), cp];
+    const kept = all.slice(-MAX_CHECKPOINTS);
+    for (const dropped of all.slice(0, all.length - kept.length)) {
+      git(["update-ref", "-d", `${REF_PREFIX}${dropped.id}`]);
+    }
+    e.store.set(LIST_KEY, kept);
   };
 
   /** The next id: one past the highest numeric id seen so far. */
@@ -94,7 +102,12 @@ export default function activate(e: ExtensionAPI): void {
       sha = git(["rev-parse", "HEAD"]) ?? "";
     }
     if (sha === "") return null;
-    const cp: Checkpoint = { id: nextId(), sha, label, at: new Date().toISOString(), toolName };
+    const id = nextId();
+    // Anchor the (otherwise dangling) stash-create commit under a real ref so it
+    // survives `git gc` between snapshot and rollback. HEAD-pinned snapshots are
+    // already reachable, but anchoring uniformly keeps restore simple.
+    git(["update-ref", `${REF_PREFIX}${id}`, sha]);
+    const cp: Checkpoint = { id, sha, label, at: new Date().toISOString(), toolName };
     record(cp);
     return cp;
   };

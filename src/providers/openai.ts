@@ -30,6 +30,13 @@ export interface OpenAIOptions {
   maxTokens?: number;
   maxRetries?: number;
   fetch?: typeof fetch;
+  /**
+   * Which JSON field carries the output-token limit. Newer official OpenAI
+   * models require `max_completion_tokens`; most OpenAI-compatible proxies
+   * (vLLM, Ollama, GLM gateways) expect `max_tokens`. Defaults to `max_tokens`,
+   * overridable via `OPENAI_MAX_TOKENS_PARAM`.
+   */
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
 }
 
 export class OpenAIProvider implements Provider {
@@ -37,6 +44,7 @@ export class OpenAIProvider implements Provider {
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #maxTokens: number;
+  readonly #maxTokensParam: "max_tokens" | "max_completion_tokens";
   readonly #maxRetries: number;
   readonly #fetch: typeof fetch;
 
@@ -44,6 +52,9 @@ export class OpenAIProvider implements Provider {
     this.#apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY ?? "";
     this.#baseUrl = (opts.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
     this.#maxTokens = opts.maxTokens ?? 4096;
+    this.#maxTokensParam =
+      opts.maxTokensParam ??
+      (process.env.OPENAI_MAX_TOKENS_PARAM === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens");
     this.#maxRetries = opts.maxRetries ?? 3;
     this.#fetch = opts.fetch ?? globalThis.fetch;
   }
@@ -55,14 +66,14 @@ export class OpenAIProvider implements Provider {
   async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
     if (!this.#apiKey) throw new Error("OpenAIProvider: OPENAI_API_KEY is not set");
 
-    const body = {
+    const body: Record<string, unknown> = {
       model: req.model,
-      max_tokens: this.#maxTokens,
       messages: toOpenAIMessages(req.systemPrompt, req.messages),
       tools: req.tools.length ? req.tools.map(toOpenAITool) : undefined,
       stream: true,
       stream_options: { include_usage: true },
     };
+    body[this.#maxTokensParam] = this.#maxTokens;
 
     const res = await fetchWithRetry({
       url: `${this.#baseUrl}/chat/completions`,
@@ -114,14 +125,16 @@ export class OpenAIProvider implements Provider {
 
     const content: ContentBlock[] = [];
     if (textBuffer) content.push({ type: "text", text: textBuffer });
-    for (const slot of [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, s]) => s)) {
+    for (const [index, slot] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
       let args: Record<string, unknown> = {};
       try {
         args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
       } catch {
         args = {};
       }
-      const id = slot.id || `call_${slot.name}`;
+      // Include the slot index in the synthesized id so two parallel calls to
+      // the same tool (when a compat endpoint omits ids) don't collide.
+      const id = slot.id || `call_${index}_${slot.name}`;
       content.push({ type: "tool_call", id, name: slot.name, arguments: args });
       yield { type: "tool_call", id, name: slot.name, arguments: args };
     }

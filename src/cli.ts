@@ -19,7 +19,7 @@ import type { Agent } from "./kernel/agent.js";
 import type { CommandRegistry } from "./kernel/commands.js";
 import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
-import { createAgentHost } from "./host.js";
+import { createAgentHost, loadEnvFile } from "./host.js";
 
 interface Args {
   model?: string;
@@ -34,16 +34,28 @@ interface Args {
 
 function parseArgs(argv: string[]): Args {
   const args: Args = { yolo: false, extensions: [], help: false, version: false, json: false };
+  // Read the value following a value-taking flag, erroring if it is missing.
+  // `allowDash` lets free-form values (eval text) begin with '-'; for the rest a
+  // dash-prefixed token means the next flag, not a value (so `--model --yolo`
+  // errors instead of silently setting model to "--yolo").
+  const takeValue = (flag: string, i: number, allowDash = false): string => {
+    const v = argv[i + 1];
+    if (v === undefined || (!allowDash && v.startsWith("-"))) {
+      throw new Error(`option ${flag} requires a value`);
+    }
+    return v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === "--model" || a === "-m") args.model = argv[++i];
-    else if (a === "--provider" || a === "-p") args.provider = argv[++i];
-    else if (a === "--eval" || a === "-e") args.eval = argv[++i];
+    if (a === "--model" || a === "-m") args.model = takeValue(a, i++);
+    else if (a === "--provider" || a === "-p") args.provider = takeValue(a, i++);
+    else if (a === "--eval" || a === "-e") args.eval = takeValue(a, i++, true);
     else if (a === "--yolo") args.yolo = true;
-    else if (a === "--ext") args.extensions.push(argv[++i]!);
+    else if (a === "--ext") args.extensions.push(takeValue(a, i++));
     else if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--version" || a === "-v") args.version = true;
     else if (a === "--json") args.json = true;
+    else throw new Error(`unknown option: ${a} (try --help)`);
   }
   return args;
 }
@@ -76,6 +88,10 @@ const C = {
 };
 
 async function main(): Promise<void> {
+  // Pick up a local .env (without overriding the real environment) so keys and
+  // model selection configured there are honored before providers are built.
+  loadEnvFile();
+
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) {
@@ -135,6 +151,17 @@ async function main(): Promise<void> {
         rl.close();
       }
     });
+  } else {
+    // Non-interactive modes (--eval, piped batch) have no readline SIGINT
+    // handler, so a bare Ctrl-C/SIGTERM would skip host.dispose() and orphan
+    // extension resources (MCP child processes, temp dirs). Tear the host down
+    // on signal before exiting; a second signal falls through to the default.
+    const shutdown = (): void => {
+      if (agent.running) agent.stop();
+      void host.dispose().finally(() => process.exit(130));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   }
 
   if (!args.json) banner(agent, host, live);
@@ -215,7 +242,7 @@ function wireRendering(agent: Agent): void {
     const args = JSON.stringify(call.arguments);
     console.log(C.cyan(`→ ${call.name}`) + " " + C.dim(args.length > 80 ? args.slice(0, 79) + "…" : args));
   });
-  agent.hooks.on("tool_end", ({ call, result }) => {
+  agent.hooks.on("tool_end", ({ result }) => {
     const head = result.content.split("\n")[0] ?? "";
     const mark = result.isError ? C.red("✗") : C.dim("✓");
     console.log(`  ${mark} ${C.dim(head.length > 100 ? head.slice(0, 99) + "…" : head)}`);

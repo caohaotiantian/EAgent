@@ -70,13 +70,46 @@ interface McpCallResult {
 const PROTOCOL_VERSION = "2024-11-05";
 
 /**
+ * Heuristics for "tool poisoning": an MCP server's tool *description* is loaded
+ * verbatim into the model's context, so a malicious server can hide instructions
+ * there (the documented attack that exfiltrated SSH keys via a trivial `add`
+ * tool). We can't stop the model from reading attacker text, but we can make it
+ * visible — scan descriptions at registration and warn the operator. Returns the
+ * names of any suspicious markers found (empty = clean). Non-blocking by design:
+ * a verbose-but-legitimate description should warn, not break.
+ */
+const INJECTION_MARKERS: Array<[string, RegExp]> = [
+  ["override-instruction", /\b(ignore|disregard|override|forget)\b[^.]{0,40}\b(previous|prior|above|earlier|all|instruction)/i],
+  ["hidden-from-user", /\bdo not (tell|inform|mention|reveal|notify)\b|\bwithout (telling|informing|notifying)\b|\bdon'?t (tell|let|notify) the user\b/i],
+  ["secret-access", /(\.ssh\b|id_rsa|id_ed25519|\.env\b|credentials\b|private key|api[_-]?key|access token|password)/i],
+  ["hidden-tag", /<\/?(important|system|secret|instructions?)\b[^>]*>/i],
+  ["exfil-verb", /\b(exfiltrat|send (it|them|this|the)|forward (it|them|the)|upload (it|them|the)|post (it|them|the))\b[^.]{0,30}\b(to|http)/i],
+];
+
+/** Return the suspicious markers found in a tool description (empty = clean). */
+export function detectSuspiciousDescription(text: string): string[] {
+  if (!text) return [];
+  return INJECTION_MARKERS.filter(([, re]) => re.test(text)).map(([name]) => name);
+}
+
+/**
+ * Per-request liveness bound for the HTTP transport. A misbehaving server that
+ * accepts a POST but never answers (or holds an SSE stream open forever) must
+ * not block activation or an agent turn indefinitely.
+ */
+const HTTP_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
  * The narrow contract every transport satisfies. The connect/register logic
  * (handshake, tool enumeration, proxying) is written once against this and so is
  * identical whether we are talking to a subprocess or an HTTP endpoint.
  */
 interface Transport {
-  /** Send a JSON-RPC request and await its correlated response result. */
-  request(method: string, params: unknown): Promise<unknown>;
+  /**
+   * Send a JSON-RPC request and await its correlated response result. An
+   * optional `signal` lets a caller (e.g. an aborted agent turn) cancel it.
+   */
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
   /** Send a JSON-RPC notification (no id, no response expected). */
   notify(method: string, params?: unknown): Promise<void>;
   /** Tear down the transport, rejecting anything still pending. */
@@ -111,12 +144,28 @@ class StdioTransport implements Transport {
     this.#rl.on("line", (line) => this.#onLine(line));
   }
 
-  request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (this.#closed) return Promise.reject(new Error(`MCP server "${this.#name}" is closed`));
+    if (signal?.aborted) return Promise.reject(new Error(`MCP request to "${this.#name}" aborted`));
     const id = this.#nextId++;
     const payload = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const onAbort = (): void => {
+        if (this.#pending.delete(id)) reject(new Error(`MCP request to "${this.#name}" aborted`));
+      };
+      // Wrap so settling the request also detaches the abort listener — no leak
+      // whether the response arrives, the server exits, or the caller aborts.
+      this.#pending.set(id, {
+        resolve: (v) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(v);
+        },
+        reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(err);
+        },
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.#write(payload);
     });
   }
@@ -188,10 +237,10 @@ class HttpTransport implements Transport {
     this.#headers = def.headers ?? {};
   }
 
-  async request(method: string, params: unknown): Promise<unknown> {
+  async request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (this.#closed) throw new Error(`MCP server "${this.#name}" is closed`);
     const id = this.#nextId++;
-    const res = await this.#post({ jsonrpc: "2.0", id, method, params });
+    const res = await this.#post({ jsonrpc: "2.0", id, method, params }, signal);
     if (!res.ok) {
       throw new Error(`MCP HTTP ${method} failed: ${res.status} ${res.statusText}`);
     }
@@ -216,14 +265,33 @@ class HttpTransport implements Transport {
     this.#closed = true;
   }
 
-  #post(message: unknown): Promise<Response> {
+  #post(message: unknown, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
       ...this.#headers,
     };
     if (this.#sessionId) headers["mcp-session-id"] = this.#sessionId;
-    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message) });
+
+    // Bound every request with a timeout, and also honor a caller's abort, by
+    // driving one AbortController from both. (Manual rather than
+    // AbortSignal.timeout/any so it types cleanly under lib ES2023.)
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error(`MCP HTTP request to "${this.#name}" timed out after ${HTTP_REQUEST_TIMEOUT_MS}ms`)),
+      HTTP_REQUEST_TIMEOUT_MS,
+    );
+    const onCallerAbort = (): void => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message), signal: controller.signal }).finally(
+      () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onCallerAbort);
+      },
+    );
   }
 
   /** Read one JSON-RPC response from either a JSON body or an SSE stream. */
@@ -286,12 +354,17 @@ class McpConnection {
     });
     await this.#transport.notify("notifications/initialized");
     const listed = (await this.#transport.request("tools/list", {})) as { tools?: McpTool[] } | undefined;
-    this.tools = listed?.tools ?? [];
+    // MCP servers are foreign code we don't vouch for; don't trust the shape of
+    // their enumeration. Keep only entries with a non-empty string name (a bad
+    // entry would otherwise register as `mcp__srv__undefined`).
+    this.tools = (listed?.tools ?? []).filter(
+      (t): t is McpTool => Boolean(t) && typeof (t as McpTool).name === "string" && (t as McpTool).name.length > 0,
+    );
   }
 
   /** Proxy a JSON-RPC request to the underlying transport. */
-  request(method: string, params: unknown): Promise<unknown> {
-    return this.#transport.request(method, params);
+  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+    return this.#transport.request(method, params, signal);
   }
 
   dispose(): void {
@@ -320,19 +393,39 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
     for (const tool of conn.tools) {
       const connection = conn;
       const toolName = tool.name;
+      const fullName = `mcp__${def.name}__${toolName}`;
+      // Surface a shadow rather than let "later wins" silently override a tool an
+      // earlier registration (e.g. a server listing the same tool name twice) put
+      // in place — the registry stacks it, but the operator should know.
+      if (e.agent.tools.has(fullName)) {
+        e.log.warn(`MCP tool "${fullName}" shadows an already-registered tool; the later registration wins.`);
+      }
+      // Tool-poisoning check: the description rides into the model's context, so
+      // flag hidden instructions before they can steer the agent.
+      const suspicious = detectSuspiciousDescription(tool.description ?? "");
+      if (suspicious.length > 0) {
+        e.log.warn(
+          `MCP tool "${fullName}" has a suspicious description (possible tool-poisoning: ${suspicious.join(", ")}); ` +
+            `review it before granting mcp:call.`,
+        );
+      }
       e.registerTool(
         defineTool({
-          name: `mcp__${def.name}__${toolName}`,
+          name: fullName,
           description: tool.description ?? `MCP tool "${toolName}" from server "${def.name}".`,
           capabilities: ["mcp:call"],
-          parameters: tool.inputSchema ?? { type: "object", properties: {} },
+          parameters:
+            tool.inputSchema && typeof tool.inputSchema === "object"
+              ? tool.inputSchema
+              : { type: "object", properties: {} },
           execute: async (args, ctx) => {
             await ctx.require("mcp:call");
             try {
-              const result = (await connection.request("tools/call", {
-                name: toolName,
-                arguments: args,
-              })) as McpCallResult | undefined;
+              const result = (await connection.request(
+                "tools/call",
+                { name: toolName, arguments: args },
+                ctx.signal,
+              )) as McpCallResult | undefined;
               const content = (result?.content ?? [])
                 .filter((c) => typeof c.text === "string")
                 .map((c) => c.text)
@@ -368,7 +461,7 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
 }
 
 /** Parse and validate `EAGENT_MCP_SERVERS`; tolerate absence and bad JSON. */
-function parseServers(warn: (msg: string) => void, raw: string | undefined): ServerDef[] {
+export function parseServers(warn: (msg: string) => void, raw: string | undefined): ServerDef[] {
   if (!raw) return [];
   let parsed: unknown;
   try {
@@ -382,15 +475,25 @@ function parseServers(warn: (msg: string) => void, raw: string | undefined): Ser
     return [];
   }
   const out: ServerDef[] = [];
+  const seen = new Set<string>();
   for (const entry of parsed) {
     const e = entry as Partial<StdioServerDef & HttpServerDef> | null;
-    if (e && typeof e === "object" && typeof e.name === "string" && typeof e.url === "string") {
-      out.push(entry as HttpServerDef);
-    } else if (e && typeof e === "object" && typeof e.name === "string" && typeof e.command === "string") {
-      out.push(entry as StdioServerDef);
-    } else {
+    const isHttp = !!e && typeof e === "object" && typeof e.name === "string" && typeof e.url === "string";
+    const isStdio = !!e && typeof e === "object" && typeof e.name === "string" && typeof e.command === "string";
+    if (!isHttp && !isStdio) {
       warn("Skipping MCP server entry missing string name with command or url.");
+      continue;
     }
+    const name = (e as { name: string }).name;
+    // Server names namespace every tool (mcp__<name>__<tool>); a duplicate name
+    // would let a later server silently shadow an earlier one's tools — a
+    // trust-boundary event, not a convenience. Skip it loudly.
+    if (seen.has(name)) {
+      warn(`Skipping duplicate MCP server name "${name}"; a later server must not shadow an earlier one's tools.`);
+      continue;
+    }
+    seen.add(name);
+    out.push(entry as ServerDef);
   }
   return out;
 }

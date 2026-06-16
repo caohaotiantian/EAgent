@@ -71,12 +71,13 @@ async function runCode(language: Language, code: string, timeout: number, signal
     writeFileSync(file, code, "utf8");
 
     // A scrubbed environment: do not inherit `process.env` wholesale, which
-    // would leak API keys and tokens into the model-authored program. HOME is
-    // pointed at the temp dir to discourage reads of the real home directory.
+    // would leak API keys and tokens into the model-authored program. HOME and
+    // the working directory both point at the throwaway temp dir to discourage
+    // reads of the real home/project directories (a soft boundary, not a sandbox).
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: tmpdir() };
 
     return await new Promise<RunOutcome>((resolve) => {
-      const child = spawn(command, [file], { env, signal, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(command, [file], { cwd: dir, env, signal, stdio: ["ignore", "pipe", "pipe"] });
       const chunks: Buffer[] = [];
       let timedOut = false;
       let settled = false;

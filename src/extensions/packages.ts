@@ -30,7 +30,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { createJiti } from "jiti";
@@ -220,8 +220,23 @@ export default function activate(e: ExtensionAPI): Disposable {
   disposables.push(
     e.on("session_start", async () => {
       const reg = readRegistry();
+      const root = resolve(packagesDir);
       for (const [id, entry] of Object.entries(reg)) {
         if (active.has(id)) continue;
+        // Harden against a tampered registry: a remotely-fetched package (git:/
+        // npm:) materializes INTO the packages dir, so on reload its entryPath
+        // must still live there. If a tampered store points it elsewhere, refuse
+        // to auto-execute it. (path:/bare installs are the user's own local code
+        // and legitimately reload from wherever they were recorded.)
+        if (/^(git|npm):/.test(entry.source)) {
+          const abs = resolve(entry.entryPath);
+          if (abs !== root && !abs.startsWith(root + sep)) {
+            e.log.warn(
+              `skipping package ${id}: a ${entry.source.split(":")[0]}: package must reload from the packages dir, not ${abs}`,
+            );
+            continue;
+          }
+        }
         if (!existsSync(entry.entryPath)) continue;
         try {
           active.set(id, await loadEntry(entry.entryPath));
@@ -260,13 +275,17 @@ async function materialize(source: string, packagesDir: string): Promise<string>
 
   if (source.startsWith("git:")) {
     const url = source.slice("git:".length);
+    assertSafeGitUrl(url);
     const dest = join(packagesDir, sanitize(repoName(url)));
-    execFileSync("git", ["clone", "--depth", "1", url, dest], { stdio: "ignore" });
+    // `--` separates the URL from options so a `-`-leading URL can't be reparsed
+    // as a git flag; assertSafeGitUrl already rejects ext::/file:// remote helpers.
+    execFileSync("git", ["clone", "--depth", "1", "--", url, dest], { stdio: "ignore" });
     return resolveEntry(dest);
   }
 
   if (source.startsWith("npm:")) {
     const spec = source.slice("npm:".length);
+    assertSafeNpmSpec(spec);
     execFileSync("npm", ["install", spec, "--ignore-scripts", "--no-save", "--prefix", packagesDir], {
       stdio: "ignore",
     });
@@ -279,6 +298,27 @@ async function materialize(source: string, packagesDir: string): Promise<string>
   const abs = isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
   if (!existsSync(abs)) throw new Error(`no such file or directory: ${abs}`);
   return resolveEntry(abs);
+}
+
+/**
+ * Reject git URLs that aren't plain transport URLs — in particular git's
+ * `ext::`/`fd::` remote helpers (which execute arbitrary commands at clone time)
+ * and `file://`, plus anything that could be reparsed as an option. Allows
+ * https/ssh/git scheme URLs and scp-style `git@host:path`.
+ */
+function assertSafeGitUrl(url: string): void {
+  const schemeUrl = /^(https?|ssh|git):\/\/[^\s]+$/.test(url);
+  const scpStyle = /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/.test(url);
+  if (!schemeUrl && !scpStyle) {
+    throw new Error(`refusing to clone unsafe git URL "${url}" — use https://, ssh://, git://, or git@host:path`);
+  }
+}
+
+/** Require a bare npm package spec (`name`, `@scope/name`, optional `@version`). */
+function assertSafeNpmSpec(spec: string): void {
+  if (!/^(@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+(@[A-Za-z0-9._^~><=.\-]+)?$/.test(spec)) {
+    throw new Error(`refusing to install unsafe npm spec "${spec}" — expected name or name@version`);
+  }
 }
 
 /** Resolve a file-or-directory to a concrete entry file. */
@@ -347,7 +387,7 @@ function makeShim(e: ExtensionAPI, collected: Disposable[]): ExtensionAPI {
 // ---------------------------------------------------------------------------
 
 function resolvePackagesDir(): string {
-  return join(homedir(), ".eagent", "packages");
+  return process.env.EAGENT_PACKAGES_DIR ?? join(homedir(), ".eagent", "packages");
 }
 
 /** A stable id derived from the entry file's basename (sans extension). */

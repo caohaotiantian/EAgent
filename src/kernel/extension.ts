@@ -148,13 +148,30 @@ export class ExtensionHost {
   async reload(id?: string): Promise<void> {
     const targets = id ? [this.#loaded.get(id)].filter(Boolean) : [...this.#loaded.values()];
     await this.agent.hooks.emit("session_shutdown", {});
+    const failures: { id: string; err: unknown }[] = [];
     for (const ext of targets as LoadedExtension[]) {
       ext.teardown.dispose();
       this.#loaded.delete(ext.id);
-      await this.activate({ id: ext.id, origin: ext.origin });
+      try {
+        await this.activate({ id: ext.id, origin: ext.origin });
+      } catch (err) {
+        // Re-activation failed (e.g. the file now has a syntax/import error).
+        // The old version is already torn down and, for file origins, cannot be
+        // restored (jiti re-imports fresh from disk). Record it and keep going
+        // so one bad reload does not take down every other extension in a
+        // reload-all; surface the failures together at the end.
+        this.#logger.error(`extension "${ext.id}" failed to reload and is now unloaded:`, err);
+        failures.push({ id: ext.id, err });
+      }
     }
     await this.agent.hooks.emit("reload", { id });
     await this.agent.hooks.emit("session_start", {});
+    if (failures.length) {
+      throw new AggregateError(
+        failures.map((f) => f.err),
+        `reload failed for: ${failures.map((f) => f.id).join(", ")}`,
+      );
+    }
   }
 
   /** Tear down a single extension without reactivating. */
@@ -183,6 +200,17 @@ export class ExtensionHost {
   // -- internals ----------------------------------------------------------
 
   private async activate(spec: { id: string; origin: LoadedExtension["origin"] }): Promise<void> {
+    // "Later wins" on id collision: if an extension is already loaded under this
+    // id (e.g. a project file shadowing a user file in discover()), tear it down
+    // first so its tools/hooks/commands are actually removed — not merely
+    // shadowed on the registry stack while its hooks keep firing. reload()/
+    // unload() already delete before calling here, so this is a no-op for them.
+    const existing = this.#loaded.get(spec.id);
+    if (existing) {
+      existing.teardown.dispose();
+      this.#loaded.delete(spec.id);
+    }
+
     const disposables: Disposable[] = [];
     const track = <T extends Disposable>(d: T): T => {
       disposables.push(d);

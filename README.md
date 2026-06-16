@@ -85,8 +85,16 @@ OPENAI_API_KEY=sk-...    node dist/cli.js -p openai -m gpt-4o
 GEMINI_API_KEY=...       node dist/cli.js -p gemini -m gemini-2.0-flash
 ```
 
+Or drop the keys in a `.env` file (copy `.env.example`): the CLI and server load
+it automatically at startup — real environment variables always win. `.env` also
+sets the model per provider via `ANTHROPIC_MODEL` / `OPENAI_MODEL` / `GEMINI_MODEL`,
+so you don't need `-m` on every call, and `ANTHROPIC_AUTH_TOKEN` is accepted as an
+alias for `ANTHROPIC_API_KEY` (the gateway convention).
+
 Any OpenAI-compatible endpoint works through the OpenAI provider — e.g. a local
 Ollama: `OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama node dist/cli.js -p openai -m llama3`.
+For newer official OpenAI models that require `max_completion_tokens`, set
+`OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`.
 
 ## How a turn works
 
@@ -245,7 +253,7 @@ flowchart LR
         ONE["One-shot<br/>eagent -e / --json"]
         BATCH["Batch<br/>(piped stdin)"]
     end
-    SRV["src/server.ts<br/>HTTP — /health, /run, /sessions"]
+    SRV["src/server.ts<br/>HTTP — /health, /run, DELETE /sessions/:id"]
     HOST["createAgentHost()<br/>src/host.ts"]
     K["Kernel + built-in extensions"]
     REPL --> HOST
@@ -301,7 +309,7 @@ src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
 src/extensions/  18 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
-src/server.ts    HTTP host: /health, /run (streaming), /sessions
+src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
 examples/        worked example extensions
 test/            the full offline suite — every primitive and extension
 ```
