@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `block`-able, tunable via `/flow-guard` or `EAGENT_FLOW_GUARD=off`. A new
   security best practice absorbed as a hot-reloadable extension, no core change.
   (Motivated by the 2026-06-16 design research; see `docs/RESEARCH-agent-kernel-design.md`.)
+  It also enforces **data confinement**: the session is tainted by sensitive-path
+  reads (`.env`, `id_rsa`, `.pem`, `.ssh/`, `.aws/`, `credentials`, `secret`) and
+  credential-looking results (PEM keys, `AKIA…`, `sk-…`, `ghp_…`), not only by
+  `shell:exec`.
+- **MCP tool-integrity hardening.** Duplicate MCP server names are skipped (a
+  later server can't silently shadow an earlier one's namespaced tools); a tool
+  name that shadows an existing tool warns; and tool **descriptions are scanned
+  for tool-poisoning / hidden-instruction patterns** at registration (the
+  SSH-key-exfil attack class) — warned, never silently trusted.
 - **`.env` auto-loading.** The CLI and server load a local `.env` at startup via
   a tiny zero-dependency parser (`loadEnvFile` in `host.ts`); real environment
   variables always win. A documented `.env.example` ships with the repo, and

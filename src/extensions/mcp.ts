@@ -70,6 +70,29 @@ interface McpCallResult {
 const PROTOCOL_VERSION = "2024-11-05";
 
 /**
+ * Heuristics for "tool poisoning": an MCP server's tool *description* is loaded
+ * verbatim into the model's context, so a malicious server can hide instructions
+ * there (the documented attack that exfiltrated SSH keys via a trivial `add`
+ * tool). We can't stop the model from reading attacker text, but we can make it
+ * visible — scan descriptions at registration and warn the operator. Returns the
+ * names of any suspicious markers found (empty = clean). Non-blocking by design:
+ * a verbose-but-legitimate description should warn, not break.
+ */
+const INJECTION_MARKERS: Array<[string, RegExp]> = [
+  ["override-instruction", /\b(ignore|disregard|override|forget)\b[^.]{0,40}\b(previous|prior|above|earlier|all|instruction)/i],
+  ["hidden-from-user", /\bdo not (tell|inform|mention|reveal|notify)\b|\bwithout (telling|informing|notifying)\b|\bdon'?t (tell|let|notify) the user\b/i],
+  ["secret-access", /(\.ssh\b|id_rsa|id_ed25519|\.env\b|credentials\b|private key|api[_-]?key|access token|password)/i],
+  ["hidden-tag", /<\/?(important|system|secret|instructions?)\b[^>]*>/i],
+  ["exfil-verb", /\b(exfiltrat|send (it|them|this|the)|forward (it|them|the)|upload (it|them|the)|post (it|them|the))\b[^.]{0,30}\b(to|http)/i],
+];
+
+/** Return the suspicious markers found in a tool description (empty = clean). */
+export function detectSuspiciousDescription(text: string): string[] {
+  if (!text) return [];
+  return INJECTION_MARKERS.filter(([, re]) => re.test(text)).map(([name]) => name);
+}
+
+/**
  * Per-request liveness bound for the HTTP transport. A misbehaving server that
  * accepts a POST but never answers (or holds an SSE stream open forever) must
  * not block activation or an agent turn indefinitely.
@@ -376,6 +399,15 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
       // in place — the registry stacks it, but the operator should know.
       if (e.agent.tools.has(fullName)) {
         e.log.warn(`MCP tool "${fullName}" shadows an already-registered tool; the later registration wins.`);
+      }
+      // Tool-poisoning check: the description rides into the model's context, so
+      // flag hidden instructions before they can steer the agent.
+      const suspicious = detectSuspiciousDescription(tool.description ?? "");
+      if (suspicious.length > 0) {
+        e.log.warn(
+          `MCP tool "${fullName}" has a suspicious description (possible tool-poisoning: ${suspicious.join(", ")}); ` +
+            `review it before granting mcp:call.`,
+        );
       }
       e.registerTool(
         defineTool({
