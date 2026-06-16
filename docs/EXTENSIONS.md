@@ -46,9 +46,22 @@ export default async function activate(e: ExtensionAPI) {
 Every registration call (`registerTool`, `on`, `hook`, `registerCommand`,
 `registerProvider`) returns a `Disposable` and is **tracked by the host**, so a
 reload tears the old version down precisely and brings the new one up — the
-"clean swap" that makes live redefinition safe. You rarely need to dispose
-those by hand; return a deactivate only for resources the host can't see
-(timers, sockets, file handles).
+"clean swap" that makes live redefinition safe. You rarely need to dispose those
+by hand; return a deactivate only for resources the host can't see (timers,
+sockets, file handles).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Activating: default export activate(api)
+    Activating --> Active: registrations tracked by the host
+    Active --> Active: tools called · events observed · hooks run
+    Active --> Reloading: /reload — old teardown disposed, re-import
+    Reloading --> Active: re-activated (shadowed tools restored)
+    Active --> Disposed: unload — every registration + your deactivate run
+    Activating --> Disposed: throws → partial registrations rolled back
+    Disposed --> [*]
+```
+
 
 ## The `ExtensionAPI` surface
 
@@ -188,15 +201,16 @@ that authority without prompting. The dotted names in use across the project:
 
 | Capability | Used by |
 | ---------- | ------- |
-| `fs:read` | `core-tools` (read/edit), `session` |
-| `fs:write` | `core-tools` (write/edit), `session` |
+| `fs:read` | `core-tools` (read/edit), `session`, `journal` |
+| `fs:write` | `core-tools` (write/edit), `session`, `journal` |
 | `shell:exec` | `core-tools` (bash) |
 | `code:exec` | `codeact` (run JS/Python) |
-| `net:fetch` | network tools |
-| `skill:write` | `skills` (authoring a `SKILL.md`) |
+| `net:fetch` | `web` (`fetch_url`) |
+| `skill:read` / `skill:write` | `skills` (reading / authoring a `SKILL.md`) |
 | `mcp:call` | `mcp` (calling a remote MCP tool) |
 | `agent:spawn` | `subagents` |
 | `pkg:install` | `packages` |
+| `self:read` / `self:extend` | `self` (reading / authoring & loading new TypeScript extensions) |
 
 ## Lifecycle events (observe)
 
@@ -230,7 +244,22 @@ e.on("tool_end", ({ call, result }) => {
 Install with `e.hook(point, handler)`. A filter hook threads a value through
 your handler, which returns the (possibly transformed) value. There are exactly
 three, and they are the seams where memory, plan-mode approvals, safety gates,
-and context engineering plug in without touching the loop.
+and context engineering plug in without touching the loop. Here is where each one
+fires inside a turn:
+
+```mermaid
+flowchart LR
+    M["transcript"] --> TC["transformContext<br/>messages ⇒ messages"]
+    TC --> P["provider.stream"]
+    P --> TCALL["a tool call"]
+    TCALL --> BT["beforeToolCall<br/>decision ⇒ decision"]
+    BT -->|"block?"| X["error result"]
+    BT -->|"allowed"| EX["validate · require · execute"]
+    EX --> AT["afterToolCall<br/>result ⇒ result"]
+    AT --> A["appended to transcript"]
+    X --> A
+```
+
 
 ### `transformContext`
 
