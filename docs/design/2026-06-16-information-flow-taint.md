@@ -1,7 +1,10 @@
 # Design — Transcript-level information-flow taint for flow-guard
 
 Slug: `2026-06-16-information-flow-taint`
-Status: draft
+Status: closed
+Closing-commit: 73f9609
+Closed-on: 2026-06-16
+Deferred: none
 
 ## 1. Background and Purpose
 
@@ -28,25 +31,25 @@ noisy after a context reset, and unable to say what tainted the session.
 
 ## 2. Deliverables
 
-- [ ] Data-confinement taint is **attached to the tool-result message** that carried sensitive data,
+- [x] Data-confinement taint is **attached to the tool-result message** that carried sensitive data,
       via the kernel's `Message.meta` escape hatch under a namespaced key (`flowGuardTaint`).
-- [ ] **The data-confinement triggers (sensitive path / sensitive content) are routed ONLY to
+- [x] **The data-confinement triggers (sensitive path / sensitive content) are routed ONLY to
       message taint and are no longer added to the session capability-taint set.** After this change
       the session set holds *only* `sourceCaps` (e.g. `shell:exec`). This split is the load-bearing
       transformation: leaving the old `tainted.add("sensitive-path"|"sensitive-content")` lines
       (`src/extensions/flow-guard.ts:104,110`) in place would keep gating after `/clear` and defeat
       the new precision (AC2).
-- [ ] Egress (`net:fetch`) is gated **iff** the session capability-taint set is non-empty **OR** a
+- [x] Egress (`net:fetch`) is gated **iff** the session capability-taint set is non-empty **OR** a
       message currently in `e.agent.messages` carries `meta.flowGuardTaint`.
-- [ ] After the tainting message leaves the transcript (`agent.clear()` via `/clear` or `/handoff`),
+- [x] After the tainting message leaves the transcript (`agent.clear()` via `/clear` or `/handoff`),
       a subsequent egress is **allowed** (the new precision), with no other change in behavior.
-- [ ] The capability-chain taint (`shell:exec` → egress) remains a session-sticky set, unchanged.
-- [ ] `/flow-guard status` reports **both** counts separately — the capability-taint set size and the
+- [x] The capability-chain taint (`shell:exec` → egress) remains a session-sticky set, unchanged.
+- [x] `/flow-guard status` reports **both** counts separately — the capability-taint set size and the
       number of tainted messages currently in the transcript — so the Set-split is directly
       observable. `/flow-guard reset` clears the session set and strips `flowGuardTaint` from current
       transcript messages.
-- [ ] Offline `node:test` coverage for the new behaviors; existing `flow-guard` tests still pass.
-- [ ] Zero kernel changes — `test/kernel-surface.test.ts` still passes (it pins the kernel export
+- [x] Offline `node:test` coverage for the new behaviors; existing `flow-guard` tests still pass.
+- [x] Zero kernel changes — `test/kernel-surface.test.ts` still passes (it pins the kernel export
       list and a source-line ceiling; nothing is added under `src/kernel/`).
 
 ## 3. Scope Boundary (NOT in scope)

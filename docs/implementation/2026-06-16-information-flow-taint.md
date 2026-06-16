@@ -2,7 +2,10 @@
 
 Slug: `2026-06-16-information-flow-taint`
 Design: `docs/design/2026-06-16-information-flow-taint.md`
-Status: draft
+Status: closed
+Closing-commit: 73f9609
+Closed-on: 2026-06-16
+Deferred: none
 
 ## 1. Task Index
 
