@@ -180,7 +180,7 @@ the loop, and OpenAI token-param / parallel-id behavior.
 | ID | Why deferred |
 | --- | --- |
 | L10 | MCP duplicate-server-name shadowing — operator-misconfig observability nit; needs a UX decision (warn vs rename vs reject). |
-| L13 | Persisted-package auto-reload capability re-check — confining `entryPath` to the packages dir would break legitimate `path:` installs; re-prompting `pkg:install` at every startup is intrusive. Exploitation already requires FS-write compromise; `pkg:install` is not auto-granted. |
+| L13 | *Tamper vector now addressed (post-review wave): `git:`/`npm:` packages only auto-reload from inside the packages dir, while `path:` installs still reload from their recorded location.* The remaining piece — re-prompting `pkg:install` at every startup — stays deferred as too intrusive; `pkg:install` is not auto-granted and exploitation already requires FS-write compromise. |
 | N2 | Anthropic cache-token accounting is a documented `Usage`-shape limitation, not a bug. |
 | N5 | CLI SIGINT only in interactive mode — orphaned MCP children on batch Ctrl-C; one-shot `--eval` is unaffected. |
 | — | (L15 was fixed.) |

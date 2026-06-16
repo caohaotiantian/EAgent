@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Extension id collisions no longer leak.** A second activation under the same
   id (the discover "later wins" path) now tears the previous version down first,
   so its tools/hooks are removed rather than left firing as orphans.
+- **Package auto-reload tamper guard.** On `session_start`, a remotely-fetched
+  package (`git:`/`npm:`) is only re-executed if its recorded `entryPath` still
+  lives inside the packages directory, so a tampered registry can't redirect
+  auto-load at arbitrary code; `path:` installs still reload from their recorded
+  location. The packages dir is now overridable via `EAGENT_PACKAGES_DIR`.
 
 ### Added
 
