@@ -86,9 +86,10 @@ In rough priority:
 4. **Extension-to-extension isolation.** In-process `jiti` gives none (same as VS Code's host). The
    honest boundary stays: trusted in-process, untrusted out-of-process. Revisit only if untrusted
    in-process extensions become a goal.
-5. ~~**Tool-poisoning awareness.**~~ **Shipped (Wave 3):** MCP tool descriptions are scanned for
-   hidden-instruction patterns at registration and warned. *Remaining:* description-change diffing
-   across sessions, and applying the same scan to non-MCP tool sources.
+5. ~~**Tool-poisoning awareness.**~~ **Shipped (Waves 3, 4, 8):** MCP tool descriptions scanned at
+   registration (W3); the `integrity` extension sweeps *all* tool sources (W4); and description-change
+   diffing across sessions catches the rug-pull / silent-update vector (W8). *Remaining:* nothing
+   material at the extension layer.
 
 ## 5. Bottom line
 
@@ -98,3 +99,15 @@ research found no structural flaw and no missing primitive. The single most valu
 move — a compositional capability policy — was added the way the architecture intends: **as an
 extension.** EAgent should keep the core frozen, keep the guard test strict, and keep absorbing new
 best practices the way `flow-guard` was absorbed.
+
+**Wave status (2026-06-16).** Eight improvement waves shipped — W1 MCP shadow-as-event, W2
+data-confinement taint, W3 MCP tool-poisoning scan, W4 cross-source `integrity` sweep, W5 batch
+SIGINT shutdown, W6 package auto-reload tamper guard, W7 transcript-level information-flow taint
+(full three-loop cycle), W8 tool-description-change detection. **Every wave was an extension edit;
+the seven-primitive kernel never grew** (the surface guard test still passes). The forward-agenda
+items that remain are now *deliberate non-goals*, not pending work: a generic `tool_shadowed` signal
+and richer token accounting (N2) would each **grow the kernel** — a conscious decision against the
+thesis, deferred until a concrete need justifies it; taint through `/handoff` summary prose was
+**accepted out of scope** by the W7 design; and extension-to-extension isolation is the
+research-endorsed honest boundary (trusted in-process / untrusted out-of-process). The
+clean, in-thesis security agenda is complete.
