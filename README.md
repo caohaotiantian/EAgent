@@ -7,46 +7,77 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more**. There are no built-in tools,
-no hard-coded prompt strategy, no memory policy, no sub-agents baked in. The four
-"built-in" tools (`read`, `write`, `edit`, `bash`) are themselves an extension.
-Everything you'd want to change is a hot-reloadable extension you can edit while
-the agent is running.
+The kernel is **seven primitives and nothing more** (~1,600 lines, held under a
+line ceiling by a test). There are no built-in tools, no hard-coded prompt
+strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
+(`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
+want to change is a hot-reloadable extension you can edit while the agent runs.
 
-```
-┌──────────────────────── kernel (stable, ~small) ─────────────────────────┐
-│  hook bus · tool registry · provider abstraction · agent loop            │
-│  capability layer · extension host · command registry                    │
-└───────────────────────────────────────────────────────────────────────────┘
-        ▲ registers tools / hooks / commands / providers
-┌───────┴───────────────────────── extensions ─────────────────────────────┐
-│  core-tools (read/write/edit/bash) · skills (LLM-authored) · your code …  │
-└───────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph FE["Front ends — one shared wiring (src/host.ts)"]
+        direction LR
+        REPL["Interactive REPL"]
+        ONE["One-shot (-e)"]
+        BATCH["Batch (piped)"]
+        HTTP["HTTP server"]
+    end
+
+    subgraph KERNEL["Kernel — src/kernel/ · 7 primitives, ~1.6k lines"]
+        direction LR
+        HOOKS["Hook bus"]
+        REG["Tool registry"]
+        LOOP["Agent loop"]
+        CAPS["Capability layer"]
+        EXT["Extension host"]
+        CMD["Command registry"]
+        PROV["Provider abstraction"]
+    end
+
+    subgraph EXTS["Extensions — src/extensions/ · everything else"]
+        direction LR
+        X1["core-tools"]
+        X2["skills · mcp · memory"]
+        X3["self · web · checkpoint"]
+        X4["+ 11 more"]
+    end
+
+    subgraph PROVIDERS["Providers — src/providers/"]
+        direction LR
+        PM["mock"]
+        PA["anthropic"]
+        PO["openai"]
+        PG["gemini"]
+    end
+
+    FE --> KERNEL
+    EXTS -->|"register tools · hooks · commands · providers"| KERNEL
+    PROVIDERS -.->|"implement Provider"| PROV
 ```
 
 ## Why another agent
 
 Most agents are a feature pile with an opaque, shifting core. EAgent inverts that:
-a core small enough to read in one sitting, and a single extension surface powerful
-enough that new behavior never requires forking. The bet — the same one pi and
-Emacs make — is that a minimal, observable, malleable core beats a big one.
+a core small enough to read in one sitting, and a single extension surface
+powerful enough that new behavior never requires forking. The bet — the same one
+pi and Emacs make — is that a minimal, observable, malleable core beats a big one.
 
 ## Quickstart
 
 ```bash
 npm install
 npm run build
-npm test          # 36 tests, no network or API key required
+npm test          # 173 tests, no network or API key required
 
-# talk to it offline (a deterministic mock LLM drives everything):
+# Talk to it offline — a deterministic mock LLM drives everything:
 node dist/cli.js -e "hello"
 
-# load an example extension and poke around:
+# Load an example extension and poke around:
 printf '/tools\n/uptime\n/quit\n' | node dist/cli.js --ext examples/extensions/clock.ts
 ```
 
-For a live model, set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and the CLI selects
-that provider automatically (override with `--provider`):
+For a live model, set an API key and the CLI selects that provider automatically
+(override with `--provider`):
 
 ```bash
 ANTHROPIC_API_KEY=sk-... node dist/cli.js -m claude-fable-5
@@ -57,169 +88,188 @@ GEMINI_API_KEY=...       node dist/cli.js -p gemini -m gemini-2.0-flash
 Any OpenAI-compatible endpoint works through the OpenAI provider — e.g. a local
 Ollama: `OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama node dist/cli.js -p openai -m llama3`.
 
-Interactive session commands: `/help`, `/tools`, `/skills`, `/extensions`,
-`/reload`, `/caps`, `/model`, `/provider`, `/clear`, `/quit`.
+## How a turn works
 
-There are four front ends to the same kernel: an **interactive REPL**, a
-**one-shot** run (`-e`), a **batch** mode (piped stdin), and an **HTTP server**
-for embedding:
+The agent loop is the one piece that must be small, correct, and observable,
+because everything else hangs off it. A turn:
 
-```bash
-npm run serve                 # POST /run streams JSONL; GET /health
-curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
-# Pass a session id to keep a multi-turn conversation:
-curl -s localhost:8787/run -d '{"input":"and now in one line","session":"abc"}'
+```mermaid
+flowchart TD
+    A["agent.run(input)"] --> B["drain steering · emit turn_start"]
+    B --> C["transformContext<br/>(filter hook: compaction · memory · RAG)"]
+    C --> D["provider.stream(request)"]
+    D --> E["text_delta … done + usage"]
+    E --> F{"tool calls?"}
+    F -->|no| G{"follow-ups queued?"}
+    G -->|yes| B
+    G -->|no| Z["stop · emit agent_end"]
+    F -->|yes| H["dispatch(calls)"]
+    H --> I["validate args"]
+    I --> J{"beforeToolCall<br/>(filter): block?"}
+    J -->|blocked| M["error result"]
+    J -->|allowed| K["capability.require → execute → afterToolCall"]
+    K --> N["append results in requested order"]
+    M --> N
+    N --> O{"every result terminate?"}
+    O -->|yes| Z
+    O -->|no| B
 ```
 
-The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
-`Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
-
-All four share one wiring (`src/host.ts`), so they load exactly the same
-extensions. To run sandboxed (the posture `SECURITY.md` recommends), there is a
-`Dockerfile` (non-root, workspace-confined):
-
-```bash
-docker build -t eagent . && docker run -p 8787:8787 -v "$PWD:/workspace" eagent
-```
-
-See `ARCHITECTURE.md` for the full design and `CONTRIBUTING.md` to hack on it.
+Two injection points make a running agent controllable from outside: **steering**
+adds a message before the next model call (interruptions, corrections), and
+**follow-up** queues work for when the loop would otherwise idle (automation).
 
 ## The seven primitives
 
-| Primitive            | File                       | Responsibility |
-| -------------------- | -------------------------- | -------------- |
-| **Hook bus**         | `src/kernel/hooks.ts`      | Lifecycle events (observe) + filter hooks (intervene) — Emacs hooks & advice. |
-| **Tool registry**    | `src/kernel/registry.ts`   | Register/shadow/dispose tools; a later definition wins, disposing restores the prior one. |
-| **Provider**         | `src/kernel/types.ts`      | The one thing the kernel knows about an LLM: a request → a stream of events. |
-| **Agent loop**       | `src/kernel/agent.ts`      | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions. |
+All seven live in `src/kernel/` and form the entire public surface of the kernel.
+
+| Primitive            | File                         | Responsibility |
+| -------------------- | ---------------------------- | -------------- |
+| **Hook bus**         | `src/kernel/hooks.ts`        | Lifecycle events (observe) + filter hooks (intervene) — Emacs *hooks* & *advice*. |
+| **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools & providers; a later definition wins, disposing restores the prior one. |
+| **Provider**         | `src/kernel/types.ts`        | The one thing the kernel knows about an LLM: a request → a stream of events. |
+| **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions. |
 | **Capability layer** | `src/kernel/capabilities.ts` | Per-capability allow / deny / ask, wildcards, an audit log. |
-| **Extension host**   | `src/kernel/extension.ts`  | Discovery, activation, the `ExtensionAPI`, and hot reload via `jiti`. |
-| **Command registry** | `src/kernel/commands.ts`   | User-facing slash commands (`M-x` for agents). |
+| **Extension host**   | `src/kernel/extension.ts`    | Discovery, activation, the `ExtensionAPI`, hot reload via `jiti`. |
+| **Command registry** | `src/kernel/commands.ts`     | User-facing slash commands — `M-x` for agents. |
 
-Everything else — tools, memory, prompts, compaction, UI, sub-agents, MCP — is
-meant to be an extension. The kernel ships with zero opinions about them.
-
-## The three modes of extensibility
-
-EAgent deliberately supports three different ways to extend it, mapped onto three
-different mechanisms rather than blurred into one.
-
-**(a) Live programmability** — trusted TypeScript extensions, hot-reloaded with no
-build step. Edit a file, run `/reload`, and the new behavior takes effect in the
-running process. Every registration is tracked, so a reload tears the old version
-down cleanly and brings the new one up.
-
-```ts
-// .eagent/extensions/hello.ts  — auto-discovered, then `/reload`
-import { defineTool, ok } from "eagent";
-export default function activate(e) {
-  e.registerTool(defineTool({
-    name: "greet",
-    description: "Greet someone by name.",
-    parameters: { type: "object", properties: { who: { type: "string" } }, required: ["who"] },
-    execute: (args) => ok(`Hello, ${args.who}!`),
-  }));
-}
-```
-
-**(b) A stable plugin API** — the `ExtensionAPI` is a single, versioned surface
-(`registerTool`, `registerProvider`, `registerCommand`, `on`, `hook`,
-`grantCapability`, `store`). It follows VS Code's discipline: minimal, additive,
-never broken. This is also where an MCP client belongs — as an extension over a
-process boundary, not in the core.
-
-**(c) LLM-authored skills** — the agent writes its own capabilities. The built-in
-`skills` extension implements Anthropic's `SKILL.md` standard with progressive
-disclosure: only skill names + descriptions are injected each turn (cheap), full
-instructions load on demand, and authoring (`skill_create`) is gated behind the
-`skill:write` capability. This is self-extension with a seatbelt.
+Everything else — tools, memory, prompts, compaction, UI, sub-agents, MCP — is an
+extension. The kernel ships with zero opinions about them.
 
 ## Hooks: observe and intervene
 
-Lifecycle **events** are notifications you subscribe to:
+The hook bus maps onto Emacs's two extension idioms. **Events** are notifications
+you observe; **filter hooks** are advice that can transform or veto a value.
 
-```ts
-e.on("tool_end", ({ call, result }) => log(call.name, result.isError));
+```mermaid
+flowchart LR
+    subgraph OBS["Events — e.on() · observe only"]
+        direction TB
+        EVA["agent_start · turn_start"]
+        EVB["message · text_delta"]
+        EVC["tool_start · tool_end · usage"]
+        EVD["turn_end · agent_end · error"]
+    end
+    subgraph INT["Filter hooks — e.hook() · intervene"]
+        direction TB
+        H1["transformContext<br/>reshape the prompt"]
+        H2["beforeToolCall<br/>veto / rewrite a call"]
+        H3["afterToolCall<br/>transform a result"]
+    end
 ```
 
-**Filter hooks** are advice — a value threaded through your handler that you can
-transform or veto:
-
 ```ts
-// Approve, rewrite, or block any tool call before it runs.
+// Observe:
+e.on("tool_end", ({ call, result }) => log(call.name, result.isError));
+
+// Intervene — block a destructive command:
 e.hook("beforeToolCall", (decision, { call }) => {
   if (call.name === "bash" && /rm -rf \//.test(String(call.arguments.command)))
     return { ...decision, block: true, reason: "destructive command" };
   return decision;
 });
-
-// Reshape the prompt just before it reaches the model (compaction, memory, RAG).
-e.hook("transformContext", (messages) => [systemNote, ...messages]);
 ```
 
-`transformContext`, `beforeToolCall`, and `afterToolCall` are the three seams
-where memory strategies, plan-mode approvals, safety gates, and context
-engineering plug in — without touching the loop.
+These three seams are where memory strategies, plan-mode approvals, safety gates,
+and context engineering plug in — without touching the loop.
 
 ## Built-in extensions
 
-Everything below is an extension — none of it is in the kernel, and any of it can
-be replaced or removed. Each is a single file under `src/extensions/`, ships with
-offline tests, and gates privileged work behind a capability.
+Everything below is an extension — none is in the kernel, and any can be replaced
+or removed. Each is a single file under `src/extensions/`, ships with offline
+tests, and gates privileged work behind a capability.
 
 | Extension     | What it adds | Commands | Capability |
 | ------------- | ------------ | -------- | ---------- |
-| `core-tools`  | `read`, `write`, `edit`, `bash` | `/tools` | `fs:read`, `fs:write`, `shell:exec` |
+| `core-tools`  | `read`, `write`, `edit`, `bash` (workspace-confined) | `/tools` | `fs:read`, `fs:write`, `shell:exec` |
 | `skills`      | LLM-authored skills via `SKILL.md` with progressive disclosure | `/skills` | `skill:read`, `skill:write` |
-| `mcp`         | Model Context Protocol client (stdio, newline-delimited JSON-RPC 2.0); registers each server's tools as `mcp__<server>__<tool>` | `/mcp` | `mcp:call` |
-| `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary (scrubbed env, timeout) | `/code` | `code:exec` |
-| `subagents`   | `spawn_agent` runs isolated child agents in single / parallel / chain modes | `/agents` | `agent:spawn` |
-| `memory`      | context compaction via `transformContext` (cached branch summaries) + `remember`/`recall` scratchpad | `/compact`, `/memory` | — |
+| `mcp`         | Model Context Protocol client (stdio **and** Streamable HTTP); registers `mcp__<server>__<tool>` | `/mcp` | `mcp:call` |
+| `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary | `/code` | `code:exec` |
+| `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
+| `memory`      | context compaction via `transformContext` + `remember`/`recall` scratchpad | `/compact`, `/memory` | — |
 | `planmode`    | human-in-the-loop approval gate before mutating tools run | `/plan` | — |
-| `session`     | save / load / handoff for transcripts (file-based memory) | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
-| `packages`    | install extensions from `path:` / `git:` / `npm:` sources (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
-| `trace`       | observability: per-run span tree, metrics, and token usage, all from the event bus | `/trace`, `/usage`, `/trace-save` | — |
-| `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them (per-project instructions) | `/context`, `/context-reload` | — |
-| `limits`      | resource guardrails: tool-output truncation and per-run tool-call budgets, via hooks | `/limits` | — |
-| `self`        | the agent authors and hot-loads its **own** TypeScript extensions at runtime | `/self` | `self:read`, `self:extend` |
-| `web`         | capability-gated HTTP access (`fetch_url`), size-bounded | `/fetch` | `net:fetch` |
+| `session`     | save / load / handoff for transcripts | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
+| `packages`    | install extensions from `path:` / `git:` / `npm:` (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
+| `trace`       | observability: per-run span tree, metrics, token usage — from the event bus | `/trace`, `/usage`, `/trace-save` | — |
+| `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them | `/context`, `/context-reload` | — |
+| `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
+| `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
+| `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
-| `introspect`  | self-documentation: describe any tool/command, search by keyword (`describe_tool` tool) | `/describe`, `/apropos` | — |
+| `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |
 | `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
-| `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompts`, `/prompt-remove` | — |
+| `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompts` | — |
 
-The MCP client configures servers from `EAGENT_MCP_SERVERS` (a JSON array of
-`{ name, command, args?, env? }`). Skills live under `~/.eagent/skills/` (override
-with `EAGENT_SKILLS_DIR`).
+The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
+`~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
 
 ## Capabilities: the one thing pi omits
 
 pi runs extensions in-process with full privileges and tells you to containerize.
 That's reasonable for a trusted coding agent — but EAgent makes *LLM-authored
 code* a first-class mode, so it carries an explicit capability layer from day one.
+A capability is a dotted authority (`fs:read`, `shell:exec`, `net:fetch`,
+`self:extend`, …); tools declare what they need and the dispatcher enforces it
+before the body runs, recording every decision in an audit log (`/caps`).
 
-A capability is a dotted authority: `fs:read`, `fs:write`, `shell:exec`,
-`net:fetch`, `skill:write`. Tools declare what they need; the dispatcher enforces
-it before the tool body runs. Decisions come from an ordered policy
-(grant → deny → ask), wildcards are supported (`fs:*`, `*`), and every check is
-recorded in an audit log you can inspect with `/caps`.
-
-```ts
-e.registerTool(defineTool({
-  name: "fetch",
-  description: "HTTP GET a URL.",
-  capabilities: ["net:fetch"],     // enforced automatically before execute()
-  execute: async (args, ctx) => { /* ... */ },
-}));
+```mermaid
+flowchart TD
+    R["ctx.require(cap)"] --> D{"matches a deny pattern?"}
+    D -->|yes| DENY["deny → CapabilityError"]
+    D -->|no| G{"matches a grant pattern?"}
+    G -->|yes| ALLOW["allow"]
+    G -->|no| F{"fallback policy"}
+    F -->|ask| Q{"UI confirms?"}
+    F -->|allow| ALLOW
+    F -->|deny| DENY
+    Q -->|yes| ALLOW
+    Q -->|no| DENY
+    ALLOW --> AUD["record in audit log"]
+    DENY --> AUD
 ```
 
 **Security stance.** The in-process extension path is for *trusted* code only.
 There is no reliable in-process JavaScript sandbox (`node:vm` is explicitly not a
 security boundary; `vm2` is abandoned). Untrusted or LLM-generated *code* that
 touches the network, the filesystem outside a scratch dir, or credentials belongs
-behind a real OS/VM boundary (container, microVM). The capability layer is the
-seam where that boundary plugs in; EAgent enforces authority but does not pretend
-to sandbox arbitrary code in-process.
+behind a real OS/VM boundary. The capability layer is the seam where that boundary
+plugs in; EAgent enforces authority but does not pretend to sandbox in-process
+code. See [`SECURITY.md`](SECURITY.md).
+
+## Four front ends, one kernel
+
+```mermaid
+flowchart LR
+    subgraph CLI["src/cli.ts"]
+        REPL["Interactive REPL<br/>(TTY)"]
+        ONE["One-shot<br/>eagent -e / --json"]
+        BATCH["Batch<br/>(piped stdin)"]
+    end
+    SRV["src/server.ts<br/>HTTP — /health, /run, /sessions"]
+    HOST["createAgentHost()<br/>src/host.ts"]
+    K["Kernel + built-in extensions"]
+    REPL --> HOST
+    ONE --> HOST
+    BATCH --> HOST
+    SRV --> HOST
+    HOST --> K
+```
+
+```bash
+npm run serve                 # POST /run streams JSONL; GET /health
+curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
+# A session id keeps a multi-turn conversation:
+curl -s localhost:8787/run -d '{"input":"now in one line","session":"abc"}'
+```
+
+The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
+`Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
+To run sandboxed (the posture `SECURITY.md` recommends) there is a `Dockerfile`
+(non-root, workspace-confined):
+
+```bash
+docker build -t eagent . && docker run -p 8787:8787 -v "$PWD:/workspace" eagent
+```
 
 ## Embedding the kernel
 
@@ -234,61 +284,35 @@ agent.providers.register(new MockProvider([
   { toolCalls: [{ name: "add", arguments: { a: 2, b: 3 } }] },
   { text: "The sum is 5." },
 ]), { default: true });
-// register tools, then:
 const { reason, messages } = await agent.run("add 2 and 3");
 ```
 
-The `MockProvider` is a scriptable, deterministic LLM. It is why the entire test
-suite runs offline and why you can explore the agent with no API key.
-
-## Design choices worth knowing
-
-- **In-process, trusted extensions** (pi's trade-off): power and live reloading
-  over isolation. Untrusted code is a separate, sandboxed path, not this one.
-- **Ordered tool results.** Tools may run in parallel, but results are always
-  appended in the order the model requested them. One `sequential` tool forces
-  the whole batch to run in order.
-- **Steering vs. follow-up.** Steering injects a message before the next model
-  call (interruptions, corrections); follow-up queues work for when the loop
-  would otherwise idle (automation).
-- **Scoped state.** Each extension gets a namespaced persistent `store` — the
-  explicit fix for Emacs's global-mutable-state mistake.
-- **Stable API discipline.** One typed `ExtensionAPI`; additive, never broken.
-- **Token accounting.** Providers report `Usage` on every completion; the agent
-  sums it and emits a `usage` event (see `/usage`).
-- **Resilient networking.** The Anthropic provider retries 429/5xx and network
-  errors with exponential backoff (honoring `retry-after`), and its `fetch` is
-  injectable for testing.
-- **Filesystem confinement.** `read`/`write`/`edit` are scoped to a workspace
-  root (`$EAGENT_WORKSPACE` or cwd), rejecting `../` escapes — defense in depth
-  over the `fs:*` capabilities.
-- **Prompt caching.** The Anthropic provider marks the stable system+tools
-  prefix as cacheable, so multi-turn runs are billed at a fraction of the input
-  cost.
-- **Programmatic mode.** `eagent --json -e "…"` emits lifecycle events as JSONL
-  on stdout (diagnostics go to stderr), for embedding in other programs.
-- **The agent extends itself.** With the `self` extension (and `self:extend`
-  granted), the agent can write a real TypeScript extension and load it live —
-  the Emacs ideal, all the way down. Guarded hard, because in-process code is
-  full-authority; see `SECURITY.md`.
-- **A minimalism guard.** A test pins the kernel's public surface and a line
-  ceiling, so the core cannot grow by accident — new capability is an
-  extension, by construction.
-
-See `docs/EXTENSIONS.md` for the full extension author's guide.
+The `MockProvider` is a scriptable, deterministic LLM — it is why the whole test
+suite runs offline. For recording a real model once and replaying it
+deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
+`eagent/providers/cassette`.
 
 ## Layout
 
 ```
 src/kernel/      the seven primitives + public barrel (index.ts)
-src/providers/   mock (deterministic), anthropic + openai + gemini (fetch + SSE,
-                 no SDK, shared retry/usage plumbing in http.ts)
-src/extensions/  core-tools, skills, mcp, codeact, subagents, memory,
-                 planmode, session, packages — all riding the ExtensionAPI
-src/cli.ts       the terminal host: interactive REPL + batch + one-shot
-examples/        a worked example extension (clock & guardrails)
-test/            the full suite, every primitive and extension, offline
+src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
+                 shared retry/usage in http.ts) · cassette (record/replay)
+src/extensions/  18 built-in extensions, all riding the ExtensionAPI
+src/host.ts      createAgentHost — shared wiring for every front end
+src/cli.ts       terminal host: REPL + one-shot + batch + --json
+src/server.ts    HTTP host: /health, /run (streaming), /sessions
+examples/        worked example extensions
+test/            the full offline suite — every primitive and extension
 ```
+
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the full design, with diagrams.
+- [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
+- [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
 
 ## License
 
