@@ -80,8 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Gemini preserves a `max_tokens` truncation signal and surfaces tool-result
   errors; `bash` defaults its cwd to the workspace; `/fetch` honors the size cap;
   `read` validates `offset`/`limit`; CLI rejects missing flag values and unknown
-  options. Docs (`CLAUDE.md`, `README.md`) corrected to the real provider/
-  extension/route set.
+  options; non-interactive CLI (`--eval`/batch) now tears the host down on
+  SIGINT/SIGTERM instead of orphaning MCP child processes. Docs (`CLAUDE.md`,
+  `README.md`) corrected to the real provider/extension/route set.
 
 ## [0.2.0] - 2026-06-15
 
