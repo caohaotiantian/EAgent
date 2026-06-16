@@ -8,16 +8,20 @@
  * per-call check catches it, because each call, alone, is allowed.
  *
  * The fix does NOT belong in the kernel: it is *policy*, and the kernel ships
- * mechanism. So it lives here, riding two primitives the core already exposes —
- * the `tool_end` event (observe what authority and data have been touched this
- * session) and the `beforeToolCall` filter (intervene before egress). The
- * session is "tainted" when either (a) a tool exercised a sensitive *capability*
- * (default `shell:exec`), or (b) a tool read a sensitive *path* or returned
- * credential-looking *content* (data confinement). Once tainted, a later tool
- * requesting an "egress" capability (default `net:fetch`) is held: confirmed
- * with the human in `ask` mode, or refused outright in `block` mode. This is
- * the thesis in action — a new security best practice absorbed as a
- * hot-reloadable extension, not a core fork.
+ * mechanism. So it lives here, riding three primitives the core already exposes
+ * — the `tool_end` event (observe what authority and data have been touched),
+ * the `message` event (tag the data-bearing message), and the `beforeToolCall`
+ * filter (intervene before egress). Egress is gated when either (a) a tool
+ * exercised a sensitive *capability* (default `shell:exec`) — a session-sticky
+ * flag, since shell output is unscannable — or (b) a tool read a sensitive
+ * *path* or returned credential-looking *content*, in which case the taint is
+ * pinned to that tool-result message via `meta.flowGuardTaint`. Data taint is
+ * information flow: it gates only while the tainting message is still in the
+ * live transcript, so `/clear` and `/handoff` un-gate. Once either trigger is
+ * active, a later tool requesting an "egress" capability (default `net:fetch`)
+ * is held: confirmed with the human in `ask` mode, or refused outright in
+ * `block` mode. This is the thesis in action — a new security best practice
+ * absorbed as a hot-reloadable extension, not a core fork.
  *
  * Disable or tune it at runtime with `/flow-guard`, or set `EAGENT_FLOW_GUARD=off`.
  */
@@ -33,9 +37,9 @@ const DEFAULT_EGRESS_CAPS = ["net:fetch"];
 
 /**
  * Data confinement (the second trigger): reading one of these path patterns, or
- * a tool result that matches one of the content patterns, taints the session
- * even if no `shell:exec` ran — because the *data*, not just the capability, is
- * what must not leave. All are overridable via the extension store.
+ * a tool result that matches one of the content patterns, taints the *message*
+ * that carried it even if no `shell:exec` ran — because the *data*, not just the
+ * capability, is what must not leave. All are overridable via the extension store.
  */
 const DEFAULT_SENSITIVE_PATHS = [
   "\\.env(\\.|$)",
@@ -82,43 +86,91 @@ export default function activate(e: ExtensionAPI): () => void {
     ),
   });
 
-  /** Source capabilities exercised so far this session (the "taint" set). */
+  /**
+   * Capability taint stays a session-sticky set: a tool that ran `shell:exec`
+   * could carry a secret in any unscannable form, so we cannot tie that taint to
+   * a single message. Data taint is different — it rides the *message* that
+   * carried the data (see the `message` handler) and clears when that message
+   * leaves the transcript. The split is the whole point of this layer.
+   */
   const tainted = new Set<string>();
+
+  /**
+   * Sensitive path detections waiting for their tool-result message to be
+   * appended. A `tool_end` knows the call arguments (the path), but the message
+   * to tag is built later, in the `message` event — so we stash `callId →
+   * reasons` and the `message` handler drains it. Cleared on session reset; a
+   * never-claimed entry is inert and reclaimed there.
+   */
+  const pending = new Map<string, string[]>();
+
+  /** Read a message's data-taint marker as an array, or undefined if absent. */
+  const taintArray = (m: { meta?: Record<string, unknown> }): unknown[] | undefined => {
+    const t = (m.meta as Record<string, unknown> | undefined)?.flowGuardTaint;
+    return Array.isArray(t) ? t : undefined;
+  };
 
   /** The capabilities a registered tool declares. */
   const capsOf = (name: string): string[] => e.agent.tools.get(name)?.capabilities ?? [];
 
-  // Observe: a session becomes "tainted" when either (a) a source-capability
-  // tool runs, or (b) a tool reads a sensitive path / returns sensitive-looking
-  // content. Either way, sensitive data may now be in the agent's hands.
+  // Observe authority: the capability-chain trigger. A source-capability tool
+  // (default shell:exec) makes the session sticky-tainted. Data confinement is
+  // handled per-message below, not here.
   const offEnd = e.on("tool_end", ({ call, result }) => {
     if (result.isError) return;
     const c = cfg();
     const caps = capsOf(call.name);
     for (const cap of caps) if (c.sourceCaps.includes(cap)) tainted.add(cap);
 
-    // Data confinement: a sensitive path argument to a read tool...
+    // Data confinement (path trigger): a sensitive path argument to a read tool.
+    // The result message does not exist yet, so record the call id for the
+    // `message` handler to tag when it is appended.
     if (caps.includes("fs:read")) {
       for (const v of Object.values(call.arguments)) {
         if (typeof v === "string" && c.sensitivePaths.some((re) => re.test(v))) {
-          tainted.add("sensitive-path");
+          const reasons = pending.get(call.id) ?? [];
+          reasons.push(`sensitive-path:${v}`);
+          pending.set(call.id, reasons);
           break;
         }
       }
     }
-    // ...or a result that looks like a credential, taints the session.
-    if (c.sensitiveContent.some((re) => re.test(result.content))) tainted.add("sensitive-content");
   });
 
-  // Intervene: hold a later egress call once the session is tainted.
+  // Tag the data: when a tool message is appended, mark each result block whose
+  // call was pending (sensitive path) or whose content matches a credential
+  // pattern. The emitted message is the same object stored in the transcript, so
+  // the tag persists and travels with the data (drops on /clear, /handoff).
+  const offMessage = e.on("message", ({ message }) => {
+    if (message.role !== "tool") return;
+    const c = cfg();
+    for (const block of message.content) {
+      if (block.type !== "tool_result") continue;
+      const reasons = [...(pending.get(block.toolCallId) ?? [])];
+      if (c.sensitiveContent.some((re) => re.test(block.content))) reasons.push("sensitive-content");
+      if (reasons.length > 0) {
+        message.meta = { ...message.meta, flowGuardTaint: reasons };
+      }
+      pending.delete(block.toolCallId);
+    }
+  });
+
+  // Intervene: hold a later egress call once the session is tainted — either by
+  // a sticky source capability, or by a still-present tool message carrying
+  // sensitive data (information flow: gone from the transcript, gone from here).
   const offHook = e.hook("beforeToolCall", async (decision, ctx) => {
     const { enabled, mode, egressCaps } = cfg();
-    if (!enabled || decision.block || tainted.size === 0) return decision;
+    if (!enabled || decision.block) return decision;
+    const dataTainted = e.agent.messages.some((m) => (taintArray(m)?.length ?? 0) > 0);
+    if (tainted.size === 0 && !dataTainted) return decision;
     const isEgress = capsOf(ctx.call.name).some((c) => egressCaps.includes(c));
     if (!isEgress) return decision;
 
+    const reasons: string[] = [];
+    if (tainted.size > 0) reasons.push(`capabilities [${[...tainted].join(", ")}]`);
+    if (dataTainted) reasons.push("sensitive data in the live transcript");
     const why =
-      `network egress (${ctx.call.name}) while the session is tainted by [${[...tainted].join(", ")}] ` +
+      `network egress (${ctx.call.name}) while the session is tainted by ${reasons.join(" and ")} ` +
       `— a capability-chaining / data-exfiltration pattern`;
     if (mode === "block") {
       return { ...decision, block: true, reason: `flow-guard: blocked ${why}` };
@@ -127,9 +179,14 @@ export default function activate(e: ExtensionAPI): () => void {
     return allow ? decision : { ...decision, block: true, reason: `flow-guard: denied ${why}` };
   });
 
-  // The chain is scoped to a session; a fresh runtime starts clean.
-  const offStart = e.on("session_start", () => tainted.clear());
-  const offDown = e.on("session_shutdown", () => tainted.clear());
+  // The chain is scoped to a session; a fresh runtime starts clean. (Data taint
+  // lives on messages, so it clears with the transcript, not here.)
+  const reset = () => {
+    tainted.clear();
+    pending.clear();
+  };
+  const offStart = e.on("session_start", reset);
+  const offDown = e.on("session_shutdown", reset);
 
   const offCmd = e.registerCommand({
     name: "flow-guard",
@@ -152,14 +209,21 @@ export default function activate(e: ExtensionAPI): () => void {
           break;
         case "reset":
           tainted.clear();
+          pending.clear();
+          // Data taint rides the messages, so a true clear-all strips it there too.
+          for (const m of e.agent.messages) {
+            if (m.meta && "flowGuardTaint" in m.meta) delete (m.meta as Record<string, unknown>).flowGuardTaint;
+          }
           c.print("flow-guard: session taint cleared");
           break;
         default: {
           const { enabled, mode, sourceCaps, egressCaps } = cfg();
+          const dataCount = e.agent.messages.filter((m) => (taintArray(m)?.length ?? 0) > 0).length;
           c.print(
             `flow-guard ${enabled ? "on" : "off"} (mode=${mode}); ` +
               `source=${sourceCaps.join(",")} -> egress=${egressCaps.join(",")}; ` +
-              `tainted: ${tainted.size ? [...tainted].join(", ") : "(none)"}`,
+              `capability-taint: ${tainted.size} (${tainted.size ? [...tainted].join(", ") : "none"}); ` +
+              `tainted-data: ${dataCount}`,
           );
         }
       }
@@ -167,7 +231,7 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   return () => {
-    for (const d of [offEnd, offHook, offStart, offDown, offCmd]) {
+    for (const d of [offEnd, offMessage, offHook, offStart, offDown, offCmd]) {
       try {
         d.dispose();
       } catch {
