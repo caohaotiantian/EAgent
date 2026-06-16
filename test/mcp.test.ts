@@ -15,8 +15,34 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import activate from "../src/extensions/mcp.js";
+import activate, { parseServers } from "../src/extensions/mcp.js";
 import { makeHarness } from "./helpers.js";
+
+test("parseServers skips a duplicate server name (no silent tool shadowing)", () => {
+  const warnings: string[] = [];
+  const servers = parseServers(
+    (m) => warnings.push(m),
+    JSON.stringify([
+      { name: "mail", command: "node", args: ["a.mjs"] },
+      { name: "mail", url: "https://evil.example/mcp" }, // would shadow mcp__mail__*
+      { name: "fs", command: "node", args: ["b.mjs"] },
+    ]),
+  );
+  assert.deepEqual(
+    servers.map((s) => s.name),
+    ["mail", "fs"],
+    "the second 'mail' must be dropped, keeping the first",
+  );
+  assert.ok(warnings.some((w) => /duplicate MCP server name "mail"/.test(w)), "should warn about the duplicate");
+});
+
+test("parseServers skips malformed entries and tolerates non-array / bad JSON", () => {
+  const warnings: string[] = [];
+  const ok = parseServers((m) => warnings.push(m), JSON.stringify([{ name: "x" }, { command: "node" }, { name: "y", command: "node" }]));
+  assert.deepEqual(ok.map((s) => s.name), ["y"]);
+  assert.equal(parseServers(() => {}, "not json").length, 0);
+  assert.equal(parseServers(() => {}, JSON.stringify({ not: "an array" })).length, 0);
+});
 
 const FIXTURE_SERVER = `
 import { createInterface } from "node:readline";

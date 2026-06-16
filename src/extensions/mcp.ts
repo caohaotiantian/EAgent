@@ -370,9 +370,16 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
     for (const tool of conn.tools) {
       const connection = conn;
       const toolName = tool.name;
+      const fullName = `mcp__${def.name}__${toolName}`;
+      // Surface a shadow rather than let "later wins" silently override a tool an
+      // earlier registration (e.g. a server listing the same tool name twice) put
+      // in place — the registry stacks it, but the operator should know.
+      if (e.agent.tools.has(fullName)) {
+        e.log.warn(`MCP tool "${fullName}" shadows an already-registered tool; the later registration wins.`);
+      }
       e.registerTool(
         defineTool({
-          name: `mcp__${def.name}__${toolName}`,
+          name: fullName,
           description: tool.description ?? `MCP tool "${toolName}" from server "${def.name}".`,
           capabilities: ["mcp:call"],
           parameters:
@@ -422,7 +429,7 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
 }
 
 /** Parse and validate `EAGENT_MCP_SERVERS`; tolerate absence and bad JSON. */
-function parseServers(warn: (msg: string) => void, raw: string | undefined): ServerDef[] {
+export function parseServers(warn: (msg: string) => void, raw: string | undefined): ServerDef[] {
   if (!raw) return [];
   let parsed: unknown;
   try {
@@ -436,15 +443,25 @@ function parseServers(warn: (msg: string) => void, raw: string | undefined): Ser
     return [];
   }
   const out: ServerDef[] = [];
+  const seen = new Set<string>();
   for (const entry of parsed) {
     const e = entry as Partial<StdioServerDef & HttpServerDef> | null;
-    if (e && typeof e === "object" && typeof e.name === "string" && typeof e.url === "string") {
-      out.push(entry as HttpServerDef);
-    } else if (e && typeof e === "object" && typeof e.name === "string" && typeof e.command === "string") {
-      out.push(entry as StdioServerDef);
-    } else {
+    const isHttp = !!e && typeof e === "object" && typeof e.name === "string" && typeof e.url === "string";
+    const isStdio = !!e && typeof e === "object" && typeof e.name === "string" && typeof e.command === "string";
+    if (!isHttp && !isStdio) {
       warn("Skipping MCP server entry missing string name with command or url.");
+      continue;
     }
+    const name = (e as { name: string }).name;
+    // Server names namespace every tool (mcp__<name>__<tool>); a duplicate name
+    // would let a later server silently shadow an earlier one's tools — a
+    // trust-boundary event, not a convenience. Skip it loudly.
+    if (seen.has(name)) {
+      warn(`Skipping duplicate MCP server name "${name}"; a later server must not shadow an earlier one's tools.`);
+      continue;
+    }
+    seen.add(name);
+    out.push(entry as ServerDef);
   }
   return out;
 }
