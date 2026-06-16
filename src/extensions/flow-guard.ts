@@ -9,9 +9,11 @@
  *
  * The fix does NOT belong in the kernel: it is *policy*, and the kernel ships
  * mechanism. So it lives here, riding two primitives the core already exposes —
- * the `tool_end` event (observe what authority has been exercised this session)
- * and the `beforeToolCall` filter (intervene before egress). When a tool that
- * exercised a "source" capability (default `shell:exec`) has run, a later tool
+ * the `tool_end` event (observe what authority and data have been touched this
+ * session) and the `beforeToolCall` filter (intervene before egress). The
+ * session is "tainted" when either (a) a tool exercised a sensitive *capability*
+ * (default `shell:exec`), or (b) a tool read a sensitive *path* or returned
+ * credential-looking *content* (data confinement). Once tainted, a later tool
  * requesting an "egress" capability (default `net:fetch`) is held: confirmed
  * with the human in `ask` mode, or refused outright in `block` mode. This is
  * the thesis in action — a new security best practice absorbed as a
@@ -29,6 +31,42 @@ const DEFAULT_SOURCE_CAPS = ["shell:exec"];
 /** Capabilities that move data off the machine (where a chain would exfiltrate). */
 const DEFAULT_EGRESS_CAPS = ["net:fetch"];
 
+/**
+ * Data confinement (the second trigger): reading one of these path patterns, or
+ * a tool result that matches one of the content patterns, taints the session
+ * even if no `shell:exec` ran — because the *data*, not just the capability, is
+ * what must not leave. All are overridable via the extension store.
+ */
+const DEFAULT_SENSITIVE_PATHS = [
+  "\\.env(\\.|$)",
+  "id_rsa",
+  "id_ed25519",
+  "\\.pem$",
+  "\\.key$",
+  "[\\\\/]\\.ssh[\\\\/]",
+  "[\\\\/]\\.aws[\\\\/]",
+  "credentials",
+  "secret",
+];
+const DEFAULT_SENSITIVE_CONTENT = [
+  "-----BEGIN [A-Z ]*PRIVATE KEY-----", // PEM private keys
+  "AKIA[0-9A-Z]{16}", // AWS access key id
+  "sk-[A-Za-z0-9_-]{16,}", // OpenAI-style secret keys
+  "ghp_[A-Za-z0-9]{36}", // GitHub personal access token
+];
+
+function compile(patterns: string[]): RegExp[] {
+  const out: RegExp[] = [];
+  for (const p of patterns) {
+    try {
+      out.push(new RegExp(p, "i"));
+    } catch {
+      // a bad user-supplied pattern is skipped, not fatal
+    }
+  }
+  return out;
+}
+
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
     enabled:
@@ -38,6 +76,10 @@ export default function activate(e: ExtensionAPI): () => void {
     mode: (e.store.get<Mode>("mode", "ask") ?? "ask") as Mode,
     sourceCaps: e.store.get<string[]>("sourceCaps", DEFAULT_SOURCE_CAPS) ?? DEFAULT_SOURCE_CAPS,
     egressCaps: e.store.get<string[]>("egressCaps", DEFAULT_EGRESS_CAPS) ?? DEFAULT_EGRESS_CAPS,
+    sensitivePaths: compile(e.store.get<string[]>("sensitivePaths", DEFAULT_SENSITIVE_PATHS) ?? DEFAULT_SENSITIVE_PATHS),
+    sensitiveContent: compile(
+      e.store.get<string[]>("sensitiveContent", DEFAULT_SENSITIVE_CONTENT) ?? DEFAULT_SENSITIVE_CONTENT,
+    ),
   });
 
   /** Source capabilities exercised so far this session (the "taint" set). */
@@ -46,12 +88,26 @@ export default function activate(e: ExtensionAPI): () => void {
   /** The capabilities a registered tool declares. */
   const capsOf = (name: string): string[] => e.agent.tools.get(name)?.capabilities ?? [];
 
-  // Observe: once a source-capability tool has actually run, the session is
-  // "tainted" — sensitive data may now be in the agent's hands.
+  // Observe: a session becomes "tainted" when either (a) a source-capability
+  // tool runs, or (b) a tool reads a sensitive path / returns sensitive-looking
+  // content. Either way, sensitive data may now be in the agent's hands.
   const offEnd = e.on("tool_end", ({ call, result }) => {
     if (result.isError) return;
-    const { sourceCaps } = cfg();
-    for (const cap of capsOf(call.name)) if (sourceCaps.includes(cap)) tainted.add(cap);
+    const c = cfg();
+    const caps = capsOf(call.name);
+    for (const cap of caps) if (c.sourceCaps.includes(cap)) tainted.add(cap);
+
+    // Data confinement: a sensitive path argument to a read tool...
+    if (caps.includes("fs:read")) {
+      for (const v of Object.values(call.arguments)) {
+        if (typeof v === "string" && c.sensitivePaths.some((re) => re.test(v))) {
+          tainted.add("sensitive-path");
+          break;
+        }
+      }
+    }
+    // ...or a result that looks like a credential, taints the session.
+    if (c.sensitiveContent.some((re) => re.test(result.content))) tainted.add("sensitive-content");
   });
 
   // Intervene: hold a later egress call once the session is tainted.
@@ -62,8 +118,8 @@ export default function activate(e: ExtensionAPI): () => void {
     if (!isEgress) return decision;
 
     const why =
-      `network egress (${ctx.call.name}) after sensitive ${[...tainted].join(", ")} use this session ` +
-      `— a capability-chaining / exfiltration pattern`;
+      `network egress (${ctx.call.name}) while the session is tainted by [${[...tainted].join(", ")}] ` +
+      `— a capability-chaining / data-exfiltration pattern`;
     if (mode === "block") {
       return { ...decision, block: true, reason: `flow-guard: blocked ${why}` };
     }
