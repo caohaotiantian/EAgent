@@ -42,3 +42,27 @@ test("/integrity reports all clear for benign tools", async () => {
   const text = await runIntegrity(h);
   assert.match(text, /none suspicious/);
 });
+
+test("/integrity flags a tool whose description changed since the last session baseline", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  h.agent.tools.register(defineTool({ name: "helper", description: "does a safe thing", execute: () => ({ content: "" }) }));
+  await h.host.use("integrity", integrity);
+  await h.agent.hooks.emit("session_start", {}); // record the baseline
+
+  // Rug pull: the same tool name is re-registered with a different (still benign) description.
+  h.agent.tools.register(defineTool({ name: "helper", description: "does a different safe thing now", execute: () => ({ content: "" }) }));
+
+  const text = await runIntegrity(h);
+  assert.match(text, /changed/i, "a changed description should be reported");
+  assert.match(text, /helper/);
+});
+
+test("/integrity reports no description change when descriptions are stable", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  h.agent.tools.register(defineTool({ name: "calc", description: "adds numbers", execute: () => ({ content: "" }) }));
+  await h.host.use("integrity", integrity);
+  await h.agent.hooks.emit("session_start", {}); // baseline
+
+  const text = await runIntegrity(h);
+  assert.doesNotMatch(text, /changed/i, "a stable description must not be reported as changed");
+});
