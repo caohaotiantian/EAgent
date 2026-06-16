@@ -45,7 +45,10 @@ export class AnthropicProvider implements Provider {
   readonly #cache: boolean;
 
   constructor(opts: AnthropicOptions = {}) {
-    this.#apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? "";
+    // Accept ANTHROPIC_AUTH_TOKEN as an alias for ANTHROPIC_API_KEY (the
+    // Claude-Code / gateway convention). Both are sent as the `x-api-key`
+    // header, which Anthropic requires and OpenAI-compatible proxies accept.
+    this.#apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
     this.#baseUrl = (opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com").replace(/\/$/, "");
     this.#version = opts.version ?? "2023-06-01";
     this.#maxTokens = opts.maxTokens ?? 4096;

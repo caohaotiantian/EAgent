@@ -119,6 +119,53 @@ test("pkg-add is refused without the pkg:install capability (fallback deny)", as
   );
 });
 
+test("session reload refuses a git:/npm: entry that points outside the packages dir (tamper guard)", async () => {
+  const pkgDir = mkdtempSync(join(tmpdir(), "eagent-pkgdir-"));
+  tempDirs.push(pkgDir);
+  const prev = process.env.EAGENT_PACKAGES_DIR;
+  process.env.EAGENT_PACKAGES_DIR = pkgDir;
+  try {
+    const outsideFile = writeSampleExtension("evil.ts"); // lives OUTSIDE pkgDir
+    const h = makeHarness({ fallback: "allow" });
+    // Pre-seed a tampered registry: a git: source whose entryPath escapes pkgDir.
+    await h.host.use("packages", (e) => {
+      e.store.set("packages", {
+        evil: { source: "git:https://evil.example/x", entryPath: outsideFile, installedAt: 1 },
+      });
+      return activate(e);
+    });
+
+    await h.agent.hooks.emit("session_start", {});
+    assert.ok(!h.agent.tools.has("pkg_tool"), "a git: package outside the packages dir must NOT auto-execute on reload");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_PACKAGES_DIR;
+    else process.env.EAGENT_PACKAGES_DIR = prev;
+  }
+});
+
+test("session reload still loads a path: entry from its recorded location", async () => {
+  const pkgDir = mkdtempSync(join(tmpdir(), "eagent-pkgdir-"));
+  tempDirs.push(pkgDir);
+  const prev = process.env.EAGENT_PACKAGES_DIR;
+  process.env.EAGENT_PACKAGES_DIR = pkgDir;
+  try {
+    const localFile = writeSampleExtension("local.ts"); // a path: install lives here, outside pkgDir — that's fine
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("packages", (e) => {
+      e.store.set("packages", {
+        local: { source: `path:${localFile}`, entryPath: localFile, installedAt: 1 },
+      });
+      return activate(e);
+    });
+
+    await h.agent.hooks.emit("session_start", {});
+    assert.ok(h.agent.tools.has("pkg_tool"), "a path: package should reload from where the user recorded it");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_PACKAGES_DIR;
+    else process.env.EAGENT_PACKAGES_DIR = prev;
+  }
+});
+
 test("pkg-add reports a clear error for a missing source and does not throw", async () => {
   const h = makeHarness({ fallback: "allow" });
   await h.host.use("packages", activate);

@@ -120,6 +120,30 @@ test("a tool returning terminate stops the loop without a follow-up call", async
   assert.equal(providerCalls, 1, "loop should not call the provider again after a terminate");
 });
 
+test("stop() halts the loop before the next turn", async () => {
+  let providerCalls = 0;
+  const { agent } = makeHarness({
+    responder: (_req: CompletionRequest) => {
+      providerCalls++;
+      // Turn 1 asks for a tool (whose execution aborts); later turns would speak.
+      return providerCalls === 1 ? { toolCalls: [{ name: "stopper" }] } : { text: "should-not-reach" };
+    },
+  });
+  agent.tools.register(
+    defineTool({
+      name: "stopper",
+      description: "",
+      execute: () => {
+        agent.stop();
+        return { content: "stopping" };
+      },
+    }),
+  );
+  const { reason } = await agent.run("go");
+  assert.equal(reason, "stop", "an aborted run should end with reason 'stop'");
+  assert.equal(providerCalls, 1, "the loop must not call the provider again after stop()");
+});
+
 test("transformContext can inject a message before the model call", async () => {
   let sawInjected = false;
   const { agent } = makeHarness({

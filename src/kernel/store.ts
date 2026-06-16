@@ -6,7 +6,7 @@
  * mutable state). A reload preserves the store; a teardown does not wipe it.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface Store {
@@ -47,9 +47,15 @@ export class MemoryBackend implements StoreBackend {
 
 /** JSON-file-backed store, one file per extension namespace. */
 export class FileBackend implements StoreBackend {
+  readonly #stores = new Map<string, FileStore>();
   constructor(private readonly root: string) {}
   open(namespace: string): Store {
-    return new FileStore(join(this.root, `${sanitize(namespace)}.json`));
+    // Cache one FileStore per namespace so two `open()` calls in the same
+    // process share in-memory state instead of clobbering each other's keys on
+    // flush (last-full-object-write-wins).
+    let s = this.#stores.get(namespace);
+    if (!s) this.#stores.set(namespace, (s = new FileStore(join(this.root, `${sanitize(namespace)}.json`))));
+    return s;
   }
 }
 
@@ -81,7 +87,11 @@ class FileStore implements Store {
   }
   private flush(): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    writeFileSync(this.path, JSON.stringify(this.#data, null, 2));
+    // Write to a temp file then atomically rename into place, so a crash or
+    // concurrent reader never sees a half-written (corrupt) JSON file.
+    const tmp = `${this.path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(this.#data, null, 2));
+    renameSync(tmp, this.path);
   }
 }
 

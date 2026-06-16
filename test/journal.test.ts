@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -55,6 +55,23 @@ test("is inert when disabled", async () => {
   await h.agent.run("hi");
   const status = await runCommand(h.commands.get("journal")!, h.agent, "status");
   assert.match(status.join("\n"), /journal off/);
+});
+
+test("resume recovers valid messages and skips a corrupt journal line", async () => {
+  const path = journalPath();
+  process.env.EAGENT_JOURNAL = path;
+  const good1 = JSON.stringify({ role: "user", content: [{ type: "text", text: "one" }] });
+  const good2 = JSON.stringify({ role: "assistant", content: [{ type: "text", text: "two" }] });
+  // A truncated/corrupt line wedged between two valid ones must not discard the
+  // whole journal (regression: one JSON.parse throw returned []).
+  writeFileSync(path, `${good1}\n{ this is not json\n${good2}\n`);
+
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("journal", journal);
+  const out = await runCommand(h.commands.get("resume")!, h.agent, "");
+  assert.match(out.join("\n"), /resumed 2 messages/);
+  assert.equal(h.agent.messages.length, 2);
+  delete process.env.EAGENT_JOURNAL;
 });
 
 test("/journal clear empties the journal", async () => {

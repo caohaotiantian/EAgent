@@ -146,6 +146,20 @@ test("/self command prints guidance and the extensions directory", async () => {
   assert.match(text, /\.eagent[\\/]extensions/, "should mention where extensions are written");
 });
 
+test("read_extension refuses a path-traversal name (cannot escape the extensions dir)", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("self", self);
+  const read = h.agent.tools.get("read_extension");
+  assert.ok(read, "read_extension should be registered");
+  // A traversal with a recognized suffix that, unsanitized, resolves to a real
+  // file outside the extensions directory. The slug-only candidate build must
+  // keep it confined, so this fails rather than leaking /etc/hosts.
+  const out = await read!.execute({ name: "../../../../../../../../etc/hosts.js" }, fakeCtx());
+  assert.ok(out.isError, "a traversal name must not resolve to a real file");
+  assert.match(out.content, /no extension named/i);
+  assert.doesNotMatch(out.content, /localhost|127\.0\.0\.1/i, "must not leak the contents of /etc/hosts");
+});
+
 /** A minimal ToolContext for invoking read/reload tools directly. */
 function fakeCtx() {
   return {

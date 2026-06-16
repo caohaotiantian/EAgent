@@ -154,10 +154,21 @@ export class Agent {
     await this.hooks.emit("message", { message: userMessage });
     try {
       for (let turn = 1; turn <= this.maxTurns; turn++) {
+        // Honor stop()/abort directly in the loop. The signal is passed to the
+        // provider and tools, but a provider that doesn't reject on abort would
+        // otherwise let the loop run on; checking here makes stop() reliable.
+        if (this.#abort!.signal.aborted) {
+          reason = "stop";
+          break;
+        }
         this.drainInto(this.#steering, this.#messages);
         await this.hooks.emit("turn_start", { turn });
 
         const assistant = await this.streamTurn(turn);
+        if (this.#abort!.signal.aborted) {
+          reason = "stop";
+          break;
+        }
         this.#messages.push(assistant.message);
         await this.hooks.emit("message", { message: assistant.message });
 
@@ -309,6 +320,14 @@ export class Agent {
       await this.capabilities.require(cap, tool.spec.name);
     }
 
+    // A beforeToolCall guard may have rewritten the arguments; re-validate so the
+    // tool still receives schema-clean, coerced input — the kernel's contract —
+    // even after a guard injected or changed fields.
+    const final = validate(tool.spec.parameters, decided.arguments);
+    if (!final.ok) {
+      return { content: `Invalid arguments for ${call.name} (after guards):\n- ${final.errors.join("\n- ")}`, isError: true };
+    }
+
     const ctx: ToolContext = {
       toolCallId: call.id,
       signal: this.#abort!.signal,
@@ -318,7 +337,7 @@ export class Agent {
       agent: this.handle,
       log: this.logger,
     };
-    return tool.execute(decided.arguments, ctx);
+    return tool.execute(final.value as Record<string, unknown>, ctx);
   }
 
   private drainInto(from: Message[], to: Message[]): void {
