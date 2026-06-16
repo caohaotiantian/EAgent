@@ -151,6 +151,17 @@ async function main(): Promise<void> {
         rl.close();
       }
     });
+  } else {
+    // Non-interactive modes (--eval, piped batch) have no readline SIGINT
+    // handler, so a bare Ctrl-C/SIGTERM would skip host.dispose() and orphan
+    // extension resources (MCP child processes, temp dirs). Tear the host down
+    // on signal before exiting; a second signal falls through to the default.
+    const shutdown = (): void => {
+      if (agent.running) agent.stop();
+      void host.dispose().finally(() => process.exit(130));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   }
 
   if (!args.json) banner(agent, host, live);
