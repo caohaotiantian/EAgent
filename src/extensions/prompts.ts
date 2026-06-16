@@ -21,8 +21,8 @@ export default function activate(e: ExtensionAPI): void {
     name: "prompt-save",
     description: "Save a prompt template. Usage: /prompt-save <name> <template with $1 $2 $*>",
     run: (ctx) => {
-      const [name, ...rest] = ctx.args.trim().split(/\s+/);
-      const template = ctx.args.trim().slice((name ?? "").length).trim();
+      const name = ctx.args.trim().split(/\s+/, 1)[0] ?? "";
+      const template = ctx.args.trim().slice(name.length).trim();
       if (!name || !template) {
         ctx.print("usage: /prompt-save <name> <template>");
         return;
@@ -31,7 +31,6 @@ export default function activate(e: ExtensionAPI): void {
       t[name] = template;
       write(t);
       ctx.print(`saved prompt "${name}".`);
-      void rest;
     },
   });
 

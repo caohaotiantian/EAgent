@@ -260,13 +260,17 @@ async function materialize(source: string, packagesDir: string): Promise<string>
 
   if (source.startsWith("git:")) {
     const url = source.slice("git:".length);
+    assertSafeGitUrl(url);
     const dest = join(packagesDir, sanitize(repoName(url)));
-    execFileSync("git", ["clone", "--depth", "1", url, dest], { stdio: "ignore" });
+    // `--` separates the URL from options so a `-`-leading URL can't be reparsed
+    // as a git flag; assertSafeGitUrl already rejects ext::/file:// remote helpers.
+    execFileSync("git", ["clone", "--depth", "1", "--", url, dest], { stdio: "ignore" });
     return resolveEntry(dest);
   }
 
   if (source.startsWith("npm:")) {
     const spec = source.slice("npm:".length);
+    assertSafeNpmSpec(spec);
     execFileSync("npm", ["install", spec, "--ignore-scripts", "--no-save", "--prefix", packagesDir], {
       stdio: "ignore",
     });
@@ -279,6 +283,27 @@ async function materialize(source: string, packagesDir: string): Promise<string>
   const abs = isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
   if (!existsSync(abs)) throw new Error(`no such file or directory: ${abs}`);
   return resolveEntry(abs);
+}
+
+/**
+ * Reject git URLs that aren't plain transport URLs — in particular git's
+ * `ext::`/`fd::` remote helpers (which execute arbitrary commands at clone time)
+ * and `file://`, plus anything that could be reparsed as an option. Allows
+ * https/ssh/git scheme URLs and scp-style `git@host:path`.
+ */
+function assertSafeGitUrl(url: string): void {
+  const schemeUrl = /^(https?|ssh|git):\/\/[^\s]+$/.test(url);
+  const scpStyle = /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/.test(url);
+  if (!schemeUrl && !scpStyle) {
+    throw new Error(`refusing to clone unsafe git URL "${url}" — use https://, ssh://, git://, or git@host:path`);
+  }
+}
+
+/** Require a bare npm package spec (`name`, `@scope/name`, optional `@version`). */
+function assertSafeNpmSpec(spec: string): void {
+  if (!/^(@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+(@[A-Za-z0-9._^~><=.\-]+)?$/.test(spec)) {
+    throw new Error(`refusing to install unsafe npm spec "${spec}" — expected name or name@version`);
+  }
 }
 
 /** Resolve a file-or-directory to a concrete entry file. */

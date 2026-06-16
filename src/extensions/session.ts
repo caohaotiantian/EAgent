@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { CapabilityError } from "../kernel/capabilities.js";
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
-import type { Message } from "../kernel/types.js";
+import { isMessage, type Message } from "../kernel/types.js";
 
 /** Current on-disk schema version. Bump when the envelope shape changes. */
 const SESSION_VERSION = 1;
@@ -237,6 +237,10 @@ function readSession(path: string): SessionFile | { error: string } {
   if (typeof parsed !== "object" || parsed === null) return { error: "not a session object" };
   const obj = parsed as Record<string, unknown>;
   if (!Array.isArray(obj.messages)) return { error: "missing messages array" };
+  // Validate each entry's shape at the boundary so a corrupt-but-valid-JSON
+  // file fails loudly here rather than crashing a later turn that assumes
+  // `message.content` is an array.
+  if (!obj.messages.every(isMessage)) return { error: "messages array contains a malformed entry" };
 
   return {
     version: typeof obj.version === "number" ? obj.version : SESSION_VERSION,

@@ -74,6 +74,20 @@ export function text(role: Role, body: string): Message {
   return { role, content: [{ type: "text", text: body }] };
 }
 
+const ROLES: readonly Role[] = ["system", "user", "assistant", "tool"];
+
+/**
+ * Runtime guard that a parsed value is a structurally valid `Message`. Used when
+ * loading transcripts from disk (sessions, journals): a corrupt-but-valid-JSON
+ * entry must be rejected at the boundary rather than crash a later turn that
+ * assumes `message.content` is an array.
+ */
+export function isMessage(value: unknown): value is Message {
+  if (typeof value !== "object" || value === null) return false;
+  const m = value as { role?: unknown; content?: unknown };
+  return typeof m.role === "string" && (ROLES as readonly string[]).includes(m.role) && Array.isArray(m.content);
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------

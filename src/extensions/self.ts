@@ -18,7 +18,7 @@
  */
 
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { extname, join } from "node:path";
+import { extname, join, resolve, sep } from "node:path";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
@@ -133,15 +133,22 @@ export default function activate(e: ExtensionAPI): void {
         const raw = typeof args.name === "string" ? args.name : "";
         if (!raw.trim()) return fail("read_extension: `name` is required.");
         const dir = extensionsDir(e);
-        const stem = EXT_SUFFIXES.includes(extname(raw)) ? raw.slice(0, -extname(raw).length) : raw;
+        const requestedSuffix = EXT_SUFFIXES.includes(extname(raw)) ? extname(raw) : undefined;
+        const stem = requestedSuffix ? raw.slice(0, -requestedSuffix.length) : raw;
         const slug = slugify(stem);
         if (!slug) return fail(`read_extension: "${raw}" is not a valid extension name.`);
-        // Try the requested suffix first (if any), then the known suffixes.
-        const candidates = EXT_SUFFIXES.includes(extname(raw))
-          ? [raw, ...EXT_SUFFIXES.map((s) => slug + s)]
-          : EXT_SUFFIXES.map((s) => slug + s);
-        for (const cand of candidates) {
-          const path = join(dir, cand);
+        // Candidates are built ONLY from the sanitized slug — never the raw
+        // input — so a name like "../../../../etc/hosts.js" cannot escape the
+        // extensions directory. Try the requested suffix first (if any).
+        const suffixes = requestedSuffix
+          ? [requestedSuffix, ...EXT_SUFFIXES.filter((s) => s !== requestedSuffix)]
+          : EXT_SUFFIXES;
+        const root = resolve(dir);
+        for (const suffix of suffixes) {
+          const path = resolve(dir, slug + suffix);
+          // Defense in depth: the slug is already traversal-free, but assert the
+          // resolved path stays inside the extensions directory before reading.
+          if (path !== root + sep + slug + suffix) continue;
           try {
             const source = readFileSync(path, "utf8");
             return ok(source, { path });
