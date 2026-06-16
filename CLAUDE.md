@@ -48,7 +48,8 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
 - `src/extensions/` — `core-tools`, `skills`, `mcp`, `codeact`, `subagents`,
   `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
   `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
-  `flow-guard` (compositional capability policy — blocks read→egress chains).
+  `flow-guard` (compositional capability policy — blocks read→egress chains),
+  `integrity` (sweeps all tool descriptions for poisoning/hidden instructions).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.

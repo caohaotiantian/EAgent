@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name that shadows an existing tool warns; and tool **descriptions are scanned
   for tool-poisoning / hidden-instruction patterns** at registration (the
   SSH-key-exfil attack class) — warned, never silently trusted.
+- **`integrity` extension — tool-poisoning sweep across every tool source.**
+  Generalizes the MCP description scan to *all* registered tools (packages,
+  self-authored, MCP) with one sweep on `session_start` (warn) and on demand via
+  `/integrity`. A pure observer, no core change.
 - **`.env` auto-loading.** The CLI and server load a local `.env` at startup via
   a tiny zero-dependency parser (`loadEnvFile` in `host.ts`); real environment
   variables always win. A documented `.env.example` ships with the repo, and
