@@ -52,7 +52,7 @@ Several review fixes already moved EAgent toward the research's four-property de
 | Property (from the research) | EAgent today |
 | --- | --- |
 | **Privilege boundedness** | capability layer; narrow non-ambient grants; `shell:exec`/`net:fetch` not auto-granted; server now loopback + constant-time auth |
-| **Tool integrity** | extension id-collision now tears the prior down (was a silent shadow leak); MCP `tools/list` is shape-validated |
+| **Tool integrity** | extension id-collision now tears the prior down (was a silent shadow leak); MCP `tools/list` is shape-validated; duplicate MCP server names are skipped; tool descriptions are scanned for poisoning at registration |
 | **Context isolation** | untrusted code routed out-of-process (MCP, codeact); codeact cwd/HOME scrubbed |
 | **Data confinement** | *partial* — `flow-guard` taints the session on sensitive-path reads and credential-looking results, and gates egress on it; full information-flow tracking remains future work |
 
@@ -73,19 +73,20 @@ Several review fixes already moved EAgent toward the research's four-property de
 
 In rough priority:
 
-1. **Chaining-aware policy, generalized.** `flow-guard` covers the high-signal `shell→net` chain.
-   A fuller policy could track more source/egress pairs and longer sequences, ideally driven by the
-   capability audit log rather than ad-hoc state.
-2. **Data confinement / taint.** Track which messages carry sensitive data and gate egress on it —
-   the only one of the four properties EAgent doesn't yet approximate.
-3. **Shadow-as-event.** Consider a `tool_shadowed` signal (or an MCP-side warning) so collisions are
-   observable, not silent.
+1. ~~**Chaining-aware policy, generalized.**~~ Partly shipped — `flow-guard` now covers configurable
+   source/egress capability pairs. *Remaining:* longer multi-step sequences driven by the capability
+   audit log rather than per-session flags.
+2. ~~**Data confinement / taint.**~~ **Shipped (Wave 2):** `flow-guard` taints on sensitive-path
+   reads and credential-looking results and gates egress on it. *Remaining:* true information-flow
+   tracking across the whole transcript (which message a leaked byte came from).
+3. ~~**Shadow-as-event.**~~ **Shipped (Wave 1):** duplicate MCP server names are skipped and tool
+   shadowing warns. *Remaining:* a generic `tool_shadowed` signal for non-MCP collisions, if needed.
 4. **Extension-to-extension isolation.** In-process `jiti` gives none (same as VS Code's host). The
    honest boundary stays: trusted in-process, untrusted out-of-process. Revisit only if untrusted
    in-process extensions become a goal.
-5. **Tool-poisoning awareness.** MCP tool *descriptions* are attacker-controlled text in the model's
-   context; narrow capabilities limit blast radius, but surfacing/diffing description changes would
-   help.
+5. ~~**Tool-poisoning awareness.**~~ **Shipped (Wave 3):** MCP tool descriptions are scanned for
+   hidden-instruction patterns at registration and warned. *Remaining:* description-change diffing
+   across sessions, and applying the same scan to non-MCP tool sources.
 
 ## 5. Bottom line
 
