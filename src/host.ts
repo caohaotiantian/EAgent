@@ -45,6 +45,7 @@ import introspect from "./extensions/introspect.js";
 import journal from "./extensions/journal.js";
 import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
+import integrity from "./extensions/integrity.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -68,6 +69,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["journal", journal],
   ["prompts", promptsExt],
   ["flow-guard", flowGuard],
+  ["integrity", integrity],
 ];
 
 export interface AgentHostOptions {
