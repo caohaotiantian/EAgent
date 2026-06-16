@@ -54,7 +54,7 @@ Several review fixes already moved EAgent toward the research's four-property de
 | **Privilege boundedness** | capability layer; narrow non-ambient grants; `shell:exec`/`net:fetch` not auto-granted; server now loopback + constant-time auth |
 | **Tool integrity** | extension id-collision now tears the prior down (was a silent shadow leak); MCP `tools/list` is shape-validated |
 | **Context isolation** | untrusted code routed out-of-process (MCP, codeact); codeact cwd/HOME scrubbed |
-| **Data confinement** | *partial* — `flow-guard` adds chain-level confinement; full information-flow/taint tracking is future work |
+| **Data confinement** | *partial* — `flow-guard` taints the session on sensitive-path reads and credential-looking results, and gates egress on it; full information-flow tracking remains future work |
 
 ## 3. Anti-patterns avoided (and to keep avoiding)
 

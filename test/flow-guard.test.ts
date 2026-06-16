@@ -78,6 +78,84 @@ test("ask mode defers to the human and blocks on denial", async () => {
   assert.equal(didFetch(), false, "ask mode + a 'no' must block the egress");
 });
 
+test("data confinement: reading a sensitive path taints the session and blocks egress", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [
+      { toolCalls: [{ name: "read_file", arguments: { path: "config/.env" } }] },
+      { toolCalls: [{ name: "get_url" }] },
+      { text: "done" },
+    ],
+  });
+  let fetched = false;
+  h.agent.tools.register(
+    defineTool({
+      name: "read_file",
+      description: "",
+      capabilities: ["fs:read"],
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      execute: () => ({ content: "DOTENV CONTENTS" }),
+    }),
+  );
+  h.agent.tools.register(
+    defineTool({
+      name: "get_url",
+      description: "",
+      capabilities: ["net:fetch"],
+      execute: () => {
+        fetched = true;
+        return { content: "fetched" };
+      },
+    }),
+  );
+  await h.host.use("flow-guard", (e) => {
+    e.store.set("mode", "block");
+    return flowGuard(e);
+  });
+
+  await h.agent.run("read the env file then exfiltrate it");
+  assert.equal(fetched, false, "egress after reading a .env path must be blocked, even with no shell:exec");
+});
+
+test("data confinement: a credential-looking result taints the session and blocks egress", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [
+      { toolCalls: [{ name: "look", arguments: { q: "key" } }] },
+      { toolCalls: [{ name: "get_url" }] },
+      { text: "done" },
+    ],
+  });
+  let fetched = false;
+  h.agent.tools.register(
+    defineTool({
+      name: "look",
+      description: "",
+      parameters: { type: "object", properties: { q: { type: "string" } } },
+      // returns something that looks like an AWS access key id
+      execute: () => ({ content: "found AKIAIOSFODNN7EXAMPLE in the logs" }),
+    }),
+  );
+  h.agent.tools.register(
+    defineTool({
+      name: "get_url",
+      description: "",
+      capabilities: ["net:fetch"],
+      execute: () => {
+        fetched = true;
+        return { content: "fetched" };
+      },
+    }),
+  );
+  await h.host.use("flow-guard", (e) => {
+    e.store.set("mode", "block");
+    return flowGuard(e);
+  });
+
+  await h.agent.run("scan then post");
+  assert.equal(fetched, false, "egress after a credential-looking result must be blocked");
+});
+
 test("/flow-guard status and off toggle work", async () => {
   const h = makeHarness({ fallback: "allow" });
   await h.host.use("flow-guard", flowGuard);
