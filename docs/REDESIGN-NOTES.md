@@ -76,9 +76,11 @@ In rough priority:
 1. ~~**Chaining-aware policy, generalized.**~~ Partly shipped — `flow-guard` now covers configurable
    source/egress capability pairs. *Remaining:* longer multi-step sequences driven by the capability
    audit log rather than per-session flags.
-2. ~~**Data confinement / taint.**~~ **Shipped (Wave 2):** `flow-guard` taints on sensitive-path
-   reads and credential-looking results and gates egress on it. *Remaining:* true information-flow
-   tracking across the whole transcript (which message a leaked byte came from).
+2. ~~**Data confinement / taint.**~~ **Shipped (Wave 2 + Wave 7):** `flow-guard` taints on
+   sensitive-path reads and credential-looking results; Wave 7 made it true information-flow —
+   the taint is pinned to the tool-result *message* (`meta.flowGuardTaint`) and egress is gated only
+   while that message is in the live transcript, so `/clear` and `/handoff` un-gate. *Remaining:*
+   tracking taint through model-derived prose (summaries) and longer multi-hop chains.
 3. ~~**Shadow-as-event.**~~ **Shipped (Wave 1):** duplicate MCP server names are skipped and tool
    shadowing warns. *Remaining:* a generic `tool_shadowed` signal for non-MCP collisions, if needed.
 4. **Extension-to-extension isolation.** In-process `jiti` gives none (same as VS Code's host). The

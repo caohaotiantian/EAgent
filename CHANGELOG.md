@@ -38,10 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `block`-able, tunable via `/flow-guard` or `EAGENT_FLOW_GUARD=off`. A new
   security best practice absorbed as a hot-reloadable extension, no core change.
   (Motivated by the 2026-06-16 design research; see `docs/RESEARCH-agent-kernel-design.md`.)
-  It also enforces **data confinement**: the session is tainted by sensitive-path
-  reads (`.env`, `id_rsa`, `.pem`, `.ssh/`, `.aws/`, `credentials`, `secret`) and
-  credential-looking results (PEM keys, `AKIA…`, `sk-…`, `ghp_…`), not only by
-  `shell:exec`.
+  It also enforces **data confinement** with transcript-level **information-flow
+  taint**: a tool result that reads a sensitive path (`.env`, `id_rsa`, `.pem`,
+  `.ssh/`, `.aws/`, `credentials`, `secret`) or returns credential-looking content
+  (PEM keys, `AKIA…`, `sk-…`, `ghp_…`) is tagged on its message (`meta.flowGuardTaint`),
+  and egress is gated only while that tainted message is still in the live
+  transcript — so `/clear` and `/handoff` un-gate. Capability-chain taint
+  (`shell:exec`) stays session-sticky. `/flow-guard status` reports both counts;
+  `/flow-guard reset` clears all taint.
 - **MCP tool-integrity hardening.** Duplicate MCP server names are skipped (a
   later server can't silently shadow an earlier one's namespaced tools); a tool
   name that shadows an existing tool warns; and tool **descriptions are scanned
