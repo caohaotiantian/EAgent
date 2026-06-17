@@ -6,6 +6,12 @@
  * `Disposable` so a hot-reload can undo it precisely. A later registration of
  * the same tool name shadows the earlier one (Emacs redefinition), and
  * disposing it restores the previous definition.
+ *
+ * Note the two registries here are not symmetric: providers register by
+ * overwrite (`Map.set` keyed by name) rather than by stack, so a later
+ * provider with the same name silently replaces the earlier one with no
+ * shadow to restore — and disposing the default provider promotes an
+ * arbitrary remaining one rather than the previously shadowed definition.
  */
 
 import type { Disposable, Provider, Tool } from "./types.js";

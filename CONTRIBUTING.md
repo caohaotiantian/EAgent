@@ -22,7 +22,7 @@ npm test         # offline test suite (node:test via tsx) — no network, no API
 npm run typecheck # tsc --noEmit, strict
 npm run build    # tsc -> dist/
 npm run dev      # interactive REPL (src/cli.ts via tsx)
-npm run serve    # HTTP server (src/server.ts; GET /health, POST /run; PORT=8787)
+npm run serve    # HTTP server (src/server.ts; GET /health, POST /run, DELETE /sessions/:id; PORT=8787)
 ```
 
 `npm test` drives everything through `MockProvider` (`src/providers/mock.ts`), a
@@ -62,17 +62,22 @@ An extension is a module with a default-exported activation function that
 receives the `ExtensionAPI`:
 
 ```ts
-import { defineTool, ok } from "eagent";
+import { defineTool } from "eagent";
 
 export default function activate(e) {
   e.registerTool(defineTool({
     name: "greet",
     description: "Greet someone by name.",
     parameters: { type: "object", properties: { who: { type: "string" } }, required: ["who"] },
-    execute: (args) => ok(`Hello, ${args.who}!`),
+    execute: (args) => ({ content: `Hello, ${args.who}!` }),
   }));
 }
 ```
+
+(`defineTool` is the only authoring helper re-exported from the package root. The
+`ok` / `fail` result builders live in `src/kernel/define.ts` for in-tree use; a
+tool's `execute` just returns a `ToolResult` — `{ content, isError? }` — so the
+plain object above is equivalent.)
 
 Register everything through the `ExtensionAPI` (`registerTool`,
 `registerProvider`, `registerCommand`, `on`, `hook`, `grantCapability`,

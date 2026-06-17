@@ -15,8 +15,8 @@
  * handler, and the kernel stays neutral. This extension ships one reasonable
  * default (cached summarization) plus a manual `/compact` lever, an
  * introspection `/memory` command, and a `remember`/`recall` scratchpad — the
- * file-backed working-memory pattern an agent uses to persist notes across the
- * compaction boundary.
+ * store-backed (persists across restart only under FileBackend) working-memory
+ * pattern an agent uses to persist notes across the compaction boundary.
  */
 
 import type { CommandContext } from "../kernel/commands.js";

@@ -17,7 +17,7 @@ receives the `ExtensionAPI` and registers tools, hooks, commands, or providers
 on it.
 
 ```ts
-import { defineTool, ok } from "eagent";
+import { defineTool } from "eagent";
 import type { ExtensionAPI } from "eagent";
 
 export default function activate(e: ExtensionAPI) {
@@ -25,7 +25,7 @@ export default function activate(e: ExtensionAPI) {
     defineTool({
       name: "ping",
       description: "Reply with pong.",
-      execute: () => ok("pong"),
+      execute: () => ({ content: "pong" }),
     }),
   );
 }
@@ -95,6 +95,13 @@ interface ExtensionAPI {
   /** Request a hot reload of this extension. Treat as terminal: code after the
    *  await runs in the old runtime. */
   reload(): Promise<void>;
+
+  /** Load another extension from a file at runtime (via the host's jiti loader)
+   *  and return its id — the seam for dynamic, self-authored, and
+   *  package-installed extensions, all tracked like built-ins. */
+  loadExtension(path: string): Promise<string>;
+  /** Tear down a runtime-loaded extension by id. */
+  unloadExtension(id: string): Promise<void>;
 }
 ```
 
@@ -112,15 +119,18 @@ interface ExtensionAPI {
 | `agent` | The running `Agent` — its registries, hook bus, capability manager, and transcript. |
 | `commands` | The `CommandRegistry`, for introspection. |
 | `reload()` | Request a hot reload of *this* extension. Terminal: code after the `await` runs in the old runtime. |
+| `loadExtension(path)` | Load another extension file at runtime via the host's `jiti` loader; returns its id. The seam for self-authored and package-installed extensions. |
+| `unloadExtension(id)` | Tear down a runtime-loaded extension by id. |
 
 ## Defining tools
 
 `defineTool` is a thin, typed constructor — no schema inference, because the
-JSON Schema is exactly what the model sees, so it stays explicit. Pair it with
-the `ok` / `fail` result helpers.
+JSON Schema is exactly what the model sees, so it stays explicit. An `execute`
+just returns a `ToolResult` — `{ content, isError? }` — so you can build one
+inline.
 
 ```ts
-import { defineTool, ok, fail } from "eagent";
+import { defineTool } from "eagent";
 
 e.registerTool(
   defineTool({
@@ -135,8 +145,8 @@ e.registerTool(
     },
     execute: (args) => {
       const text = String(args.text ?? "");
-      if (!text.trim()) return fail("text is empty");
-      return ok(String(text.trim().split(/\s+/).length));
+      if (!text.trim()) return { content: "text is empty", isError: true };
+      return { content: String(text.trim().split(/\s+/).length) };
     },
   }),
 );
@@ -153,10 +163,14 @@ The full `ToolDefinition` (`src/kernel/define.ts`):
 | `capabilities?` | Capabilities the tool needs, enforced before `execute` runs (see below). |
 | `execute(args, ctx)` | The body. May be sync or async; returns a `ToolResult`. |
 
-- `ok(content, details?)` builds a successful result. `content` is the
-  model-legible text; `details` is a structured payload for renderers/telemetry
-  and is never sent to the model.
-- `fail(content, details?)` builds an error result (`isError: true`).
+A `ToolResult` is `{ content, isError?, details?, terminate? }`: `content` is the
+model-legible text; `details` is a structured payload for renderers/telemetry and
+is never sent to the model. When authoring **inside this repo**, the `ok(content,
+details?)` / `fail(content, details?)` helpers in
+[`src/kernel/define.ts`](../src/kernel/define.ts) build these for you (imported
+relatively, e.g. `import { ok, fail } from "../kernel/define.js"`); they are
+in-tree conveniences and are intentionally not part of the package's public
+barrel, so from the published package just return the object directly.
 
 The second argument to `execute`, `ctx: ToolContext`, gives you
 `ctx.toolCallId`, `ctx.signal` (an `AbortSignal`), `ctx.require(cap)`,
@@ -178,7 +192,7 @@ e.registerTool(
       properties: { url: { type: "string" } },
       required: ["url"],
     },
-    execute: async (args) => ok(await (await fetch(String(args.url))).text()),
+    execute: async (args) => ({ content: await (await fetch(String(args.url))).text() }),
   }),
 );
 ```
@@ -328,16 +342,18 @@ prefixed with `[<id>]`, so output from different extensions stays attributable.
 
 ## Discovery and hot reload
 
-The CLI discovers extension files, in order, from:
+The CLI discovers extension files from two directories, **project-local taking
+precedence over user-global** on an id collision:
 
-1. `.eagent/extensions/` in the current working directory (project-local), then
+1. `.eagent/extensions/` in the current working directory (project-local) — wins;
 2. `~/.eagent/extensions/` (user-global).
 
-Files are loaded directly via **jiti** with **no build step** — drop a `.ts`
-(or `.js`/`.mjs`/`.tsx`) file in one of those directories and it is picked up on
-the next start. Files and directories beginning with `_` or `.` are skipped, and
-on an id collision the later (more specific) directory wins. You can also load a
-file explicitly with `--ext path/to/ext.ts`.
+They are loaded user-dir first, project-dir last, so the project file wins under
+the registry's "later wins" rule. Files are loaded directly via **jiti** with
+**no build step** — drop a `.ts` (or `.js`/`.mjs`/`.tsx`) file in one of those
+directories and it is picked up on the next start. Files and directories
+beginning with `_` or `.` are skipped. You can also load a file explicitly with
+`--ext path/to/ext.ts`.
 
 `/reload` re-imports and re-activates extensions. Because every registration is
 a tracked `Disposable`, reload tears the old version down cleanly (running any
@@ -350,14 +366,15 @@ in the *old*, now-disposed runtime. Treat the await as the end of the function.
 
 ## A complete worked example
 
-A single file with a tool, a guard hook, and a command — copy-pasteable. (When
-authoring inside this repo, import from the relative `src/kernel/*.js` paths as
-the example under `examples/extensions/` does; when authoring against the
-published package, import from `"eagent"`.)
+A single file with a tool, a guard hook, and a command — copy-pasteable. (This
+file is auto-discovered from `.eagent/extensions/`, so it imports from the
+published package `"eagent"`; when authoring in-tree — as `examples/extensions/`
+does — import from the relative `src/kernel/*.js` paths instead, which also gives
+you the `ok`/`fail` helpers.)
 
 ```ts
 // .eagent/extensions/notes.ts — auto-discovered, then `/reload`
-import { defineTool, ok, fail } from "eagent";
+import { defineTool } from "eagent";
 import type { ExtensionAPI } from "eagent";
 
 export default function activate(e: ExtensionAPI) {
@@ -375,11 +392,11 @@ export default function activate(e: ExtensionAPI) {
       },
       execute: (args) => {
         const text = String(args.text ?? "").trim();
-        if (!text) return fail("note text is empty");
+        if (!text) return { content: "note text is empty", isError: true };
         const notes = e.store.get<string[]>("notes") ?? [];
         notes.push(text);
         e.store.set("notes", notes);
-        return ok(`Saved note #${notes.length}.`);
+        return { content: `Saved note #${notes.length}.` };
       },
     }),
   );

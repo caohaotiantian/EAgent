@@ -401,7 +401,8 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
         e.log.warn(`MCP tool "${fullName}" shadows an already-registered tool; the later registration wins.`);
       }
       // Tool-poisoning check: the description rides into the model's context, so
-      // flag hidden instructions before they can steer the agent.
+      // warn the operator about suspicious descriptions that may hide
+      // instructions (advisory only — this never blocks registration or calls).
       const suspicious = detectSuspiciousDescription(tool.description ?? "");
       if (suspicious.length > 0) {
         e.log.warn(
