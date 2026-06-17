@@ -1,8 +1,8 @@
 /**
  * Shared HTTP/SSE plumbing for streaming LLM providers.
  *
- * Both the Anthropic and OpenAI providers POST a JSON body and read back a
- * Server-Sent Events stream, and both want the same reliability behavior:
+ * The Anthropic, OpenAI, and Gemini providers all POST a JSON body and read
+ * back a Server-Sent Events stream, and all want the same reliability behavior:
  * retry transient failures with backoff, honor `retry-after`, and abort
  * cleanly. Keeping that here means each provider file is just wire-format
  * mapping.

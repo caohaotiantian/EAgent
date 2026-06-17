@@ -4,8 +4,8 @@
  * An agent that edits files and runs shell commands will eventually make a
  * mistake: a bad `edit`, an over-eager `rm`, a refactor that goes sideways.
  * The cheapest insurance is a snapshot taken JUST BEFORE each risky mutation,
- * so the working tree can be rolled back to a known-good point. pi ships a
- * git-checkpoint hook for exactly this; here it stays an extension.
+ * so the working tree can be rolled back to a known-good point. Here that
+ * insurance stays an extension.
  *
  * The mechanism is `git stash create`, which writes a commit that captures the
  * current working tree and index WITHOUT touching either — a pure snapshot of

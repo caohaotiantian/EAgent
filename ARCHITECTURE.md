@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["18 extensions<br/>src/extensions/"]
+        EXTS["20 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -68,7 +68,7 @@ kernel (re-exported from `src/kernel/index.ts`).
 | Primitive            | File                          | Responsibility |
 | -------------------- | ----------------------------- | -------------- |
 | **Hook bus**         | `src/kernel/hooks.ts`         | Lifecycle events (observe) and filter hooks (intervene) — Emacs *hooks* + *advice*. |
-| **Tool registry**    | `src/kernel/registry.ts`      | Register / shadow / dispose tools and providers; a later definition wins, disposing it restores the prior one. |
+| **Tool registry**    | `src/kernel/registry.ts`      | Register / shadow / dispose tools (and, with the same stack semantics, commands); a later definition wins, disposing it restores the prior one. The `ProviderRegistry` in the same file instead registers by overwrite (no shadow stack), so disposing the default promotes an arbitrary remaining provider. |
 | **Provider**         | `src/kernel/types.ts`         | The single thing the kernel knows about an LLM: a request becomes a stream of events. |
 | **Agent loop**       | `src/kernel/agent.ts`         | Turns, streaming, guarded and ordered tool dispatch, steering, follow-up, stop conditions. |
 | **Capability layer** | `src/kernel/capabilities.ts`  | Per-capability allow / deny / ask, wildcards, and an audit log. |
@@ -240,8 +240,9 @@ stateDiagram-v2
 ```
 
 **Discovery and hot reload.** The host discovers extension files in a list of
-directories (project `.eagent/extensions/` then user `~/.eagent/extensions/`,
-most-specific last so it wins on id collision). Files are loaded via `jiti`, which
+directories — user `~/.eagent/extensions/` then project `.eagent/extensions/`,
+most-specific *last*, so a project extension wins over a user one of the same id
+("later wins"). Files are loaded via `jiti`, which
 evaluates TypeScript with no build step; the loader uses `moduleCache: false` so
 re-importing on reload re-evaluates the module. `loadExtension` is the uniform
 seam through which built-in, discovered, self-authored, and package-installed
@@ -262,6 +263,12 @@ sequenceDiagram
     P-->>Loop: tool_call (id, name, arguments)
     P-->>Loop: done (message, stopReason, usage)
 ```
+
+The incremental `tool_call` events are part of the streaming contract, but the
+agent loop does not consume them: it reads the turn's tool calls from the final
+`done` message's content (`agent.ts`, where it filters the assistant message for
+`tool_call` blocks). Providers still emit them for any observer that wants the
+finer-grained stream. Only `text_delta` and `done` are load-bearing for the loop.
 
 Four ship in `src/providers/`:
 
@@ -288,7 +295,11 @@ provider from configuration, constructs the `CapabilityManager`, `Agent`,
 canonical built-in extension set (`BUILTIN_EXTENSIONS`) — skipping (with a log) any
 that fail to activate — before discovering project/user extensions. `host.ts` is a
 host, not part of the kernel: it has opinions (which providers, which extensions);
-the kernel stays neutral.
+the kernel stays neutral. One opinion is security-relevant: the host pre-grants
+`fs:read`, `fs:write`, and `skill:read`, and the *fallback* for everything else
+is set by the front end — the CLI passes `yolo: false` (fallback **ask**) while
+the HTTP server defaults `yolo: true` (fallback **allow**, auto-granting every
+capability). See `SECURITY.md`.
 
 Four front ends share that one assembly, so they all load exactly the same
 extensions:
@@ -316,9 +327,10 @@ sequenceDiagram
     S-->>C: done event (reason, usage)
 ```
 
-`GET /health` returns `{ ok, model, extensions, sessions }`; `DELETE /sessions/:id`
-forgets a conversation. Sessions give multi-turn continuity; the server runs one
-turn at a time and shuts down gracefully on SIGTERM/SIGINT.
+`GET /health` returns `{ ok, model, extensions, sessions, auth }` (where `auth`
+is `"required"` or `"open"`); `DELETE /sessions/:id` forgets a conversation.
+Sessions give multi-turn continuity; the server runs one turn at a time and shuts
+down gracefully on SIGTERM/SIGINT.
 
 ## The minimalism guard
 
@@ -359,5 +371,5 @@ with offline tests, and gates privileged work behind a capability. They load in
 the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `skills`,
 `mcp`, `codeact`, `subagents`, `memory`, `planmode`, `session`, `packages`,
 `trace`, `context-files`, `limits`, `self`, `web`, `checkpoint`, `introspect`,
-`journal`, `prompts`. The README has a one-line description and capability for
-each; `docs/EXTENSIONS.md` is the author's guide.
+`journal`, `prompts`, `flow-guard`, `integrity`. The README has a one-line
+description and capability for each; `docs/EXTENSIONS.md` is the author's guide.
