@@ -9,7 +9,7 @@
  * configuration.
  *
  * Disclosure is progressive in the cheap sense: discovery is a single filesystem
- * walk whose rendered result is cached, so the tree is not re-walked every turn,
+ * walk whose discovery result (the parsed files) is cached, so the tree is not re-walked every turn,
  * and the total injected size is capped so per-turn cost stays bounded. Each
  * ancestor directory contributes at most one file (the highest-priority name
  * present there), and the blocks are ordered from the root-most ancestor down to
@@ -36,7 +36,7 @@ interface ContextFile {
   path: string;
   /** Path shown to the user/model, relative to the base directory. */
   display: string;
-  /** UTF-8 contents (possibly truncated to respect the size cap). */
+  /** UTF-8 contents (never truncated; whole files are dropped to respect the size cap). */
   content: string;
   /** Byte size of the contents as injected. */
   bytes: number;

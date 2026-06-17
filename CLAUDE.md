@@ -16,7 +16,7 @@ The kernel is **seven primitives and nothing more**, all under `src/kernel/`:
 | ---------------- | ------------------- | -------------- |
 | Hook bus         | `hooks.ts`          | Lifecycle events (observe) + filter hooks (intervene). |
 | Tool registry    | `registry.ts`       | Register/shadow/dispose tools; later wins, disposing restores. |
-| Provider         | `types.ts`          | The LLM abstraction: a request → a stream of events. |
+| Provider         | `types.ts` (interface) | The LLM abstraction: a request → a stream of events. Implementations live in `src/providers/`. |
 | Agent loop       | `agent.ts`          | Turns, streaming, guarded/ordered tool dispatch, steering, follow-up. |
 | Capability layer | `capabilities.ts`   | Per-capability grant/deny/ask, wildcards, audit log. |
 | Extension host   | `extension.ts`      | Discovery, activation, `ExtensionAPI`, hot reload via `jiti`. |
@@ -48,8 +48,11 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
 - `src/extensions/` — `core-tools`, `skills`, `mcp`, `codeact`, `subagents`,
   `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
   `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
-  `flow-guard` (compositional capability policy — blocks read→egress chains),
-  `integrity` (sweeps all tool descriptions for poisoning/hidden instructions).
+  `flow-guard` (compositional egress gate — taints a session on a source
+  capability, default `shell:exec`, or sensitive data in the transcript, then
+  holds egress, default `net:fetch`; ask or block mode),
+  `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
+  and flags descriptions that change across sessions — a rug-pull guard).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.

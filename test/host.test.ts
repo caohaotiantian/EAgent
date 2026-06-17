@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -78,6 +78,44 @@ test("createAgentHost uses *_MODEL env for the chosen provider", async () => {
     else process.env.OPENAI_API_KEY = prevKey;
     if (prevModel === undefined) delete process.env.OPENAI_MODEL;
     else process.env.OPENAI_MODEL = prevModel;
+  }
+});
+
+test("createAgentHost gives a project-local extension precedence over a user-global one of the same id", async () => {
+  // The discover() contract is "later wins"; host.ts must therefore list the
+  // project dir LAST so a project extension shadows a same-id user one. This
+  // pins that ordering against an accidental swap.
+  const root = mkdtempSync(join(tmpdir(), "eagent-precedence-"));
+  const projExtDir = join(root, "project", ".eagent", "extensions");
+  const homeExtDir = join(root, "home", ".eagent", "extensions");
+  mkdirSync(projExtDir, { recursive: true });
+  mkdirSync(homeExtDir, { recursive: true });
+  // Same filename in both dirs => same extension id ("dup") => a collision.
+  // Each registers a tool named "dup_marker" whose description records its origin.
+  const ext = (origin: string) =>
+    `export default function activate(e) {\n` +
+    `  e.registerTool({ spec: { name: "dup_marker", description: ${JSON.stringify(origin)}, ` +
+    `parameters: { type: "object", properties: {} } }, execute: async () => ({ content: "ok" }) });\n` +
+    `}\n`;
+  writeFileSync(join(projExtDir, "dup.ts"), ext("project"));
+  writeFileSync(join(homeExtDir, "dup.ts"), ext("user"));
+
+  const prevHome = process.env.HOME;
+  const prevCwd = process.cwd();
+  process.env.HOME = join(root, "home"); // homedir() reads $HOME on POSIX
+  process.chdir(join(root, "project"));
+  try {
+    const built = await createAgentHost({ logger: silentLogger, storeRoot: join(root, "state") });
+    assert.equal(
+      built.agent.tools.get("dup_marker")?.spec.description,
+      "project",
+      "the project-local extension must win over the user-global one of the same id",
+    );
+    await built.host.dispose();
+  } finally {
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
   }
 });
 

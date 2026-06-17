@@ -14,20 +14,30 @@ kernel is designed around that assumption rather than trusting the model.
 ## What the kernel defends
 
 - **Capabilities.** Every privileged tool declares the authority it needs
-  (`fs:read`, `fs:write`, `shell:exec`, `code:exec`, `net:fetch`, `skill:write`,
-  `mcp:call`, `agent:spawn`, `pkg:install`). The dispatcher enforces the
-  declaration before the tool body runs. The default policy is *ask*: anything
-  not explicitly granted prompts the human. A full audit log is available via
-  `/caps`.
+  (`fs:read`, `fs:write`, `shell:exec`, `code:exec`, `net:fetch`, `skill:read`,
+  `skill:write`, `mcp:call`, `agent:spawn`, `pkg:install`, `self:read`,
+  `self:extend`). The dispatcher enforces the declaration before the tool body
+  runs. The *fallback* for anything not explicitly granted depends on the front
+  end: the **CLI** defaults to *ask* (it prompts the human), while the **HTTP
+  server** defaults to *allow* (`yolo` — every capability auto-granted, including
+  `shell:exec`), so it must be run with `EAGENT_TOKEN` and a network boundary.
+  Either way the host pre-grants `fs:read`, `fs:write`, and `skill:read`, and
+  some extensions auto-grant their own authority (e.g. `mcp:call`, `agent:spawn`),
+  so those never prompt; the high-authority gates left to *ask*/deny are
+  `shell:exec`, `code:exec`, `skill:write`, `net:fetch`, `pkg:install`, and
+  `self:extend`. A full audit log is available via `/caps`.
 - **Approval gates.** The `planmode` extension interposes a human approval step
   before any mutating tool runs (`beforeToolCall` advice), independent of the
-  capability grant.
+  capability grant. Under a non-interactive host the default headless UI denies
+  every prompt, so with plan mode on the server (or piped CLI) *blocks* mutating
+  tools outright rather than prompting — a hard gate there, not an approval dialog.
 - **Filesystem confinement.** The `read`/`write`/`edit` tools are scoped to a
   workspace root (`$EAGENT_WORKSPACE` or the cwd) and reject `../` traversal and
   absolute paths that point outside it.
 - **Scrubbed code execution.** `codeact`'s `run_code` runs in a separate OS
-  process with a timeout and a minimal environment (no inherited `process.env`),
-  so secrets in the parent environment are not handed to generated code.
+  process with a timeout and a minimal environment (only `PATH` plus a throwaway
+  `HOME`, not the parent's `process.env` wholesale), so secrets in the parent
+  environment are not handed to generated code.
 - **Scoped state.** Extensions get a namespaced `store`; there is no ambient
   global mutable state to corrupt across extensions.
 - **Supply-chain caution.** The `packages` manager installs with
@@ -47,16 +57,25 @@ kernel is designed around that assumption rather than trusting the model.
   `code:exec` capability and the `spawn` call are the intended swap points.
 - **Network egress.** Tools that reach the network (MCP HTTP, `net:fetch`,
   `packages`) can move data off the machine. Gate them with capabilities and run
-  in a network-restricted environment when handling sensitive data.
+  in a network-restricted environment when handling sensitive data. `fetch_url`
+  does **not** defend against SSRF: requests to internal, link-local, or
+  cloud-metadata hosts are not blocked, and redirects are followed without
+  re-validating the final URL. For the compositional read→exfiltrate risk, the
+  `flow-guard` extension holds later egress (default `net:fetch`) once a session
+  is tainted by a source capability (default `shell:exec`) or sensitive data in
+  the transcript — confirming in `ask` mode or refusing in `block` mode.
 
 ## Recommended deployment
 
 Run EAgent inside a container or VM with: a non-root user, a restricted
 filesystem mount as the workspace root, a network policy scoped to the providers
 and MCP servers you actually use, and no real secrets in the process environment
-(pass credentials out-of-band to the specific tools that need them). Keep the
-default *ask* capability policy unless the environment is already isolated, in
-which case `--yolo` (fallback *allow*) is reasonable.
+(pass credentials out-of-band to the specific tools that need them). The CLI
+keeps the *ask* policy by default; the **HTTP server defaults to *allow* (yolo)**,
+so always set `EAGENT_TOKEN` and keep it on loopback (the default bind) or behind
+a boundary. Use `--yolo` (fallback *allow*) on the CLI only when the environment
+is already isolated, and conversely run the server with `yolo: false` if you want
+per-capability prompting back.
 
 ## Reporting
 

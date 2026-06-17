@@ -10,7 +10,8 @@
  *   - **Filters** (`filter`/`apply`) — a value is threaded through each
  *     handler, which may transform it or short-circuit. This is how
  *     `beforeToolCall` can veto a call and `transformContext` can rewrite the
- *     prompt. Equivalent to Emacs around-advice.
+ *     prompt. Filter/transform advice (no continuation / cannot call the
+ *     original).
  *
  * Everything is typed against a map interface so extensions get autocomplete
  * and the compiler catches payload mistakes.
