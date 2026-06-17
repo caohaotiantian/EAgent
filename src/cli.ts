@@ -9,7 +9,8 @@
  * can explore everything offline.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { createInterface, type Interface } from "node:readline/promises";
 import { dirname, join } from "node:path";
 import { stdin, stdout } from "node:process";
@@ -19,7 +20,8 @@ import type { Agent } from "./kernel/agent.js";
 import type { CommandRegistry } from "./kernel/commands.js";
 import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
-import { createAgentHost, loadEnvFile } from "./host.js";
+import { complete } from "./complete.js";
+import { createAgentHost, loadEnvFile, PROVIDER_NAMES } from "./host.js";
 
 interface Args {
   model?: string;
@@ -104,7 +106,10 @@ async function main(): Promise<void> {
   }
 
   const interactive = Boolean(stdin.isTTY) && args.eval === undefined;
-  const rl = interactive ? createInterface({ input: stdin, output: stdout }) : undefined;
+  // The readline interface is created only after createAgentHost yields the
+  // live command/extension registries the completer reads, so it is declared
+  // here and assigned below; ui.confirm's `if (!rl)` guard late-binds it.
+  let rl: Interface | undefined;
 
   const ui: UI = {
     confirm: async (q) => {
@@ -134,6 +139,19 @@ async function main(): Promise<void> {
   });
 
   registerHostCommands(commands, host, agent);
+
+  // Tab completion reads the live registries at completion time, so the
+  // interface is built now that commands and the host exist.
+  const completer = (line: string): [string[], string] =>
+    complete(line, {
+      commandNames: () => commands.list().map((c) => c.name),
+      extensionIds: () => host.list(),
+      providerNames: PROVIDER_NAMES,
+      readDir: (dir) => readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, isDirectory: d.isDirectory() })),
+      homedir,
+    });
+  rl = interactive ? createInterface({ input: stdin, output: stdout, completer }) : undefined;
+
   await agent.hooks.emit("session_start", {});
 
   if (args.json) wireJsonRendering(agent);
