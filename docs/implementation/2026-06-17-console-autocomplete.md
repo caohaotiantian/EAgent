@@ -2,24 +2,17 @@
 
 - Slug: `2026-06-17-console-autocomplete` (matches the design doc)
 - Design doc: `docs/design/2026-06-17-console-autocomplete.md`
-- Status: L2 approved (entering L3)
+- Status: closed
+- Closing-commit: eaee749
+- Closed-on: 2026-06-17
+- Deferred: none
 - `<TEST-CMD>`: `npm test` (i.e. `node --import tsx --test "test/**/*.test.ts"`)
 
-### L2 review log (pruned at F)
-
-- R1 — 0 severe, 2 general (single-segment absolute-path `dirPart===""` must read `/` not cwd;
-  under-specified match reconstruction). Both fixed.
-- R2 — 0 severe, 1 general (stale design-doc line citations). Fixed by switching to stable
-  section/Decision/AC anchors.
-- R3 — verdict **pass**, 0 severe, 0 general, 0 clarification; path domain re-traced, fixes
-  verified, `host.test.ts` run green.
-- Cap reached at R3 with two-generation corroboration unmet (R2 carried a general). Escalated;
-  user authorized a corroborating round and granted standing authorization to auto-run one
-  corroborating round on any future clean-at-cap convergence (see
-  `[[three-loop-cap-convergence-policy]]`).
-- R4 — verdict **pass**, 0 severe, 0 general, 0 clarification; all six path traces re-verified,
-  `host.test.ts` run green. **L2 closed by the book** (R3 zero-general + R4 zero-severe satisfies
-  the two-generation rule).
+> Review history: L2 was reviewed by independent fresh-eyes subagents (which caught
+> a real single-segment-absolute-path defect in the path-domain spec before any code
+> was written) and was never blocked by a severe issue. It closed under the
+> two-generation rule after a user-authorized corroborating round over the 3-round
+> cap. Round-by-round detail lives in git history.
 
 ## 1. Task Index
 

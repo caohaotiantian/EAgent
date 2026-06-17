@@ -1,23 +1,18 @@
 # Design: Interactive Console Auto-Complete
 
 - Slug: `2026-06-17-console-autocomplete`
-- Status: L1 approved (entering L2)
+- Status: closed
+- Closing-commit: eaee749
+- Closed-on: 2026-06-17
+- Deferred: none
 - Tier: Full Mode (three-loop-workflow)
 
-### L1 review log (pruned at F)
-
-- R1 — 0 severe, 3 general (provider-list drift; AC-4 empty-fragment symmetry;
-  AC-8 bundling). All fixed.
-- R2 — 0 severe, 3 general (literal-extraction framing; unmeasured
-  "sub-millisecond" claim; AC-10 bundling). All fixed.
-- R3 — verdict **pass**, 0 severe, 2 general (`/provider` enumerable-plus-passthrough
-  nuance; Decision 6 flow-guard clause). Both folded in.
-- Cap reached at R3 with two-generation corroboration unmet (no prior zero-general
-  round). Escalated to the user; user authorized one corroborating round over the
-  cap.
-- R4 — verdict **pass**, 0 severe, 0 general, 0 clarification; fresh independent
-  reviewer verified every cited file:line against source. **L1 closed by user
-  authorization, corroborated by the clean R4.**
+> Review history: L1 was reviewed by independent fresh-eyes subagents and was never
+> blocked by a severe issue. It closed after a user-authorized corroborating review
+> round taken over the 3-round cap (the design had converged clean; a standing
+> policy was authorized to auto-run one corroborating round on clean-at-cap
+> convergence). The completion scope (commands + arguments + filesystem paths) was
+> a user-confirmed decision. Round-by-round detail lives in git history.
 
 ## 1. Background and Purpose
 
@@ -38,29 +33,29 @@ zero-cost-to-the-kernel UX win goes unrealized.
 
 ## 2. Deliverables
 
-- [ ] A pure, exported completer module `src/complete.ts` exposing a function
+- [x] A pure, exported completer module `src/complete.ts` exposing a function
       that maps `(line, context)` to readline's `[matches, substring]` tuple,
       with no dependency on a live TTY so it is unit-testable offline.
-- [ ] The completer is wired into the interactive REPL by passing it to
+- [x] The completer is wired into the interactive REPL by passing it to
       `createInterface` in `src/cli.ts` (interactive path only; `--json`,
       `--eval`, and piped-batch paths are untouched).
-- [ ] Three completion domains, dispatched from the parsed line:
+- [x] Three completion domains, dispatched from the parsed line:
       (a) slash-command **name** completion (against the live command registry);
       (b) context-sensitive **argument** completion for the commands whose value
       set is enumerable (`/provider`, `/reload`);
       (c) filesystem **path** completion of a path-like trailing token in
       free-text input.
-- [ ] A `PROVIDER_NAMES` constant exported from `src/host.ts`, created by
+- [x] A `PROVIDER_NAMES` constant exported from `src/host.ts`, created by
       **extracting the literal `["anthropic", "openai", "gemini", "mock"]` that
       already exists inline at `src/host.ts:237`** into a named export. The
       completer consumes it, and `selectProvider`'s existing `known` reference is
       repointed at it. This is a behavior-preserving literal-extraction (it
       *removes* a duplicate rather than adding an abstraction), scoped to those
       two lines — not a refactor of `selectProvider`'s logic (see Decision 2).
-- [ ] An offline test file `test/complete.test.ts` covering every domain,
+- [x] An offline test file `test/complete.test.ts` covering every domain,
       including the disambiguation and "no completion" cases, with the directory
       reader injected so no real filesystem state is required.
-- [ ] `docs/design/2026-06-17-console-autocomplete.md` (this file) and
+- [x] `docs/design/2026-06-17-console-autocomplete.md` (this file) and
       `docs/implementation/2026-06-17-console-autocomplete.md`.
 
 ## 3. Scope Boundary (NOT in scope)
