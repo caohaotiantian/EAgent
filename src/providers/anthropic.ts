@@ -62,7 +62,10 @@ export class AnthropicProvider implements Provider {
   }
 
   async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
-    if (!this.#apiKey) throw new Error("AnthropicProvider: ANTHROPIC_API_KEY is not set");
+    if (!this.#apiKey)
+      throw new Error(
+        "AnthropicProvider: no Anthropic API key/token configured (set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN)",
+      );
 
     // Prompt caching: the system prompt and tool definitions are the large,
     // stable prefix of every turn, so marking them `ephemeral` lets Anthropic
@@ -164,10 +167,9 @@ export class AnthropicProvider implements Provider {
   }
 
   /**
-   * POST the request, retrying transient failures (429 and 5xx, plus network
-   * errors) with exponential backoff. Honors a `retry-after` header when the
-   * server provides one, and gives up after `maxRetries` attempts or if the
-   * caller aborts. 4xx other than 429 are non-retryable and surface immediately.
+   * Thin wrapper that POSTs to the Messages endpoint via `http.ts`'s
+   * `fetchWithRetry`; see that function for the authoritative retry/backoff
+   * and `retry-after` semantics.
    */
   private fetchWithRetry(signal: AbortSignal, body: unknown): Promise<Response> {
     return fetchWithRetry({

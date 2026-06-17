@@ -9,9 +9,10 @@
  *
  * When plan mode is ON, any tool whose effects reach beyond the conversation —
  * writing files, running shells, fetching the network, spawning agents — must
- * be approved by the human before it runs. Read-only tools (read, recall, now)
- * pass through untouched, so the agent can still look around freely while every
- * irreversible step waits for a yes.
+ * be approved by the human before it runs. Read-only tools (the core `read`
+ * tool, plus cross-extension examples like `recall`/`now` that may not be
+ * loaded) pass through untouched, so the agent can still look around freely
+ * while every irreversible step waits for a yes.
  *
  * State is a single `enabled` boolean in the extension store, defaulting to OFF
  * and read fresh on every call so a `/plan` toggle takes effect immediately.

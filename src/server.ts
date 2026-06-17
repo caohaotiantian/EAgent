@@ -7,7 +7,7 @@
  * framework — and reuses `createAgentHost`, so it loads exactly the same
  * extensions as the CLI.
  *
- *   GET    /health          → { ok, model, extensions, sessions }
+ *   GET    /health          → { ok, model, extensions, sessions, auth }
  *   POST   /run             → streams lifecycle events as JSONL (one per line)
  *                             body: { input: string, session?: string }
  *   DELETE /sessions/:id     → forget a conversation

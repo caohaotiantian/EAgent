@@ -7,7 +7,7 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~1,600 lines, held under a
+The kernel is **seven primitives and nothing more** (~1,700 lines, held under a
 line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
@@ -23,7 +23,7 @@ flowchart TB
         HTTP["HTTP server"]
     end
 
-    subgraph KERNEL["Kernel — src/kernel/ · 7 primitives, ~1.6k lines"]
+    subgraph KERNEL["Kernel — src/kernel/ · 7 primitives, ~1.7k lines"]
         direction LR
         HOOKS["Hook bus"]
         REG["Tool registry"]
@@ -39,7 +39,7 @@ flowchart TB
         X1["core-tools"]
         X2["skills · mcp · memory"]
         X3["self · web · checkpoint"]
-        X4["+ 11 more"]
+        X4["+ 13 more"]
     end
 
     subgraph PROVIDERS["Providers — src/providers/"]
@@ -67,7 +67,7 @@ pi and Emacs make — is that a minimal, observable, malleable core beats a big 
 ```bash
 npm install
 npm run build
-npm test          # 173 tests, no network or API key required
+npm test          # the full offline suite — no network or API key required
 
 # Talk to it offline — a deterministic mock LLM drives everything:
 node dist/cli.js -e "hello"
@@ -134,7 +134,7 @@ All seven live in `src/kernel/` and form the entire public surface of the kernel
 | Primitive            | File                         | Responsibility |
 | -------------------- | ---------------------------- | -------------- |
 | **Hook bus**         | `src/kernel/hooks.ts`        | Lifecycle events (observe) + filter hooks (intervene) — Emacs *hooks* & *advice*. |
-| **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools & providers; a later definition wins, disposing restores the prior one. |
+| **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools (and commands); a later definition wins, disposing restores the prior one. (Providers, in the same file, register by overwrite — no restore.) |
 | **Provider**         | `src/kernel/types.ts`        | The one thing the kernel knows about an LLM: a request → a stream of events. |
 | **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions. |
 | **Capability layer** | `src/kernel/capabilities.ts` | Per-capability allow / deny / ask, wildcards, an audit log. |
@@ -207,6 +207,8 @@ tests, and gates privileged work behind a capability.
 | `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |
 | `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
 | `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompts` | — |
+| `flow-guard`  | compositional egress gate: taints a session on a source capability (default `shell:exec`) or sensitive data, then holds egress (`net:fetch`) — ask or block | `/flow-guard` | — |
+| `integrity`   | sweeps every tool description for poisoning / hidden instructions, and flags descriptions that change across sessions (rug-pull guard) | `/integrity` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -306,7 +308,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  18 built-in extensions, all riding the ExtensionAPI
+src/extensions/  20 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

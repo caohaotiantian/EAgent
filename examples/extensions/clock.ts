@@ -52,8 +52,13 @@ export default function activate(e: ExtensionAPI) {
   // 4. A user-facing command.
   e.registerCommand({
     name: "uptime",
+    // `runs` is the activation-count snapshot taken at activation time, not a
+    // live store read — so this prints the same number for the whole session.
+    // Scope is this extension's store namespace (process lifetime under
+    // MemoryBackend; the ~/.eagent/state file under FileBackend), not the host.
     description: "How many times this extension has been activated.",
-    run: (ctx) => ctx.print(`clock has been activated ${runs} time(s) this machine.`),
+    run: (ctx) =>
+      ctx.print(`clock had been activated ${runs} time(s) in this extension's store at activation.`),
   });
 
   // Optional cleanup, run on unload/reload.

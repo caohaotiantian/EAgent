@@ -157,6 +157,9 @@ export class Agent {
         // Honor stop()/abort directly in the loop. The signal is passed to the
         // provider and tools, but a provider that doesn't reject on abort would
         // otherwise let the loop run on; checking here makes stop() reliable.
+        // Two checks guard a turn: this one at the top of the loop, and a second
+        // immediately after streamTurn (below) so an abort that lands mid-stream
+        // stops us before the assistant message is appended and dispatched.
         if (this.#abort!.signal.aborted) {
           reason = "stop";
           break;

@@ -57,9 +57,10 @@ const STORE_KEY = "packages";
 const ENTRY_CANDIDATES = ["index.ts", "extension.ts", "index.js", "extension.js", "main.ts", "main.js"];
 
 /**
- * A structural subset of `ExtensionAPI` — enough for an installed package to
- * register against — whose registration methods record the disposables they
- * return so they can be torn down later.
+ * A full alias of `ExtensionAPI`, named to mark where an installed package
+ * activates against the recording shim (see `makeShim`) rather than the raw
+ * host API. The shim implements this same interface but wraps the registration
+ * methods so the disposables they return are captured for later teardown.
  */
 type ShimAPI = ExtensionAPI;
 
@@ -277,8 +278,10 @@ async function materialize(source: string, packagesDir: string): Promise<string>
     const url = source.slice("git:".length);
     assertSafeGitUrl(url);
     const dest = join(packagesDir, sanitize(repoName(url)));
-    // `--` separates the URL from options so a `-`-leading URL can't be reparsed
-    // as a git flag; assertSafeGitUrl already rejects ext::/file:// remote helpers.
+    // assertSafeGitUrl is the real guard: its scheme/scp allowlist already
+    // rejects `-`-leading URLs and the dangerous ext::/fd::/file:// remote
+    // helpers. The `--` below is belt-and-suspenders, separating the URL from
+    // options so nothing that slipped through could be reparsed as a git flag.
     execFileSync("git", ["clone", "--depth", "1", "--", url, dest], { stdio: "ignore" });
     return resolveEntry(dest);
   }

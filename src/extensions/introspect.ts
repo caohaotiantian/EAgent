@@ -57,7 +57,7 @@ export default function activate(e: ExtensionAPI): void {
         ctx.print(`command /${command.name}\n${command.description}`);
         return;
       }
-      ctx.print(`Nothing named "${name}". Try /apropos ${name} or /tools.`);
+      ctx.print(`Nothing named "${name}". Try /apropos ${name} to search the available tools and commands.`);
     },
   });
 

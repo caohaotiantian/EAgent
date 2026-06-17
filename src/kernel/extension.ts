@@ -14,8 +14,12 @@
  * the "clean swap" that makes live redefinition safe.
  *
  * Trusted extensions run in-process for power and immediacy (pi's trade-off).
- * Untrusted/LLM-authored code does NOT belong here; it goes through the
- * capability layer and is meant to be executed behind an OS/VM boundary.
+ * Note that ALL file extensions — including those loaded at runtime via
+ * `loadExtension` — are imported and executed in-process by jiti with no
+ * sandbox; the only boundary this host actually enforces is the capability
+ * layer. An OS/VM isolation boundary for untrusted/LLM-authored code is
+ * aspirational: if you need one, the deployment must provide it externally,
+ * because nothing in this host does.
  */
 
 import { createJiti } from "jiti";

@@ -1,113 +1,113 @@
-# EAgent — Architectural Review & Redesign Notes
+# EAgent — Architecture & Security Posture
 
-**Date:** 2026-06-16
-**Inputs:** the whole-project code review (`CODE-REVIEW-2026-06-16.md`), a live end-to-end test
-against a GLM-5.1 endpoint, and verified design research (`RESEARCH-agent-kernel-design.md`).
-**Verdict:** keep the architecture. The seven-primitive core is sound and well-precedented; the work
-is hardening and one principled extension, not a redesign.
+These notes record *why* EAgent is shaped the way it is and where its security
+frontier sits. They are design rationale, not a changelog — release history lives
+in `CHANGELOG.md` and git. The conclusions here were checked against the design
+research in [`RESEARCH-agent-kernel-design.md`](RESEARCH-agent-kernel-design.md).
 
----
+**Verdict:** keep the architecture. The seven-primitive core is sound and
+well-precedented; ongoing work is hardening and principled extensions, not a
+redesign.
 
-## 1. The core thesis holds — with external evidence
+## 1. The core thesis holds
 
-EAgent bets on a *small, stable, mechanism-only core* with *unbounded extensibility*. The research
-puts that bet on solid ground:
+EAgent bets on a *small, stable, mechanism-only core* with *unbounded
+extensibility*. The research puts that bet on solid ground:
 
-- **Mechanism, not policy** is the principle behind the most durable extensible systems. seL4's
-  designer frames policy-freedom as a *consequence* of minimality — "build everything on top." EAgent
-  says the same thing in `CLAUDE.md` and enforces it with the `kernel-surface` guard test.
-- **VS Code is the closest production precedent**: a curated, strictly-controlled API; behavior in
-  extensions; the core oblivious. EAgent's `ExtensionAPI` is the same discipline.
-- **The seven primitives are expressively complete** for the paradigms that matter. ReAct = agent
-  loop + tool registry. CodeAct = the `codeact` extension. Voyager's lifelong skill library =
-  `skills` + `self` + `memory`. CoALA's memory/action/decision taxonomy maps cleanly onto the
-  registries, the loop, and the hook bus. Nothing in scope required a new primitive.
-- The verifiers **refuted** the two tempting over-simplifications — "a single loop is enough" (0-3)
-  and "everything is just a tool" (0-3). That validates keeping the primitives *distinct*: memory,
-  sub-agents, planning, and commands are not all "tools." EAgent already resists that collapse.
+- **Mechanism, not policy** is the principle behind the most durable extensible
+  systems. seL4's designer frames policy-freedom as a *consequence* of minimality
+  — "build everything on top." EAgent says the same in `CLAUDE.md` and enforces it
+  with the `kernel-surface` guard test.
+- **VS Code is the closest production precedent**: a curated, strictly-controlled
+  API; behavior in extensions; the core oblivious. EAgent's `ExtensionAPI` is the
+  same discipline.
+- **The seven primitives are expressively complete** for the paradigms that
+  matter. ReAct = agent loop + tool registry. CodeAct = the `codeact` extension.
+  Voyager's lifelong skill library = `skills` + `self` + `memory`. CoALA's
+  memory/action/decision taxonomy maps cleanly onto the registries, the loop, and
+  the hook bus. Nothing in scope required a new primitive.
+- The research **refuted** the two tempting over-simplifications — "a single loop
+  is enough" and "everything is just a tool." That validates keeping the
+  primitives *distinct*: memory, sub-agents, planning, and commands are not all
+  "tools," and EAgent resists that collapse.
 
-**Conclusion:** do not grow the core. The minimalism guard (`test/kernel-surface.test.ts`) is the
-single most valuable test in the repo; keep it strict. The only kernel-surface change this pass was
-`isMessage`, a guard for the core `Message` type — a conscious, justified addition.
+**Conclusion:** do not grow the core. The minimalism guard
+(`test/kernel-surface.test.ts`) is the single most valuable test in the repo —
+keep it strict.
 
 ## 2. The real frontier is security, not expressiveness
 
-The most important research result: **per-tool capability gating is necessary but not sufficient.**
-Demonstrated, reproducible exploits — tool-poisoning exfiltrating SSH keys, cross-server tool
-*shadowing* redirecting email, the Supabase `service_role` confused-deputy — all defeat per-call
-authorization, because each call *in isolation* is allowed. The gap is **capability chaining**:
+The most important research result: **per-tool capability gating is necessary but
+not sufficient.** Demonstrated, reproducible exploits — tool-poisoning
+exfiltrating SSH keys, cross-server tool *shadowing* redirecting email, the
+Supabase `service_role` confused-deputy — all defeat per-call authorization,
+because each call *in isolation* is allowed. The gap is **capability chaining**:
 `read a secret` + `reach the network` = exfiltration.
 
-This is exactly the kind of new best practice EAgent is designed to absorb **as an extension, not a
-core fork** — and that's what was built:
+EAgent answers this the way the architecture intends — **as extensions, not a core
+fork**:
 
-- **`flow-guard`** (new, shipped, tested) rides two primitives the core already exposes — the
-  `tool_end` event (observe which authority has been used) and the `beforeToolCall` filter (intervene
-  before egress). When a `shell:exec` tool has run, a later `net:fetch` call is held (confirm in
-  `ask` mode, refuse in `block`). Zero kernel changes. This is the thesis demonstrated end to end: a
-  2025/26-era threat class answered by a hot-reloadable module.
+- **`flow-guard`** rides the hook bus at three points: the `tool_end` event
+  (observe which authority has been used), the `message` event (tag the
+  data-bearing tool-result message), and the `beforeToolCall` filter (intervene
+  before egress). Once a session is tainted — by a source capability
+  (default `shell:exec`) or by sensitive data in the transcript — a later egress
+  call (default `net:fetch`) is held: confirmed in `ask` mode, refused in `block`
+  mode. The data taint is genuine *information-flow*: it is pinned to the
+  tool-result message (`meta.flowGuardTaint`) and egress is gated only while that
+  message is in the live transcript, so `/clear` and `/handoff` un-gate. Taint
+  through model-derived prose (summaries) and longer multi-hop chains are out of
+  scope (see §4).
+- **`integrity`** sweeps every registered tool's description for poisoning and
+  hidden instructions, and fingerprints descriptions to flag silent changes across
+  sessions (the rug-pull / version-swap vector). It observes and warns; it never
+  blocks.
 
-Several review fixes already moved EAgent toward the research's four-property defense model:
+Both are zero-kernel-change extensions — a 2025/26-era threat class answered with
+hot-reloadable modules. EAgent's posture against the research's four-property
+defense model:
 
-| Property (from the research) | EAgent today |
+| Property | EAgent today |
 | --- | --- |
-| **Privilege boundedness** | capability layer; narrow non-ambient grants; `shell:exec`/`net:fetch` not auto-granted; server now loopback + constant-time auth |
-| **Tool integrity** | extension id-collision now tears the prior down (was a silent shadow leak); MCP `tools/list` is shape-validated; duplicate MCP server names are skipped; tool descriptions are scanned for poisoning at registration |
-| **Context isolation** | untrusted code routed out-of-process (MCP, codeact); codeact cwd/HOME scrubbed |
-| **Data confinement** | *partial* — `flow-guard` taints the session on sensitive-path reads and credential-looking results, and gates egress on it; full information-flow tracking remains future work |
+| **Privilege boundedness** | capability layer; narrow non-ambient grants; `shell:exec` / `net:fetch` / `code:exec` are not auto-granted; the server binds loopback with constant-time bearer auth |
+| **Tool integrity** | an extension id-collision tears the prior version down (no silent shadow leak); MCP `tools/list` is shape-validated and duplicate server names are skipped; `integrity` scans all tool descriptions and detects cross-session changes |
+| **Context isolation** | untrusted code is routed out-of-process (MCP, `codeact`); `codeact` runs with a scrubbed environment (only `PATH` plus a throwaway `HOME`, not the parent's `process.env` wholesale) |
+| **Data confinement** | `flow-guard` taints on a source capability or sensitive data and gates egress; the data taint is transcript-level information-flow (message-pinned, un-gates on `/clear` and `/handoff`); taint through summary prose is out of scope |
 
 ## 3. Anti-patterns avoided (and to keep avoiding)
 
-- **Config bankruptcy** (the Emacs/Doom failure mode): keep behavior in scoped extensions with their
-  own `store`, not a sprawling global config. EAgent's per-extension namespaced store is the explicit
-  fix for Emacs's global mutable state.
-- **Core creep**: resist folding new behavior into the kernel "for convenience." The guard test makes
-  this a deliberate decision every time.
-- **Silent shadowing**: "later wins" is right for reload, but a *different-origin* registration
-  shadowing an existing name is a trust event. Fixed for extension ids; MCP duplicate-server-name
-  shadowing is the remaining warn-worthy case (tracked, low severity).
-- **Ambient authority**: never hand a tool more than it needs; the confused-deputy breach is what
-  ambient over-authority looks like.
+- **Config bankruptcy** (the Emacs/Doom failure mode): keep behavior in scoped
+  extensions with their own `store`, not a sprawling global config. EAgent's
+  per-extension namespaced store is the explicit fix for Emacs's global mutable
+  state.
+- **Core creep**: resist folding new behavior into the kernel "for convenience."
+  The guard test makes this a deliberate decision every time.
+- **Silent shadowing**: "later wins" is right for reload, but a *different-origin*
+  registration shadowing an existing name is a trust event. Handled for extension
+  ids and MCP duplicate-server names.
+- **Ambient authority**: never hand a tool more than it needs; the confused-deputy
+  breach is what ambient over-authority looks like.
 
-## 4. Forward agenda (not done; deliberately scoped out)
+## 4. Deliberate non-goals
 
-In rough priority:
+These are scoped *out* on purpose — not pending work. Each would either grow the
+kernel (against the thesis) or chase a threat the honest boundary already handles:
 
-1. ~~**Chaining-aware policy, generalized.**~~ Partly shipped — `flow-guard` now covers configurable
-   source/egress capability pairs. *Remaining:* longer multi-step sequences driven by the capability
-   audit log rather than per-session flags.
-2. ~~**Data confinement / taint.**~~ **Shipped (Wave 2 + Wave 7):** `flow-guard` taints on
-   sensitive-path reads and credential-looking results; Wave 7 made it true information-flow —
-   the taint is pinned to the tool-result *message* (`meta.flowGuardTaint`) and egress is gated only
-   while that message is in the live transcript, so `/clear` and `/handoff` un-gate. *Remaining:*
-   tracking taint through model-derived prose (summaries) and longer multi-hop chains.
-3. ~~**Shadow-as-event.**~~ **Shipped (Wave 1):** duplicate MCP server names are skipped and tool
-   shadowing warns. *Remaining:* a generic `tool_shadowed` signal for non-MCP collisions, if needed.
-4. **Extension-to-extension isolation.** In-process `jiti` gives none (same as VS Code's host). The
-   honest boundary stays: trusted in-process, untrusted out-of-process. Revisit only if untrusted
-   in-process extensions become a goal.
-5. ~~**Tool-poisoning awareness.**~~ **Shipped (Waves 3, 4, 8):** MCP tool descriptions scanned at
-   registration (W3); the `integrity` extension sweeps *all* tool sources (W4); and description-change
-   diffing across sessions catches the rug-pull / silent-update vector (W8). *Remaining:* nothing
-   material at the extension layer.
+- **A generic `tool_shadowed` kernel signal** and **richer in-kernel token
+  accounting** would each grow the core; deferred until a concrete need justifies
+  the surface.
+- **Taint through model-derived summary prose** was accepted out of scope by the
+  information-flow design — `flow-guard` tracks data, not paraphrase.
+- **Extension-to-extension in-process isolation.** In-process `jiti` gives none
+  (the same as VS Code's host). The honest boundary stays: trusted in-process,
+  untrusted out-of-process. Revisit only if untrusted in-process extensions become
+  a goal.
 
 ## 5. Bottom line
 
-The review found localized robustness/security/ergonomics gaps — 35 of 40 fixed this pass, all
-high/medium included, with the suite green (192 tests) and the live endpoint re-verified. The
-research found no structural flaw and no missing primitive. The single most valuable architectural
-move — a compositional capability policy — was added the way the architecture intends: **as an
-extension.** EAgent should keep the core frozen, keep the guard test strict, and keep absorbing new
-best practices the way `flow-guard` was absorbed.
-
-**Wave status (2026-06-16).** Eight improvement waves shipped — W1 MCP shadow-as-event, W2
-data-confinement taint, W3 MCP tool-poisoning scan, W4 cross-source `integrity` sweep, W5 batch
-SIGINT shutdown, W6 package auto-reload tamper guard, W7 transcript-level information-flow taint
-(full three-loop cycle), W8 tool-description-change detection. **Every wave was an extension edit;
-the seven-primitive kernel never grew** (the surface guard test still passes). The forward-agenda
-items that remain are now *deliberate non-goals*, not pending work: a generic `tool_shadowed` signal
-and richer token accounting (N2) would each **grow the kernel** — a conscious decision against the
-thesis, deferred until a concrete need justifies it; taint through `/handoff` summary prose was
-**accepted out of scope** by the W7 design; and extension-to-extension isolation is the
-research-endorsed honest boundary (trusted in-process / untrusted out-of-process). The
-clean, in-thesis security agenda is complete.
+The research found no structural flaw and no missing primitive. The most valuable
+architectural move — a compositional capability policy — was added the way the
+architecture intends: **as an extension.** Keep the core frozen, keep the guard
+test strict, and keep absorbing new best practices the way `flow-guard` and
+`integrity` were. For current status run `npm test`; for history see
+`CHANGELOG.md`.

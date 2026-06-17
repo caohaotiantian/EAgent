@@ -171,9 +171,13 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     }
   }
 
+  // User-global first, project-local last: discover() loads in order and a later
+  // registration wins on an id collision, so listing the project dir last gives
+  // it precedence over the user dir (the project-over-user model the discover()
+  // contract documents).
   const dirs = opts.discoverDirs ?? [
-    join(process.cwd(), ".eagent", "extensions"),
     join(homedir(), ".eagent", "extensions"),
+    join(process.cwd(), ".eagent", "extensions"),
   ];
   await host.discover(dirs);
   for (const path of opts.extraExtensions ?? []) await host.loadFile(path);
