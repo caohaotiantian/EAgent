@@ -72,6 +72,9 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["integrity", integrity],
 ];
 
+/** The provider names EAgent recognizes, shared by selection and completion. */
+export const PROVIDER_NAMES = ["anthropic", "openai", "gemini", "mock"] as const;
+
 export interface AgentHostOptions {
   provider?: string;
   model?: string;
@@ -234,7 +237,7 @@ export function selectProvider(
   if (requested === "anthropic" && configured.anthropic) return "anthropic";
   if (requested === "openai" && configured.openai) return "openai";
   if (requested === "gemini" && configured.gemini) return "gemini";
-  const known = ["anthropic", "openai", "gemini", "mock"];
+  const known: readonly string[] = PROVIDER_NAMES;
   if (requested && !known.includes(requested)) return requested;
   if (configured.anthropic) return "anthropic";
   if (configured.openai) return "openai";

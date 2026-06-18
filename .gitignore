@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.log
 .eagent/
+.e2e-artifacts/
 .DS_Store
 .env
 .env.*
