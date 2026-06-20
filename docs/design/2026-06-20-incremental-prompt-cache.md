@@ -1,6 +1,9 @@
 # Design: incremental conversation prompt-caching for the Anthropic provider
 
-Status: draft
+Status: closed
+Closing-commit: c548e65
+Closed-on: 2026-06-20
+Deferred: none
 Slug: `2026-06-20-incremental-prompt-cache`
 
 ## 1. Background and Purpose
@@ -33,11 +36,11 @@ growing history at 1× input, which on long agentic runs is the dominant cost.
 
 ## 2. Deliverables
 
-- [ ] `src/providers/anthropic.ts` — when caching is enabled and at least one
+- [x] `src/providers/anthropic.ts` — when caching is enabled and at least one
       message is sent, mark the **last content block of the last message** with
       `cache_control: {type:"ephemeral"}`, in addition to the existing system and
       last-tool breakpoints.
-- [ ] `test/anthropic.test.ts` — offline tests: the last message's last content
+- [x] `test/anthropic.test.ts` — offline tests: the last message's last content
       block is marked when caching is on; it is **not** marked when caching is
       off; a last `tool` message that filters to zero blocks is handled without a
       breakpoint or a throw; system + last-tool breakpoints are unaffected; the
