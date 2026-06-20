@@ -189,3 +189,35 @@ test("synthesizes distinct ids for parallel same-name calls when the endpoint om
   assert.equal(ids.length, 2);
   assert.notEqual(ids[0], ids[1], "two parallel same-name calls must not collide on a synthesized id");
 });
+
+test("maps thinking level to reasoning_effort, omitting it when off", async () => {
+  let captured: any;
+  const provider = new OpenAIProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(provider.stream(req({ thinking: "medium" })));
+  assert.equal(captured.reasoning_effort, "medium");
+  await collect(provider.stream(req({ thinking: "off" })));
+  assert.equal(captured.reasoning_effort, undefined);
+});
+
+test("surfaces reasoning_content deltas as reasoning events", async () => {
+  const chunks = [
+    { choices: [{ delta: { role: "assistant", reasoning_content: "hmm" } }] },
+    { choices: [{ delta: { content: "answer" } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+  ];
+  const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(chunks) });
+  const events = await collect(provider.stream(req({ thinking: "low" })));
+  assert.deepEqual(
+    events.filter((e) => e.type === "reasoning_delta").map((e) => (e as { text: string }).text),
+    ["hmm"],
+  );
+  const done = events.at(-1)!;
+  // Reasoning must not leak into the assistant text.
+  assert.ok(done.type === "done" && (done.message.content[0] as { text: string }).text === "answer");
+});

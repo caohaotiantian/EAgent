@@ -24,6 +24,7 @@ import {
   type StopReason,
   type ToolCallBlock,
   type ToolContext,
+  type ThinkingLevel,
   type ToolResult,
   type ToolResultBlock,
   type UI,
@@ -38,6 +39,8 @@ export interface AgentOptions {
   model?: string;
   /** Provider name to use; defaults to the registry default. */
   provider?: string;
+  /** Reasoning effort forwarded to the provider; defaults to `off`. */
+  thinking?: ThinkingLevel;
   /** Safety bound on loop iterations within a single `run`. */
   maxTurns?: number;
   ui?: UI;
@@ -67,6 +70,8 @@ export class Agent {
   systemPrompt: string;
   model: string;
   providerName: string | undefined;
+  /** Reasoning effort forwarded to the provider on every turn. */
+  thinking: ThinkingLevel;
   maxTurns: number;
 
   readonly #messages: Message[] = [];
@@ -86,6 +91,7 @@ export class Agent {
     this.systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.model = opts.model ?? "mock";
     this.providerName = opts.provider;
+    this.thinking = opts.thinking ?? "off";
     this.maxTurns = opts.maxTurns ?? 24;
   }
 
@@ -250,6 +256,7 @@ export class Agent {
       tools: this.tools.list().map((t) => t.spec),
       model: this.model,
       signal: this.#abort!.signal,
+      thinking: this.thinking,
     };
 
     let message: Message | undefined;
@@ -258,6 +265,8 @@ export class Agent {
     for await (const ev of provider.stream(req)) {
       if (ev.type === "text_delta") {
         await this.hooks.emit("text_delta", { text: ev.text });
+      } else if (ev.type === "reasoning_delta") {
+        await this.hooks.emit("reasoning_delta", { text: ev.text });
       } else if (ev.type === "done") {
         message = ev.message;
         stopReason = ev.stopReason;

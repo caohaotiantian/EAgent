@@ -81,7 +81,7 @@ export class AnthropicProvider implements Provider {
         ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
         : req.systemPrompt;
 
-    const body = {
+    const body: Record<string, unknown> = {
       model: req.model,
       max_tokens: this.#maxTokens,
       system,
@@ -90,10 +90,24 @@ export class AnthropicProvider implements Provider {
       stream: true,
     };
 
+    // Reasoning: modern Claude models (Opus 4.6+, Fable 5) take adaptive
+    // thinking plus an `output_config` effort dial — never the legacy
+    // `budget_tokens`, which these models reject. `off` sends neither, leaving
+    // the model's default (which on always-thinking models is still on).
+    if (req.thinking && req.thinking !== "off") {
+      body.thinking = { type: "adaptive", display: "summarized" };
+      body.output_config = { effort: req.thinking };
+    }
+
     const res = await this.fetchWithRetry(req.signal, body);
 
     // Assemble blocks as they stream in.
-    const blocks = new Map<number, { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; json: string }>();
+    const blocks = new Map<
+      number,
+      | { type: "text"; text: string }
+      | { type: "thinking"; thinking: string; signature: string }
+      | { type: "tool_use"; id: string; name: string; json: string }
+    >();
     let stopReason: StopReason = "end_turn";
     const usage: Usage = { inputTokens: 0, outputTokens: 0 };
 
@@ -122,6 +136,8 @@ export class AnthropicProvider implements Provider {
         case "content_block_start": {
           const cb = parsed.content_block;
           if (cb.type === "text") blocks.set(parsed.index, { type: "text", text: "" });
+          else if (cb.type === "thinking")
+            blocks.set(parsed.index, { type: "thinking", thinking: "", signature: "" });
           else if (cb.type === "tool_use")
             blocks.set(parsed.index, { type: "tool_use", id: cb.id, name: cb.name, json: "" });
           break;
@@ -132,6 +148,13 @@ export class AnthropicProvider implements Provider {
           if (parsed.delta.type === "text_delta" && block.type === "text") {
             block.text += parsed.delta.text;
             yield { type: "text_delta", text: parsed.delta.text };
+          } else if (parsed.delta.type === "thinking_delta" && block.type === "thinking") {
+            block.thinking += parsed.delta.thinking;
+            yield { type: "reasoning_delta", text: parsed.delta.thinking };
+          } else if (parsed.delta.type === "signature_delta" && block.type === "thinking") {
+            // Opaque token; not surfaced to the user, but kept so the block can
+            // be replayed verbatim on the next turn (required under tool use).
+            block.signature += parsed.delta.signature;
           } else if (parsed.delta.type === "input_json_delta" && block.type === "tool_use") {
             block.json += parsed.delta.partial_json;
           }
@@ -151,6 +174,8 @@ export class AnthropicProvider implements Provider {
     for (const block of [...blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, b]) => b)) {
       if (block.type === "text") {
         content.push({ type: "text", text: block.text });
+      } else if (block.type === "thinking") {
+        content.push({ type: "thinking", thinking: block.thinking, signature: block.signature });
       } else {
         let args: Record<string, unknown> = {};
         try {
@@ -208,16 +233,21 @@ function toAnthropicMessages(messages: Message[]): unknown[] {
     }
     out.push({
       role: m.role,
-      content: m.content.map((b) => {
-        if (b.type === "text") return { type: "text", text: b.text };
-        if (b.type === "tool_call") return { type: "tool_use", id: b.id, name: b.name, input: b.arguments };
+      content: m.content.flatMap((b): unknown[] => {
+        if (b.type === "text") return [{ type: "text", text: b.text }];
+        if (b.type === "tool_call") return [{ type: "tool_use", id: b.id, name: b.name, input: b.arguments }];
+        // Replay a thinking block only with its signature — Anthropic rejects a
+        // modified or unsigned one. Drop signatureless blocks (e.g. carried over
+        // from another provider) rather than risk a 400.
+        if (b.type === "thinking")
+          return b.signature ? [{ type: "thinking", thinking: b.thinking, signature: b.signature }] : [];
         if (b.type === "image") {
           const source = b.url
             ? { type: "url", url: b.url }
             : { type: "base64", media_type: b.mimeType, data: b.data ?? "" };
-          return { type: "image", source };
+          return [{ type: "image", source }];
         }
-        return { type: "text", text: "" };
+        return [{ type: "text", text: "" }];
       }),
     });
   }
@@ -248,7 +278,19 @@ interface AnthropicUsage {
 
 type AnthropicStreamEvent =
   | { type: "message_start"; message?: { usage?: AnthropicUsage } }
-  | { type: "content_block_start"; index: number; content_block: { type: "text" } | { type: "tool_use"; id: string; name: string } }
-  | { type: "content_block_delta"; index: number; delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string } }
+  | {
+      type: "content_block_start";
+      index: number;
+      content_block: { type: "text" } | { type: "thinking" } | { type: "tool_use"; id: string; name: string };
+    }
+  | {
+      type: "content_block_delta";
+      index: number;
+      delta:
+        | { type: "text_delta"; text: string }
+        | { type: "thinking_delta"; thinking: string }
+        | { type: "signature_delta"; signature: string }
+        | { type: "input_json_delta"; partial_json: string };
+    }
   | { type: "message_delta"; delta: { stop_reason?: string }; usage?: AnthropicUsage }
   | { type: "message_stop" | "content_block_stop" | "ping" };

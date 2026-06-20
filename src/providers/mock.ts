@@ -14,6 +14,7 @@ import type {
   Provider,
   StopReason,
   StreamEvent,
+  ThinkingLevel,
 } from "../kernel/types.js";
 
 export interface MockToolCall {
@@ -24,6 +25,8 @@ export interface MockToolCall {
 
 export interface MockTurn {
   text?: string;
+  /** Optional reasoning to replay as `reasoning_delta` events + a thinking block. */
+  reasoning?: string;
   toolCalls?: MockToolCall[];
 }
 
@@ -34,6 +37,8 @@ export type MockResponder =
 
 export class MockProvider implements Provider {
   readonly name = "mock";
+  /** The thinking level seen on the most recent `stream` call (for assertions). */
+  lastThinking: ThinkingLevel | undefined;
   #turn = 0;
   #queue: MockTurn[] | undefined;
   #fn: ((req: CompletionRequest, i: number) => MockTurn | undefined) | undefined;
@@ -56,8 +61,18 @@ export class MockProvider implements Provider {
   }
 
   async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
+    this.lastThinking = req.thinking;
     const turn = this.nextTurn(req);
     const content: ContentBlock[] = [];
+
+    if (turn.reasoning) {
+      for (const chunk of chunkText(turn.reasoning)) {
+        if (req.signal.aborted) break;
+        yield { type: "reasoning_delta", text: chunk };
+      }
+      // A signed thinking block, so round-trip behavior can be exercised offline.
+      content.push({ type: "thinking", thinking: turn.reasoning, signature: "mock-sig" });
+    }
 
     if (turn.text) {
       for (const chunk of chunkText(turn.text)) {

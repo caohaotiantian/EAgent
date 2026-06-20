@@ -21,11 +21,12 @@ import type { CommandRegistry } from "./kernel/commands.js";
 import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { complete } from "./complete.js";
-import { createAgentHost, loadEnvFile, PROVIDER_NAMES } from "./host.js";
+import { createAgentHost, loadEnvFile, PROVIDER_NAMES, thinkingFromEnv } from "./host.js";
 
 interface Args {
   model?: string;
   provider?: string;
+  think?: string;
   eval?: string;
   yolo: boolean;
   extensions: string[];
@@ -51,6 +52,7 @@ function parseArgs(argv: string[]): Args {
     const a = argv[i]!;
     if (a === "--model" || a === "-m") args.model = takeValue(a, i++);
     else if (a === "--provider" || a === "-p") args.provider = takeValue(a, i++);
+    else if (a === "--think") args.think = takeValue(a, i++);
     else if (a === "--eval" || a === "-e") args.eval = takeValue(a, i++, true);
     else if (a === "--yolo") args.yolo = true;
     else if (a === "--ext") args.extensions.push(takeValue(a, i++));
@@ -70,6 +72,7 @@ Options:
   -e, --eval <text>      Run one turn with <text> and exit (non-interactive)
   -m, --model <name>     Model to use (e.g. claude-fable-5, gpt-4o)
   -p, --provider <name>  Provider: anthropic | openai | gemini | mock
+      --think <level>    Reasoning effort: off | low | medium | high
       --ext <path>       Load an extra extension file (repeatable)
       --yolo             Auto-grant capabilities (no approval prompts)
       --json             Emit lifecycle events as JSONL (programmatic mode)
@@ -135,6 +138,7 @@ async function main(): Promise<void> {
     yolo: args.yolo,
     provider: args.provider,
     model: args.model,
+    thinking: args.think ? thinkingFromEnv(args.think) : undefined,
     extraExtensions: args.extensions,
   });
 
@@ -243,7 +247,21 @@ async function dispatchCommand(
 
 function wireRendering(agent: Agent): void {
   let streaming = false;
+  let thinking = false;
+  // Reasoning streams before the answer; render it dimmed and close the block
+  // when the first answer text (or the completed message) arrives.
+  agent.hooks.on("reasoning_delta", ({ text }) => {
+    if (!thinking) {
+      stdout.write(C.dim("🧠 "));
+      thinking = true;
+    }
+    stdout.write(C.dim(text));
+  });
   agent.hooks.on("text_delta", ({ text }) => {
+    if (thinking) {
+      stdout.write("\n");
+      thinking = false;
+    }
     if (!streaming) {
       stdout.write(C.green("⏺ "));
       streaming = true;
@@ -251,9 +269,10 @@ function wireRendering(agent: Agent): void {
     stdout.write(text);
   });
   agent.hooks.on("message", ({ message }) => {
-    if (message.role === "assistant" && streaming) {
+    if (message.role === "assistant" && (streaming || thinking)) {
       stdout.write("\n");
       streaming = false;
+      thinking = false;
     }
   });
   agent.hooks.on("tool_start", ({ call }) => {
@@ -276,6 +295,7 @@ function wireJsonRendering(agent: Agent): void {
     process.stdout.write(JSON.stringify(obj) + "\n");
   };
   agent.hooks.on("text_delta", ({ text }) => emit({ type: "text_delta", text }));
+  agent.hooks.on("reasoning_delta", ({ text }) => emit({ type: "reasoning_delta", text }));
   agent.hooks.on("message", ({ message }) => emit({ type: "message", role: message.role, content: message.content }));
   agent.hooks.on("tool_start", ({ call }) => emit({ type: "tool_start", id: call.id, name: call.name, arguments: call.arguments }));
   agent.hooks.on("tool_end", ({ call, result }) =>

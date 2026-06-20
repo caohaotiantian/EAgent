@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createAgentHost, loadEnvFile, selectProvider } from "../src/host.js";
+import { createAgentHost, loadEnvFile, selectProvider, thinkingFromEnv } from "../src/host.js";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { silentLogger } from "./helpers.js";
 
@@ -130,4 +130,17 @@ test("createAgentHost fails fast on an unknown provider instead of on the first 
       }),
     /not available/,
   );
+});
+
+test("thinkingFromEnv accepts known levels and falls back to off", () => {
+  assert.equal(thinkingFromEnv("high"), "high");
+  assert.equal(thinkingFromEnv(" Medium "), "medium");
+  assert.equal(thinkingFromEnv("off"), "off");
+  assert.equal(thinkingFromEnv("bogus"), "off");
+  assert.equal(thinkingFromEnv(undefined), "off");
+});
+
+test("createAgentHost threads an explicit thinking level onto the agent", async () => {
+  const { agent } = await createAgentHost({ provider: "mock", logger: silentLogger, thinking: "low" });
+  assert.equal(agent.thinking, "low");
 });
