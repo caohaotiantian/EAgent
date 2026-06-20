@@ -1,8 +1,19 @@
 # Design: Dynamic Workflow Extension
 
 - Slug: `2026-06-20-dynamic-workflow`
-- Status: L1 closed (design loop passed: round 1 severe+general → fixed; rounds 2 and 3 clean)
+- Status: closed
+- Closing-commit: 459e31a
+- Closed-on: 2026-06-20
+- Deferred: none
 - Tier: Full Mode (three-loop-workflow)
+
+> Review history: L1 design — round 1 raised two severe issues (the tool-step
+> guard mirror dropped the kernel's post-guard re-validation and mislocated
+> `afterToolCall`) plus general issues; all fixed, rounds 2 and 3 clean. L2
+> implementation — rounds 1 and 2 clean. L3 development — one fresh-eyes review,
+> clean (the guard-mirror fidelity verified stage-for-stage against
+> `src/kernel/agent.ts`), plus one cosmetic post-review cleanup. Round-by-round
+> detail lives in git history.
 
 ## 1. Background and Purpose
 
@@ -39,24 +50,24 @@ branches and no explicit, observable plan.
 
 ## 2. Deliverables
 
-- [ ] A new extension `src/extensions/dynamic-workflow.ts` registering one tool,
+- [x] A new extension `src/extensions/dynamic-workflow.ts` registering one tool,
       `run_workflow`, gated behind a new `workflow:run` capability. The tool
       accepts a **workflow spec** (an array of steps) emitted by the model, and
       executes it as a dependency DAG.
-- [ ] Two step types: `tool` (invoke a registered tool by name with args) and
+- [x] Two step types: `tool` (invoke a registered tool by name with args) and
       `agent` (spawn an isolated child agent on a prompt, reusing the `subagents`
       child-construction pattern).
-- [ ] **Data flow by `${id}` substitution**: any string leaf in a step's `args`
+- [x] **Data flow by `${id}` substitution**: any string leaf in a step's `args`
       or `prompt` containing `${otherStepId}` is replaced, before that step runs,
       with the referenced step's string output. Referenced ids are automatically
       added to the step's dependency set (LLMCompiler-style auto-derived edges),
       unioned with any explicit `needs: string[]`.
-- [ ] A **topological scheduler** (Kahn's algorithm) that runs the ready frontier
+- [x] A **topological scheduler** (Kahn's algorithm) that runs the ready frontier
       each round, executing independent steps concurrently and dependent steps
       after their inputs resolve. Up-front validation rejects unknown step ids,
       duplicate ids, references to unknown steps, cycles, an unknown tool name,
       and a step count over `MAX_STEPS`.
-- [ ] **Tool-step guarding that does not bypass existing policy**: a `tool` step
+- [x] **Tool-step guarding that does not bypass existing policy**: a `tool` step
       is run through a faithful mirror of the kernel's guard sequence
       (`Agent.executeGuarded` + the `runOne` wrapper, `src/kernel/agent.ts:286-344`)
       — see Decision 4 for the exact stage order, including the **post-guard
@@ -64,18 +75,18 @@ branches and no explicit, observable plan.
       semantics. It reuses the agent's public `hooks` / `capabilities` surface, so
       `planmode`, `flow-guard`, and `integrity` continue to govern tool calls made
       inside a workflow.
-- [ ] **Fail-fast-with-isolation error model**: a step that errors marks its
+- [x] **Fail-fast-with-isolation error model**: a step that errors marks its
       transitive dependents `skipped`; independent branches still complete; the
       tool returns `isError: true` when any step errored or was skipped, with a
       full per-step status rundown so the model can revise and re-call (the
       replanning loop lives in the model, not the tool).
-- [ ] A `/workflow` slash command that explains the spec shape and step types
+- [x] A `/workflow` slash command that explains the spec shape and step types
       (mirrors `subagents`' `/agents` help command).
-- [ ] Registration in `BUILTIN_EXTENSIONS` (`src/host.ts`) and a one-line entry
+- [x] Registration in `BUILTIN_EXTENSIONS` (`src/host.ts`) and a one-line entry
       in the CLAUDE.md extension inventory.
-- [ ] An offline test file `test/dynamic-workflow.test.ts` (node:test via tsx,
+- [x] An offline test file `test/dynamic-workflow.test.ts` (node:test via tsx,
       `MockProvider`, no network) covering every Acceptance Criterion.
-- [ ] `docs/design/2026-06-20-dynamic-workflow.md` (this file) and
+- [x] `docs/design/2026-06-20-dynamic-workflow.md` (this file) and
       `docs/implementation/2026-06-20-dynamic-workflow.md`.
 
 ## 3. Scope Boundary (NOT in scope)
