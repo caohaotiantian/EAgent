@@ -1,7 +1,18 @@
 # Implementation: incremental conversation prompt-caching (Anthropic provider)
 
+Status: closed
+Closing-commit: c548e65
+Closed-on: 2026-06-20
+Deferred: none
 Slug: `2026-06-20-incremental-prompt-cache`
 Design doc: `docs/design/2026-06-20-incremental-prompt-cache.md`
+
+Phase 1 closed: dev → review (clean first round) → accept (all pass) → main-agent
+PhaseEnd re-run green (`npm test` 284 pass / 0 fail, `npm run typecheck` exit 0).
+Behavior observed end-to-end: through a real `provider.stream()` call, the
+outgoing Anthropic request body carried `cache_control: {type:"ephemeral"}` on the
+system block, the last tool, **and** the last message's tail block — 3 breakpoints
+(≤ 4) — caching the growing conversation prefix.
 
 ## 1. Task Index
 
