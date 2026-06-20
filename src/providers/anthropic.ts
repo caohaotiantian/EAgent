@@ -81,11 +81,27 @@ export class AnthropicProvider implements Provider {
         ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
         : req.systemPrompt;
 
+    // A third breakpoint on the last content block of the last message caches
+    // the growing conversation prefix, so each turn reads the prior transcript
+    // from cache and writes only its own extension. Total breakpoints stay
+    // within Anthropic's limit: system + last tool + last message = 3 of 4.
+    const msgs = toAnthropicMessages(req.messages);
+    if (this.#cache && msgs.length > 0) {
+      const lastMsg = msgs[msgs.length - 1];
+      const content = (lastMsg as { content?: unknown }).content;
+      if (Array.isArray(content) && content.length > 0) {
+        const lastBlock = content[content.length - 1];
+        if (lastBlock !== undefined) {
+          (lastBlock as Record<string, unknown>).cache_control = { type: "ephemeral" };
+        }
+      }
+    }
+
     const body: Record<string, unknown> = {
       model: req.model,
       max_tokens: this.#maxTokens,
       system,
-      messages: toAnthropicMessages(req.messages),
+      messages: msgs,
       tools,
       stream: true,
     };
