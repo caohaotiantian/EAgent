@@ -34,6 +34,20 @@ export interface ToolResultBlock {
 }
 
 /**
+ * A reasoning ("thinking") block emitted by a model that exposes its chain of
+ * thought. `signature` is an opaque provider token (Anthropic) that must be
+ * echoed back verbatim when the block is replayed in a later turn — preserving
+ * it is what keeps multi-turn tool use valid under extended thinking. The kernel
+ * treats both fields opaquely; providers that don't reason simply never produce
+ * one.
+ */
+export interface ThinkingBlock {
+  type: "thinking";
+  thinking: string;
+  signature?: string;
+}
+
+/**
  * An image, supplied either inline (base64 in `data`) or by reference (`url`).
  * Providers map it to their own multimodal format; text-only providers and the
  * mock simply account for it. The kernel treats it opaquely.
@@ -48,7 +62,7 @@ export interface ImageBlock {
   url?: string;
 }
 
-export type ContentBlock = TextBlock | ToolCallBlock | ToolResultBlock | ImageBlock;
+export type ContentBlock = TextBlock | ToolCallBlock | ToolResultBlock | ThinkingBlock | ImageBlock;
 
 /** Build a user message carrying an image (plus optional caption text). */
 export function imageMessage(image: Omit<ImageBlock, "type">, caption?: string): Message {
@@ -155,6 +169,15 @@ export interface ToolContext {
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop" | "error";
 
+/**
+ * A normalized reasoning-effort dial. The kernel speaks one neutral vocabulary;
+ * each provider maps it to its own native control — Anthropic's `output_config`
+ * effort + adaptive thinking, OpenAI's `reasoning_effort`, Gemini's thinking
+ * budget. `off` means "don't ask the model to reason"; providers whose models
+ * always reason (e.g. Claude Fable) simply fall back to their default.
+ */
+export type ThinkingLevel = "off" | "low" | "medium" | "high";
+
 /** Token accounting for a completion. Providers report it; the agent sums it. */
 export interface Usage {
   inputTokens: number;
@@ -173,6 +196,7 @@ export function totalTokens(u: Usage): number {
 
 export type StreamEvent =
   | { type: "text_delta"; text: string }
+  | { type: "reasoning_delta"; text: string }
   | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
   | { type: "done"; message: Message; stopReason: StopReason; usage?: Usage };
 
@@ -182,6 +206,8 @@ export interface CompletionRequest {
   tools: ToolSpec[];
   model: string;
   signal: AbortSignal;
+  /** Requested reasoning effort; a provider maps it to its native control. */
+  thinking?: ThinkingLevel;
 }
 
 /**

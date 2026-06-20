@@ -115,3 +115,32 @@ test("throws on a non-retryable error", async () => {
   const provider = new GeminiProvider({ apiKey: "k", fetch: async () => new Response("bad", { status: 400 }) });
   await assert.rejects(() => collect(provider.stream(req())), /Gemini API error 400/);
 });
+
+test("maps thinking level to a thinkingConfig budget, and 0 when off", async () => {
+  let captured: any;
+  const provider = new GeminiProvider({
+    apiKey: "k",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(provider.stream(req({ thinking: "high" })));
+  assert.deepEqual(captured.generationConfig.thinkingConfig, { thinkingBudget: 24576, includeThoughts: true });
+  await collect(provider.stream(req({ thinking: "off" })));
+  assert.deepEqual(captured.generationConfig.thinkingConfig, { thinkingBudget: 0, includeThoughts: false });
+});
+
+test("surfaces thought parts as reasoning, keeping them out of the answer", async () => {
+  const chunks = [
+    { candidates: [{ content: { role: "model", parts: [{ text: "planning", thought: true }, { text: "Hi" }] }, finishReason: "STOP" }] },
+  ];
+  const provider = new GeminiProvider({ apiKey: "k", fetch: async () => sse(chunks) });
+  const events = await collect(provider.stream(req({ thinking: "low" })));
+  assert.deepEqual(
+    events.filter((e) => e.type === "reasoning_delta").map((e) => (e as { text: string }).text),
+    ["planning"],
+  );
+  const done = events.at(-1)!;
+  assert.ok(done.type === "done" && (done.message.content[0] as { text: string }).text === "Hi");
+});

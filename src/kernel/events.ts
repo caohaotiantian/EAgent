@@ -25,6 +25,8 @@ export type KernelEvents = {
   message: { message: Message };
   /** Incremental assistant text during streaming. */
   text_delta: { text: string };
+  /** Incremental reasoning ("thinking") text, for models that expose it. */
+  reasoning_delta: { text: string };
 
   tool_start: { call: ToolCallBlock };
   tool_end: { call: ToolCallBlock; result: ToolResult };
