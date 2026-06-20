@@ -176,6 +176,122 @@ test("caching can be disabled", async () => {
   assert.equal(typeof captured.system, "string", "system stays a plain string when caching is off");
 });
 
+const TWO_TOOLS = [
+  { name: "a", description: "", parameters: { type: "object" } as Record<string, unknown> },
+  { name: "b", description: "", parameters: { type: "object" } as Record<string, unknown> },
+];
+
+const HISTORY_MESSAGES: CompletionRequest["messages"] = [
+  { role: "user", content: [{ type: "text", text: "add" }] },
+  { role: "assistant", content: [{ type: "tool_call", id: "t1", name: "a", arguments: { x: 1 } }] },
+  { role: "tool", content: [{ type: "tool_result", toolCallId: "t1", content: "2" }] },
+  { role: "user", content: [{ type: "text", text: "thanks" }] },
+];
+
+/** Count every cache_control occurrence across system, tools, and all message blocks. */
+function countBreakpoints(captured: any): number {
+  let n = 0;
+  if (Array.isArray(captured.system)) {
+    for (const block of captured.system) if (block?.cache_control) n++;
+  }
+  if (Array.isArray(captured.tools)) {
+    for (const tool of captured.tools) if (tool?.cache_control) n++;
+  }
+  if (Array.isArray(captured.messages)) {
+    for (const msg of captured.messages) {
+      if (Array.isArray(msg?.content)) for (const block of msg.content) if (block?.cache_control) n++;
+    }
+  }
+  return n;
+}
+
+test("caches the last message's last content block by default", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(provider.stream(req({ tools: TWO_TOOLS, messages: HISTORY_MESSAGES })));
+  // The growing conversation tail carries the new breakpoint.
+  assert.deepEqual(captured.messages.at(-1).content.at(-1).cache_control, { type: "ephemeral" });
+  // The static system + last-tool breakpoints are unaffected.
+  assert.deepEqual(captured.system[0].cache_control, { type: "ephemeral" });
+  assert.equal(captured.tools[0].cache_control, undefined);
+  assert.deepEqual(captured.tools.at(-1).cache_control, { type: "ephemeral" });
+});
+
+test("does not cache any message block when caching is off", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    cache: false,
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(provider.stream(req({ tools: TWO_TOOLS, messages: HISTORY_MESSAGES })));
+  for (const msg of captured.messages) {
+    for (const block of msg.content) assert.equal(block.cache_control, undefined);
+  }
+  assert.equal(captured.system, "be helpful");
+  for (const tool of captured.tools) assert.equal(tool.cache_control, undefined);
+});
+
+test("leaves no breakpoint when the last message filters to empty content", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  // A tool message with no tool_result block maps to content: [].
+  const messages: CompletionRequest["messages"] = [
+    { role: "user", content: [{ type: "text", text: "go" }] },
+    { role: "tool", content: [{ type: "text", text: "x" }] },
+  ];
+  await collect(provider.stream(req({ tools: TWO_TOOLS, messages })));
+  assert.equal(captured.messages.at(-1).content.length, 0);
+  // The static breakpoints still apply.
+  assert.deepEqual(captured.system[0].cache_control, { type: "ephemeral" });
+  assert.deepEqual(captured.tools.at(-1).cache_control, { type: "ephemeral" });
+});
+
+test("uses at most 4 cache_control breakpoints", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(provider.stream(req({ tools: TWO_TOOLS, messages: HISTORY_MESSAGES })));
+  const count = countBreakpoints(captured);
+  assert.ok(count <= 4, `expected <= 4 breakpoints, got ${count}`);
+  assert.equal(count, 3);
+});
+
+test("handles an empty messages array without error", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(provider.stream(req({ tools: TWO_TOOLS, messages: [] })));
+  assert.deepEqual(captured.messages, []);
+  assert.deepEqual(captured.system[0].cache_control, { type: "ephemeral" });
+  assert.deepEqual(captured.tools.at(-1).cache_control, { type: "ephemeral" });
+});
+
 const THINKING_EVENTS = [
   { event: "message_start", data: { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 0 } } } },
   { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } },
