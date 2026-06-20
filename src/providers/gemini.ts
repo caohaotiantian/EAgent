@@ -54,9 +54,19 @@ export class GeminiProvider implements Provider {
   async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
     if (!this.#apiKey) throw new Error("GeminiProvider: GEMINI_API_KEY is not set");
 
+    const generationConfig: Record<string, unknown> = { maxOutputTokens: this.#maxTokens };
+    // Gemini 2.5 exposes a `thinkingBudget` (token allowance) and asks for the
+    // thought summary via `includeThoughts`. Map the neutral level to a budget;
+    // `off` sets 0, which disables thinking on models that allow it.
+    if (req.thinking) {
+      generationConfig.thinkingConfig = {
+        thinkingBudget: thinkingBudget(req.thinking),
+        includeThoughts: req.thinking !== "off",
+      };
+    }
     const body: Record<string, unknown> = {
       contents: toGeminiContents(req.messages),
-      generationConfig: { maxOutputTokens: this.#maxTokens },
+      generationConfig,
     };
     if (req.systemPrompt) body.systemInstruction = { parts: [{ text: req.systemPrompt }] };
     if (req.tools.length) body.tools = [{ functionDeclarations: req.tools.map(toGeminiTool) }];
@@ -91,7 +101,10 @@ export class GeminiProvider implements Provider {
       const candidate = parsed.candidates?.[0];
       if (!candidate) continue;
       for (const part of candidate.content?.parts ?? []) {
-        if (typeof part.text === "string") {
+        if (typeof part.text === "string" && part.thought === true) {
+          // A thought summary part — surfaced as reasoning, kept out of the answer.
+          yield { type: "reasoning_delta", text: part.text };
+        } else if (typeof part.text === "string") {
           text += part.text;
           yield { type: "text_delta", text: part.text };
         } else if (part.functionCall) {
@@ -173,11 +186,28 @@ function mapFinishReason(reason: string): StopReason {
   }
 }
 
+/** Map the neutral effort level to a Gemini thinking-token budget. */
+function thinkingBudget(level: "off" | "low" | "medium" | "high"): number {
+  switch (level) {
+    case "off":
+      return 0;
+    case "low":
+      return 1024;
+    case "medium":
+      return 8192;
+    case "high":
+      return 24576;
+  }
+}
+
 // -- minimal stream-chunk typings -------------------------------------------
 
 interface GeminiChunk {
   candidates?: {
-    content?: { role?: string; parts?: { text?: string; functionCall?: { name: string; args?: Record<string, unknown> } }[] };
+    content?: {
+      role?: string;
+      parts?: { text?: string; thought?: boolean; functionCall?: { name: string; args?: Record<string, unknown> } }[];
+    };
     finishReason?: string;
   }[];
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };

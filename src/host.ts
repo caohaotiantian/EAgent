@@ -20,7 +20,7 @@ import { CapabilityManager } from "./kernel/capabilities.js";
 import { CommandRegistry } from "./kernel/commands.js";
 import { ExtensionHost } from "./kernel/extension.js";
 import { FileBackend } from "./kernel/store.js";
-import type { Logger, UI } from "./kernel/types.js";
+import type { Logger, ThinkingLevel, UI } from "./kernel/types.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAIProvider } from "./providers/openai.js";
 import { GeminiProvider } from "./providers/gemini.js";
@@ -80,6 +80,8 @@ export const PROVIDER_NAMES = ["anthropic", "openai", "gemini", "mock"] as const
 export interface AgentHostOptions {
   provider?: string;
   model?: string;
+  /** Reasoning effort; falls back to the `EAGENT_THINKING` env var, else `off`. */
+  thinking?: ThinkingLevel;
   yolo?: boolean;
   ui?: UI;
   logger?: Logger;
@@ -143,6 +145,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     capabilities,
     model,
     provider: defaultProvider,
+    thinking: opts.thinking ?? thinkingFromEnv(process.env.EAGENT_THINKING),
   });
 
   agent.providers.register(new MockProvider(), { default: defaultProvider === "mock" });
@@ -228,6 +231,12 @@ export function loadEnvFile(file: string = join(process.cwd(), ".env")): string[
     setKeys.push(key);
   }
   return setKeys;
+}
+
+/** Parse a thinking level from a string (env/flag), ignoring anything unknown. */
+export function thinkingFromEnv(value: string | undefined): ThinkingLevel {
+  const v = value?.trim().toLowerCase();
+  return v === "low" || v === "medium" || v === "high" || v === "off" ? v : "off";
 }
 
 /** Resolve which provider to default to given the user's flag and what's configured. */

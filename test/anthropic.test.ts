@@ -176,6 +176,86 @@ test("caching can be disabled", async () => {
   assert.equal(typeof captured.system, "string", "system stays a plain string when caching is off");
 });
 
+const THINKING_EVENTS = [
+  { event: "message_start", data: { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 0 } } } },
+  { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } },
+  { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "let me " } } },
+  { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "think" } } },
+  { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "SIG==" } } },
+  { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+  { event: "content_block_start", data: { type: "content_block_start", index: 1, content_block: { type: "text" } } },
+  { event: "content_block_delta", data: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "answer" } } },
+  { event: "content_block_stop", data: { type: "content_block_stop", index: 1 } },
+  { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 7 } } },
+];
+
+test("maps a thinking level to adaptive thinking + effort, omitting it when off", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(provider.stream(req({ thinking: "high" })));
+  assert.deepEqual(captured.thinking, { type: "adaptive", display: "summarized" });
+  assert.deepEqual(captured.output_config, { effort: "high" });
+  // `off` (and the unset default) must send neither — Fable/Opus 4.7+ reject budget_tokens.
+  await collect(provider.stream(req({ thinking: "off" })));
+  assert.equal(captured.thinking, undefined);
+  assert.equal(captured.output_config, undefined);
+});
+
+test("parses thinking blocks: emits reasoning deltas and keeps a signed thinking block", async () => {
+  const provider = new AnthropicProvider({ apiKey: "test", fetch: async () => sseResponse(THINKING_EVENTS) });
+  const events = await collect(provider.stream(req({ thinking: "low" })));
+  const reasoning = events.filter((e) => e.type === "reasoning_delta").map((e) => (e as { text: string }).text);
+  assert.deepEqual(reasoning, ["let me ", "think"]);
+  const done = events.at(-1)!;
+  assert.ok(done.type === "done");
+  if (done.type === "done") {
+    const thinking = done.message.content[0];
+    assert.equal(thinking?.type, "thinking");
+    assert.deepEqual(thinking, { type: "thinking", thinking: "let me think", signature: "SIG==" });
+    assert.equal(done.message.content[1]?.type, "text");
+  }
+});
+
+test("round-trips a signed thinking block back to the wire, dropping unsigned ones", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    cache: false,
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "go" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "kept", signature: "SIG==" },
+              { type: "thinking", thinking: "dropped" },
+              { type: "text", text: "ok" },
+            ],
+          },
+        ],
+      }),
+    ),
+  );
+  const blocks = captured.messages[1].content;
+  assert.deepEqual(blocks[0], { type: "thinking", thinking: "kept", signature: "SIG==" });
+  // The signatureless block is dropped; only the kept thinking + text remain.
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[1].type, "text");
+});
+
 test("throws on a non-retryable error status", async () => {
   const provider = new AnthropicProvider({
     apiKey: "test",

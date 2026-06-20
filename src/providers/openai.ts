@@ -74,6 +74,10 @@ export class OpenAIProvider implements Provider {
       stream_options: { include_usage: true },
     };
     body[this.#maxTokensParam] = this.#maxTokens;
+    // Reasoning models (o-series, GPT-5, and compatible gateways) take a
+    // `reasoning_effort` dial. `off` omits it so non-reasoning models are
+    // unaffected.
+    if (req.thinking && req.thinking !== "off") body.reasoning_effort = req.thinking;
 
     const res = await fetchWithRetry({
       url: `${this.#baseUrl}/chat/completions`,
@@ -112,6 +116,11 @@ export class OpenAIProvider implements Provider {
       if (choice.delta?.content) {
         textBuffer += choice.delta.content;
         yield { type: "text_delta", text: choice.delta.content };
+      }
+      // Some reasoning endpoints stream the chain of thought on a sibling
+      // `reasoning_content` field. Surface it without folding it into the answer.
+      if (choice.delta?.reasoning_content) {
+        yield { type: "reasoning_delta", text: choice.delta.reasoning_content };
       }
       for (const tc of choice.delta?.tool_calls ?? []) {
         const slot = toolCalls.get(tc.index) ?? { id: "", name: "", args: "" };
@@ -220,6 +229,7 @@ interface OpenAIChunk {
   choices?: {
     delta?: {
       content?: string;
+      reasoning_content?: string;
       tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[];
     };
     finish_reason?: string | null;
