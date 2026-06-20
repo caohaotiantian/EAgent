@@ -53,7 +53,11 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   dependency DAG of `tool`/`agent` steps with `${id}` output substitution;
   independent steps run in parallel, tool steps reuse the kernel's guard
   sequence so capability/policy checks still apply),
-  `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
+  `memory`,
+  `prune` (token-budget tool-output pruning on `transformContext` — truncates
+  old, oversized `tool_result` content beyond a protected recent window; no
+  capability, `EAGENT_PRUNE=off` kill switch),
+  `planmode`, `session`, `packages`, `trace`, `context-files`,
   `limits` (per-run call/token budgets + tool-output byte cap; on overflow it
   spills the full output to a gitignored file under `.eagent/tool-output` and
   returns a retrieval hint instead of discarding the clipped bytes),

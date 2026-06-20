@@ -34,6 +34,7 @@ import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
+import prune from "./extensions/prune.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
@@ -62,6 +63,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["subagents", subagents],
   ["dynamic-workflow", dynamicWorkflow],
   ["memory", memory],
+  ["prune", prune],
   ["planmode", planmode],
   ["session", session],
   ["packages", packages],
