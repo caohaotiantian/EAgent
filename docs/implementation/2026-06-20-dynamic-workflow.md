@@ -1,8 +1,11 @@
 # Implementation: Dynamic Workflow Extension
 
 - Slug: `2026-06-20-dynamic-workflow`
-- Design doc: `docs/design/2026-06-20-dynamic-workflow.md` (L1 closed)
-- Status: L2 closed (rounds 1 and 2 clean)
+- Design doc: `docs/design/2026-06-20-dynamic-workflow.md`
+- Status: closed
+- Closing-commit: 459e31a
+- Closed-on: 2026-06-20
+- Deferred: none
 
 ## 1. Task Index
 
