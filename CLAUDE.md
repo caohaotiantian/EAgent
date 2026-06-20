@@ -46,6 +46,10 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   (all `fetch` + SSE, no SDK), shared `http.ts` plumbing, and `cassette`
   (record/replay). All read config from `process.env`.
 - `src/extensions/` — `core-tools`, `skills`, `mcp`, `codeact`, `subagents`,
+  `dynamic-workflow` (a `run_workflow` tool that executes a model-emitted
+  dependency DAG of `tool`/`agent` steps with `${id}` output substitution;
+  independent steps run in parallel, tool steps reuse the kernel's guard
+  sequence so capability/policy checks still apply),
   `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
   `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
   `flow-guard` (compositional egress gate — taints a session on a source
