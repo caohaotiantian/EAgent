@@ -27,6 +27,7 @@ import { GeminiProvider } from "./providers/gemini.js";
 import { MockProvider } from "./providers/mock.js";
 
 import coreTools from "./extensions/core-tools.js";
+import search from "./extensions/search.js";
 import skills from "./extensions/skills.js";
 import mcp from "./extensions/mcp.js";
 import codeact from "./extensions/codeact.js";
@@ -53,6 +54,7 @@ import type { ActivateFn } from "./kernel/extension.js";
 /** The canonical built-in extension set, in load order. */
 export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["core-tools", coreTools],
+  ["search", search],
   ["skills", skills],
   ["mcp", mcp],
   ["codeact", codeact],
