@@ -1,7 +1,19 @@
 # Implementation: resilient `edit` matching — whitespace-insensitive fallbacks
 
+Status: closed
+Closing-commit: c5f8f32
+Closed-on: 2026-06-20
+Deferred: finding — `IndentationFlexibleReplacer` unreachable-as-first-winner
+(see design closure block); harmless, optional future Simplicity prune.
 Slug: `2026-06-20-resilient-edit`
 Design doc: `docs/design/2026-06-20-resilient-edit.md`
+
+Phase 1 closed: dev → review (clean first round) → accept (all pass) → main-agent
+PhaseEnd re-run green (`npm test` 279 pass / 0 fail, `npm run typecheck` exit 0).
+Behavior observed end-to-end: an `old` supplied with the wrong indentation
+(2-space + trailing space vs the file's 4-space) — an exact-match miss — was
+relocated by the line-trimmed fallback and edited correctly, with the result
+announcing `matched via whitespace-insensitive fallback: line-trimmed`.
 
 ## 1. Task Index
 

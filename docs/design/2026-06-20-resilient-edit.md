@@ -1,6 +1,14 @@
 # Design: resilient `edit` matching — whitespace-insensitive fallbacks
 
-Status: draft
+Status: closed
+Closing-commit: c5f8f32
+Closed-on: 2026-06-20
+Deferred: finding — `IndentationFlexibleReplacer` is provably unreachable as a
+first winner (its yielded span is always subsumed by `LineTrimmedReplacer`, which
+runs earlier, once opencode's interleaved `BlockAnchorReplacer` is excluded per
+D1); it is retained as a faithful port of opencode's ladder and is harmless (it
+can never cause a wrong edit), but a future Simplicity-First pass could drop it
+and relabel its unit test (no tracker available; recorded here).
 Slug: `2026-06-20-resilient-edit`
 
 ## 1. Background and Purpose
@@ -37,24 +45,23 @@ the agent into re-read/retry loops that waste turns and context.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/edit-match.ts` — a pure, dependency-free module exporting
+- [x] `src/extensions/edit-match.ts` — a pure, dependency-free module exporting
       `locateEdit(content, find, replaceAll): EditMatch` that returns the matched
       span and the strategy that found it, or a typed
       not-found / ambiguous / disproportionate result. Houses the ported
       structural replacers, the `isDisproportionateMatch` guard, and the
       empty-`find` guard (D2).
-- [ ] `src/extensions/core-tools.ts` — the `edit` tool calls `locateEdit` on an
+- [x] `src/extensions/core-tools.ts` — the `edit` tool calls `locateEdit` on an
       exact-match miss, replaces the located span (honoring `replaceAll`), and
       reports which strategy matched when it was a non-exact one.
-- [ ] `test/edit-match.test.ts` — offline unit tests for each replacer and the
+- [x] `test/edit-match.test.ts` — offline unit tests for each replacer and the
       `locateEdit` contract (exact precedence, unique-only acceptance,
       strict→loose order, not-found/ambiguous results).
-- [ ] `test/core-tools.test.ts` — extend with live `edit` tests: whitespace-drift
+- [x] `test/core-tools.test.ts` — extend with live `edit` tests: whitespace-drift
       now edits; exact behavior and the ambiguity guard are unchanged; the
       feedback names a non-exact strategy.
-- [ ] `CLAUDE.md` — no change required unless the `edit` one-liner is inaccurate;
-      the four-builtins description does not enumerate matching semantics
-      (confirm at implementation; treat as out-of-scope if so).
+- [x] `CLAUDE.md` — confirmed no change required: the four-builtins description
+      does not enumerate matching semantics, so it stays accurate (out of scope).
 
 ## 3. Scope Boundary (NOT in scope)
 
