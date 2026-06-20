@@ -123,6 +123,19 @@ test("AC-5b glob does not follow an in-root symlink", async () => {
   });
 });
 
+test("AC-5b grep does not read through an in-root symlink", async () => {
+  await withWorkspace(async (root) => {
+    const outside = mkdtempSync(join(tmpdir(), "eagent-outside-"));
+    writeFileSync(join(outside, "secret.ts"), "SEKRET_NEEDLE here\n");
+    write(root, "a.ts", "nothing to see\n");
+    symlinkSync(outside, join(root, "link"));
+    const tools = await loadSearch();
+
+    const r = await run(tools.get("grep"), { pattern: "SEKRET_NEEDLE" });
+    assert.ok(!/SEKRET_NEEDLE/.test(r.content), "grep must not read through the symlink to the out-of-root target");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // T3 — grep: content+location, include, caps, binary, metadata, capability
 // ---------------------------------------------------------------------------
