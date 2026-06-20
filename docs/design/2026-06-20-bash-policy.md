@@ -1,5 +1,10 @@
 # Design: `bash-policy` extension — command-granular shell authority
 
+Status: closed
+Closing-commit: 4069d10
+Closed-on: 2026-06-20
+Deferred: none
+
 Slug: `2026-06-20-bash-policy`
 
 ## 1. Background and Purpose
@@ -39,19 +44,19 @@ eventually needs.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/bash-policy.ts` — the extension: arity extraction,
+- [x] `src/extensions/bash-policy.ts` — the extension: arity extraction,
       ruleset evaluation, a `beforeToolCall` guard, a `/bash-policy` command,
       and an `EAGENT_BASH_POLICY=off` kill switch.
-- [ ] An exported pure helper `extractCommand(commandLine: string): string`
+- [x] An exported pure helper `extractCommand(commandLine: string): string`
       returning the arity-based command prefix (e.g. `"git commit"`), and a
       pure `evaluate(command, rules, fallthrough): Action` — both unit-testable
       without the agent loop.
-- [ ] `test/bash-policy.test.ts` — offline tests covering arity extraction,
+- [x] `test/bash-policy.test.ts` — offline tests covering arity extraction,
       ruleset evaluation precedence, and the live guard through the agent loop
       (deny blocks, ask defers to the human, allow passes, no-op default).
-- [ ] `bash-policy` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`),
+- [x] `bash-policy` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`),
       placed beside the other security extensions (`flow-guard`, `integrity`).
-- [ ] `CLAUDE.md` extension inventory updated with a one-line `bash-policy`
+- [x] `CLAUDE.md` extension inventory updated with a one-line `bash-policy`
       entry.
 
 `docs/EXTENSIONS.md` is **not** touched: a grep confirms it is the extension
