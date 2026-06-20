@@ -314,8 +314,9 @@ async function runWorkflow(plan: PlannedWorkflow, ctx: ToolContext, e: Extension
     const run = async (id: string): Promise<void> => {
       const res = await runStep(byId.get(id)!, outputs, ctx, e);
       status.set(id, res.status);
-      if (res.status === "done") outputs[id] = res.output;
-      else outputs[id] = res.output; // keep error/empty text for the rundown
+      // Record the output regardless of status; an error step's text shows in the
+      // rundown, and its non-"done" status keeps dependents from consuming it.
+      outputs[id] = res.output;
       pending.delete(id);
     };
 
