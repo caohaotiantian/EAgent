@@ -1,6 +1,12 @@
 # Design: dedicated `glob` / `grep` search tools (fs:read, parallel)
 
-Status: draft
+Status: closed
+Closing-commit: 8454798
+Closed-on: 2026-06-20
+Deferred: none (closeout finding "grep symlink-skip tested only via glob" was
+fixed in the closeout round; the "grep `include` matches the full relative path,
+not basename" behavior is by-design per D6 — an `include:"*.md"` matches root-
+level `.md` files, `**/*.md` matches nested ones — recorded, not a defect)
 Slug: `2026-06-20-search-tools`
 
 ## 1. Background and Purpose
@@ -49,18 +55,18 @@ read-only operation.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/search.ts` — a `search` extension registering two
+- [x] `src/extensions/search.ts` — a `search` extension registering two
       `fs:read`, `executionMode:"parallel"` tools: `glob(pattern, path?)` and
       `grep(pattern, path?, include?)`. Pure-Node recursive walk confined to the
       workspace root, with a default-ignore set, result limits, and truncation
       markers.
-- [ ] `test/search.test.ts` — offline tests: glob matches by pattern; grep finds
+- [x] `test/search.test.ts` — offline tests: glob matches by pattern; grep finds
       content with `file:line`; the `include` filter scopes grep; both confine to
       the workspace root (reject `../` escapes); both need only `fs:read` (work
       with `shell:exec` denied); default-ignore skips `node_modules`/`.git`;
       result limits truncate with a marker.
-- [ ] `src/host.ts` — register `search` in `BUILTIN_EXTENSIONS`.
-- [ ] `CLAUDE.md` — add a one-line `search` entry to the extension inventory.
+- [x] `src/host.ts` — register `search` in `BUILTIN_EXTENSIONS`.
+- [x] `CLAUDE.md` — add a one-line `search` entry to the extension inventory.
 
 ## 3. Scope Boundary (NOT in scope)
 

@@ -1,7 +1,21 @@
 # Implementation: dedicated `glob` / `grep` search tools
 
+Status: closed
+Closing-commit: 8454798
+Closed-on: 2026-06-20
+Deferred: none
 Slug: `2026-06-20-search-tools`
 Design doc: `docs/design/2026-06-20-search-tools.md`
+
+Phase 1 closed: dev → review (clean first round) → one within-round fix
+(escape the raw NUL in the binary-guard fixture so the test file stays git-text)
+→ accept (all pass) → main-agent PhaseEnd re-run green (`npm test` 298 pass /
+0 fail, `npm run typecheck` exit 0). A closeout-round fix added a grep-specific
+symlink-skip test (AC-5b for grep). Behavior observed end-to-end: under a
+capability manager with `fallback:"deny"` (so `shell:exec` would be denied), the
+agent ran `glob("**/*.ts")` → `src/app.ts` and `grep("TOKEN")` →
+`README.md:2:...` + `src/app.ts:1:...`, using only the `fs:read` granted by
+`core-tools` — search without `shell:exec`.
 
 ## 1. Task Index
 
