@@ -45,6 +45,7 @@ import web from "./extensions/web.js";
 import checkpoint from "./extensions/checkpoint.js";
 import introspect from "./extensions/introspect.js";
 import journal from "./extensions/journal.js";
+import todo from "./extensions/todo.js";
 import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
 import bashPolicy from "./extensions/bash-policy.js";
@@ -72,6 +73,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["checkpoint", checkpoint],
   ["introspect", introspect],
   ["journal", journal],
+  ["todo", todo],
   ["prompts", promptsExt],
   ["flow-guard", flowGuard],
   ["bash-policy", bashPolicy],

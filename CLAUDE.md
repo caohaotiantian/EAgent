@@ -58,6 +58,8 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   spills the full output to a gitignored file under `.eagent/tool-output` and
   returns a retrieval hint instead of discarding the clipped bytes),
   `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
+  `todo` (session-scoped in-memory todo list — a `todowrite` tool that replaces
+  and echoes the list plus a `/todos` command; no capability),
   `flow-guard` (compositional egress gate — taints a session on a source
   capability, default `shell:exec`, or sensitive data in the transcript, then
   holds egress, default `net:fetch`; ask or block mode),
