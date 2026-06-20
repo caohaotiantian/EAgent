@@ -252,7 +252,15 @@ function textOf(message: Message): string {
 function renderFallback(older: Message[]): string {
   const lines = older.map((m) => {
     const body = m.content
-      .map((b) => (b.type === "text" ? b.text : b.type === "tool_call" ? `[call ${b.name}]` : "[result]"))
+      .map((b) =>
+        b.type === "text"
+          ? b.text
+          : b.type === "tool_call"
+            ? `[call ${b.name}]`
+            : b.type === "thinking"
+              ? "[thinking]"
+              : "[result]",
+      )
       .join(" ");
     return `- ${m.role}: ${body.slice(0, 120)}`;
   });
