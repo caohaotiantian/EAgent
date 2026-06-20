@@ -31,6 +31,7 @@ import skills from "./extensions/skills.js";
 import mcp from "./extensions/mcp.js";
 import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
+import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
@@ -55,6 +56,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["mcp", mcp],
   ["codeact", codeact],
   ["subagents", subagents],
+  ["dynamic-workflow", dynamicWorkflow],
   ["memory", memory],
   ["planmode", planmode],
   ["session", session],
