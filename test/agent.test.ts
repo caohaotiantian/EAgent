@@ -249,3 +249,18 @@ test("unknown tools yield an error result, not a crash", async () => {
   const toolMsg = agent.messages.find((m) => m.role === "tool")!;
   assert.match((toolMsg.content[0] as { content: string }).content, /unknown tool/i);
 });
+
+test("forwards the thinking level and surfaces reasoning deltas as a hook event", async () => {
+  const { agent, provider } = makeHarness({ responder: [{ reasoning: "thinking hard", text: "done" }] });
+  agent.thinking = "high";
+  const reasoning: string[] = [];
+  agent.hooks.on("reasoning_delta", ({ text }) => reasoning.push(text));
+
+  await agent.run("go");
+
+  assert.equal(provider.lastThinking, "high", "the level reaches the provider request");
+  assert.equal(reasoning.join(""), "thinking hard");
+  // The signed thinking block is retained on the assistant message.
+  const assistant = agent.messages.find((m) => m.role === "assistant")!;
+  assert.equal(assistant.content[0]?.type, "thinking");
+});
