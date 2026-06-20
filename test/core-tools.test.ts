@@ -82,6 +82,67 @@ test("edit replaces unique text and guards ambiguous edits", async () => {
   assert.match(missing.content, /not found/);
 });
 
+test("edit succeeds on whitespace-drift via a fallback strategy", async () => {
+  const tools = await loadTools();
+  await run(tools.get("write"), { path: "drift.txt", content: "function f() {\n    return 42;\n}\n" });
+
+  // `old` differs only by the middle line's indentation; the exact match misses
+  // and the relaxed ladder locates the real indented span.
+  const r = await run(tools.get("edit"), {
+    path: "drift.txt",
+    old: "function f() {\nreturn 42;\n}",
+    new: "function f() {\n    return 7;\n}",
+  });
+  assert.equal(r.isError, undefined);
+  assert.match(r.content, /matched via/);
+  assert.match(r.content, /line-trimmed/);
+  assert.equal(readFileSync(join(WORKSPACE, "drift.txt"), "utf8"), "function f() {\n    return 7;\n}\n");
+});
+
+test("edit keeps the exact-match guards unchanged", async () => {
+  const tools = await loadTools();
+  await run(tools.get("write"), { path: "guards.txt", content: "dup dup" });
+
+  const twice = await run(tools.get("edit"), { path: "guards.txt", old: "dup", new: "Z" });
+  assert.equal(twice.isError, true);
+  assert.match(twice.content, /appears 2 times/);
+
+  const absent = await run(tools.get("edit"), { path: "guards.txt", old: "nope", new: "Z" });
+  assert.equal(absent.isError, true);
+  assert.match(absent.content, /not found/);
+});
+
+test("edit rejects a disproportionate relaxed span and leaves the file unchanged", async () => {
+  const tools = await loadTools();
+  const lines = Array.from({ length: 10 }, (_, i) => `row${i}`);
+  const original = lines.join("\n") + "\n";
+  await run(tools.get("write"), { path: "prop.txt", content: original });
+
+  // A single-line `old` (literal \n separators) escape-normalizes to a ten-line
+  // span — far larger than the find — so the edit must refuse and ask for a re-read.
+  const r = await run(tools.get("edit"), { path: "prop.txt", old: lines.join("\\n"), new: "ONE" });
+  assert.equal(r.isError, true);
+  assert.match(r.content, /re-read/);
+  assert.equal(readFileSync(join(WORKSPACE, "prop.txt"), "utf8"), original);
+});
+
+test("edit replaceAll over a relaxed unique span replaces the located text", async () => {
+  const tools = await loadTools();
+  await run(tools.get("write"), { path: "relaxed-all.txt", content: "  const x = 1;\n" });
+
+  // `old` collapses internal whitespace runs; the relaxed match locates the one
+  // real span, and replaceAll replaces that single located span.
+  const r = await run(tools.get("edit"), {
+    path: "relaxed-all.txt",
+    old: "const   x   =   1;",
+    new: "  const x = 2;",
+    replaceAll: true,
+  });
+  assert.equal(r.isError, undefined);
+  assert.match(r.content, /matched via/);
+  assert.equal(readFileSync(join(WORKSPACE, "relaxed-all.txt"), "utf8"), "  const x = 2;\n");
+});
+
 test("bash is gated behind shell:exec and runs when allowed", async () => {
   // Denied: shell:exec is not auto-granted by core-tools.
   const denied = makeHarness({ responder: [{ toolCalls: [{ name: "bash", arguments: { command: "echo hi" } }] }, { text: "ok" }], fallback: "deny" });

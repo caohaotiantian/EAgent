@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import { locateEdit } from "./edit-match.js";
 
 const execAsync = promisify(exec);
 
@@ -146,20 +147,46 @@ export default function activate(e: ExtensionAPI): void {
           return fail(`Cannot read ${path}: ${(err as Error).message}`);
         }
         const oldStr = String(args.old);
-        const count = content.split(oldStr).length - 1;
-        if (count === 0) return fail(`Text not found in ${path}.`);
-        if (count > 1 && !args.replaceAll) {
-          return fail(`Text appears ${count} times in ${path}; pass replaceAll or make it unique.`);
+        const newStr = String(args.new);
+        const match = locateEdit(content, oldStr, !!args.replaceAll);
+
+        let updated: string;
+        let message: string;
+        switch (match.kind) {
+          case "exact": {
+            const count = match.count;
+            if (count > 1 && !args.replaceAll) {
+              return fail(`Text appears ${count} times in ${path}; pass replaceAll or make it unique.`);
+            }
+            updated = args.replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
+            message = `Edited ${path} (${count} replacement${count === 1 ? "" : "s"}).`;
+            break;
+          }
+          case "relaxed": {
+            updated = args.replaceAll
+              ? content.split(match.span).join(newStr)
+              : content.replace(match.span, newStr);
+            message = `Edited ${path} (1 replacement; matched via whitespace-insensitive fallback: ${match.strategy}).`;
+            break;
+          }
+          case "ambiguous":
+            return fail(
+              `Text matches multiple places after whitespace-insensitive search in ${path}; add surrounding context to make it unique.`,
+            );
+          case "disproportionate":
+            return fail(
+              `The matched span is much larger than the text to replace in ${path}; re-read the file and provide the exact text.`,
+            );
+          case "not-found":
+            return fail(`Text not found in ${path}.`);
         }
-        const updated = args.replaceAll
-          ? content.split(oldStr).join(String(args.new))
-          : content.replace(oldStr, String(args.new));
+
         try {
           writeFileSync(path, updated);
         } catch (err) {
           return fail(`Cannot write ${path}: ${(err as Error).message}`);
         }
-        return ok(`Edited ${path} (${count} replacement${count === 1 ? "" : "s"}).`);
+        return ok(message);
       },
     }),
   );
