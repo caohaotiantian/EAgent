@@ -1,7 +1,17 @@
 # Implementation: lossless tool-output overflow — spill-to-file in `limits`
 
+Status: closed
+Closing-commit: 0fa3219
+Closed-on: 2026-06-20
+Deferred: none
 Slug: `2026-06-20-tool-output-spill`
 Design doc: `docs/design/2026-06-20-tool-output-spill.md`
+
+Phase 1 closed: dev → review (clean first round) → accept (all pass) → main-agent
+PhaseEnd re-run green (`npm test` 261 pass / 0 fail, `npm run typecheck` exit 0).
+Behavior observed end-to-end: a ~112 KB tool output was capped to ~16.5 KB in the
+transcript with a `full output saved to .eagent/tool-output/...` marker, and the
+spill file's bytes equalled the full original output (lossless overflow).
 
 ## 1. Task Index
 

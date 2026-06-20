@@ -1,6 +1,9 @@
 # Design: lossless tool-output overflow — spill-to-file in `limits`
 
-Status: draft
+Status: closed
+Closing-commit: 0fa3219
+Closed-on: 2026-06-20
+Deferred: none
 Slug: `2026-06-20-tool-output-spill`
 
 ## 1. Background and Purpose
@@ -33,19 +36,19 @@ blindly.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/limits.ts` — the `afterToolCall` truncation hook spills the
+- [x] `src/extensions/limits.ts` — the `afterToolCall` truncation hook spills the
       full output to a file on overflow and emits a retrieval hint; a best-effort
       age-based cleanup of stale spill files on activation; new store-backed
       config (`spillToolOutput` on/off, `toolOutputDir`, `toolOutputRetentionDays`)
       surfaced through the existing `/limits` command; an `EAGENT_TOOL_SPILL=off`
       kill switch.
-- [ ] `test/limits.test.ts` — offline tests: overflow spills the full content to
+- [x] `test/limits.test.ts` — offline tests: overflow spills the full content to
       a readable file + hint; under-limit is untouched and writes nothing; spill
       disabled falls back to the current in-context marker; a spill-write failure
       falls back to in-context truncation without throwing; `isError`/`details`/
       `terminate` survive the spill branch; retention cleanup removes stale files;
       the existing budget/command tests stay green.
-- [ ] `CLAUDE.md` — update the one-line `limits` description to mention
+- [x] `CLAUDE.md` — update the one-line `limits` description to mention
       spill-to-file (the inventory currently says only "limits").
 
 ## 3. Scope Boundary (NOT in scope)
