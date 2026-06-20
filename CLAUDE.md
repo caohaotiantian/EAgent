@@ -55,6 +55,9 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `flow-guard` (compositional egress gate — taints a session on a source
   capability, default `shell:exec`, or sensitive data in the transcript, then
   holds egress, default `net:fetch`; ask or block mode),
+  `bash-policy` (command-granular shell policy gate — reduces a command line to
+  an arity-based command family and evaluates an allow/deny/ask ruleset over the
+  full command line; no-op by default),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
   and flags descriptions that change across sessions — a rug-pull guard).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,

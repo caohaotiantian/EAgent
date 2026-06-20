@@ -46,6 +46,7 @@ import introspect from "./extensions/introspect.js";
 import journal from "./extensions/journal.js";
 import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
+import bashPolicy from "./extensions/bash-policy.js";
 import integrity from "./extensions/integrity.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
@@ -71,6 +72,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["journal", journal],
   ["prompts", promptsExt],
   ["flow-guard", flowGuard],
+  ["bash-policy", bashPolicy],
   ["integrity", integrity],
 ];
 
