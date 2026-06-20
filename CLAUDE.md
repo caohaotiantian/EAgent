@@ -51,7 +51,10 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   independent steps run in parallel, tool steps reuse the kernel's guard
   sequence so capability/policy checks still apply),
   `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
-  `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
+  `limits` (per-run call/token budgets + tool-output byte cap; on overflow it
+  spills the full output to a gitignored file under `.eagent/tool-output` and
+  returns a retrieval hint instead of discarding the clipped bytes),
+  `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
   `flow-guard` (compositional egress gate — taints a session on a source
   capability, default `shell:exec`, or sensitive data in the transcript, then
   holds egress, default `net:fetch`; ask or block mode),
