@@ -1,7 +1,19 @@
 # Implementation: `bash-policy` extension
 
+Status: closed
+Closing-commit: 4069d10
+Closed-on: 2026-06-20
+Deferred: none
+
 Slug: `2026-06-20-bash-policy`
 Design doc: `docs/design/2026-06-20-bash-policy.md`
+
+Phase 1 closed: dev → review (clean first round) → accept (all pass) → main-agent
+PhaseEnd re-run green (`npm test` 252 pass / 0 fail, `npm run typecheck` exit 0).
+Behavior observed end-to-end: a `rm *`→deny rule blocked a scripted
+`bash {command:"rm -rf build"}` call through the real agent loop, surfacing
+`"Tool call blocked: bash-policy: blocked rm (policy deny)"` to the model with the
+command never executing.
 
 ## 1. Task Index
 
