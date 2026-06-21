@@ -137,4 +137,14 @@ change any existing assertion. `npm test` (all 343+ tests) must stay green.
 
 ## Closure
 
-Status: open.
+Status: closed
+Closing-commit: 24fa6b0
+Closed-on: 2026-06-21
+Deferred: none
+
+Phase 1 closed: `npm run typecheck` exit 0; `npm test` exit 0 (356 passed);
+`npx tsx --test test/bash-policy.test.ts` exit 0 (27 passed). No L2 rollback
+occurred (no Deprecated section). Regression protection held — the pre-existing
+bash-policy suite (argv[0] normalization + family/evaluate/ask tests) stayed green
+and unmodified; `evaluate` reimplemented on `evaluateAny` is behavior-identical for
+the single-line case.
