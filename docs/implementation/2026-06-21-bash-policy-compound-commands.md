@@ -162,4 +162,15 @@ rewired guard.
 
 ## Closure
 
-Status: open.
+Status: closed
+Closing-commit: 4a9be26
+Closed-on: 2026-06-21
+Deferred: none
+
+Phase 1 closed in a single L3 round (clean first review, no fix). `npm run
+typecheck` exit 0; `npm test` exit 0 (367 passed); `npx tsx --test
+test/bash-policy.test.ts` exit 0 (38 passed). No L2 rollback (no Deprecated
+section). Regression protection held — the prior argv0 + wrapper-unwrapping +
+family/evaluate/ask tests stayed green and unmodified through the rewired guard;
+`expandCommands("sudo rm -rf build")` reproduces the prior `[outer, inner]`
+candidate set.
