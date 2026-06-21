@@ -11,7 +11,12 @@ import { test } from "node:test";
 import { defineTool } from "../src/kernel/define.js";
 import type { Agent } from "../src/kernel/agent.js";
 import { makeHarness } from "./helpers.js";
-import bashPolicy, { extractCommand, evaluate, type Rule } from "../src/extensions/bash-policy.js";
+import bashPolicy, {
+  extractCommand,
+  evaluate,
+  normalizeProgram,
+  type Rule,
+} from "../src/extensions/bash-policy.js";
 
 test("extractCommand reduces a command line to its arity-based command family", () => {
   assert.equal(extractCommand('git commit -m "wip"'), "git commit");
@@ -39,6 +44,32 @@ test("evaluate matches wildcards literally except for *", () => {
   const rules: Rule[] = [{ pattern: "rm *.b", action: "deny" }];
   assert.equal(evaluate("rm -rf a.b", rules, "allow"), "deny");
   assert.equal(evaluate("rm -rf axb", rules, "allow"), "allow");
+});
+
+test("normalizeProgram strips the program's path to its basename", () => {
+  assert.equal(normalizeProgram("/bin/rm -rf build"), "rm -rf build");
+  assert.equal(normalizeProgram("/usr/bin/git commit"), "git commit");
+  assert.equal(normalizeProgram("./script.sh arg"), "script.sh arg");
+  assert.equal(normalizeProgram("../sbin/rm x"), "rm x");
+  assert.equal(normalizeProgram("bin/rm x"), "rm x");
+  // Environment assignments are preserved; only argv[0] is rewritten.
+  assert.equal(normalizeProgram("FOO=bar /usr/bin/rm -rf x"), "FOO=bar rm -rf x");
+});
+
+test("normalizeProgram leaves bare programs and path-like arguments untouched", () => {
+  assert.equal(normalizeProgram("rm -rf build"), "rm -rf build");
+  assert.equal(normalizeProgram("git commit"), "git commit");
+  // A path operand is not the program, so it must not be normalized.
+  assert.equal(normalizeProgram("cat /etc/passwd"), "cat /etc/passwd");
+  assert.equal(normalizeProgram("rm /bin/foo"), "rm /bin/foo");
+  // A trailing-slash program has no basename to extract; leave it alone.
+  assert.equal(normalizeProgram("/bin/ x"), "/bin/ x");
+  assert.equal(normalizeProgram(""), "");
+});
+
+test("extractCommand resolves a path-qualified program against the arity table", () => {
+  assert.equal(extractCommand(normalizeProgram("/usr/bin/git checkout -b feature")), "git checkout");
+  assert.equal(extractCommand(normalizeProgram("/bin/rm -rf build")), "rm");
 });
 
 /** Register a shell:exec tool whose execute flips a flag, so blocking is observable. */
@@ -92,6 +123,22 @@ test("deny blocks the matching command", async () => {
 
   await h.agent.run("clean up");
   assert.equal(didRun(), false, "a deny rule blocks execution");
+  assert.equal(sawBlock(h.agent), true, "the model sees the bash-policy block reason");
+});
+
+test("deny blocks a path-qualified invocation of the program", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "/bin/rm -rf build" } }] }, { text: "done" }],
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "rm *", action: "deny" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("clean up via an absolute path");
+  assert.equal(didRun(), false, "a path-qualified program is matched by its basename rule");
   assert.equal(sawBlock(h.agent), true, "the model sees the bash-policy block reason");
 });
 
