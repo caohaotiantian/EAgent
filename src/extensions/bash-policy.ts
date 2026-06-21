@@ -213,19 +213,112 @@ export function extractCommand(commandLine: string): string {
   return prefix(commandTokens(commandLine)).join(" ");
 }
 
+/**
+ * Per-wrapper prefix grammar: how to skip a wrapper's own options so the inner
+ * program is exposed. `argFlags` are flags that consume a following value
+ * (`sudo -u root`) or carry it attached (`-uroot`, `--user=root`); `positionals`
+ * is the count of leading bare operands the wrapper takes (`timeout 5 cmd`);
+ * `assignments` is whether leading `VAR=value` tokens precede the command
+ * (`env FOO=bar cmd`).
+ */
+interface Wrapper {
+  argFlags: Set<string>;
+  positionals: number;
+  assignments: boolean;
+}
+
+const WRAPPERS: Record<string, Wrapper> = {
+  sudo: { argFlags: new Set(["-u", "--user", "-g", "--group", "-C", "-p", "-U", "-h", "-r", "-t"]), positionals: 0, assignments: false },
+  doas: { argFlags: new Set(["-u", "-C"]), positionals: 0, assignments: false },
+  env: { argFlags: new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]), positionals: 0, assignments: true },
+  nice: { argFlags: new Set(["-n", "--adjustment"]), positionals: 0, assignments: false },
+  ionice: { argFlags: new Set(["-c", "--class", "-n", "--classdata", "-p", "--pid"]), positionals: 0, assignments: false },
+  timeout: { argFlags: new Set(["-s", "--signal", "-k", "--kill-after"]), positionals: 1, assignments: false },
+  nohup: { argFlags: new Set(), positionals: 0, assignments: false },
+  setsid: { argFlags: new Set(), positionals: 0, assignments: false },
+};
+
+/** Basename of a token, so a path-qualified wrapper (`/usr/bin/sudo`) is recognized. */
+function basename(token: string): string {
+  const slash = token.lastIndexOf("/");
+  return slash < 0 ? token : token.slice(slash + 1);
+}
+
+/**
+ * When the command's head program (by basename) is a recognized wrapper, consume
+ * its option/argument prefix and return the remaining inner command line, with
+ * verbatim spacing preserved by slicing the original at the inner program's
+ * offset. Recurses for stacked wrappers (`sudo env rm`), terminating because at
+ * least argv[0] is removed each step. Returns `null` when the head is not a
+ * recognized wrapper or no inner program remains.
+ */
+export function unwrap(commandLine: string): string | null {
+  const offsets = [...commandLine.matchAll(/\S+/g)];
+  if (offsets.length === 0) return null;
+  const tokens = offsets.map((m) => m[0]);
+
+  const wrapper = WRAPPERS[basename(tokens[0]!)];
+  if (!wrapper) return null;
+
+  let i = 1;
+  let positionalsLeft = wrapper.positionals;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (wrapper.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      i++;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      const hasAttachedValue = token.includes("=");
+      if (wrapper.argFlags.has(token) && !hasAttachedValue) i += 2;
+      else i++;
+      continue;
+    }
+    if (positionalsLeft > 0) {
+      positionalsLeft--;
+      i++;
+      continue;
+    }
+    break;
+  }
+
+  if (i >= tokens.length) return null;
+  const inner = commandLine.slice(offsets[i]!.index);
+  return unwrap(inner) ?? inner;
+}
+
 /** Compile a wildcard pattern: `*` → `.*`, every other regex metachar escaped, full-anchored. */
 function toRegExp(pattern: string): RegExp {
   const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, (c) => (c === "*" ? ".*" : `\\${c}`));
   return new RegExp(`^${escaped}$`);
 }
 
-/** The action of the last rule whose pattern matches the full command line, else fallthrough. */
-export function evaluate(command: string, rules: Rule[], fallthrough: Action): Action {
+/**
+ * Resolve a ruleset over several candidate command lines under last-match-wins:
+ * iterate rules from last to first; the first rule whose pattern matches some
+ * candidate wins, with `matched` set to the last candidate (in the given order)
+ * that rule matches. No rule matches → `{ action: fallthrough, matched: commands[0] }`.
+ */
+export function evaluateAny(
+  commands: string[],
+  rules: Rule[],
+  fallthrough: Action,
+): { action: Action; matched: string } {
   for (let i = rules.length - 1; i >= 0; i--) {
     const rule = rules[i]!;
-    if (toRegExp(rule.pattern).test(command)) return rule.action;
+    const re = toRegExp(rule.pattern);
+    let matched: string | undefined;
+    for (const command of commands) {
+      if (re.test(command)) matched = command;
+    }
+    if (matched !== undefined) return { action: rule.action, matched };
   }
-  return fallthrough;
+  return { action: fallthrough, matched: commands[0] ?? "" };
+}
+
+/** The action of the last rule whose pattern matches the full command line, else fallthrough. */
+export function evaluate(command: string, rules: Rule[], fallthrough: Action): Action {
+  return evaluateAny([command], rules, fallthrough).action;
 }
 
 export default function activate(e: ExtensionAPI): () => void {
@@ -249,13 +342,17 @@ export default function activate(e: ExtensionAPI): () => void {
     const command = ctx.call.arguments[commandArgKey];
     if (typeof command !== "string") return decision;
 
-    // Normalize once so a path-qualified program (e.g. `/bin/rm`) is matched and
-    // labeled exactly as its bare name would be.
-    const normalized = normalizeProgram(command);
-    const action = evaluate(normalized, rules, fallthrough);
+    // Normalize so a path-qualified program (e.g. `/bin/rm`) is matched and
+    // labeled as its bare name; additionally expose a wrapper's inner program
+    // (e.g. the `rm` of `sudo rm`) so inner-program rules fire through it.
+    const outer = normalizeProgram(command);
+    const innerRaw = unwrap(outer);
+    const inner = innerRaw != null ? normalizeProgram(innerRaw) : null;
+    const candidates = inner != null ? [outer, inner] : [outer];
+    const { action, matched } = evaluateAny(candidates, rules, fallthrough);
     if (action === "allow") return decision;
 
-    const family = extractCommand(normalized);
+    const family = extractCommand(matched);
     const why = `${family || command} (policy ${action})`;
     if (action === "deny") {
       return { ...decision, block: true, reason: `bash-policy: blocked ${why}` };
