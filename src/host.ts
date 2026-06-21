@@ -52,6 +52,7 @@ import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
 import bashPolicy from "./extensions/bash-policy.js";
 import integrity from "./extensions/integrity.js";
+import writeGuard from "./extensions/write-guard.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -82,6 +83,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["flow-guard", flowGuard],
   ["bash-policy", bashPolicy],
   ["integrity", integrity],
+  ["write-guard", writeGuard],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
