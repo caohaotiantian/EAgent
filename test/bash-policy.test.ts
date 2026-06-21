@@ -14,7 +14,9 @@ import { makeHarness } from "./helpers.js";
 import bashPolicy, {
   extractCommand,
   evaluate,
+  evaluateAny,
   normalizeProgram,
+  unwrap,
   type Rule,
 } from "../src/extensions/bash-policy.js";
 
@@ -70,6 +72,55 @@ test("normalizeProgram leaves bare programs and path-like arguments untouched", 
 test("extractCommand resolves a path-qualified program against the arity table", () => {
   assert.equal(extractCommand(normalizeProgram("/usr/bin/git checkout -b feature")), "git checkout");
   assert.equal(extractCommand(normalizeProgram("/bin/rm -rf build")), "rm");
+});
+
+test("unwrap exposes the inner command of a recognized wrapper", () => {
+  assert.equal(unwrap("sudo rm -rf build"), "rm -rf build");
+  assert.equal(unwrap("env FOO=bar rm -rf build"), "rm -rf build");
+  assert.equal(unwrap("nice -n 10 rm x"), "rm x");
+  assert.equal(unwrap("timeout 5 rm x"), "rm x");
+  assert.equal(unwrap("sudo -u root rm x"), "rm x");
+  assert.equal(normalizeProgram(unwrap("sudo env /bin/rm x")!), "rm x");
+  assert.equal(unwrap("/usr/bin/sudo rm x"), "rm x");
+});
+
+test("unwrap returns null for a non-wrapper or a program-less line", () => {
+  assert.equal(unwrap("rm -rf build"), null);
+  assert.equal(unwrap("git commit"), null);
+  assert.equal(unwrap("sudo"), null);
+  assert.equal(unwrap(""), null);
+});
+
+test("unwrap mis-locates the inner program of a malformed leading-positional wrapper", () => {
+  // `timeout` consumes one leading positional as its duration. A malformed
+  // invocation that omits the duration mis-locates the inner program. This is a
+  // documented best-effort boundary: such a command is itself broken (timeout
+  // would fail to parse the missing duration) and would not run, and the outer
+  // line is always evaluated too, so the worst case is over-blocking an
+  // already-failing command — fail-safe for a security gate.
+  assert.equal(unwrap("timeout build.sh deploy"), "deploy");
+  // A well-formed duration is consumed correctly, exposing the real inner program.
+  assert.equal(unwrap("timeout 30s rm -rf x"), "rm -rf x");
+});
+
+test("evaluateAny is last-match-wins across candidates with the matched candidate", () => {
+  const deny = evaluateAny(
+    ["sudo rm -rf build", "rm -rf build"],
+    [{ pattern: "rm *", action: "deny" }],
+    "allow",
+  );
+  assert.equal(deny.action, "deny");
+  assert.equal(deny.matched, "rm -rf build");
+
+  const override = evaluateAny(
+    ["sudo rm -rf build", "rm -rf build"],
+    [
+      { pattern: "rm *", action: "deny" },
+      { pattern: "sudo rm *", action: "allow" },
+    ],
+    "allow",
+  );
+  assert.equal(override.action, "allow");
 });
 
 /** Register a shell:exec tool whose execute flips a flag, so blocking is observable. */
@@ -223,6 +274,105 @@ test("capability fidelity: a shell:exec tool named other than bash is gated", as
   await h.agent.run("clean up");
   assert.equal(didRun(), false, "matching is on the declared capability, not the tool name");
   assert.equal(sawBlock(h.agent), true, "the model sees the bash-policy block reason");
+});
+
+for (const command of [
+  "sudo rm -rf build",
+  "env rm -rf build",
+  "nice -n 10 rm -rf build",
+  "timeout 5 rm -rf build",
+  "/usr/bin/sudo rm -rf build",
+]) {
+  test(`deny on the inner program blocks the wrapped command: ${command}`, async () => {
+    const h = makeHarness({
+      fallback: "allow",
+      responder: [{ toolCalls: [{ name: "bash", arguments: { command } }] }, { text: "done" }],
+    });
+    const didRun = shellTool(h.agent);
+    await h.host.use("bash-policy", (e) => {
+      e.store.set("rules", [{ pattern: "rm *", action: "deny" }]);
+      return bashPolicy(e);
+    });
+
+    await h.agent.run("clean up");
+    assert.equal(didRun(), false, "the inner-program deny fires through the wrapper");
+    assert.equal(sawBlock(h.agent), true, "the model sees the bash-policy block reason");
+  });
+}
+
+test("a wrapper-level rule still fires (no regression)", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "sudo apt update" } }] }, { text: "done" }],
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "sudo *", action: "deny" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("update");
+  assert.equal(didRun(), false, "a rule on the wrapper itself still blocks");
+  assert.equal(sawBlock(h.agent), true, "the model sees the bash-policy block reason");
+});
+
+test("a later allow on the wrapped form overrides an earlier inner deny", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "sudo rm -rf build" } }] }, { text: "done" }],
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [
+      { pattern: "rm *", action: "deny" },
+      { pattern: "sudo rm *", action: "allow" },
+    ]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("clean up");
+  assert.equal(didRun(), true, "last-match-wins re-permits the wrapped command");
+  assert.equal(sawBlock(h.agent), false, "no bash-policy block reason");
+});
+
+test("empty ruleset still runs a wrapped command", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "sudo rm -rf build" } }] }, { text: "done" }],
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use("bash-policy", bashPolicy);
+
+  await h.agent.run("clean up");
+  assert.equal(didRun(), true, "no rules, no block");
+  assert.equal(sawBlock(h.agent), false, "no bash-policy block reason");
+});
+
+test("ask remember key is scoped to the inner program across wrappers", async () => {
+  let confirms = 0;
+  const h = makeHarness({
+    fallback: "allow",
+    ui: {
+      confirm: async () => {
+        confirms++;
+        return true;
+      },
+      notify: () => {},
+    },
+    responder: [
+      { toolCalls: [{ name: "bash", arguments: { command: "sudo rm -rf a" } }] },
+      { toolCalls: [{ name: "bash", arguments: { command: "rm -rf b" } }] },
+      { text: "done" },
+    ],
+  });
+  shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "rm *", action: "ask" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("two removes");
+  assert.equal(confirms, 1, "approving the wrapped rm covers the later bare rm");
 });
 
 test("EAGENT_BASH_POLICY=off disables the guard", async () => {

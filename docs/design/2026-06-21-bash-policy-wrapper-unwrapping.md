@@ -187,9 +187,22 @@ remainder, or an unclassifiable token)?
 Choice: return `null` and evaluate only the original line (today's behavior). A
 guess that mis-identifies the program would at worst evaluate a nonsense inner
 line whose family matches no rule (a missed catch). Combined with Decision 1
-(original always evaluated), best-effort unwrapping therefore never produces a
-false block and never regresses an existing catch; it only adds catches when it is
-confident. This is what bounds the risk of the hard grammar cases.
+(original always evaluated), best-effort unwrapping never regresses an existing
+catch, and for **well-formed** wrapper invocations never produces a false block;
+it only adds catches when it is confident. This is what bounds the risk of the
+hard grammar cases.
+
+One bounded exception, fail-safe by direction: a wrapper with a leading positional
+(`timeout`, `positionals: 1`) consumes its first bare operand as that positional.
+A *malformed* invocation that omits the positional — e.g. `timeout build.sh deploy`
+(no duration) — therefore mis-locates the inner program and could match an inner
+rule on the wrong token. The blast radius is small and acceptable: such a command
+is itself broken (`timeout` would fail to parse the missing duration), so it would
+not run regardless; the error is over-blocking an already-failing command, which
+fails toward caution for a security gate rather than toward a bypass. The boundary
+is pinned by a unit test rather than papered over with a per-wrapper duration
+heuristic (Simplicity First: no special-casing for a command that cannot
+meaningfully run).
 
 ### Decision 5 — Label with the family of the candidate the winning rule matched
 
@@ -282,8 +295,11 @@ comparable time"; explicitly excluded as not user-perceptible.
 ## 8. Risks and Rollback
 
 - **Risk: mis-parsed wrapper prefix.** Mitigated by Decision 1 (original line
-  always evaluated → no regression) and Decision 4 (ambiguous → `null` → no false
-  block). Worst case is a missed inner catch, equal to today's behavior.
+  always evaluated → no regression) and Decision 4 (ambiguous → `null`). Worst case
+  for a well-formed invocation is a missed inner catch, equal to today's behavior.
+  The one exception (a malformed leading-positional wrapper, Decision 4) over-blocks
+  an already-broken command — fail-safe for a security gate — and is pinned by a
+  test.
 - **Risk: surprising interaction with last-match-wins.** Resolved by §4 Decision 1
   Option C: the union happens at the matching level under the *existing* precedence
   rule, so a later, more-specific `allow` still overrides an earlier inner `deny`.
