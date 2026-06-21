@@ -28,15 +28,15 @@ nothing, deny/ask rules remain trivially evadable.
 
 ## 2. Deliverables
 
-- [ ] `unwrap(commandLine): string | null` — a pure exported helper that, when the
+- [x] `unwrap(commandLine): string | null` — a pure exported helper that, when the
       command's program (basename) is a recognized wrapper, consumes the wrapper's
       own option/argument prefix and returns the remaining **inner** command line;
       recurses for stacked wrappers (`sudo env rm`); returns `null` when the head
       is not a recognized wrapper or no inner program can be located.
-- [ ] A small curated `WRAPPERS` data table mapping each supported wrapper to the
+- [x] A small curated `WRAPPERS` data table mapping each supported wrapper to the
       minimal prefix-grammar it needs (arg-taking flags, leading positional count,
       whether `VAR=value` assignments precede the command).
-- [ ] `evaluateAny(commands, rules, fallthrough): { action, matched }` with a
+- [x] `evaluateAny(commands, rules, fallthrough): { action, matched }` with a
       precisely pinned algorithm (so the `evaluate` re-implementation is equivalent
       by construction, not by luck): **iterate rules from last index to first; the
       first rule R for which `commands.some(c => toRegExp(R.pattern).test(c))` holds
@@ -46,7 +46,7 @@ nothing, deny/ask rules remain trivially evadable.
       `evaluate` is reimplemented as `evaluateAny([command], …).action`; with one
       command this is identical to today's high-index→low short-circuit, so its
       signature and behavior are unchanged.
-- [ ] `beforeToolCall` guard updated: build the candidate list **in the order
+- [x] `beforeToolCall` guard updated: build the candidate list **in the order
       `[outer, inner]`** — the normalized original line, plus (when `unwrap`
       returns one) the normalized unwrapped inner line — and run one `evaluateAny`
       pass. Label the block/ask, and key the session-remember set, with
@@ -55,13 +55,13 @@ nothing, deny/ask rules remain trivially evadable.
       inner-only or both) labels with the inner family; an outer-only match labels
       with the outer family. This is the deterministic tie rule for the
       both-candidates-match case.
-- [ ] Offline tests: unit tests for `unwrap` (each supported wrapper, stacked
+- [x] Offline tests: unit tests for `unwrap` (each supported wrapper, stacked
       wrappers, path-qualified wrapper, arg-flag forms, non-wrapper → `null`) and
       `evaluateAny` (last-match-wins across candidates, `matched` identity);
       integration tests through the agent loop proving a `rm *` deny
       blocks the command under each common wrapper, and proving a `sudo *` rule is
       **not** regressed (still fires).
-- [ ] Closure block appended to this doc at F.
+- [x] Closure block appended to this doc at F.
 
 ## 3. Scope Boundary (NOT in scope)
 
@@ -317,4 +317,21 @@ comparable time"; explicitly excluded as not user-perceptible.
 
 ## Closure
 
-Status: open.
+Status: closed
+Closing-commit: 24fa6b0
+Closed-on: 2026-06-21
+Deferred: none — `xargs` / `find -exec` template wrappers are documented as
+out-of-scope in §3 (a deliberate scope boundary, not an unticked deliverable or
+unfixed finding) and are the natural next increment.
+
+All six Deliverables (§2) implemented and verified against code by the closeout
+whole-change review. Acceptance: `npm run typecheck` exit 0; `npm test` exit 0
+(356 passed, 0 failed); `npx tsx --test test/bash-policy.test.ts` exit 0 (27
+passed). L1 design review passed (3 rounds; round-1 false-block severe resolved by
+Decision 1 Option C). L2 impl review passed (2 rounds). L3 Phase 1: dev → review
+(2 rounds; round-1 general on the `timeout` positional over-claim resolved by
+softening Decision 4 + a boundary test) → accept → whole-change review, all pass.
+E2E: skipped — no live provider in the offline harness (MockProvider; running as
+root → AUTH_FAIL for a real-CLI spawn); the externally observable behavior
+(commands blocked/allowed under wrappers) is verified by the criteria 5–9
+integration tests that drive the real `beforeToolCall` guard through `agent.run`.
