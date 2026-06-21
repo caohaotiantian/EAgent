@@ -71,7 +71,15 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   an arity-based command family and evaluates an allow/deny/ask ruleset over the
   full command line; no-op by default),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
-  and flags descriptions that change across sessions — a rug-pull guard).
+  and flags descriptions that change across sessions — a rug-pull guard),
+  `recovery` (turns a *failed* tool result into a corrective nudge — appends one
+  hint keyed to EAgent's own error strings via `afterToolCall`, so the model
+  self-corrects instead of re-issuing the broken call; on by default, no
+  capability, `EAGENT_RECOVERY=off` kill switch),
+  `write-guard` (prompts before a *blind overwrite* — a full-content `write` to
+  an existing file the session has not read — via `beforeToolCall`; tracks
+  read/edit/written paths per session, asks once, excludes `edit` and new-file
+  creation; on by default, no capability, `EAGENT_WRITE_GUARD=off` kill switch).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.

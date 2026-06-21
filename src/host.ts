@@ -35,6 +35,7 @@ import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
+import recovery from "./extensions/recovery.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
@@ -51,6 +52,7 @@ import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
 import bashPolicy from "./extensions/bash-policy.js";
 import integrity from "./extensions/integrity.js";
+import writeGuard from "./extensions/write-guard.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -64,6 +66,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["dynamic-workflow", dynamicWorkflow],
   ["memory", memory],
   ["prune", prune],
+  ["recovery", recovery],
   ["planmode", planmode],
   ["session", session],
   ["packages", packages],
@@ -80,6 +83,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["flow-guard", flowGuard],
   ["bash-policy", bashPolicy],
   ["integrity", integrity],
+  ["write-guard", writeGuard],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
