@@ -17,6 +17,9 @@ import bashPolicy, {
   evaluateAny,
   normalizeProgram,
   unwrap,
+  segments,
+  findExecCommands,
+  expandCommands,
   type Rule,
 } from "../src/extensions/bash-policy.js";
 
@@ -121,6 +124,48 @@ test("evaluateAny is last-match-wins across candidates with the matched candidat
     "allow",
   );
   assert.equal(override.action, "allow");
+});
+
+test("segments splits on shell operators outside quotes/groups, spacing-independent", () => {
+  assert.deepEqual(segments("git status && rm -rf build"), ["git status", "rm -rf build"]);
+  assert.deepEqual(segments("a | b ; c"), ["a", "b", "c"]);
+  assert.deepEqual(segments("true || rm x"), ["true", "rm x"]);
+
+  assert.deepEqual(segments("git status&&rm -rf build"), ["git status", "rm -rf build"]);
+  assert.deepEqual(segments("a|rm x"), ["a", "rm x"]);
+
+  assert.deepEqual(segments('git commit -m "a; b"'), ['git commit -m "a; b"']);
+  assert.deepEqual(segments('echo "a | b"'), ['echo "a | b"']);
+  assert.deepEqual(segments('echo "a\\"b" && ls'), ['echo "a\\"b"', "ls"]);
+  assert.deepEqual(segments("find . -exec rm {} \\;"), ["find . -exec rm {} \\;"]);
+
+  assert.deepEqual(segments("echo $(a && b)"), ["echo $(a && b)"]);
+  assert.deepEqual(segments("sleep 1 &"), ["sleep 1 &"]);
+});
+
+test("findExecCommands extracts find's embedded commands between primary and terminator", () => {
+  assert.deepEqual(findExecCommands("find . -name '*.log' -exec rm -f {} \\;"), ["rm -f {}"]);
+  assert.deepEqual(
+    findExecCommands("find . -exec chmod 644 {} + -exec chown me {} \\;"),
+    ["chmod 644 {}", "chown me {}"],
+  );
+  assert.deepEqual(findExecCommands("rm -rf build"), []);
+  assert.deepEqual(findExecCommands("find . -exec g++ -O2 {} +"), ["g++ -O2 {}"]);
+});
+
+test("unwrap exposes the inner command of xargs regardless of option spelling", () => {
+  assert.equal(unwrap("xargs rm -rf"), "rm -rf");
+  assert.equal(unwrap("xargs -n1 rm"), "rm");
+  assert.equal(unwrap("xargs -n 1 rm"), "rm");
+  assert.equal(unwrap("xargs -I{} rm {}"), "rm {}");
+  assert.equal(unwrap("xargs -I {} rm {}"), "rm {}");
+});
+
+test("expandCommands is the whole line plus deduped sub-commands, inner last", () => {
+  assert.deepEqual(expandCommands("sudo rm -rf build"), ["sudo rm -rf build", "rm -rf build"]);
+  assert.ok(expandCommands("cat x | xargs rm -rf").includes("rm -rf"));
+  assert.ok(expandCommands("find . -exec rm {} \\;").includes("rm {}"));
+  assert.ok(expandCommands("git status && rm -rf build").indexOf("rm -rf build") > 0);
 });
 
 /** Register a shell:exec tool whose execute flips a flag, so blocking is observable. */
@@ -373,6 +418,91 @@ test("ask remember key is scoped to the inner program across wrappers", async ()
 
   await h.agent.run("two removes");
   assert.equal(confirms, 1, "approving the wrapped rm covers the later bare rm");
+});
+
+for (const command of [
+  "git status && rm -rf build",
+  "cat list | xargs rm -rf",
+  "find . -name '*.log' -exec rm -f {} \\;",
+  ": ; rm -rf build",
+]) {
+  test(`deny on an embedded/piped/compound rm blocks: ${command}`, async () => {
+    const h = makeHarness({
+      fallback: "allow",
+      responder: [{ toolCalls: [{ name: "bash", arguments: { command } }] }, { text: "done" }],
+    });
+    const didRun = shellTool(h.agent);
+    await h.host.use("bash-policy", (e) => {
+      e.store.set("rules", [{ pattern: "rm *", action: "deny" }]);
+      return bashPolicy(e);
+    });
+
+    await h.agent.run("clean up");
+    assert.equal(didRun(), false, "the embedded/piped/compound rm is blocked");
+    assert.equal(sawBlock(h.agent), true, "the model sees the bash-policy block reason");
+  });
+}
+
+test("a quoted operator does not produce a spurious blocked segment", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [
+      { toolCalls: [{ name: "bash", arguments: { command: 'git commit -m "fixup; rm temp"' } }] },
+      { text: "done" },
+    ],
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "rm *", action: "deny" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("commit");
+  assert.equal(didRun(), true, "the quoted `;` is not a split, so no rm segment is produced");
+  assert.equal(sawBlock(h.agent), false, "no bash-policy block reason");
+});
+
+test("empty ruleset still runs a compound command (no regression)", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [
+      { toolCalls: [{ name: "bash", arguments: { command: "git status && rm -rf build" } }] },
+      { text: "done" },
+    ],
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use("bash-policy", bashPolicy);
+
+  await h.agent.run("status then clean");
+  assert.equal(didRun(), true, "no rules, no block");
+  assert.equal(sawBlock(h.agent), false, "no bash-policy block reason");
+});
+
+test("ask remember key is scoped to the offending sub-command", async () => {
+  let confirms = 0;
+  const h = makeHarness({
+    fallback: "allow",
+    ui: {
+      confirm: async () => {
+        confirms++;
+        return true;
+      },
+      notify: () => {},
+    },
+    responder: [
+      { toolCalls: [{ name: "bash", arguments: { command: "a && rm -rf x" } }] },
+      { toolCalls: [{ name: "bash", arguments: { command: "rm -rf y" } }] },
+      { text: "done" },
+    ],
+  });
+  shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "rm *", action: "ask" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("two removes");
+  assert.equal(confirms, 1, "approving the sub-command rm covers the later bare rm");
 });
 
 test("EAGENT_BASH_POLICY=off disables the guard", async () => {
