@@ -28,11 +28,11 @@ do nothing, a deny rule is defeated by one `&&`, `|`, `;`, or `-exec`.
 
 ## 2. Deliverables
 
-- [ ] `segments(commandLine): string[]` — split a line into command segments on the
+- [x] `segments(commandLine): string[]` — split a line into command segments on the
       shell control operators `|`, `||`, `&&`, `;`, and newline, **only when they
       occur outside single/double quotes, outside `$( … )` / `( … )` / backtick
       groups, and not backslash-escaped**. Trims and drops empty segments.
-- [ ] `findExecCommands(segment): string[]` — when a segment's program (by
+- [x] `findExecCommands(segment): string[]` — when a segment's program (by
       basename) is `find`, extract each embedded command introduced by `-exec` /
       `-execdir` / `-ok` / `-okdir`. The command is the tokens from just after the
       primary up to **but excluding** the terminator token; placeholders like `{}`
@@ -46,9 +46,9 @@ do nothing, a deny rule is defeated by one `&&`, `|`, `;`, or `-exec`.
       terminator, the command runs to
       the end of the segment. Scanning continues past each terminator for further
       clauses.
-- [ ] `xargs` added to the `WRAPPERS` table (its option grammar) so a `xargs …`
+- [x] `xargs` added to the `WRAPPERS` table (its option grammar) so a `xargs …`
       segment unwraps to its inner command via the existing `unwrap`.
-- [ ] `expandCommands(commandLine): string[]` — the unifying expansion: the
+- [x] `expandCommands(commandLine): string[]` — the unifying expansion: the
       normalized whole line first (preserving whole-line rules), then for each
       segment its normalized form, its `unwrap` inner (if any), and each
       `findExecCommands` result (also normalized + unwrapped). **Deduplicated by
@@ -58,14 +58,14 @@ do nothing, a deny rule is defeated by one `&&`, `|`, `;`, or `-exec`.
       `["sudo rm -rf build","rm -rf build"]` — parity with the prior task — while
       keeping the inner/sub-command candidates *last* so Decision 5's
       last-match labeling still names the sub-command.)
-- [ ] `beforeToolCall` guard updated to evaluate `evaluateAny(expandCommands(command),
+- [x] `beforeToolCall` guard updated to evaluate `evaluateAny(expandCommands(command),
       rules, fallthrough)`, replacing the current two-candidate `[outer, inner]`
       construction (which `expandCommands` subsumes). Labeling/remember key stays
       `extractCommand(matched)`.
-- [ ] Offline tests for each helper and integration tests through the agent loop
+- [x] Offline tests for each helper and integration tests through the agent loop
       for the acceptance criteria below — including the **quoted-operator no-false-block**
       cases.
-- [ ] Closure block appended at F.
+- [x] Closure block appended at F.
 
 ## 3. Scope Boundary (NOT in scope)
 
@@ -288,4 +288,27 @@ scan plus `evaluateAny` over a bounded candidate list. No latency budget beyond
 
 ## Closure
 
-Status: open.
+Status: closed
+Closing-commit: 4a9be26
+Closed-on: 2026-06-21
+Deferred: none — command-substitution interiors and `xargs`/dangerous commands
+reached only through unhandled constructs (here-docs, lone-`&` sequencing) remain
+documented §3 scope exclusions (fail-safe under-blocks, never bypasses), not
+unticked deliverables or unfixed findings.
+
+All seven Deliverables (§2) implemented and verified against code by the closeout
+whole-change review. Acceptance: `npm run typecheck` exit 0; `npm test` exit 0
+(367 passed); `npx tsx --test test/bash-policy.test.ts` exit 0 (38 passed). L1
+design review passed (3 rounds; round-1 generals — no-space-operator splitting,
+xargs attached-value mechanism, find-exec terminator rules, dedup rule — and a
+round-2 general on the backslash/quote rule all resolved and independently
+re-derived against bash). L2 impl review passed (2 rounds). L3 Phase 1: dev →
+review (clean first round, no fix) → accept → whole-change review, all pass.
+Whole-change review recorded one general (criterion 9's no-regression cases for
+`nice`/`sudo`/override are covered by the pre-existing wrapper tests running
+through the rewired guard, plus the new compound empty-ruleset test — the
+no-regression intent is met and tested; no new dedicated test added). E2E: skipped
+— no live provider in the offline harness (MockProvider; root → AUTH_FAIL for a
+real-CLI spawn); the externally observable behavior (compound/piped/embedded
+commands blocked or allowed) is verified by the criteria 7–10 integration tests
+driving the real guard through `agent.run`.
