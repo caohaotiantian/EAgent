@@ -236,6 +236,15 @@ const WRAPPERS: Record<string, Wrapper> = {
   timeout: { argFlags: new Set(["-s", "--signal", "-k", "--kill-after"]), positionals: 1, assignments: false },
   nohup: { argFlags: new Set(), positionals: 0, assignments: false },
   setsid: { argFlags: new Set(), positionals: 0, assignments: false },
+  xargs: {
+    argFlags: new Set([
+      "-n", "--max-args", "-P", "--max-procs", "-I", "--replace",
+      "-d", "--delimiter", "-a", "--arg-file", "-E", "-L", "--max-lines",
+      "-s", "--max-chars",
+    ]),
+    positionals: 0,
+    assignments: false,
+  },
 };
 
 /** Basename of a token, so a path-qualified wrapper (`/usr/bin/sudo`) is recognized. */
@@ -285,6 +294,177 @@ export function unwrap(commandLine: string): string | null {
   if (i >= tokens.length) return null;
   const inner = commandLine.slice(offsets[i]!.index);
   return unwrap(inner) ?? inner;
+}
+
+/**
+ * Split a command line into the command segments a shell would run sequentially,
+ * cutting on the control operators `|`, `||`, `&&`, `;`, and newline — but only
+ * when they occur at quote/group depth zero and are not backslash-escaped. The
+ * scanner tracks single-quote, double-quote, and backtick state plus `$(`/`(`
+ * paren depth so an operator inside a quoted string or a substitution does not
+ * split (which would tear a legitimate command into a spurious dangerous-looking
+ * segment and false-block it). A backslash escapes the next character when the
+ * scanner is unquoted or inside double quotes, and is literal inside single
+ * quotes (bash semantics). A lone `&` is not a split operator; only `&&` splits.
+ * Segments are trimmed and empties dropped.
+ */
+export function segments(commandLine: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let single = false;
+  let double = false;
+  let backtick = false;
+  let parenDepth = 0;
+
+  const push = (end: number): void => {
+    const seg = commandLine.slice(start, end).trim();
+    if (seg !== "") out.push(seg);
+  };
+
+  for (let i = 0; i < commandLine.length; i++) {
+    const c = commandLine[i]!;
+
+    if (c === "\\" && !single) {
+      i++;
+      continue;
+    }
+
+    if (single) {
+      if (c === "'") single = false;
+      continue;
+    }
+    if (double) {
+      if (c === '"') double = false;
+      continue;
+    }
+    if (backtick) {
+      if (c === "`") backtick = false;
+      continue;
+    }
+
+    if (c === "'") {
+      single = true;
+      continue;
+    }
+    if (c === '"') {
+      double = true;
+      continue;
+    }
+    if (c === "`") {
+      backtick = true;
+      continue;
+    }
+
+    if (c === "$" && commandLine[i + 1] === "(") {
+      parenDepth++;
+      i++;
+      continue;
+    }
+    if (c === "(") {
+      parenDepth++;
+      continue;
+    }
+    if (c === ")") {
+      if (parenDepth > 0) parenDepth--;
+      continue;
+    }
+
+    if (parenDepth > 0) continue;
+
+    if (c === "\n" || c === ";") {
+      push(i);
+      start = i + 1;
+      continue;
+    }
+    if (c === "|") {
+      push(i);
+      if (commandLine[i + 1] === "|") i++;
+      start = i + 1;
+      continue;
+    }
+    if (c === "&" && commandLine[i + 1] === "&") {
+      push(i);
+      i++;
+      start = i + 1;
+      continue;
+    }
+  }
+
+  push(commandLine.length);
+  return out;
+}
+
+const EXEC_PRIMARIES = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const EXEC_TERMINATORS = new Set([";", "\\;", "+", "';'", '";"']);
+
+/**
+ * When a segment's program (by basename) is `find`, extract each command `find`
+ * itself runs: the tokens between an `-exec`/`-execdir`/`-ok`/`-okdir` primary
+ * and its terminator token (`;`, `\;`, `+`, or a quoted form), excluding the
+ * terminator and keeping placeholders like `{}`. Returns `[]` for a non-`find`
+ * segment. The terminator is matched as a whole token wherever it appears, so a
+ * `g++` operand is never mistaken for a `+` terminator. A clause with no
+ * terminator runs to the end of the segment; scanning continues past each
+ * terminator for further clauses. The original string is sliced so the inner
+ * command's spacing is preserved verbatim.
+ */
+export function findExecCommands(segment: string): string[] {
+  const program = commandTokens(normalizeProgram(segment))[0];
+  if (program === undefined || basename(program) !== "find") return [];
+
+  const offsets = [...segment.matchAll(/\S+/g)];
+  const tokens = offsets.map((m) => m[0]);
+  const out: string[] = [];
+
+  let i = 0;
+  while (i < tokens.length) {
+    if (!EXEC_PRIMARIES.has(tokens[i]!)) {
+      i++;
+      continue;
+    }
+    const cmdStart = i + 1;
+    let j = cmdStart;
+    while (j < tokens.length && !EXEC_TERMINATORS.has(tokens[j]!)) j++;
+    if (j > cmdStart) {
+      const from = offsets[cmdStart]!.index;
+      const to = offsets[j - 1]!.index + tokens[j - 1]!.length;
+      const command = segment.slice(from, to).trim();
+      if (command !== "") out.push(command);
+    }
+    i = j + 1;
+  }
+
+  return out;
+}
+
+/**
+ * Expand a command line into the full candidate set the guard evaluates: the
+ * normalized whole line first, then for each segment its normalized form, its
+ * `unwrap` inner, and each `find -exec` command (also normalized + unwrapped).
+ * The list is first-wins deduped with order otherwise preserved, so
+ * `expandCommands("sudo rm -rf build")` collapses to exactly
+ * `["sudo rm -rf build", "rm -rf build"]` (parity with prior behavior) while the
+ * inner/sub-command candidates stay last, keeping the last-match labeling on the
+ * offending sub-command.
+ */
+export function expandCommands(commandLine: string): string[] {
+  const out: string[] = [];
+  const add = (line: string): void => {
+    const normalized = normalizeProgram(line);
+    if (normalized !== "" && !out.includes(normalized)) out.push(normalized);
+    const innerRaw = unwrap(normalized);
+    if (innerRaw != null) {
+      const inner = normalizeProgram(innerRaw);
+      if (inner !== "" && !out.includes(inner)) out.push(inner);
+    }
+  };
+
+  add(commandLine);
+  for (const segment of segments(commandLine)) {
+    add(segment);
+    for (const inner of findExecCommands(segment)) add(inner);
+  }
+  return out;
 }
 
 /** Compile a wildcard pattern: `*` → `.*`, every other regex metachar escaped, full-anchored. */
@@ -342,13 +522,12 @@ export default function activate(e: ExtensionAPI): () => void {
     const command = ctx.call.arguments[commandArgKey];
     if (typeof command !== "string") return decision;
 
-    // Normalize so a path-qualified program (e.g. `/bin/rm`) is matched and
-    // labeled as its bare name; additionally expose a wrapper's inner program
-    // (e.g. the `rm` of `sudo rm`) so inner-program rules fire through it.
-    const outer = normalizeProgram(command);
-    const innerRaw = unwrap(outer);
-    const inner = innerRaw != null ? normalizeProgram(innerRaw) : null;
-    const candidates = inner != null ? [outer, inner] : [outer];
+    // Expand the line into the whole line plus every effective sub-command
+    // (segments, wrapper unwraps, and `find -exec` commands), each normalized so
+    // a path-qualified or wrapped inner program (e.g. the `rm` of `sudo rm` or of
+    // `... && rm`) is matched and labeled by its bare name. Inner candidates come
+    // last so a sub-command rule labels the offending sub-command, not the head.
+    const candidates = expandCommands(command);
     const { action, matched } = evaluateAny(candidates, rules, fallthrough);
     if (action === "allow") return decision;
 
