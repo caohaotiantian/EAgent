@@ -45,16 +45,31 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` plumbing, and `cassette`
   (record/replay). All read config from `process.env`.
-- `src/extensions/` — `core-tools`, `skills`, `mcp`, `codeact`, `subagents`,
+- `src/extensions/` — `core-tools`,
+  `search` (`fs:read`, parallel `glob`/`grep` tools for finding files and
+  searching contents in pure Node — no shell, confined to the workspace root),
+  `skills`, `mcp`, `codeact`, `subagents`,
   `dynamic-workflow` (a `run_workflow` tool that executes a model-emitted
   dependency DAG of `tool`/`agent` steps with `${id}` output substitution;
   independent steps run in parallel, tool steps reuse the kernel's guard
   sequence so capability/policy checks still apply),
-  `memory`, `planmode`, `session`, `packages`, `trace`, `context-files`,
-  `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
+  `memory`,
+  `prune` (token-budget tool-output pruning on `transformContext` — truncates
+  old, oversized `tool_result` content beyond a protected recent window; no
+  capability, `EAGENT_PRUNE=off` kill switch),
+  `planmode`, `session`, `packages`, `trace`, `context-files`,
+  `limits` (per-run call/token budgets + tool-output byte cap; on overflow it
+  spills the full output to a gitignored file under `.eagent/tool-output` and
+  returns a retrieval hint instead of discarding the clipped bytes),
+  `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
+  `todo` (session-scoped in-memory todo list — a `todowrite` tool that replaces
+  and echoes the list plus a `/todos` command; no capability),
   `flow-guard` (compositional egress gate — taints a session on a source
   capability, default `shell:exec`, or sensitive data in the transcript, then
   holds egress, default `net:fetch`; ask or block mode),
+  `bash-policy` (command-granular shell policy gate — reduces a command line to
+  an arity-based command family and evaluates an allow/deny/ask ruleset over the
+  full command line; no-op by default),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
   and flags descriptions that change across sessions — a rug-pull guard).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
