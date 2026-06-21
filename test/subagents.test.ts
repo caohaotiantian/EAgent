@@ -3,8 +3,10 @@ import test from "node:test";
 
 import type { CompletionRequest, Message, ToolResultBlock } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
-import subagents, { childRegistryFrom } from "../src/extensions/subagents.js";
+import subagents, { childRegistryFrom, readOnlyCapabilities } from "../src/extensions/subagents.js";
+import { CapabilityError } from "../src/kernel/capabilities.js";
 import { defineTool } from "../src/kernel/define.js";
+import type { Agent } from "../src/kernel/agent.js";
 import { lastText, makeHarness } from "./helpers.js";
 
 /** The last text block of the most recent user message in a request. */
@@ -209,6 +211,85 @@ test("recursion guard (behavioral): spawned child cannot itself spawn", async ()
   assert.equal(result.isError, undefined);
   assert.match(result.content, /child-done/);
   assert.equal(lastText(agent), "parent-done");
+});
+
+test("readOnlyCapabilities grants reads and denies mutation/egress", async () => {
+  const rc = readOnlyCapabilities();
+  // Read capabilities resolve (no throw).
+  await rc.require("fs:read", "t");
+  await rc.require("skill:read", "t");
+  // Everything else is denied by fallback.
+  await assert.rejects(() => rc.require("fs:write", "t"), CapabilityError);
+  await assert.rejects(() => rc.require("shell:exec", "t"), CapabilityError);
+  await assert.rejects(() => rc.require("net:fetch", "t"), CapabilityError);
+});
+
+/** Register an fs:write tool whose body flips a flag, so a denial is observable. */
+function mutateTool(agent: Agent, flag: { wrote: boolean }): void {
+  agent.tools.register(
+    defineTool({
+      name: "mutate",
+      description: "Writes a file (declares fs:write).",
+      capabilities: ["fs:write"],
+      parameters: { type: "object", properties: {} },
+      execute: () => {
+        flag.wrote = true;
+        return { content: "mutated" };
+      },
+    }),
+  );
+}
+
+/** A provider that has the parent spawn one CHILD which calls `mutate` once. */
+function spawnAndMutate(readOnly: boolean): MockProvider {
+  let parentSpawned = false;
+  let childActed = false;
+  return new MockProvider((req) => {
+    if (req.systemPrompt.includes("CHILD")) {
+      if (!childActed) {
+        childActed = true;
+        return { toolCalls: [{ name: "mutate", arguments: {} }] };
+      }
+      return { text: "child-done" };
+    }
+    if (!parentSpawned) {
+      parentSpawned = true;
+      return {
+        toolCalls: [
+          { name: "spawn_agent", arguments: { mode: "single", prompt: "explore", system: "CHILD", readOnly } },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  });
+}
+
+test("a readOnly child's fs:write tool is denied at the capability boundary", async () => {
+  const flag = { wrote: false };
+  const provider = spawnAndMutate(true);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  mutateTool(agent, flag);
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  assert.equal(flag.wrote, false, "the read-only child's fs:write was denied; the tool body never ran");
+  // The parent's own capabilities are untouched: it can still write.
+  await agent.capabilities.require("fs:write", "parent");
+});
+
+test("a default (non-readOnly) child shares the parent's capabilities and may mutate", async () => {
+  const flag = { wrote: false };
+  const provider = spawnAndMutate(false);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  mutateTool(agent, flag);
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  assert.equal(flag.wrote, true, "the default child inherits the parent's allow-fallback and runs the write");
 });
 
 test("/agents command prints mode help", async () => {

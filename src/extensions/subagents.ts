@@ -25,10 +25,11 @@
  */
 
 import { Agent } from "../kernel/agent.js";
+import { CapabilityManager } from "../kernel/capabilities.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
-import type { Message, Tool } from "../kernel/types.js";
+import type { Message, Tool, UI } from "../kernel/types.js";
 
 /** The tool name, also the registration that children must never inherit. */
 const SPAWN_TOOL = "spawn_agent";
@@ -49,11 +50,16 @@ export default function activate(e: ExtensionAPI): void {
    */
   const buildChildRegistry = (): ToolRegistry => childRegistryFrom(e.agent.tools.list());
 
-  /** Construct (but do not run) a child agent for a given prompt. */
-  const makeChild = (system: string | undefined, maxTurns: number): Agent =>
+  /**
+   * Construct (but do not run) a child agent for a given prompt. A `readOnly`
+   * child runs against its own strict capability manager (read grants, fallback
+   * deny) instead of sharing the parent's, so any mutation/egress tool it tries
+   * is refused at the capability boundary.
+   */
+  const makeChild = (system: string | undefined, maxTurns: number, readOnly: boolean): Agent =>
     new Agent({
       providers: e.agent.providers,
-      capabilities: e.agent.capabilities,
+      capabilities: readOnly ? readOnlyCapabilities(e.agent.ui) : e.agent.capabilities,
       ui: e.agent.ui,
       logger: e.agent.logger,
       model: e.agent.model,
@@ -64,8 +70,13 @@ export default function activate(e: ExtensionAPI): void {
     });
 
   /** Run a single child on `prompt`, returning its final assistant text. */
-  const runChild = async (prompt: string, system: string | undefined, maxTurns: number): Promise<string> => {
-    const child = makeChild(system, maxTurns);
+  const runChild = async (
+    prompt: string,
+    system: string | undefined,
+    maxTurns: number,
+    readOnly: boolean,
+  ): Promise<string> => {
+    const child = makeChild(system, maxTurns, readOnly);
     const { messages } = await child.run(prompt);
     return finalText(messages);
   };
@@ -79,7 +90,10 @@ export default function activate(e: ExtensionAPI): void {
         "per entry of `prompts` concurrently and concatenates their answers. " +
         "mode=chain runs children sequentially, feeding each answer into the " +
         "next prompt. Children share this agent's providers and permissions " +
-        "but cannot themselves spawn.",
+        "but cannot themselves spawn. Set readOnly=true to run the child(ren) " +
+        "in a strict read-only lane (fs:read only; all mutation and network " +
+        "egress denied) — use it for explorers and reviewers that must not " +
+        "change anything.",
       capabilities: ["agent:spawn"],
       parameters: {
         type: "object",
@@ -108,6 +122,13 @@ export default function activate(e: ExtensionAPI): void {
             default: DEFAULT_MAX_TURNS,
             description: "Safety bound on each child's loop iterations.",
           },
+          readOnly: {
+            type: "boolean",
+            default: false,
+            description:
+              "Run the child(ren) in a strict read-only capability lane: fs:read only, " +
+              "all mutation/egress (fs:write, shell:exec, net:fetch, …) denied.",
+          },
         },
       },
       execute: async (args) => {
@@ -117,14 +138,15 @@ export default function activate(e: ExtensionAPI): void {
           typeof args.maxTurns === "number" && args.maxTurns > 0
             ? Math.floor(args.maxTurns)
             : DEFAULT_MAX_TURNS;
+        const readOnly = args.readOnly === true;
 
         if (mode === "single") {
           const prompt = args.prompt;
           if (typeof prompt !== "string" || prompt.length === 0) {
             return fail("mode=single requires a non-empty string `prompt`.");
           }
-          const answer = await runChild(prompt, system, maxTurns);
-          return ok(answer, { mode, children: 1 });
+          const answer = await runChild(prompt, system, maxTurns, readOnly);
+          return ok(answer, { mode, children: 1, readOnly });
         }
 
         const prompts = asPrompts(args.prompts);
@@ -133,9 +155,9 @@ export default function activate(e: ExtensionAPI): void {
         }
 
         if (mode === "parallel") {
-          const answers = await Promise.all(prompts.map((p) => runChild(p, system, maxTurns)));
+          const answers = await Promise.all(prompts.map((p) => runChild(p, system, maxTurns, readOnly)));
           const body = answers.map((a, i) => `[child ${i + 1}]\n${a}`).join("\n\n");
-          return ok(body, { mode, children: answers.length });
+          return ok(body, { mode, children: answers.length, readOnly });
         }
 
         if (mode === "chain") {
@@ -144,10 +166,10 @@ export default function activate(e: ExtensionAPI): void {
           for (const p of prompts) {
             const prompt =
               previous === undefined ? p : `Previous result:\n${previous}\n\nNow: ${p}`;
-            answer = await runChild(prompt, system, maxTurns);
+            answer = await runChild(prompt, system, maxTurns, readOnly);
             previous = answer;
           }
-          return ok(answer, { mode, children: prompts.length });
+          return ok(answer, { mode, children: prompts.length, readOnly });
         }
 
         return fail(`Unknown mode: ${mode}. Use single, parallel, or chain.`);
@@ -166,6 +188,19 @@ export default function activate(e: ExtensionAPI): void {
       ctx.print("Children share this agent's providers and permissions but cannot re-spawn.");
     },
   });
+}
+
+/** The read capabilities a read-only child is granted; everything else is denied. */
+const READ_ONLY_GRANTS = ["fs:read", "skill:read"] as const;
+
+/**
+ * A fresh capability manager for a read-only child: it grants only local read
+ * capabilities and denies everything else by fallback, so any mutation or
+ * network-egress tool the child attempts is refused at the capability boundary.
+ * Exported so the lane's enforcement is unit-testable directly.
+ */
+export function readOnlyCapabilities(ui?: UI): CapabilityManager {
+  return new CapabilityManager({ grant: [...READ_ONLY_GRANTS], fallback: "deny", ui });
 }
 
 /**
