@@ -1,5 +1,10 @@
 # Design: `recovery` extension — turn tool errors into corrective nudges
 
+Status: closed
+Closing-commit: afccad3
+Closed-on: 2026-06-21
+Deferred: none
+
 Slug: `2026-06-21-recovery-hooks`
 
 ## 1. Background and Purpose
@@ -36,19 +41,20 @@ agent loop can have — goes unlearned.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/recovery.ts` — the extension: an `afterToolCall` guard
+- [x] `src/extensions/recovery.ts` — the extension: an `afterToolCall` guard
       that appends one corrective hint to a *failed* tool result, an exported
       default ruleset, an exported pure matcher, and an `EAGENT_RECOVERY=off`
-      kill switch.
-- [ ] An exported pure helper `recoveryHint(content: string): string | null`
+      kill switch. (Also exports `annotate`, the guard transform, as the
+      idempotency test seam — same behavior, exposed for unit testing.)
+- [x] An exported pure helper `recoveryHint(content: string): string | null`
       returning the hint of the first matching rule (or `null`), and an exported
       `RECOVERY_RULES` constant — both unit-testable without the agent loop.
-- [ ] `test/recovery.test.ts` — offline tests covering the pure matcher
+- [x] `test/recovery.test.ts` — offline tests covering the pure matcher
       (each default rule, no-match, first-match-wins), idempotency, and the live
       guard through the agent loop (a failed `edit` result the model sees carries
       the hint; a successful result does not; the kill switch suppresses it).
-- [ ] `recovery` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`).
-- [ ] `CLAUDE.md` extension inventory updated with a one-line `recovery` entry.
+- [x] `recovery` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`).
+- [x] `CLAUDE.md` extension inventory updated with a one-line `recovery` entry.
 
 `docs/EXTENSIONS.md` is **not** touched: per the `bash-policy` design
 (`docs/design/2026-06-20-bash-policy.md:62`) it is the extension *author's
