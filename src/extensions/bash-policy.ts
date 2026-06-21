@@ -188,6 +188,26 @@ function commandTokens(commandLine: string): string[] {
   return tokens.filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) && !t.startsWith("-"));
 }
 
+/**
+ * Strip the directory from the program token so a path-qualified invocation is
+ * governed by the same rules as the bare name: `/bin/rm`, `./rm`, `../sbin/rm`,
+ * and `bin/rm` all reduce to `rm`. Without this, a `rm` deny rule is bypassed by
+ * spelling the program with a path. Only argv[0] — the first non-`VAR=value`
+ * token, after any leading environment assignments — is rewritten; operands
+ * (e.g. the `/etc/passwd` in `cat /etc/passwd`) are left untouched, and all other
+ * spacing and tokens are preserved verbatim.
+ */
+export function normalizeProgram(commandLine: string): string {
+  const match = commandLine.match(/^(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)(\S+)/);
+  if (!match) return commandLine;
+  const [, lead, program] = match as unknown as [string, string, string];
+  const slash = program.lastIndexOf("/");
+  if (slash < 0) return commandLine;
+  const base = program.slice(slash + 1);
+  if (base === "") return commandLine;
+  return commandLine.slice(0, lead.length) + base + commandLine.slice(lead.length + program.length);
+}
+
 /** Reduce a command line to its human-meaningful command family (or "" if empty). */
 export function extractCommand(commandLine: string): string {
   return prefix(commandTokens(commandLine)).join(" ");
@@ -229,10 +249,13 @@ export default function activate(e: ExtensionAPI): () => void {
     const command = ctx.call.arguments[commandArgKey];
     if (typeof command !== "string") return decision;
 
-    const action = evaluate(command, rules, fallthrough);
+    // Normalize once so a path-qualified program (e.g. `/bin/rm`) is matched and
+    // labeled exactly as its bare name would be.
+    const normalized = normalizeProgram(command);
+    const action = evaluate(normalized, rules, fallthrough);
     if (action === "allow") return decision;
 
-    const family = extractCommand(command);
+    const family = extractCommand(normalized);
     const why = `${family || command} (policy ${action})`;
     if (action === "deny") {
       return { ...decision, block: true, reason: `bash-policy: blocked ${why}` };
