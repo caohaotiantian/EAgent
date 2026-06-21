@@ -8,6 +8,9 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
@@ -24,6 +27,28 @@ function toolResults(messages: readonly Message[]): ToolResultBlock[] {
     for (const b of m.content) if (b.type === "tool_result") out.push(b);
   }
   return out;
+}
+
+/** Mirror of core-tools' confine: assert `p` resolves inside `root`. */
+function isInside(root: string, p: string): boolean {
+  const abs = isAbsolute(p) ? resolve(p) : resolve(root, p);
+  const rel = relative(root, abs);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${"/"}`) && !isAbsolute(rel));
+}
+
+/** Make a fresh workspace dir and point EAGENT_WORKSPACE at it. */
+function withWorkspace(): { root: string; restore: () => void } {
+  const prev = process.env.EAGENT_WORKSPACE;
+  const root = mkdtempSync(join(tmpdir(), "eagent-spill-"));
+  process.env.EAGENT_WORKSPACE = root;
+  return {
+    root,
+    restore: () => {
+      if (prev === undefined) delete process.env.EAGENT_WORKSPACE;
+      else process.env.EAGENT_WORKSPACE = prev;
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
 }
 
 /** Run a command captured into a lines array; returns the printed lines. */
@@ -56,8 +81,9 @@ test("truncates oversized tool output and leaves short output untouched", async 
   await host.use("limits", activateLimits);
 
   // Seed a low byte cap BEFORE running, via the command (it writes e.store).
+  // Spill off here keeps this an in-context-truncation regression check.
   const limitsCmd = commands.get("limits")!;
-  await runCommand(limitsCmd, agent, "maxToolOutputBytes=50");
+  await runCommand(limitsCmd, agent, "maxToolOutputBytes=50 spillToolOutput=0");
 
   await agent.run("go");
 
@@ -94,7 +120,7 @@ test("preserves isError when truncating", async () => {
   );
 
   await host.use("limits", activateLimits);
-  await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=40");
+  await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=40 spillToolOutput=0");
   await agent.run("go");
 
   const r = toolResults(agent.messages).find((b) => b.toolCallId === "e0")!;
@@ -248,4 +274,234 @@ test("the token budget is disabled by default (0)", async () => {
   assert.ok(out.some((l) => l.startsWith("maxTokensPerRun=0")), "token budget defaults to disabled");
   await agent.run("go");
   assert.equal(ran, 1, "with the budget disabled the tool runs normally");
+});
+
+test("overflow spills the full output to a retrievable file inside the workspace", async () => {
+  const ws = withWorkspace();
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: (_req, i) => (i === 0 ? { toolCalls: [{ name: "big", id: "c0" }] } : { text: "done" }),
+      fallback: "allow",
+    });
+    const big = "X".repeat(500);
+    agent.tools.register(defineTool({ name: "big", description: "big", execute: () => ({ content: big }) }));
+
+    await host.use("limits", activateLimits);
+    await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=50");
+    await agent.run("go");
+
+    const r = toolResults(agent.messages).find((b) => b.toolCallId === "c0")!;
+
+    // The marker now points at a saved file and the body still fits the cap.
+    assert.match(r.content, /full output saved to /, "marker names a saved file");
+    const preview = r.content.split("\n\n[output truncated:")[0]!;
+    assert.ok(Buffer.byteLength(preview, "utf8") <= 50, "preview fits within the byte cap");
+
+    // Pull the path out of the marker; it must resolve inside the workspace.
+    const m = r.content.match(/full output saved to (.+?)\. Retrieve/);
+    assert.ok(m, "marker embeds a path");
+    const rel = m![1]!.trim();
+    assert.ok(isInside(ws.root, rel), "spill path is inside the workspace root");
+
+    const abs = isAbsolute(rel) ? rel : join(ws.root, rel);
+    assert.ok(existsSync(abs), "spill file exists on disk");
+    assert.equal(readFileSync(abs, "utf8"), big, "spill file holds the full original output");
+  } finally {
+    ws.restore();
+  }
+});
+
+test("under-limit output is byte-identical and writes no spill file", async () => {
+  const ws = withWorkspace();
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: (_req, i) => (i === 0 ? { toolCalls: [{ name: "small", id: "c1" }] } : { text: "done" }),
+      fallback: "allow",
+    });
+    const small = "tiny output";
+    agent.tools.register(defineTool({ name: "small", description: "small", execute: () => ({ content: small }) }));
+
+    await host.use("limits", activateLimits);
+    await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=50");
+    await agent.run("go");
+
+    const r = toolResults(agent.messages).find((b) => b.toolCallId === "c1")!;
+    assert.equal(r.content, small, "short output passes through verbatim");
+
+    const spillDir = join(ws.root, ".eagent", "tool-output");
+    assert.ok(!existsSync(spillDir), "no spill directory created for under-limit output");
+  } finally {
+    ws.restore();
+  }
+});
+
+test("spillToolOutput=0 falls back to the in-context marker and writes no file", async () => {
+  const ws = withWorkspace();
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: (_req, i) => (i === 0 ? { toolCalls: [{ name: "big", id: "c0" }] } : { text: "done" }),
+      fallback: "allow",
+    });
+    agent.tools.register(defineTool({ name: "big", description: "big", execute: () => ({ content: "X".repeat(500) }) }));
+
+    await host.use("limits", activateLimits);
+    await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=50 spillToolOutput=0");
+    await agent.run("go");
+
+    const r = toolResults(agent.messages).find((b) => b.toolCallId === "c0")!;
+    assert.match(r.content, /output truncated: \d+ of \d+ bytes shown/);
+    assert.ok(!r.content.includes("full output saved to"), "no spill hint when disabled");
+    assert.ok(!existsSync(join(ws.root, ".eagent", "tool-output")), "no spill file written");
+  } finally {
+    ws.restore();
+  }
+});
+
+test("EAGENT_TOOL_SPILL=off disables spill and writes no file", async () => {
+  const ws = withWorkspace();
+  const prev = process.env.EAGENT_TOOL_SPILL;
+  process.env.EAGENT_TOOL_SPILL = "off";
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: (_req, i) => (i === 0 ? { toolCalls: [{ name: "big", id: "c0" }] } : { text: "done" }),
+      fallback: "allow",
+    });
+    agent.tools.register(defineTool({ name: "big", description: "big", execute: () => ({ content: "X".repeat(500) }) }));
+
+    await host.use("limits", activateLimits);
+    await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=50");
+    await agent.run("go");
+
+    const r = toolResults(agent.messages).find((b) => b.toolCallId === "c0")!;
+    assert.match(r.content, /output truncated: \d+ of \d+ bytes shown/);
+    assert.ok(!r.content.includes("full output saved to"), "kill switch disables the spill hint");
+    assert.ok(!existsSync(join(ws.root, ".eagent", "tool-output")), "no spill file written");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_TOOL_SPILL;
+    else process.env.EAGENT_TOOL_SPILL = prev;
+    ws.restore();
+  }
+});
+
+test("a spill-write failure falls back to in-context truncation without throwing", async () => {
+  const ws = withWorkspace();
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: (_req, i) => (i === 0 ? { toolCalls: [{ name: "big", id: "c0" }] } : { text: "done" }),
+      fallback: "allow",
+    });
+    agent.tools.register(
+      defineTool({ name: "big", description: "big", execute: () => ({ content: "X".repeat(500), isError: false }) }),
+    );
+
+    // Point toolOutputDir UNDER an existing regular file, so mkdirSync throws.
+    const blocker = join(ws.root, "blocker");
+    writeFileSync(blocker, "i am a file");
+    const badDir = join(blocker, "tool-output");
+
+    await host.use("limits", activateLimits);
+    await runCommand(commands.get("limits")!, agent, `maxToolOutputBytes=50 toolOutputDir=${badDir}`);
+    await agent.run("go");
+
+    const r = toolResults(agent.messages).find((b) => b.toolCallId === "c0")!;
+    assert.match(r.content, /output truncated: \d+ of \d+ bytes shown/);
+    assert.ok(!r.content.includes("full output saved to"), "no spill hint when the write fails");
+    assert.equal(r.isError, false, "isError unchanged by the fail-soft path");
+    assert.ok(!existsSync(badDir), "no spill directory created on failure");
+  } finally {
+    ws.restore();
+  }
+});
+
+test("spilling preserves isError, details, and terminate (only content changes)", async () => {
+  const ws = withWorkspace();
+  try {
+    const { agent, host, commands } = makeHarness({ fallback: "allow" });
+    await host.use("limits", activateLimits);
+    await runCommand(commands.get("limits")!, agent, "maxToolOutputBytes=50");
+
+    // Drive the afterToolCall filter directly so the full ToolResult (including
+    // details/terminate, which the transcript block does not carry) is visible.
+    const details = { code: 7, note: "kept" };
+    const out = await agent.hooks.apply(
+      "afterToolCall",
+      { content: "X".repeat(500), isError: true, details, terminate: true },
+      { call: { type: "tool_call", id: "c0", name: "big", arguments: {} } },
+    );
+
+    assert.match(out.content, /full output saved to /, "content was spilled");
+    assert.equal(out.isError, true, "isError preserved through spill");
+    assert.deepEqual(out.details, details, "details preserved through spill");
+    assert.equal(out.terminate, true, "terminate preserved through spill");
+  } finally {
+    ws.restore();
+  }
+});
+
+test("activation sweeps stale spill files and keeps fresh ones", async () => {
+  const ws = withWorkspace();
+  try {
+    const dir = join(ws.root, ".eagent", "tool-output");
+    mkdirSync(dir, { recursive: true });
+    const stale1 = join(dir, "tool-old-1");
+    const stale2 = join(dir, "tool-old-2");
+    const fresh = join(dir, "tool-new-1");
+    for (const f of [stale1, stale2, fresh]) writeFileSync(f, "spill");
+
+    // Age the stale files to ~10 days old (older than the 7-day default).
+    const tenDaysAgo = (Date.now() - 10 * 86_400_000) / 1000;
+    utimesSync(stale1, tenDaysAgo, tenDaysAgo);
+    utimesSync(stale2, tenDaysAgo, tenDaysAgo);
+
+    const { host } = makeHarness({ fallback: "allow" });
+    await host.use("limits", activateLimits);
+
+    const remaining = readdirSync(dir);
+    assert.ok(!existsSync(stale1), "stale file 1 deleted");
+    assert.ok(!existsSync(stale2), "stale file 2 deleted");
+    assert.ok(existsSync(fresh), "fresh file kept");
+    assert.deepEqual(remaining, ["tool-new-1"], "only the fresh file remains");
+  } finally {
+    ws.restore();
+  }
+});
+
+test("activation does not throw when the spill directory is absent", async () => {
+  const ws = withWorkspace();
+  try {
+    assert.ok(!existsSync(join(ws.root, ".eagent", "tool-output")), "no spill dir yet");
+    const { host } = makeHarness({ fallback: "allow" });
+    await host.use("limits", activateLimits); // must not throw on a missing dir
+  } finally {
+    ws.restore();
+  }
+});
+
+test("/limits prints and accepts the spill config keys", async () => {
+  const { agent, host, commands } = makeHarness({ fallback: "allow" });
+  await host.use("limits", activateLimits);
+  const cmd = commands.get("limits")!;
+
+  // Defaults are printed.
+  const before = await runCommand(cmd, agent, "");
+  assert.ok(before.some((l) => l === "spillToolOutput=true"), "spill defaults on");
+  assert.ok(before.some((l) => l === "toolOutputRetentionDays=7"), "retention default printed");
+  assert.ok(before.some((l) => l.startsWith("toolOutputDir=")), "spill dir printed");
+
+  // Boolean, string, and numeric keys each update.
+  const after = await runCommand(
+    cmd,
+    agent,
+    "spillToolOutput=off toolOutputDir=/tmp/spill toolOutputRetentionDays=3",
+  );
+  assert.ok(after.some((l) => l === "spillToolOutput=false"), "boolean key updated");
+  assert.ok(after.some((l) => l === "toolOutputDir=/tmp/spill"), "string key updated");
+  assert.ok(after.some((l) => l === "toolOutputRetentionDays=3"), "numeric key updated");
+
+  // Bad boolean and bad retention are rejected with a message, leaving prior values.
+  const bad = await runCommand(cmd, agent, "spillToolOutput=maybe toolOutputRetentionDays=-1");
+  assert.ok(bad.some((l) => l.includes('"spillToolOutput" must be a boolean')), "rejects bad boolean");
+  assert.ok(bad.some((l) => l.includes('"toolOutputRetentionDays" must be a number')), "rejects bad number");
+  assert.ok(bad.some((l) => l === "spillToolOutput=false"), "bad input left spill flag unchanged");
+  assert.ok(bad.some((l) => l === "toolOutputRetentionDays=3"), "bad input left retention unchanged");
 });

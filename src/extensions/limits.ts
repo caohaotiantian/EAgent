@@ -17,6 +17,9 @@
  * no guardrail at all.
  */
 
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { ToolResult } from "../kernel/types.js";
 import type { ToolDecision } from "../kernel/events.js";
@@ -27,11 +30,18 @@ const DEFAULT_MAX_TOOL_OUTPUT_BYTES = 16384;
 const DEFAULT_MAX_TOOL_CALLS_PER_RUN = 100;
 /** Token budget per run; 0 means disabled (opt-in, unlike the others). */
 const DEFAULT_MAX_TOKENS_PER_RUN = 0;
+/** Whether oversized output is spilled to a file instead of discarded. */
+const DEFAULT_SPILL_TOOL_OUTPUT = true;
+/** Days before a stale spill file is eligible for the activation sweep. */
+const DEFAULT_TOOL_OUTPUT_RETENTION_DAYS = 7;
 
 interface LimitsConfig {
   maxToolOutputBytes: number;
   maxToolCallsPerRun: number;
   maxTokensPerRun: number;
+  spillToolOutput: boolean;
+  toolOutputDir: string | undefined;
+  toolOutputRetentionDays: number;
 }
 
 /** The store keys the config is persisted under. */
@@ -39,7 +49,26 @@ const KEYS = {
   maxToolOutputBytes: "maxToolOutputBytes",
   maxToolCallsPerRun: "maxToolCallsPerRun",
   maxTokensPerRun: "maxTokensPerRun",
+  spillToolOutput: "spillToolOutput",
+  toolOutputDir: "toolOutputDir",
+  toolOutputRetentionDays: "toolOutputRetentionDays",
 } as const;
+
+/** The workspace the `read` tool confines to: `$EAGENT_WORKSPACE` or cwd. */
+function workspaceRoot(): string {
+  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+}
+
+/** True when `p` resolves inside `root` (same rule the `read` tool enforces). */
+function isInsideRoot(root: string, p: string): boolean {
+  const abs = isAbsolute(p) ? resolve(p) : resolve(root, p);
+  const rel = relative(root, abs);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep()}`) && !isAbsolute(rel));
+}
+
+function sep(): string {
+  return process.platform === "win32" ? "\\" : "/";
+}
 
 export default function activate(e: ExtensionAPI): () => void {
   /**
@@ -72,11 +101,46 @@ export default function activate(e: ExtensionAPI): () => void {
     return fallback;
   };
 
+  /** Read a boolean flag, treating `0`/`"0"`/`"false"`/`"off"` as false. */
+  const readBool = (key: string, fallback: boolean): boolean => {
+    const raw = e.store.get<unknown>(key);
+    if (typeof raw === "boolean") return raw;
+    if (typeof raw === "number") return raw !== 0;
+    if (typeof raw === "string") {
+      const s = raw.trim().toLowerCase();
+      if (s === "0" || s === "false" || s === "off" || s === "no") return false;
+      if (s === "1" || s === "true" || s === "on" || s === "yes") return true;
+    }
+    return fallback;
+  };
+
+  /** Read an optional non-empty string, else `undefined`. */
+  const readString = (key: string): string | undefined => {
+    const raw = e.store.get<unknown>(key);
+    if (typeof raw === "string" && raw.trim().length > 0) return raw;
+    return undefined;
+  };
+
   const config = (): LimitsConfig => ({
     maxToolOutputBytes: readPositiveInt(KEYS.maxToolOutputBytes, DEFAULT_MAX_TOOL_OUTPUT_BYTES),
     maxToolCallsPerRun: readPositiveInt(KEYS.maxToolCallsPerRun, DEFAULT_MAX_TOOL_CALLS_PER_RUN),
     maxTokensPerRun: readNonNegativeInt(KEYS.maxTokensPerRun, DEFAULT_MAX_TOKENS_PER_RUN),
+    spillToolOutput:
+      process.env.EAGENT_TOOL_SPILL === "off"
+        ? false
+        : readBool(KEYS.spillToolOutput, DEFAULT_SPILL_TOOL_OUTPUT),
+    toolOutputDir: readString(KEYS.toolOutputDir),
+    toolOutputRetentionDays: readPositiveInt(
+      KEYS.toolOutputRetentionDays,
+      DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+    ),
   });
+
+  /**
+   * Monotonic spill-file counter, so two spills in the same millisecond still
+   * land on distinct paths. Declared once per activation.
+   */
+  let nextSpillId = 0;
 
   // --- 1. Tool-output truncation ------------------------------------------
   //
@@ -86,21 +150,49 @@ export default function activate(e: ExtensionAPI): () => void {
   // not about changing the meaning of the result.
   const offTruncate = e.hook("afterToolCall", (result: ToolResult): ToolResult => {
     try {
-      const limit = config().maxToolOutputBytes;
+      const cfg = config();
+      const limit = cfg.maxToolOutputBytes;
       const content = result.content ?? "";
       const total = Buffer.byteLength(content, "utf8");
       if (total <= limit) return result;
       const shown = truncateToBytes(content, limit);
       const shownBytes = Buffer.byteLength(shown, "utf8");
-      return {
-        ...result,
-        content: `${shown}\n\n[output truncated: ${shownBytes} of ${total} bytes shown]`,
-      };
+
+      // The clipped marker, used both when spill is off and as the fail-soft
+      // fallback. No information about where the rest went — it was discarded.
+      const clipped = `${shown}\n\n[output truncated: ${shownBytes} of ${total} bytes shown]`;
+
+      if (!cfg.spillToolOutput) return { ...result, content: clipped };
+
+      // Spill the FULL output to disk, then point the model at it. Any disk
+      // failure degrades to the clipped marker rather than crashing the run.
+      try {
+        const root = workspaceRoot();
+        const dir = cfg.toolOutputDir ?? join(root, ".eagent", "tool-output");
+        mkdirSync(dir, { recursive: true });
+        const file = join(dir, `tool-${Date.now()}-${nextSpillId++}`);
+        writeFileSync(file, content, "utf8");
+        const hint = isInsideRoot(root, file)
+          ? `full output saved to ${relative(root, file)}. Retrieve more with the read tool (offset/limit) or grep it via bash`
+          : `full output saved to ${file}. Retrieve it with bash (grep/cat)`;
+        return {
+          ...result,
+          content: `${shown}\n\n[output truncated: ${shownBytes} of ${total} bytes shown; ${hint}.]`,
+        };
+      } catch (spillErr) {
+        e.log.warn("limits: tool-output spill failed, falling back to in-context truncation:", spillErr);
+        return { ...result, content: clipped };
+      }
     } catch (err) {
       e.log.warn("limits: truncation hook error:", err);
       return result;
     }
   });
+
+  // Best-effort cleanup of stale spill files, once per activation (idempotent,
+  // so re-running on a hot reload is harmless). Not a hook and not part of the
+  // teardown loop — both of those must stay off this path.
+  sweepSpillDir(e, config());
 
   // --- 2. Per-run tool-call budget ----------------------------------------
   //
@@ -158,7 +250,25 @@ export default function activate(e: ExtensionAPI): () => void {
           }
           const key = pair.slice(0, eq);
           const value = pair.slice(eq + 1);
-          if (key !== KEYS.maxToolOutputBytes && key !== KEYS.maxToolCallsPerRun && key !== KEYS.maxTokensPerRun) {
+          if (key === KEYS.toolOutputDir) {
+            // A free-form path; an empty value clears the override.
+            if (value.length === 0) e.store.set(key, "");
+            else e.store.set(key, value);
+            continue;
+          }
+          if (key === KEYS.spillToolOutput) {
+            const v = value.trim().toLowerCase();
+            if (v === "1" || v === "true" || v === "on" || v === "yes") e.store.set(key, true);
+            else if (v === "0" || v === "false" || v === "off" || v === "no") e.store.set(key, false);
+            else ctx.print(`limits: "${key}" must be a boolean (got "${value}")`);
+            continue;
+          }
+          if (
+            key !== KEYS.maxToolOutputBytes &&
+            key !== KEYS.maxToolCallsPerRun &&
+            key !== KEYS.maxTokensPerRun &&
+            key !== KEYS.toolOutputRetentionDays
+          ) {
             ctx.print(`limits: unknown key "${key}"`);
             continue;
           }
@@ -176,6 +286,9 @@ export default function activate(e: ExtensionAPI): () => void {
       ctx.print(`maxToolOutputBytes=${cfg.maxToolOutputBytes}`);
       ctx.print(`maxToolCallsPerRun=${cfg.maxToolCallsPerRun}`);
       ctx.print(`maxTokensPerRun=${cfg.maxTokensPerRun}${cfg.maxTokensPerRun === 0 ? " (disabled)" : ""}`);
+      ctx.print(`spillToolOutput=${cfg.spillToolOutput}`);
+      ctx.print(`toolOutputDir=${cfg.toolOutputDir ?? `(default: ${workspaceRoot()}/.eagent/tool-output)`}`);
+      ctx.print(`toolOutputRetentionDays=${cfg.toolOutputRetentionDays}`);
       ctx.print(`toolCallsThisRun=${toolCallsThisRun}`);
       ctx.print(`tokensThisRun=${tokensThisRun}`);
     },
@@ -209,4 +322,29 @@ function truncateToBytes(s: string, limit: number): string {
     out = s.slice(0, end);
   }
   return out;
+}
+
+/**
+ * Delete spill files older than the retention window. Every disk op is isolated
+ * so a missing directory or one undeletable file cannot abort the sweep or
+ * throw out of activation.
+ */
+function sweepSpillDir(e: ExtensionAPI, cfg: LimitsConfig): void {
+  if (!cfg.spillToolOutput) return;
+  const dir = cfg.toolOutputDir ?? join(workspaceRoot(), ".eagent", "tool-output");
+  const cutoff = Date.now() - cfg.toolOutputRetentionDays * 86_400_000;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return; // missing directory: nothing to sweep
+  }
+  for (const name of entries) {
+    const file = join(dir, name);
+    try {
+      if (statSync(file).mtimeMs < cutoff) rmSync(file, { force: true });
+    } catch (err) {
+      e.log.warn("limits: spill sweep skipped a file:", err);
+    }
+  }
 }

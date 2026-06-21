@@ -27,12 +27,14 @@ import { GeminiProvider } from "./providers/gemini.js";
 import { MockProvider } from "./providers/mock.js";
 
 import coreTools from "./extensions/core-tools.js";
+import search from "./extensions/search.js";
 import skills from "./extensions/skills.js";
 import mcp from "./extensions/mcp.js";
 import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
+import prune from "./extensions/prune.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
@@ -44,20 +46,24 @@ import web from "./extensions/web.js";
 import checkpoint from "./extensions/checkpoint.js";
 import introspect from "./extensions/introspect.js";
 import journal from "./extensions/journal.js";
+import todo from "./extensions/todo.js";
 import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
+import bashPolicy from "./extensions/bash-policy.js";
 import integrity from "./extensions/integrity.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
 export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["core-tools", coreTools],
+  ["search", search],
   ["skills", skills],
   ["mcp", mcp],
   ["codeact", codeact],
   ["subagents", subagents],
   ["dynamic-workflow", dynamicWorkflow],
   ["memory", memory],
+  ["prune", prune],
   ["planmode", planmode],
   ["session", session],
   ["packages", packages],
@@ -69,8 +75,10 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["checkpoint", checkpoint],
   ["introspect", introspect],
   ["journal", journal],
+  ["todo", todo],
   ["prompts", promptsExt],
   ["flow-guard", flowGuard],
+  ["bash-policy", bashPolicy],
   ["integrity", integrity],
 ];
 
