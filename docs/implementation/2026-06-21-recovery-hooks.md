@@ -1,5 +1,10 @@
 # Implementation: `recovery` extension
 
+Status: closed
+Closing-commit: afccad3
+Closed-on: 2026-06-21
+Deferred: none
+
 Slug: `2026-06-21-recovery-hooks`
 Design: `docs/design/2026-06-21-recovery-hooks.md`
 
@@ -128,10 +133,13 @@ Key Design Decisions D1–D5 `:55`–`165`; Acceptance Criteria `:229`–`270`.
   `npm test`
 - Typecheck (crit 1): `npm run typecheck`
 
-> Note: `node --test` name filtering uses `--test-name-pattern`; the project
-> `test` script already globs `test/**/*.test.ts`, so the new file is picked up
-> automatically. The single canonical acceptance gate for the Phase is
-> `npm test` exit 0 **and** `npm run typecheck` exit 0.
+> Note: the project `test` script globs `test/**/*.test.ts`, so the new file is
+> picked up automatically. (Verified at acceptance: `--test-name-pattern` does
+> **not** subset this `node --import tsx --test` runner — it executes the whole
+> file set regardless — so the recovery cases are confirmed by reading the
+> `ok 244`–`ok 253` lines in the full `npm test` output.) The single canonical
+> acceptance gate for the Phase is `npm test` exit 0 **and**
+> `npm run typecheck` exit 0.
 
 **Exit condition:** `npm test` exits 0 (new `test/recovery.test.ts` plus all
 pre-existing tests green) and `npm run typecheck` exits 0; `recovery` present in
