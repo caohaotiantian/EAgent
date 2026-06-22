@@ -1,7 +1,10 @@
 # Design: `secret-guard` — keep secret VALUES out of tool args (and the transcript)
 
 Slug: `2026-06-22-secret-guard`
-Status: draft
+Status: closed
+Closing-commit: b6b0d26
+Closed-on: 2026-06-22
+Deferred: none
 
 ## 1. Background and Purpose
 

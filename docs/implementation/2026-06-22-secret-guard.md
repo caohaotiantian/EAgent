@@ -1,7 +1,10 @@
 # Implementation: `secret-guard` — keep secret VALUES out of tool args (and the transcript)
 
 Slug: `2026-06-22-secret-guard`
-Status: draft
+Status: closed
+Closing-commit: b6b0d26
+Closed-on: 2026-06-22
+Deferred: none
 Design doc: `docs/design/2026-06-22-secret-guard.md`
 
 This guide drives a fresh agent through TDD development of `secret-guard`. It

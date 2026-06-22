@@ -1,5 +1,10 @@
 # Implementation guide — citations
 
+Status: closed
+Closing-commit: b6b0d26
+Closed-on: 2026-06-22
+Deferred: none
+
 Tag retrieval outputs with stable ids and validate answer `[id]` markers.
 
 - **Design (FINAL, PASSED):** `docs/design/2026-06-22-citations.md` — read it in
