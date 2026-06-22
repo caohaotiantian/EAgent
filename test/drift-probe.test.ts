@@ -20,6 +20,7 @@ import driftProbe, {
   pickProbe,
   scoreProbe,
   isRegression,
+  type Probe,
 } from "../src/extensions/drift-probe.js";
 import type { ExtensionAPI } from "../src/kernel/extension.js";
 import type { CompletionRequest, Logger, Message, UI } from "../src/kernel/types.js";
@@ -88,9 +89,30 @@ async function activate(h: Harness, cfg: StoreCfg = {}): Promise<ExtensionAPI> {
   return api;
 }
 
-/** True when a request is the canary sub-call (tool-less, probe prompt). */
+/** Concatenate the text of the request's single user message. */
+function userText(req: CompletionRequest): string {
+  return req.messages
+    .filter((m) => m.role === "user")
+    .flatMap((m) => m.content)
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+}
+
+/** Find the probe a canary request asked, by its prompt in the user message. */
+function probeOf(req: CompletionRequest): Probe | undefined {
+  const body = userText(req);
+  return PROBE_POOL.find((p) => p.prompt === body);
+}
+
+/**
+ * True when a request is the canary sub-call (tool-less, and its user message
+ * carries one of the pinned probe prompts). The probe prompt now lives in the
+ * user message — the system prompt is a fixed instruction (Design 4.3) — so the
+ * discriminator keys on the user payload, not `systemPrompt`.
+ */
 function isProbeReq(req: CompletionRequest): boolean {
-  return req.tools.length === 0 && PROBE_POOL.some((p) => p.prompt === req.systemPrompt);
+  return req.tools.length === 0 && probeOf(req) !== undefined;
 }
 
 /**
@@ -107,8 +129,8 @@ class ProbeProvider extends MockProvider {
   #fired = 0;
   constructor(probeReplies: string[]) {
     super((req) => {
-      if (isProbeReq(req)) {
-        const asked = PROBE_POOL.find((p) => p.prompt === req.systemPrompt)!;
+      const asked = probeOf(req);
+      if (asked) {
         const reply = probeReplies[this.#fired] ?? strongFor(asked);
         this.#fired++;
         return { text: reply };
@@ -331,8 +353,8 @@ class NoteSpyProvider extends MockProvider {
   #fired = 0;
   constructor(probeReplies: string[]) {
     super((req) => {
-      if (isProbeReq(req)) {
-        const asked = PROBE_POOL.find((p) => p.prompt === req.systemPrompt)!;
+      const asked = probeOf(req);
+      if (asked) {
         const reply = probeReplies[this.#fired] ?? strongFor(asked);
         this.#fired++;
         return { text: reply };
@@ -375,6 +397,42 @@ test("AC6+AC7: one-shot note injected next turn, then disarmed, never in the tra
     (m) => m.role === "system" && m.meta?.kind === "drift-note",
   );
   assert.equal(inTranscript, false, "the note never enters the durable transcript");
+});
+
+test("4.6: a regression that arms while noteOnRegression=false, then flipped true, fires NO stale note", async () => {
+  const { logger, warns } = spyLogger();
+  const { ui, notifies } = spyUI();
+  const h = makeHarness({ logger, ui });
+  // The disarm-on-bail asymmetry, made reachable: a regression registers while
+  // notes are DISABLED, then the config is flipped to enabled before the next
+  // qualifying turn. With the gate at ARM time the flag never armed, so no stale
+  // note can fire afterwards; the regression is still warned+notified (it IS
+  // detected). The old code armed unconditionally and only bailed in the note
+  // handler, so a later flip would strand a stale armed flag and inject a late
+  // note — exactly the latent edge this pins shut.
+  const provider = new NoteSpyProvider([STRONG_REPLY_0, WEAK_REPLY]);
+  h.agent.providers.register(provider, { default: true });
+  const api = await activate(h, { enabled: true, n: 2, noteOnRegression: false });
+
+  await runTurns(h, 4); // probes fire after turns 2 (baseline) and 4 (regression)
+
+  // The regression was detected even with notes off.
+  assert.equal(
+    warns.filter((w) => /drift detected/i.test(w)).length,
+    1,
+    "the regression is still detected and warned with notes disabled",
+  );
+  assert.equal(notifies.filter((m) => /drift/i.test(m)).length, 1, "and notified");
+
+  // Now flip notes ON, then run more turns. No stale note may appear.
+  api.store.set("noteOnRegression", true);
+  await runTurns(h, 4);
+
+  assert.equal(
+    provider.mainTurnHadNote.filter((had) => had).length,
+    0,
+    "no main turn ever saw a drift-note — the flag never armed under disabled notes",
+  );
 });
 
 // ===========================================================================
