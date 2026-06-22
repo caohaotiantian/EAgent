@@ -202,3 +202,13 @@ extension appears in `BUILTIN_EXTENSIONS` and the `CLAUDE.md` inventory.
 - The new `transformContext` listener must be additive and order-independent
   (it returns the input by reference on the no-match path, so it cannot corrupt
   `prune`/`memory`/`context-files` output in the no-trigger case).
+
+## Closure note
+
+Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Phase 1 closed: dev (`feat(phase1)`), one within-round test-coverage fix
+(`fix(phase1-round2)`), review 2 generations clean, accept-pass. Main-agent
+Phase-end re-run: `npm test` exit 0 (385/385, 0 skipped), `npm run typecheck`
+exit 0, `node --import tsx --test test/microagents.test.ts` exit 0 (11/11).
+No `Deprecated` section (no L1/L2 rollbacks occurred).
+Deferred: none.
