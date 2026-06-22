@@ -1,6 +1,9 @@
 # tool_batch_end — a wave-settled lifecycle event for once-per-parallel-batch checks
 
-Status: design
+Status: closed
+Closing-commit: 36c6090
+Closed-on: 2026-06-23
+Deferred: none
 Date: 2026-06-22
 Author: design author (EAgent)
 
