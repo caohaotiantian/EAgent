@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
-import type { CompletionRequest } from "../src/kernel/types.js";
+import { setHandlerErrorReporter } from "../src/kernel/hooks.js";
+import type { CompletionRequest, ToolCallBlock, ToolResult } from "../src/kernel/types.js";
 import { makeHarness, lastText } from "./helpers.js";
 
 test("runs a full tool-use turn: call -> result -> final answer", async () => {
@@ -55,6 +56,102 @@ test("parallel tool results preserve requested order regardless of finish time",
   const toolMsg = agent.messages.find((m) => m.role === "tool")!;
   const order = toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId);
   assert.deepEqual(order, ["c1", "c2"], "results must follow the order the model requested");
+});
+
+test("a parallel wave settles into exactly one ordered tool_batch_end", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "slow", id: "c1" }, { name: "mid", id: "c2" }, { name: "fast", id: "c3" }] },
+      { text: "done" },
+    ],
+  });
+  agent.tools.register(
+    defineTool({
+      name: "slow",
+      description: "",
+      execute: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        return { content: "slow-result" };
+      },
+    }),
+  );
+  agent.tools.register(defineTool({ name: "mid", description: "", execute: () => ({ content: "mid-result" }) }));
+  agent.tools.register(defineTool({ name: "fast", description: "", execute: () => ({ content: "fast-result" }) }));
+
+  const batches: { batch: { call: ToolCallBlock; result: ToolResult }[] }[] = [];
+  let toolEndCount = 0;
+  let turnEndCount = 0;
+  // AC#1: destructure ({ batch }) with no cast; `batch` must be inferred as the
+  // { call, result } pair array (enforced by typecheck, exercised here at runtime).
+  agent.hooks.on("tool_batch_end", ({ batch }) => {
+    batches.push({ batch });
+  });
+  agent.hooks.on("tool_end", () => {
+    toolEndCount++;
+  });
+  agent.hooks.on("turn_end", () => {
+    turnEndCount++;
+  });
+
+  await agent.run("go");
+
+  // AC#2: exactly one wave-settled signal for the single dispatch group.
+  assert.equal(batches.length, 1, "a single parallel wave emits exactly one tool_batch_end");
+  // AC#3: the batch carries the ordered {call,result} pairs in requested order.
+  assert.equal(batches[0]!.batch.length, 3);
+  assert.deepEqual(
+    batches[0]!.batch.map((p) => p.call.id),
+    ["c1", "c2", "c3"],
+    "batch pairs follow the order the model requested",
+  );
+  // The paired results are present and correctly matched to their calls.
+  assert.deepEqual(
+    batches[0]!.batch.map((p) => p.result.content),
+    ["slow-result", "mid-result", "fast-result"],
+  );
+  // AC#4: per-tool tool_end is unchanged — still fires once per tool (3x).
+  assert.equal(toolEndCount, 3, "tool_end still fires once per tool");
+  // AC#5: turn_end is unchanged — one tool turn + one text turn = 2 for the run.
+  assert.equal(turnEndCount, 2, "turn_end fires once per turn, unperturbed by the new event");
+});
+
+test("a single-tool wave still emits one length-1 tool_batch_end", async () => {
+  const { agent } = makeHarness({
+    responder: [{ toolCalls: [{ name: "solo", id: "s1" }] }, { text: "done" }],
+  });
+  agent.tools.register(defineTool({ name: "solo", description: "", execute: () => ({ content: "solo-result" }) }));
+
+  const batches: { batch: { call: ToolCallBlock; result: ToolResult }[] }[] = [];
+  agent.hooks.on("tool_batch_end", ({ batch }) => {
+    batches.push({ batch });
+  });
+
+  await agent.run("go");
+
+  // AC#6: a wave of one fires too — once per dispatch group, no length gate.
+  assert.equal(batches.length, 1, "a single-tool wave still emits exactly one tool_batch_end");
+  assert.equal(batches[0]!.batch.length, 1);
+  assert.equal(batches[0]!.batch[0]!.call.id, "s1");
+});
+
+test("a throwing tool_batch_end consumer does not break the loop", async () => {
+  setHandlerErrorReporter(() => {});
+  try {
+    const { agent } = makeHarness({
+      responder: [{ toolCalls: [{ name: "noop", id: "n1" }] }, { text: "recovered" }],
+    });
+    agent.tools.register(defineTool({ name: "noop", description: "", execute: () => ({ content: "ok" }) }));
+    // AC#7: an observe-only consumer that throws cannot break the agent loop.
+    agent.hooks.on("tool_batch_end", () => {
+      throw new Error("boom");
+    });
+
+    const { reason } = await agent.run("go");
+    assert.equal(reason, "end_turn", "the run completes despite the throwing consumer");
+    assert.equal(lastText(agent), "recovered");
+  } finally {
+    setHandlerErrorReporter((event, err) => console.error(event, err));
+  }
 });
 
 test("beforeToolCall can veto a call", async () => {

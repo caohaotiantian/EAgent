@@ -246,6 +246,7 @@ change anything. From `src/kernel/events.ts`:
 | `reasoning_delta` | `{ text }` | Incremental reasoning ("thinking") text during streaming, for models that expose it. |
 | `tool_start` | `{ call }` | A tool call is about to run. |
 | `tool_end` | `{ call, result }` | A tool call finished. |
+| `tool_batch_end` | `{ batch }` | A parallel tool wave settled (the ordered `{call,result}` pairs). |
 | `usage` | `{ usage, cumulative }` | Token usage for the just-finished model call, plus the running total. |
 | `error` | `{ error, where }` | Something threw. |
 
