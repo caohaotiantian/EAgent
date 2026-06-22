@@ -229,4 +229,16 @@ particular every existing `bash-policy.test.ts` case:
 
 ## Closure
 
-Status: open.
+Status: closed
+Closing-commit: 387ddc8
+Closed-on: 2026-06-22
+Deferred: none
+
+Phase 1 closed in a single L3 round (clean first review, no fix). `npm run
+typecheck` exit 0; `npm test` exit 0 (374 passed); `npx tsx --test
+test/bash-policy.test.ts` exit 0 (45 passed). No L2 rollback (no Deprecated
+section). Regression protection held — the prior bash-policy tests (no-op default,
+deny/ask/allow, path-qualified, wrapper-unwrapping, compound/piped/`find -exec`,
+ask-remember) stayed green and unmodified; every non-bracket, non-backslash pattern
+compiles byte-identically to the old `toRegExp`, and the absent-justification reason
+strings are byte-identical (pinned by the crit-5 `assert.equal`).
