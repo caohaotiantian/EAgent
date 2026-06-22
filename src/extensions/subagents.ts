@@ -238,7 +238,10 @@ export default function activate(e: ExtensionAPI): void {
           const results = await Promise.all(prompts.map((p) => runChild(p, system, maxTurns, opts)));
           const body = results.map((r, i) => `[child ${i + 1}]\n${r.content}`).join("\n\n");
           const isError = results.some((r) => r.isError) || undefined;
-          return { content: body, isError, details: { mode, children: results.length, readOnly } };
+          // Carry each child's details so the shape stays consistent with single/chain
+          // (which expose a nested `child`); here it is one `child` entry per prompt.
+          const children = results.map((r) => r.details);
+          return { content: body, isError, details: { mode, children: results.length, readOnly, child: children } };
         }
 
         if (mode === "chain") {
@@ -301,8 +304,8 @@ export function readOnlyCapabilities(ui?: UI): CapabilityManager {
   return scopedCapabilities(READ_ONLY_GRANTS, ui);
 }
 
-/** Coerce a value into a non-empty array of capability-pattern strings, or undefined. */
-function asCapabilityList(value: unknown): string[] | undefined {
+/** Coerce a value into a non-empty array of non-empty strings, or undefined. */
+function nonEmptyStringList(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined;
   const out = value.filter((v): v is string => typeof v === "string" && v.length > 0);
   return out.length > 0 ? out : undefined;
@@ -321,7 +324,7 @@ export function resolveChildCapabilities(
   enabled = lpEnabled(),
 ): CapabilityManager {
   if (!enabled) return parent.capabilities;
-  const allowlist = asCapabilityList(args.capabilities);
+  const allowlist = nonEmptyStringList(args.capabilities);
   const readOnly = args.readOnly === true;
   if (allowlist) {
     if (readOnly) {
@@ -377,7 +380,7 @@ export function resolveOutputSchema(
   const raw = args.outputSchema;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const schema = { ...(raw as JSONSchema) };
-  const extra = asCapabilityList(args.require);
+  const extra = nonEmptyStringList(args.require);
   if (extra) {
     const required = new Set<string>([...(schema.required ?? []), ...extra]);
     schema.required = [...required];

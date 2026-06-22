@@ -535,6 +535,39 @@ test("AC-4: an unregistered provider name falls back to the parent and warns", a
   );
 });
 
+// --- T5: model override reaches the child request; parent keeps its own model -
+
+test("model override passes the requested model to the child request only", async () => {
+  let childModel: string | undefined;
+  let parentModel: string | undefined;
+  let parentSpawned = false;
+  const provider = new MockProvider((req) => {
+    if (req.systemPrompt.includes("CHILD")) {
+      childModel = req.model;
+      return { text: "child-done" };
+    }
+    parentModel = req.model;
+    if (!parentSpawned) {
+      parentSpawned = true;
+      return {
+        toolCalls: [
+          { name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "CHILD", model: "child-model" } },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  });
+
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  assert.equal(childModel, "child-model", "the child request carried the overridden model");
+  assert.equal(parentModel, "mock", "the parent kept the harness default model");
+});
+
 // --- T6: typed return validates; one re-prompt then fail; invalid→valid -----
 
 const STATUS_SCHEMA = {
