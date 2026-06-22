@@ -19,25 +19,12 @@ import type { ToolDecision } from "../src/kernel/events.js";
 import type {
   CompletionRequest,
   Message,
-  Provider,
-  StreamEvent,
   Tool,
   ToolResult,
   ToolResultBlock,
 } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
-import { makeHarness, type Harness } from "./helpers.js";
-
-/** A provider that delegates to a MockProvider but reports a different `name`. */
-class RenamedProvider implements Provider {
-  constructor(
-    readonly name: string,
-    private readonly inner: MockProvider,
-  ) {}
-  stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
-    return this.inner.stream(req);
-  }
-}
+import { makeHarness, RenamedProvider, type Harness } from "./helpers.js";
 
 // --- helpers ----------------------------------------------------------------
 
