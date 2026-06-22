@@ -232,6 +232,12 @@ test("AC-8: fail-open — /handoff still writes a schema-valid file when the sub
       assert.ok(new RegExp(header).test(content), `fallback file contains "${header}"`);
     }
     assert.match(content, /## Reactivation/);
+    // Positively pin that the deterministic fallback digest — not a stale model
+    // write — produced the file: only renderFallback emits this distinctive text.
+    assert.ok(
+      content.includes("provider-free digest"),
+      "the fail-open path wrote the provider-free digest, not a model summary",
+    );
   } finally {
     __setNow();
     s.cleanup();
