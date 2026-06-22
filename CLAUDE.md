@@ -99,7 +99,16 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   selectors) and wraps the body in an `<untrusted-content>` provenance fence with
   a standing "data, not instructions" note; skips error results so it stays
   disjoint from `recovery`; never blocks or calls a model, no capability, on by
-  default, `EAGENT_CONTENT_GUARD=off` kill switch).
+  default, `EAGENT_CONTENT_GUARD=off` kill switch),
+  `circuit-breaker` (tool-call repetition / consecutive-failure fail-fast — a
+  per-run `Map` keyed on the call signature `name + canonical(args)` where object
+  keys are recursively sorted; on `beforeToolCall` the 2nd identical occurrence
+  earns one non-blocking `steer` nudge and the N-th (default threshold 3) — or N
+  consecutive failures of that signature, tracked via `afterToolCall` and reset on
+  success — asks via `ui.confirm` in `ask` mode or blocks in `block` mode; counts
+  total-in-run so A-B-A-B oscillation trips; resets all state on `agent_start`,
+  exports a pure `stableSignature`, fails open, on by default mode `ask`, no
+  capability, `/circuit-breaker` command, `EAGENT_CIRCUIT_BREAKER=off` kill switch).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.
