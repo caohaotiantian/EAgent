@@ -92,7 +92,14 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `write-guard` (prompts before a *blind overwrite* — a full-content `write` to
   an existing file the session has not read — via `beforeToolCall`; tracks
   read/edit/written paths per session, asks once, excludes `edit` and new-file
-  creation; on by default, no capability, `EAGENT_WRITE_GUARD=off` kill switch).
+  creation; on by default, no capability, `EAGENT_WRITE_GUARD=off` kill switch),
+  `content-guard` (ingress trust labeling — on `afterToolCall`, for *successful*
+  results from a *foreign*-capability tool (default `net:fetch`/`mcp:call`) it
+  strips always-invisible injection-vector Unicode (zero-width/bidi/tag/variation
+  selectors) and wraps the body in an `<untrusted-content>` provenance fence with
+  a standing "data, not instructions" note; skips error results so it stays
+  disjoint from `recovery`; never blocks or calls a model, no capability, on by
+  default, `EAGENT_CONTENT_GUARD=off` kill switch).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.

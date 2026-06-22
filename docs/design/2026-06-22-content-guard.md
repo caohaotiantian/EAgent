@@ -1,5 +1,10 @@
 # Design: content-guard — ingress trust labeling for foreign tool results
 
+Status: closed
+Closing-commit: d01140f
+Closed-on: 2026-06-22
+Deferred: none
+
 ## 1. Background and Purpose
 
 Indirect prompt injection is the top agentic risk: content returned by a tool
