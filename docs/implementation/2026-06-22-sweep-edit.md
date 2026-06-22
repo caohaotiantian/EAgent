@@ -1,5 +1,10 @@
 # Implementation: `sweep-edit` — regex-enumerated multi-site refactor that fans a sub-agent per match
 
+Status: closed
+Closing-commit: b6b0d26
+Closed-on: 2026-06-22
+Deferred: none
+
 Slug: `2026-06-22-sweep-edit`
 Design: [`docs/design/2026-06-22-sweep-edit.md`](../design/2026-06-22-sweep-edit.md) (status: PASSED)
 Mode: **batch** — `src/host.ts`, `CLAUDE.md`, `README.md` are **off-limits** (see §3).

@@ -1,9 +1,9 @@
 # citations — tag retrieval outputs with stable ids and validate answer [id] markers
 
-Status: open
-Closing-commit: TBD
-Closed-on: TBD
-Deferred: host.ts registration + CLAUDE.md/README inventory (batch integration)
+Status: closed
+Closing-commit: b6b0d26
+Closed-on: 2026-06-22
+Deferred: none
 
 Design author: EAgent design team · Date: 2026-06-22
 

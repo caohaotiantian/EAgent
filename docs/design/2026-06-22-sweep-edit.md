@@ -1,7 +1,10 @@
 # Design: `sweep-edit` — regex-enumerated multi-site refactor that fans a sub-agent per match
 
 Slug: `2026-06-22-sweep-edit`
-Status: draft
+Status: closed
+Closing-commit: b6b0d26
+Closed-on: 2026-06-22
+Deferred: none
 
 ## 1. Background and Purpose
 
