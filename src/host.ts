@@ -36,6 +36,7 @@ import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
 import recovery from "./extensions/recovery.js";
+import outputContract from "./extensions/output-contract.js";
 import contentGuard from "./extensions/content-guard.js";
 import circuitBreaker from "./extensions/circuit-breaker.js";
 import planmode from "./extensions/planmode.js";
@@ -80,6 +81,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["memory", memory],
   ["prune", prune],
   ["recovery", recovery],
+  ["output-contract", outputContract],
   ["content-guard", contentGuard],
   ["circuit-breaker", circuitBreaker],
   ["planmode", planmode],

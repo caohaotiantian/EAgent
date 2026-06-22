@@ -1,8 +1,8 @@
 # Design: `output-contract` extension — schema-validated final output via a `respond` tool + validate-and-reask
 
-Status: open
+Status: closed
 Closing-commit: TBD
-Closed-on: TBD
+Closed-on: 2026-06-23
 Deferred: provider-side decode-time forcing (`toolChoice`/`responseFormat` on the Provider request + anthropic/openai/gemini/mock) — see Scope Boundary.
 
 Slug: `2026-06-22-output-contract`
