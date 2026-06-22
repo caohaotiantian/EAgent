@@ -579,8 +579,21 @@ test("T16: EAGENT_EVALS=off makes the consumer + commands + tool no-ops", async 
     const t = getTrajectory(api);
     assert.ok(!t || t.tools.length === 0, "with the kill switch set, the consumer records nothing");
 
-    const out = (await runCommand(h, "expect", '{"tools":["A","B"]}')).join("\n");
-    assert.match(out, /disabled|off/i, "/expect reports the disabled state");
+    const expectOut = (await runCommand(h, "expect", '{"tools":["A","B"]}')).join("\n");
+    assert.match(expectOut, /disabled|off/i, "/expect reports the disabled state");
+
+    // The /eval command early-returns the disabled message before any dir work
+    // (so the dir argument is never read — a literal path suffices here).
+    const evalOut = (await runCommand(h, "eval", "/some/dir")).join("\n");
+    assert.match(evalOut, /disabled|off/i, "/eval reports the disabled state");
+    assert.doesNotMatch(evalOut, /passed|FAIL/i, "/eval runs no scenarios when disabled");
+
+    // The judge tool fails closed with the disabled message — it never grades.
+    const judge = h.agent.tools.get("judge");
+    assert.ok(judge, "judge is registered");
+    const judgeRes = await judge.execute({ rubric: "r", candidate: "c" }, toolCtx(h));
+    assert.equal(judgeRes.isError, true, "judge fails closed when disabled");
+    assert.match(judgeRes.content, /disabled|off/i, "judge reports the disabled state");
   } finally {
     if (prev === undefined) delete process.env.EAGENT_EVALS;
     else process.env.EAGENT_EVALS = prev;
