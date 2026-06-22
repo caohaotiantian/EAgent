@@ -378,6 +378,27 @@ protects and PRECEDES the IMPL that protects it).**
 
 ## Closure note
 
-_(Reconcile at closeout: record the closing-commit sha, final `npm test` /
-`npm run typecheck` / targeted-test results, any `fix(phase1-roundR)` rounds, and
-confirm the two integration deliverables remain deferred to batch integration.)_
+Phase 1 implemented on branch `20260622secretguard-dev-r1` (base
+`c122bcea5a4842ebe6c318dbb00e0eaf76ad4a9c`). Built strictly TDD: the eight test
+tasks (`test/secret-guard.test.ts`, 17 cases covering AC-1…AC-11) were authored
+first and watched fail at red for the right reason — `ERR_MODULE_NOT_FOUND` on the
+not-yet-existent `src/extensions/secret-guard.js` import — then the module
+(`scanSecrets`/`scanArgs` pure helpers + attributed pattern table + `cfg()` with
+the `EAGENT_SECRET_GUARD=off` kill switch + the leak-cap-scoped `beforeToolCall`
+filter + the `/secret-guard` command + a never-throwing dispose loop) turned them
+green. No `fix(phase1-roundR)` rounds were needed — the suite passed on the first
+implementation pass.
+
+Final results:
+- Targeted: `node --import tsx --test test/secret-guard.test.ts` → tests 17,
+  pass 17, fail 0.
+- `npm run typecheck` → exit 0.
+- `npm test` → tests 460, pass 460, fail 0, skipped 0 (full suite green;
+  `test/flow-guard.test.ts` and the sibling guard tests unaffected).
+
+Batch mode honored: `src/host.ts`, `CLAUDE.md`, and `README.md` are untouched —
+only `src/extensions/secret-guard.ts`, `test/secret-guard.test.ts`, and these
+two docs changed. The two integration deliverables (`host.ts` `BUILTIN_EXTENSIONS`
+registration and the `CLAUDE.md`/`README` inventory line, count **not** bumped)
+remain **deferred to batch integration**; the test loads the extension via
+`host.use("secret-guard", activate)` and does not depend on it being a builtin.
