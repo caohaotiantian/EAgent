@@ -221,6 +221,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `integrity`   | sweeps every tool description for poisoning / hidden instructions, and flags descriptions that change across sessions (rug-pull guard) | `/integrity` | — |
 | `write-guard` | prompts before a *blind overwrite* — a full-content `write` to an existing file the session has not read — via `beforeToolCall` (`EAGENT_WRITE_GUARD=off` to disable) | — | — |
 | `content-guard`| ingress trust labeling on `afterToolCall` — strips invisible injection-vector Unicode and wraps *successful* foreign-tool output (default `net:fetch`/`mcp:call`) in an `<untrusted-content>` provenance fence (on by default; `EAGENT_CONTENT_GUARD=off`) | `/content-guard` | — |
+| `circuit-breaker` | tool-call repetition / consecutive-failure fail-fast — buckets calls by signature (`name + canonical(args)`); the 2nd identical call earns a non-blocking steer, the N-th (default 3) or N consecutive failures ask/block (on by default, mode `ask`; `EAGENT_CIRCUIT_BREAKER=off`) | `/circuit-breaker` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -320,7 +321,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  30 built-in extensions, all riding the ExtensionAPI
+src/extensions/  31 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
