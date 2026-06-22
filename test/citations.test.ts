@@ -299,6 +299,18 @@ test("citations: an already-[src:-tagged content gets no second header (AC14)", 
   assert.ok(content.startsWith("[src:1] already tagged"), `content is unchanged; got: ${content}`);
 });
 
+// -- error-skip : a failed retrieval result is never tagged ------------------
+
+test("citations: an isError retrieval result gets no [src: header", async () => {
+  const h = makeHarness();
+  enable(h);
+  // A retrieval-capability tool whose result is an error must be skipped: the
+  // afterToolCall filter returns it untouched (no id is minted, no header added).
+  await runWithStub(h, "grab", ["net:fetch"], { content: "boom", isError: true });
+  const content = firstResultContent(h.agent) ?? "";
+  assert.ok(!content.startsWith("[src:"), `a failed result is not tagged; got: ${content}`);
+});
+
 // -- AC11 : EAGENT_CITATIONS=off kill switch ---------------------------------
 
 test("citations: EAGENT_CITATIONS=off suppresses tagging (AC11)", async () => {
