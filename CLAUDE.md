@@ -48,11 +48,19 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
 - `src/extensions/` — `core-tools`,
   `search` (`fs:read`, parallel `glob`/`grep` tools for finding files and
   searching contents in pure Node — no shell, confined to the workspace root),
-  `skills`, `mcp`, `codeact`, `subagents`,
+  `skills`, `mcp`, `codeact`,
+  `subagents` (`spawn_agent` — plus three optional per-spawn least-privilege
+  passthroughs: a capability allowlist that scopes a child to a capability subset
+  (`readOnly` is now sugar over it), a provider/model override validated against
+  the provider registry (falls back to the parent on an unknown name), and an
+  `outputSchema` typed return validated via the kernel input-validator with one
+  bounded re-prompt then a contract-violation failure; all default-off so an
+  unadorned spawn is unchanged, `EAGENT_SUBAGENTS_LP=off`),
   `dynamic-workflow` (a `run_workflow` tool that executes a model-emitted
   dependency DAG of `tool`/`agent` steps with `${id}` output substitution;
   independent steps run in parallel, tool steps reuse the kernel's guard
-  sequence so capability/policy checks still apply),
+  sequence so capability/policy checks still apply; agent-steps accept the same
+  three per-spawn least-privilege options as `subagents`),
   `memory`,
   `prune` (token-budget tool-output pruning on `transformContext` — truncates
   old, oversized `tool_result` content beyond a protected recent window; no

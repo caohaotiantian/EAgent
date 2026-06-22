@@ -6,7 +6,10 @@ passthroughs designed in
 (**PASSED** — read it first; it is the single source of truth for the *behavioral*
 contract, and this log adds **no requirement absent from it**). This log deviates
 from the design on exactly one *non-behavioral* point — the extension's file
-**shape** (§0 below) — and justifies that deviation only from material visible in
+**shape** (Status: closed
+Closing-commit: 36c6090
+Closed-on: 2026-06-23
+Deferred: finding — D3 re-prompt mechanism + an AC test-citation were doc-imprecise (resolved in implementation; doc-precision)0 below) — and justifies that deviation only from material visible in
 the design itself; it appeals to no authority a fresh reader cannot inspect.
 
 ## 0. Build-shape note (read before touching code)
