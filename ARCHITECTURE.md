@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["20 extensions<br/>src/extensions/"]
+        EXTS["29 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -176,9 +176,9 @@ gates, and resource limits plug in without modifying the loop.
 The kernel runs LLM-directed — and optionally LLM-authored — code, so authority
 is explicit rather than ambient. A capability is a dotted string naming an
 authority: `fs:read`, `fs:write`, `shell:exec`, `code:exec`, `net:fetch`,
-`skill:write`, `mcp:call`, `agent:spawn`, `pkg:install`, `self:extend`. Tools
-declare what they need; the dispatcher enforces the declaration before the body
-runs.
+`skill:read`, `skill:write`, `mcp:call`, `agent:spawn`, `pkg:install`,
+`workflow:run`, `self:read`, `self:extend`. Tools declare what they need; the
+dispatcher enforces the declaration before the body runs.
 
 ```mermaid
 flowchart TD
@@ -368,8 +368,10 @@ flowchart TB
 
 Each is a single file under `src/extensions/`, rides the `ExtensionAPI`, ships
 with offline tests, and gates privileged work behind a capability. They load in
-the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `skills`,
-`mcp`, `codeact`, `subagents`, `memory`, `planmode`, `session`, `packages`,
-`trace`, `context-files`, `limits`, `self`, `web`, `checkpoint`, `introspect`,
-`journal`, `prompts`, `flow-guard`, `integrity`. The README has a one-line
-description and capability for each; `docs/EXTENSIONS.md` is the author's guide.
+the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`,
+`skills`, `mcp`, `codeact`, `subagents`, `dynamic-workflow`, `memory`, `prune`,
+`recovery`, `planmode`, `session`, `packages`, `trace`, `context-files`,
+`microagents`, `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`,
+`todo`, `prompts`, `flow-guard`, `risk-guard`, `bash-policy`, `integrity`,
+`write-guard`. The README has a one-line description and capability for each;
+`docs/EXTENSIONS.md` is the author's guide.
