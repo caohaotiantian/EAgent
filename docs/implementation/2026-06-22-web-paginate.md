@@ -1,7 +1,7 @@
 # Implementation: web-paginate — `start_index` continuation for the web fetch tool
 
 Status: closed
-Closing-commit: — (recorded post-commit on branch 20260622webpaginate-dev-r1)
+Closing-commit: 64f9baa (on branch 20260622webpaginate-dev-r1)
 Closed-on: 2026-06-22
 
 Closeout results: `npm test` exit 0 (525 tests pass, offline, no `ANTHROPIC_API_KEY`;
