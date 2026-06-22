@@ -98,12 +98,7 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   candidate set the existing rules judge, `EAGENT_DECODE_NORMALIZE=off`;
   no-op by default, no capability, `EAGENT_BASH_POLICY=off` kill switch),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
-  and flags descriptions that change across sessions — a rug-pull guard; the
-  *skills-hardening* additions extend the sweep to scan `SKILL.md` bodies + skill
-  scripts for `eval`/`exec`/`curl`/env-near-network patterns and fingerprint bodies
-  for cross-session rug-pull, all warn-only; `skills` itself gains frontmatter
-  validation, `allowed-tools` `beforeToolCall` scoping while a skill is active, and
-  optional `triggers:`-gated tier-1 disclosure, `EAGENT_SKILL_TRIGGERS=off`),
+  and flags descriptions that change across sessions — a rug-pull guard),
   `recovery` (turns a *failed* tool result into a corrective nudge — appends one
   hint keyed to EAgent's own error strings via `afterToolCall`, so the model
   self-corrects instead of re-issuing the broken call; on by default, no
@@ -173,7 +168,15 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   answer, scores regression vs the turn-0 baseline, and on a regression warns +
   injects an optional `transformContext` note suggesting `/compact` or `/handoff`; a
   *leading* indicator of context-pressure degradation the size-managers (prune/
-  limits) can't see; never blocks, off by default, `EAGENT_DRIFT_PROBE=off`).
+  limits) can't see; never blocks, off by default, `EAGENT_DRIFT_PROBE=off`),
+  `skills-hardening` (guards the skill self-extension surface — scans each
+  `SKILL.md` body + skill scripts for `eval`/`exec`/`curl`/env-near-network
+  patterns and fingerprints bodies for cross-session rug-pull (warn-only,
+  complementing `integrity`'s description sweep); validates skill frontmatter;
+  scopes an active skill to its `allowed-tools` via a `beforeToolCall` ask/deny
+  (no-op when unspecified); and optionally gates a skill's tier-1 disclosure on
+  `triggers:` frontmatter, `EAGENT_SKILL_TRIGGERS=off`; each guard independently
+  killable, no new capability).
   `compact` (token-gated structured conversation compaction — ships in
   `src/extensions/compact.ts` but is **not yet wired into `BUILTIN_EXTENSIONS`**:
   it is the token-aware structured-slot successor to `memory`'s count-based
