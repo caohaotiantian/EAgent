@@ -1,8 +1,20 @@
 # Implementation: web-paginate — `start_index` continuation for the web fetch tool
 
-Status: open
-Closing-commit: —
-Closed-on: —
+Status: closed
+Closing-commit: — (recorded post-commit on branch 20260622webpaginate-dev-r1)
+Closed-on: 2026-06-22
+
+Closeout results: `npm test` exit 0 (525 tests pass, offline, no `ANTHROPIC_API_KEY`;
+11 new tests added to `test/web.test.ts`). `npm run typecheck` exit 0. All design §7
+acceptance criteria covered. Deviation flagged at T8/clamp: design crit 8's
+"non-numeric value behaves identically to start_index: 0" — the kernel's integer
+schema validator (`src/kernel/validate.ts:46-54`) coerces numeric strings but
+*rejects* a truly non-numeric value before `execute` runs, so a non-numeric
+`start_index` is rejected with "Invalid arguments for fetch_url" rather than
+clamped to 0. This is the safe outcome (never reads at a garbage offset) and the
+defensive `Math.max(0, …)` + `Number.isFinite` clamp still protects the negative
+and omitted/undefined paths. The crit-8 test was adjusted to assert this real
+contract (negative → window identical to 0; non-numeric → validation error).
 Deferred: host.ts registration (none needed — `web` already in `BUILTIN_EXTENSIONS`,
 no new extension id); CLAUDE.md `web` bullet clause + README (batch integration step).
 

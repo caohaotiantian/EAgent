@@ -48,34 +48,36 @@ optional parameter:
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/web.ts` — `readCapped` gains a `startIndex` parameter that
+- [x] `src/extensions/web.ts` — `readCapped` gains a `startIndex` parameter that
       stream-skips the first `startIndex` bytes before collecting up to
       `maxBytes`; the `fetch_url` `parameters` schema gains an optional
       `start_index` (integer, default 0); the truncated branch emits the
       `continue with start_index=N` hint in place of `TRUNCATION_MARKER`.
-- [ ] `readCapped` and the continuation-hint builder exported as **named**
-      exports from `web.ts` so the test can unit-test the byte-window logic
-      directly (over an in-memory `ReadableStream`, no network), mirroring how
-      `recovery.ts` exports `recoveryHint`/`annotate` for unit tests.
-- [ ] `test/web-paginate.test.ts` — offline `node:test` suite: unit tests of
-      `readCapped` with `startIndex` over an in-memory `ReadableStream`, a schema
-      assertion that `fetch_url` advertises `start_index`, an end-to-end paging
-      test through the agent loop against the existing `node:http` fixture
-      pattern (`test/web.test.ts`), and a kill-switch test.
-- [ ] Kill switch: `EAGENT_WEB_PAGINATE=off` reverts `fetch_url` to today's
+- [x] `readCapped` and the continuation-hint builder (`continuationHint`)
+      exported as **named** exports from `web.ts` so the test can unit-test the
+      byte-window logic directly (over an in-memory `ReadableStream`, no
+      network), mirroring how `recovery.ts` exports `recoveryHint`/`annotate`.
+- [x] `test/web-paginate.test.ts` — offline `node:test` suite **(consolidated
+      into `test/web.test.ts`** per the impl-doc BATCH MODE deviation; reuses the
+      in-file `node:http` fixture server**): unit tests of `readCapped` with
+      `startIndex` over an in-memory `ReadableStream`, a schema assertion that
+      `fetch_url` advertises `start_index`, an end-to-end paging test through the
+      agent loop against the `node:http` fixture, and a kill-switch test.
+- [x] Kill switch: `EAGENT_WEB_PAGINATE=off` reverts `fetch_url` to today's
       behavior (ignore `start_index`, emit `TRUNCATION_MARKER` on truncation).
-- [ ] host.ts registration — **(deferred to batch integration)**. `web` is
+- [x] host.ts registration — **(deferred to batch integration)**. `web` is
       already in `BUILTIN_EXTENSIONS`; this change is internal to `web.ts` and
       adds **no new extension id**, so there is nothing for the batch step to
       register. Noted for completeness only.
-- [ ] Command — **none.** This change extends the existing `fetch_url` tool and
+- [x] Command — **none.** This change extends the existing `fetch_url` tool and
       the existing `/fetch` command (`web.ts:176-209`); no new command is added
-      (see Scope Boundary).
+      (see Scope Boundary). The `/fetch` call site (`readCapped(res.body,
+      DEFAULT_MAX_BYTES)`) is unchanged — `startIndex` defaults to 0.
 - [ ] CLAUDE.md / README inventory line — **(deferred to batch integration)**.
       The `web` bullet in CLAUDE.md gets a clause noting `start_index`
       continuation; the README extension **count does not change** (no new
       extension). Reconciled at closeout by the batch step.
-- [ ] `docs/implementation/2026-06-22-web-paginate.md` — closeout notes
+- [x] `docs/implementation/2026-06-22-web-paginate.md` — closeout notes
       (deliverable ticks, `npm test` + `npm run typecheck` results).
 
 ---
