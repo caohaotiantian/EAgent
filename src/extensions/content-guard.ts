@@ -26,7 +26,7 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import type { ToolResult } from "../kernel/types.js";
 
 /** Capabilities whose declaring tool produces foreign/untrusted output. */
-const DEFAULT_FOREIGN_CAPS = ["net:fetch", "mcp:call"];
+const DEFAULT_FOREIGN_CAPS = ["net:fetch", "mcp:call", "mcp:read"];
 
 /** The standing note that prefixes the provenance envelope. */
 const STANDING_NOTE =
