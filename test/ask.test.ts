@@ -108,8 +108,17 @@ test("interactive run does not double-prompt: confirm 0x, ask 1x", async () => {
       return "Postgres";
     },
   };
+  // `fallback: "ask"` is load-bearing: it is the only fallback under which the
+  // conditional grant is *observable*. Absent the grant, `require("ui:ask")`
+  // would reach the confirm-fallback (capabilities.ts:111-119) and call
+  // `confirm`, so `confirmCount == 0` proves the grant pre-allowed ui:ask and
+  // `require` never reached the ratify prompt — the exact AC 4 mechanism. Under
+  // the harness default `fallback: "allow"`, require resolves to ALLOW via the
+  // allow-fallback regardless of the grant, so the assertion would pass even if
+  // the grant were deleted (vacuous).
   const h = makeHarness({
     ui,
+    fallback: "ask",
     responder: [
       { toolCalls: [{ name: "ask_user_question", arguments: { question: "Which DB?" } }] },
       { text: "done" },
