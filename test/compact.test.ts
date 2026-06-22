@@ -536,3 +536,66 @@ test("/compact status reports config; /compact on enables; /compact force folds"
   const forced = (await run("force")).join("\n");
   assert.match(forced, /fold|compact|summar/i);
 });
+
+test("/compact force reports the fold WITHOUT paying for a discarded summarization sub-call", async () => {
+  // memory's force populates a cache the hook later consumes; compact has no
+  // cache, so a summarize() call here would be computed and thrown away. force
+  // must describe what would fold (splitIndex is pure) without a paid sub-call.
+  const count = { sub: 0, real: 0 };
+  const h = makeHarness({ responder: makeResponder({ count }) });
+  await activate(h, { enabled: true });
+
+  const run = async (args: string): Promise<string[]> => {
+    const out: string[] = [];
+    await h.commands.get("compact")!.run({ agent: h.agent, args, print: (l) => out.push(l) });
+    return out;
+  };
+
+  h.agent.load(overBudget());
+  const forced = (await run("force")).join("\n");
+  assert.match(forced, /fold|compact|summar/i, "force still reports what it folded");
+  assert.equal(count.sub, 0, "force makes no wasted summarization sub-call");
+});
+
+test("/compact force on an under-budget transcript with no foldable boundary prints nothing-to-compact", async () => {
+  const count = { sub: 0, real: 0 };
+  const h = makeHarness({ responder: makeResponder({ count }) });
+  await activate(h, { enabled: true });
+
+  const run = async (args: string): Promise<string[]> => {
+    const out: string[] = [];
+    await h.commands.get("compact")!.run({ agent: h.agent, args, print: (l) => out.push(l) });
+    return out;
+  };
+
+  // One user turn only: splitIndex returns 0 (fewer than keepTurns user turns).
+  h.agent.load([userMsg("only one turn"), assistantMsg("a")]);
+  const forced = (await run("force")).join("\n");
+  assert.match(forced, /nothing to compact/i, "no foldable boundary → nothing to compact");
+  assert.equal(count.sub, 0, "no sub-call when there is nothing to fold");
+});
+
+test("/compact off disables; /compact unpin removes a pin (command verbs)", async () => {
+  const h = makeHarness({ responder: makeResponder() });
+  const e = await activate(h, { enabled: true });
+
+  const run = async (args: string): Promise<string[]> => {
+    const out: string[] = [];
+    await h.commands.get("compact")!.run({ agent: h.agent, args, print: (l) => out.push(l) });
+    return out;
+  };
+
+  // off verb flips enabled false in the store and reports it.
+  assert.match((await run("off")).join("\n"), /off/i);
+  assert.equal(e.store.get<boolean>("enabled"), false, "off verb cleared the enabled flag");
+
+  // pin then unpin via the command verbs; status reflects the count both ways.
+  await run("pin k1 some-value");
+  assert.match((await run("status")).join("\n"), /pins?=1/i);
+  const unpinned = (await run("unpin k1")).join("\n");
+  assert.match(unpinned, /unpinned/i);
+  assert.match((await run("status")).join("\n"), /pins?=0/i);
+
+  // unpin with no key prints the usage hint.
+  assert.match((await run("unpin")).join("\n"), /usage/i);
+});
