@@ -218,9 +218,12 @@ export default function activate(e: ExtensionAPI): () => void {
    * The optional LLM-mode classifier: a recursion-safe tool-less provider
    * sub-call (the risk-guard shape). Passing `tools: []` runs outside the agent
    * loop so this completion cannot emit a tool call and re-enter any tool seam.
-   * It runs on the CURRENTLY configured `e.agent.model` (the captured baseline at
-   * turn_start), not a routed tier. Any failure (no provider, a throw, an
-   * empty/garbled reply) resolves to `undefined` so the caller fails open.
+   * It runs on the CURRENTLY configured `e.agent.model` at call time — by design
+   * the classifier sub-call is itself unrouted. (Note this is whatever model is
+   * configured when the sub-call fires, which on turn N>=2 of a routing run is the
+   * tier picked on the previous turn, not necessarily the captured baseline.) Any
+   * failure (no provider, a throw, an empty/garbled reply) resolves to `undefined`
+   * so the caller fails open.
    */
   async function classifyLlm(messages: readonly Message[]): Promise<Tier | undefined> {
     try {
