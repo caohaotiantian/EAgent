@@ -7,9 +7,9 @@ Design: `docs/design/2026-06-22-content-guard.md` (slug `2026-06-22-content-guar
 | Design Deliverable | Design AC | Phase task |
 |---|---|---|
 | `src/extensions/content-guard.ts` (§2) | AC3-AC9 | Phase 1, T6-T11 |
-| `stripInvisible` helper (§2, D3) | AC1, AC5 | Phase 1, T2/T6 |
+| `stripInvisible` helper (§2, D3) | AC1 (unit); AC5 (live, exercised through the filter) | Phase 1, T2/T6 |
 | `fence` helper (§2, D4) | AC2, AC3 | Phase 1, T3/T7 |
-| `afterToolCall` filter, foreign+success only (§2, D1/D2/D5) | AC3/AC4/AC6 | Phase 1, T4/T8/T9 |
+| `afterToolCall` filter, foreign+success only (§2, D1/D2/D5) | AC3/AC4/AC5/AC6 | Phase 1, T4/T8/T9 |
 | per-runtime counters + `/content-guard` cmd (§2, D6) | AC7/AC8 | Phase 1, T5/T10 |
 | host.ts registration (§2) | AC10 | Phase 1, T11 |
 | tests `test/content-guard.test.ts` (§2) | AC1-AC9 | Phase 1, T1-T5 (tests precede impl) |
@@ -45,8 +45,16 @@ Design: `docs/design/2026-06-22-content-guard.md` (slug `2026-06-22-content-guar
   `grab` declaring `capabilities:["net:fetch"]` returning known content, run the
   agent so it calls `grab`; assert the resulting `tool_result` block's `content`
   begins with the `<untrusted-content` marker (AC3). In the same spirit add the
-  negative: a stub tool declaring only `["fs:read"]` returning content is NOT
-  fenced (AC4); and an `isError:true` net:fetch result is NOT fenced (AC6).
+  negatives and the remaining live ACs: a stub tool declaring only `["fs:read"]`
+  returning content is NOT fenced (AC4); a net:fetch body laden with one invisible
+  codepoint per documented category is fenced with **no** invisible codepoint
+  surviving in the model-visible `content` (AC5 — the live counterpart of T2's
+  unit assertion, exercising `stripInvisible` through the filter, not directly);
+  an `isError:true` net:fetch result is NOT fenced (AC6 half 1); and, with
+  **both** content-guard and `recovery` loaded, a foreign `isError` result whose
+  text matches a recovery rule carries recovery's hint **unwrapped** (no
+  `<untrusted-content` marker) — pinning the D5 disjointness on the `isError`
+  partition (AC6 half 2).
 - **T5 (test):** Live — invariants for the kill switch and no-leak teardown:
   `EAGENT_CONTENT_GUARD=off` ⇒ a net:fetch result is unfenced (AC8); after
   `host.unload("content-guard")` a net:fetch result is unfenced (AC9); and after a
