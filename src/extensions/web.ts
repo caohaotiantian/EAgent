@@ -171,13 +171,14 @@ export default function activate(e: ExtensionAPI): void {
 
         const method = String(args.method ?? "GET");
         const maxBytes = Math.max(0, Number(args.maxBytes ?? DEFAULT_MAX_BYTES));
-        // start_index is a byte offset into the response body. Negative/NaN
-        // clamps to 0 (mirrors the maxBytes guard above; Number(undefined) and a
-        // non-numeric string both yield NaN → 0). The kill switch reverts to
+        // start_index is a byte offset into the response body. The integer
+        // schema means the kernel validator has already rejected any non-numeric
+        // value before execute runs, so args.start_index is omitted (→ 0) or a
+        // finite integer here; a validly-passed negative integer clamps to 0 via
+        // Math.max (mirrors the maxBytes guard above). The kill switch reverts to
         // today's behavior: ignore start_index and re-emit the legacy marker.
         const paginate = process.env.EAGENT_WEB_PAGINATE !== "off";
-        const requested = Math.max(0, Number(args.start_index ?? 0));
-        const startIndex = paginate && Number.isFinite(requested) ? requested : 0;
+        const startIndex = paginate ? Math.max(0, Number(args.start_index ?? 0)) : 0;
         const headers =
           args.headers && typeof args.headers === "object"
             ? (args.headers as Record<string, string>)
