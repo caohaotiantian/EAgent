@@ -1,8 +1,38 @@
 # Implementation: `white-box-memory` — per-entry provenance, edit/forget/rollback
 
-Status: open
+Status: dev-complete (awaiting batch integration + closeout sha)
 Slug: `2026-06-22-white-box-memory`
 Design doc: `docs/design/2026-06-22-white-box-memory.md` (Status: PASSED — read it first)
+
+## Closeout notes (dev round r1)
+
+All 15 acceptance criteria implemented and tested. Final gate, from repo root:
+
+- `node --import tsx --test test/memory.test.ts` → 22 pass / 0 fail (original 7 +
+  15 new white-box tests).
+- `npm run typecheck` → exit 0.
+- `npm test` → 529 pass / 0 fail (was 514; only the memory tests were added).
+
+Files changed (and only these): `src/extensions/memory.ts` (MODIFY),
+`test/memory.test.ts` (EXTEND), this doc.
+
+Deferred to batch integration (NOT done here, per BATCH MODE):
+
+- **host.ts registration** — `memory` is already in `BUILTIN_EXTENSIONS`; no new
+  id introduced, nothing to add.
+- **CLAUDE.md / README inventory** — the `memory` inventory clause noting
+  per-entry provenance/edit/forget/rollback and any doc reconciliation are
+  deferred; the README extension count is **not** bumped (no new extension).
+
+Resolved design ambiguity (recorded so the closeout reviewer can see the call):
+the impl-guide T11 prose says rollback "swaps text↔prevText" leaving the
+just-replaced value as the new `prevText`, but design D3 (§168-169) and AC 6
+require a **second consecutive** rollback to be a **no-op** ("there is nothing
+before prevText"). Per the guide's own "where the design and this guide
+disagree, the design wins" rule, `rollback` restores `prevText` into `text` and
+**consumes** `prevText` (clears it), so a second rollback finds nothing to undo.
+This is the only reading that satisfies AC 6 and keeps the 2×-text storage
+bound.
 
 This guide directs a fresh agent through TDD development of the white-box-memory
 upgrade. It introduces **no requirement absent from the design** — every task
