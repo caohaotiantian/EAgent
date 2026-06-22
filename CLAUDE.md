@@ -78,9 +78,11 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   it classifies the specific call via a recursion-safe, tool-less provider
   sub-call and, on a RISKY verdict, asks or blocks; off by default, no
   capability, fails open with a warning, `EAGENT_RISK_GUARD=off` kill switch),
-  `bash-policy` (command-granular shell policy gate — reduces a command line to
-  an arity-based command family and evaluates an allow/deny/ask ruleset over the
-  full command line; no-op by default),
+  `bash-policy` (command-granular shell policy gate — evaluates an allow/deny/ask
+  ruleset over the full command line plus every effective sub-command (pipe/`;`/`&&`
+  segments, unwrapped wrappers like `sudo`/`env`/`timeout`, and `find -exec` inner
+  commands), last-match-wins; the matched command family is the approval label;
+  no-op by default, no capability, `EAGENT_BASH_POLICY=off` kill switch),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
   and flags descriptions that change across sessions — a rug-pull guard),
   `recovery` (turns a *failed* tool result into a corrective nudge — appends one
@@ -95,6 +97,10 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.
 - `src/cli.ts` — the terminal host: interactive REPL, batch, one-shot.
+- `src/complete.ts` — the REPL Tab-completion engine: a pure `complete(line, ctx)`
+  returning readline's `[matches, substring]`; completes command names, command
+  arguments, and filesystem paths, with `readDir`/`homedir` injected so it is
+  offline-testable.
 - `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `DELETE /sessions/:id`).
 - `test/` — the full offline suite, one file per primitive/extension.
 - `examples/extensions/` — worked example extensions.
