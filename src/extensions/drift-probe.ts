@@ -62,7 +62,7 @@ const VERIFY_CUES: readonly string[] = [
 
 /** A pinned canary: a fixed question with a known-good expected answer. */
 export interface Probe {
-  /** The system prompt + question posed to the model in the sub-call. */
+  /** The question posed to the model — sent as the user message of the sub-call. */
   prompt: string;
   /** Key tokens a correct reply should contain (whole-word, case-insensitive). */
   expectedTokens: string[];
@@ -107,14 +107,14 @@ export const PROBE_POOL: readonly Probe[] = [
  */
 function containsToken(haystack: string, token: string): boolean {
   if (token.length === 0) return false;
-  const text = haystack.toLowerCase();
+  const hay = haystack.toLowerCase();
   const t = token.toLowerCase();
   const isWord = (c: string | undefined): boolean => c !== undefined && /[a-z0-9]/.test(c);
   let from = 0;
   for (;;) {
-    const i = text.indexOf(t, from);
+    const i = hay.indexOf(t, from);
     if (i === -1) return false;
-    if (!isWord(text[i - 1]) && !isWord(text[i + t.length])) return true;
+    if (!isWord(hay[i - 1]) && !isWord(hay[i + t.length])) return true;
     from = i + 1;
   }
 }
@@ -187,6 +187,15 @@ function textOf(message: Message): string {
 const DRIFT_NOTE_TEXT =
   "reasoning-quality drift detected; consider /compact or /handoff to refresh the session.";
 
+/**
+ * The fixed system prompt for the canary sub-call (the `risk-guard` shape,
+ * Design 4.3): a distinct instruction in `systemPrompt`, with the probe question
+ * carried as the single user message — so the canary is sent ONCE, not duplicated
+ * across both slots.
+ */
+const PROBE_SYSTEM_PROMPT =
+  "Answer the following question concisely, showing your reasoning, then verify it.";
+
 export default function activate(e: ExtensionAPI): () => void {
   // Module-scoped (per-activation) lifecycle state. The turn counter accumulates
   // ACROSS `agent.run` calls — a long session is many runs, and drift is a
@@ -234,7 +243,7 @@ export default function activate(e: ExtensionAPI): () => void {
       ];
       let reply = "";
       for await (const ev of provider.stream({
-        systemPrompt: probe.prompt,
+        systemPrompt: PROBE_SYSTEM_PROMPT,
         messages,
         tools: [],
         model: e.agent.model,
@@ -277,7 +286,12 @@ export default function activate(e: ExtensionAPI): () => void {
         `consider /compact or /handoff.`;
       e.log.warn(msg);
       e.agent.ui.notify(msg);
-      armedAtTurn = turnCounter; // arm the one-shot note for the NEXT turn (4.6)
+      // Arm the one-shot note for the NEXT turn (4.6) ONLY when notes are
+      // enabled, so the one-shot invariant cannot be stranded by a later config
+      // flip: a flag is never armed while `noteOnRegression` is false, so the
+      // note handler need not re-check config to disarm. The warn/notify above
+      // still fire (the regression IS detected); only the note is suppressed.
+      if (cfg().noteOnRegression) armedAtTurn = turnCounter;
     }
   }
 
@@ -303,7 +317,10 @@ export default function activate(e: ExtensionAPI): () => void {
   // -- 2. one-shot regression note on transformContext ----------------------
   const offNote = e.hook("transformContext", (messages: Message[]): Message[] => {
     if (armedAtTurn < 0) return messages; // unarmed: by reference, nothing to do
-    if (!cfg().noteOnRegression) return messages;
+    // No `noteOnRegression` re-check here: the flag is gated at ARM time (see
+    // `fireProbe`), so an armed flag already implies notes were enabled. This
+    // keeps the one-shot invariant config-order-independent — there is no path
+    // that bails out of this handler while leaving a stale flag armed.
     // Inject only on a turn LATER than the one the note was armed at, so the
     // note lands on the *next* model call (4.6), not the probe's own turn.
     if (turnCounter <= armedAtTurn) return messages;
