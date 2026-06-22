@@ -296,7 +296,7 @@ network, no API key). Each criterion is realized as an assertion in
 
 ## Closure note
 
-Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Status: closed. Closing-commit: 6cb9f96. Closed-on: 2026-06-22.
 Acceptance: `npm test` exit 0 (385/385 pass, 0 skipped, incl. the 11 new
 `microagents` tests), `npm run typecheck` exit 0,
 `node --import tsx --test test/microagents.test.ts` exit 0 (11/11).

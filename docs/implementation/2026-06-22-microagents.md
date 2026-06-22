@@ -205,7 +205,7 @@ extension appears in `BUILTIN_EXTENSIONS` and the `CLAUDE.md` inventory.
 
 ## Closure note
 
-Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Status: closed. Closing-commit: 6cb9f96. Closed-on: 2026-06-22.
 Phase 1 closed: dev (`feat(phase1)`), one within-round test-coverage fix
 (`fix(phase1-round2)`), review 2 generations clean, accept-pass. Main-agent
 Phase-end re-run: `npm test` exit 0 (385/385, 0 skipped), `npm run typecheck`
