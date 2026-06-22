@@ -47,8 +47,9 @@ export interface Verdict {
 /**
  * Parse a classifier reply into a verdict, or `undefined` when unrecognized.
  *
- * Reads the first non-empty line and upper-cases its leading whitespace-
- * delimited token: `RISKY` is risky (reason is the text after the first `:`,
+ * Reads the first non-empty line and upper-cases its leading run of letters
+ * (so `RISKY:` and `safe,` classify by `RISKY`/`SAFE`): `RISKY` is risky (reason
+ * is the text after the first `:`,
  * trimmed, possibly empty — a missing colon is not a failure); `SAFE` is not
  * risky; anything else, or an empty reply, is unrecognized so the caller fails
  * open with a warning.
