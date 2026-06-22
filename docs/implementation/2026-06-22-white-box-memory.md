@@ -1,6 +1,9 @@
 # Implementation: `white-box-memory` — per-entry provenance, edit/forget/rollback
 
-Status: dev-complete (awaiting batch integration + closeout sha)
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: none
 Slug: `2026-06-22-white-box-memory`
 Design doc: `docs/design/2026-06-22-white-box-memory.md` (Status: PASSED — read it first)
 
