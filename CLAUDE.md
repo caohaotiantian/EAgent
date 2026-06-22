@@ -58,6 +58,12 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   old, oversized `tool_result` content beyond a protected recent window; no
   capability, `EAGENT_PRUNE=off` kill switch),
   `planmode`, `session`, `packages`, `trace`, `context-files`,
+  `microagents` (keyword-triggered knowledge injection on `transformContext` —
+  scans one directory of `*.md` files with single-line `triggers:` frontmatter
+  and injects a file's body, whole-word-matched and case-insensitive, only when a
+  trigger appears in the latest user message; cached scan + `/microagents`
+  re-scan, byte-capped prefix fill, no capability, `EAGENT_MICROAGENTS=off` kill
+  switch),
   `limits` (per-run call/token budgets + tool-output byte cap; on overflow it
   spills the full output to a gitignored file under `.eagent/tool-output` and
   returns a retrieval hint instead of discarding the clipped bytes),

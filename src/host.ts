@@ -41,6 +41,7 @@ import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
 import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
+import microagents from "./extensions/microagents.js";
 import limits from "./extensions/limits.js";
 import self from "./extensions/self.js";
 import web from "./extensions/web.js";
@@ -72,6 +73,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["packages", packages],
   ["trace", trace],
   ["context-files", contextFiles],
+  ["microagents", microagents],
   ["limits", limits],
   ["self", self],
   ["web", web],
