@@ -25,6 +25,7 @@
 
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, ToolCallBlock } from "../kernel/types.js";
+import { normalizeForInspection } from "./lib/decode.js";
 
 type Mode = "ask" | "block";
 
@@ -96,11 +97,26 @@ export default function activate(e: ExtensionAPI): () => void {
     try {
       const provider = e.agent.providers.get();
       if (!provider) return undefined;
+
+      // Pre-inspection decode (decode-normalize): the decode SUBJECT is the WHOLE
+      // stringified-arguments blob (risk-guard has no per-value `commandArgKey`),
+      // so the substring-scanning idiom/base64 matchers still find a payload
+      // embedded inside the JSON wrapper. Prepend a `[decoded payload: …]` line for
+      // each decode that differs from that raw blob, so the judge sees the real
+      // command. `EAGENT_DECODE_NORMALIZE=off` leaves the prompt byte-identical.
+      const rawArgs = JSON.stringify(call.arguments);
+      let prefix = "";
+      if (process.env.EAGENT_DECODE_NORMALIZE !== "off") {
+        for (const decoded of normalizeForInspection(rawArgs)) {
+          if (decoded !== rawArgs) prefix += `[decoded payload: ${decoded}]\n`;
+        }
+      }
+
       const messages: Message[] = [
         {
           role: "user",
           content: [
-            { type: "text", text: `Tool: ${call.name}\nArguments: ${JSON.stringify(call.arguments)}` },
+            { type: "text", text: `${prefix}Tool: ${call.name}\nArguments: ${rawArgs}` },
           ],
         },
       ];

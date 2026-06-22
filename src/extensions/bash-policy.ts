@@ -19,6 +19,7 @@
  */
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import { normalizeForInspection } from "./lib/decode.js";
 
 export type Action = "allow" | "deny" | "ask";
 
@@ -608,6 +609,21 @@ export default function activate(e: ExtensionAPI): () => void {
     // `... && rm`) is matched and labeled by its bare name. Inner candidates come
     // last so a sub-command rule labels the offending sub-command, not the head.
     const candidates = expandCommands(command);
+
+    // Pre-inspection decode (decode-normalize): union the best-effort decoded
+    // candidates (base64/hex/rot13 and the `echo <b64>|base64 -d|sh` / `printf
+    // '\xNN'` idioms), each itself run through `expandCommands` so a decoded
+    // `rm -rf /` is segmented/normalized like any command line. The decode layer
+    // never blocks — it only widens the set this same ruleset already judges.
+    // `EAGENT_DECODE_NORMALIZE=off` restores literal-only matching.
+    if (process.env.EAGENT_DECODE_NORMALIZE !== "off") {
+      for (const decoded of normalizeForInspection(command)) {
+        for (const expanded of expandCommands(decoded)) {
+          if (!candidates.includes(expanded)) candidates.push(expanded);
+        }
+      }
+    }
+
     const { action, matched, rule } = evaluateAny(candidates, rules, fallthrough);
     if (action === "allow") return decision;
 
