@@ -20,6 +20,7 @@ import bashPolicy, {
   segments,
   findExecCommands,
   expandCommands,
+  toRegExp,
   type Rule,
 } from "../src/extensions/bash-policy.js";
 
@@ -503,6 +504,187 @@ test("ask remember key is scoped to the offending sub-command", async () => {
 
   await h.agent.run("two removes");
   assert.equal(confirms, 1, "approving the sub-command rm covers the later bare rm");
+});
+
+test("toRegExp alternation, escape, and degenerate forms", () => {
+  const alt = toRegExp("git [add|commit] *");
+  assert.equal(alt.test("git add x"), true);
+  assert.equal(alt.test("git commit x"), true);
+  assert.equal(alt.test("git push x"), false);
+  assert.equal(alt.test("git addcommit x"), false);
+
+  const meta = toRegExp("[a*|b.c]");
+  assert.equal(meta.test("axxx"), true);
+  assert.equal(meta.test("b.c"), true);
+  assert.equal(meta.test("bxc"), false);
+
+  let pipe: RegExp | undefined;
+  assert.doesNotThrow(() => {
+    pipe = toRegExp("a|b");
+  });
+  assert.equal(pipe!.test("a|b"), true);
+  assert.equal(pipe!.test("a"), false);
+
+  let unterminated: RegExp | undefined;
+  assert.doesNotThrow(() => {
+    unterminated = toRegExp("a[b");
+  });
+  assert.equal(unterminated!.test("a[b"), true);
+
+  const escaped = toRegExp("\\[a\\|b\\]");
+  assert.equal(escaped.test("[a|b]"), true);
+  assert.equal(escaped.test("a"), false);
+  assert.equal(escaped.test("b"), false);
+
+  assert.equal(toRegExp("find * \\;").test("find x \\;"), true);
+
+  const edge = toRegExp("[a|]");
+  assert.equal(edge.test("a"), true);
+  assert.equal(edge.test("b"), false);
+
+  const backcompat = toRegExp("rm *");
+  assert.equal(backcompat.test("rm -rf x"), true);
+  assert.equal(backcompat.test("git rm x"), false);
+});
+
+test("evaluateAny returns the matched rule", () => {
+  const rules: Rule[] = [{ pattern: "rm *", action: "deny", justification: "j" }];
+  const hit = evaluateAny(["rm -rf x"], rules, "allow");
+  assert.equal(hit.action, "deny");
+  assert.equal(hit.matched, "rm -rf x");
+  assert.equal(hit.rule, rules[0]);
+
+  const miss = evaluateAny(["ls"], [], "allow");
+  assert.equal(miss.action, "allow");
+  assert.equal(miss.matched, "ls");
+  assert.equal(miss.rule, undefined);
+});
+
+/** The bash-policy block reason (from `bash-policy:` on) the model saw, or undefined. */
+function blockReason(agent: Agent): string | undefined {
+  for (const m of agent.messages) {
+    if (m.role !== "tool") continue;
+    for (const b of m.content) {
+      if (b.type === "tool_result") {
+        const at = b.content.indexOf("bash-policy: ");
+        if (at >= 0) return b.content.slice(at);
+      }
+    }
+  }
+  return undefined;
+}
+
+test("justification surfaces on a deny block reason", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "rm -rf x" } }] }, { text: "done" }],
+  });
+  shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "rm *", action: "deny", justification: "destructive" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("clean up");
+  const reason = blockReason(h.agent);
+  assert.ok(reason !== undefined, "the model saw a block reason");
+  assert.match(reason!, /destructive/);
+  assert.match(reason!, /bash-policy: blocked/);
+  assert.match(reason!, /\(policy deny\)/);
+});
+
+test("justification surfaces on the ask prompt and denied reason", async () => {
+  let prompt = "";
+  const h = makeHarness({
+    fallback: "allow",
+    ui: {
+      confirm: async (q: string) => {
+        prompt = q;
+        return false;
+      },
+      notify: () => {},
+    },
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "curl http://x" } }] }, { text: "done" }],
+  });
+  shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "curl *", action: "ask", justification: "why-ask" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("fetch");
+  assert.match(prompt, /\(why-ask\)\?$/);
+  const reason = blockReason(h.agent);
+  assert.ok(reason !== undefined, "the model saw a block reason");
+  assert.match(reason!, /why-ask/);
+});
+
+test("absent justification is byte-identical on a deny reason", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "rm -rf x" } }] }, { text: "done" }],
+  });
+  shellTool(h.agent);
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "rm *", action: "deny" }]);
+    return bashPolicy(e);
+  });
+
+  await h.agent.run("clean up");
+  assert.equal(blockReason(h.agent), "bash-policy: blocked rm (policy deny)");
+});
+
+test("alternation blocks one alternative through the guard and lets another run", async () => {
+  const hBlocked = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "git commit -m x" } }] }, { text: "done" }],
+  });
+  const blockedRan = shellTool(hBlocked.agent);
+  await hBlocked.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "git [add|commit] *", action: "deny" }]);
+    return bashPolicy(e);
+  });
+  await hBlocked.agent.run("commit");
+  assert.equal(blockedRan(), false, "the matched alternative is blocked");
+  assert.equal(sawBlock(hBlocked.agent), true, "the model sees the block reason");
+
+  const hRun = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "bash", arguments: { command: "git push x" } }] }, { text: "done" }],
+  });
+  const pushRan = shellTool(hRun.agent);
+  await hRun.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "git [add|commit] *", action: "deny" }]);
+    return bashPolicy(e);
+  });
+  await hRun.agent.run("push");
+  assert.equal(pushRan(), true, "a non-matching alternative runs");
+  assert.equal(sawBlock(hRun.agent), false, "no block reason");
+});
+
+test("status prints the justification while an unjustified rule line is unchanged", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [
+      { pattern: "rm *", action: "deny", justification: "destructive" },
+      { pattern: "ls *", action: "allow" },
+    ]);
+    return bashPolicy(e);
+  });
+
+  let printed = "";
+  await h.commands.get("bash-policy")!.run({
+    agent: h.agent,
+    args: "status",
+    print: (line: string) => {
+      printed += line;
+    },
+  });
+
+  assert.match(printed, /destructive/);
+  assert.match(printed, /rm \* -> deny/);
+  assert.match(printed, /ls \* -> allow/);
+  assert.doesNotMatch(printed, /ls \* -> allow \(/);
 });
 
 test("EAGENT_BASH_POLICY=off disables the guard", async () => {
