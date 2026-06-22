@@ -73,6 +73,11 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `flow-guard` (compositional egress gate — taints a session on a source
   capability, default `shell:exec`, or sensitive data in the transcript, then
   holds egress, default `net:fetch`; ask or block mode),
+  `risk-guard` (LLM-based semantic risk analyzer on `beforeToolCall` — for tools
+  whose capabilities intersect a configured sensitive set, default `shell:exec`,
+  it classifies the specific call via a recursion-safe, tool-less provider
+  sub-call and, on a RISKY verdict, asks or blocks; off by default, no
+  capability, fails open with a warning, `EAGENT_RISK_GUARD=off` kill switch),
   `bash-policy` (command-granular shell policy gate — reduces a command line to
   an arity-based command family and evaluates an allow/deny/ask ruleset over the
   full command line; no-op by default),
