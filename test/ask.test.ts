@@ -154,7 +154,15 @@ test("unload removes the tool and never throws; the ui:ask grant persists", asyn
     notify: () => {},
     ask: async () => "Postgres",
   };
-  const h = makeHarness({ ui });
+  // `fallback: "deny"` is load-bearing: under it `isGranted` reduces to
+  // `matchesAny(capability, #grant)` (capabilities.ts:124-127), so the two
+  // grant assertions below are non-vacuous — they pass only if the conditional
+  // grant pattern is genuinely present/persisted. Under the harness default
+  // `fallback: "allow"`, `isGranted` returns true via the allow-fallback
+  // (capabilities.ts:127) regardless of the grant, making both assertions pass
+  // even if `grantCapability("ui:ask")` were deleted (vacuous) — the same defect
+  // round 2 (e097d1b) fixed for AC 4.
+  const h = makeHarness({ ui, fallback: "deny" });
   await h.host.use("ask", ask);
 
   // The conditional grant fired (the UI can ask), so ui:ask is allowed now.
