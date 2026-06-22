@@ -1,7 +1,10 @@
 # Design: `circuit-breaker` — tool-call repetition / consecutive-failure fail-fast
 
 Slug: `2026-06-22-circuit-breaker`
-Status: draft
+Status: closed
+Closing-commit: ae71248
+Closed-on: 2026-06-22
+Deferred: none
 
 ## 1. Background and Purpose
 
@@ -334,12 +337,13 @@ to default off.
   command (`limits.ts:237`), and fail-open `try/catch` wrapping
   (`limits.ts:230-233`). The breaker copies this *shape*. **Dedup:** `limits`
   counts **totals** with no notion of call identity; the breaker buckets by
-  **signature**. They are complementary on the same seam: the budget guard runs
-  first in the per-call `beforeToolCall` chain (it registers earlier in
-  `BUILTIN_EXTENSIONS`, and filters fire in registration order —
-  `hooks.ts:64,76`), the breaker later — but the breaker trips chronologically
-  earlier, at N=3, long before `limits`' total-100 cap. Neither subsumes the
-  other.
+  **signature**. They are complementary on the same seam, and order between them
+  does not matter: each guard honors an already-set `decision.block` and the chain
+  short-circuits on the first block via the `(d) => d.block` predicate
+  (`agent.ts:322`, `hooks.ts:104`). (For the record, `circuit-breaker` registers
+  just after `content-guard`, *before* `limits`, in `BUILTIN_EXTENSIONS`.) The
+  breaker trips chronologically earlier, at N=3, long before `limits`' total-100
+  cap. Neither subsumes the other.
 
 - **`recovery` (`src/extensions/recovery.ts`)** — the complement this builds on:
   it nudges **once** on a *failed* result (`recovery.ts:94-100`) with **no

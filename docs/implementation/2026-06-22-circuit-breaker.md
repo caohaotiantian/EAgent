@@ -1,7 +1,10 @@
 # Implementation: `circuit-breaker` — tool-call repetition / consecutive-failure fail-fast
 
 Slug: `2026-06-22-circuit-breaker`
-Status: draft
+Status: closed
+Closing-commit: ae71248
+Closed-on: 2026-06-22
+Deferred: none
 Design doc: `docs/design/2026-06-22-circuit-breaker.md` (PASSED)
 
 This guide drives a fresh agent to TDD-build the `circuit-breaker` extension. It
