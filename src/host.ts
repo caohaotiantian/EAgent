@@ -41,6 +41,7 @@ import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
 import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
+import microagents from "./extensions/microagents.js";
 import limits from "./extensions/limits.js";
 import self from "./extensions/self.js";
 import web from "./extensions/web.js";
@@ -50,6 +51,7 @@ import journal from "./extensions/journal.js";
 import todo from "./extensions/todo.js";
 import promptsExt from "./extensions/prompts.js";
 import flowGuard from "./extensions/flow-guard.js";
+import riskGuard from "./extensions/risk-guard.js";
 import bashPolicy from "./extensions/bash-policy.js";
 import integrity from "./extensions/integrity.js";
 import writeGuard from "./extensions/write-guard.js";
@@ -72,6 +74,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["packages", packages],
   ["trace", trace],
   ["context-files", contextFiles],
+  ["microagents", microagents],
   ["limits", limits],
   ["self", self],
   ["web", web],
@@ -81,6 +84,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["todo", todo],
   ["prompts", promptsExt],
   ["flow-guard", flowGuard],
+  ["risk-guard", riskGuard],
   ["bash-policy", bashPolicy],
   ["integrity", integrity],
   ["write-guard", writeGuard],
