@@ -146,9 +146,12 @@ buckets to detect repetition.
 *and* same arguments. Option (c) makes `{a,b}` and `{b,a}` collapse to one
 bucket, because providers do not guarantee a stable key order across turns — two
 genuinely-identical calls must not land in different buckets and dodge the
-breaker. Args are validated/coerced before `beforeToolCall` runs
-(`agent.ts:314-317`), and the canonical signature is computed from the decision's
-arguments, so we hash the same coerced shape the tool will receive.
+breaker. Both hooks key on the **raw model arguments** (`ctx.call.arguments`),
+not the validate-coerced `decision.arguments`: `afterToolCall` only sees
+`ctx.call`, so keying `beforeToolCall` on the coerced shape (`"3"`→`3`, filled
+defaults) for any coercing schema would split the occurrence count and the
+failure streak across two buckets and silently defeat detection. Hashing
+`ctx.call.arguments` in both hooks keeps a single bucket per call.
 
 **Why (a) rejected.** Name-only trips on *legitimately different* calls — reading
 ten different files with `read` would trip after three reads, which is normal
@@ -280,8 +283,8 @@ to default off.
   (`events.ts:41-46,55-58`). Applied at `agent.ts:318-323`; `decision.block`
   short-circuits later guards via the `(d) => d.block` predicate
   (`agent.ts:322`), and a blocked call becomes `Tool call blocked: <reason>` with
-  `isError:true` (`agent.ts:324-325`). The breaker reads `ctx.call` (name + id)
-  and `decision.arguments`.
+  `isError:true` (`agent.ts:324-325`). The breaker reads `ctx.call` (name + id +
+  raw `arguments`) and keys on `ctx.call.arguments` (D2).
 - `e.hook("afterToolCall", …)` — filter receiving the `ToolResult` and
   `{ call }` context (`events.ts:60-63`), applied at `agent.ts:303`. The breaker
   reads `result.isError` and `ctx.call` to update the consecutive-failure streak,
@@ -309,9 +312,10 @@ to default off.
   prior guard already set `decision.block`, the breaker passes the decision
   through untouched — matching `limits.ts:212` (`if (decision.block) return
   decision`).
-- `ctx.call.name` plus `decision.arguments` fully determine the call's identity
-  for loop-detection purposes. Arguments are JSON-serializable (they came from
-  the model as JSON and were validated, `agent.ts:314`).
+- `ctx.call.name` plus `ctx.call.arguments` (the raw model arguments, keyed the
+  same way in both hooks — D2) fully determine the call's identity for
+  loop-detection purposes. Arguments are JSON-serializable (they came from
+  the model as JSON, `agent.ts:314`).
 - `steer` injecting a message does **not** re-enter `beforeToolCall` (it is a
   user/system message, not a tool call), so the soft nudge cannot itself trip the
   breaker — no recursion risk.
