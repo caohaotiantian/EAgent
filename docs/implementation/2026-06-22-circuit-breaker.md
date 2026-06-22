@@ -117,8 +117,11 @@ vocabulary). One **exported pure function** so the signature is unit-testable
   3. `if (!enabled || decision.block) return decision;` (kill switch / store
      disable / already-vetoed passthrough — §5 assumption,
      mirrors `limits.ts:212`). **Never un-block** an existing `block`.
-  4. `const sig = stableSignature(ctx.call.name, decision.arguments);`
-     (hash the **decision's** arguments — the coerced shape, §5).
+  4. `const sig = stableSignature(ctx.call.name, ctx.call.arguments);`
+     (hash the **raw model arguments**, exactly as `afterToolCall` does below —
+     keying on the validate-coerced `decision.arguments` here would split the
+     count and the failure streak across two buckets for any coercing schema,
+     since `afterToolCall` only sees `ctx.call`).
   5. Increment the bucket's `count` (total-in-run, D3 — create the bucket if
      absent). This counts every occurrence including ones a later guard blocks
      (§5 assumption — acceptable/conservative).
