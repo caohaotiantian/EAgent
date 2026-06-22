@@ -28,6 +28,12 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
 import type { JSONSchema, Message, Tool, ToolCallBlock, ToolContext, ToolResult } from "../kernel/types.js";
 import { validate } from "../kernel/validate.js";
+import {
+  resolveChildCapabilities,
+  resolveChildProvider,
+  resolveOutputSchema,
+  runTypedChild,
+} from "./subagents.js";
 
 /** The tool name; also the registration a workflow's child agents must not inherit. */
 const WORKFLOW_TOOL = "run_workflow";
@@ -52,6 +58,13 @@ interface WorkflowStep {
   args: Record<string, unknown>;
   prompt?: string;
   system?: string;
+  /** type=agent: optional least-privilege passthroughs (default off). */
+  capabilities?: unknown;
+  readOnly?: unknown;
+  provider?: unknown;
+  model?: unknown;
+  outputSchema?: unknown;
+  require?: unknown;
 }
 
 interface PlannedWorkflow {
@@ -82,6 +95,16 @@ const STEP_SCHEMA: JSONSchema = {
     },
     prompt: { type: "string", description: "For type=agent: the child task. May embed ${otherStepId} references." },
     system: { type: "string", description: "For type=agent: optional system prompt for the child." },
+    capabilities: {
+      type: "array",
+      items: { type: "string" },
+      description: "For type=agent: optional capability allowlist scoping the child (generalizes readOnly).",
+    },
+    readOnly: { type: "boolean", description: "For type=agent: run the child in the read-only lane." },
+    provider: { type: "string", description: "For type=agent: a registered provider to run the child on (falls back if unknown)." },
+    model: { type: "string", description: "For type=agent: optional model override for the child." },
+    outputSchema: { type: "object", description: "For type=agent: JSON Schema the child's final answer must satisfy (re-prompted once)." },
+    require: { type: "array", items: { type: "string" }, description: "For type=agent: keys folded into outputSchema.required." },
   },
   required: ["id"],
 };
@@ -182,7 +205,22 @@ export function planWorkflow(rawSteps: unknown, tools: ToolRegistry): PlannedWor
       steps.push({ id, type, needs, tool, args });
     } else {
       if (!prompt || prompt.length === 0) return { error: `step "${id}" (agent) needs a non-empty \`prompt\`.` };
-      steps.push({ id, type, needs, args, prompt, system });
+      // Carry the optional least-privilege passthroughs verbatim; they are coerced
+      // and validated at run time by the shared resolvers (gated by the kill switch).
+      steps.push({
+        id,
+        type,
+        needs,
+        args,
+        prompt,
+        system,
+        capabilities: r.capabilities,
+        readOnly: r.readOnly,
+        provider: r.provider,
+        model: r.model,
+        outputSchema: r.outputSchema,
+        require: r.require,
+      });
     }
   }
 
@@ -434,19 +472,41 @@ async function guardedBody(tool: Tool, call: ToolCallBlock, ctx: ToolContext, e:
 
 async function runAgentStep(step: WorkflowStep, outputs: Record<string, string>, e: ExtensionAPI): Promise<StepResult> {
   const prompt = substitute(step.prompt ?? "", outputs);
-  const child = new Agent({
-    providers: e.agent.providers,
+
+  // Resolve the three least-privilege passthroughs once (D6 parity); omitting all
+  // of them — or the kill switch being off — reproduces today's exact construction
+  // (parent manager, parent provider/model, free-text return).
+  const parent = {
     capabilities: e.agent.capabilities,
     ui: e.agent.ui,
-    logger: e.agent.logger,
+    providers: e.agent.providers,
+    providerName: e.agent.providerName,
     model: e.agent.model,
-    provider: e.agent.providerName,
-    systemPrompt: step.system ?? DEFAULT_CHILD_SYSTEM,
-    maxTurns: DEFAULT_AGENT_MAX_TURNS,
-    tools: workflowChildRegistry(e.agent.tools.list()),
-  });
+    log: e.log,
+  };
+  const { provider, model } = resolveChildProvider(step, parent);
+  const capabilities = resolveChildCapabilities(step, parent);
+  const schema = resolveOutputSchema(step);
+
+  const build = (system: string): Agent =>
+    new Agent({
+      providers: e.agent.providers,
+      capabilities,
+      ui: e.agent.ui,
+      logger: e.agent.logger,
+      model,
+      provider,
+      systemPrompt: system,
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
+      tools: workflowChildRegistry(e.agent.tools.list()),
+    });
+
   try {
-    const { messages } = await child.run(prompt);
+    if (schema) {
+      const result = await runTypedChild(prompt, step.system ?? DEFAULT_CHILD_SYSTEM, schema, build, finalText);
+      return { status: result.isError ? "error" : "done", output: result.content };
+    }
+    const { messages } = await build(step.system ?? DEFAULT_CHILD_SYSTEM).run(prompt);
     return { status: "done", output: finalText(messages) };
   } catch (err) {
     return { status: "error", output: errorText(err) };

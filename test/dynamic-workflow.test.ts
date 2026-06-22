@@ -16,8 +16,28 @@ import dynamicWorkflow, {
 } from "../src/extensions/dynamic-workflow.js";
 import { defineTool, fail, ok } from "../src/kernel/define.js";
 import type { ToolDecision } from "../src/kernel/events.js";
-import type { CompletionRequest, Message, Tool, ToolResult, ToolResultBlock } from "../src/kernel/types.js";
+import type {
+  CompletionRequest,
+  Message,
+  Provider,
+  StreamEvent,
+  Tool,
+  ToolResult,
+  ToolResultBlock,
+} from "../src/kernel/types.js";
+import { MockProvider } from "../src/providers/mock.js";
 import { makeHarness, type Harness } from "./helpers.js";
+
+/** A provider that delegates to a MockProvider but reports a different `name`. */
+class RenamedProvider implements Provider {
+  constructor(
+    readonly name: string,
+    private readonly inner: MockProvider,
+  ) {}
+  stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
+    return this.inner.stream(req);
+  }
+}
 
 // --- helpers ----------------------------------------------------------------
 
@@ -448,4 +468,257 @@ test("AC-11: a sequential-mode tool is not interleaved; parallel tools may overl
   });
   await hPar.agent.run("go");
   assert.equal(maxPar, 2, "parallel tool steps overlap");
+});
+
+// ---------------------------------------------------------------------------
+// subagents-least-privilege parity (D6/AC-8): the same three passthroughs on
+// the workflow `agent` step.
+// ---------------------------------------------------------------------------
+
+/** Register an fs:write `mutate` tool that flips a flag (denial is observable). */
+function mutateTool(agent: Harness["agent"], flag: { wrote: boolean }): void {
+  agent.tools.register(
+    defineTool({
+      name: "mutate",
+      description: "Writes (declares fs:write).",
+      capabilities: ["fs:write"],
+      parameters: { type: "object", properties: {} },
+      execute: () => {
+        flag.wrote = true;
+        return { content: "mutated" };
+      },
+    }),
+  );
+}
+
+/** Register a shell:exec `lint` tool that flips a flag (allow is observable). */
+function lintTool(agent: Harness["agent"], flag: { linted: boolean }): void {
+  agent.tools.register(
+    defineTool({
+      name: "lint",
+      description: "Lints (declares shell:exec).",
+      capabilities: ["shell:exec"],
+      parameters: { type: "object", properties: {} },
+      execute: () => {
+        flag.linted = true;
+        return { content: "linted" };
+      },
+    }),
+  );
+}
+
+/**
+ * A parent that emits one agent-step workflow; the WF_CHILD then calls each tool
+ * in `childToolCalls` (one per turn) before finishing with `childFinal`.
+ */
+function parentEmitsAgentStep(
+  stepExtra: Record<string, unknown>,
+  childToolCalls: string[],
+  childFinal = "child-done",
+): (req: CompletionRequest) => unknown {
+  let parentCalls = 0;
+  let childStep = 0;
+  return (req) => {
+    if (req.systemPrompt.includes("WF_CHILD")) {
+      if (childStep < childToolCalls.length) {
+        const name = childToolCalls[childStep]!;
+        childStep++;
+        return { toolCalls: [{ name, arguments: {} }] };
+      }
+      return { text: childFinal };
+    }
+    parentCalls++;
+    if (parentCalls === 1) {
+      return {
+        toolCalls: [
+          {
+            name: "run_workflow",
+            id: "w1",
+            arguments: {
+              steps: [{ id: "a", type: "agent", prompt: "go", system: "WF_CHILD", ...stepExtra }],
+            },
+          },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  };
+}
+
+test("AC-8: an agent step's `capabilities` allowlist scopes the child (granted runs, ungranted denied)", async () => {
+  const linted = { linted: false };
+  const wrote = { wrote: false };
+  const h = makeHarness({
+    responder: parentEmitsAgentStep({ capabilities: ["shell:exec"] }, ["lint", "mutate"]) as never,
+    fallback: "allow",
+  });
+  lintTool(h.agent, linted);
+  mutateTool(h.agent, wrote);
+  await h.host.use("dynamic-workflow", dynamicWorkflow);
+
+  await h.agent.run("go");
+
+  assert.equal(linted.linted, true, "shell:exec granted → lint runs inside the DAG");
+  assert.equal(wrote.wrote, false, "fs:write not in allowlist → mutate denied inside the DAG");
+});
+
+test("AC-8: an agent step's `provider` routes the child to the named provider", async () => {
+  let parentChildCalls = 0;
+  let criticChildCalls = 0;
+  let parentSpawned = false;
+  const parentMock = new MockProvider((req) => {
+    if (req.systemPrompt.includes("WF_CHILD")) {
+      parentChildCalls++;
+      return { text: "parent-child" };
+    }
+    if (!parentSpawned) {
+      parentSpawned = true;
+      return {
+        toolCalls: [
+          {
+            name: "run_workflow",
+            id: "w1",
+            arguments: { steps: [{ id: "a", type: "agent", prompt: "go", system: "WF_CHILD", provider: "critic" }] },
+          },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  });
+  const criticMock = new MockProvider((req) => {
+    if (req.systemPrompt.includes("WF_CHILD")) {
+      criticChildCalls++;
+      return { text: "critic-child" };
+    }
+    return { text: "" };
+  });
+
+  const h = makeHarness({ fallback: "allow" });
+  h.agent.providers.register(parentMock, { default: true });
+  h.agent.providers.register(new RenamedProvider("critic", criticMock));
+  await h.host.use("dynamic-workflow", dynamicWorkflow);
+
+  await h.agent.run("go");
+
+  const res = wfResult(h.agent.messages);
+  assert.match(res.content, /critic-child/, "the agent step's child ran on the critic provider");
+  assert.equal(criticChildCalls, 1);
+  assert.equal(parentChildCalls, 0, "the parent provider was not used for the child");
+});
+
+test("AC-8: an agent step's `outputSchema` validates and surfaces the child's typed JSON", async () => {
+  // The child emits confidence as a string; only the typed path coerces it to a
+  // number, so the rendered step output reflects the validated object.
+  let parentCalls = 0;
+  const responder = (req: CompletionRequest) => {
+    if (req.systemPrompt.includes("WF_CHILD")) {
+      return { text: JSON.stringify({ status: "ok", confidence: "0.9" }) };
+    }
+    parentCalls++;
+    if (parentCalls === 1) {
+      return {
+        toolCalls: [
+          {
+            name: "run_workflow",
+            id: "w1",
+            arguments: {
+              steps: [
+                {
+                  id: "a",
+                  type: "agent",
+                  prompt: "verify",
+                  system: "WF_CHILD",
+                  outputSchema: {
+                    type: "object",
+                    properties: { status: { type: "string" }, confidence: { type: "number" } },
+                    required: ["status", "confidence"],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  };
+
+  const h = makeHarness({ responder: responder as never, fallback: "allow" });
+  await h.host.use("dynamic-workflow", dynamicWorkflow);
+  await h.agent.run("go");
+
+  const res = wfResult(h.agent.messages);
+  assert.equal(res.isError, undefined, "valid typed return is not an error");
+  assert.match(res.content, /\[a\] \(done\)/);
+  // The step's rendered output is the validated JSON, with confidence coerced to a number.
+  assert.match(res.content, /"confidence":0\.9/);
+});
+
+test("AC-8: an agent step's invalid typed return re-prompts once then errors with contract violation", async () => {
+  let parentCalls = 0;
+  const responder = (req: CompletionRequest) => {
+    if (req.systemPrompt.includes("WF_CHILD")) return { text: "not json at all" };
+    parentCalls++;
+    if (parentCalls === 1) {
+      return {
+        toolCalls: [
+          {
+            name: "run_workflow",
+            id: "w1",
+            arguments: {
+              steps: [
+                {
+                  id: "a",
+                  type: "agent",
+                  prompt: "verify",
+                  system: "WF_CHILD",
+                  outputSchema: { type: "object", properties: { x: { type: "string" } }, required: ["x"] },
+                },
+              ],
+            },
+          },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  };
+
+  const h = makeHarness({ responder: responder as never, fallback: "allow" });
+  await h.host.use("dynamic-workflow", dynamicWorkflow);
+  await h.agent.run("go");
+
+  const res = wfResult(h.agent.messages);
+  assert.equal(res.isError, true);
+  assert.match(res.content, /\[a\] \(error\)/);
+  assert.match(res.content, /contract violation/);
+});
+
+test("AC-9: EAGENT_SUBAGENTS_LP=off makes the agent step's new fields a no-op", async () => {
+  const prev = process.env.EAGENT_SUBAGENTS_LP;
+  process.env.EAGENT_SUBAGENTS_LP = "off";
+  try {
+    const wrote = { wrote: false };
+    const h = makeHarness({
+      responder: parentEmitsAgentStep({ capabilities: ["shell:exec"] }, ["mutate"]) as never,
+      fallback: "allow",
+    });
+    mutateTool(h.agent, wrote);
+    await h.host.use("dynamic-workflow", dynamicWorkflow);
+
+    await h.agent.run("go");
+
+    assert.equal(wrote.wrote, true, "with the kill switch off, the child inherits the parent manager and writes");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_SUBAGENTS_LP;
+    else process.env.EAGENT_SUBAGENTS_LP = prev;
+  }
+});
+
+test("AC-10: unloading dynamic-workflow is clean and removes run_workflow", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("dynamic-workflow", dynamicWorkflow);
+  assert.ok(h.agent.tools.get("run_workflow"), "run_workflow is registered after load");
+
+  await assert.doesNotReject(() => h.host.unload("dynamic-workflow"), "unload throws nothing");
+  assert.equal(h.agent.tools.get("run_workflow"), undefined, "run_workflow is gone after unload");
 });
