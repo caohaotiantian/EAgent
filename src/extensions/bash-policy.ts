@@ -25,6 +25,7 @@ export type Action = "allow" | "deny" | "ask";
 export interface Rule {
   pattern: string;
   action: Action;
+  justification?: string;
 }
 
 /**
@@ -188,24 +189,396 @@ function commandTokens(commandLine: string): string[] {
   return tokens.filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) && !t.startsWith("-"));
 }
 
+/**
+ * Strip the directory from the program token so a path-qualified invocation is
+ * governed by the same rules as the bare name: `/bin/rm`, `./rm`, `../sbin/rm`,
+ * and `bin/rm` all reduce to `rm`. Without this, a `rm` deny rule is bypassed by
+ * spelling the program with a path. Only argv[0] — the first non-`VAR=value`
+ * token, after any leading environment assignments — is rewritten; operands
+ * (e.g. the `/etc/passwd` in `cat /etc/passwd`) are left untouched, and all other
+ * spacing and tokens are preserved verbatim.
+ */
+export function normalizeProgram(commandLine: string): string {
+  const match = commandLine.match(/^(\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)(\S+)/);
+  if (!match) return commandLine;
+  const [, lead, program] = match as unknown as [string, string, string];
+  const slash = program.lastIndexOf("/");
+  if (slash < 0) return commandLine;
+  const base = program.slice(slash + 1);
+  if (base === "") return commandLine;
+  return commandLine.slice(0, lead.length) + base + commandLine.slice(lead.length + program.length);
+}
+
 /** Reduce a command line to its human-meaningful command family (or "" if empty). */
 export function extractCommand(commandLine: string): string {
   return prefix(commandTokens(commandLine)).join(" ");
 }
 
-/** Compile a wildcard pattern: `*` → `.*`, every other regex metachar escaped, full-anchored. */
-function toRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, (c) => (c === "*" ? ".*" : `\\${c}`));
-  return new RegExp(`^${escaped}$`);
+/**
+ * Per-wrapper prefix grammar: how to skip a wrapper's own options so the inner
+ * program is exposed. `argFlags` are flags that consume a following value
+ * (`sudo -u root`) or carry it attached (`-uroot`, `--user=root`); `positionals`
+ * is the count of leading bare operands the wrapper takes (`timeout 5 cmd`);
+ * `assignments` is whether leading `VAR=value` tokens precede the command
+ * (`env FOO=bar cmd`).
+ */
+interface Wrapper {
+  argFlags: Set<string>;
+  positionals: number;
+  assignments: boolean;
+}
+
+const WRAPPERS: Record<string, Wrapper> = {
+  sudo: { argFlags: new Set(["-u", "--user", "-g", "--group", "-C", "-p", "-U", "-h", "-r", "-t"]), positionals: 0, assignments: false },
+  doas: { argFlags: new Set(["-u", "-C"]), positionals: 0, assignments: false },
+  env: { argFlags: new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]), positionals: 0, assignments: true },
+  nice: { argFlags: new Set(["-n", "--adjustment"]), positionals: 0, assignments: false },
+  ionice: { argFlags: new Set(["-c", "--class", "-n", "--classdata", "-p", "--pid"]), positionals: 0, assignments: false },
+  timeout: { argFlags: new Set(["-s", "--signal", "-k", "--kill-after"]), positionals: 1, assignments: false },
+  nohup: { argFlags: new Set(), positionals: 0, assignments: false },
+  setsid: { argFlags: new Set(), positionals: 0, assignments: false },
+  xargs: {
+    argFlags: new Set([
+      "-n", "--max-args", "-P", "--max-procs", "-I", "--replace",
+      "-d", "--delimiter", "-a", "--arg-file", "-E", "-L", "--max-lines",
+      "-s", "--max-chars",
+    ]),
+    positionals: 0,
+    assignments: false,
+  },
+};
+
+/** Basename of a token, so a path-qualified wrapper (`/usr/bin/sudo`) is recognized. */
+function basename(token: string): string {
+  const slash = token.lastIndexOf("/");
+  return slash < 0 ? token : token.slice(slash + 1);
+}
+
+/**
+ * When the command's head program (by basename) is a recognized wrapper, consume
+ * its option/argument prefix and return the remaining inner command line, with
+ * verbatim spacing preserved by slicing the original at the inner program's
+ * offset. Recurses for stacked wrappers (`sudo env rm`), terminating because at
+ * least argv[0] is removed each step. Returns `null` when the head is not a
+ * recognized wrapper or no inner program remains.
+ */
+export function unwrap(commandLine: string): string | null {
+  const offsets = [...commandLine.matchAll(/\S+/g)];
+  if (offsets.length === 0) return null;
+  const tokens = offsets.map((m) => m[0]);
+
+  const wrapper = WRAPPERS[basename(tokens[0]!)];
+  if (!wrapper) return null;
+
+  let i = 1;
+  let positionalsLeft = wrapper.positionals;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (wrapper.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      i++;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      const hasAttachedValue = token.includes("=");
+      if (wrapper.argFlags.has(token) && !hasAttachedValue) i += 2;
+      else i++;
+      continue;
+    }
+    if (positionalsLeft > 0) {
+      positionalsLeft--;
+      i++;
+      continue;
+    }
+    break;
+  }
+
+  if (i >= tokens.length) return null;
+  const inner = commandLine.slice(offsets[i]!.index);
+  return unwrap(inner) ?? inner;
+}
+
+/**
+ * Split a command line into the command segments a shell would run sequentially,
+ * cutting on the control operators `|`, `||`, `&&`, `;`, and newline — but only
+ * when they occur at quote/group depth zero and are not backslash-escaped. The
+ * scanner tracks single-quote, double-quote, and backtick state plus `$(`/`(`
+ * paren depth so an operator inside a quoted string or a substitution does not
+ * split (which would tear a legitimate command into a spurious dangerous-looking
+ * segment and false-block it). A backslash escapes the next character when the
+ * scanner is unquoted or inside double quotes, and is literal inside single
+ * quotes (bash semantics). A lone `&` is not a split operator; only `&&` splits.
+ * Segments are trimmed and empties dropped.
+ */
+export function segments(commandLine: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let single = false;
+  let double = false;
+  let backtick = false;
+  let parenDepth = 0;
+
+  const push = (end: number): void => {
+    const seg = commandLine.slice(start, end).trim();
+    if (seg !== "") out.push(seg);
+  };
+
+  for (let i = 0; i < commandLine.length; i++) {
+    const c = commandLine[i]!;
+
+    if (c === "\\" && !single) {
+      i++;
+      continue;
+    }
+
+    if (single) {
+      if (c === "'") single = false;
+      continue;
+    }
+    if (double) {
+      if (c === '"') double = false;
+      continue;
+    }
+    if (backtick) {
+      if (c === "`") backtick = false;
+      continue;
+    }
+
+    if (c === "'") {
+      single = true;
+      continue;
+    }
+    if (c === '"') {
+      double = true;
+      continue;
+    }
+    if (c === "`") {
+      backtick = true;
+      continue;
+    }
+
+    if (c === "$" && commandLine[i + 1] === "(") {
+      parenDepth++;
+      i++;
+      continue;
+    }
+    if (c === "(") {
+      parenDepth++;
+      continue;
+    }
+    if (c === ")") {
+      if (parenDepth > 0) parenDepth--;
+      continue;
+    }
+
+    if (parenDepth > 0) continue;
+
+    if (c === "\n" || c === ";") {
+      push(i);
+      start = i + 1;
+      continue;
+    }
+    if (c === "|") {
+      push(i);
+      if (commandLine[i + 1] === "|") i++;
+      start = i + 1;
+      continue;
+    }
+    if (c === "&" && commandLine[i + 1] === "&") {
+      push(i);
+      i++;
+      start = i + 1;
+      continue;
+    }
+  }
+
+  push(commandLine.length);
+  return out;
+}
+
+const EXEC_PRIMARIES = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const EXEC_TERMINATORS = new Set([";", "\\;", "+", "';'", '";"']);
+
+/**
+ * When a segment's program (by basename) is `find`, extract each command `find`
+ * itself runs: the tokens between an `-exec`/`-execdir`/`-ok`/`-okdir` primary
+ * and its terminator token (`;`, `\;`, `+`, or a quoted form), excluding the
+ * terminator and keeping placeholders like `{}`. Returns `[]` for a non-`find`
+ * segment. The terminator is matched as a whole token wherever it appears, so a
+ * `g++` operand is never mistaken for a `+` terminator. A clause with no
+ * terminator runs to the end of the segment; scanning continues past each
+ * terminator for further clauses. The original string is sliced so the inner
+ * command's spacing is preserved verbatim.
+ */
+export function findExecCommands(segment: string): string[] {
+  const program = commandTokens(normalizeProgram(segment))[0];
+  if (program === undefined || basename(program) !== "find") return [];
+
+  const offsets = [...segment.matchAll(/\S+/g)];
+  const tokens = offsets.map((m) => m[0]);
+  const out: string[] = [];
+
+  let i = 0;
+  while (i < tokens.length) {
+    if (!EXEC_PRIMARIES.has(tokens[i]!)) {
+      i++;
+      continue;
+    }
+    const cmdStart = i + 1;
+    let j = cmdStart;
+    while (j < tokens.length && !EXEC_TERMINATORS.has(tokens[j]!)) j++;
+    if (j > cmdStart) {
+      const from = offsets[cmdStart]!.index;
+      const to = offsets[j - 1]!.index + tokens[j - 1]!.length;
+      const command = segment.slice(from, to).trim();
+      if (command !== "") out.push(command);
+    }
+    i = j + 1;
+  }
+
+  return out;
+}
+
+/**
+ * Expand a command line into the full candidate set the guard evaluates: the
+ * normalized whole line first, then for each segment its normalized form, its
+ * `unwrap` inner, and each `find -exec` command (also normalized + unwrapped).
+ * The list is first-wins deduped with order otherwise preserved, so
+ * `expandCommands("sudo rm -rf build")` collapses to exactly
+ * `["sudo rm -rf build", "rm -rf build"]` (parity with prior behavior) while the
+ * inner/sub-command candidates stay last, keeping the last-match labeling on the
+ * offending sub-command.
+ */
+export function expandCommands(commandLine: string): string[] {
+  const out: string[] = [];
+  const add = (line: string): void => {
+    const normalized = normalizeProgram(line);
+    if (normalized !== "" && !out.includes(normalized)) out.push(normalized);
+    const innerRaw = unwrap(normalized);
+    if (innerRaw != null) {
+      const inner = normalizeProgram(innerRaw);
+      if (inner !== "" && !out.includes(inner)) out.push(inner);
+    }
+  };
+
+  add(commandLine);
+  for (const segment of segments(commandLine)) {
+    add(segment);
+    for (const inner of findExecCommands(segment)) add(inner);
+  }
+  return out;
+}
+
+/** Regex-escape a single literal character (the metacharacter set the matcher recognizes). */
+function escapeChar(c: string): string {
+  return /[.*+?^${}()|[\]\\]/.test(c) ? `\\${c}` : c;
+}
+
+/**
+ * Compile a pattern body to anchored regex source. `*` → `.*`; `\` + one of
+ * `[ ] | \` → that literal; `\` + any other char (or trailing `\`) → a literal
+ * backslash; `[`…`]` → a non-capturing alternation `(?:…|…)` over its
+ * (unescaped-`|`-split) interior — when `allowGroups` is false (inside a group)
+ * a `[` is a literal, so groups stay flat; an unterminated `[` is a fail-safe
+ * literal. Every other char is escaped literal. Never throws.
+ */
+function compile(pattern: string, allowGroups: boolean): string {
+  let out = "";
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i]!;
+    if (c === "\\") {
+      const next = pattern[i + 1];
+      if (next === "[" || next === "]" || next === "|" || next === "\\") {
+        out += escapeChar(next);
+        i += 2;
+        continue;
+      }
+      out += "\\\\";
+      i += 1;
+      continue;
+    }
+    if (c === "*") {
+      out += ".*";
+      i += 1;
+      continue;
+    }
+    if (c === "[" && allowGroups) {
+      let close = -1;
+      for (let j = i + 1; j < pattern.length; j++) {
+        if (pattern[j] === "\\") {
+          j++;
+          continue;
+        }
+        if (pattern[j] === "]") {
+          close = j;
+          break;
+        }
+      }
+      if (close < 0) {
+        out += "\\[";
+        i += 1;
+        continue;
+      }
+      const interior = pattern.slice(i + 1, close);
+      const alternatives: string[] = [];
+      let start = 0;
+      for (let j = 0; j < interior.length; j++) {
+        if (interior[j] === "\\") {
+          j++;
+          continue;
+        }
+        if (interior[j] === "|") {
+          alternatives.push(interior.slice(start, j));
+          start = j + 1;
+        }
+      }
+      alternatives.push(interior.slice(start));
+      out += `(?:${alternatives.map((a) => compile(a, false)).join("|")})`;
+      i = close + 1;
+      continue;
+    }
+    out += escapeChar(c);
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Compile a pattern to an anchored matcher. `*` is the wildcard (`.*`), `[a|b]`
+ * is a bounded alternation group, the `\` escape yields literal `[ ] | \`, and
+ * every other character is literal. Degenerate forms compile fail-safe-literal
+ * and never throw.
+ */
+export function toRegExp(pattern: string): RegExp {
+  return new RegExp(`^${compile(pattern, true)}$`);
+}
+
+/**
+ * Resolve a ruleset over several candidate command lines under last-match-wins:
+ * iterate rules from last to first; the first rule whose pattern matches some
+ * candidate wins, with `matched` set to the last candidate (in the given order)
+ * that rule matches. No rule matches → `{ action: fallthrough, matched: commands[0] }`.
+ */
+export function evaluateAny(
+  commands: string[],
+  rules: Rule[],
+  fallthrough: Action,
+): { action: Action; matched: string; rule?: Rule } {
+  for (let i = rules.length - 1; i >= 0; i--) {
+    const rule = rules[i]!;
+    const re = toRegExp(rule.pattern);
+    let matched: string | undefined;
+    for (const command of commands) {
+      if (re.test(command)) matched = command;
+    }
+    if (matched !== undefined) return { action: rule.action, matched, rule };
+  }
+  return { action: fallthrough, matched: commands[0] ?? "", rule: undefined };
 }
 
 /** The action of the last rule whose pattern matches the full command line, else fallthrough. */
 export function evaluate(command: string, rules: Rule[], fallthrough: Action): Action {
-  for (let i = rules.length - 1; i >= 0; i--) {
-    const rule = rules[i]!;
-    if (toRegExp(rule.pattern).test(command)) return rule.action;
-  }
-  return fallthrough;
+  return evaluateAny([command], rules, fallthrough).action;
 }
 
 export default function activate(e: ExtensionAPI): () => void {
@@ -229,18 +602,26 @@ export default function activate(e: ExtensionAPI): () => void {
     const command = ctx.call.arguments[commandArgKey];
     if (typeof command !== "string") return decision;
 
-    const action = evaluate(command, rules, fallthrough);
+    // Expand the line into the whole line plus every effective sub-command
+    // (segments, wrapper unwraps, and `find -exec` commands), each normalized so
+    // a path-qualified or wrapped inner program (e.g. the `rm` of `sudo rm` or of
+    // `... && rm`) is matched and labeled by its bare name. Inner candidates come
+    // last so a sub-command rule labels the offending sub-command, not the head.
+    const candidates = expandCommands(command);
+    const { action, matched, rule } = evaluateAny(candidates, rules, fallthrough);
     if (action === "allow") return decision;
 
-    const family = extractCommand(command);
+    const family = extractCommand(matched);
     const why = `${family || command} (policy ${action})`;
+    const j = rule?.justification?.trim();
+    const suffix = j ? `: ${j}` : "";
     if (action === "deny") {
-      return { ...decision, block: true, reason: `bash-policy: blocked ${why}` };
+      return { ...decision, block: true, reason: `bash-policy: blocked ${why}${suffix}` };
     }
 
     if (approved.has(family)) return decision;
-    const allow = await e.agent.ui.confirm(`bash-policy: allow ${family || command}?`);
-    if (!allow) return { ...decision, block: true, reason: `bash-policy: denied ${why}` };
+    const allow = await e.agent.ui.confirm(`bash-policy: allow ${family || command}${j ? ` (${j})` : ""}?`);
+    if (!allow) return { ...decision, block: true, reason: `bash-policy: denied ${why}${suffix}` };
     approved.add(family);
     return decision;
   });
@@ -265,7 +646,10 @@ export default function activate(e: ExtensionAPI): () => void {
           break;
         default: {
           const { enabled, rules, fallthrough } = cfg();
-          const printed = rules.map((r) => `${r.pattern} -> ${r.action}`).join("; ") || "(none)";
+          const printed =
+            rules
+              .map((r) => `${r.pattern} -> ${r.action}${r.justification ? ` (${r.justification})` : ""}`)
+              .join("; ") || "(none)";
           c.print(`bash-policy ${enabled ? "on" : "off"} (fallthrough=${fallthrough}); rules: ${printed}`);
         }
       }
