@@ -201,8 +201,10 @@ function workspaceRoot(): string {
 export default function activate(e: ExtensionAPI): () => void {
   /** Off by default; the env kill switch hard-disables the auto-trigger (design D6). */
   const cfg = () => ({
+    // `store.get(key, false)` already returns the `false` fallback when unset, so
+    // the read is a clean `boolean`; `=== true` only pins the static type.
     enabled:
-      process.env.EAGENT_HANDOFF === "off" ? false : e.store.get<boolean>("enabled", false) ?? false,
+      process.env.EAGENT_HANDOFF === "off" ? false : e.store.get<boolean>("enabled", false) === true,
   });
 
   /** Recursion guard: true while a summarization sub-call is in flight (compact.ts:175). */
