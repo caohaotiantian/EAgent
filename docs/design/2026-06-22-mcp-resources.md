@@ -1,6 +1,6 @@
 # Design: mcp-resources — ingest the read-only resources half of MCP
 
-Status: draft
+Status: PASSED
 Slug: `2026-06-22-mcp-resources`
 
 ## 1. Background and Purpose
@@ -33,29 +33,29 @@ capability machinery the tools half already uses.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/mcp.ts` — **extended in place** (additive diff, no fork):
+- [x] `src/extensions/mcp.ts` — **extended in place** (additive diff, no fork):
   `McpConnection` gains a cached `resources: McpResource[]` field populated by a
   new `resources/list` call inside `start()`; `activate()` registers, per server
   that advertises resources, one `mcp__<server>__read_resource` tool that calls
   `resources/read`; the `/mcp` command line also prints the per-server resource
   count.
-- [ ] An exported pure helper `parseResourceList(raw): McpResource[]` that
+- [x] An exported pure helper `parseResourceList(raw): McpResource[]` that
   defensively filters a foreign `resources/list` payload to entries with a
   non-empty string `uri` (mirroring the existing tool-list filter at
   `mcp.ts:360`), unit-tested in isolation.
-- [ ] `test/mcp.test.ts` — **extended**: the in-test stdio fixture server gains
+- [x] `test/mcp.test.ts` — **extended**: the in-test stdio fixture server gains
   `resources/list` and `resources/read` handlers; new offline tests load the
   extension via `host.use("mcp", activate)` (the established pattern, e.g.
   `test/recovery.test.ts:118`) and assert registration, read, the
   no-resources-server path, the catalog cache + refresh command, and the kill
   switch.
-- [ ] `/mcp resources [server]` command surface (the catalog the model/operator
+- [x] `/mcp resources [server]` command surface (the catalog the model/operator
   can see) and `/mcp refresh` (re-run `resources/list`) — registered on the
   existing `mcp` command (D2, D5).
-- [ ] Kill switch `EAGENT_MCP_RESOURCES=off` — when set, `start()` skips
+- [x] Kill switch `EAGENT_MCP_RESOURCES=off` — when set, `start()` skips
   `resources/list` entirely and no `read_resource` tool is registered (the tools
   half is untouched).
-- [ ] `src/extensions/content-guard.ts` — **one-line edit, owned here:** add
+- [x] `src/extensions/content-guard.ts` — **one-line edit, owned here:** add
   `"mcp:read"` to `DEFAULT_FOREIGN_CAPS` (`content-guard.ts:29`, currently
   `["net:fetch", "mcp:call"]`) so resource bodies are fenced by content-guard's
   ingress sanitizer out of the box, exactly like `mcp:call` tool output (§6, §8).

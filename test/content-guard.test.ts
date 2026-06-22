@@ -113,6 +113,17 @@ test("live: a successful net:fetch result is fenced in the transcript (AC3)", as
   assert.ok(content.includes("fetched body text"), "the original body survives inside the envelope");
 });
 
+test("live: a successful mcp:read result is fenced in the transcript (mcp-resources default)", async () => {
+  // mcp:read resource bodies are untrusted foreign content; they must be fenced
+  // by default, exactly like net:fetch/mcp:call output (mcp:read is in DEFAULT_FOREIGN_CAPS).
+  const h = makeHarness();
+  await runWithStub(h, "readres", ["mcp:read"], { content: "resource body text" });
+  const content = firstResultContent(h.agent) ?? "";
+  assert.ok(content.includes(FENCE_MARKER), "the mcp:read result is wrapped in the provenance envelope");
+  assert.match(content, /<untrusted-content source="readres">/, "fenced with the producing tool's name as source");
+  assert.ok(content.includes("resource body text"), "the original body survives inside the envelope");
+});
+
 test("live: a result from an fs:read-only tool is NOT fenced (AC4)", async () => {
   const h = makeHarness();
   await runWithStub(h, "loadfile", ["fs:read"], { content: "local file text" });
