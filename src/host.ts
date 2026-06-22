@@ -63,6 +63,8 @@ import sweepEdit from "./extensions/sweep-edit.js";
 import citations from "./extensions/citations.js";
 import envReport from "./extensions/env-report.js";
 import evals from "./extensions/evals.js";
+import handoff from "./extensions/handoff.js";
+import driftProbe from "./extensions/drift-probe.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -104,6 +106,8 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["citations", citations],
   ["env-report", envReport],
   ["evals", evals],
+  ["handoff", handoff],
+  ["drift-probe", driftProbe],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
