@@ -61,7 +61,10 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   independent steps run in parallel, tool steps reuse the kernel's guard
   sequence so capability/policy checks still apply; agent-steps accept the same
   three per-spawn least-privilege options as `subagents`),
-  `memory`,
+  `memory` (a store-backed `remember`/`recall` working-memory scratchpad with
+  white-box per-entry provenance — `/memory list|edit|forget|rollback|
+  consolidate`, `EAGENT_MEMORY_ENTRIES=off` kill switch; registers no
+  `transformContext` hook — conversation compaction is `compact`'s job),
   `prune` (token-budget tool-output pruning on `transformContext` — truncates
   old, oversized `tool_result` content beyond a protected recent window; no
   capability, `EAGENT_PRUNE=off` kill switch),
@@ -193,12 +196,15 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   (no-op when unspecified); and optionally gates a skill's tier-1 disclosure on
   `triggers:` frontmatter, `EAGENT_SKILL_TRIGGERS=off`; each guard independently
   killable, no new capability).
-  `compact` (token-gated structured conversation compaction — ships in
-  `src/extensions/compact.ts` but is **not yet wired into `BUILTIN_EXTENSIONS`**:
-  it is the token-aware structured-slot successor to `memory`'s count-based
-  compaction, and enabling it requires retiring `memory`'s count-based
-  `transformContext` hook in the same change so the two compactors don't fight —
-  a tracked follow-up; until then it is exercised only by its isolated tests).
+  `compact` (token-gated structured conversation compaction on
+  `transformContext` — the token-aware structured-slot successor to `memory`'s
+  retired count-based compaction; when the estimated transcript exceeds a budget
+  it folds the older prefix at a user-turn boundary into `## Decisions` /
+  `## Files` / `## Open threads` via a recursion-safe tool-less provider sub-call,
+  keeps the last K user turns verbatim, and re-injects a byte-capped pinned block
+  so designated evidence always survives. Registered in `BUILTIN_EXTENSIONS`
+  right after `prune`, but **off by default** — opt in via `enabled` /
+  `/compact on`; `EAGENT_COMPACT=off` is the hard kill switch, no capability).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.

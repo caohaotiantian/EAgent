@@ -35,6 +35,7 @@ import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
+import compact from "./extensions/compact.js";
 import recovery from "./extensions/recovery.js";
 import outputContract from "./extensions/output-contract.js";
 import contentGuard from "./extensions/content-guard.js";
@@ -80,6 +81,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["dynamic-workflow", dynamicWorkflow],
   ["memory", memory],
   ["prune", prune],
+  ["compact", compact],
   ["recovery", recovery],
   ["output-contract", outputContract],
   ["content-guard", contentGuard],

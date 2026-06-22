@@ -134,6 +134,70 @@ function overBudget(): Message[] {
   ];
 }
 
+/**
+ * An over-budget transcript LONGER than memory's DEFAULT_THRESHOLD (12), so that
+ * memory's pre-retirement count-hook (`messages.length > 12`) would ALSO fold it.
+ * That makes the co-load regression test (no double-compaction) a genuine guard:
+ * before the hook is retired, memory folds too and a second / `memory`-sourced
+ * summary appears. 16 messages, last 3 user turns kept verbatim.
+ */
+function coLoadOverBudget(): Message[] {
+  const big = "y".repeat(50_000); // ≈12.5k tokens each
+  return [
+    userMsg("q0 " + big),
+    assistantMsg("a0 " + big),
+    userMsg("q1 " + big),
+    assistantMsg("a1 " + big),
+    userMsg("q2 " + big),
+    assistantMsg("a2"),
+    userMsg("q3"),
+    assistantMsg("a3"),
+    userMsg("q4"),
+    assistantMsg("a4"),
+    // recent window (last 3 user turns):
+    userMsg("recent-A"),
+    assistantMsg("ra"),
+    userMsg("recent-B"),
+    assistantMsg("rb"),
+    userMsg("recent-C"),
+    assistantMsg("rc"),
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Co-load regression (D4 / AC-1) — compact owns the seam, memory does not fold
+// ---------------------------------------------------------------------------
+
+test("co-load: compact owns the seam; memory does not count-compact (one summary, sourced compact)", async () => {
+  const h = makeHarness({ responder: makeResponder() });
+  // Load memory first (mirrors host.ts order), then compact enabled.
+  await h.host.use("memory", memory);
+  await activate(h, { enabled: true });
+
+  const out = await applyHook(h, coLoadOverBudget());
+
+  const s = summaries(out);
+  assert.equal(s.length, 1, "exactly one summary — no double-compaction");
+  assert.equal(s[0]!.meta?.source, "compact", "the summary is authored by compact, never memory");
+
+  // The recent window survives verbatim.
+  const joined = out.map(textOf).join("\n");
+  for (const tag of ["recent-A", "recent-B", "recent-C"]) {
+    assert.ok(joined.includes(tag), `recent turn ${tag} survives verbatim`);
+  }
+});
+
+test("memory registers no transformContext hook — the seam is no longer memory's (AC-2)", async () => {
+  const h = makeHarness({ responder: makeResponder() });
+  const before = h.agent.hooks.listenerCount("transformContext");
+  await h.host.use("memory", memory);
+  assert.equal(
+    h.agent.hooks.listenerCount("transformContext"),
+    before,
+    "loading memory alone adds zero transformContext listeners",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Task 1 — tokenEstimate
 // ---------------------------------------------------------------------------
@@ -431,24 +495,23 @@ test("AC-9: EAGENT_COMPACT=off is a hard kill even when enabled", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Task 11 / AC-10 — /compact supersedes memory's; dispose restores it
+// Task 11 / AC-10 — /compact is owned solely by compact; no stale memory fallback
 // ---------------------------------------------------------------------------
 
-test("AC-10: /compact supersedes memory's command; disposing compact restores memory's", async () => {
+test("AC-10: /compact is owned solely by compact; no stale memory fallback on unload", async () => {
   const h = makeHarness({
     responder: (req: CompletionRequest) => (isSummarizeReq(req) ? { text: STRUCTURED } : { text: "ok" }),
   });
+  // memory no longer registers /compact, so loading it first provides no fallback.
   await h.host.use("memory", memory);
-  const memoryDesc = h.commands.get("compact")?.description;
-  assert.ok(memoryDesc, "memory registered /compact");
-
   await h.host.use("compact", compact);
   const compactDesc = h.commands.get("compact")?.description;
   assert.ok(compactDesc, "compact registered /compact");
-  assert.notEqual(compactDesc, memoryDesc, "compact's /compact shadows memory's (distinct description)");
+  assert.match(compactDesc, /status|force|on|off|pin/, "compact's /compact describes status/force/on/off/pin");
 
+  // Unloading compact leaves NO /compact behind (memory provides none).
   await h.host.unload("compact");
-  assert.equal(h.commands.get("compact")?.description, memoryDesc, "memory's /compact restored on dispose");
+  assert.equal(h.commands.get("compact"), undefined, "no /compact after compact unloads (memory has none)");
 });
 
 // ---------------------------------------------------------------------------
@@ -573,6 +636,39 @@ test("/compact force on an under-budget transcript with no foldable boundary pri
   const forced = (await run("force")).join("\n");
   assert.match(forced, /nothing to compact/i, "no foldable boundary → nothing to compact");
   assert.equal(count.sub, 0, "no sub-call when there is nothing to fold");
+});
+
+test("/compact force on an under-budget transcript WITH a foldable boundary previews the future fold", async () => {
+  const count = { sub: 0, real: 0 };
+  const h = makeHarness({ responder: makeResponder({ count }) });
+  await activate(h, { enabled: true });
+
+  const run = async (args: string): Promise<string[]> => {
+    const out: string[] = [];
+    await h.commands.get("compact")!.run({ agent: h.agent, args, print: (l) => out.push(l) });
+    return out;
+  };
+
+  // 4+ short user turns → splitIndex returns a boundary > 0 (more than keepTurns
+  // user turns), but the transcript is well under the 60k budget, so the live
+  // transcript is NOT over budget right now.
+  h.agent.load([
+    userMsg("q0"),
+    assistantMsg("a0"),
+    userMsg("q1"),
+    assistantMsg("a1"),
+    userMsg("q2"),
+    assistantMsg("a2"),
+    userMsg("q3"),
+    assistantMsg("a3"),
+  ]);
+  const forced = (await run("force")).join("\n");
+  assert.match(
+    forced,
+    /once the transcript next goes over budget/,
+    "under-budget force previews the FUTURE fold, not an imminent one",
+  );
+  assert.equal(count.sub, 0, "force is pure splitIndex — no summarization sub-call");
 });
 
 test("/compact off disables; /compact unpin removes a pin (command verbs)", async () => {
