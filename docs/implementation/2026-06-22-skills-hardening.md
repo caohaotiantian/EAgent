@@ -1,7 +1,10 @@
 # Implementation: `skills-hardening` — supply-chain scan, frontmatter lint, allowed-tools scoping, trigger-gated disclosure
 
 Slug: `2026-06-22-skills-hardening`
-Status: draft
+Status: closed
+Closing-commit: a531f5b
+Closed-on: 2026-06-22
+Deferred: finding — trigger-gating couples to skills.ts tier-1 render format; skill:write capability characterization corrected (doc-precision)
 Design doc: `docs/design/2026-06-22-skills-hardening.md` (PASSED)
 
 > **Authority note.** This guide implements the **PASSED design** verbatim. The

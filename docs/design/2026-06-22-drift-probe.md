@@ -1,7 +1,10 @@
 # Design: `drift-probe` — canary reasoning-quality probe as a leading degradation indicator
 
 Slug: `2026-06-22-drift-probe`
-Status: draft
+Status: closed
+Closing-commit: a531f5b
+Closed-on: 2026-06-22
+Deferred: finding — stale AC wording on the probe-discriminator test mechanism (cosmetic; code+tests consistent)
 
 ## 1. Background and Purpose
 
