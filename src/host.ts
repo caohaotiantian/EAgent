@@ -61,6 +61,8 @@ import writeGuard from "./extensions/write-guard.js";
 import secretGuard from "./extensions/secret-guard.js";
 import sweepEdit from "./extensions/sweep-edit.js";
 import citations from "./extensions/citations.js";
+import envReport from "./extensions/env-report.js";
+import evals from "./extensions/evals.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -100,6 +102,8 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["secret-guard", secretGuard],
   ["sweep-edit", sweepEdit],
   ["citations", citations],
+  ["env-report", envReport],
+  ["evals", evals],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */

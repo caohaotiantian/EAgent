@@ -83,11 +83,19 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   whose capabilities intersect a configured sensitive set, default `shell:exec`,
   it classifies the specific call via a recursion-safe, tool-less provider
   sub-call and, on a RISKY verdict, asks or blocks; off by default, no
-  capability, fails open with a warning, `EAGENT_RISK_GUARD=off` kill switch),
+  capability, fails open with a warning, `EAGENT_RISK_GUARD=off` kill switch; its
+  judge prompt is annotated with any decoded obfuscated payload via the shared
+  `lib/decode-normalize` helper — see `bash-policy`),
   `bash-policy` (command-granular shell policy gate — evaluates an allow/deny/ask
   ruleset over the full command line plus every effective sub-command (pipe/`;`/`&&`
   segments, unwrapped wrappers like `sudo`/`env`/`timeout`, and `find -exec` inner
   commands), last-match-wins; the matched command family is the approval label;
+  also evaluates the ruleset over *decoded* candidates produced by the shared
+  `src/extensions/lib/decode.ts` `normalizeForInspection` helper (strips invisible
+  Unicode via content-guard's `stripInvisible`, then best-effort decodes
+  base64/hex/rot13 and `echo|base64 -d|sh`/`printf '\\xNN'` idioms) so an obfuscated
+  `rm -rf /` is caught; the decode layer never blocks on its own, only expands the
+  candidate set the existing rules judge, `EAGENT_DECODE_NORMALIZE=off`;
   no-op by default, no capability, `EAGENT_BASH_POLICY=off` kill switch),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
   and flags descriptions that change across sessions — a rug-pull guard),
@@ -133,7 +141,21 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `net:fetch`/`fs:read`) and records it per-run; on `agent_end` it parses the final
   answer's `[src:N]`/`[N]` markers and warns (never blocks) on a *fabricated*
   citation — an id never emitted; `/citations` report, on by default, no capability,
-  `EAGENT_CITATIONS=off` kill switch).
+  `EAGENT_CITATIONS=off` kill switch),
+  `env-report` (classifies *environmental* tool failures — auth/missing-binary/
+  network/permission — on `afterToolCall`; for that error class it surfaces an
+  `environment_issue` to the host and *replaces* `recovery`'s retry-nudge with a
+  "surface and route around, do not retry" note (registered after `recovery`), so
+  the model stops looping on an infra fault; plus an `env_report` tool the model
+  can call to declare a blocker; on by default, no capability,
+  `EAGENT_ENV_REPORT=off` kill switch),
+  `evals` (offline behavior-eval harness — a pure event-bus trajectory consumer
+  (trace shape) plus `/expect` declarative trajectory assertions (tool order/exact,
+  span count, finish reason, no-tool-errors, token budget), an `/eval <dir>`
+  headless runner over `*.eval.json` scenarios printing a pass@k scorecard, and a
+  `judge` tool (rubric+candidate → score/verdict/reason) via a recursion-safe
+  tool-less provider sub-call; ships a `test/security/` regression set asserting the
+  safety guards still fire; offline against MockProvider/cassette, no capability).
   `compact` (token-gated structured conversation compaction — ships in
   `src/extensions/compact.ts` but is **not yet wired into `BUILTIN_EXTENSIONS`**:
   it is the token-aware structured-slot successor to `memory`'s count-based

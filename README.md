@@ -226,6 +226,8 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `secret-guard` | keeps secret *values* out of outgoing tool args — on `beforeToolCall`, scans leak-capable tools' args (default `net:fetch`/`shell:exec`/`mcp:call`) for credential patterns + high-entropy tokens and asks/blocks without echoing the value (on by default, mode `ask`; `EAGENT_SECRET_GUARD=off`) | `/secret-guard` | — |
 | `sweep-edit`   | `sweep_edit` tool — regex-enumerated multi-site refactor: finds match sites via `search` (no shell), fans a scoped sub-agent per file that edits or declines, with a max-sites cap | — | `fs:write`, `agent:spawn` |
 | `citations`    | grounding — tags *retrieval* tool output (`net:fetch`/`fs:read`) with a visible `[src:N]` id and, on `agent_end`, warns (never blocks) on a *fabricated* citation in the final answer (on by default; `EAGENT_CITATIONS=off`) | `/citations` | — |
+| `env-report`   | classifies *environmental* tool failures (auth/missing-binary/network/permission), surfaces an `environment_issue` and replaces `recovery`'s retry-nudge with a "surface, don't retry" note so the model stops looping on infra faults (on by default; `EAGENT_ENV_REPORT=off`) | — (`env_report` tool) | — |
+| `evals`        | offline behavior-eval harness — `/expect` trajectory assertions, an `/eval <dir>` headless pass@k runner over `*.eval.json`, and a `judge` tool (recursion-safe sub-call); ships a `test/security/` guard-regression set | `/expect`, `/eval` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -325,7 +327,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  35 built-in extensions, all riding the ExtensionAPI
+src/extensions/  37 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
