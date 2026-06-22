@@ -67,6 +67,12 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `limits` (per-run call/token budgets + tool-output byte cap; on overflow it
   spills the full output to a gitignored file under `.eagent/tool-output` and
   returns a retrieval hint instead of discarding the clipped bytes),
+  `cost` (token→USD accounting on `usage`/`agent_*` — a pure observability
+  sibling of `trace`: prices tokens via a date-pinned, store-overridable price
+  card, accumulates per-run + per-model session cost, and emits a warn-only
+  rolling-mean anomaly flag when a finished run's cost exceeds mean+3σ past a
+  5-sample guard; `/cost` status view + `/cost pricecard` setter, no capability,
+  `EAGENT_COST=off` kill switch),
   `self`, `web`, `checkpoint`, `introspect`, `journal`, `prompts`,
   `todo` (session-scoped in-memory todo list — a `todowrite` tool that replaces
   and echoes the list plus a `/todos` command; no capability),

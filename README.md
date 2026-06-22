@@ -208,6 +208,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them | `/context`, `/context-reload` | — |
 | `microagents` | keyword-triggered knowledge injection via `transformContext` — scans `*.md` files with `triggers:` frontmatter and injects a body when a trigger appears in the latest user message (`EAGENT_MICROAGENTS=off` to disable) | `/microagents` | — |
 | `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
+| `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
 | `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
@@ -321,7 +322,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  31 built-in extensions, all riding the ExtensionAPI
+src/extensions/  32 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

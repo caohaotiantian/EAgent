@@ -45,6 +45,7 @@ import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
 import microagents from "./extensions/microagents.js";
 import limits from "./extensions/limits.js";
+import cost from "./extensions/cost.js";
 import self from "./extensions/self.js";
 import web from "./extensions/web.js";
 import checkpoint from "./extensions/checkpoint.js";
@@ -80,6 +81,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["context-files", contextFiles],
   ["microagents", microagents],
   ["limits", limits],
+  ["cost", cost],
   ["self", self],
   ["web", web],
   ["checkpoint", checkpoint],
