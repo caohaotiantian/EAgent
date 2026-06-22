@@ -225,7 +225,7 @@ inventory.
 
 ## Closure note
 
-Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Status: closed. Closing-commit: a4bb19c. Closed-on: 2026-06-22.
 Phase 1 closed: dev (`feat(phase1)`), one non-behavioral doc-comment fix
 (`fix(phase1)` — aligned the `parseVerdict` comment with its leading-alphabetic-
 run token extraction), review clean, accept-pass. Main-agent Phase-end re-run:
