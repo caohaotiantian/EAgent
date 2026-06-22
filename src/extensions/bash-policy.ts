@@ -25,6 +25,7 @@ export type Action = "allow" | "deny" | "ask";
 export interface Rule {
   pattern: string;
   action: Action;
+  justification?: string;
 }
 
 /**
@@ -467,10 +468,89 @@ export function expandCommands(commandLine: string): string[] {
   return out;
 }
 
-/** Compile a wildcard pattern: `*` → `.*`, every other regex metachar escaped, full-anchored. */
-function toRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, (c) => (c === "*" ? ".*" : `\\${c}`));
-  return new RegExp(`^${escaped}$`);
+/** Regex-escape a single literal character (the metacharacter set the matcher recognizes). */
+function escapeChar(c: string): string {
+  return /[.*+?^${}()|[\]\\]/.test(c) ? `\\${c}` : c;
+}
+
+/**
+ * Compile a pattern body to anchored regex source. `*` → `.*`; `\` + one of
+ * `[ ] | \` → that literal; `\` + any other char (or trailing `\`) → a literal
+ * backslash; `[`…`]` → a non-capturing alternation `(?:…|…)` over its
+ * (unescaped-`|`-split) interior — when `allowGroups` is false (inside a group)
+ * a `[` is a literal, so groups stay flat; an unterminated `[` is a fail-safe
+ * literal. Every other char is escaped literal. Never throws.
+ */
+function compile(pattern: string, allowGroups: boolean): string {
+  let out = "";
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i]!;
+    if (c === "\\") {
+      const next = pattern[i + 1];
+      if (next === "[" || next === "]" || next === "|" || next === "\\") {
+        out += escapeChar(next);
+        i += 2;
+        continue;
+      }
+      out += "\\\\";
+      i += 1;
+      continue;
+    }
+    if (c === "*") {
+      out += ".*";
+      i += 1;
+      continue;
+    }
+    if (c === "[" && allowGroups) {
+      let close = -1;
+      for (let j = i + 1; j < pattern.length; j++) {
+        if (pattern[j] === "\\") {
+          j++;
+          continue;
+        }
+        if (pattern[j] === "]") {
+          close = j;
+          break;
+        }
+      }
+      if (close < 0) {
+        out += "\\[";
+        i += 1;
+        continue;
+      }
+      const interior = pattern.slice(i + 1, close);
+      const alternatives: string[] = [];
+      let start = 0;
+      for (let j = 0; j < interior.length; j++) {
+        if (interior[j] === "\\") {
+          j++;
+          continue;
+        }
+        if (interior[j] === "|") {
+          alternatives.push(interior.slice(start, j));
+          start = j + 1;
+        }
+      }
+      alternatives.push(interior.slice(start));
+      out += `(?:${alternatives.map((a) => compile(a, false)).join("|")})`;
+      i = close + 1;
+      continue;
+    }
+    out += escapeChar(c);
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Compile a pattern to an anchored matcher. `*` is the wildcard (`.*`), `[a|b]`
+ * is a bounded alternation group, the `\` escape yields literal `[ ] | \`, and
+ * every other character is literal. Degenerate forms compile fail-safe-literal
+ * and never throw.
+ */
+export function toRegExp(pattern: string): RegExp {
+  return new RegExp(`^${compile(pattern, true)}$`);
 }
 
 /**
@@ -483,7 +563,7 @@ export function evaluateAny(
   commands: string[],
   rules: Rule[],
   fallthrough: Action,
-): { action: Action; matched: string } {
+): { action: Action; matched: string; rule?: Rule } {
   for (let i = rules.length - 1; i >= 0; i--) {
     const rule = rules[i]!;
     const re = toRegExp(rule.pattern);
@@ -491,9 +571,9 @@ export function evaluateAny(
     for (const command of commands) {
       if (re.test(command)) matched = command;
     }
-    if (matched !== undefined) return { action: rule.action, matched };
+    if (matched !== undefined) return { action: rule.action, matched, rule };
   }
-  return { action: fallthrough, matched: commands[0] ?? "" };
+  return { action: fallthrough, matched: commands[0] ?? "", rule: undefined };
 }
 
 /** The action of the last rule whose pattern matches the full command line, else fallthrough. */
@@ -528,18 +608,20 @@ export default function activate(e: ExtensionAPI): () => void {
     // `... && rm`) is matched and labeled by its bare name. Inner candidates come
     // last so a sub-command rule labels the offending sub-command, not the head.
     const candidates = expandCommands(command);
-    const { action, matched } = evaluateAny(candidates, rules, fallthrough);
+    const { action, matched, rule } = evaluateAny(candidates, rules, fallthrough);
     if (action === "allow") return decision;
 
     const family = extractCommand(matched);
     const why = `${family || command} (policy ${action})`;
+    const j = rule?.justification?.trim();
+    const suffix = j ? `: ${j}` : "";
     if (action === "deny") {
-      return { ...decision, block: true, reason: `bash-policy: blocked ${why}` };
+      return { ...decision, block: true, reason: `bash-policy: blocked ${why}${suffix}` };
     }
 
     if (approved.has(family)) return decision;
-    const allow = await e.agent.ui.confirm(`bash-policy: allow ${family || command}?`);
-    if (!allow) return { ...decision, block: true, reason: `bash-policy: denied ${why}` };
+    const allow = await e.agent.ui.confirm(`bash-policy: allow ${family || command}${j ? ` (${j})` : ""}?`);
+    if (!allow) return { ...decision, block: true, reason: `bash-policy: denied ${why}${suffix}` };
     approved.add(family);
     return decision;
   });
@@ -564,7 +646,10 @@ export default function activate(e: ExtensionAPI): () => void {
           break;
         default: {
           const { enabled, rules, fallthrough } = cfg();
-          const printed = rules.map((r) => `${r.pattern} -> ${r.action}`).join("; ") || "(none)";
+          const printed =
+            rules
+              .map((r) => `${r.pattern} -> ${r.action}${r.justification ? ` (${r.justification})` : ""}`)
+              .join("; ") || "(none)";
           c.print(`bash-policy ${enabled ? "on" : "off"} (fallthrough=${fallthrough}); rules: ${printed}`);
         }
       }
