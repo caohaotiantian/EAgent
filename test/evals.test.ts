@@ -456,6 +456,112 @@ test("T14: /eval counts a malformed file as a failed scenario, never throwing", 
   }
 });
 
+// -- T15: defensive branches — fail-closed/early-return paths (AC7/AC8) -------
+//
+// These are the no-action-needed-but-untested guards the second-round review
+// flagged: the judge's no-provider fail-closed path and the /eval runner's
+// missing-arg, unreadable-dir, empty-dir, and no-scriptable-provider returns.
+// Each is a cheap assertion that the path is reached and degrades, not throws.
+
+/** A minimal ToolContext sufficient for the judge tool (it reads only `signal`). */
+function toolCtx(h: Harness): import("../src/kernel/types.js").ToolContext {
+  return {
+    toolCallId: "t1",
+    signal: new AbortController().signal,
+    require: async () => {},
+    progress: () => {},
+    ui: { confirm: async () => true, notify: () => {} },
+    agent: h.agent.handle,
+    log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+  };
+}
+
+test("T15: judge fails closed (isError) when no provider is registered (AC7)", async () => {
+  const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });
+  await activate(h);
+  const judge = h.agent.tools.get("judge");
+  assert.ok(judge, "judge is registered");
+
+  // Deregister the default provider (same key as the harness's "mock").
+  h.agent.providers.register(h.provider).dispose();
+  assert.equal(h.agent.providers.get(), undefined, "no provider remains");
+
+  const res = await judge.execute({ rubric: "r", candidate: "c" }, toolCtx(h));
+  assert.equal(res.isError, true, "the no-provider path fails closed, never a silent pass");
+  assert.match(res.content, /no provider/i);
+});
+
+test("T15: /eval with no dir argument prints usage, never throwing", async () => {
+  const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });
+  await activate(h);
+  let out: string[] = [];
+  await assert.doesNotReject(async () => {
+    out = await runCommand(h, "eval", "   ");
+  });
+  assert.match(out.join("\n"), /usage/i);
+});
+
+test("T15: /eval on an unreadable/nonexistent dir reports the error, never throwing", async () => {
+  const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });
+  await activate(h);
+  const missing = join(tmpdir(), `eagent-evals-nope-${process.pid}-${Date.now()}`);
+  let out: string[] = [];
+  await assert.doesNotReject(async () => {
+    out = await runCommand(h, "eval", missing);
+  });
+  assert.match(out.join("\n"), /cannot read/i);
+});
+
+test("T15: /eval on an empty dir reports no scenarios, never throwing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eagent-evals-"));
+  try {
+    const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });
+    await activate(h);
+    let out: string[] = [];
+    await assert.doesNotReject(async () => {
+      out = await runCommand(h, "eval", dir);
+    });
+    assert.match(out.join("\n"), /no .*scenarios/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("T15: /eval names a scenario failed when the provider is not scriptable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eagent-evals-"));
+  try {
+    writeFileSync(
+      join(dir, "x.eval.json"),
+      JSON.stringify({
+        input: "go",
+        mockScript: [{ toolCalls: [{ name: "A" }] }, { text: "done" }],
+        expect: { tools: ["A"], order: "exact" },
+      }),
+    );
+    const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });
+    registerAB(h.agent);
+    await activate(h);
+    // Replace the scriptable mock with a non-scriptable provider (no `script`).
+    h.agent.providers.register(h.provider).dispose();
+    h.agent.providers.register(
+      {
+        name: "plain",
+        // A bare Provider with no `script` method — the runner must skip it.
+        async *stream() {
+          // no turns; the scenario never runs
+        },
+      },
+      { default: true },
+    );
+
+    const out = (await runCommand(h, "eval", dir)).join("\n");
+    assert.match(out, /0\/1/, "the lone scenario could not run");
+    assert.match(out, /no scriptable provider/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // -- T16: kill switch (AC9) --------------------------------------------------
 
 test("T16: EAGENT_EVALS=off makes the consumer + commands + tool no-ops", async () => {

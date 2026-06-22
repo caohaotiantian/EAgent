@@ -370,6 +370,13 @@ export default function activate(e: ExtensionAPI): () => void {
         return;
       }
 
+      // `/eval` is a headless harness: each scenario re-scripts the agent's
+      // default provider and clears its transcript, and the loop deliberately
+      // leaves the last scenario's (consumed) queue and an empty transcript in
+      // place on return rather than restoring the prior script — the scriptable
+      // provider exposes no read accessor to snapshot, so a faithful save is not
+      // possible through the public API. Run `/eval` as a terminal action, not
+      // interleaved with interactive turns that depend on a pre-existing queue.
       const provider = e.agent.providers.get();
       let passed = 0;
       const failures: string[] = [];
