@@ -25,13 +25,14 @@ export interface Harness {
 }
 
 export function makeHarness(
-  opts: { responder?: MockResponder; fallback?: "allow" | "deny" | "ask"; ui?: UI } = {},
+  opts: { responder?: MockResponder; fallback?: "allow" | "deny" | "ask"; ui?: UI; logger?: Logger } = {},
 ): Harness {
   const ui = opts.ui ?? autoUI(true);
+  const logger = opts.logger ?? silentLogger;
   const capabilities = new CapabilityManager({ ui, fallback: opts.fallback ?? "allow" });
   const agent = new Agent({
     ui,
-    logger: silentLogger,
+    logger,
     capabilities,
     provider: "mock",
     model: "mock",
@@ -39,7 +40,7 @@ export function makeHarness(
   const provider = new MockProvider(opts.responder);
   agent.providers.register(provider, { default: true });
   const commands = new CommandRegistry();
-  const host = new ExtensionHost({ agent, commands, logger: silentLogger, store: new MemoryBackend() });
+  const host = new ExtensionHost({ agent, commands, logger, store: new MemoryBackend() });
   return { agent, host, commands, provider };
 }
 
