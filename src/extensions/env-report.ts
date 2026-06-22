@@ -112,10 +112,17 @@ const RECOVERY_MARKER = "Recovery hint:";
  * Exported so its gating, idempotency, and replacement are unit-testable without
  * the agent loop. Pure — no logging (the `e.log.warn` surfacing lives in the
  * hook body); never sets `terminate`/`block`.
+ *
+ * The caller may pass the already-computed `kind` to avoid a second regex sweep
+ * (the hook body classifies once for its warn gate); omit it and the transform
+ * classifies itself, so the standalone unit contract is unchanged. The `isError`
+ * gate runs first, so a success result never classifies on the no-arg path.
  */
-export function annotateEnv(result: ToolResult): ToolResult {
+export function annotateEnv(result: ToolResult, kind?: EnvClass | null): ToolResult {
   if (!result.isError) return result;
-  if (classifyEnv(result.content) === null) return result;
+  // `undefined` means "not pre-classified": sweep now. An explicit `null` from
+  // the caller is authoritative (a non-env failure) and short-circuits here.
+  if ((kind === undefined ? classifyEnv(result.content) : kind) === null) return result;
   // Strip any recovery hint: recovery appends `${content}\n\n${MARKER} ${hint}`,
   // so slice at the literal marker and trim the trailing separator.
   const markerAt = result.content.indexOf(RECOVERY_MARKER);
@@ -130,8 +137,10 @@ export default function activate(e: ExtensionAPI): () => void {
 
   const off = e.hook("afterToolCall", (result) => {
     try {
+      // Classify once and thread the verdict into annotateEnv (which would
+      // otherwise sweep the same regex set a second time).
       const kind = classifyEnv(result.content);
-      const annotated = annotateEnv(result);
+      const annotated = annotateEnv(result, kind);
       // Only an actually-rewritten env-class failure surfaces the signal.
       if (result.isError && kind !== null) {
         e.log.warn("environment_issue", kind);
