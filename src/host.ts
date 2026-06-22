@@ -68,6 +68,8 @@ import evals from "./extensions/evals.js";
 import handoff from "./extensions/handoff.js";
 import driftProbe from "./extensions/drift-probe.js";
 import skillsHardening from "./extensions/skills-hardening.js";
+import ask from "./extensions/ask.js";
+import routing from "./extensions/routing.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -114,6 +116,8 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["handoff", handoff],
   ["drift-probe", driftProbe],
   ["skills-hardening", skillsHardening],
+  ["ask", ask],
+  ["routing", routing],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */

@@ -204,7 +204,21 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   keeps the last K user turns verbatim, and re-injects a byte-capped pinned block
   so designated evidence always survives. Registered in `BUILTIN_EXTENSIONS`
   right after `prune`, but **off by default** — opt in via `enabled` /
-  `/compact on`; `EAGENT_COMPACT=off` is the hard kill switch, no capability).
+  `/compact on`; `EAGENT_COMPACT=off` is the hard kill switch, no capability),
+  `ask` (agent→host elicitation — the inverse of `steer`/`followUp`: an
+  `ask_user_question` tool ({question, options?}) so the model can pause and ask
+  the human *before* guessing on an ambiguous instruction, gated by a `ui:ask`
+  capability so a non-interactive/batch run auto-declines; it calls an OPTIONAL
+  `UI.ask` method (implemented on the CLI via readline; absent → the tool returns a
+  "proceed with a stated assumption" fallback so an ambiguous task still makes
+  progress); no agent-loop change, the UI method is optional/back-compatible),
+  `routing` (difficulty-aware per-turn model tiering — on `turn_start` a cheap
+  deterministic heuristic classifier (default flagship-when-unsure), or an optional
+  recursion-safe tool-less sub-call, picks a tier from a store-configurable map and
+  sets the existing mutable `Agent.model` for that turn; restores the configured
+  model on disable/`agent_end` and validates a tier model against the provider
+  registry; pairs with `cost` (which measures) and `subagents`' per-spawn provider
+  override; off by default, `EAGENT_ROUTING=off`, no kernel change).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.

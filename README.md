@@ -233,6 +233,8 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `handoff`      | session resume doc — on `agent_end` (or `/handoff-doc`) summarizes the transcript via a recursion-safe sub-call into a fixed schema + reactivation paragraph, written to `.eagent/handoffs/` (off by default; `EAGENT_HANDOFF=off`) | `/handoff-doc` | — |
 | `drift-probe`  | reasoning-quality canary — every N turns probes a pinned question and warns (never blocks) on regression vs the turn-0 baseline, suggesting `/compact` or `/handoff-doc` (off by default; `EAGENT_DRIFT_PROBE=off`) | `/drift-probe` | — |
 | `skills-hardening` | guards the skill self-extension surface — `SKILL.md` body/script supply-chain scan + body rug-pull fingerprint (warn-only), frontmatter validation, `allowed-tools` `beforeToolCall` scoping for the active skill, and optional `triggers:`-gated tier-1 disclosure (`EAGENT_SKILL_TRIGGERS=off`) | — | — |
+| `ask`          | agent→host elicitation — an `ask_user_question` tool so the model can pause and ask the human (with options) before guessing, gated by `ui:ask` so batch runs auto-decline; calls an optional `UI.ask` (CLI readline), else falls back to "proceed with a stated assumption" | — (`ask_user_question`) | `ui:ask` |
+| `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -332,7 +334,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  42 built-in extensions, all riding the ExtensionAPI
+src/extensions/  44 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
