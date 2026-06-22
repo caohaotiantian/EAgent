@@ -114,7 +114,32 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   success — asks via `ui.confirm` in `ask` mode or blocks in `block` mode; counts
   total-in-run so A-B-A-B oscillation trips; resets all state on `agent_start`,
   exports a pure `stableSignature`, fails open, on by default mode `ask`, no
-  capability, `/circuit-breaker` command, `EAGENT_CIRCUIT_BREAKER=off` kill switch).
+  capability, `/circuit-breaker` command, `EAGENT_CIRCUIT_BREAKER=off` kill switch),
+  `secret-guard` (keeps secret *values* out of outgoing tool args — on
+  `beforeToolCall`, scans the args of leak-capable tools (default
+  `net:fetch`/`shell:exec`/`mcp:call`) for known-credential patterns (reused from
+  flow-guard) + optional high-entropy tokens and, on a hit, asks via `ui.confirm`
+  in `ask` mode or blocks in `block` mode — never echoing the matched value;
+  the prevention seam flow-guard's egress taint and content-guard's ingress fence
+  leave open; on by default, no capability, `EAGENT_SECRET_GUARD=off` kill switch),
+  `sweep-edit` (a `sweep_edit` tool for regex-enumerated multi-site refactors —
+  enumerates match sites via the `search` extension (workspace-confined, no shell)
+  then fans a scoped sub-agent per file that applies the change or declines;
+  per-site isolation, a max-sites cap with a logged truncation note, capabilities
+  `fs:write`+`agent:spawn`; composes `search`+`subagents` rather than reimplementing
+  either),
+  `citations` (grounding/attribution — on `afterToolCall` it prepends a visible
+  stable `[src:N]` id to *retrieval*-capability tool output (default
+  `net:fetch`/`fs:read`) and records it per-run; on `agent_end` it parses the final
+  answer's `[src:N]`/`[N]` markers and warns (never blocks) on a *fabricated*
+  citation — an id never emitted; `/citations` report, on by default, no capability,
+  `EAGENT_CITATIONS=off` kill switch).
+  `compact` (token-gated structured conversation compaction — ships in
+  `src/extensions/compact.ts` but is **not yet wired into `BUILTIN_EXTENSIONS`**:
+  it is the token-aware structured-slot successor to `memory`'s count-based
+  compaction, and enabling it requires retiring `memory`'s count-based
+  `transformContext` hook in the same change so the two compactors don't fight —
+  a tracked follow-up; until then it is exercised only by its isolated tests).
 - `src/host.ts` — shared wiring reused by both front ends: provider selection,
   `.env` loading (`loadEnvFile`), model defaulting (honors `*_MODEL` env vars),
   and the canonical builtin extension set.
