@@ -13,6 +13,8 @@
     "emacs",
     "mcp",
     "anthropic",
+    "openai",
+    "gemini",
     "tools",
     "kernel"
   ],

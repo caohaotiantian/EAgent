@@ -215,7 +215,7 @@ that authority without prompting. The dotted names in use across the project:
 
 | Capability | Used by |
 | ---------- | ------- |
-| `fs:read` | `core-tools` (read/edit), `session`, `journal` |
+| `fs:read` | `core-tools` (read/edit), `search` (glob/grep), `session`, `journal` |
 | `fs:write` | `core-tools` (write/edit), `session`, `journal` |
 | `shell:exec` | `core-tools` (bash) |
 | `code:exec` | `codeact` (run JS/Python) |
@@ -223,6 +223,7 @@ that authority without prompting. The dotted names in use across the project:
 | `skill:read` / `skill:write` | `skills` (reading / authoring a `SKILL.md`) |
 | `mcp:call` | `mcp` (calling a remote MCP tool) |
 | `agent:spawn` | `subagents` |
+| `workflow:run` | `dynamic-workflow` (`run_workflow`) |
 | `pkg:install` | `packages` |
 | `self:read` / `self:extend` | `self` (reading / authoring & loading new TypeScript extensions) |
 
@@ -242,6 +243,7 @@ change anything. From `src/kernel/events.ts`:
 | `turn_end` | `{ turn }` | A turn ends. |
 | `message` | `{ message }` | A completed message was appended to the transcript. |
 | `text_delta` | `{ text }` | Incremental assistant text during streaming. |
+| `reasoning_delta` | `{ text }` | Incremental reasoning ("thinking") text during streaming, for models that expose it. |
 | `tool_start` | `{ call }` | A tool call is about to run. |
 | `tool_end` | `{ call, result }` | A tool call finished. |
 | `usage` | `{ usage, cumulative }` | Token usage for the just-finished model call, plus the running total. |
