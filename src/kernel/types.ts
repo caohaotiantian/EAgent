@@ -228,6 +228,13 @@ export interface UI {
   /** Ask the human a yes/no question. Resolves to the decision. */
   confirm(question: string): Promise<boolean>;
   notify(message: string): void;
+  /**
+   * Ask the human a free-form or multiple-choice question and resolve with the
+   * answer (or null if none / non-interactive). Optional: a UI that cannot
+   * elicit simply omits it, and callers fall back. (agent→host elicitation;
+   * mirror of confirm's host channel.)
+   */
+  ask?(question: string, options?: string[]): Promise<string | null>;
 }
 
 export interface Logger {
