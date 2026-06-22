@@ -70,8 +70,11 @@ and the operator gets no signal to fix the infra or route around it.
 - [ ] An exported pure helper `classifyEnv(content: string): EnvClass | null`
       (returns the matched environmental class — `"auth"`, `"missing-binary"`,
       `"network"`, `"permission"` — or `null`) and an exported `ENV_RULES`
-      constant; plus an exported `annotateEnv(result: ToolResult): ToolResult`
-      guard transform — all unit-testable without the agent loop, mirroring
+      constant; plus an exported `annotateEnv(result: ToolResult, kind?: EnvClass | null): ToolResult`
+      guard transform (the optional `kind` lets the hook thread its
+      already-computed verdict to avoid a second sweep; omitted, the transform
+      self-classifies — the standalone single-arg contract is unchanged) — all
+      unit-testable without the agent loop, mirroring
       `recovery`'s `recoveryHint`/`RECOVERY_RULES`/`annotate` seam
       (`recovery.ts:79-100`).
 - [ ] `test/env-report.test.ts` — offline `node:test` tests against `MockProvider`

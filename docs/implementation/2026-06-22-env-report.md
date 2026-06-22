@@ -96,9 +96,12 @@ pure/seam-level exports so the agent loop is not needed for the core logic:
   (mirrors `RECOVERY_RULES`, design §2 / D2).
 - `classifyEnv(content: string): EnvClass | null` — first-match-wins over
   `ENV_RULES` (mirrors `recoveryHint`).
-- `annotateEnv(result: ToolResult): ToolResult` — the guard transform (mirrors
-  `annotate`): gates on `isError`, strips any `"Recovery hint:"` block, appends
-  the route-around note once, idempotent.
+- `annotateEnv(result: ToolResult, kind?: EnvClass | null): ToolResult` — the
+  guard transform (mirrors `annotate`): gates on `isError`, strips any
+  `"Recovery hint:"` block, appends the route-around note once, idempotent. The
+  optional `kind` lets the hook pass its already-computed verdict to skip a
+  redundant sweep; omitted, the transform self-classifies, so the single-arg
+  contract is unchanged.
 
 The route-around **note** is a fixed string the design pins by its assertable
 shape (AC6, AC7): it must match `/environment issue/i` **and** `/do NOT retry/i`,

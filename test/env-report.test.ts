@@ -87,6 +87,21 @@ test("annotateEnv replaces a recovery hint with the route-around note", () => {
   assert.match(out.content, /do NOT retry/i);
 });
 
+test("annotateEnv honors a pre-classified verdict over a fresh sweep", () => {
+  // The optional second arg (the hook threads its already-computed verdict):
+  // an explicit `null` is authoritative — a non-env failure short-circuits even
+  // though the content *would* classify on a fresh sweep; an explicit class
+  // drives the rewrite; the no-arg path self-classifies, matching the explicit
+  // class. Locks the `undefined`-sweep vs explicit-`null` vs explicit-class
+  // distinction the r2 optimization introduced.
+  const failedEnv: ToolResult = { content: "spawn rg ENOENT", isError: true };
+  // explicit null is authoritative: skip the rewrite despite env-shaped content.
+  assert.equal(annotateEnv(failedEnv, null).content, failedEnv.content);
+  // explicit class drives the rewrite, same as the self-classifying no-arg path.
+  assert.equal(annotateEnv(failedEnv, "missing-binary").content, annotateEnv(failedEnv).content);
+  assert.match(annotateEnv(failedEnv, "missing-binary").content, /do NOT retry/i);
+});
+
 test("ENV_NOTE is the single literal carrying the route-around markers", () => {
   assert.match(ENV_NOTE, /environment issue/i);
   assert.match(ENV_NOTE, /do NOT retry/i);
