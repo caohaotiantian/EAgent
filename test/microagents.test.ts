@@ -86,6 +86,16 @@ test("injectMicroagents: trigger fires (AC-1/AC-3/AC-4); no match returns input 
   assert.equal(out, input);
 });
 
+test("injectMicroagents: no user message returns input by reference", () => {
+  const m: Microagent = { name: "k8s", triggers: ["kubernetes", "k8s"], body: "BODY-K8S" };
+  const input: Message[] = [
+    text("assistant", "deploying to kubernetes"),
+    { role: "tool", content: [{ type: "tool_result", toolCallId: "t", content: "kubernetes" }] },
+  ];
+  const out = injectMicroagents(input, [m]);
+  assert.equal(out, input);
+});
+
 test("injectMicroagents: AC-5 latest-user anchoring (last message a tool_result)", () => {
   const m: Microagent = { name: "k8s", triggers: ["kubernetes"], body: "BODY-K8S" };
   const messages: Message[] = [
