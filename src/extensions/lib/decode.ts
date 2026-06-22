@@ -145,7 +145,15 @@ function passesGate(c: Candidate, raw: string): boolean {
   return KNOWN_COMMANDS.has(token);
 }
 
-/** Scan for a plausible base64 token (length-4-multiple-ish run of base64 chars). */
+/**
+ * Scan for a plausible base64 token: a run of base64 chars with optional `=`
+ * padding. The `{8,}` lower bound is a false-positive-reduction *heuristic*, not
+ * a coverage guarantee — short base64 runs (e.g. `c2ggLWM=`, the 7-char encoding
+ * of `sh -c`) are intentionally skipped so ordinary 1-2 char tokens that happen
+ * to be valid base64 do not flood the candidate set; a `>=8`-char run carrying
+ * the same idiom IS surfaced. Consistent with the focused-coverage design (D2):
+ * the gate decides what is *emitted*; this bound only tunes what is *scanned*.
+ */
 const BASE64_TOKEN = /[A-Za-z0-9+/]{8,}={0,2}/g;
 
 /**
