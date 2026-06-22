@@ -1,7 +1,10 @@
 # Design: `white-box-memory` — per-entry provenance, edit/forget/rollback for the memory extension
 
 Slug: `2026-06-22-white-box-memory`
-Status: PASSED
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: none
 
 ## 1. Background and Purpose
 

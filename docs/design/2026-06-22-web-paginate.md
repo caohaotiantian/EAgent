@@ -1,6 +1,9 @@
 # web-paginate — `start_index` continuation for the web fetch tool
 
-Status: design
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: finding — direct fetch_url past-the-end tool-level test (cosmetic completeness nit; behavior covered transitively, no defect)
 Date: 2026-06-22
 Author: design author (EAgent)
 Scope: a self-contained change to `src/extensions/web.ts` plus its test.

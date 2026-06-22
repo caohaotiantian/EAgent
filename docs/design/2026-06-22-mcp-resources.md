@@ -1,6 +1,9 @@
 # Design: mcp-resources — ingest the read-only resources half of MCP
 
-Status: PASSED
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: none
 Slug: `2026-06-22-mcp-resources`
 
 ## 1. Background and Purpose

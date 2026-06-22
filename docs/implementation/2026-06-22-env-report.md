@@ -1,6 +1,9 @@
 # Implementation: `env-report` — classify environmental failures and suppress the retry-nudge
 
-Status: open
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: none
 Design: `docs/design/2026-06-22-env-report.md` (PASSED)
 Slug: `2026-06-22-env-report`
 Mode: **batch** — see Engineering Constraints §3 (do NOT touch `host.ts` / `CLAUDE.md` / `README.md`).

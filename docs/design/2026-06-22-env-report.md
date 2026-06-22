@@ -1,9 +1,9 @@
 # Design: `env-report` extension — classify environmental failures and suppress the retry-nudge
 
-Status: open
-Closing-commit: (pending)
-Closed-on: (pending)
-Deferred: host.ts registration + CLAUDE.md/README inventory (batch integration)
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: none
 
 Slug: `2026-06-22-env-report`
 

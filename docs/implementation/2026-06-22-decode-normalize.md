@@ -1,9 +1,9 @@
 # Implementation: decode-normalize — pre-inspection decode/normalize feeding `bash-policy` and `risk-guard`
 
-Status: open
-Closing-commit: (fill at closeout)
-Closed-on: (fill at closeout)
-Deferred: host.ts registration; CLAUDE.md/README inventory (both to batch integration)
+Status: closed
+Closing-commit: c7bfcaa
+Closed-on: 2026-06-22
+Deferred: finding — risk-guard rot13-in-JSON-arg decode asymmetry (documented D5 scope limitation; bash-policy covers rot13; base64/hex/idiom payloads covered for both)
 
 Design: `docs/design/2026-06-22-decode-normalize.md` (slug `2026-06-22-decode-normalize`, status PASSED).
 
