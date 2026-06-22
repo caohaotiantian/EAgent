@@ -1,35 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type {
-  CompletionRequest,
-  Logger,
-  Message,
-  Provider,
-  StreamEvent,
-  ToolResultBlock,
-} from "../src/kernel/types.js";
+import type { CompletionRequest, Logger, Message, ToolResultBlock } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
 import subagents, { childRegistryFrom, readOnlyCapabilities } from "../src/extensions/subagents.js";
 import { CapabilityError } from "../src/kernel/capabilities.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { Agent } from "../src/kernel/agent.js";
-import { lastText, makeHarness } from "./helpers.js";
-
-/**
- * A thin provider that delegates to a MockProvider but reports a different
- * `name`, so a second vendor can be registered under (e.g.) "critic" — the
- * design's offline-test assumption (MockProvider.name is fixed to "mock").
- */
-class RenamedProvider implements Provider {
-  constructor(
-    readonly name: string,
-    private readonly inner: MockProvider,
-  ) {}
-  stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
-    return this.inner.stream(req);
-  }
-}
+import { lastText, makeHarness, RenamedProvider } from "./helpers.js";
 
 /** A logger that captures every warn() argument list, for AC-4 assertions. */
 function capturingLogger(): { logger: Logger; warnings: string[] } {
