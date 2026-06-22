@@ -367,9 +367,17 @@ export default function activate(e: ExtensionAPI): () => void {
             );
             return;
           }
+          // `splitIndex` ignores the budget, so a foldable boundary can exist on
+          // an under-budget transcript that would never fold on its own. Phrase
+          // the preview by whether the live transcript is actually over budget:
+          // "the next over-budget turn" is only guaranteed when we already are.
+          const when =
+            tokenEstimate(messages) > budget
+              ? "on the next over-budget turn"
+              : "once the transcript next goes over budget";
           ctx.print(
-            `Would compact ${idx} message(s) into a structured summary on the next ` +
-              `over-budget turn; keeping the last ${keepTurns} user turn(s) ` +
+            `Would compact ${idx} message(s) into a structured summary ${when}; ` +
+              `keeping the last ${keepTurns} user turn(s) ` +
               `(${messages.length - idx} message(s)). (${pinKeys().length} pin(s) retained)`,
           );
           return;
