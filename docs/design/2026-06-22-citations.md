@@ -45,7 +45,7 @@ getter `e.agent.messages` (`src/kernel/agent.ts:98-100`).
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/citations.ts` — the extension: capability-based retrieval
+- [x] `src/extensions/citations.ts` — the extension: capability-based retrieval
       detection (default `["net:fetch", "fs:read"]` covering `web`, `read`, and
       the `glob`/`grep` search tools, store-overridable via `retrievalCaps`),
       `on("agent_start")` per-run map reset, `afterToolCall` `[src:N]` header
@@ -53,7 +53,7 @@ getter `e.agent.messages` (`src/kernel/agent.ts:98-100`).
       marker parse + fabricated-id warn, `/citations` report command,
       `EAGENT_CITATIONS=off` kill switch + `enabled` store flag, never-throw
       dispose loop.
-- [ ] `test/citations.test.ts` — offline `node:test` suite driven by
+- [x] `test/citations.test.ts` — offline `node:test` suite driven by
       `makeHarness` + a scripted `MockProvider` whose final answer contains both
       a good and a fabricated `[src:N]` marker, plus inline stub retrieval tools
       loaded directly via `host.use(id, activate)` (the established offline
@@ -62,11 +62,11 @@ getter `e.agent.messages` (`src/kernel/agent.ts:98-100`).
       depend on the extension being in `BUILTIN_EXTENSIONS`.
 - [ ] `src/host.ts` — register `citations` in `BUILTIN_EXTENSIONS`, adjacent to
       `content-guard`/`trace`. **(deferred to batch integration)**
-- [ ] `/citations` command — registered via `e.registerCommand`: prints the
+- [x] `/citations` command — registered via `e.registerCommand`: prints the
       per-run report (ids emitted, ids cited, fabricated ids, missing-attribution
       flag) plus the `on|off|status` toggle, mirroring `/content-guard`
       (`src/extensions/content-guard.ts:129-154`).
-- [ ] Kill switch — `EAGENT_CITATIONS=off` env var (checked at activation) **and**
+- [x] Kill switch — `EAGENT_CITATIONS=off` env var (checked at activation) **and**
       an `e.store` `enabled` flag, mirroring `content-guard`
       (`src/extensions/content-guard.ts:103`).
 - [ ] CLAUDE.md / README inventory line — one `citations` row reconciled at
