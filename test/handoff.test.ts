@@ -145,8 +145,8 @@ function summarizingResponder() {
 
 /** Run the /handoff command directly through the command registry. */
 async function runHandoff(h: ReturnType<typeof makeHarness>, args = ""): Promise<string[]> {
-  const cmd = h.commands.get("handoff");
-  assert.ok(cmd, "the /handoff command must be registered");
+  const cmd = h.commands.get("handoff-doc");
+  assert.ok(cmd, "the /handoff-doc command must be registered");
   const out: string[] = [];
   await cmd.run({ agent: h.agent, args, print: (l: string) => out.push(l) });
   return out;

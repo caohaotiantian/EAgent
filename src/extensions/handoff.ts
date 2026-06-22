@@ -286,8 +286,8 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // -- the /handoff command (manual, always available) ----------------------
   const offCmd = e.registerCommand({
-    name: "handoff",
-    description: "Write a session resume document. Usage: /handoff [on|off|status]",
+    name: "handoff-doc",
+    description: "Write a session resume document. Usage: /handoff-doc [on|off|status]",
     run: async (ctx: CommandContext) => {
       const arg = ctx.args.trim();
       switch (arg) {
