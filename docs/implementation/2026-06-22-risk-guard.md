@@ -222,3 +222,14 @@ inventory.
   path except an enabled+in-scope+RISKY verdict, so it cannot disturb
   `flow-guard`/`bash-policy`/`write-guard` decisions when off (the default) or
   out of scope.
+
+## Closure note
+
+Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Phase 1 closed: dev (`feat(phase1)`), one non-behavioral doc-comment fix
+(`fix(phase1)` — aligned the `parseVerdict` comment with its leading-alphabetic-
+run token extraction), review clean, accept-pass. Main-agent Phase-end re-run:
+`npm test` exit 0 (400/400, 0 skipped), `npm run typecheck` exit 0,
+`node --import tsx --test test/risk-guard.test.ts` exit 0 (15/15).
+No `Deprecated` section (no L1/L2 rollbacks occurred).
+Deferred: none.

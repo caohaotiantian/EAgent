@@ -36,19 +36,19 @@ command-family envelope.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/risk-guard.ts` — a `beforeToolCall` guard that classifies
+- [x] `src/extensions/risk-guard.ts` — a `beforeToolCall` guard that classifies
       sensitive-capability tool calls via a recursion-safe provider sub-call and
       blocks/asks on a RISKY verdict.
-- [ ] A `/risk-guard` command: `on | off | ask | block | status`.
-- [ ] Off-by-default gating: disabled unless explicitly enabled, plus an
+- [x] A `/risk-guard` command: `on | off | ask | block | status`.
+- [x] Off-by-default gating: disabled unless explicitly enabled, plus an
       `EAGENT_RISK_GUARD=off` hard kill switch (consistent with the other guards'
       env switches).
-- [ ] Registration in `src/host.ts` `BUILTIN_EXTENSIONS`.
-- [ ] `test/risk-guard.test.ts` — offline `node:test` suite (scripted
+- [x] Registration in `src/host.ts` `BUILTIN_EXTENSIONS`.
+- [x] `test/risk-guard.test.ts` — offline `node:test` suite (scripted
       `MockProvider` verdicts) covering: risky→block, risky→ask(allow/deny),
       safe→pass, out-of-scope→no provider call, already-blocked passthrough,
       disabled→no call, analyzer-failure fallback, registration, command.
-- [ ] One inventory line in `CLAUDE.md` "Where things live".
+- [x] One inventory line in `CLAUDE.md` "Where things live".
 
 ## 3. Scope Boundary (NOT in scope)
 
@@ -286,3 +286,25 @@ guard's `beforeToolCall` handler is exercised directly and/or through the harnes
   line. Removing the line, `/risk-guard off`, `EAGENT_RISK_GUARD=off`, or
   deleting `src/extensions/risk-guard.ts` + its test disables/removes it with
   zero effect on other extensions. No schema/storage/protocol change.
+
+## Closure note
+
+Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Acceptance: `npm test` exit 0 (400/400 pass, 0 skipped, incl. the 15 new
+`risk-guard` tests), `npm run typecheck` exit 0,
+`node --import tsx --test test/risk-guard.test.ts` exit 0 (15/15).
+E2E / behavior gate: triggered (new `/risk-guard` command + new `beforeToolCall`
+gating). Paid external run skipped — `AUTH_FAIL: no ANTHROPIC_API_KEY /
+OPENAI_API_KEY / GEMINI_API_KEY set`; substituted with a MockProvider behavior
+smoke through the real `createAgentHost` wiring (SMOKE-PASS: `/risk-guard`
+registered and toggled off→on/block with `sensitive=shell:exec`; a `RISKY`-
+classified `rm -rf /` shell call was BLOCKED — the tool never executed — and the
+model saw the block reason; classifier consulted only for the in-scope call)
+plus the full offline suite.
+Reviews: L1 design pass (3 rounds), L2 impl pass (3 rounds), L3
+dev→review→accept (review clean first round; one non-behavioral doc-comment fix
+`fix(phase1)`; accept-pass), F whole-change correctness review pass (zero severe;
+2 non-blocking cosmetic notes: a `parseVerdict` comment line-wrap, and AC-7(b)
+asserting warn-count vs substring while AC-7(a) asserts the substring on the same
+warn path — intentionally retained).
+Deferred: none.
