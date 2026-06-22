@@ -191,6 +191,32 @@ test("AC1: scoreProbe maps a strong reply high (>=0.9) and a degraded reply low 
   assert.ok(strong >= 0 && strong <= 1 && weak >= 0 && weak <= 1, "scores are in [0,1]");
 });
 
+test("4.5: every probe in the pool is comparable — a correct prose answer scores ~1.0", () => {
+  // Design 4.5 asserts a single turn-0 baseline is comparable across the pool:
+  // a fully-correct, natural-language answer to ANY probe must score near 1.0,
+  // not just the arithmetic one. The hexagon probe answered in prose ("six")
+  // must score like its peers, or a correct answer trips a false regression.
+  for (const probe of PROBE_POOL) {
+    const tokens = probe.expectedTokens.join(" ");
+    const ans = probe.exactAnswer ?? "";
+    const prose = `The answer involves ${tokens}: ${ans}. Let me verify, double-check: ${ans}.`;
+    const s = scoreProbe(prose, probe);
+    assert.ok(
+      s >= 0.9,
+      `a correct prose answer to "${probe.exactAnswer}" should score >= 0.9, got ${s}`,
+    );
+  }
+  // The cry-wolf scenario: a real strong arithmetic baseline (0.9) vs. a real,
+  // fully-correct prose hexagon answer must NOT register as a regression.
+  const hex = PROBE_POOL[2]!;
+  const hexProse = "A hexagon has six sides. Let me verify: six.";
+  assert.equal(
+    isRegression(0.9, scoreProbe(hexProse, hex), 25),
+    false,
+    "a correct prose hexagon answer must not be flagged as drift against a 0.9 baseline",
+  );
+});
+
 // ===========================================================================
 // T3 — regression rule + rotation (AC2 + 4.5)
 // ===========================================================================
@@ -460,6 +486,18 @@ test("AC13: /drift-probe on|off|status toggles, reports, and gates firing", asyn
   runCommand(h, "on");
   await runTurns(h, 4);
   assert.ok(provider.probeCalls > 0, "probe fires after /drift-probe on");
+
+  // status after a probe has run: the populated numeric branch is exercised —
+  // baseline and last now print a real `toFixed(2)` value, not the "—" stub.
+  const status1 = runCommand(h, "status");
+  assert.ok(
+    status1.some((l) => /^baseline \d+\.\d{2}$/.test(l)),
+    "status prints a numeric baseline once a probe has scored",
+  );
+  assert.ok(
+    status1.some((l) => /^last \d+\.\d{2}$/.test(l)),
+    "status prints a numeric last score once a probe has scored",
+  );
 
   // off again → no further probes.
   const before = provider.probeCalls;

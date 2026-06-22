@@ -75,28 +75,30 @@ export interface Probe {
  * known-good expected set so a scripted reply maps to a known score. Rotated by
  * `pickProbe` so no single canary repeats often enough to be parroted (4.5).
  * The questions are short (cost) and self-contained (asked with no transcript).
+ * Each `prompt` is JUST the bare question: the "show your reasoning, then verify"
+ * instruction lives once in `PROBE_SYSTEM_PROMPT`, so it is not duplicated into
+ * the user message (keeping the canary call as cheap as the design intends).
  */
 export const PROBE_POOL: readonly Probe[] = [
   {
-    prompt:
-      "Answer the arithmetic question, showing your reasoning, then verify it. " +
-      "What is 17 multiplied by 4?",
+    prompt: "What is 17 multiplied by 4?",
     expectedTokens: ["17", "4", "68"],
     exactAnswer: "68",
   },
   {
-    prompt:
-      "Answer the question, showing your reasoning, then verify it. " +
-      "What is the capital of France?",
+    prompt: "What is the capital of France?",
     expectedTokens: ["capital", "France", "Paris"],
     exactAnswer: "Paris",
   },
   {
-    prompt:
-      "Answer the question, showing your reasoning, then verify it. " +
-      "How many sides does a hexagon have?",
+    prompt: "How many sides does a hexagon have?",
     expectedTokens: ["hexagon", "sides", "six"],
-    exactAnswer: "6",
+    // The word "six", not the digit "6": exact-match is whole-word, so a digit
+    // would never match a correct prose answer ("...has six sides"), forfeiting
+    // the exact-match weight and capping a correct reply at ~0.6 — below its
+    // peers' ~1.0, which would trip a false regression against the shared
+    // turn-0 baseline (Design 4.5: the pool must be comparable at full score).
+    exactAnswer: "six",
   },
 ];
 
