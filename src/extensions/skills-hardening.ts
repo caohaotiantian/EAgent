@@ -126,13 +126,29 @@ function siblingScripts(dir: string): string[] {
 export default function activate(e: ExtensionAPI): () => void {
   // -- Piece 1: supply-chain body/script scan + rug-pull fingerprint --------
 
-  /** Sweep every skill: scan its SKILL.md body and top-level sibling scripts. */
-  const sweep = (): ScanFinding[] => {
+  /** A skill scanned once: its name, description, dir, and SKILL.md body. */
+  interface ScannedSkill {
+    name: string;
+    description: string;
+    dir: string;
+    body: string | undefined;
+  }
+
+  /** One pass over the skills root: scan + read each SKILL.md body exactly once. */
+  const readSkills = (): ScannedSkill[] =>
+    scanSkills(skillsRoot()).map((skill) => ({
+      name: skill.name,
+      description: skill.description,
+      dir: skill.dir,
+      body: readTextOrUndefined(join(skill.dir, "SKILL.md")),
+    }));
+
+  /** Sweep the given skills: scan each SKILL.md body and top-level sibling scripts. */
+  const sweep = (scanned: ScannedSkill[]): ScanFinding[] => {
     const findings: ScanFinding[] = [];
-    for (const skill of scanSkills(skillsRoot())) {
-      const body = readTextOrUndefined(join(skill.dir, "SKILL.md"));
-      if (body !== undefined) {
-        const markers = bodyMarkers(body);
+    for (const skill of scanned) {
+      if (skill.body !== undefined) {
+        const markers = bodyMarkers(skill.body);
         if (markers.length > 0) findings.push({ skill: skill.name, where: "body", markers });
       }
       for (const scriptPath of siblingScripts(skill.dir)) {
@@ -146,40 +162,39 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   /** Skills whose SKILL.md body fingerprint differs from the recorded baseline. */
-  const changedBodies = (): string[] => {
+  const changedBodies = (scanned: ScannedSkill[]): string[] => {
     const baseline = e.store.get<Record<string, string>>(BASELINE_KEY, {}) ?? {};
     const out: string[] = [];
-    for (const skill of scanSkills(skillsRoot())) {
-      const body = readTextOrUndefined(join(skill.dir, "SKILL.md"));
-      if (body === undefined) continue;
+    for (const skill of scanned) {
+      if (skill.body === undefined) continue;
       const prev = baseline[skill.name];
-      if (prev !== undefined && prev !== fingerprint(body)) out.push(skill.name);
+      if (prev !== undefined && prev !== fingerprint(skill.body)) out.push(skill.name);
     }
     return out;
   };
 
-  /** Record current SKILL.md body fingerprints as the new baseline. */
-  const recordBaseline = (): void => {
+  /** Record the given skills' SKILL.md body fingerprints as the new baseline. */
+  const recordBaseline = (scanned: ScannedSkill[]): void => {
     const fps: Record<string, string> = {};
-    for (const skill of scanSkills(skillsRoot())) {
-      const body = readTextOrUndefined(join(skill.dir, "SKILL.md"));
-      if (body !== undefined) fps[skill.name] = fingerprint(body);
+    for (const skill of scanned) {
+      if (skill.body !== undefined) fps[skill.name] = fingerprint(skill.body);
     }
     e.store.set(BASELINE_KEY, fps);
   };
 
   const offStart = e.on("session_start", () => {
-    for (const f of sweep()) {
+    const scanned = readSkills(); // single pass shared by all three consumers below
+    for (const f of sweep(scanned)) {
       e.log.warn(
         `skill "${f.skill}" has a suspicious ${f.where} (possible supply-chain poisoning: ${f.markers.join(", ")}); ` +
           `review it before trusting this skill.`,
       );
     }
-    for (const name of changedBodies()) {
+    for (const name of changedBodies(scanned)) {
       e.log.warn(`skill "${name}" body changed since the last session; review the update for poisoning.`);
     }
     // Re-baseline after warning, so the next session compares against now.
-    recordBaseline();
+    recordBaseline(scanned);
   });
 
   // -- Piece 2: frontmatter-validation surfacing on /skills -----------------
@@ -187,12 +202,11 @@ export default function activate(e: ExtensionAPI): () => void {
   // and appends supply-chain + frontmatter-validation findings. Disposing this
   // registration restores the original `skills` /skills listing.
 
-  const validationFindings = (): string[] => {
+  const validationFindings = (scanned: ScannedSkill[]): string[] => {
     const out: string[] = [];
-    for (const skill of scanSkills(skillsRoot())) {
-      const body = readTextOrUndefined(join(skill.dir, "SKILL.md"));
-      if (body === undefined) continue;
-      const errors = validateFrontmatter(parseFrontmatter(body));
+    for (const skill of scanned) {
+      if (skill.body === undefined) continue;
+      const errors = validateFrontmatter(parseFrontmatter(skill.body));
       if (errors.length > 0) out.push(`${skill.name}: invalid frontmatter — ${errors.join("; ")}`);
     }
     return out;
@@ -202,21 +216,21 @@ export default function activate(e: ExtensionAPI): () => void {
     name: "skills",
     description: "List installed skills and surface frontmatter-validation / supply-chain findings.",
     run: (ctx) => {
-      const skills = scanSkills(skillsRoot());
+      const scanned = readSkills(); // single pass shared by the listing + both finding sets
       ctx.print(
-        skills.length
-          ? skills.map((s) => `  ${s.name.padEnd(20)} ${s.description}`).join("\n")
+        scanned.length
+          ? scanned.map((s) => `  ${s.name.padEnd(20)} ${s.description}`).join("\n")
           : `(no skills in ${skillsRoot()})`,
       );
-      const findings = validationFindings();
+      const findings = validationFindings(scanned);
       if (findings.length > 0) {
         ctx.print(`skills-hardening: ${findings.length} skill(s) with invalid frontmatter:`);
         for (const f of findings) ctx.print(`  ${f}`);
       }
-      const scanned = sweep();
-      if (scanned.length > 0) {
-        ctx.print(`skills-hardening: ${scanned.length} suspicious skill body/script(s):`);
-        for (const f of scanned) ctx.print(`  ${f.skill} (${f.where}) — ${f.markers.join(", ")}`);
+      const scan = sweep(scanned);
+      if (scan.length > 0) {
+        ctx.print(`skills-hardening: ${scan.length} suspicious skill body/script(s):`);
+        for (const f of scan) ctx.print(`  ${f.skill} (${f.where}) — ${f.markers.join(", ")}`);
       }
     },
   });
