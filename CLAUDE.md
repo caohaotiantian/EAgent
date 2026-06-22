@@ -98,7 +98,12 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   candidate set the existing rules judge, `EAGENT_DECODE_NORMALIZE=off`;
   no-op by default, no capability, `EAGENT_BASH_POLICY=off` kill switch),
   `integrity` (sweeps all tool descriptions for poisoning/hidden instructions,
-  and flags descriptions that change across sessions — a rug-pull guard),
+  and flags descriptions that change across sessions — a rug-pull guard; the
+  *skills-hardening* additions extend the sweep to scan `SKILL.md` bodies + skill
+  scripts for `eval`/`exec`/`curl`/env-near-network patterns and fingerprint bodies
+  for cross-session rug-pull, all warn-only; `skills` itself gains frontmatter
+  validation, `allowed-tools` `beforeToolCall` scoping while a skill is active, and
+  optional `triggers:`-gated tier-1 disclosure, `EAGENT_SKILL_TRIGGERS=off`),
   `recovery` (turns a *failed* tool result into a corrective nudge — appends one
   hint keyed to EAgent's own error strings via `afterToolCall`, so the model
   self-corrects instead of re-issuing the broken call; on by default, no
@@ -155,7 +160,20 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   headless runner over `*.eval.json` scenarios printing a pass@k scorecard, and a
   `judge` tool (rubric+candidate → score/verdict/reason) via a recursion-safe
   tool-less provider sub-call; ships a `test/security/` regression set asserting the
-  safety guards still fire; offline against MockProvider/cassette, no capability).
+  safety guards still fire; offline against MockProvider/cassette, no capability),
+  `handoff` (session resume document — a `/handoff` command + an `agent_end`
+  observer that summarizes the transcript via a recursion-safe tool-less provider
+  sub-call into a fixed handoff schema (goal / completed / in-progress / pending /
+  files touched / commands run / open decisions / do-not-touch / next 3-7 steps)
+  plus a paste-ready reactivation paragraph, written to a gitignored
+  `.eagent/handoffs/<date>-<slug>.md`; distills a session into a resumable artifact,
+  off by default, `EAGENT_HANDOFF=off`),
+  `drift-probe` (reasoning-quality canary — every N turns it fires a recursion-safe
+  tool-less provider sub-call on a rotating pinned canary question with a known-good
+  answer, scores regression vs the turn-0 baseline, and on a regression warns +
+  injects an optional `transformContext` note suggesting `/compact` or `/handoff`; a
+  *leading* indicator of context-pressure degradation the size-managers (prune/
+  limits) can't see; never blocks, off by default, `EAGENT_DRIFT_PROBE=off`).
   `compact` (token-gated structured conversation compaction — ships in
   `src/extensions/compact.ts` but is **not yet wired into `BUILTIN_EXTENSIONS`**:
   it is the token-aware structured-slot successor to `memory`'s count-based

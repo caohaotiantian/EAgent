@@ -228,6 +228,8 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `citations`    | grounding — tags *retrieval* tool output (`net:fetch`/`fs:read`) with a visible `[src:N]` id and, on `agent_end`, warns (never blocks) on a *fabricated* citation in the final answer (on by default; `EAGENT_CITATIONS=off`) | `/citations` | — |
 | `env-report`   | classifies *environmental* tool failures (auth/missing-binary/network/permission), surfaces an `environment_issue` and replaces `recovery`'s retry-nudge with a "surface, don't retry" note so the model stops looping on infra faults (on by default; `EAGENT_ENV_REPORT=off`) | — (`env_report` tool) | — |
 | `evals`        | offline behavior-eval harness — `/expect` trajectory assertions, an `/eval <dir>` headless pass@k runner over `*.eval.json`, and a `judge` tool (recursion-safe sub-call); ships a `test/security/` guard-regression set | `/expect`, `/eval` | — |
+| `handoff`      | session resume doc — on `agent_end` (or `/handoff`) summarizes the transcript via a recursion-safe sub-call into a fixed schema + reactivation paragraph, written to `.eagent/handoffs/` (off by default; `EAGENT_HANDOFF=off`) | `/handoff` | — |
+| `drift-probe`  | reasoning-quality canary — every N turns probes a pinned question and warns (never blocks) on regression vs the turn-0 baseline, suggesting `/compact` or `/handoff` (off by default; `EAGENT_DRIFT_PROBE=off`) | `/drift-probe` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -327,7 +329,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  37 built-in extensions, all riding the ExtensionAPI
+src/extensions/  39 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
