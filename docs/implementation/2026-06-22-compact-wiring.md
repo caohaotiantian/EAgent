@@ -1,6 +1,9 @@
 # Implementation: compact-wiring — make `compact` live and retire `memory`'s count-based compaction
 
-Status: open
+Status: closed
+Closing-commit: e20db1a
+Closed-on: 2026-06-23
+Deferred: none — compact now live, memory count-compaction retired
 Slug: `2026-06-22-compact-wiring`
 Design: [`docs/design/2026-06-22-compact-wiring.md`](../design/2026-06-22-compact-wiring.md) (PASSED)
 
