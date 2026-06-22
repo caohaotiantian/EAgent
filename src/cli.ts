@@ -121,6 +121,23 @@ async function main(): Promise<void> {
       const answer = (await rl.question(`${C.yellow("?")} ${q} ${C.dim("[y/N]")} `)).trim().toLowerCase();
       return answer === "y" || answer === "yes";
     },
+    ask: async (q, options) => {
+      // Non-interactive → null, mirroring confirm's `if (!rl)` guard; the ask
+      // tool's absence-fallback then keeps the run moving forward.
+      if (!rl) return null;
+      // Options are listed to stderr so stdout stays clean for --json mode
+      // (matching notify); the human may answer with a 1-based index or free text.
+      if (options?.length) {
+        for (const [i, opt] of options.entries()) console.error(C.dim(`  ${i + 1}. ${opt}`));
+      }
+      const raw = (await rl.question(`${C.yellow("?")} ${q} `)).trim();
+      if (!raw) return null; // empty → null; the tool reports it plainly
+      if (options?.length) {
+        const idx = Number(raw);
+        if (Number.isInteger(idx) && idx >= 1 && idx <= options.length) return options[idx - 1]!;
+      }
+      return raw; // free text, e.g. "none of these, do Z"
+    },
     notify: (m) => console.error(C.dim(`· ${m}`)),
   };
 
