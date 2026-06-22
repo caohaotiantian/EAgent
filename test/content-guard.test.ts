@@ -4,6 +4,8 @@
  * The pure helpers (stripInvisible, fence) are unit-tested directly; the
  * afterToolCall filter is exercised through the agent loop with only the stub
  * tool and content-guard loaded, so any fencing is unambiguously content-guard's.
+ * The one D5-disjointness test additionally co-loads `recovery` and asserts the
+ * *absence* of content-guard's marker, so attribution stays unambiguous there too.
  * All offline against the MockProvider.
  */
 
@@ -15,6 +17,7 @@ import type { ExtensionAPI } from "../src/kernel/extension.js";
 import { defineTool, ok, fail } from "../src/kernel/define.js";
 import { makeHarness, type Harness } from "./helpers.js";
 import contentGuard, { stripInvisible, fence } from "../src/extensions/content-guard.js";
+import recovery from "../src/extensions/recovery.js";
 
 // -- unit: stripInvisible ----------------------------------------------------
 
@@ -117,12 +120,54 @@ test("live: a result from an fs:read-only tool is NOT fenced (AC4)", async () =>
   assert.equal(content, "local file text", "default-excluded fs:read result is untouched");
 });
 
+test("live: invisible chars in a foreign result are stripped from the fenced content (AC5)", async () => {
+  // AC5 — the live path (not just the stripInvisible unit) must remove always-invisible
+  // injection codepoints from the model-visible fenced content. Embed one representative
+  // codepoint per documented category into the foreign body and assert none survive.
+  const zwsp = "​"; // zero-width space
+  const zwj = "‍"; // zero-width joiner
+  const bom = "﻿"; // BOM / zero-width no-break
+  const rlo = "‮"; // right-to-left override (bidi control)
+  const tag = String.fromCodePoint(0xe0041); // Plane-14 tag char
+  const vs = "️"; // variation selector-16
+  const body = `safe${zwsp}${zwj}${bom}${rlo}${tag}${vs}text`;
+  const h = makeHarness();
+  await runWithStub(h, "grab", ["net:fetch"], { content: body });
+  const content = firstResultContent(h.agent) ?? "";
+
+  assert.ok(content.includes(FENCE_MARKER), "the foreign result is still fenced");
+  assert.ok(content.includes("safetext"), "the visible body survives, contiguous after stripping");
+  // No documented invisible codepoint may appear anywhere in the model-visible content.
+  const INVISIBLE = /[​-‍﻿‪-‮⁦-⁩\u{E0000}-\u{E007F}︀-️]/u;
+  assert.ok(!INVISIBLE.test(content), "no invisible injection codepoint remains in what the model sees");
+});
+
 test("live: an isError net:fetch result is NOT fenced (AC6)", async () => {
   const h = makeHarness();
   await runWithStub(h, "grab", ["net:fetch"], { content: "HTTP 500 from origin", isError: true });
   const content = firstResultContent(h.agent);
   assert.equal(content, "HTTP 500 from origin", "an error result carries no external payload, so it is not fenced");
   assert.ok(!content?.includes(FENCE_MARKER), "no fence marker on the error result");
+});
+
+test("live: with content-guard AND recovery loaded, a recovery hint on a foreign error is left unwrapped (AC6, D5)", async () => {
+  // AC6 half 2 / D5 — content-guard and recovery are disjoint on the isError partition:
+  // content-guard fences only successes, recovery annotates only errors, so a recovery
+  // hint on a foreign error must never end up inside an <untrusted-content> envelope.
+  // Use an error string that matches a recovery rule so recovery actually appends a hint.
+  const h = makeHarness();
+  const errBody = "Invalid arguments for grab";
+  h.provider.script([{ toolCalls: [{ name: "grab", arguments: {} }] }, { text: "done" }]);
+  await h.host.use("stub", stubTool("grab", ["net:fetch"], { content: errBody, isError: true }));
+  // Load both filters; either registration order must keep them disjoint here.
+  await h.host.use("recovery", recovery);
+  await h.host.use("content-guard", contentGuard);
+  await h.agent.run("go");
+
+  const content = firstResultContent(h.agent) ?? "";
+  assert.ok(content.includes("Recovery hint:"), "recovery still annotates the foreign error result");
+  assert.ok(content.startsWith(errBody), "the original error text is preserved, unwrapped");
+  assert.ok(!content.includes(FENCE_MARKER), "the recovery hint is NOT wrapped in the untrusted-content envelope");
 });
 
 // -- live: AC8 / AC9 / AC7 ---------------------------------------------------
