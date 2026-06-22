@@ -1,5 +1,10 @@
 # Implementation: content-guard
 
+Status: closed
+Closing-commit: d01140f
+Closed-on: 2026-06-22
+Deferred: none
+
 Design: `docs/design/2026-06-22-content-guard.md` (slug `2026-06-22-content-guard`).
 
 ## 1. Task Index
