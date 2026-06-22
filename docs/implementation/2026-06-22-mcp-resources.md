@@ -1,6 +1,6 @@
 # Implementation: mcp-resources — ingest the read-only resources half of MCP
 
-Status: open
+Status: implemented (pending batch integration)
 Closing-commit: (pending)
 Closed-on: (pending)
 Deferred: host.ts registration; CLAUDE.md/README inventory (both to batch integration — see §2)
