@@ -250,7 +250,13 @@ export default function activate(e: ExtensionAPI): () => void {
     const idx = splitIndex(messages, budget, keepTurns);
     if (idx <= 0) return messages; // no foldable boundary (§5)
 
-    // `older` deliberately includes any prior summary at its head (D8 carry-forward).
+    // We split on (not exclude) any prior summary marker, so if a summary ever
+    // sits at the head of `older` it flows into the sub-call and the merge prompt
+    // (D2) preserves its slots (D8 carry-forward). In the live agent loop this is
+    // a defensive belt-and-suspenders: `transformContext` runs over a fresh
+    // `[...this.#messages]` copy each turn and the folded result is never written
+    // back (agent.ts:247-251), so the hook re-receives the RAW older messages and
+    // re-folds them from scratch — no decisions are lost across folds either way.
     const older = messages.slice(0, idx);
     const recent = messages.slice(idx);
 
@@ -345,6 +351,13 @@ export default function activate(e: ExtensionAPI): () => void {
           return;
         }
         case "force": {
+          // Report what the next over-budget turn WOULD fold, computed from the
+          // pure `splitIndex` over the live transcript. We deliberately do NOT
+          // run `summarize(older)` here: unlike `memory`'s force (which populates
+          // a cache its hook later consumes, `memory.ts:160`), `compact` keeps no
+          // cache, so a sub-call's result would be computed and discarded — a paid
+          // model call with no effect on the transcript. The actual fold happens
+          // in the `transformContext` hook when the budget gate fires.
           const { budget, keepTurns } = cfg();
           const messages = [...e.agent.messages];
           const idx = splitIndex(messages, budget, keepTurns);
@@ -354,17 +367,10 @@ export default function activate(e: ExtensionAPI): () => void {
             );
             return;
           }
-          const older = messages.slice(0, idx);
-          summarizing = true;
-          try {
-            await summarize(older);
-          } finally {
-            summarizing = false;
-          }
           ctx.print(
-            `Compacted ${older.length} message(s) into a structured summary; ` +
-              `keeping the last ${keepTurns} user turn(s) (${messages.length - idx} message(s)). ` +
-              `(${pinKeys().length} pin(s) retained)`,
+            `Would compact ${idx} message(s) into a structured summary on the next ` +
+              `over-budget turn; keeping the last ${keepTurns} user turn(s) ` +
+              `(${messages.length - idx} message(s)). (${pinKeys().length} pin(s) retained)`,
           );
           return;
         }
