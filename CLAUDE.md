@@ -103,6 +103,14 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   hint keyed to EAgent's own error strings via `afterToolCall`, so the model
   self-corrects instead of re-issuing the broken call; on by default, no
   capability, `EAGENT_RECOVERY=off` kill switch),
+  `output-contract` (schema-validated final output — when a caller sets
+  `Agent.outputSchema`, it registers a per-run `respond` tool whose parameters
+  ARE that schema so the kernel's input validation coerces/validates the model's
+  answer for free; a valid call surfaces the typed value on `Agent.output` and
+  ends the turn, an invalid one drives a bounded validate-and-reask on
+  `afterToolCall` echoing the validator's exact per-field errors (default 2
+  retries) then flags the best-effort value and stops; inert with no schema set,
+  no capability, `EAGENT_OUTPUT_CONTRACT=off` kill switch),
   `write-guard` (prompts before a *blind overwrite* — a full-content `write` to
   an existing file the session has not read — via `beforeToolCall`; tracks
   read/edit/written paths per session, asks once, excludes `edit` and new-file
