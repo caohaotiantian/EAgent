@@ -117,7 +117,12 @@ export default function activate(e: ExtensionAPI): () => void {
       // Never un-block an existing block.
       if (!enabled || decision.block) return decision;
 
-      const sig = stableSignature(ctx.call.name, decision.arguments);
+      // Key on the RAW model arguments (`ctx.call.arguments`), exactly as
+      // `afterToolCall` does, so both hooks address the same bucket. Keying on
+      // `decision.arguments` here would use the validate-coerced shape ("3"->3,
+      // filled defaults), diverging from the after-hook for any coercing schema
+      // and splitting the count and the failure streak across two buckets.
+      const sig = stableSignature(ctx.call.name, ctx.call.arguments);
       const b = bucketFor(sig);
       b.count += 1;
 

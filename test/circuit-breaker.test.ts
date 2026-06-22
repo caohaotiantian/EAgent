@@ -271,6 +271,50 @@ test("T-4: N consecutive failures halt with a failure-framed reason", async () =
   assert.ok(!blocked!.content.includes("identical args"), "failure reason is not the identical-args string");
 });
 
+// --- T-4b: live — failure streak survives schema coercion of the args --------
+
+test("T-4b: failure streak halts with failure framing even when args are coerced", async () => {
+  // Regression: the two hooks must key the per-signature bucket on the SAME
+  // argument shape. `beforeToolCall` sees the validate-coerced `decision.arguments`
+  // ("3" -> 3); `afterToolCall` sees `ctx.call.arguments`. If they diverge, the
+  // failure streak maintained in afterToolCall lands in a bucket the failure-trip
+  // never reads — so the 4th call would halt via the identical-args COUNT branch
+  // with the wrong framing instead of the failure-framed reason.
+  const { agent, host, commands } = makeHarness({
+    responder: (_req, i) =>
+      // Model emits the number as a STRING, which the schema coerces to a number.
+      i < 4 ? { toolCalls: [{ name: "probe", id: `c${i}`, arguments: { n: "3" } }] } : { text: "done" },
+    fallback: "allow",
+  });
+  let count = 0;
+  agent.tools.register(
+    defineTool({
+      name: "probe",
+      description: "coercing-schema stub that always fails",
+      // A schema that triggers coercion: string "3" -> number 3.
+      parameters: { type: "object", properties: { n: { type: "number" } } },
+      execute: () => {
+        count += 1;
+        return { content: "boom", isError: true };
+      },
+    }),
+  );
+  await host.use("circuit-breaker", activateCircuitBreaker);
+  await runCommand(commands.get("circuit-breaker")!, agent, "block");
+
+  await agent.run("go");
+
+  // The first three fail (run); the 4th is halted on the failure streak.
+  assert.equal(count, 3, "the 4th failing call never ran");
+  const blocked = toolResults(agent.messages).find((r) => r.toolCallId === "c3");
+  assert.ok(blocked && blocked.isError, "the 4th was blocked");
+  assert.ok(
+    blocked!.content.includes("circuit-breaker:") && /failed 3x/.test(blocked!.content),
+    `expected failure-framed reason, got: ${blocked!.content}`,
+  );
+  assert.ok(!blocked!.content.includes("identical args"), "failure reason is not the identical-args string");
+});
+
 // --- T-5: live — different-argument calls never trip -------------------------
 
 test("T-5: different-argument calls never trip", async () => {
