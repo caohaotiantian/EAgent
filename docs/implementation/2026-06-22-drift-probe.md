@@ -5,7 +5,10 @@ Design: [`docs/design/2026-06-22-drift-probe.md`](../design/2026-06-22-drift-pro
 Audience: a fresh agent implementing this extension by TDD, from the repo root.
 
 This guide carries **no requirement absent from the design**. Every task traces
-to a design Deliverable (§2) and an Acceptance Criterion (§7), cited inline as
+to a design Deliverable (Status: closed
+Closing-commit: a531f5b
+Closed-on: 2026-06-22
+Deferred: finding — stale AC wording on the probe-discriminator test mechanism (cosmetic; code+tests consistent)2) and an Acceptance Criterion (§7), cited inline as
 `D#` / `AC#`. When this guide and the design disagree, the design wins.
 
 > **BATCH MODE (binding).** Touch only:
