@@ -579,6 +579,7 @@ test("trigger gating hides non-matching skills, injects on whole-word match, res
       await h.host.use("skills-hardening", skillsHardening);
       await h.agent.run("hello there");
       assert.match(cap.get(), /k8s-skill/, "kill switch reverts to always-on");
+      assert.match(cap.get(), /always-skill/, "trigger-less skill still shown under kill switch");
     }
   } finally {
     if (prev === undefined) delete process.env.EAGENT_SKILL_TRIGGERS;
