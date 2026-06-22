@@ -30,6 +30,8 @@ export type KernelEvents = {
 
   tool_start: { call: ToolCallBlock };
   tool_end: { call: ToolCallBlock; result: ToolResult };
+  /** A parallel tool wave settled; carries the ordered {call,result} pairs. */
+  tool_batch_end: { batch: { call: ToolCallBlock; result: ToolResult }[] };
 
   /** Token usage for the just-finished model call, plus the running total. */
   usage: { usage: Usage; cumulative: Usage };

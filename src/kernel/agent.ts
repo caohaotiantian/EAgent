@@ -203,6 +203,12 @@ export class Agent {
         }
 
         const results = await this.dispatch(calls);
+        // A wave-settled, observe-only signal: the whole dispatch group as one
+        // ordered value, before anything commits it to the transcript. Additive
+        // to tool_end (per-tool) and turn_end (per-turn); neither is perturbed.
+        await this.hooks.emit("tool_batch_end", {
+          batch: results.map((r) => ({ call: r.call, result: r.result })),
+        });
         const toolMessage: Message = {
           role: "tool",
           content: results.map(

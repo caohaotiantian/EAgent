@@ -155,7 +155,7 @@ flowchart LR
         direction TB
         EVA["agent_start · turn_start"]
         EVB["message · text_delta"]
-        EVC["tool_start · tool_end · usage"]
+        EVC["tool_start · tool_end · tool_batch_end · usage"]
         EVD["turn_end · agent_end · error"]
     end
     subgraph INT["Filter hooks — e.hook() · intervene"]
