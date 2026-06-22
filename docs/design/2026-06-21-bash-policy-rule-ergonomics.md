@@ -41,17 +41,17 @@ matching behavior, one (the bracket) a contained breaking change to pattern
 
 ## 2. Deliverables
 
-- [ ] `Rule` gains an **optional** `justification?: string` field. Rules without it
+- [x] `Rule` gains an **optional** `justification?: string` field. Rules without it
       behave exactly as today (criterion 5 regression). The field is free-text; no
       schema validation beyond "string if present".
-- [ ] `evaluateAny` returns the **matched rule** alongside its existing
+- [x] `evaluateAny` returns the **matched rule** alongside its existing
       `{ action, matched }` as a new optional field `rule?: Rule`, so the caller can
       read the winning rule's `justification`. The field is `undefined` on the
       fallthrough (no-rule-matched) path. Existing destructuring
       (`const { action, matched } = evaluateAny(...)`) is unaffected (additive
       field). `evaluate` (the single-command wrapper returning only `.action`) is
       unchanged in signature and behavior.
-- [ ] The `beforeToolCall` guard surfaces the matched rule's justification (when
+- [x] The `beforeToolCall` guard surfaces the matched rule's justification (when
       present and non-empty) at **all three** existing user/model-facing surfaces,
       with **site-appropriate placement** so each reads cleanly:
       - **deny block reason** and **ask-denied block reason** — neither ends in
@@ -66,13 +66,13 @@ matching behavior, one (the bracket) a contained breaking change to pattern
       When absent/empty, the text at every site is **byte-identical to today**.
       Surfacing on the two *ask* sites (not just the deny site the request names) is
       a deliberate, low-cost extension — Decision 3, justified there.
-- [ ] `toRegExp` gains **bracket-pipe alternation**: a `[` … `]` group compiles to a
+- [x] `toRegExp` gains **bracket-pipe alternation**: a `[` … `]` group compiles to a
       non-capturing alternation `(?: … | … )`; the interior is split on (unescaped)
       `|`, and within each alternative `*` → `.*` and every other regex metacharacter
       is escaped, exactly as outside a group. So `git [add|commit] *` matches
       `git add x` and `git commit x` but not `git push x`. A `|` **outside** any
       bracket group remains a literal, unchanged from today.
-- [ ] **A `\` escape for the alternation metacharacters.** `\[`, `\]`, `\|`, and
+- [x] **A `\` escape for the alternation metacharacters.** `\[`, `\]`, `\|`, and
       `\\` compile to a literal `[`, `]`, `|`, and `\` respectively — so a rule that
       must match a literal bracket, pipe, or backslash can. A `\` before **any other
       character** (or at end of string) emits a literal backslash and the next
@@ -80,22 +80,22 @@ matching behavior, one (the bracket) a contained breaking change to pattern
       a literal backslash (e.g. a `find … \;` terminator still matches `\;`). `*` has
       **no** literal form (it is always the wildcard, unchanged from today); the
       escape set is exactly `[ ] | \`.
-- [ ] **Unterminated / degenerate brackets are fail-safe literals.** A `[` with no
+- [x] **Unterminated / degenerate brackets are fail-safe literals.** A `[` with no
       following unescaped `]` compiles to a literal `[` (and the rest literal), so a
       malformed pattern can never throw at compile time or match unexpectedly wide.
       Nested `[` inside a group is a literal character within the alternative (groups
       are flat, not recursive).
-- [ ] `/bash-policy` status print appends ` (<justification>)` to a rule line when
+- [x] `/bash-policy` status print appends ` (<justification>)` to a rule line when
       that rule has a justification, so `status` shows the reason the author wrote.
       The pattern still prints verbatim (an alternation pattern like
       `git [add|commit] *` shows literally), and rules without justification print
       unchanged. (Deliberately in scope — see §3.)
-- [ ] Offline unit tests for `toRegExp` alternation (match/no-match, `*`-inside-group,
+- [x] Offline unit tests for `toRegExp` alternation (match/no-match, `*`-inside-group,
       metachar-escaping-inside-group, literal-`|`-outside, unterminated-`[`,
       empty-group) and for `evaluateAny` returning the matched rule; integration
       tests through the agent loop asserting the justification text reaches the
       blocked tool result and that an alternation rule blocks one alternative.
-- [ ] CLAUDE.md `bash-policy` one-line description updated to mention the two new
+- [x] CLAUDE.md `bash-policy` one-line description updated to mention the two new
       authoring affordances **only if** the current wording is now inaccurate (it
       describes the gate, not the rule schema — likely no change needed; the
       reviewer confirms). Closure block appended at F.
@@ -355,4 +355,32 @@ path beyond the existing `evaluateAny`. Excluded explicitly per §3.
 
 ## Closure
 
-Status: open.
+Status: closed
+Closing-commit: 387ddc8
+Closed-on: 2026-06-22
+Deferred: none. `justification` templating/validation/i18n and any pattern syntax
+beyond the one bracket-group form + `\` escape remain documented §3 scope
+exclusions, not unfinished work.
+
+All nine Deliverables (§2) implemented and verified against code by the closeout
+whole-change review. Deliverable 8 (CLAUDE.md): the one-line `bash-policy`
+description is at gate-altitude ("evaluates an allow/deny/ask ruleset") and stays
+accurate without mention of the rule schema, so it was reviewed and **left
+unchanged** per the deliverable's own condition. Acceptance: `npm run typecheck`
+exit 0; `npm test` exit 0 (374 passed, up from 367); `npx tsx --test
+test/bash-policy.test.ts` exit 0 (45 passed). L1 design review passed (2 rounds;
+round-1 generals — ask-prompt `?:` placement, ask-site scope, status-print scope,
+`evaluateAny` pins — resolved; the literal-`[` escape added per a user decision
+favoring a hatch over a clean break). L2 impl review passed (2 rounds). L3 Phase 1:
+dev → review (clean first round, no fix) → accept → whole-change review, all pass.
+The whole-change reviewer independently re-derived the `toRegExp` compiler (40+
+match cases, 18 pathological no-throw inputs, byte-for-byte regression vs the old
+matcher) and found no over-match, no throw, and zero regression. E2E: skipped — no
+live provider in the offline harness (MockProvider; the change is matcher/reason
+text with no external process); the externally observable behavior (justification
+text reaching the model, alternation rules blocking/allowing) is verified by the
+criteria 3/4/10 integration tests driving the real guard through `agent.run`.
+
+Supersedes the "No change to the `Rule` schema" boundary asserted in
+2026-06-21-bash-policy-wrapper-unwrapping.md:85 and
+2026-06-21-bash-policy-compound-commands.md:99 (additively — an optional field).
