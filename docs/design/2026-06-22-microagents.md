@@ -293,3 +293,24 @@ network, no API key). Each criterion is realized as an assertion in
   fully disables it with zero effect on other extensions; deleting
   `src/extensions/microagents.ts` and `test/microagents.test.ts` removes it
   entirely. No schema, storage, or protocol change to revert.
+
+## Closure note
+
+Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Acceptance: `npm test` exit 0 (385/385 pass, 0 skipped, incl. the 11 new
+`microagents` tests), `npm run typecheck` exit 0,
+`node --import tsx --test test/microagents.test.ts` exit 0 (11/11).
+E2E / behavior gate: triggered (new `/microagents` command + new context
+injection). Paid external run skipped — `AUTH_FAIL: no ANTHROPIC_API_KEY /
+OPENAI_API_KEY / GEMINI_API_KEY set`; substituted with a MockProvider behavior
+smoke through the real `createAgentHost` wiring (SMOKE-PASS: a kubernetes-trigger
+turn injected the microagent body into model context, a non-triggering turn did
+not, and `/microagents` listed the entry with its triggers) plus the full
+offline suite.
+Reviews: L1 design pass (3 rounds), L2 impl pass (3 rounds), L3 dev→review→accept
+(review 2 generations clean after one test-coverage fix; accept-pass), F
+whole-change correctness review pass (zero severe; 3 non-blocking advisories:
+AC-7/AC-9 covered-by-construction, and the optional `description` frontmatter
+field is parsed but not yet surfaced — a documented optional contract field per
+§4.4, intentionally retained).
+Deferred: none.
