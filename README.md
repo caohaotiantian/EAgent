@@ -198,8 +198,9 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary | `/code` | `code:exec` |
 | `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
 | `dynamic-workflow` | `run_workflow` executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
-| `memory`      | context compaction via `transformContext` + `remember`/`recall` scratchpad | `/compact`, `/memory` | — |
+| `memory`      | store-backed `remember`/`recall` working-memory scratchpad with white-box per-entry provenance (`EAGENT_MEMORY_ENTRIES=off` to disable) — registers no `transformContext` hook | `/memory` | — |
 | `prune`       | token-budget tool-output pruning via `transformContext` — truncates old, oversized tool results beyond a protected recent window (`EAGENT_PRUNE=off` to disable) | — | — |
+| `compact`     | token-gated structured conversation compaction via `transformContext` — folds the older prefix at a user-turn boundary into `## Decisions`/`## Files`/`## Open threads`, keeps the last K user turns, re-injects a byte-capped pinned block; off by default (`/compact on`, `EAGENT_COMPACT=off` to kill) | `/compact` | — |
 | `recovery`    | turns a *failed* tool result into a corrective nudge via `afterToolCall`, keyed to EAgent's own error strings, so the model self-corrects (`EAGENT_RECOVERY=off` to disable) | — | — |
 | `output-contract`| schema-validated final output — set `Agent.outputSchema` and the model's answer is validated/coerced (reusing the kernel input-validator) via a per-run `respond` tool, surfaced typed on `Agent.output`; invalid answers drive a bounded validate-and-reask with the exact per-field errors (inert with no schema; `EAGENT_OUTPUT_CONTRACT=off`) | — (`respond`) | — |
 | `planmode`    | human-in-the-loop approval gate before mutating tools run | `/plan` | — |
@@ -331,7 +332,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  41 built-in extensions, all riding the ExtensionAPI
+src/extensions/  42 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
