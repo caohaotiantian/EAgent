@@ -43,32 +43,32 @@ record by construction.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/secret-guard.ts` — a new built-in extension whose
+- [x] `src/extensions/secret-guard.ts` — a new built-in extension whose
       `activate(e)` registers one `beforeToolCall` filter and one
       `/secret-guard` command, and returns a dispose loop that never throws.
-- [ ] A pure, exported, zero-dependency `scanSecrets(value: string): string[]`
+- [x] A pure, exported, zero-dependency `scanSecrets(value: string): string[]`
       helper that returns the **kinds** of secret matched (e.g.
       `["pem-private-key"]`, `["aws-access-key-id"]`) — never the matched
       substring — so the reason string can name *what* matched without leaking
       *the value*. Exported for direct unit testing.
-- [ ] A pure, exported `scanArgs(args: Record<string, unknown>): string[]`
+- [x] A pure, exported `scanArgs(args: Record<string, unknown>): string[]`
       helper that walks the argument values (strings, and strings nested in
       arrays/objects) and returns the de-duplicated union of secret kinds found.
-- [ ] The known-credential pattern set, **copied with attribution** from
+- [x] The known-credential pattern set, **copied with attribution** from
       `flow-guard`'s `DEFAULT_SENSITIVE_CONTENT`
       (`src/extensions/flow-guard.ts:55-60`): PEM private keys, `AKIA…` AWS
       access-key ids, `sk-…` keys, `ghp_…` GitHub tokens. No entropy heuristic in
       v1 (see D4).
-- [ ] A `beforeToolCall` filter that runs only for *leak-capable* tools (default
+- [x] A `beforeToolCall` filter that runs only for *leak-capable* tools (default
       `net:fetch`, `shell:exec`; store-overridable `leakCaps`), scans the
       decision arguments, and on a hit asks (`ask` mode, default) via
       `e.agent.ui.confirm` or blocks (`block` mode) with a reason that names the
       matched kind(s) only.
-- [ ] A `/secret-guard` command: `[on|off|ask|block|status]` (mirroring
+- [x] A `/secret-guard` command: `[on|off|ask|block|status]` (mirroring
       `/flow-guard` and `/risk-guard`).
-- [ ] Kill switch: `EAGENT_SECRET_GUARD=off` short-circuits the guard to a no-op
+- [x] Kill switch: `EAGENT_SECRET_GUARD=off` short-circuits the guard to a no-op
       (checked in `cfg()`, mirroring `flow-guard`/`risk-guard`).
-- [ ] Offline tests in `test/secret-guard.test.ts` — pure-helper unit tests plus
+- [x] Offline tests in `test/secret-guard.test.ts` — pure-helper unit tests plus
       live `beforeToolCall`-application tests with inline stub tools declaring
       `net:fetch` / `shell:exec` / a benign cap, loaded via
       `host.use(id, activate)` (the `test/recovery.test.ts` /
@@ -79,7 +79,7 @@ record by construction.
 - [ ] `CLAUDE.md` / `README.md` extension-inventory line — **(deferred to batch
       integration)**; not touched by this task, and the README extension count is
       **not** bumped here.
-- [ ] Implementation log at `docs/implementation/2026-06-22-secret-guard.md`,
+- [x] Implementation log at `docs/implementation/2026-06-22-secret-guard.md`,
       reconciled at closeout.
 
 ## 3. Scope Boundary (NOT in scope) — Simplicity First
