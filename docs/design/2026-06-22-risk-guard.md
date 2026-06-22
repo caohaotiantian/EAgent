@@ -289,7 +289,7 @@ guard's `beforeToolCall` handler is exercised directly and/or through the harnes
 
 ## Closure note
 
-Status: closed. Closing-commit: PENDING_SHA. Closed-on: 2026-06-22.
+Status: closed. Closing-commit: a4bb19c. Closed-on: 2026-06-22.
 Acceptance: `npm test` exit 0 (400/400 pass, 0 skipped, incl. the 15 new
 `risk-guard` tests), `npm run typecheck` exit 0,
 `node --import tsx --test test/risk-guard.test.ts` exit 0 (15/15).
