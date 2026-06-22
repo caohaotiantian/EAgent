@@ -482,16 +482,58 @@ there means the implementation reached into a dependency it should only consume.
 
 ## 6. Closeout notes
 
-_(fill at phase close)_
+Phase 1 complete. Branch `20260622sweepedit-dev-r1`, base
+`1dd14589187cd26fbc548652d1415578ff08b09f`.
 
-- [ ] All `test/sweep-edit.test.ts` invariants green.
-- [ ] `npm test` exit 0; `npm run typecheck` exit 0 (paste results as commit
-      trailers).
-- [ ] `search.test.ts` + `subagents.test.ts` + `core-tools.test.ts` unaffected.
-- [ ] Files changed limited to `src/extensions/sweep-edit.ts`,
-      `test/sweep-edit.test.ts`, this doc.
-- [ ] `src/host.ts`, `CLAUDE.md`, `README.md` **untouched** (batch-deferred).
-- [ ] Deferred for batch integration: `BUILTIN_EXTENSIONS` registration +
+- [x] All `test/sweep-edit.test.ts` invariants green (13 tests, one per AC +
+      the AC1-corollary/confinement pins). Each was validated by mutation: the
+      decline/error classification, the `maxSites` cap, the scoped `[read, edit]`
+      child registry, the kill switch, and the declared-capability contract were
+      each broken in turn and the matching test went red, confirming no test is a
+      tautology.
+- [x] `npm test` exit 0 (456 pass, 0 fail — 443 baseline + 13 new);
+      `npm run typecheck` exit 0.
+- [x] `search.test.ts` + `subagents.test.ts` + `core-tools.test.ts` (+
+      `recovery.test.ts`) unaffected — 42/42 green; the composition reuses `grep`,
+      the `Agent` spawn surface, and `read`/`edit` with **no edits** to any of
+      them.
+- [x] Files changed limited to `src/extensions/sweep-edit.ts`,
+      `test/sweep-edit.test.ts`, this doc (closeout).
+- [x] `src/host.ts`, `CLAUDE.md`, `README.md` **untouched** (batch-deferred).
+- [x] Deferred for batch integration: `BUILTIN_EXTENSIONS` registration +
       CLAUDE.md/README inventory line + extension count.
+
+### TDD order followed (red → green)
+
+- **T1 (AC1)** written first; ran red ("the sweep_edit tool result is present"
+  failed — tool unregistered). **T2** implemented the tool → green.
+- **T3 (AC2 decline)** — validated red via mutation (forcing `declined`→`edited`
+  fails AC2); classified a no-edit child as `declined` → green.
+- **T5 (AC1 corollary, non-match)** — regression pin; passed on the grep-derived
+  worklist as the impl doc anticipated (enumeration is strictly grep-driven).
+- **T7 (AC6 cap)** — validated red via mutation (removing the cap fails AC6); the
+  `DEFAULT_MAX_SITES = 50` cap, `truncated` flag, and `e.log.warn` make it green.
+- **T9 (AC7 missing-dep + confinement)** — the absent-`grep` path returns a clear
+  `fail` naming `grep`; confinement rides `grep` (no second walker).
+- **T11 (AC3 + AC5)** — validated red via mutation (breaking per-site error
+  isolation fails AC3; seeding `bash` into the child registry fails AC5); per-site
+  try/catch + the closed `[read, edit]` registry make both green.
+- **T13 (AC4)** — the deny-rule gate (a) is driven by the declared capability
+  array, and (b) is pinned directly; `/sweeps` prints the contract + cap.
+- **T15 (AC8 + AC9)** — kill switch (validated red via mutation) registers nothing
+  under `EAGENT_SWEEP_EDIT=off`; `host.unload` removes tool + command without
+  throwing (never-throwing dispose loop).
+
+### Notes / residuals (as designed)
+
+- Confinement is **defense-by-registry-omission, not by capability** (design §8,
+  D3): the child runs against the parent's capability manager, so AC5 asserts
+  `bash` is *absent from the registry* (an `Unknown tool: bash` result), not that
+  the capability layer denies a shell call. The `[read, edit]` registry is a
+  closed two-tool set, never extended from caller input.
+- Return shape (D7): the tool's `content` is a single JSON object
+  `{total, edited, declined, errors, truncated, sites:[{file,status,note}]}` — the
+  per-site array plus the totals/`truncated` header fields in one machine- and
+  model-legible payload. Pure format choice; no behavior hinges on it.
 </content>
 </invoke>
