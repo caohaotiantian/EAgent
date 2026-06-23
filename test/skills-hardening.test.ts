@@ -588,6 +588,66 @@ test("trigger gating hides non-matching skills, injects on whole-word match, res
   }
 });
 
+// -- T13b: trigger gating is coupled to skills.ts's exact catalog line format -
+
+test("trigger gating strips/keeps the EXACT `- name: description` line skills.ts renders", async () => {
+  // Maintenance guard: skills-hardening's gating regex (`^- ([^:]+):`) parses the
+  // tier-1 catalog line skills.ts renders as `- ${name}: ${description}`. This
+  // test pins that coupling by asserting the WHOLE line (name AND description),
+  // not just the name's presence — so a future change to skills.ts's render
+  // format silently breaks gating and trips here. skills is loaded upstream of
+  // skills-hardening (host.ts order), so skills.ts owns the note and
+  // skills-hardening narrows it.
+  const s = scratchSkills();
+  const prev = process.env.EAGENT_SKILL_TRIGGERS;
+  try {
+    delete process.env.EAGENT_SKILL_TRIGGERS;
+    s.write(
+      "k8s-skill",
+      fm({ name: "k8s-skill", description: "deploy clusters", triggers: "kubernetes" }, "..."),
+    );
+    // A trigger-less companion so the catalog note survives even when the gated
+    // skill is stripped (skills-hardening drops the note entirely only when EVERY
+    // catalog line is gated out).
+    s.write("always-skill", fm({ name: "always-skill", description: "always relevant" }, "..."));
+    // The literal line skills.ts (skills.ts:46) renders for this skill.
+    const gatedLine = "- k8s-skill: deploy clusters";
+
+    // Case 1 — the latest user message does NOT contain the trigger word:
+    // the gated skill's exact catalog line is stripped from the injected note.
+    {
+      const cap = captureSkillsNote();
+      const h = makeHarness({ responder: cap.responder, fallback: "allow" });
+      await h.host.use("skills", skills);
+      await h.host.use("skills-hardening", skillsHardening);
+      await h.agent.run("hello there, nothing relevant here");
+      assert.ok(cap.get().includes("Available skills"), "the skills note was injected");
+      assert.ok(
+        !cap.get().includes(gatedLine),
+        "the gated skill's `- name: description` line is absent when no trigger matches",
+      );
+    }
+
+    // Case 2 — the latest user message DOES contain the trigger word (whole-word):
+    // the gated skill's exact catalog line is present, verbatim.
+    {
+      const cap = captureSkillsNote();
+      const h = makeHarness({ responder: cap.responder, fallback: "allow" });
+      await h.host.use("skills", skills);
+      await h.host.use("skills-hardening", skillsHardening);
+      await h.agent.run("please deploy to kubernetes now");
+      assert.ok(
+        cap.get().includes(gatedLine),
+        "the gated skill's `- name: description` line is present verbatim when the trigger matches",
+      );
+    }
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_SKILL_TRIGGERS;
+    else process.env.EAGENT_SKILL_TRIGGERS = prev;
+    s.cleanup();
+  }
+});
+
 // -- T14: dispose loop never throws and unregisters cleanly — AC-14 ----------
 
 test("dispose loop restores every hook count and never throws", async () => {

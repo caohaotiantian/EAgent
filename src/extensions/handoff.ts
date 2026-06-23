@@ -180,7 +180,7 @@ export function renderFallback(messages: readonly Message[], goal: string): stri
  * fixed schema (design D3). Returns the summary unchanged when it is already
  * complete.
  */
-function ensureSchema(summary: string, goal: string): string {
+export function ensureSchema(summary: string, goal: string): string {
   const missing = SCHEMA_SECTIONS.filter((h) => !summary.includes(h));
   if (missing.length === 0) return summary;
   const filler = missing
