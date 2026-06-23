@@ -3,7 +3,7 @@
 Status: closed
 Closing-commit: 560f2a5946769a78fdb6074f46539090e221d4d4
 Closed-on: 2026-06-23
-Deferred: provider-side decode-time forcing (`toolChoice`/`responseFormat` on the Provider request + anthropic/openai/gemini/mock) — see Scope Boundary.
+Deferred: (delivered) provider-side decode-time forcing — `CompletionRequest.toolChoice` + a public mutable `Agent.forceTool`, mapped to native forcing in anthropic/openai/gemini and recorded by mock, set corrective-turn-only by output-contract. See §9 for the design and D-force-1..5. Residual: `"required"`-style "call SOME tool" is wired through the providers but output-contract only ever uses the named `{type:"tool",name:"respond"}` form; no `responseFormat`/JSON-schema decode constraint (Anthropic has none) is added — forcing is expressed purely via tool-choice.
 
 Slug: `2026-06-22-output-contract`
 
@@ -106,18 +106,20 @@ that already guarantees clean *input* is never turned around to guarantee clean
 
 ## 3. Scope Boundary (NON-goals — Simplicity First)
 
-- **NO provider-interface change. This is the load-bearing scope cut.**
-  Decode-time forcing — adding a `toolChoice`/`responseFormat` field to
+- **NO provider-interface change *in v1*. This was the load-bearing scope cut**
+  (now lifted in the follow-up, §9). v1 deliberately delivered typed validated
+  output with **zero** provider change, via the `respond` tool plus post-hoc
+  validate-and-reask. Decode-time forcing — adding a `toolChoice` field to
   `CompletionRequest` (`src/kernel/types.ts:203-211`) and teaching anthropic,
-  openai, gemini, and mock to constrain decoding to the schema — is **explicitly
-  deferred**. It is the riskiest path: it touches the kernel `Provider` contract
-  (`types.ts:218-221`), all four providers, and Anthropic in particular does
-  **not** accept an arbitrary `json_schema` decode constraint, so a uniform
-  forcing field would degrade unevenly across providers and need a
-  graceful-degrade path anyway. v1 delivers typed validated output with **zero**
-  provider change, via the `respond` tool plus post-hoc validate-and-reask. The
-  forcing field is a clean, separately-scoped follow-up that *layers onto* this
-  design (the validator and the `respond` schema are already the shape it needs).
+  openai, gemini, and mock to act on it — was deferred as the riskiest path: it
+  touches the kernel `Provider` contract (`types.ts:218-221`) and all four
+  providers, and Anthropic does **not** accept an arbitrary `json_schema` decode
+  constraint, so a uniform forcing field degrades unevenly and needs a
+  graceful-degrade path. The **follow-up (§9) delivers exactly that**: forcing is
+  expressed via tool-choice (not `responseFormat`/`json_schema`), each provider
+  maps it natively or omits it, and output-contract sets it corrective-turn-only —
+  layering onto this design (the validator and the `respond` schema are already
+  the shape it needs) without re-touching v1's mechanism.
 - **NO change to `RunResult` or to `run()`'s signature.** `RunResult` stays
   `{ reason, messages }` (`agent.ts:54-57`); the typed output is read off the
   optional `Agent.output` field (D2), so existing `run()` callers compile and
@@ -492,3 +494,107 @@ of string steers — off any hot loop.
   (`src/host.ts`) and reverting the CLAUDE.md inventory line fully removes it; the
   extension holds no persisted state, and the two optional `Agent` fields are inert
   when never set (and removable in a follow-up if the `e.store` fallback is taken).
+
+## 9. Follow-up delivered: provider decode-time forcing
+
+The v1 design deferred provider decode-time forcing (§3, D1 option 1) because it
+touches the `Provider` contract and all four providers, and a model can ignore
+the `respond` nudge and keep returning prose — the only bound being the retry cap
++ flagged result (R2). This follow-up delivers forcing so that on the **corrective
+turn** the model is *compelled by the provider* to call `respond`, turning
+best-effort into near-guaranteed where the provider supports forcing, while
+preserving multi-step work and full backward compatibility. It layers onto v1
+with **zero** change to v1's mechanism (the `respond` schema + validate-and-reask
++ cap stay exactly as designed; the cap remains the ultimate bound for a
+non-forcing provider).
+
+### D-force-1. A neutral `ToolChoice` on `CompletionRequest`, not a `responseFormat`/`json_schema` decode constraint
+
+- **Decision:** Add `type ToolChoice = "auto" | "required" | { type: "tool"; name: string }`
+  to `src/kernel/types.ts` and an **optional** `toolChoice?: ToolChoice` field on
+  `CompletionRequest`. Absent (or `"auto"`) is the default and means today's
+  behavior — the model's free choice — so a request built without it is
+  byte-identical to before.
+- **Rationale:** Forcing-by-*tool-choice* is the one mechanism all three real
+  providers express natively (D-force-4), unlike an arbitrary `json_schema`
+  decode constraint, which Anthropic does not accept (§3, D1). Because the
+  `respond` tool's parameters already *are* the caller schema (D3), forcing the
+  `respond` tool **is** forcing the schema — no second forcing vocabulary is
+  needed. Modeling it as a three-case union (auto / some-tool / named-tool) keeps
+  the kernel neutral while giving each provider a clean target. An optional field
+  (not a required one) is what keeps every existing provider call and the v1
+  `respond`-loop untouched.
+
+### D-force-2. One public mutable `Agent.forceTool`, mirroring `Agent.model`
+
+- **Decision:** Add a single public mutable field `forceTool?: string` to the
+  `Agent` class (instance data, **not** a kernel barrel export). In `streamTurn`,
+  when building the `CompletionRequest`, set
+  `toolChoice: this.forceTool ? { type: "tool", name: this.forceTool } : undefined`.
+  This is the **only** agent-loop behavior change, and it is inert while
+  `forceTool` is `undefined`.
+- **Rationale:** `Agent.model` is already a public mutable field the loop re-reads
+  at the top of every turn (which is exactly how `routing` retiers per-turn with
+  zero kernel change). `forceTool` rides the identical seam: an extension sets it
+  for the next turn, the loop maps it to `toolChoice`, and clearing it restores
+  free choice — no new hook point, no `run()`/`RunResult` change, no new barrel
+  export (so `kernel-surface.test.ts` stays green, as with the v1 fields, D2). A
+  string (the tool name) rather than a full `ToolChoice` keeps the field minimal;
+  the loop wraps it into the named-tool shape.
+
+### D-force-3. Corrective-turn-only: force on the reask path, never on initial working turns
+
+- **Decision:** output-contract sets `e.agent.forceTool = "respond"` on the
+  **same** `afterToolCall` branch where it already steers a validate-and-reask
+  (i.e. after the kernel's invalid-`respond` refusal). It clears `forceTool` (a)
+  the instant a valid `respond` is accepted (`respond.execute`), (b) at the retry
+  cap, (c) on `agent_end`, and (d) on teardown/kill-switch. It is **never** set on
+  the model's initial working turns.
+- **Rationale (load-bearing):** A research-style agent must be free to call
+  `read`/`grep`/`bash`/sub-agents before it finalizes; forcing `respond` from turn
+  1 would break every multi-step run by compelling an immediate (and probably
+  premature) final answer. So forcing is scoped to the precise moment the
+  extension has *already decided the model should finalize* — the corrective turn
+  after a malformed `respond`. On a forcing-capable provider the next turn is then
+  compelled to emit a (this time hopefully valid) `respond`; on a non-forcing
+  provider the unchanged reask still nudges, and the cap still bounds. Clearing on
+  every exit (accept / cap / end / teardown) guarantees a force never leaks into a
+  later turn or a later run, and the no-schema path never writes `forceTool` at
+  all (so v1's AC8 byte-identical opt-out holds, now extended to "no toolChoice on
+  any request").
+
+### D-force-4. Per-provider native mapping with graceful degrade
+
+Each provider maps `req.toolChoice` to its native control and **omits** the key
+for `"auto"`/absent (so no-forcing is byte-identical), degrading gracefully where
+a shape is unsupported:
+
+| neutral `ToolChoice`        | anthropic `tool_choice`          | openai `tool_choice`                              | gemini `tool_config.functionCallingConfig`           |
+| --------------------------- | -------------------------------- | ------------------------------------------------- | ---------------------------------------------------- |
+| `"auto"` / absent           | *(omitted)*                      | *(omitted)*                                        | *(omitted — Gemini defaults to AUTO)*                |
+| `"required"`                | `{ type: "any" }`                | `"required"`                                       | `{ mode: "ANY" }`                                    |
+| `{ type: "tool", name }`    | `{ type: "tool", name }`         | `{ type: "function", function: { name } }`        | `{ mode: "ANY", allowedFunctionNames: [name] }`     |
+
+- All three real providers natively support forcing a **specific** tool by name —
+  the shape output-contract uses — so the headline feature degrades nowhere on the
+  shipped providers. Gemini's `tool_config` is only meaningful with declared
+  tools, so it is emitted inside the existing "tools present" block; a forcing
+  request with no tools simply omits it. The mock **records** the received
+  `toolChoice` (`lastToolChoice` + the ordered `toolChoices[]`) without changing
+  replay, so a test asserts forcing reached the provider while the scripted
+  responder still drives the turn.
+- **Residual limitation:** the union also carries `"required"` ("call SOME tool"),
+  wired through all providers for completeness, but output-contract itself only
+  ever uses the named form. No `responseFormat`/JSON-schema decode constraint is
+  added (Anthropic has none); forcing is expressed purely via tool-choice, which
+  is sufficient because the `respond` tool's parameters *are* the schema (D3).
+
+### D-force-5. Backward compatibility
+
+- A request built with no `toolChoice` is byte-identical to before in every
+  provider (the key is omitted), proven by a per-provider request-body unit test
+  and by the live "no schema ⇒ every request omits toolChoice" test.
+- output-contract touches `forceTool` **only** when a schema is set; with no
+  schema (or the kill switch on) `forceTool` is never written and every request
+  omits `toolChoice`. The v1 cap + flagged-result bound is unchanged and remains
+  the ultimate guarantee for a model/provider that cannot be forced.

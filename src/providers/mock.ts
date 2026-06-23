@@ -15,6 +15,7 @@ import type {
   StopReason,
   StreamEvent,
   ThinkingLevel,
+  ToolChoice,
 } from "../kernel/types.js";
 
 export interface MockToolCall {
@@ -39,6 +40,10 @@ export class MockProvider implements Provider {
   readonly name = "mock";
   /** The thinking level seen on the most recent `stream` call (for assertions). */
   lastThinking: ThinkingLevel | undefined;
+  /** The tool-choice seen on the most recent `stream` call (for assertions). */
+  lastToolChoice: ToolChoice | undefined;
+  /** Every tool-choice seen, in order, across all `stream` calls (for assertions). */
+  readonly toolChoices: (ToolChoice | undefined)[] = [];
   #turn = 0;
   #queue: MockTurn[] | undefined;
   #fn: ((req: CompletionRequest, i: number) => MockTurn | undefined) | undefined;
@@ -62,6 +67,12 @@ export class MockProvider implements Provider {
 
   async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
     this.lastThinking = req.thinking;
+    // Record the received tool-choice so a test can assert that forcing reached
+    // the provider (the agent-loop → CompletionRequest seam). Recording it does
+    // not change replay: the scripted responder still drives the turn, so a test
+    // can script a forced `respond` and confirm the choice arrived together.
+    this.lastToolChoice = req.toolChoice;
+    this.toolChoices.push(req.toolChoice);
     const turn = this.nextTurn(req);
     const content: ContentBlock[] = [];
 

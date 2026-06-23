@@ -131,6 +131,34 @@ test("maps thinking level to a thinkingConfig budget, and 0 when off", async () 
   assert.deepEqual(captured.generationConfig.thinkingConfig, { thinkingBudget: 0, includeThoughts: false });
 });
 
+test("maps toolChoice to Gemini tool_config, omitting it for auto/absent", async () => {
+  let captured: any;
+  const provider = new GeminiProvider({
+    apiKey: "k",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  const withTool = { tools: [{ name: "respond", description: "", parameters: { type: "object" as const } }] };
+  // A named tool ⇒ mode ANY restricted to that function.
+  await collect(provider.stream(req({ ...withTool, toolChoice: { type: "tool", name: "respond" } })));
+  assert.deepEqual(captured.tool_config, {
+    functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["respond"] },
+  });
+  // "required" ⇒ mode ANY (call SOME function).
+  await collect(provider.stream(req({ ...withTool, toolChoice: "required" })));
+  assert.deepEqual(captured.tool_config, { functionCallingConfig: { mode: "ANY" } });
+  // "auto" and absent ⇒ omit the key entirely (graceful default — Gemini defaults to AUTO).
+  await collect(provider.stream(req({ ...withTool, toolChoice: "auto" })));
+  assert.equal(captured.tool_config, undefined);
+  await collect(provider.stream(req(withTool)));
+  assert.equal(captured.tool_config, undefined);
+  // No tools declared ⇒ no tool_config even with a choice (forcing is meaningless).
+  await collect(provider.stream(req({ toolChoice: { type: "tool", name: "respond" } })));
+  assert.equal(captured.tool_config, undefined);
+});
+
 test("surfaces thought parts as reasoning, keeping them out of the answer", async () => {
   const chunks = [
     { candidates: [{ content: { role: "model", parts: [{ text: "planning", thought: true }, { text: "Hi" }] }, finishReason: "STOP" }] },

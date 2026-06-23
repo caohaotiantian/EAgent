@@ -25,6 +25,18 @@
  * steer, no reask — byte-identical to today. On-by-default builtin with an
  * `EAGENT_OUTPUT_CONTRACT=off` kill switch. No capability (recording a value the
  * run already produced is not a side effect; mirrors `recovery`).
+ *
+ * Decode-time forcing (the delivered follow-up, design §9): on the SAME
+ * corrective-turn path where it steers a reask, it also sets the public mutable
+ * `e.agent.forceTool = "respond"` so the kernel maps it to
+ * `CompletionRequest.toolChoice` and the provider COMPELS a `respond` call on
+ * the next turn — turning best-effort into near-guaranteed where the provider
+ * supports forcing, while a non-forcing provider still converges via the
+ * unchanged reask + cap. Forcing is strictly corrective-turn-only: the model's
+ * initial working turns are NEVER forced (so a multi-step run is free to call
+ * read/grep/etc. before finalizing). `forceTool` is cleared the instant a valid
+ * `respond` is accepted, at the retry cap, on `agent_end`, and on teardown — so
+ * it never leaks across turns or runs, and the no-schema path never touches it.
  */
 
 import { defineTool } from "../kernel/define.js";
@@ -98,10 +110,28 @@ export default function activate(e: ExtensionAPI): () => void {
     respondReg = undefined;
   };
 
+  /**
+   * Clear any pending decode-time force. Called the instant a valid `respond` is
+   * accepted, at the retry cap, on `agent_end`, and on teardown — so a force set
+   * for a corrective turn never leaks into a later turn or a later run, and a
+   * run that never opted in never has `forceTool` touched.
+   */
+  const clearForce = (): void => {
+    if (e.agent.forceTool === "respond") e.agent.forceTool = undefined;
+  };
+
   const onStart = e.on("agent_start", () => {
     attempts = 0;
     const schema = e.agent.outputSchema;
-    if (!schema) return; // no opt-in ⇒ fully inert (byte-identical to today)
+    if (!schema) {
+      // No opt-in ⇒ fully inert (byte-identical to today). Do NOT touch
+      // forceTool: a run without a schema must never see this extension write it.
+      return;
+    }
+    // Opted in: clear any stale force from a prior run so a corrective force can
+    // never leak across runs (the listener may outlive a run; agent_end also
+    // clears, but reset defensively here too).
+    clearForce();
 
     const respond = defineTool({
       name: "respond",
@@ -112,6 +142,9 @@ export default function activate(e: ExtensionAPI): () => void {
       // This runs ONLY on a valid call — the kernel's input validation passed.
       execute: (args): ToolResult => {
         e.agent.output = { value: args, ok: true };
+        // A valid contract satisfies the run; drop any pending force so it never
+        // outlives the corrective turn that set it.
+        clearForce();
         return { content: "Final output recorded.", terminate: true };
       },
     });
@@ -135,18 +168,31 @@ export default function activate(e: ExtensionAPI): () => void {
     if (attempts <= maxOutputRetries) {
       const errors = parseErrorLines(result.content);
       e.agent.handle.steer(text("user", buildReask(errors)));
+      // Corrective turn: compel the model to call `respond` next, so a provider
+      // that supports forcing turns the reask from a nudge into a near-guarantee.
+      // Set ONLY here (never on the model's initial working turns), so multi-step
+      // work before finalizing is unaffected. A non-forcing provider ignores it
+      // and still converges via this reask + the cap below. Cleared on a valid
+      // accept (execute), at the cap (below), on agent_end, and on teardown.
+      e.agent.forceTool = "respond";
       return result;
     }
     // Cap reached: surface the last (invalid-but-best-effort) value, flagged, and
     // halt the loop. The invalid-arg refusal is non-terminating, so without this
     // explicit stop the run would advance turn-by-turn to maxTurns.
     e.agent.output = { value: call.arguments, ok: false };
+    // Drop the force before halting so it never outlives the run (e.g. if a host
+    // reuses the agent without an intervening agent_start).
+    clearForce();
     e.agent.stop();
     return result;
   });
 
   const onEnd = e.on("agent_end", () => {
     disposeRespond();
+    // Restore the model's free choice for the next run: a force must never
+    // outlive the run that set it (mirrors routing restoring Agent.model).
+    clearForce();
   });
 
   const cmd = e.registerCommand({
@@ -169,6 +215,9 @@ export default function activate(e: ExtensionAPI): () => void {
       onEnd.dispose();
       cmd.dispose();
       disposeRespond();
+      // Drop any pending force on unload so a disabled extension leaves no
+      // lingering toolChoice for the next run.
+      clearForce();
     } catch {
       // teardown must not throw
     }
