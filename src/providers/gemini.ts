@@ -18,6 +18,7 @@ import type {
   Provider,
   StopReason,
   StreamEvent,
+  ToolChoice,
   ToolSpec,
   Usage,
 } from "../kernel/types.js";
@@ -69,7 +70,15 @@ export class GeminiProvider implements Provider {
       generationConfig,
     };
     if (req.systemPrompt) body.systemInstruction = { parts: [{ text: req.systemPrompt }] };
-    if (req.tools.length) body.tools = [{ functionDeclarations: req.tools.map(toGeminiTool) }];
+    if (req.tools.length) {
+      body.tools = [{ functionDeclarations: req.tools.map(toGeminiTool) }];
+      // Decode-time forcing: Gemini constrains tool use via `tool_config`'s
+      // function-calling mode. `"auto"`/absent omits it (the default — Gemini
+      // already defaults to AUTO), so a no-forcing request is byte-identical.
+      // Only meaningful when tools are declared, so it lives in this block.
+      const toolConfig = toGeminiToolConfig(req.toolChoice);
+      if (toolConfig) body.tool_config = toolConfig;
+    }
 
     const res = await fetchWithRetry({
       url: `${this.#baseUrl}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse`,
@@ -133,6 +142,18 @@ export class GeminiProvider implements Provider {
 
 function toGeminiTool(spec: ToolSpec): unknown {
   return { name: spec.name, description: spec.description, parameters: spec.parameters };
+}
+
+/**
+ * Map the neutral `ToolChoice` to Gemini's `tool_config`, or `undefined` (omit)
+ * for `"auto"`/absent — the no-forcing default. `"required"` sets mode `ANY`
+ * (call SOME function); a named choice sets mode `ANY` with
+ * `allowedFunctionNames: [name]` (call only that function).
+ */
+function toGeminiToolConfig(choice: ToolChoice | undefined): Record<string, unknown> | undefined {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "required") return { functionCallingConfig: { mode: "ANY" } };
+  return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [choice.name] } };
 }
 
 function toGeminiContents(messages: Message[]): unknown[] {

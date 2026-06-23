@@ -372,6 +372,29 @@ test("round-trips a signed thinking block back to the wire, dropping unsigned on
   assert.equal(blocks[1].type, "text");
 });
 
+test("maps toolChoice to Anthropic tool_choice, omitting it for auto/absent", async () => {
+  let captured: any;
+  const provider = new AnthropicProvider({
+    apiKey: "test",
+    cache: false,
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sseResponse(TEXT_EVENTS);
+    },
+  });
+  // A named tool ⇒ force exactly that tool.
+  await collect(provider.stream(req({ toolChoice: { type: "tool", name: "respond" } })));
+  assert.deepEqual(captured.tool_choice, { type: "tool", name: "respond" });
+  // "required" ⇒ call SOME tool.
+  await collect(provider.stream(req({ toolChoice: "required" })));
+  assert.deepEqual(captured.tool_choice, { type: "any" });
+  // "auto" and absent ⇒ omit the key entirely (graceful default).
+  await collect(provider.stream(req({ toolChoice: "auto" })));
+  assert.equal(captured.tool_choice, undefined);
+  await collect(provider.stream(req()));
+  assert.equal(captured.tool_choice, undefined);
+});
+
 test("throws on a non-retryable error status", async () => {
   const provider = new AnthropicProvider({
     apiKey: "test",

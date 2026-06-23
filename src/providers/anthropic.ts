@@ -16,6 +16,7 @@ import type {
   Provider,
   StopReason,
   StreamEvent,
+  ToolChoice,
   ToolSpec,
   Usage,
 } from "../kernel/types.js";
@@ -105,6 +106,12 @@ export class AnthropicProvider implements Provider {
       tools,
       stream: true,
     };
+
+    // Decode-time forcing: Anthropic's `tool_choice` accepts forcing a specific
+    // tool by name or requiring *some* tool. `"auto"`/absent omits the key (the
+    // default), so a request with no forcing is byte-identical to before.
+    const toolChoice = toAnthropicToolChoice(req.toolChoice);
+    if (toolChoice) body.tool_choice = toolChoice;
 
     // Reasoning: modern Claude models (Opus 4.6+, Fable 5) take adaptive
     // thinking plus an `output_config` effort dial — never the legacy
@@ -229,6 +236,18 @@ export class AnthropicProvider implements Provider {
 
 function toAnthropicTool(spec: ToolSpec): unknown {
   return { name: spec.name, description: spec.description, input_schema: spec.parameters };
+}
+
+/**
+ * Map the neutral `ToolChoice` to Anthropic's `tool_choice`, or `undefined`
+ * (omit the key) for `"auto"`/absent — the no-forcing default. `"required"`
+ * becomes `{ type: "any" }` (call SOME tool); a named choice becomes
+ * `{ type: "tool", name }` (call exactly that tool).
+ */
+function toAnthropicToolChoice(choice: ToolChoice | undefined): Record<string, unknown> | undefined {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "required") return { type: "any" };
+  return { type: "tool", name: choice.name };
 }
 
 function toAnthropicMessages(messages: Message[]): unknown[] {

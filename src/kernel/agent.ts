@@ -80,6 +80,17 @@ export class Agent {
   /** Caller-read after run(): the validated final output (ok) or best-effort value (ok:false). undefined when no schema was set. */
   output?: { value: unknown; ok: boolean };
 
+  /**
+   * The name of a tool the model MUST call on the NEXT request, or `undefined`
+   * for the model's free choice. A public mutable field re-read at the top of
+   * each turn (mirroring `Agent.model`, which `routing` rides). The only thing
+   * the loop does with it is map a set value to `CompletionRequest.toolChoice`;
+   * it is inert while `undefined`, so the default behavior is unchanged. Its one
+   * live consumer is `output-contract`, which sets it to `"respond"` on a
+   * corrective turn to compel the final-output call, then clears it.
+   */
+  forceTool?: string;
+
   readonly #messages: Message[] = [];
   readonly #steering: Message[] = [];
   readonly #followUps: Message[] = [];
@@ -269,6 +280,15 @@ export class Agent {
       model: this.model,
       signal: this.#abort!.signal,
       thinking: this.thinking,
+      // Re-read each turn (like `model`): a set `forceTool` compels exactly that
+      // tool this turn; `undefined` leaves `toolChoice` absent ⇒ the model's free
+      // choice, byte-identical to a build without forcing. `forceTool` is public
+      // API, so guard it against an unregistered name (which would make a real
+      // provider 400) by only forcing a tool that is actually registered.
+      toolChoice:
+        this.forceTool && this.tools.get(this.forceTool)
+          ? { type: "tool" as const, name: this.forceTool }
+          : undefined,
     };
 
     let message: Message | undefined;
