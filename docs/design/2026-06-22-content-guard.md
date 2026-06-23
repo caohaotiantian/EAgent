@@ -1,7 +1,7 @@
 # Design: content-guard — ingress trust labeling for foreign tool results
 
 Status: closed
-Closing-commit: d01140f
+Closing-commit: 38e18ca
 Closed-on: 2026-06-22
 Deferred: none
 

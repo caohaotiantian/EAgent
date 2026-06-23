@@ -6,7 +6,7 @@ Audience: a fresh agent implementing this extension by TDD, from the repo root.
 
 This guide carries **no requirement absent from the design**. Every task traces
 to a design Deliverable (Status: closed
-Closing-commit: a531f5b
+Closing-commit: 186f0dd
 Closed-on: 2026-06-22
 Deferred: finding — stale AC wording on the probe-discriminator test mechanism (cosmetic; code+tests consistent)2) and an Acceptance Criterion (§7), cited inline as
 `D#` / `AC#`. When this guide and the design disagree, the design wins.
@@ -87,9 +87,10 @@ ordering carries scorers → cadence → regression → note → command → reg
 - Seeding the namespaced store from inside a wrapping `activate` + a
   call-counting provider subclass: `risk-guard.test.ts:32-60`.
 - `MockProvider` function responder `(req, turnIndex) => MockTurn`:
-  `mock.ts:36`, `mock.ts:103-108`. Branch on `req.systemPrompt` (the probe
-  prompt) and `req.tools.length === 0` to serve the canary distinctly from main
-  turns.
+  `mock.ts:36`, `mock.ts:103-108`. Branch on the USER-message probe question (via
+  `probeOf`/`isProbeReq`) and `req.tools.length === 0` to serve the canary
+  distinctly from main turns — the probe question is the user payload, not
+  `systemPrompt` (which holds the fixed instruction).
 - Harness accepts custom `logger` and `ui` for spies: `helpers.ts:25-46`.
 
 ### House facts the implementation depends on (verified against this tree)
@@ -205,8 +206,9 @@ running past N turns triggers **no** canary sub-call and **no** warning. A paid
 model call must never happen un-opted-in (least-surprise on cost).
 
 Use a call-counting `MockProvider` (subclass that counts `stream` calls whose
-`req.tools.length === 0` and whose `req.systemPrompt` is the probe prompt). Run
-several turns past N; assert the probe-call count is `0` and no warn/notify fired.
+`req.tools.length === 0` and whose USER message is the probe question, matched via
+`probeOf`/`isProbeReq` — the probe rides the user payload, not `systemPrompt`).
+Run several turns past N; assert the probe-call count is `0` and no warn/notify fired.
 
 Acceptance: `node --import tsx --test test/drift-probe.test.ts` — T6 fails.
 
@@ -216,10 +218,12 @@ Register `offTurn = e.on("turn_start", ...)`. Increment the module-scoped counte
 (accumulating across runs — do **not** reset on `agent_start`). When
 `cfg().enabled` and `counter % N === 0`, fire the recursion-safe tool-less
 canary sub-call (copy `risk-guard.ts:96-137`: `e.agent.providers.get()`,
-`provider.stream({ systemPrompt: <probe.prompt>, messages: [<probe as one user
-msg, no prior transcript>], tools: [], model: e.agent.model, signal: new
-AbortController().signal })`, read the `done` event via `textOf`). The probe to
-ask is `pickProbe(probeCount)`. When disabled, do nothing (early return). Wrap the
+`provider.stream({ systemPrompt: <fixed probe instruction>, messages: [<probe
+question as one user msg, no prior transcript>], tools: [], model: e.agent.model,
+signal: new AbortController().signal })`, read the `done` event via `textOf`). The
+fixed instruction lives in `systemPrompt`; the probe *question* rides the single
+user message, so the test keys on the user payload, not `systemPrompt`. The probe
+to ask is `pickProbe(probeCount)`. When disabled, do nothing (early return). Wrap the
 whole sub-call to **fail open** (try/catch → `e.log.warn`, no throw escapes).
 
 Acceptance: `node --import tsx --test test/drift-probe.test.ts` (T6 passes);
@@ -259,9 +263,10 @@ proof: the tool-less sub-call runs outside `agent.run`, emits no `turn_start`, s
 it cannot increment its own counter. Canary count must equal `floor(turns / N)`.
 
 Enable via store (`enabled:true`, `n:2`). Script main turns + a probe responder
-that increments a probe counter when `req.tools.length === 0 && req.systemPrompt
-=== <probe prompt>`. Run enough turns; assert the probe counter equals the
-expected `floor(turns/2)` and the firing turn indices match.
+that increments a probe counter when `req.tools.length === 0 && isProbeReq(req)`
+(i.e. the USER message carries the probe question; the probe rides the user
+payload, not `systemPrompt`). Run enough turns; assert the probe counter equals
+the expected `floor(turns/2)` and the firing turn indices match.
 
 Acceptance: `node --import tsx --test test/drift-probe.test.ts` — T10 fails.
 
@@ -507,7 +512,9 @@ is closed, `events.ts:11-38`):**
 - **`MockProvider` scripting** (`mock.ts`): use the **function responder**
   `(req, turnIndex) => MockTurn | undefined` (`mock.ts:36`, `mock.ts:103-108`) so
   the test serves the canary sub-call distinctly from main turns by branching on
-  `req.systemPrompt === <probe.prompt>` and `req.tools.length === 0`. A
+  the USER-message probe question (via `probeOf`/`isProbeReq`) and
+  `req.tools.length === 0` — the probe question rides the user message, not
+  `systemPrompt` (which carries only the fixed instruction). A
   **call-counting subclass** of `MockProvider` (override `stream`, count probe
   calls, then `yield* super.stream(req)`) is the AC3/AC8/AC11 instrument — the
   `risk-guard.test.ts:54-60` and `prune.test.ts:236-245` pattern.

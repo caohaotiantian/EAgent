@@ -2,7 +2,7 @@
 
 Slug: `2026-06-22-drift-probe`
 Status: closed
-Closing-commit: a531f5b
+Closing-commit: 186f0dd
 Closed-on: 2026-06-22
 Deferred: finding — stale AC wording on the probe-discriminator test mechanism (cosmetic; code+tests consistent)
 
@@ -321,9 +321,10 @@ signal — with no earlier, automatable warning that the session has drifted.
   (and/or `e.store`) and resets only on dispose/reload.
 - `MockProvider` is scriptable and deterministic (`mock.ts:38-109`); its function
   responder form `(req, turnIndex) => MockTurn` (`mock.ts:36`,
-  `mock.ts:103-108`) lets a test branch on `req.systemPrompt` /
-  `req.tools.length === 0` to serve the canary sub-call distinctly from the main
-  turns. The suite stays offline, no API key (the house rule).
+  `mock.ts:103-108`) lets a test branch on the USER-message probe question (via
+  `probeOf`/`isProbeReq`) / `req.tools.length === 0` to serve the canary sub-call
+  distinctly from the main turns — the probe rides the user payload, not
+  `systemPrompt`. The suite stays offline, no API key (the house rule).
 - The scorer's determinism: a given `(reply, expected)` always yields the same
   number, so a scripted reply has a known, asserted score.
 - No new npm dependency (jiti-only rule holds); Node built-ins only if any are
@@ -374,8 +375,11 @@ All verified offline by `npm test` against a scripted `MockProvider` (no network
 no API key). Each is a runnable assertion in `test/drift-probe.test.ts` unless it
 is the typecheck gate. The extension is loaded via
 `host.use("drift-probe", activate)` and exercised through `h.agent.run(...)`; the
-responder distinguishes the canary sub-call from main turns by `req.systemPrompt`
-(the probe prompt) and `req.tools.length === 0`.
+responder distinguishes the canary sub-call from main turns by its USER-message
+payload (the probe question, matched via `probeOf`/`isProbeReq`) and
+`req.tools.length === 0`. The fixed instruction lives in `systemPrompt`; the
+probe question is carried as the single user message, so the discriminator keys
+on the user payload, not `systemPrompt`.
 
 1. **Pure scorer — baseline vs regressed**: `scoreProbe(reply, expected)` returns
    a number in `[0,1]`; a reply containing all `expectedTokens` (and exact answer,
@@ -387,9 +391,10 @@ responder distinguishes the canary sub-call from main turns by `req.systemPrompt
    is `true` and `isRegression(1.0, 0.8, 25)` is `false` (boundary at 25%).
 3. **Probe fires every N turns**: with the extension enabled and `N` set small
    (e.g. 2) via the command/store, run enough turns that the turn counter crosses
-   N twice; assert the canary sub-call (identified by `req.systemPrompt`/`tools:
-   []`) was invoked exactly twice, on the expected turn indices. (A call counter
-   incremented in the responder.)
+   N twice; assert the canary sub-call (identified by its USER-message probe
+   question via `probeOf`/`isProbeReq`, with `tools: []`) was invoked exactly
+   twice, on the expected turn indices. (A call counter incremented in the
+   responder.)
 4. **Warn on regression**: script a strong baseline canary answer on the first
    probe and a degraded answer on the second; assert a warning fires after the
    second probe — captured via a custom `logger.warn` spy (the harness accepts a

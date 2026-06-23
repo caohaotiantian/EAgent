@@ -1,9 +1,10 @@
 # Implementation: compact-wiring — make `compact` live and retire `memory`'s count-based compaction
 
 Status: closed
-Closing-commit: e20db1a
+Closing-commit: 065efbe
 Closed-on: 2026-06-23
 Deferred: none — compact now live, memory count-compaction retired
+Completes: 2026-06-22-compact — fulfils that task's deferred host.ts wiring deliverable
 Slug: `2026-06-22-compact-wiring`
 Design: [`docs/design/2026-06-22-compact-wiring.md`](../design/2026-06-22-compact-wiring.md) (PASSED)
 

@@ -19,6 +19,7 @@ import type {
   Provider,
   StopReason,
   StreamEvent,
+  ToolChoice,
   ToolSpec,
   Usage,
 } from "../kernel/types.js";
@@ -78,6 +79,13 @@ export class OpenAIProvider implements Provider {
     // `reasoning_effort` dial. `off` omits it so non-reasoning models are
     // unaffected.
     if (req.thinking && req.thinking !== "off") body.reasoning_effort = req.thinking;
+    // Decode-time forcing: OpenAI's `tool_choice` forces a named function or
+    // requires some tool; `"auto"`/absent omits it (the default, byte-identical
+    // to before).
+    // Only emit tool_choice when tools are actually declared (mirrors gemini's
+    // tools-present guard) — forcing a tool with no tools present is an API error.
+    const toolChoice = toOpenAIToolChoice(req.toolChoice);
+    if (toolChoice !== undefined && req.tools.length) body.tool_choice = toolChoice;
 
     const res = await fetchWithRetry({
       url: `${this.#baseUrl}/chat/completions`,
@@ -156,6 +164,18 @@ export class OpenAIProvider implements Provider {
 
 function toOpenAITool(spec: ToolSpec): unknown {
   return { type: "function", function: { name: spec.name, description: spec.description, parameters: spec.parameters } };
+}
+
+/**
+ * Map the neutral `ToolChoice` to OpenAI's `tool_choice`, or `undefined` (omit)
+ * for `"auto"`/absent — the no-forcing default. `"required"` is the string
+ * `"required"` (call SOME tool); a named choice becomes
+ * `{ type: "function", function: { name } }` (call exactly that function).
+ */
+function toOpenAIToolChoice(choice: ToolChoice | undefined): unknown {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "required") return "required";
+  return { type: "function", function: { name: choice.name } };
 }
 
 function toOpenAIMessages(systemPrompt: string, messages: Message[]): unknown[] {

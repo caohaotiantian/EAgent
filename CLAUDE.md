@@ -120,8 +120,12 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   answer for free; a valid call surfaces the typed value on `Agent.output` and
   ends the turn, an invalid one drives a bounded validate-and-reask on
   `afterToolCall` echoing the validator's exact per-field errors (default 2
-  retries) then flags the best-effort value and stops; inert with no schema set,
-  no capability, `EAGENT_OUTPUT_CONTRACT=off` kill switch),
+  retries) then flags the best-effort value and stops; on the corrective/reask
+  turn it also sets `Agent.forceTool` so the kernel's `CompletionRequest.toolChoice`
+  COMPELS the `respond` call at decode time (native per-provider mapping with
+  graceful degrade — best-effort becomes near-guaranteed, the retry cap remains
+  the bound), never forcing the model's initial working turns; inert with no
+  schema set, no capability, `EAGENT_OUTPUT_CONTRACT=off` kill switch),
   `write-guard` (prompts before a *blind overwrite* — a full-content `write` to
   an existing file the session has not read — via `beforeToolCall`; tracks
   read/edit/written paths per session, asks once, excludes `edit` and new-file
@@ -175,13 +179,17 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   `judge` tool (rubric+candidate → score/verdict/reason) via a recursion-safe
   tool-less provider sub-call; ships a `test/security/` regression set asserting the
   safety guards still fire; offline against MockProvider/cassette, no capability),
-  `handoff` (session resume document — a `/handoff` command + an `agent_end`
+  `handoff` (session resume document — a `/handoff-doc` command + an `agent_end`
   observer that summarizes the transcript via a recursion-safe tool-less provider
   sub-call into a fixed handoff schema (goal / completed / in-progress / pending /
   files touched / commands run / open decisions / do-not-touch / next 3-7 steps)
   plus a paste-ready reactivation paragraph, written to a gitignored
-  `.eagent/handoffs/<date>-<slug>.md`; distills a session into a resumable artifact,
-  off by default, `EAGENT_HANDOFF=off`),
+  `.eagent/handoffs/<date>-<slug>.md`; plus an opt-in, relevance- and
+  freshness-gated read side that injects the newest matching prior handoff once
+  into a fresh session's first turn via `transformContext` (`/handoff-doc resume
+  on`, separate `resume` flag default off, `EAGENT_HANDOFF_RESUME=off`); distills a
+  session into a resumable artifact and reads it back, off by default,
+  `EAGENT_HANDOFF=off`),
   `drift-probe` (reasoning-quality canary — every N turns it fires a recursion-safe
   tool-less provider sub-call on a rotating pinned canary question with a known-good
   answer, scores regression vs the turn-0 baseline, and on a regression warns +
@@ -211,7 +219,12 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
   capability so a non-interactive/batch run auto-declines; it calls an OPTIONAL
   `UI.ask` method (implemented on the CLI via readline; absent → the tool returns a
   "proceed with a stated assumption" fallback so an ambiguous task still makes
-  progress); no agent-loop change, the UI method is optional/back-compatible),
+  progress). The HTTP server implements a durable channel: a mid-turn ask emits an
+  `action_required` NDJSON event on the open `/run` stream, parks the turn, and
+  resumes when the client answers out-of-band via `POST /answer`, with a
+  bounded-timeout + disconnect fallback (the server's `confirm` stays fail-safe
+  deny so supplying a `ui` never flips the guards open). No agent-loop change, the
+  UI method is optional/back-compatible),
   `routing` (difficulty-aware per-turn model tiering — on `turn_start` a cheap
   deterministic heuristic classifier (default flagship-when-unsure), or an optional
   recursion-safe tool-less sub-call, picks a tier from a store-configurable map and

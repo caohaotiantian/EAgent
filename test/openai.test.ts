@@ -190,6 +190,37 @@ test("synthesizes distinct ids for parallel same-name calls when the endpoint om
   assert.notEqual(ids[0], ids[1], "two parallel same-name calls must not collide on a synthesized id");
 });
 
+test("maps toolChoice to OpenAI tool_choice, omitting it for auto/absent", async () => {
+  let captured: any;
+  const provider = new OpenAIProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  // Forcing is only emitted when tools are actually declared (the realistic
+  // case — you force a tool that exists; mirrors the gemini tools-present guard).
+  const withTool = {
+    tools: [{ name: "respond", description: "answer", parameters: { type: "object" as const, properties: {} } }],
+  };
+  // A named tool ⇒ force exactly that function.
+  await collect(provider.stream(req({ ...withTool, toolChoice: { type: "tool", name: "respond" } })));
+  assert.deepEqual(captured.tool_choice, { type: "function", function: { name: "respond" } });
+  // "required" ⇒ the literal string "required".
+  await collect(provider.stream(req({ ...withTool, toolChoice: "required" })));
+  assert.equal(captured.tool_choice, "required");
+  // "auto" and absent ⇒ omit the key entirely (graceful default).
+  await collect(provider.stream(req({ ...withTool, toolChoice: "auto" })));
+  assert.equal(captured.tool_choice, undefined);
+  await collect(provider.stream(req(withTool)));
+  assert.equal(captured.tool_choice, undefined);
+  // Guard: a forced choice with NO tools declared is omitted, not sent (it would
+  // be an API error). This is the tools-present guard the named case relies on.
+  await collect(provider.stream(req({ toolChoice: { type: "tool", name: "respond" } })));
+  assert.equal(captured.tool_choice, undefined);
+});
+
 test("maps thinking level to reasoning_effort, omitting it when off", async () => {
   let captured: any;
   const provider = new OpenAIProvider({

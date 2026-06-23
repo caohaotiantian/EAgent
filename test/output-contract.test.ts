@@ -210,3 +210,113 @@ test("live (g): clean teardown — unload removes every listener/registration, n
   // The model emitted a respond call name but no respond tool/registration existed.
   assert.equal(sawRespond, true);
 });
+
+// ---------------------------------------------------------------------------
+// P2 — Decode-time forcing (the delivered follow-up). The model is COMPELLED to
+// call `respond` on a corrective turn via CompletionRequest.toolChoice, never on
+// its initial working turns. We assert the choice that reached the provider
+// using MockProvider's `toolChoices` recording.
+// ---------------------------------------------------------------------------
+
+/** Script one turn that calls a non-respond tool (the model "working" first). */
+function readTurn(path: string): MockTurn {
+  return { toolCalls: [{ name: "read", arguments: { path } }] };
+}
+
+test("forcing (a): back-compat — no schema ⇒ every request omits toolChoice", async () => {
+  const h = makeHarness({ responder: [readTurn("/nope"), { text: "done" }] });
+  await h.host.use("core-tools", coreTools);
+  await h.host.use("output-contract", outputContract);
+  // No outputSchema set ⇒ the extension is inert and never writes forceTool.
+
+  await h.agent.run("do a thing");
+
+  // The agent-loop seam never set toolChoice on any turn: byte-identical request.
+  assert.ok(h.provider.toolChoices.length >= 1);
+  for (const tc of h.provider.toolChoices) assert.equal(tc, undefined);
+  assert.equal(h.agent.forceTool, undefined);
+});
+
+test("forcing (b): multi-step preserved — the model's first (working) turn is NOT forced", async () => {
+  // Turn 1: the model calls `read` (working). Turn 2: it finalizes with respond.
+  const h = makeHarness({ responder: [readTurn("/nope"), respondTurn({ name: "Ada", age: 36 })] });
+  await h.host.use("core-tools", coreTools);
+  await h.host.use("output-contract", outputContract);
+  h.agent.outputSchema = SCHEMA;
+
+  await h.agent.run("research then answer");
+
+  // Turn 1 — the working turn — carried NO forcing: the model was free to call read.
+  assert.equal(h.provider.toolChoices[0], undefined);
+  // The run still finalized correctly.
+  assert.deepEqual(h.agent.output, { value: { name: "Ada", age: 36 }, ok: true });
+  // And no force leaked past the run.
+  assert.equal(h.agent.forceTool, undefined);
+});
+
+test("forcing (c): corrective turn forces respond; cleared once a valid respond is accepted", async () => {
+  // Turn 1: invalid respond (missing age) ⇒ reask + force respond for turn 2.
+  // Turn 2: valid respond ⇒ accepted, force cleared.
+  const h = makeHarness({
+    responder: [respondTurn({ name: "Ada" }), respondTurn({ name: "Ada", age: 36 })],
+  });
+  await h.host.use("core-tools", coreTools);
+  await h.host.use("output-contract", outputContract);
+  h.agent.outputSchema = SCHEMA;
+
+  // Capture forceTool as seen at the top of each turn (before streamTurn reads it).
+  const forcedAtTurn: (string | undefined)[] = [];
+  h.agent.hooks.on("turn_start", () => {
+    forcedAtTurn.push(h.agent.forceTool);
+  });
+
+  await h.agent.run("produce a person");
+
+  // Turn 1 (the initial attempt) was NOT forced; turn 2 (the corrective turn) WAS.
+  assert.equal(forcedAtTurn[0], undefined);
+  assert.equal(forcedAtTurn[1], "respond");
+  // The forcing reached the provider as a named tool_choice on the corrective turn.
+  assert.equal(h.provider.toolChoices[0], undefined);
+  assert.deepEqual(h.provider.toolChoices[1], { type: "tool", name: "respond" });
+  // A valid respond was accepted and the force was cleared (not left dangling).
+  assert.deepEqual(h.agent.output, { value: { name: "Ada", age: 36 }, ok: true });
+  assert.equal(h.agent.forceTool, undefined);
+});
+
+test("forcing (d): never-valid — force is set on each corrective turn and cleared at the cap", async () => {
+  const h = makeHarness({ responder: () => respondTurn({ name: "Ada" }) });
+  await h.host.use("core-tools", coreTools);
+  await h.host.use("output-contract", outputContract);
+  h.agent.outputSchema = SCHEMA;
+
+  await h.agent.run("produce a person");
+
+  // 3 respond attempts ⇒ 3 requests. Turn 1 unforced; turns 2 and 3 forced (the
+  // two reasks each set forceTool for the next turn).
+  assert.equal(h.provider.toolChoices.length, 3);
+  assert.equal(h.provider.toolChoices[0], undefined);
+  assert.deepEqual(h.provider.toolChoices[1], { type: "tool", name: "respond" });
+  assert.deepEqual(h.provider.toolChoices[2], { type: "tool", name: "respond" });
+  // At the cap the run halts with a flagged value and the force is cleared.
+  assert.equal(h.agent.output?.ok, false);
+  assert.equal(h.agent.forceTool, undefined);
+});
+
+test("forcing (e): kill switch ⇒ forceTool never set, every request omits toolChoice", async () => {
+  const prev = process.env.EAGENT_OUTPUT_CONTRACT;
+  process.env.EAGENT_OUTPUT_CONTRACT = "off";
+  try {
+    const h = makeHarness({ responder: [respondTurn({ name: "Ada" }), { text: "done" }] });
+    await h.host.use("core-tools", coreTools);
+    await h.host.use("output-contract", outputContract);
+    h.agent.outputSchema = SCHEMA;
+
+    await h.agent.run("produce a person");
+
+    assert.equal(h.agent.forceTool, undefined);
+    for (const tc of h.provider.toolChoices) assert.equal(tc, undefined);
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_OUTPUT_CONTRACT;
+    else process.env.EAGENT_OUTPUT_CONTRACT = prev;
+  }
+});

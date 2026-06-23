@@ -1,7 +1,7 @@
 # Implementation: web-paginate — `start_index` continuation for the web fetch tool
 
 Status: closed
-Closing-commit: c7bfcaa
+Closing-commit: 34afd8f
 Closed-on: 2026-06-22
 Deferred: finding — direct fetch_url past-the-end tool-level test (cosmetic completeness nit; behavior covered transitively, no defect)
 

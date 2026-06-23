@@ -1,7 +1,7 @@
 # Design: `env-report` extension — classify environmental failures and suppress the retry-nudge
 
 Status: closed
-Closing-commit: c7bfcaa
+Closing-commit: 34afd8f
 Closed-on: 2026-06-22
 Deferred: none
 

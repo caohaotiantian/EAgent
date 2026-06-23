@@ -309,6 +309,35 @@ test("chained fetch_url calls page the whole body with no gap or overlap (crit 6
   await host.dispose();
 });
 
+// T6 (tool-level) — a start_index at/past the body length yields a clean empty
+// window through the agent loop: empty body, not an error, and NO continuation
+// hint (the past-the-end window is non-truncated, so it is a clean end, not a
+// dead-end). The /paged body is 200 bytes; start_index=200 is exactly past-the-end.
+test("fetch_url past-the-end start_index returns a clean empty window with no continuation hint", async () => {
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "fetch_url", arguments: { url: `${base}/paged`, maxBytes: 100, start_index: 200 } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  await host.use("web", web);
+  await agent.run("page past the end");
+  const result = lastToolResult(agent.messages);
+
+  // Not an error: a 200 OK whose window is simply empty.
+  assert.equal(result.isError, false, "past-the-end is a clean 200, not an error");
+  // The body after the status summary line is empty (0 bytes read).
+  const body = result.content.slice(result.content.indexOf("\n") + 1);
+  assert.equal(body, "", "the window body is empty past the end");
+  assert.match(result.content, /· 0 bytes/, "the summary reports 0 bytes read");
+  // No "more available" continuation hint and no legacy truncation marker:
+  // a non-truncated empty window is a clean end, not a dead-end.
+  assert.ok(!/start_index=/.test(result.content), "past-the-end window carries no continuation hint");
+  assert.ok(!/…\[truncated\]/.test(result.content), "past-the-end window carries no truncation marker");
+  await host.dispose();
+});
+
 // T6 — negative start_index clamps to 0; a non-numeric value is rejected by the
 // kernel's integer-schema validator *before* execute runs (so it can never land
 // at a bad offset). Both are safe outcomes (crit 8 — defensive clamp).

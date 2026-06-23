@@ -170,6 +170,21 @@ export interface ToolContext {
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop" | "error";
 
 /**
+ * How a turn's decoding should treat tool use. The kernel speaks one neutral
+ * vocabulary; each provider maps it to its native forcing control (Anthropic
+ * `tool_choice`, OpenAI `tool_choice`, Gemini `tool_config`) and gracefully
+ * omits it when unsupported.
+ *
+ * - `"auto"` (the default, and the meaning of an absent field) — the model
+ *   decides whether and which tool to call; identical to never setting it.
+ * - `"required"` — the model MUST call some tool, but may pick which one.
+ * - `{ type: "tool"; name }` — the model MUST call exactly the named tool. This
+ *   is the shape `output-contract` uses on its corrective turn to compel a
+ *   `respond` call.
+ */
+export type ToolChoice = "auto" | "required" | { type: "tool"; name: string };
+
+/**
  * A normalized reasoning-effort dial. The kernel speaks one neutral vocabulary;
  * each provider maps it to its own native control — Anthropic's `output_config`
  * effort + adaptive thinking, OpenAI's `reasoning_effort`, Gemini's thinking
@@ -208,6 +223,14 @@ export interface CompletionRequest {
   signal: AbortSignal;
   /** Requested reasoning effort; a provider maps it to its native control. */
   thinking?: ThinkingLevel;
+  /**
+   * How decoding should treat tool use this turn. Absent (or `"auto"`) is the
+   * default and is byte-identical to today's behavior; a provider maps a
+   * stronger choice to its native forcing control and gracefully omits it when
+   * the underlying API can't express it. Set by the agent loop from
+   * `Agent.forceTool` (see `agent.ts`).
+   */
+  toolChoice?: ToolChoice;
 }
 
 /**

@@ -1,7 +1,7 @@
 # Implementation guide — citations
 
 Status: closed
-Closing-commit: b6b0d26
+Closing-commit: 82a2da8
 Closed-on: 2026-06-22
 Deferred: none
 

@@ -3,7 +3,7 @@
 Status: closed
 Closing-commit: 560f2a5946769a78fdb6074f46539090e221d4d4
 Closed-on: 2026-06-23
-Deferred: provider-side decode-time forcing (`toolChoice`/`responseFormat`) — see design §3 Scope Boundary; out of scope here.
+Deferred: (delivered in a follow-up) provider-side decode-time forcing — `CompletionRequest.toolChoice` + `Agent.forceTool`, set corrective-turn-only by output-contract. See design §9 and the follow-up note at the end of this guide.
 
 Slug: `2026-06-22-output-contract`
 Design: `docs/design/2026-06-22-output-contract.md` (PASSED)
@@ -530,3 +530,42 @@ without `outputSchema` can change behavior. The only legitimate reconciliations
 are (a) a builtin-count assertion in `host.test.ts`, and (b) the doc-count strings
 (CLAUDE.md / README) — both intended by this Phase. Any other red is a real
 interaction to investigate; run `npm test` and read the first failure.
+
+---
+
+## 6. Follow-up delivered — provider decode-time forcing (design §9)
+
+The v1 "NO provider-interface change" cut (design §3) was a deliberate v1
+boundary, not a permanent one. A subsequent change delivers decode-time forcing
+per design §9 (D-force-1..5), making the corrective-turn `respond` call
+near-guaranteed on a forcing-capable provider while preserving multi-step work
+and full backward compatibility. Files touched:
+
+- `src/kernel/types.ts` — add `export type ToolChoice = "auto" | "required" |
+  { type: "tool"; name: string }` and an optional `toolChoice?: ToolChoice` on
+  `CompletionRequest` (absent ⇒ today's behavior). D-force-1.
+- `src/kernel/agent.ts` — add a public mutable `forceTool?: string` field on the
+  `Agent` class (instance data, no new barrel export) and, in `streamTurn`, set
+  `toolChoice: this.forceTool ? { type: "tool", name: this.forceTool } : undefined`.
+  The only agent-loop change; inert while `forceTool` is unset. D-force-2.
+- `src/providers/{anthropic,openai,gemini}.ts` — a per-provider mapper
+  (`toAnthropicToolChoice` / `toOpenAIToolChoice` / `toGeminiToolConfig`) emits
+  the native forcing shape and **omits** the key for `"auto"`/absent (graceful
+  degrade). Gemini's lives inside the existing tools-present block. D-force-4.
+- `src/providers/mock.ts` — records the received `toolChoice` (`lastToolChoice`
+  + ordered `toolChoices[]`) without changing replay, so a test can assert
+  forcing reached the provider. D-force-4.
+- `src/extensions/output-contract.ts` — sets `e.agent.forceTool = "respond"` on
+  the existing corrective-turn (reask) branch only, and clears it on a valid
+  accept (`respond.execute`), at the cap, on `agent_end`, and on teardown/kill
+  switch. Never set on initial working turns. D-force-3, D-force-5.
+
+Tests added (all offline, `node:test` via `tsx`, MockProvider only):
+`test/output-contract.test.ts` gains forcing (a) back-compat — no schema ⇒ every
+request omits `toolChoice`; (b) multi-step preserved — turn 1 (a `read`) is not
+forced; (c) corrective turn forces `respond` and clears on a valid accept;
+(d) never-valid — force set on each corrective turn, cleared at the cap;
+(e) kill switch ⇒ `forceTool` never set. `test/{anthropic,openai,gemini}.test.ts`
+each gain a pure request-body test asserting the native mapping + omission for
+`"auto"`/absent. No existing test changed. The v1 retry cap remains the bound for
+a non-forcing provider.
