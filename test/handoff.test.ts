@@ -18,6 +18,7 @@ import { makeHarness } from "./helpers.js";
 import handoff, {
   slugify,
   renderFallback,
+  ensureSchema,
   HANDOFF_SYSTEM_PROMPT,
   __setNow,
 } from "../src/extensions/handoff.js";
@@ -62,6 +63,44 @@ test("renderFallback is non-empty even for an empty transcript", () => {
   const content = renderFallback([], "");
   assert.ok(content.length > 0);
   for (const header of SECTIONS) assert.ok(content.includes(header));
+});
+
+test("ensureSchema back-fills a section header the model dropped (schema D3)", () => {
+  // Invariant D3: a partial model summary missing a required section gets the
+  // header appended so the artifact always satisfies the fixed schema. Drop a
+  // middle section (## Do not touch) AND the trailing ## Reactivation to exercise
+  // both the generic filler and the reactivation-specific filler branch.
+  const partial =
+    "## Goal\nFix the bug\n" +
+    "## Completed\n- read code\n" +
+    "## In progress\n- tracing\n" +
+    "## Pending\n- the test\n" +
+    "## Files touched\n- src/auth.ts\n" +
+    "## Commands run\n- npm test\n" +
+    "## Open decisions\n- token rotation\n" +
+    "## Next steps\n1. add test\n2. ship";
+  // Sanity: the input is genuinely missing the two dropped sections.
+  assert.ok(!partial.includes("## Do not touch"), "fixture omits ## Do not touch");
+  assert.ok(!partial.includes("## Reactivation"), "fixture omits ## Reactivation");
+
+  const filled = ensureSchema(partial, "Fix the bug");
+
+  // Every required section header is now present.
+  for (const header of SECTIONS) {
+    assert.ok(filled.includes(header), `ensureSchema back-fills "${header}"`);
+  }
+  // The already-present sections are preserved verbatim.
+  assert.ok(filled.includes("## Goal\nFix the bug"), "existing sections preserved");
+  // The reactivation filler is goal-aware (its dedicated branch, not "(not reported)").
+  assert.match(filled, /## Reactivation\nResume the work toward: Fix the bug\./);
+  // The middle drop got the generic filler.
+  assert.match(filled, /## Do not touch\n\(not reported\)/);
+});
+
+test("ensureSchema returns a complete summary unchanged", () => {
+  // A summary already carrying every header is returned byte-for-byte.
+  const complete = SECTIONS.map((h) => `${h}\nbody`).join("\n");
+  assert.equal(ensureSchema(complete, "any goal"), complete, "complete summary is untouched");
 });
 
 test("HANDOFF_SYSTEM_PROMPT names the nine sections + reactivation and a branch word", () => {
