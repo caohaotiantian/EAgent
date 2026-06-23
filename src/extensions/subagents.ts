@@ -29,10 +29,16 @@ import { CapabilityManager } from "../kernel/capabilities.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
-import type { Message, Tool, UI } from "../kernel/types.js";
+import type { JSONSchema, Logger, Message, Tool, ToolResult, UI } from "../kernel/types.js";
+import { validate } from "../kernel/validate.js";
 
 /** The tool name, also the registration that children must never inherit. */
 const SPAWN_TOOL = "spawn_agent";
+
+/** Kill switch: when set to "off", the three least-privilege params are no-ops. */
+function lpEnabled(): boolean {
+  return process.env.EAGENT_SUBAGENTS_LP !== "off";
+}
 
 const DEFAULT_CHILD_SYSTEM =
   "You are a focused sub-agent. You have a fresh context and a single task. " +
@@ -51,34 +57,59 @@ export default function activate(e: ExtensionAPI): void {
   const buildChildRegistry = (): ToolRegistry => childRegistryFrom(e.agent.tools.list());
 
   /**
-   * Construct (but do not run) a child agent for a given prompt. A `readOnly`
-   * child runs against its own strict capability manager (read grants, fallback
-   * deny) instead of sharing the parent's, so any mutation/egress tool it tries
-   * is refused at the capability boundary.
+   * The per-spawn options resolved once from the tool args and applied uniformly
+   * to every child of the call. Omitting all of them reproduces today's exact
+   * construction (parent capabilities, parent provider/model, free-text return).
    */
-  const makeChild = (system: string | undefined, maxTurns: number, readOnly: boolean): Agent =>
+  interface ChildOptions {
+    capabilities: CapabilityManager;
+    provider: string | undefined;
+    model: string;
+    schema: JSONSchema | undefined;
+  }
+
+  /**
+   * Construct (but do not run) a child agent for a given system prompt, using the
+   * resolved per-spawn capability manager and provider/model. With no new params
+   * supplied this is byte-identical to today (parent manager, parent
+   * provider/model).
+   */
+  const makeChild = (system: string | undefined, maxTurns: number, opts: ChildOptions): Agent =>
     new Agent({
       providers: e.agent.providers,
-      capabilities: readOnly ? readOnlyCapabilities(e.agent.ui) : e.agent.capabilities,
+      capabilities: opts.capabilities,
       ui: e.agent.ui,
       logger: e.agent.logger,
-      model: e.agent.model,
-      provider: e.agent.providerName,
+      model: opts.model,
+      provider: opts.provider,
       systemPrompt: system ?? DEFAULT_CHILD_SYSTEM,
       maxTurns,
       tools: buildChildRegistry(),
     });
 
-  /** Run a single child on `prompt`, returning its final assistant text. */
+  /**
+   * Run a single child on `prompt`. With no `outputSchema` the return is the
+   * child's free-text final answer (today's behavior). With a schema, the child
+   * runs under the typed-return contract (validate + one re-prompt then fail).
+   */
   const runChild = async (
     prompt: string,
     system: string | undefined,
     maxTurns: number,
-    readOnly: boolean,
-  ): Promise<string> => {
-    const child = makeChild(system, maxTurns, readOnly);
+    opts: ChildOptions,
+  ): Promise<ToolResult> => {
+    if (opts.schema) {
+      return runTypedChild(
+        prompt,
+        system ?? DEFAULT_CHILD_SYSTEM,
+        opts.schema,
+        (sys) => makeChild(sys, maxTurns, opts),
+        finalText,
+      );
+    }
+    const child = makeChild(system, maxTurns, opts);
     const { messages } = await child.run(prompt);
-    return finalText(messages);
+    return ok(finalText(messages));
   };
 
   e.registerTool(
@@ -93,7 +124,10 @@ export default function activate(e: ExtensionAPI): void {
         "but cannot themselves spawn. Set readOnly=true to run the child(ren) " +
         "in a strict read-only lane (fs:read only; all mutation and network " +
         "egress denied) — use it for explorers and reviewers that must not " +
-        "change anything.",
+        "change anything. Optionally scope the child(ren) to a capability subset " +
+        "with `capabilities`, run them on a different registered vendor with " +
+        "`provider`/`model`, and demand a typed JSON return with " +
+        "`outputSchema`/`require`.",
       capabilities: ["agent:spawn"],
       parameters: {
         type: "object",
@@ -129,6 +163,34 @@ export default function activate(e: ExtensionAPI): void {
               "Run the child(ren) in a strict read-only capability lane: fs:read only, " +
               "all mutation/egress (fs:write, shell:exec, net:fetch, …) denied.",
           },
+          capabilities: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional capability allowlist scoping the child(ren) to exactly these patterns " +
+              "(deny everything else); generalizes readOnly. If both are set, this wins.",
+          },
+          provider: {
+            type: "string",
+            description:
+              "Optional name of a registered provider to run the child(ren) on (de-correlate a " +
+              "reviewer from the producer). Falls back to the parent provider if unregistered.",
+          },
+          model: {
+            type: "string",
+            description: "Optional model override for the child(ren); defaults to the parent's model.",
+          },
+          outputSchema: {
+            type: "object",
+            description:
+              "Optional JSON Schema the child(ren)'s final answer must satisfy. The child is " +
+              "instructed to emit only matching JSON; an invalid reply is re-prompted once then fails.",
+          },
+          require: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional keys folded into outputSchema.required, to demand fields without a full schema.",
+          },
         },
       },
       execute: async (args) => {
@@ -140,13 +202,31 @@ export default function activate(e: ExtensionAPI): void {
             : DEFAULT_MAX_TURNS;
         const readOnly = args.readOnly === true;
 
+        // Resolve the three least-privilege passthroughs once; applied to every
+        // child of this call (like `system`). Omitting all three reproduces today.
+        const parent = {
+          capabilities: e.agent.capabilities,
+          ui: e.agent.ui,
+          providers: e.agent.providers,
+          providerName: e.agent.providerName,
+          model: e.agent.model,
+          log: e.log,
+        };
+        const { provider, model } = resolveChildProvider(args, parent);
+        const opts: ChildOptions = {
+          capabilities: resolveChildCapabilities(args, parent),
+          provider,
+          model,
+          schema: resolveOutputSchema(args),
+        };
+
         if (mode === "single") {
           const prompt = args.prompt;
           if (typeof prompt !== "string" || prompt.length === 0) {
             return fail("mode=single requires a non-empty string `prompt`.");
           }
-          const answer = await runChild(prompt, system, maxTurns, readOnly);
-          return ok(answer, { mode, children: 1, readOnly });
+          const res = await runChild(prompt, system, maxTurns, opts);
+          return { ...res, details: { mode, children: 1, readOnly, child: res.details } };
         }
 
         const prompts = asPrompts(args.prompts);
@@ -155,21 +235,28 @@ export default function activate(e: ExtensionAPI): void {
         }
 
         if (mode === "parallel") {
-          const answers = await Promise.all(prompts.map((p) => runChild(p, system, maxTurns, readOnly)));
-          const body = answers.map((a, i) => `[child ${i + 1}]\n${a}`).join("\n\n");
-          return ok(body, { mode, children: answers.length, readOnly });
+          const results = await Promise.all(prompts.map((p) => runChild(p, system, maxTurns, opts)));
+          const body = results.map((r, i) => `[child ${i + 1}]\n${r.content}`).join("\n\n");
+          const isError = results.some((r) => r.isError) || undefined;
+          // Carry each child's details so the shape stays consistent with single/chain
+          // (which expose a nested `child`); here it is one `child` entry per prompt.
+          const children = results.map((r) => r.details);
+          return { content: body, isError, details: { mode, children: results.length, readOnly, child: children } };
         }
 
         if (mode === "chain") {
           let previous: string | undefined;
-          let answer = "";
+          let last: ToolResult = ok("");
           for (const p of prompts) {
             const prompt =
               previous === undefined ? p : `Previous result:\n${previous}\n\nNow: ${p}`;
-            answer = await runChild(prompt, system, maxTurns, readOnly);
-            previous = answer;
+            last = await runChild(prompt, system, maxTurns, opts);
+            if (last.isError) {
+              return { ...last, details: { mode, children: prompts.length, readOnly, child: last.details } };
+            }
+            previous = last.content;
           }
-          return ok(answer, { mode, children: prompts.length, readOnly });
+          return { ...last, details: { mode, children: prompts.length, readOnly, child: last.details } };
         }
 
         return fail(`Unknown mode: ${mode}. Use single, parallel, or chain.`);
@@ -186,6 +273,10 @@ export default function activate(e: ExtensionAPI): void {
       ctx.print("  parallel : one child per `prompts[]`, run concurrently; answers concatenated.");
       ctx.print("  chain    : children run in sequence, each fed the previous child's answer.");
       ctx.print("Children share this agent's providers and permissions but cannot re-spawn.");
+      ctx.print("Optional per-spawn controls (default off):");
+      ctx.print("  capabilities : allowlist scoping the child to a capability subset (readOnly is sugar).");
+      ctx.print("  provider/model : run the child on a different registered provider/model (falls back if unknown).");
+      ctx.print("  outputSchema/require : demand a typed JSON return (validated; re-prompted once then failed).");
     },
   });
 }
@@ -194,13 +285,184 @@ export default function activate(e: ExtensionAPI): void {
 const READ_ONLY_GRANTS = ["fs:read", "skill:read"] as const;
 
 /**
+ * A fresh deny-fallback capability manager scoped to exactly the granted
+ * patterns. This is the generalized middle privilege tier: a child gets only the
+ * listed capabilities and everything else is refused at the capability boundary.
+ * `readOnlyCapabilities` is now sugar over this with the read-only preset.
+ */
+export function scopedCapabilities(grant: readonly string[], ui?: UI): CapabilityManager {
+  return new CapabilityManager({ grant: [...grant], fallback: "deny", ui });
+}
+
+/**
  * A fresh capability manager for a read-only child: it grants only local read
  * capabilities and denies everything else by fallback, so any mutation or
  * network-egress tool the child attempts is refused at the capability boundary.
  * Exported so the lane's enforcement is unit-testable directly.
  */
 export function readOnlyCapabilities(ui?: UI): CapabilityManager {
-  return new CapabilityManager({ grant: [...READ_ONLY_GRANTS], fallback: "deny", ui });
+  return scopedCapabilities(READ_ONLY_GRANTS, ui);
+}
+
+/** Coerce a value into a non-empty array of non-empty strings, or undefined. */
+function nonEmptyStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const out = value.filter((v): v is string => typeof v === "string" && v.length > 0);
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Resolve the capability manager for a child from its spawn args, shared by the
+ * spawn tool and the workflow `agent` step (D1/D6). Precedence: an explicit
+ * `capabilities` allowlist wins (a warning is logged if `readOnly` is also set);
+ * else `readOnly:true` uses the read-only preset; else the child inherits the
+ * parent's manager exactly as today. When the kill switch is off, always inherit.
+ */
+export function resolveChildCapabilities(
+  args: { capabilities?: unknown; readOnly?: unknown },
+  parent: { capabilities: CapabilityManager; ui: UI; log: Pick<Logger, "warn"> },
+  enabled = lpEnabled(),
+): CapabilityManager {
+  if (!enabled) return parent.capabilities;
+  const allowlist = nonEmptyStringList(args.capabilities);
+  const readOnly = args.readOnly === true;
+  if (allowlist) {
+    if (readOnly) {
+      parent.log.warn("spawn_agent: both `capabilities` and `readOnly` supplied; `capabilities` wins.");
+    }
+    return scopedCapabilities(allowlist, parent.ui);
+  }
+  if (readOnly) return readOnlyCapabilities(parent.ui);
+  return parent.capabilities;
+}
+
+/**
+ * Resolve the child's provider/model from its spawn args (D2/D6). A named,
+ * *registered* provider is used as-is; an unregistered/typo'd name falls back to
+ * the parent's provider with a logged warning (never a hard failure). `model` is
+ * overridden only when a string is supplied. When the kill switch is off, the
+ * parent's provider/model are used unchanged.
+ */
+export function resolveChildProvider(
+  args: { provider?: unknown; model?: unknown },
+  parent: { providers: { get(name?: string): unknown }; providerName: string | undefined; model: string; log: Pick<Logger, "warn"> },
+  enabled = lpEnabled(),
+): { provider: string | undefined; model: string } {
+  if (!enabled) return { provider: parent.providerName, model: parent.model };
+  let provider = parent.providerName;
+  if (typeof args.provider === "string" && args.provider.length > 0) {
+    if (parent.providers.get(args.provider) !== undefined) {
+      provider = args.provider;
+    } else {
+      parent.log.warn(
+        `spawn_agent: provider "${args.provider}" is not registered; falling back to the parent provider.`,
+      );
+    }
+  }
+  const model = typeof args.model === "string" && args.model.length > 0 ? args.model : parent.model;
+  return { provider, model };
+}
+
+/** The fixed prefix marking a typed-return contract failure (a stable constant). */
+const CONTRACT_VIOLATION = "contract violation:";
+
+/**
+ * Resolve the `outputSchema` (+ folded `require`) for a child, or `undefined`
+ * when no typed return is requested or the kill switch is off. `require` keys are
+ * unioned into the schema's `required` so a parent can demand keys without
+ * hand-writing a full schema (D3).
+ */
+export function resolveOutputSchema(
+  args: { outputSchema?: unknown; require?: unknown },
+  enabled = lpEnabled(),
+): JSONSchema | undefined {
+  if (!enabled) return undefined;
+  const raw = args.outputSchema;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const schema = { ...(raw as JSONSchema) };
+  const extra = nonEmptyStringList(args.require);
+  if (extra) {
+    const required = new Set<string>([...(schema.required ?? []), ...extra]);
+    schema.required = [...required];
+  }
+  return schema;
+}
+
+/** The contract instruction appended to a typed child's system prompt (fixed wording). */
+function contractInstruction(schema: JSONSchema): string {
+  const required = schema.required ?? [];
+  return (
+    "\n\nReturn ONLY a JSON object matching this schema: " +
+    JSON.stringify(schema) +
+    (required.length > 0 ? `; required: ${required.join(", ")}` : "") +
+    ". Emit no prose around the JSON."
+  );
+}
+
+/**
+ * Render a re-prompt seed from validation errors (recovery-style single nudge):
+ * the same child is re-run with this concrete, error-keyed correction (D3).
+ */
+function repromptSeed(prompt: string, errors: string[]): string {
+  return (
+    `${prompt}\n\nYour previous reply did not satisfy the required JSON contract:\n- ` +
+    errors.join("\n- ") +
+    "\nReturn ONLY the corrected JSON object, nothing else."
+  );
+}
+
+/** Parse the child's final text as JSON; a parse failure is treated as a miss. */
+function parseChildJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Run a child under a typed-return contract (D3), shared by the spawn tool and
+ * the workflow `agent` step. The child is run, its final text parsed as JSON and
+ * validated against `schema`; on a miss the child is re-run *once* seeded with
+ * the concrete errors, then validated again. Still invalid → a `contract
+ * violation:` failure. At most two child runs. On success the validated object is
+ * rendered as JSON `content` and carried in the result `details`.
+ *
+ * `build` constructs a fresh child given the (contract-augmented) system prompt;
+ * `harvest` reads a finished child's final assistant text. Both are supplied by
+ * the caller so this stays free of either file's Agent-construction specifics.
+ */
+export async function runTypedChild(
+  prompt: string,
+  baseSystem: string,
+  schema: JSONSchema,
+  build: (system: string) => Agent,
+  harvest: (messages: readonly Message[]) => string,
+): Promise<ToolResult> {
+  const system = baseSystem + contractInstruction(schema);
+
+  const attempt = async (input: string): Promise<{ text: string; result: ReturnType<typeof validate> }> => {
+    const child = build(system);
+    const { messages } = await child.run(input);
+    const text = harvest(messages);
+    const parsed = parseChildJson(text);
+    if (!parsed.ok) {
+      return { text, result: { ok: false, value: undefined, errors: ["final reply was not valid JSON"] } };
+    }
+    return { text, result: validate(schema, parsed.value) };
+  };
+
+  const first = await attempt(prompt);
+  if (first.result.ok) {
+    return ok(JSON.stringify(first.result.value), first.result.value);
+  }
+
+  const second = await attempt(repromptSeed(prompt, first.result.errors));
+  if (second.result.ok) {
+    return ok(JSON.stringify(second.result.value), second.result.value);
+  }
+
+  return fail(`${CONTRACT_VIOLATION} child output did not match the schema after one retry:\n- ${second.result.errors.join("\n- ")}`);
 }
 
 /**

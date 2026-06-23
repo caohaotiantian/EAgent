@@ -35,7 +35,11 @@ import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
+import compact from "./extensions/compact.js";
 import recovery from "./extensions/recovery.js";
+import outputContract from "./extensions/output-contract.js";
+import contentGuard from "./extensions/content-guard.js";
+import circuitBreaker from "./extensions/circuit-breaker.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
 import packages from "./extensions/packages.js";
@@ -43,6 +47,7 @@ import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
 import microagents from "./extensions/microagents.js";
 import limits from "./extensions/limits.js";
+import cost from "./extensions/cost.js";
 import self from "./extensions/self.js";
 import web from "./extensions/web.js";
 import checkpoint from "./extensions/checkpoint.js";
@@ -55,6 +60,16 @@ import riskGuard from "./extensions/risk-guard.js";
 import bashPolicy from "./extensions/bash-policy.js";
 import integrity from "./extensions/integrity.js";
 import writeGuard from "./extensions/write-guard.js";
+import secretGuard from "./extensions/secret-guard.js";
+import sweepEdit from "./extensions/sweep-edit.js";
+import citations from "./extensions/citations.js";
+import envReport from "./extensions/env-report.js";
+import evals from "./extensions/evals.js";
+import handoff from "./extensions/handoff.js";
+import driftProbe from "./extensions/drift-probe.js";
+import skillsHardening from "./extensions/skills-hardening.js";
+import ask from "./extensions/ask.js";
+import routing from "./extensions/routing.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -68,7 +83,11 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["dynamic-workflow", dynamicWorkflow],
   ["memory", memory],
   ["prune", prune],
+  ["compact", compact],
   ["recovery", recovery],
+  ["output-contract", outputContract],
+  ["content-guard", contentGuard],
+  ["circuit-breaker", circuitBreaker],
   ["planmode", planmode],
   ["session", session],
   ["packages", packages],
@@ -76,6 +95,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["context-files", contextFiles],
   ["microagents", microagents],
   ["limits", limits],
+  ["cost", cost],
   ["self", self],
   ["web", web],
   ["checkpoint", checkpoint],
@@ -88,6 +108,16 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["bash-policy", bashPolicy],
   ["integrity", integrity],
   ["write-guard", writeGuard],
+  ["secret-guard", secretGuard],
+  ["sweep-edit", sweepEdit],
+  ["citations", citations],
+  ["env-report", envReport],
+  ["evals", evals],
+  ["handoff", handoff],
+  ["drift-probe", driftProbe],
+  ["skills-hardening", skillsHardening],
+  ["ask", ask],
+  ["routing", routing],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */

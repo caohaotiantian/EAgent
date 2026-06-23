@@ -67,7 +67,52 @@ interface McpCallResult {
   isError?: boolean;
 }
 
+/** A resource as described by an MCP server's `resources/list`. */
+export interface McpResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** The textual shape of an MCP `resources/read` result. */
+interface McpReadResult {
+  contents?: Array<{ uri?: string; text?: string; blob?: string; mimeType?: string }>;
+}
+
 const PROTOCOL_VERSION = "2024-11-05";
+
+/**
+ * Defensive cap on the cached catalog: a server may publish an enormous
+ * `resources/list`, and we only need enough for the model to discover what to
+ * read. A single fixed bound (not a behavioral lever) on memory/context.
+ */
+const MAX_RESOURCES = 1000;
+
+/**
+ * Narrow a foreign `resources/list` payload to the resources we trust to act on:
+ * objects with a non-empty string `uri`. MCP servers are foreign code we don't
+ * vouch for, so — exactly like the tool-list filter in `start()` — we re-validate
+ * the shape rather than trust it. A non-array payload (or a non-array
+ * `resources`) yields `[]`. Capped at `MAX_RESOURCES`.
+ */
+export function parseResourceList(raw: unknown): McpResource[] {
+  const list = (raw as { resources?: unknown } | null | undefined)?.resources;
+  if (!Array.isArray(list)) return [];
+  const out: McpResource[] = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const r = entry as Partial<McpResource>;
+    if (typeof r.uri !== "string" || r.uri.length === 0) continue;
+    const resource: McpResource = { uri: r.uri };
+    if (typeof r.name === "string") resource.name = r.name;
+    if (typeof r.description === "string") resource.description = r.description;
+    if (typeof r.mimeType === "string") resource.mimeType = r.mimeType;
+    out.push(resource);
+    if (out.length >= MAX_RESOURCES) break;
+  }
+  return out;
+}
 
 /**
  * Heuristics for "tool poisoning": an MCP server's tool *description* is loaded
@@ -338,20 +383,29 @@ class HttpTransport implements Transport {
 class McpConnection {
   readonly name: string;
   readonly #transport: Transport;
+  readonly #warn: (msg: string) => void;
   tools: McpTool[] = [];
+  /** The read-only data half: cached `resources/list` catalog (bodies read live). */
+  resources: McpResource[] = [];
+  /** The server's advertised `initialize` capabilities, used as a skip hint (D4). */
+  #serverCapabilities: Record<string, unknown> = {};
 
-  constructor(def: ServerDef) {
+  constructor(def: ServerDef, warn: (msg: string) => void = () => {}) {
     this.name = def.name;
+    this.#warn = warn;
     this.#transport = isHttpDef(def) ? new HttpTransport(def) : new StdioTransport(def);
   }
 
   /** Run the handshake and load the tool list. Throws if the server misbehaves. */
   async start(): Promise<void> {
-    await this.#transport.request("initialize", {
+    const init = (await this.#transport.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: "eagent", version: "0.1" },
-    });
+    })) as { capabilities?: Record<string, unknown> } | undefined;
+    // Capture the server's advertised capabilities; used below as a cheap skip
+    // hint for the resources half (the controlling behavior is fail-soft, D4).
+    this.#serverCapabilities = init?.capabilities && typeof init.capabilities === "object" ? init.capabilities : {};
     await this.#transport.notify("notifications/initialized");
     const listed = (await this.#transport.request("tools/list", {})) as { tools?: McpTool[] } | undefined;
     // MCP servers are foreign code we don't vouch for; don't trust the shape of
@@ -360,6 +414,40 @@ class McpConnection {
     this.tools = (listed?.tools ?? []).filter(
       (t): t is McpTool => Boolean(t) && typeof (t as McpTool).name === "string" && (t as McpTool).name.length > 0,
     );
+    // The read-only data half: enumerate resources, mirroring tools/list. Fully
+    // additive — the tools path above is unchanged.
+    await this.#loadResources();
+  }
+
+  /**
+   * Enumerate `resources/list` into the cached catalog. Gated by the kill switch
+   * and the advertised-capability skip hint; fail-soft on any error or garbage
+   * payload (empty catalog, never throws) — the same tolerance `tools/list` has.
+   */
+  async #loadResources(): Promise<void> {
+    if (process.env.EAGENT_MCP_RESOURCES === "off") {
+      this.resources = [];
+      return;
+    }
+    // D4 skip hint: a server that clearly does not advertise `resources` is not
+    // probed (saves a round-trip). Foreign servers aren't trusted to advertise
+    // honestly, so this is an optimization, not the correctness boundary.
+    if (!("resources" in this.#serverCapabilities)) {
+      this.resources = [];
+      return;
+    }
+    try {
+      const raw = await this.#transport.request("resources/list", {});
+      this.resources = parseResourceList(raw);
+    } catch (err) {
+      this.#warn(`MCP server "${this.name}" resources/list failed: ${(err as Error).message}`);
+      this.resources = [];
+    }
+  }
+
+  /** Re-run `resources/list` and refresh the cached catalog in place (D5). */
+  async refreshResources(): Promise<void> {
+    await this.#loadResources();
   }
 
   /** Proxy a JSON-RPC request to the underlying transport. */
@@ -374,13 +462,16 @@ class McpConnection {
 
 export default async function activate(e: ExtensionAPI): Promise<() => void> {
   e.grantCapability("mcp:call");
+  // Reading a server's resources is a distinct, read-only privilege from calling
+  // its (possibly mutating) tools, so it gets its own capability (D3).
+  e.grantCapability("mcp:read");
 
   const connections: McpConnection[] = [];
 
   for (const def of parseServers(e.log.warn, process.env.EAGENT_MCP_SERVERS)) {
     let conn: McpConnection | undefined;
     try {
-      conn = new McpConnection(def);
+      conn = new McpConnection(def, e.log.warn);
       await conn.start();
     } catch (err) {
       // A server that won't start is skipped, never fatal to activation.
@@ -439,19 +530,91 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
         }),
       );
     }
-    e.log.info(`MCP server "${def.name}" connected with ${conn.tools.length} tool(s).`);
+
+    // The read-only data half: register one `read_resource` tool per server that
+    // actually has a catalog (a resource-less server gets none — AC4/AC7). The
+    // catalog is cached; bodies are read live (D5). Gated by `mcp:read` (D3).
+    if (conn.resources.length > 0) {
+      const connection = conn;
+      const fullName = `mcp__${def.name}__read_resource`;
+      if (e.agent.tools.has(fullName)) {
+        e.log.warn(`MCP tool "${fullName}" shadows an already-registered tool; the later registration wins.`);
+      }
+      const sample = connection.resources
+        .slice(0, 5)
+        .map((r) => r.uri)
+        .join(", ");
+      e.registerTool(
+        defineTool({
+          name: fullName,
+          description:
+            `Read a resource published by MCP server "${def.name}" by URI ` +
+            `(${connection.resources.length} available, e.g. ${sample}).`,
+          capabilities: ["mcp:read"],
+          parameters: {
+            type: "object",
+            properties: { uri: { type: "string", description: "The resource URI to read." } },
+            required: ["uri"],
+          },
+          execute: async (args, ctx) => {
+            await ctx.require("mcp:read");
+            const uri = (args as { uri?: unknown }).uri;
+            if (typeof uri !== "string" || uri.length === 0) {
+              return fail("MCP resource read failed: a non-empty string `uri` is required.");
+            }
+            try {
+              const result = (await connection.request("resources/read", { uri }, ctx.signal)) as
+                | McpReadResult
+                | undefined;
+              // Surface concatenated text parts; binary `blob` parts are ignored.
+              const content = (result?.contents ?? [])
+                .filter((c) => typeof c.text === "string")
+                .map((c) => c.text)
+                .join("");
+              return ok(content, result);
+            } catch (err) {
+              // Fail-open per resource: one bad URI must not throw out of the tool.
+              return fail(`MCP resource read failed: ${(err as Error).message}`);
+            }
+          },
+        }),
+      );
+    }
+
+    e.log.info(
+      `MCP server "${def.name}" connected with ${conn.tools.length} tool(s) and ${conn.resources.length} resource(s).`,
+    );
   }
 
   e.registerCommand({
     name: "mcp",
-    description: "List connected MCP servers and their tool counts.",
-    run: (ctx) => {
+    description:
+      "Inspect connected MCP servers. Usage: /mcp [resources [server]|refresh] " +
+      "(bare: tool + resource counts; resources: the cached catalog; refresh: re-enumerate resources).",
+    run: async (ctx) => {
       if (connections.length === 0) {
         ctx.print("(no MCP servers connected)");
         return;
       }
+      const [sub, server] = ctx.args.trim().split(/\s+/);
+      if (sub === "resources") {
+        const shown = server ? connections.filter((c) => c.name === server) : connections;
+        for (const conn of shown) {
+          ctx.print(`  ${conn.name} (${conn.resources.length} resource(s)):`);
+          for (const r of conn.resources) ctx.print(`    ${r.uri}`);
+        }
+        return;
+      }
+      if (sub === "refresh") {
+        for (const conn of connections) await conn.refreshResources();
+        ctx.print("(refreshed MCP resource catalogs)");
+        for (const conn of connections) {
+          ctx.print(`  ${conn.name.padEnd(20)} ${conn.resources.length} resource(s)`);
+        }
+        return;
+      }
       for (const conn of connections) {
-        ctx.print(`  ${conn.name.padEnd(20)} ${conn.tools.length} tool(s)`);
+        ctx.print(`  ${conn.name.padEnd(20)} ${conn.tools.length} tool(s), ${conn.resources.length} resource(s)`);
       }
     },
   });

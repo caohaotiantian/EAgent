@@ -155,7 +155,7 @@ flowchart LR
         direction TB
         EVA["agent_start · turn_start"]
         EVB["message · text_delta"]
-        EVC["tool_start · tool_end · usage"]
+        EVC["tool_start · tool_end · tool_batch_end · usage"]
         EVD["turn_end · agent_end · error"]
     end
     subgraph INT["Filter hooks — e.hook() · intervene"]
@@ -198,9 +198,11 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary | `/code` | `code:exec` |
 | `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
 | `dynamic-workflow` | `run_workflow` executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
-| `memory`      | context compaction via `transformContext` + `remember`/`recall` scratchpad | `/compact`, `/memory` | — |
+| `memory`      | store-backed `remember`/`recall` working-memory scratchpad with white-box per-entry provenance (`EAGENT_MEMORY_ENTRIES=off` to disable) — registers no `transformContext` hook | `/memory` | — |
 | `prune`       | token-budget tool-output pruning via `transformContext` — truncates old, oversized tool results beyond a protected recent window (`EAGENT_PRUNE=off` to disable) | — | — |
+| `compact`     | token-gated structured conversation compaction via `transformContext` — folds the older prefix at a user-turn boundary into `## Decisions`/`## Files`/`## Open threads`, keeps the last K user turns, re-injects a byte-capped pinned block; off by default (`/compact on`, `EAGENT_COMPACT=off` to kill) | `/compact` | — |
 | `recovery`    | turns a *failed* tool result into a corrective nudge via `afterToolCall`, keyed to EAgent's own error strings, so the model self-corrects (`EAGENT_RECOVERY=off` to disable) | — | — |
+| `output-contract`| schema-validated final output — set `Agent.outputSchema` and the model's answer is validated/coerced (reusing the kernel input-validator) via a per-run `respond` tool, surfaced typed on `Agent.output`; invalid answers drive a bounded validate-and-reask with the exact per-field errors (inert with no schema; `EAGENT_OUTPUT_CONTRACT=off`) | — (`respond`) | — |
 | `planmode`    | human-in-the-loop approval gate before mutating tools run | `/plan` | — |
 | `session`     | save / load / handoff for transcripts | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
 | `packages`    | install extensions from `path:` / `git:` / `npm:` (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
@@ -208,6 +210,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them | `/context`, `/context-reload` | — |
 | `microagents` | keyword-triggered knowledge injection via `transformContext` — scans `*.md` files with `triggers:` frontmatter and injects a body when a trigger appears in the latest user message (`EAGENT_MICROAGENTS=off` to disable) | `/microagents` | — |
 | `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
+| `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
 | `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
@@ -220,6 +223,18 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `bash-policy` | command-granular shell policy gate — reduces a command line to a command family and evaluates an allow/deny/ask ruleset (no-op by default; `EAGENT_BASH_POLICY=off`) | `/bash-policy` | — |
 | `integrity`   | sweeps every tool description for poisoning / hidden instructions, and flags descriptions that change across sessions (rug-pull guard) | `/integrity` | — |
 | `write-guard` | prompts before a *blind overwrite* — a full-content `write` to an existing file the session has not read — via `beforeToolCall` (`EAGENT_WRITE_GUARD=off` to disable) | — | — |
+| `content-guard`| ingress trust labeling on `afterToolCall` — strips invisible injection-vector Unicode and wraps *successful* foreign-tool output (default `net:fetch`/`mcp:call`) in an `<untrusted-content>` provenance fence (on by default; `EAGENT_CONTENT_GUARD=off`) | `/content-guard` | — |
+| `circuit-breaker` | tool-call repetition / consecutive-failure fail-fast — buckets calls by signature (`name + canonical(args)`); the 2nd identical call earns a non-blocking steer, the N-th (default 3) or N consecutive failures ask/block (on by default, mode `ask`; `EAGENT_CIRCUIT_BREAKER=off`) | `/circuit-breaker` | — |
+| `secret-guard` | keeps secret *values* out of outgoing tool args — on `beforeToolCall`, scans leak-capable tools' args (default `net:fetch`/`shell:exec`/`mcp:call`) for credential patterns + high-entropy tokens and asks/blocks without echoing the value (on by default, mode `ask`; `EAGENT_SECRET_GUARD=off`) | `/secret-guard` | — |
+| `sweep-edit`   | `sweep_edit` tool — regex-enumerated multi-site refactor: finds match sites via `search` (no shell), fans a scoped sub-agent per file that edits or declines, with a max-sites cap | — | `fs:write`, `agent:spawn` |
+| `citations`    | grounding — tags *retrieval* tool output (`net:fetch`/`fs:read`) with a visible `[src:N]` id and, on `agent_end`, warns (never blocks) on a *fabricated* citation in the final answer (on by default; `EAGENT_CITATIONS=off`) | `/citations` | — |
+| `env-report`   | classifies *environmental* tool failures (auth/missing-binary/network/permission), surfaces an `environment_issue` and replaces `recovery`'s retry-nudge with a "surface, don't retry" note so the model stops looping on infra faults (on by default; `EAGENT_ENV_REPORT=off`) | — (`env_report` tool) | — |
+| `evals`        | offline behavior-eval harness — `/expect` trajectory assertions, an `/eval <dir>` headless pass@k runner over `*.eval.json`, and a `judge` tool (recursion-safe sub-call); ships a `test/security/` guard-regression set | `/expect`, `/eval` | — |
+| `handoff`      | session resume doc — on `agent_end` (or `/handoff-doc`) summarizes the transcript via a recursion-safe sub-call into a fixed schema + reactivation paragraph, written to `.eagent/handoffs/` (off by default; `EAGENT_HANDOFF=off`) | `/handoff-doc` | — |
+| `drift-probe`  | reasoning-quality canary — every N turns probes a pinned question and warns (never blocks) on regression vs the turn-0 baseline, suggesting `/compact` or `/handoff-doc` (off by default; `EAGENT_DRIFT_PROBE=off`) | `/drift-probe` | — |
+| `skills-hardening` | guards the skill self-extension surface — `SKILL.md` body/script supply-chain scan + body rug-pull fingerprint (warn-only), frontmatter validation, `allowed-tools` `beforeToolCall` scoping for the active skill, and optional `triggers:`-gated tier-1 disclosure (`EAGENT_SKILL_TRIGGERS=off`) | — | — |
+| `ask`          | agent→host elicitation — an `ask_user_question` tool so the model can pause and ask the human (with options) before guessing, gated by `ui:ask` so batch runs auto-decline; calls an optional `UI.ask` (CLI readline), else falls back to "proceed with a stated assumption" | — (`ask_user_question`) | `ui:ask` |
+| `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -319,7 +334,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/usage in http.ts) · cassette (record/replay)
-src/extensions/  29 built-in extensions, all riding the ExtensionAPI
+src/extensions/  44 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

@@ -15,8 +15,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import activate, { parseServers, detectSuspiciousDescription } from "../src/extensions/mcp.js";
-import { makeHarness } from "./helpers.js";
+import activate, { parseResourceList, parseServers, detectSuspiciousDescription } from "../src/extensions/mcp.js";
+import { Agent } from "../src/kernel/agent.js";
+import { CapabilityManager } from "../src/kernel/capabilities.js";
+import { CommandRegistry } from "../src/kernel/commands.js";
+import { ExtensionHost } from "../src/kernel/extension.js";
+import { MemoryBackend } from "../src/kernel/store.js";
+import { MockProvider, type MockResponder } from "../src/providers/mock.js";
+import { autoUI, makeHarness, silentLogger } from "./helpers.js";
 
 test("detectSuspiciousDescription flags tool-poisoning markers and clears benign text", () => {
   // The Invariant-Labs-style poisoned 'add' tool description.
@@ -60,7 +66,79 @@ test("parseServers skips malformed entries and tolerates non-array / bad JSON", 
   assert.equal(parseServers(() => {}, JSON.stringify({ not: "an array" })).length, 0);
 });
 
+// T1 (AC5) — a foreign resources/list payload is narrowed to entries with a
+// non-empty string `uri`; everything else is dropped and a non-array yields [].
+test("parseResourceList keeps only non-empty-string uri entries and tolerates junk", () => {
+  const kept = parseResourceList({
+    resources: [
+      { uri: "file:///a", name: "a", mimeType: "text/plain" },
+      null,
+      {},
+      { uri: 42 },
+      { uri: "" },
+      { uri: "file:///b" },
+    ],
+  });
+  assert.deepEqual(
+    kept.map((r) => r.uri),
+    ["file:///a", "file:///b"],
+    "only the two valid uris survive; null/{}/{uri:42}/{uri:''} are dropped",
+  );
+  // The first valid entry keeps its optional metadata.
+  assert.equal(kept[0]?.name, "a");
+  assert.equal(kept[0]?.mimeType, "text/plain");
+
+  // A non-array payload (or a payload whose `resources` is not an array) yields [].
+  assert.deepEqual(parseResourceList(undefined), []);
+  assert.deepEqual(parseResourceList({}), []);
+  assert.deepEqual(parseResourceList("x"), []);
+  assert.deepEqual(parseResourceList({ resources: "nope" }), []);
+  assert.deepEqual(parseResourceList(null), []);
+});
+
 const FIXTURE_SERVER = `
+import { createInterface } from "node:readline";
+
+const rl = createInterface({ input: process.stdin });
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\\n"); }
+
+// Count resources/list calls so a refresh re-enumeration is observable: the
+// first list returns one resource, every subsequent list returns two.
+let listCalls = 0;
+
+rl.on("line", (line) => {
+  const t = line.trim();
+  if (!t) return;
+  let msg;
+  try { msg = JSON.parse(t); } catch { return; }
+  const { id, method, params } = msg;
+  if (method === "initialize") {
+    send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {}, resources: {} }, serverInfo: { name: "fixture", version: "1" } } });
+  } else if (method === "notifications/initialized") {
+    // no reply
+  } else if (method === "tools/list") {
+    send({ jsonrpc: "2.0", id, result: { tools: [ { name: "echo", description: "echo text", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } } ] } });
+  } else if (method === "tools/call") {
+    const args = (params && params.arguments) || {};
+    send({ jsonrpc: "2.0", id, result: { content: [ { type: "text", text: "echo: " + args.text } ] } });
+  } else if (method === "resources/list") {
+    listCalls++;
+    const resources = listCalls <= 1
+      ? [ { uri: "file:///readme.md", name: "readme", mimeType: "text/plain" } ]
+      : [ { uri: "file:///readme.md", name: "readme", mimeType: "text/plain" }, { uri: "file:///changelog.md", name: "changelog", mimeType: "text/plain" } ];
+    send({ jsonrpc: "2.0", id, result: { resources } });
+  } else if (method === "resources/read") {
+    const uri = (params && params.uri) || "";
+    send({ jsonrpc: "2.0", id, result: { contents: [ { uri, mimeType: "text/plain", text: "RESOURCE BODY" } ] } });
+  } else if (typeof id === "number") {
+    send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } });
+  }
+});
+`;
+
+// A second fixture that does NOT support resources: it advertises only
+// `tools: {}` and falls through to the -32601 catch-all for resources/list.
+const NO_RESOURCES_SERVER = `
 import { createInterface } from "node:readline";
 
 const rl = createInterface({ input: process.stdin });
@@ -82,6 +160,7 @@ rl.on("line", (line) => {
     const args = (params && params.arguments) || {};
     send({ jsonrpc: "2.0", id, result: { content: [ { type: "text", text: "echo: " + args.text } ] } });
   } else if (typeof id === "number") {
+    // Catch-all: resources/list (and anything else) errors with -32601.
     send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } });
   }
 });
@@ -89,11 +168,14 @@ rl.on("line", (line) => {
 
 let dir: string;
 let fixturePath: string;
+let noResourcesPath: string;
 
 before(() => {
   dir = mkdtempSync(join(tmpdir(), "eagent-mcp-"));
   fixturePath = join(dir, "fixture-server.mjs");
   writeFileSync(fixturePath, FIXTURE_SERVER);
+  noResourcesPath = join(dir, "no-resources-server.mjs");
+  writeFileSync(noResourcesPath, NO_RESOURCES_SERVER);
   process.env.EAGENT_MCP_SERVERS = JSON.stringify([
     { name: "fixture", command: "node", args: [fixturePath] },
   ]);
@@ -149,5 +231,163 @@ test("the /mcp command lists the connected server", async () => {
     assert.match(output, /1 tool/);
   } finally {
     await host.dispose();
+  }
+});
+
+// -- resources half ----------------------------------------------------------
+
+// T2 (AC1) — after connecting to a resource-advertising server, the read tool exists.
+test("registers a read_resource tool for a server that advertises resources", async () => {
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  await host.use("mcp", activate);
+  try {
+    assert.ok(
+      agent.tools.has("mcp__fixture__read_resource"),
+      "expected mcp__fixture__read_resource to be registered",
+    );
+  } finally {
+    await host.dispose();
+  }
+});
+
+// T2 (AC2) — reading a known URI returns the resource body, not an error.
+test("calling read_resource returns the server's resource body", async () => {
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__fixture__read_resource", arguments: { uri: "file:///readme.md" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  await host.use("mcp", activate);
+  try {
+    await agent.run("please read");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    assert.ok(toolMsg, "expected a tool-role message in the transcript");
+    const block = toolMsg!.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.match(block.content, /RESOURCE BODY/);
+    assert.ok(!block.isError, "result should not be an error");
+  } finally {
+    await host.dispose();
+  }
+});
+
+// T3 (AC3 positive) — the read tool is gated by mcp:read only, and mcp:read is granted.
+test("read_resource is gated by mcp:read and the capability is granted", async () => {
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  await host.use("mcp", activate);
+  try {
+    const tool = agent.tools.get("mcp__fixture__read_resource");
+    assert.ok(tool, "expected the read_resource tool");
+    assert.deepEqual(tool!.capabilities, ["mcp:read"], "gated by mcp:read, nothing else");
+    assert.ok(agent.capabilities.isGranted("mcp:read"), "mcp:read is granted in activate()");
+  } finally {
+    await host.dispose();
+  }
+});
+
+// T3 (AC3 deny) — an explicit deny:["mcp:read"] rule blocks the read even though
+// activate() grants it (a deny rule precedes the grant). Wire CapabilityManager
+// directly because makeHarness exposes no runtime deny.
+test("an explicit deny of mcp:read blocks the read", async () => {
+  const ui = autoUI(true);
+  const capabilities = new CapabilityManager({ deny: ["mcp:read"], ui });
+  const agent = new Agent({ ui, logger: silentLogger, capabilities, provider: "mock", model: "mock" });
+  const provider = new MockProvider([
+    { toolCalls: [{ name: "mcp__fixture__read_resource", arguments: { uri: "file:///readme.md" } }] },
+    { text: "done" },
+  ] satisfies MockResponder);
+  agent.providers.register(provider, { default: true });
+  const commands = new CommandRegistry();
+  const host = new ExtensionHost({ agent, commands, logger: silentLogger, store: new MemoryBackend() });
+  await host.use("mcp", activate);
+  try {
+    await agent.run("please read");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    assert.ok(toolMsg, "expected a tool-role message in the transcript");
+    const block = toolMsg!.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.ok(block.isError, "a denied mcp:read read must surface as an error result");
+  } finally {
+    await host.dispose();
+  }
+});
+
+// T3 (AC8) — teardown removes the read tool.
+test("disposing the host removes the read_resource tool", async () => {
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  await host.use("mcp", activate);
+  assert.ok(agent.tools.has("mcp__fixture__read_resource"));
+  await host.dispose();
+  assert.ok(!agent.tools.has("mcp__fixture__read_resource"), "the read tool is gone after dispose");
+});
+
+// T4 (AC4) — a server without resources yields no read tool and no error.
+test("a server that does not support resources registers no read tool and never throws", async () => {
+  const prev = process.env.EAGENT_MCP_SERVERS;
+  process.env.EAGENT_MCP_SERVERS = JSON.stringify([
+    { name: "fixture", command: "node", args: [noResourcesPath] },
+  ]);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  try {
+    await host.use("mcp", activate); // must not throw
+    assert.ok(agent.tools.has("mcp__fixture__echo"), "the tools half is still registered");
+    assert.ok(
+      !agent.tools.has("mcp__fixture__read_resource"),
+      "no read tool for a resource-less server",
+    );
+  } finally {
+    await host.dispose();
+    if (prev === undefined) delete process.env.EAGENT_MCP_SERVERS;
+    else process.env.EAGENT_MCP_SERVERS = prev;
+  }
+});
+
+// T5 (AC6) — /mcp resources prints the catalog, /mcp reports the count, and
+// /mcp refresh re-enumerates (the fixture grows its list on the second call).
+test("/mcp resources, the per-server count, and /mcp refresh re-enumerate", async () => {
+  const { host, commands } = makeHarness({ fallback: "allow" });
+  await host.use("mcp", activate);
+  try {
+    const cmd = commands.get("mcp");
+    assert.ok(cmd, "expected an /mcp command to be registered");
+
+    const run = async (args: string): Promise<string> => {
+      const lines: string[] = [];
+      await cmd!.run({ agent: {} as never, args, print: (l) => lines.push(l) });
+      return lines.join("\n");
+    };
+
+    const cat = await run("resources");
+    assert.match(cat, /file:\/\/\/readme\.md/, "the cached catalog lists the resource uri");
+
+    const summary = await run("");
+    assert.match(summary, /fixture/);
+    assert.match(summary, /1 resource/, "the bare /mcp reports the per-server resource count");
+
+    // Refresh re-runs resources/list; the fixture now returns two resources.
+    await run("refresh");
+    const cat2 = await run("resources");
+    assert.match(cat2, /file:\/\/\/readme\.md/);
+    assert.match(cat2, /file:\/\/\/changelog\.md/, "refresh re-enumerated and picked up the new resource");
+  } finally {
+    await host.dispose();
+  }
+});
+
+// T6 (AC7) — EAGENT_MCP_RESOURCES=off disables the resources half entirely.
+test("EAGENT_MCP_RESOURCES=off registers no read tool and leaves the tools half intact", async () => {
+  const prev = process.env.EAGENT_MCP_RESOURCES;
+  process.env.EAGENT_MCP_RESOURCES = "off";
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  try {
+    await host.use("mcp", activate); // must succeed
+    assert.ok(!agent.tools.has("mcp__fixture__read_resource"), "no read tool when the kill switch is set");
+    assert.ok(agent.tools.has("mcp__fixture__echo"), "the tools half is unaffected");
+  } finally {
+    await host.dispose();
+    if (prev === undefined) delete process.env.EAGENT_MCP_RESOURCES;
+    else process.env.EAGENT_MCP_RESOURCES = prev;
   }
 });

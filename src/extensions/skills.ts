@@ -29,7 +29,7 @@ interface SkillMeta {
   dir: string;
 }
 
-function skillsRoot(): string {
+export function skillsRoot(): string {
   return process.env.EAGENT_SKILLS_DIR ?? join(homedir(), ".eagent", "skills");
 }
 
@@ -101,8 +101,13 @@ export default function activate(e: ExtensionAPI): void {
       execute: (args) => {
         const name = slug(String(args.name));
         if (!name) return fail("Invalid skill name.");
+        const description = String(args.description);
+        // Reject invalid frontmatter at the authoring boundary, before any write.
+        // Removing this one call restores the old accept-anything path.
+        const errors = validateFrontmatter({ name, description });
+        if (errors.length > 0) return fail(`Invalid skill frontmatter: ${errors.join("; ")}.`);
         const dir = join(skillsRoot(), name);
-        const body = renderSkill(name, String(args.description), String(args.instructions));
+        const body = renderSkill(name, description, String(args.instructions));
         try {
           mkdirSync(dir, { recursive: true });
           writeFileSync(join(dir, "SKILL.md"), body);
@@ -131,7 +136,7 @@ export default function activate(e: ExtensionAPI): void {
 
 // -- SKILL.md helpers -------------------------------------------------------
 
-function scanSkills(root: string): SkillMeta[] {
+export function scanSkills(root: string): SkillMeta[] {
   let entries: string[];
   try {
     entries = readdirSync(root);
@@ -152,7 +157,7 @@ function scanSkills(root: string): SkillMeta[] {
   return out;
 }
 
-function parseFrontmatter(md: string): Record<string, string> {
+export function parseFrontmatter(md: string): Record<string, string> {
   if (!md.startsWith("---")) return {};
   const end = md.indexOf("\n---", 3);
   if (end === -1) return {};
@@ -163,6 +168,46 @@ function parseFrontmatter(md: string): Record<string, string> {
     if (m) result[m[1]!] = m[2]!.replace(/^["']|["']$/g, "");
   }
   return result;
+}
+
+/** The only frontmatter keys EAgent reads; any other key is a smuggle/typo. */
+const ALLOWED_FRONTMATTER_KEYS = new Set(["name", "description", "allowed-tools", "triggers"]);
+
+/**
+ * Validate a parsed frontmatter record against EAgent's skill rules and return a
+ * list of human-readable errors (empty = valid). Pure, dependency-free: a
+ * hand-rolled charset/length check, not a YAML schema (house rule: zero deps).
+ *
+ * - `name`: required, kebab-case `^[a-z0-9]+(-[a-z0-9]+)*$`, length ≤ 64.
+ * - `description`: required, non-empty, length ≤ 1024, no `<` or `>` (the
+ *   `hidden-tag` injection vector before it ever reaches tier-1).
+ * - allowed keys: `name`, `description`, `allowed-tools`, `triggers` — any other
+ *   key is reported as unknown.
+ */
+export function validateFrontmatter(fm: Record<string, string>): string[] {
+  const errors: string[] = [];
+
+  const name = fm.name;
+  if (name === undefined || name.length === 0) {
+    errors.push("name: required");
+  } else {
+    if (name.length > 64) errors.push("name: too long (max 64 characters)");
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) errors.push("name: must be kebab-case (lowercase a-z, 0-9, hyphens)");
+  }
+
+  const description = fm.description;
+  if (description === undefined || description.length === 0) {
+    errors.push("description: required and non-empty");
+  } else {
+    if (description.length > 1024) errors.push("description: too long (max 1024 characters)");
+    if (/[<>]/.test(description)) errors.push("description: must not contain angle brackets (< or >)");
+  }
+
+  for (const key of Object.keys(fm)) {
+    if (!ALLOWED_FRONTMATTER_KEYS.has(key)) errors.push(`unknown key: "${key}"`);
+  }
+
+  return errors;
 }
 
 function renderSkill(name: string, description: string, instructions: string): string {

@@ -3,8 +3,23 @@ import { CapabilityManager } from "../src/kernel/capabilities.js";
 import { CommandRegistry } from "../src/kernel/commands.js";
 import { ExtensionHost } from "../src/kernel/extension.js";
 import { MemoryBackend } from "../src/kernel/store.js";
-import type { Logger, UI } from "../src/kernel/types.js";
+import type { CompletionRequest, Logger, Provider, StreamEvent, UI } from "../src/kernel/types.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
+
+/**
+ * A thin provider that delegates to a MockProvider but reports a different
+ * `name`, so a second vendor can be registered under (e.g.) "critic" — the
+ * design's offline-test assumption (MockProvider.name is fixed to "mock").
+ */
+export class RenamedProvider implements Provider {
+  constructor(
+    readonly name: string,
+    private readonly inner: MockProvider,
+  ) {}
+  stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
+    return this.inner.stream(req);
+  }
+}
 
 export const silentLogger: Logger = {
   debug: () => {},
