@@ -2,7 +2,7 @@
 
 Slug: `2026-06-22-drift-probe`
 Status: closed
-Closing-commit: a531f5b
+Closing-commit: 186f0dd
 Closed-on: 2026-06-22
 Deferred: finding — stale AC wording on the probe-discriminator test mechanism (cosmetic; code+tests consistent)
 

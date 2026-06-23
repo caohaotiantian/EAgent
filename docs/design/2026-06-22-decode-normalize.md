@@ -2,7 +2,7 @@
 
 Slug: `2026-06-22-decode-normalize`
 Status: closed
-Closing-commit: c7bfcaa
+Closing-commit: 34afd8f
 Closed-on: 2026-06-22
 Deferred: finding — risk-guard rot13-in-JSON-arg decode asymmetry (documented D5 scope limitation; bash-policy covers rot13; base64/hex/idiom payloads covered for both)
 

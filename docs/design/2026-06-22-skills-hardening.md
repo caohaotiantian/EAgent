@@ -1,7 +1,7 @@
 # skills-hardening — supply-chain scan, frontmatter lint, allowed-tools scoping, trigger-gated disclosure
 
 Status: closed
-Closing-commit: a531f5b
+Closing-commit: 186f0dd
 Closed-on: 2026-06-22
 Deferred: finding — trigger-gating couples to skills.ts tier-1 render format; skill:write capability characterization corrected (doc-precision)
 Date: 2026-06-22
