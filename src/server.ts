@@ -10,19 +10,30 @@
  *   GET    /health          → { ok, model, extensions, sessions, auth }
  *   POST   /run             → streams lifecycle events as JSONL (one per line)
  *                             body: { input: string, session?: string }
+ *   POST   /answer          → answer a pending elicitation mid-turn
+ *                             body: { id: number, answer: string }
  *   DELETE /sessions/:id     → forget a conversation
  *
  * A `session` id makes `/run` calls accumulate into one conversation; without
  * it, each call is a fresh, stateless turn. The agent runs one turn at a time
  * (a second concurrent `/run` gets 409) — a deliberate simplicity for a minimal
  * server; front a pool of these for real concurrency.
+ *
+ * ELICITATION (the `ask` extension over HTTP). When the model calls
+ * `ask_user_question` mid-turn it reaches a server-side `UI.ask`, which pauses
+ * the turn and emits an `{ type: "action_required", id, question, options }`
+ * line on the open `/run` stream. The client answers out-of-band with
+ * `POST /answer { id, answer }` (same auth as `/run`, NOT blocked by the
+ * single-flight lock), and the turn resumes with that answer fed back to the
+ * model. An unanswered ask falls back (proceed-with-assumption) on a bounded
+ * timeout (`askTimeoutMs`) or on client disconnect, so a turn never hangs.
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { Agent } from "./kernel/agent.js";
-import type { Message, Logger } from "./kernel/types.js";
+import type { Message, Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 
 export interface ServeOptions extends AgentHostOptions {
@@ -33,9 +44,14 @@ export interface ServeOptions extends AgentHostOptions {
   token?: string;
   /** Max request body size in bytes (default 1 MiB). */
   maxBodyBytes?: number;
+  /** How long (ms) a mid-turn `ask_user_question` waits for `POST /answer`
+   *  before falling back to proceed-with-assumption. Default 120 s; a tiny
+   *  value keeps tests fast. */
+  askTimeoutMs?: number;
 }
 
 const DEFAULT_MAX_BODY = 1024 * 1024;
+const DEFAULT_ASK_TIMEOUT = 120_000;
 
 export interface HttpServer {
   server: ReturnType<typeof createServer>;
@@ -46,6 +62,23 @@ export interface HttpServer {
   close(): Promise<void>;
 }
 
+/**
+ * The per-turn elicitation channel shared by `streamRun` (producer) and the
+ * `/answer` route (consumer). At most one turn runs at a time (the single-flight
+ * lock), so a single mutable holder is enough: `streamRun` installs an `ask`
+ * implementation at turn start and clears it in `finally`; `serverUI.ask`
+ * delegates to whatever is installed, or returns null (→ the ask tool's
+ * proceed-with-assumption fallback) when no turn is streaming.
+ *
+ * A pending ask is keyed by a monotonic id (no clock/randomness); its resolver
+ * lives in `pending` until `/answer`, a timeout, or a disconnect settles it.
+ */
+interface Elicitation {
+  ask: ((question: string, options?: string[]) => Promise<string | null>) | null;
+  pending: Map<number, (answer: string | null) => void>;
+  nextId: number;
+}
+
 /** Build the agent host and return a configured (but not yet listening) server. */
 export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpServer> {
   const logger: Logger = opts.logger ?? {
@@ -54,11 +87,30 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     warn: (...a) => console.error("!", ...a),
     error: (...a) => console.error("✗", ...a),
   };
-  const built = await createAgentHost({ ...opts, logger, yolo: opts.yolo ?? true });
+
+  // The mid-turn elicitation channel (see the `Elicitation` doc). `serverUI.ask`
+  // delegates to the turn-installed sink so the `ask` extension's conditional
+  // grant of `ui:ask` fires (its activation sees a function-valued `ask`) and
+  // the model actually reaches a human over HTTP instead of the fallback.
+  const elicit: Elicitation = { ask: null, pending: new Map(), nextId: 1 };
+  const serverUI: UI = {
+    // Preserve the headless fail-safe: a guard prompt the server can't surface
+    // interactively (write-guard, secret-guard, flow-guard, risk-guard,
+    // bash-policy, circuit-breaker, …) DENIES rather than auto-approves — exactly
+    // what the prior `defaultUI` (agent.ts:412, `confirm: async () => false`) did
+    // before this server set its own `ui`. Only `ask` is new; `confirm` must not
+    // become fail-open just because we now supply a UI.
+    confirm: async () => false,
+    notify: () => {},
+    ask: (question, options) => (elicit.ask ? elicit.ask(question, options) : Promise.resolve(null)),
+  };
+
+  const built = await createAgentHost({ ...opts, ui: serverUI, logger, yolo: opts.yolo ?? true });
   await built.agent.hooks.emit("session_start", {});
 
   const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
+  const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
 
   // No token means /run and DELETE /sessions are unauthenticated, and the agent
   // is built with yolo (every capability auto-granted, including shell:exec).
@@ -83,7 +135,9 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
       set busy(v) {
         busy = v;
       },
-    }, { token, maxBody }).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
+    }, { token, maxBody }, elicit, askTimeoutMs).catch((err) =>
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }),
+    );
   });
 
   return {
@@ -112,6 +166,8 @@ async function route(
   sessions: Map<string, Message[]>,
   lock: Lock,
   security: Security,
+  elicit: Elicitation,
+  askTimeoutMs: number,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -131,6 +187,38 @@ async function route(
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
     const existed = sessions.delete(id);
     sendJson(res, existed ? 200 : 404, { deleted: existed, session: id });
+    return;
+  }
+
+  // Answer a mid-turn elicitation. Deliberately NOT behind the single-flight
+  // lock: it must succeed *while* a `/run` turn is paused on `ask`. Resolving an
+  // unknown id is a 404 (the ask already timed out, was answered, or the turn
+  // ended) rather than an error — the client can simply re-read the stream.
+  if (req.method === "POST" && url.pathname === "/answer") {
+    let body: string;
+    try {
+      body = await readBody(req, security.maxBody);
+    } catch {
+      sendJson(res, 413, { error: `request body exceeds ${security.maxBody} bytes` });
+      return;
+    }
+    let id: number;
+    let answer: string;
+    try {
+      const parsed = JSON.parse(body) as { id?: unknown; answer?: unknown };
+      id = Number(parsed.id);
+      answer = String(parsed.answer ?? "");
+    } catch {
+      sendJson(res, 400, { error: "invalid JSON body; expected { id: number, answer: string }" });
+      return;
+    }
+    const resolve = Number.isInteger(id) ? elicit.pending.get(id) : undefined;
+    if (!resolve) {
+      sendJson(res, 404, { resolved: false, error: "no pending elicitation with that id" });
+      return;
+    }
+    resolve(answer); // unblocks the awaiting ask; it deletes itself from `pending`
+    sendJson(res, 200, { resolved: true, id });
     return;
   }
 
@@ -162,14 +250,17 @@ async function route(
     }
     lock.busy = true;
     try {
-      await streamRun(res, agent, input, sessions, session);
+      await streamRun(res, agent, input, sessions, session, elicit, askTimeoutMs);
     } finally {
       lock.busy = false;
     }
     return;
   }
 
-  sendJson(res, 404, { error: "not found", routes: ["GET /health", "POST /run", "DELETE /sessions/:id"] });
+  sendJson(res, 404, {
+    error: "not found",
+    routes: ["GET /health", "POST /run", "POST /answer", "DELETE /sessions/:id"],
+  });
 }
 
 /** Run one turn, streaming lifecycle events to the client as JSONL. */
@@ -179,6 +270,8 @@ async function streamRun(
   input: string,
   sessions: Map<string, Message[]>,
   session: string | undefined,
+  elicit: Elicitation,
+  askTimeoutMs: number,
 ): Promise<void> {
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   let closed = false;
@@ -186,11 +279,44 @@ async function streamRun(
     if (closed) return; // don't write to a destroyed socket
     res.write(JSON.stringify(obj) + "\n");
   };
+
+  // Install this turn's elicitation sink. A model `ask_user_question` reaches
+  // serverUI.ask → here: we emit an `action_required` line, register a resolver
+  // under a fresh id, and return a Promise that the client settles via
+  // `POST /answer` — or that a bounded timeout / disconnect settles with null
+  // (→ the ask tool's proceed-with-assumption fallback), so the turn never hangs.
+  elicit.ask = (question, options) =>
+    new Promise<string | null>((resolve) => {
+      const id = elicit.nextId++;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (answer: string | null): void => {
+        if (!elicit.pending.has(id)) return; // already settled (answer/timeout/close)
+        elicit.pending.delete(id);
+        if (timer) clearTimeout(timer);
+        resolve(answer);
+      };
+      elicit.pending.set(id, settle);
+      timer = setTimeout(() => settle(null), askTimeoutMs);
+      if (typeof timer.unref === "function") timer.unref(); // don't keep the event loop alive
+      write({ type: "action_required", id, question, options: options ?? null });
+    });
+
+  // Settle every outstanding ask for this turn with null (fallback) and drop the
+  // sink. Called from disconnect and from the finally so no resolver leaks past
+  // the turn and a later `/answer` for a stale id is a clean 404.
+  const drainElicitations = (): void => {
+    for (const settle of [...elicit.pending.values()]) settle(null);
+    elicit.pending.clear();
+    elicit.ask = null;
+  };
+
   // If the client disconnects mid-turn, abort the agent so it stops streaming
   // to a dead socket (and frees the single-flight lock) instead of running the
-  // whole turn to completion and wasting tokens/side effects.
+  // whole turn to completion and wasting tokens/side effects. Also release any
+  // ask the turn is blocked on, so the agent loop can unwind instead of hanging.
   const onClose = (): void => {
     closed = true;
+    drainElicitations();
     if (agent.running) agent.stop();
   };
   res.on("close", onClose);
@@ -218,6 +344,7 @@ async function streamRun(
   } catch (err) {
     write({ type: "error", message: err instanceof Error ? err.message : String(err) });
   } finally {
+    drainElicitations(); // clear the sink + any leftover resolver before the next turn
     res.off("close", onClose);
     for (const s of subs) s.dispose();
     if (!closed) res.end();

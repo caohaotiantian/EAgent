@@ -5,13 +5,17 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { createHttpServer } from "../src/server.js";
+import { createHttpServer, type HttpServer } from "../src/server.js";
+import type { MockProvider } from "../src/providers/mock.js";
 import { silentLogger } from "./helpers.js";
 
 async function withServer(
   fn: (base: string) => Promise<void>,
-  opts: { token?: string; maxBodyBytes?: number } = {},
+  opts: { token?: string; maxBodyBytes?: number; askTimeoutMs?: number } = {},
 ): Promise<void> {
   const { server } = await createHttpServer({ provider: "mock", logger: silentLogger, ...opts });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -23,6 +27,62 @@ async function withServer(
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+}
+
+/**
+ * Like `withServer`, but hands the test the whole `HttpServer` (so it can reach
+ * `http.agent` and script the mock provider) alongside the base URL. The
+ * elicitation tests need the agent to drive `ask_user_question`.
+ */
+async function withServerHandle(
+  fn: (base: string, http: HttpServer) => Promise<void>,
+  opts: { token?: string; askTimeoutMs?: number } = {},
+): Promise<void> {
+  const http = await createHttpServer({ provider: "mock", logger: silentLogger, ...opts });
+  await new Promise<void>((resolve) => http.server.listen(0, "127.0.0.1", resolve));
+  const addr = http.server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    await fn(base, http);
+  } finally {
+    await new Promise<void>((resolve) => http.server.close(() => resolve()));
+    await http.close();
+  }
+}
+
+/** Reach the server's scriptable mock provider so a test can drive tool calls. */
+function mockOf(http: HttpServer): MockProvider {
+  return http.agent.providers.get("mock") as MockProvider;
+}
+
+/**
+ * Read an open NDJSON response line by line, invoking `onLine` for each parsed
+ * object. Resolves when the stream ends. `onLine` may fire side-effecting work
+ * (e.g. `POST /answer`) while the stream is still open — exactly the out-of-band
+ * answer pattern the elicitation channel needs.
+ */
+async function readNdjson(
+  res: Response,
+  onLine: (obj: Record<string, unknown>) => void,
+): Promise<void> {
+  assert.ok(res.body, "response has a readable body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onLine(JSON.parse(line) as Record<string, unknown>);
+    }
+  }
+  const tail = buf.trim();
+  if (tail) onLine(JSON.parse(tail) as Record<string, unknown>);
 }
 
 test("GET /health reports model and extensions", async () => {
@@ -147,4 +207,233 @@ test("unknown routes 404 with the route list", async () => {
     const body = (await res.json()) as { routes: string[] };
     assert.ok(Array.isArray(body.routes));
   });
+});
+
+// -- elicitation: durable server-side ask/resume (the `ask` extension over HTTP) --
+
+test("a mid-turn ask emits action_required and POST /answer resumes the turn", async () => {
+  await withServerHandle(async (base, http) => {
+    // Turn 1 asks; turn 2 echoes whatever answer flowed back as the tool result,
+    // proving the supplied answer actually influenced the run.
+    mockOf(http).script((req, i) => {
+      if (i === 0) {
+        return {
+          toolCalls: [
+            { name: "ask_user_question", arguments: { question: "Which DB?", options: ["Postgres", "MySQL"] } },
+          ],
+        };
+      }
+      const toolMsg = req.messages.find((m) => m.role === "tool");
+      const block = toolMsg?.content.find((b) => b.type === "tool_result");
+      const echoed = block && block.type === "tool_result" ? block.content : "";
+      return { text: `chosen: ${echoed}` };
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    let answered: { status: number; resolved: boolean } | undefined;
+    const res = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "set up the db" }),
+    });
+    assert.equal(res.status, 200);
+
+    await readNdjson(res, (obj) => {
+      lines.push(obj);
+      if (obj.type === "action_required" && !answered) {
+        // Answer out-of-band on a separate request while /run is still open.
+        void fetch(`${base}/answer`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: obj.id, answer: "Postgres" }),
+        }).then(async (r) => {
+          answered = { status: r.status, resolved: ((await r.json()) as { resolved: boolean }).resolved };
+        });
+      }
+    });
+
+    const action = lines.find((l) => l.type === "action_required");
+    assert.ok(action, "an action_required line was emitted mid-turn");
+    assert.equal(action.question, "Which DB?");
+    assert.deepEqual(action.options, ["Postgres", "MySQL"]);
+    assert.equal(typeof action.id, "number");
+
+    assert.ok(answered, "the /answer request completed");
+    assert.equal(answered.status, 200);
+    assert.equal(answered.resolved, true);
+
+    // The answer reached the tool (tool_end echoes "Answer: Postgres") and the
+    // model's final text reflects it — the turn resumed and completed.
+    const toolEnd = lines.find((l) => l.type === "tool_end" && l.name === "ask_user_question");
+    assert.ok(toolEnd, "the ask tool finished");
+    assert.match(String(toolEnd.content), /Postgres/, "the ask tool returned the supplied answer");
+    assert.equal(lines.at(-1)?.type, "done", "the turn completed");
+    const finalText = lines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
+    assert.match(finalText, /chosen: .*Postgres/, "the model saw the answer and echoed it");
+  });
+});
+
+test("an unanswered ask falls back on the askTimeoutMs and the turn still completes", async () => {
+  await withServerHandle(
+    async (base, http) => {
+      mockOf(http).script((req, i) => {
+        if (i === 0) {
+          return { toolCalls: [{ name: "ask_user_question", arguments: { question: "Which env?" } }] };
+        }
+        const toolMsg = req.messages.find((m) => m.role === "tool");
+        const block = toolMsg?.content.find((b) => b.type === "tool_result");
+        const echoed = block && block.type === "tool_result" ? block.content : "";
+        return { text: `fellback: ${echoed}` };
+      });
+
+      const lines: Record<string, unknown>[] = [];
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "deploy it" }),
+      });
+      // Never answer: the tiny timeout resolves the ask to the fallback.
+      await readNdjson(res, (obj) => lines.push(obj));
+
+      assert.ok(lines.find((l) => l.type === "action_required"), "the ask still surfaced");
+      const toolEnd = lines.find((l) => l.type === "tool_end" && l.name === "ask_user_question");
+      assert.ok(toolEnd, "the ask tool finished without an answer");
+      assert.match(String(toolEnd.content), /proceed.*assumption/i, "it took the proceed-with-assumption fallback");
+      assert.equal(lines.at(-1)?.type, "done", "the turn completed (no hang)");
+    },
+    { askTimeoutMs: 25 },
+  );
+});
+
+test("a client disconnect mid-elicitation frees the lock (no hang)", async () => {
+  await withServerHandle(async (base, http) => {
+    mockOf(http).script((_req, i) =>
+      i === 0
+        ? { toolCalls: [{ name: "ask_user_question", arguments: { question: "Which region?" } }] }
+        : { text: "resumed" },
+    );
+
+    // Start a run, read until the ask surfaces, then abort the request so the
+    // client disconnects while the turn is parked on the elicitation.
+    const ctrl = new AbortController();
+    const res = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "where to?" }),
+      signal: ctrl.signal,
+    });
+    assert.ok(res.body, "the run stream is open");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let sawAction = false;
+    let buf = "";
+    while (!sawAction) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      if (buf.includes("action_required")) sawAction = true;
+    }
+    assert.ok(sawAction, "the ask surfaced before the disconnect");
+    ctrl.abort();
+    await reader.cancel().catch(() => {});
+
+    // The lock must free promptly: a fresh /run succeeds (200), not 409 (busy).
+    let ok = false;
+    for (let attempt = 0; attempt < 50 && !ok; attempt++) {
+      const r = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "again" }),
+      });
+      if (r.status === 200) {
+        ok = true;
+        await r.text();
+      } else {
+        await r.text();
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+    assert.ok(ok, "a subsequent /run returns 200 (the single-flight lock was released)");
+  });
+});
+
+test("a normal turn (no ask) emits no action_required line (back-compat)", async () => {
+  await withServerHandle(async (base, http) => {
+    mockOf(http).script({ text: "plain answer" });
+    const lines: Record<string, unknown>[] = [];
+    const res = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "hello" }),
+    });
+    await readNdjson(res, (obj) => lines.push(obj));
+    assert.equal(lines.find((l) => l.type === "action_required"), undefined, "no elicitation on a normal turn");
+    assert.equal(lines.at(-1)?.type, "done");
+  });
+});
+
+test("POST /answer without the token is rejected when a token is configured", async () => {
+  await withServerHandle(
+    async (base) => {
+      const res = await fetch(`${base}/answer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: 1, answer: "x" }),
+      });
+      assert.equal(res.status, 401);
+      await res.text();
+      // With the token, an unknown id is a clean 404 (not 401) — auth passed.
+      const res2 = await fetch(`${base}/answer`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer secret" },
+        body: JSON.stringify({ id: 999, answer: "x" }),
+      });
+      assert.equal(res2.status, 404);
+      const body = (await res2.json()) as { resolved: boolean };
+      assert.equal(body.resolved, false);
+    },
+    { token: "secret" },
+  );
+});
+
+test("a guard's confirm prompt is DENIED on the server (fail-safe, not auto-approved)", async () => {
+  // Regression: the server now supplies its own `ui` for the `ask` elicitation
+  // channel; its `confirm` MUST stay fail-safe (deny) like the prior `defaultUI`,
+  // NOT auto-approve. If it auto-approved, every ask-mode guard (write-guard,
+  // secret-guard, flow-guard, risk-guard, bash-policy, …) would silently
+  // fail-open on the server. Here write-guard's blind-overwrite prompt must BLOCK
+  // the write, and the file on disk must be untouched.
+  const dir = mkdtempSync(join(tmpdir(), "eagent-srv-guard-"));
+  const victim = join(dir, "victim.txt");
+  writeFileSync(victim, "ORIGINAL");
+  const prev = process.env.EAGENT_WORKSPACE;
+  process.env.EAGENT_WORKSPACE = dir; // set before the server builds (write-guard reads it)
+  try {
+    await withServerHandle(async (base, http) => {
+      // Turn 0: blindly overwrite a file the session never read ⇒ write-guard asks.
+      mockOf(http).script((_req, i) =>
+        i === 0
+          ? { toolCalls: [{ name: "write", arguments: { path: "victim.txt", content: "OVERWRITTEN" } }] }
+          : { text: "done" },
+      );
+      const lines: Record<string, unknown>[] = [];
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "overwrite it" }),
+      });
+      await readNdjson(res, (obj) => lines.push(obj));
+      const writeEnd = lines.find((l) => l.type === "tool_end" && l.name === "write") as
+        | { isError?: boolean; content?: string }
+        | undefined;
+      assert.ok(writeEnd, "the write tool call ran");
+      assert.equal(writeEnd?.isError, true, "write-guard blocked the blind overwrite (confirm must deny)");
+    });
+    // The strongest proof: the overwrite never reached disk.
+    assert.equal(readFileSync(victim, "utf8"), "ORIGINAL", "blind overwrite must not reach disk");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_WORKSPACE;
+    else process.env.EAGENT_WORKSPACE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
