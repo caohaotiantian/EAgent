@@ -1,7 +1,7 @@
 # Design: `subagents-least-privilege` — per-spawn capability allowlist, provider override, typed return
 
 Status: closed
-Closing-commit: 36c6090
+Closing-commit: 308c239
 Closed-on: 2026-06-23
 Deferred: finding — D3 re-prompt mechanism + an AC test-citation were doc-imprecise (resolved in implementation; doc-precision)
 

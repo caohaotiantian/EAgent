@@ -1,7 +1,7 @@
 # Implementation: mcp-resources — ingest the read-only resources half of MCP
 
 Status: closed
-Closing-commit: c7bfcaa
+Closing-commit: 34afd8f
 Closed-on: 2026-06-22
 Deferred: none
 

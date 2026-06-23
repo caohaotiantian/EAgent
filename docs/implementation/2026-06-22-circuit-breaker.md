@@ -2,7 +2,7 @@
 
 Slug: `2026-06-22-circuit-breaker`
 Status: closed
-Closing-commit: ae71248
+Closing-commit: 3716179
 Closed-on: 2026-06-22
 Deferred: none
 Design doc: `docs/design/2026-06-22-circuit-breaker.md` (PASSED)
