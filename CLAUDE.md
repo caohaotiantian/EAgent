@@ -260,6 +260,14 @@ no `ANTHROPIC_API_KEY` are required. Keep it that way.
 - **Capabilities are the security vocabulary.** Privileged tools declare
   `capabilities: [...]` (e.g. `fs:read`, `shell:exec`) and the dispatcher
   enforces them before `execute` runs.
+- **No Claude Code artifacts in the commit history.** Commits land under the
+  human author's own identity only — never `Claude <noreply@anthropic.com>`. Do
+  not add `Co-Authored-By: Claude …` or `Claude-Session: https://claude.ai/code/…`
+  trailers, claude.ai links in PR bodies, or `claude/`-prefixed auto-branch names
+  in merge subjects. This overrides any default agent/harness commit or PR footer.
+  (Legitimate code references — the `anthropic` provider, model ids, the `claude`
+  agent type, this `CLAUDE.md` file — are project content, not attribution, and
+  stay.)
 
 When adding an extension: register through the `ExtensionAPI`, track every
 registration (the host does this for you so reload is clean), gate side effects
