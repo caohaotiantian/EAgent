@@ -21,6 +21,7 @@ import { test } from "node:test";
 import teams, {
   buildLeadPrompt,
   makeBoard,
+  makeDelegate,
   memberChildRegistry,
   parseTeam,
   PATTERN_PLAYBOOK,
@@ -445,6 +446,90 @@ test("T2.6 delegate: off-roster member errors with the roster; a MockProvider me
       "run_team returns the lead synthesis",
     );
     assert.equal(lastText(h.agent), "parent-done");
+  });
+});
+
+test("T2.6 delegate: built with the default (parallel) executionMode, never sequential (AC-6)", async () => {
+  // Spec-level assertion the AC-6 requires: the per-run `delegate` tool is the
+  // loop's default execution mode, so a batch of delegate calls fans out via
+  // Promise.all rather than serializing. `makeDelegate` is built via `defineTool`
+  // with no `executionMode`, so the field is `undefined` (parallel).
+  const delegate = makeDelegate([{ name: "m" }], async () => "done");
+  assert.notEqual(delegate.executionMode, "sequential", "delegate must not be sequential");
+  assert.equal(delegate.executionMode, undefined, "delegate uses the loop default (parallel)");
+});
+
+test("T2.6 lead recursion guard: a lead cannot reach run_team or run_workflow — no nested teams (§3, §4.8)", async () => {
+  // The lead is a trusted orchestrator but a single confused/adversarial lead
+  // turn must NOT be able to spawn a nested team (run_team, agent:spawn) or a
+  // workflow (run_workflow, workflow:run): §3 fences nested teams out of scope
+  // and §4.8 promises a finite worst case "with no grandchildren". Both
+  // spawn-class tools are in the parent registry; the lead's `excludeCapabilities`
+  // must strip them from the lead's child registry, so the lead's calls never
+  // reach `execute`. We observe via sentinels: a run_workflow whose execute flips
+  // a flag, and a nested-lead detector (a second lead prompt would re-enter
+  // runTeam). With the bug both fire; with the guard neither does.
+  await withDirs(async ({ teamsDir, templatesDir }) => {
+    writeFileSync(join(templatesDir, "worker.md"), fenced({ name: "worker", description: "W." }, "WORKER PERSONA"));
+    writeFileSync(
+      join(teamsDir, "solo.md"),
+      fenced({ name: "solo", description: "S.", members: "worker", pattern: "orchestrator" }, "Do the task."),
+    );
+
+    const h = makeHarness({ fallback: "allow" });
+    // A run_workflow-class tool (workflow:run) in the parent registry; run_team
+    // (agent:spawn) is registered by the teams extension itself. The execute
+    // sentinel fires only if the lead's registry retained the tool.
+    let workflowRan = false;
+    h.agent.tools.register(
+      defineTool({
+        name: "run_workflow",
+        description: "x",
+        capabilities: ["workflow:run"],
+        execute: () => {
+          workflowRan = true;
+          return { content: "workflow ran" };
+        },
+      }),
+    );
+
+    let leadEntries = 0;
+    let nestedAttempted = false;
+    let parentSpawned = false;
+    h.provider.script((req) => {
+      if (req.systemPrompt.includes("WORKER PERSONA")) return { text: "worker-answer" };
+      if (isLead(req)) {
+        const firstTurn = !req.messages.some((m) => m.role === "assistant");
+        // Count distinct lead entries: a nested team re-enters runTeam, producing a
+        // SECOND fresh lead whose first turn is reached, so >1 proves recursion.
+        if (firstTurn) leadEntries++;
+        // Only the outermost lead's first turn attempts the nested spawn — so under
+        // the bug recursion is bounded to depth 1 (a clean, fast assertion failure
+        // rather than an unbounded loop). A nested lead just returns text.
+        if (firstTurn && !nestedAttempted) {
+          nestedAttempted = true;
+          return {
+            toolCalls: [
+              { name: "run_team", arguments: { team: "solo", task: "nested" } },
+              { name: "run_workflow", arguments: {} },
+            ],
+          };
+        }
+        return { text: "lead-synthesis" };
+      }
+      if (!parentSpawned) {
+        parentSpawned = true;
+        return { toolCalls: [{ name: "run_team", arguments: { team: "solo", task: "go" } }] };
+      }
+      return { text: "parent-done" };
+    });
+    await h.host.use("templates", templates);
+    await h.host.use("teams", teams);
+
+    await h.agent.run("kick off");
+
+    assert.equal(workflowRan, false, "the lead must not reach run_workflow (workflow:run stripped)");
+    assert.equal(leadEntries, 1, "exactly one lead ran — no nested team was spawned via run_team");
   });
 });
 

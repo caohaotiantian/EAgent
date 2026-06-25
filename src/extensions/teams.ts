@@ -22,14 +22,15 @@
  * its `mission` is not angle-bracket-validated, but its `members` must resolve to
  * known templates and its `pattern` must be a playbook key.
  *
- * Bounds (Decision 4.8): the member recursion guard (`memberChildRegistry`)
- * strips every tool whose declared capabilities intersect `SPAWN_CAPS`
- * ({agent:spawn, workflow:run}), so a member can reach no spawning/workflow tool;
- * the lead is capped at `LEAD_MAX_TURNS`; a per-run delegate counter (incremented
- * synchronously before any await) rejects past `DELEGATE_CAP`; each member is
- * built with a `MEMBER_MAX_TURNS` ceiling; the roster is capped at `MAX_MEMBERS`;
- * the board has entry- and byte-caps. Kill switch: `EAGENT_TEAMS=off`. Reuses
- * `agent:spawn`; adds no new capability.
+ * Bounds (Decision 4.8): the recursion guard strips every tool whose declared
+ * capabilities intersect `SPAWN_CAPS` ({agent:spawn, workflow:run}) from BOTH the
+ * member (`memberChildRegistry`) and the lead (`excludeCapabilities: SPAWN_CAPS`),
+ * so neither can reach a nested-team / workflow tool — the worst case stays finite
+ * "with no grandchildren"; the lead is capped at `LEAD_MAX_TURNS`; a per-run
+ * delegate counter (incremented synchronously before any await) rejects past
+ * `DELEGATE_CAP`; each member is built with a `MEMBER_MAX_TURNS` ceiling; the
+ * roster is capped at `MAX_MEMBERS`; the board has entry- and byte-caps. Kill
+ * switch: `EAGENT_TEAMS=off`. Reuses `agent:spawn`; adds no new capability.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -464,6 +465,58 @@ export function makeBoard(): { tool: Tool; entries(): BoardEntry[] } {
   return { tool, entries: () => store.slice() };
 }
 
+/**
+ * Build a run-scoped `delegate` tool: the per-run primitive the lead calls to run
+ * a roster member on a subtask. Off-roster names error with the roster listed; a
+ * per-run counter (incremented synchronously before any `await`, so it is
+ * race-free under a concurrent delegate batch) rejects past `DELEGATE_CAP`. The
+ * actual member spawn is delegated to `runMember` (the host wires
+ * `buildTemplateChild` + `memberChildRegistry`), keeping this factory free of
+ * host plumbing and directly inspectable. Built via `defineTool` with NO
+ * `executionMode`, so it is the loop's default (`parallel`) — several delegate
+ * calls in one lead turn fan out concurrently (never serialized).
+ */
+export function makeDelegate(
+  members: { name: string }[],
+  runMember: (memberName: string, subtask: string) => Promise<string>,
+): Tool {
+  let delegateCount = 0;
+  return defineTool<{ member?: unknown; task?: unknown }>({
+    name: "delegate",
+    description:
+      "Delegate a subtask to a named team member (a roster role). The member runs as a fresh " +
+      "isolated child agent on `task` and returns its final answer. Several delegate calls in one " +
+      "turn run concurrently. Members cannot themselves spawn or run workflows.",
+    parameters: {
+      type: "object",
+      properties: {
+        member: { type: "string", description: "The roster member name to delegate to." },
+        task: { type: "string", description: "The subtask for the member." },
+      },
+      required: ["member", "task"],
+    },
+    execute: async (args): Promise<ToolResult> => {
+      // Synchronous cap check+increment at the top, BEFORE any await, so the
+      // counter is race-free under a concurrent delegate batch.
+      if (delegateCount >= DELEGATE_CAP) {
+        return fail(`delegate cap reached (max ${DELEGATE_CAP} delegations per team run).`);
+      }
+      delegateCount++;
+
+      const memberName = typeof args.member === "string" ? args.member : "";
+      const subtask = typeof args.task === "string" ? args.task : "";
+      const member = members.find((m) => m.name === memberName);
+      if (!member) {
+        const roster = members.map((m) => m.name).join(", ") || "(none)";
+        return fail(`unknown member "${memberName}". Team roster: ${roster}.`);
+      }
+
+      const text = await runMember(memberName, subtask);
+      return ok(text, { member: memberName });
+    },
+  });
+}
+
 /** Find the last assistant text block in a transcript. */
 function finalText(messages: readonly Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -500,52 +553,33 @@ export default function activate(e: ExtensionAPI): void {
   /** Run a resolved team on a task: build the board, the delegate tool, and the lead; run the lead. */
   const runTeam = async (rt: ResolvedTeam, task: string): Promise<ToolResult> => {
     const board = makeBoard();
-    let delegateCount = 0;
 
-    const delegateTool = defineTool<{ member?: unknown; task?: unknown }>({
-      name: "delegate",
-      description:
-        "Delegate a subtask to a named team member (a roster role). The member runs as a fresh " +
-        "isolated child agent on `task` and returns its final answer. Several delegate calls in one " +
-        "turn run concurrently. Members cannot themselves spawn or run workflows.",
-      parameters: {
-        type: "object",
-        properties: {
-          member: { type: "string", description: "The roster member name to delegate to." },
-          task: { type: "string", description: "The subtask for the member." },
-        },
-        required: ["member", "task"],
-      },
-      execute: async (args): Promise<ToolResult> => {
-        // Synchronous cap check+increment at the top, BEFORE any await, so the
-        // counter is race-free under a concurrent delegate batch.
-        if (delegateCount >= DELEGATE_CAP) {
-          return fail(`delegate cap reached (max ${DELEGATE_CAP} delegations per team run).`);
-        }
-        delegateCount++;
-
-        const memberName = typeof args.member === "string" ? args.member : "";
-        const subtask = typeof args.task === "string" ? args.task : "";
-        const member = rt.members.find((m) => m.name === memberName);
-        if (!member) {
-          const roster = rt.members.map((m) => m.name).join(", ") || "(none)";
-          return fail(`unknown member "${memberName}". Team roster: ${roster}.`);
-        }
-
-        const child = buildTemplateChild(member.template, parentFields(), {
-          baseRegistry: memberChildRegistry(e.agent.tools.list(), member.template.tools, board.tool),
-          maxTurnsCeiling: MEMBER_MAX_TURNS,
-        });
-        const { messages } = await child.run(subtask);
-        return ok(finalText(messages), { member: memberName });
-      },
-    });
+    // The actual member spawn: a fresh isolated child built via the templates
+    // child-builder, capped by `MEMBER_MAX_TURNS`, its registry stripped of every
+    // spawn-class tool by `memberChildRegistry` (the recursion guard) and given
+    // the shared board. The cap/roster/race logic lives in `makeDelegate`.
+    const runMember = async (memberName: string, subtask: string): Promise<string> => {
+      const member = rt.members.find((m) => m.name === memberName)!;
+      const child = buildTemplateChild(member.template, parentFields(), {
+        baseRegistry: memberChildRegistry(e.agent.tools.list(), member.template.tools, board.tool),
+        maxTurnsCeiling: MEMBER_MAX_TURNS,
+      });
+      const { messages } = await child.run(subtask);
+      return finalText(messages);
+    };
+    const delegateTool = makeDelegate(rt.members, runMember);
 
     // The lead reuses `buildTemplateChild` but with its own prompt: clone the
     // resolved lead template, swapping in the team-aware system prompt (the
-    // helper wires `resolved.systemPrompt` into the child).
+    // helper wires `resolved.systemPrompt` into the child). `excludeCapabilities:
+    // SPAWN_CAPS` strips every inherited spawn-class tool (`run_team`,
+    // `run_workflow`, `spawn_*`, …) so a lead turn cannot spawn a nested team or
+    // workflow — the recursion guard that keeps §4.8's worst case finite ("no
+    // grandchildren"). `delegate`/`board` are then re-added via `extraTools`
+    // AFTER the exclude filter, so the lead keeps exactly those two primitives.
     const leadTemplate: ResolvedTemplate = { ...rt.lead, systemPrompt: buildLeadPrompt(rt, task) };
     const lead = buildTemplateChild(leadTemplate, parentFields(), {
+      excludeCapabilities: [...SPAWN_CAPS],
       extraTools: [board.tool, delegateTool],
       maxTurnsCeiling: LEAD_MAX_TURNS,
     });
