@@ -34,6 +34,7 @@ import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import templates from "./extensions/templates.js";
+import teams from "./extensions/teams.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
 import compact from "./extensions/compact.js";
@@ -83,6 +84,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["subagents", subagents],
   ["dynamic-workflow", dynamicWorkflow],
   ["templates", templates],
+  ["teams", teams],
   ["memory", memory],
   ["prune", prune],
   ["compact", compact],
