@@ -239,7 +239,8 @@ task that needs decomposition, parallelism, cross-checking, or synthesis.
   text.
 - **`memberChildRegistry`** (the recursion guard) is **capability-driven, not a
   name list:** starting from the member template's tool allow-list ∩ the parent
-  tools, it **excludes every tool whose `spec.capabilities` intersects the
+  tools, it **excludes every tool whose `capabilities` (the field on `Tool`,
+  `types.ts:149` — not `ToolSpec`) intersects the
   spawn-class set `SPAWN_CAPS = {"agent:spawn", "workflow:run"}`** — which
   auto-covers `spawn_agent` / `spawn_template` / `sweep_edit` / `delegate` /
   `run_team` (all `agent:spawn`) **and `run_workflow`** (which declares
@@ -337,8 +338,8 @@ task that needs decomposition, parallelism, cross-checking, or synthesis.
   (the caller runs `.run()` — so both `spawn_template` and `delegate` keep their
   own run/return logic; the cited boundary is 399-412, the construction only).
   Behavior: base registry = `templateChildRegistry(parent.tools, resolved.tools)`
-  unless `baseRegistry` given; then **remove** any tool whose `spec.capabilities`
-  intersects `excludeCapabilities`; then **add** `extraTools`; `maxTurns =
+  unless `baseRegistry` given; then **remove** any tool whose `capabilities`
+  (the `Tool` field) intersects `excludeCapabilities`; then **add** `extraTools`; `maxTurns =
   maxTurnsCeiling ? min(resolved.maxTurns ?? maxTurnsCeiling, maxTurnsCeiling) :
   resolved.maxTurns`; capabilities/model/provider/thinking/systemPrompt exactly as
   today. **`spawn_template` calls it with no `opts`** ⇒ byte-identical to the

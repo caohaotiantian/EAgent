@@ -47,7 +47,7 @@ export function buildTemplateChild(
            excludeCapabilities?: string[]; maxTurnsCeiling?: number },
 ): Agent
 // base registry = opts.baseRegistry ?? templateChildRegistry(parent.tools, resolved.tools);
-// then REMOVE any tool whose spec.capabilities intersects opts.excludeCapabilities;
+// then REMOVE any tool whose `capabilities` (the field on Tool, types.ts:149 — NOT tool.spec) intersects opts.excludeCapabilities;
 // then ADD opts.extraTools; maxTurns = opts.maxTurnsCeiling
 //   ? Math.min(resolved.maxTurns ?? ceiling, ceiling) : resolved.maxTurns;
 // capabilities/model/provider/thinking/systemPrompt EXACTLY as templates.ts:399-412 today.
