@@ -1,7 +1,10 @@
 # Design: Agent Teams (multi-agent orchestration)
 
 Slug: `2026-06-25-agent-teams`
-Status: draft (L1)
+Status: closed
+Closing-commit: <pending>
+Closed-on: 2026-06-25
+Deferred: none
 Builds on: `docs/design/2026-06-25-templates.md` (closed) — the named role unit teams orchestrate.
 
 ## 1. Background and Purpose
@@ -44,27 +47,27 @@ task that needs decomposition, parallelism, cross-checking, or synthesis.
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/teams.ts` — one extension exporting pure, offline-testable
+- [x] `src/extensions/teams.ts` — one extension exporting pure, offline-testable
   functions (`parseTeam`, `validateTeam`, `scanTeams`, `resolveTeam`,
   `buildLeadPrompt`, `memberChildRegistry`, `makeBoard`, `PATTERN_PLAYBOOK`) plus
   a default `activate(e)` that registers: a `run_team` tool (model-driven; file
   **or** inline roster), a `/team` command (`list`/`show`/`run`, with `/teams`
   alias), and an `EAGENT_TEAMS=off` kill switch. The board and member-`delegate`
   tools are **per-run** tools built inside `run_team` (not globally registered).
-- [ ] `teams` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`), placed
+- [x] `teams` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`), placed
   immediately **after `templates`** (it reuses the templates resolver and is the
   next layer of the multi-agent stack).
-- [ ] One small **construct-only** helper added to `src/extensions/templates.ts`
+- [x] One small **construct-only** helper added to `src/extensions/templates.ts`
   — `buildTemplateChild(resolved, parent, opts?)` (contract in §5) — factoring out
   the child `Agent` construction at `templates.ts:399-412` so teams reuses it
   instead of duplicating it. `spawn_template` is refactored to call it with **no
   opts**, producing a byte-identical child (AC-11). (The only edit to a cycle-1
   file; surgical, additive, behavior-preserving.)
-- [ ] `test/teams.test.ts` — offline `node:test`/`tsx`/`MockProvider` suite,
+- [x] `test/teams.test.ts` — offline `node:test`/`tsx`/`MockProvider` suite,
   AC-numbered, covering §7.
-- [ ] `README.md` — one extension-table row (Capability column `agent:spawn`), and
+- [x] `README.md` — one extension-table row (Capability column `agent:spawn`), and
   the `45`→`46` count updates (`README.md:338`, `CLAUDE.md:65`, `CLAUDE.md:79`).
-- [ ] No kernel change; no new npm dependency; no new capability in the kernel
+- [x] No kernel change; no new npm dependency; no new capability in the kernel
   vocabulary (reuse `agent:spawn`).
 
 ## 3. Scope Boundary (NOT in scope)

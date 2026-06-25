@@ -1,7 +1,10 @@
 # Implementation: Agent Teams (multi-agent orchestration)
 
 Slug: `2026-06-25-agent-teams`
-Status: draft (L2)
+Status: closed
+Closing-commit: <pending>
+Closed-on: 2026-06-25
+Deferred: none
 Design: `docs/design/2026-06-25-agent-teams.md`
 
 ## 1. Task Index
