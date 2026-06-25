@@ -1,19 +1,19 @@
 /**
  * Token-budget tool-output pruning — the `transformContext` seam.
  *
- * `memory` defends against a long *conversation* by folding the old prefix into
- * a summary once the message *count* crosses a threshold. It does not defend
- * against a *heavy* one: an agentic run can blow the model's context window with
- * only a handful of messages when those messages carry enormous tool outputs —
- * several whole-file reads, a giant grep, a verbose bash dump. Such a run never
- * trips the count threshold yet still overflows.
+ * `compact` defends against a long *conversation* by folding the old prefix into
+ * a structured summary once the estimated transcript crosses a *token* budget. It
+ * does not defend against a *heavy* one: an agentic run can blow the model's
+ * context window with only a handful of messages when those messages carry
+ * enormous tool outputs — several whole-file reads, a giant grep, a verbose bash
+ * dump. Such a run never trips the conversation budget yet still overflows.
  *
  * This extension is the complementary, token-size defense. It walks the
  * transcript backward, keeps the most recent tool outputs verbatim, and
  * truncates the older, oversized ones — a cheap, provider-free trim that targets
  * the single biggest space consumer in agentic context (tool results) without
  * summarizing or calling the model. It returns a NEW message array and never
- * mutates the durable transcript, the same contract `memory` holds.
+ * mutates the durable transcript, the same contract `compact` holds.
  */
 
 import type { ExtensionAPI } from "../kernel/extension.js";
