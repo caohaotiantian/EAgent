@@ -198,6 +198,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary | `/code` | `code:exec` |
 | `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
 | `dynamic-workflow` | `run_workflow` executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
+| `templates`   | named, file-based, inheritable **agent templates** (`<name>.md` frontmatter + body = system prompt; single-parent `extends`); `spawn_template` delegates to a scoped isolated child, `/template use` reconfigures the live session (become) with a tool allow-list veto; opt-in name+description catalog (`/template catalog on`), `EAGENT_TEMPLATES=off` kill switch | `/template` | `agent:spawn` |
 | `memory`      | store-backed `remember`/`recall` working-memory scratchpad with white-box per-entry provenance (`EAGENT_MEMORY_ENTRIES=off` to disable) — registers no `transformContext` hook | `/memory` | — |
 | `prune`       | token-budget tool-output pruning via `transformContext` — truncates old, oversized tool results beyond a protected recent window (`EAGENT_PRUNE=off` to disable) | — | — |
 | `compact`     | token-gated structured conversation compaction via `transformContext` — folds the older prefix at a user-turn boundary into `## Decisions`/`## Files`/`## Open threads`, keeps the last K user turns, re-injects a byte-capped pinned block; off by default (`/compact on`, `EAGENT_COMPACT=off` to kill) | `/compact` | — |
@@ -334,7 +335,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  44 built-in extensions, all riding the ExtensionAPI
+src/extensions/  45 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

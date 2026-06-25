@@ -62,7 +62,7 @@ required. Keep it that way.
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` (retry/backoff + SSE parsing),
   and `cassette` (record/replay). All read config from `process.env`.
-- `src/extensions/` — the 44 built-in extensions, plus internal helpers in `lib/`.
+- `src/extensions/` — the 45 built-in extensions, plus internal helpers in `lib/`.
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
   defaulting (honors `*_MODEL` env vars), and the canonical `BUILTIN_EXTENSIONS`
   set and load order.
@@ -76,7 +76,7 @@ required. Keep it that way.
 
 ## Built-in extensions
 
-Everything outside `src/kernel/` is an extension. 44 ship in `BUILTIN_EXTENSIONS`
+Everything outside `src/kernel/` is an extension. 45 ship in `BUILTIN_EXTENSIONS`
 (`src/host.ts`), each a single file with offline tests that gates privileged work
 behind a capability. Conventions worth knowing:
 

@@ -33,6 +33,7 @@ import mcp from "./extensions/mcp.js";
 import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
+import templates from "./extensions/templates.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
 import compact from "./extensions/compact.js";
@@ -81,6 +82,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["codeact", codeact],
   ["subagents", subagents],
   ["dynamic-workflow", dynamicWorkflow],
+  ["templates", templates],
   ["memory", memory],
   ["prune", prune],
   ["compact", compact],
