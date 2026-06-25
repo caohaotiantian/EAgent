@@ -2,7 +2,7 @@
 
 Slug: `2026-06-25-agent-teams`
 Status: closed
-Closing-commit: <pending>
+Closing-commit: aeb1da5
 Closed-on: 2026-06-25
 Deferred: none
 Builds on: `docs/design/2026-06-25-templates.md` (closed) — the named role unit teams orchestrate.
