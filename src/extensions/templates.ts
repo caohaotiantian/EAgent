@@ -33,11 +33,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { Agent } from "../kernel/agent.js";
+import type { CapabilityManager } from "../kernel/capabilities.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ToolDecision } from "../kernel/events.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
-import { ToolRegistry } from "../kernel/registry.js";
-import type { Message, ThinkingLevel, Tool } from "../kernel/types.js";
+import { ProviderRegistry, ToolRegistry } from "../kernel/registry.js";
+import type { Logger, Message, ThinkingLevel, Tool, UI } from "../kernel/types.js";
 
 import { scopedCapabilities } from "./subagents.js";
 
@@ -321,6 +322,74 @@ export function templateChildRegistry(parentTools: Tool[], allowlist?: string[])
   return registry;
 }
 
+/**
+ * Construct (but do NOT run) a child `Agent` from a resolved template. Factored
+ * out of `spawn_template` so it can be reused by other delegators (teams), which
+ * supply `opts`; the caller runs `.run()` and owns the return value.
+ *
+ * The base registry is `templateChildRegistry(parent.tools, resolved.tools)`
+ * unless `opts.baseRegistry` is given. With `opts.excludeCapabilities`, a fresh
+ * registry is built from the base's tools dropping any whose declared
+ * capabilities intersect the set (a stricter, capability-driven guard than the
+ * name-based one above). `opts.extraTools` are then registered. `maxTurns` is the
+ * template's own value, or `min(resolved.maxTurns ?? ceiling, ceiling)` when a
+ * `maxTurnsCeiling` is given. Capabilities/model/provider/thinking/systemPrompt
+ * are wired exactly as the inline `spawn_template` construction. With no `opts`
+ * the result is byte-identical to that inline child.
+ */
+export function buildTemplateChild(
+  resolved: ResolvedTemplate,
+  parent: {
+    providers: ProviderRegistry;
+    ui: UI;
+    logger: Logger;
+    capabilities: CapabilityManager;
+    model: string;
+    providerName: string | undefined;
+    tools: Tool[];
+  },
+  opts?: {
+    baseRegistry?: ToolRegistry;
+    extraTools?: Tool[];
+    excludeCapabilities?: string[];
+    maxTurnsCeiling?: number;
+  },
+): Agent {
+  const base = opts?.baseRegistry ?? templateChildRegistry(parent.tools, resolved.tools);
+
+  let registry = base;
+  if (opts?.excludeCapabilities) {
+    const exclude = opts.excludeCapabilities;
+    registry = new ToolRegistry();
+    for (const tool of base.list()) {
+      if (tool.capabilities?.some((c) => exclude.includes(c))) continue;
+      registry.register(tool);
+    }
+  }
+  if (opts?.extraTools) {
+    for (const tool of opts.extraTools) registry.register(tool);
+  }
+
+  const ceiling = opts?.maxTurnsCeiling;
+  const maxTurns =
+    ceiling != null ? Math.min(resolved.maxTurns ?? ceiling, ceiling) : resolved.maxTurns;
+
+  return new Agent({
+    providers: parent.providers,
+    ui: parent.ui,
+    logger: parent.logger,
+    capabilities: resolved.capabilities
+      ? scopedCapabilities(resolved.capabilities, parent.ui)
+      : parent.capabilities,
+    model: resolved.model ?? parent.model,
+    provider: resolved.provider ?? parent.providerName,
+    thinking: resolved.thinking,
+    maxTurns,
+    systemPrompt: resolved.systemPrompt,
+    tools: registry,
+  });
+}
+
 /** The four live-agent fields the become path mutates and `reset` restores. */
 interface Baseline {
   systemPrompt: string;
@@ -396,19 +465,14 @@ export default function activate(e: ExtensionAPI): void {
         }
         const t = resolved.template;
 
-        const child = new Agent({
+        const child = buildTemplateChild(t, {
           providers: e.agent.providers,
           ui: e.agent.ui,
           logger: e.agent.logger,
-          capabilities: t.capabilities
-            ? scopedCapabilities(t.capabilities, e.agent.ui)
-            : e.agent.capabilities,
-          model: t.model ?? e.agent.model,
-          provider: t.provider ?? e.agent.providerName,
-          thinking: t.thinking,
-          maxTurns: t.maxTurns,
-          systemPrompt: t.systemPrompt,
-          tools: templateChildRegistry(e.agent.tools.list(), t.tools),
+          capabilities: e.agent.capabilities,
+          model: e.agent.model,
+          providerName: e.agent.providerName,
+          tools: e.agent.tools.list(),
         });
         const { messages } = await child.run(prompt);
         return ok(finalText(messages), { template: t.name });

@@ -17,21 +17,25 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import templates, {
+  buildTemplateChild,
   injectCatalog,
   parseTemplate,
   resolveTemplate,
   scanTemplates,
   templateChildRegistry,
   validateTemplate,
+  type ResolvedTemplate,
   type Template,
 } from "../src/extensions/templates.js";
+import { CapabilityManager } from "../src/kernel/capabilities.js";
 import type { CommandContext } from "../src/kernel/commands.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { ToolDecision } from "../src/kernel/events.js";
-import type { Message, Tool, ToolCallBlock } from "../src/kernel/types.js";
+import { ProviderRegistry } from "../src/kernel/registry.js";
+import type { Logger, Message, Tool, ToolCallBlock, UI } from "../src/kernel/types.js";
 import { text } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
-import { lastText, makeHarness, RenamedProvider } from "./helpers.js";
+import { autoUI, lastText, makeHarness, RenamedProvider, silentLogger } from "./helpers.js";
 
 /** A template file with single-line frontmatter and a markdown body. */
 function fenced(front: Record<string, string>, body: string): string {
@@ -653,4 +657,100 @@ test("T8 registration: one tool, /template + /templates, one transformContext + 
     else process.env.EAGENT_TEMPLATES_DIR = savedDir;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// T9 — buildTemplateChild construct-only helper (AC-11)
+// ---------------------------------------------------------------------------
+
+/** A minimal `parent` shape for buildTemplateChild, with the given tool list. */
+function parentFor(tools: Tool[]): {
+  providers: ProviderRegistry;
+  ui: UI;
+  logger: Logger;
+  capabilities: CapabilityManager;
+  model: string;
+  providerName: string | undefined;
+  tools: Tool[];
+} {
+  const ui: UI = autoUI(true);
+  return {
+    providers: new ProviderRegistry(),
+    ui,
+    logger: silentLogger,
+    capabilities: new CapabilityManager({ ui, fallback: "allow" }),
+    model: "mock",
+    providerName: undefined,
+    tools,
+  };
+}
+
+/** A named tool declaring the given capabilities (for the exclude-by-capability path). */
+function capTool(name: string, capabilities: string[]): Tool {
+  return defineTool({ name, description: "x", capabilities, execute: () => ({ content: "" }) });
+}
+
+test("T9 buildTemplateChild: no opts => child registry equals templateChildRegistry(parentTools, t.tools) (AC-11)", () => {
+  const parentTools = [
+    tool("read"),
+    tool("write"),
+    tool("edit"),
+    tool("spawn_agent"),
+    tool("spawn_template"),
+  ];
+  const t: ResolvedTemplate = {
+    name: "reader",
+    description: "R.",
+    tools: ["read"],
+    systemPrompt: "READER PERSONA",
+  };
+
+  const child = buildTemplateChild(t, parentFor(parentTools));
+  const expected = templateChildRegistry(parentTools, t.tools);
+
+  // Invariant: the closed-cycle (no-opts) child registry is unchanged by the refactor.
+  assert.equal(child.tools.list().length, expected.list().length);
+  for (const name of ["read", "write", "edit", "spawn_agent", "spawn_template"]) {
+    assert.equal(child.tools.has(name), expected.has(name), `membership of "${name}" matches`);
+  }
+  assert.equal(child.tools.has("read"), true);
+  assert.equal(child.tools.has("write"), false, "an allow-listed template keeps only its tools");
+});
+
+test("T9 buildTemplateChild: opts excludeCapabilities drops spawn-class tools and extraTools are added (AC-11)", () => {
+  const parentTools = [
+    tool("read"),
+    capTool("spawn_agent", ["agent:spawn"]),
+    capTool("plain-write", ["fs:write"]),
+  ];
+  const extra = tool("board");
+  const t: ResolvedTemplate = { name: "member", description: "M.", systemPrompt: "MEMBER" };
+
+  const child = buildTemplateChild(t, parentFor(parentTools), {
+    excludeCapabilities: ["agent:spawn"],
+    extraTools: [extra],
+  });
+
+  assert.equal(child.tools.has("spawn_agent"), false, "agent:spawn tool is excluded");
+  assert.equal(child.tools.has("plain-write"), true, "an fs:write-only tool is retained (intersection, not subset)");
+  assert.equal(child.tools.has("read"), true);
+  assert.equal(child.tools.has("board"), true, "extraTools are registered");
+});
+
+test("T9 buildTemplateChild: maxTurnsCeiling caps a large template maxTurns and floors at the template's own (AC-11)", () => {
+  const parentTools = [tool("read")];
+
+  const capped = buildTemplateChild(
+    { name: "big", description: "B.", maxTurns: 99, systemPrompt: "BIG" },
+    parentFor(parentTools),
+    { maxTurnsCeiling: 8 },
+  );
+  assert.equal(capped.maxTurns, 8, "maxTurns 99 is capped to the ceiling 8");
+
+  const underCeiling = buildTemplateChild(
+    { name: "small", description: "S.", maxTurns: 4, systemPrompt: "SMALL" },
+    parentFor(parentTools),
+    { maxTurnsCeiling: 8 },
+  );
+  assert.equal(underCeiling.maxTurns, 4, "a template maxTurns below the ceiling is kept");
 });
