@@ -32,7 +32,17 @@ import type { CommandContext } from "../src/kernel/commands.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { ToolDecision } from "../src/kernel/events.js";
 import { ProviderRegistry } from "../src/kernel/registry.js";
-import type { Logger, Message, Tool, ToolCallBlock, UI } from "../src/kernel/types.js";
+import type {
+  CompletionRequest,
+  Logger,
+  Message,
+  Provider,
+  StreamEvent,
+  Tool,
+  ToolCallBlock,
+  ToolContext,
+  UI,
+} from "../src/kernel/types.js";
 import { text } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
 import { autoUI, lastText, makeHarness, RenamedProvider, silentLogger } from "./helpers.js";
@@ -753,4 +763,63 @@ test("T9 buildTemplateChild: maxTurnsCeiling caps a large template maxTurns and 
     { maxTurnsCeiling: 8 },
   );
   assert.equal(underCeiling.maxTurns, 4, "a template maxTurns below the ceiling is kept");
+});
+
+// ---------------------------------------------------------------------------
+// Regression: a child's final text concatenates ALL text blocks (AC live-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * A provider that returns one assistant message whose content is
+ * [text(""), thinking, text("REAL ANSWER")] — the shape some models (e.g. GLM
+ * via an Anthropic-compatible proxy) emit: an empty leading text block before
+ * the thinking block and the real answer. `find(first text block)` would pick
+ * the empty one; the fix concatenates all text blocks.
+ */
+class LeadingEmptyTextProvider implements Provider {
+  readonly name = "mock";
+  // eslint-disable-next-line require-yield
+  async *stream(_req: CompletionRequest): AsyncIterable<StreamEvent> {
+    const message: Message = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "" },
+        { type: "thinking", thinking: "no tools needed" },
+        { type: "text", text: "REAL ANSWER" },
+      ],
+    };
+    yield { type: "done", message, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+  }
+}
+
+test("spawn_template: a child's final text uses all text blocks, not just the first (empty-leading-block regression)", async () => {
+  const saved = process.env.EAGENT_TEMPLATES_DIR;
+  const dir = mkdtempSync(join(tmpdir(), "tmpl-blocks-"));
+  process.env.EAGENT_TEMPLATES_DIR = dir;
+  try {
+    writeFileSync(join(dir, "answerer.md"), fenced({ name: "answerer", description: "A." }, "You answer."));
+    const h = makeHarness({ fallback: "allow" });
+    h.agent.providers.register(new LeadingEmptyTextProvider(), { default: true });
+    await h.host.use("templates", templates);
+
+    const ctx: ToolContext = {
+      toolCallId: "t",
+      signal: new AbortController().signal,
+      require: async () => {},
+      progress: () => {},
+      ui: h.agent.ui,
+      agent: { model: "mock", messages: [], steer() {}, followUp() {} },
+      log: h.agent.logger,
+    };
+    const res = await h.agent.tools.get("spawn_template")!.execute(
+      { template: "answerer", prompt: "hi" },
+      ctx,
+    );
+    assert.equal(res.isError, undefined);
+    assert.equal(res.content, "REAL ANSWER", "the real answer is returned, not the empty leading text block");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    if (saved === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = saved;
+  }
 });

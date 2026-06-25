@@ -106,14 +106,17 @@ export default function activate(e: ExtensionAPI): () => void {
     return caps.some((c) => retrievalCaps.includes(c));
   };
 
-  /** The final answer = the last assistant message's first text block. */
+  /** The final answer = the last assistant message's concatenated text blocks. */
   const finalAnswer = (): string => {
     const msgs = e.agent.messages;
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]!;
       if (m.role !== "assistant") continue;
-      const t = m.content.find((b) => b.type === "text");
-      if (t && t.type === "text") return t.text;
+      // Concatenate every text block: a model may split its answer across blocks
+      // (or emit an empty leading text block before a thinking block).
+      let text = "";
+      for (const b of m.content) if (b.type === "text") text += b.text;
+      if (text.length > 0) return text;
     }
     return "";
   };

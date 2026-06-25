@@ -63,8 +63,9 @@ export function lastText(agent: Agent): string {
   for (let i = agent.messages.length - 1; i >= 0; i--) {
     const m = agent.messages[i]!;
     if (m.role !== "assistant") continue;
-    const t = m.content.find((b) => b.type === "text");
-    if (t && t.type === "text") return t.text;
+    let text = "";
+    for (const b of m.content) if (b.type === "text") text += b.text;
+    if (text.length > 0) return text;
   }
   return "";
 }
