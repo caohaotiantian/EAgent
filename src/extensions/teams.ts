@@ -270,8 +270,10 @@ function defaultCoordinator(): ResolvedTemplate {
  * Resolve a team (by name from `teamCatalog`, or an inline `Team`) into a
  * `ResolvedTeam`: each member name and the `lead` (or a default coordinator) is
  * resolved against `templateCatalog` via `resolveTemplate`. An unknown
- * member/lead, or a roster over `MAX_MEMBERS`, returns a typed error naming it.
- * `pattern` defaults to `auto`.
+ * member/lead, a roster over `MAX_MEMBERS`, or a `pattern` outside `PATTERN_KEYS`
+ * returns a typed error naming it. This `pattern` check covers the inline-roster
+ * path, which (unlike a file team) is not scan-validated. `pattern` defaults to
+ * `auto`.
  */
 export function resolveTeam(
   nameOrTeam: string | Team,
@@ -291,6 +293,10 @@ export function resolveTeam(
 
   if (team.members.length > MAX_MEMBERS) {
     return { ok: false, error: `team "${team.name}" has too many members (${team.members.length}, max ${MAX_MEMBERS})` };
+  }
+
+  if (team.pattern !== undefined && !(PATTERN_KEYS as readonly string[]).includes(team.pattern)) {
+    return { ok: false, error: `team "${team.name}": pattern must be one of ${PATTERN_KEYS.join(", ")}` };
   }
 
   const members: { name: string; template: ResolvedTemplate }[] = [];

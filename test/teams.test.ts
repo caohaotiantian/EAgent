@@ -183,7 +183,7 @@ test("T2.1 scanTeams: valid sorted, invalid excluded, missing dir => [] (AC-2)",
 
     const found = scanTeams(dir);
     assert.deepEqual(
-      found.map((t) => t.name),
+      found.map((t: Team) => t.name),
       ["alpha", "bravo"],
     );
   } finally {
@@ -219,7 +219,7 @@ test("T2.2 resolveTeam: members + lead resolve against real templates; ResolvedT
   assert.equal(rt.pattern, "orchestrator");
   assert.equal(rt.lead.name, "coordinator");
   assert.deepEqual(
-    rt.members.map((m) => m.name),
+    rt.members.map((m: { name: string }) => m.name),
     ["researcher", "writer"],
   );
   assert.equal(rt.members[0]!.template.systemPrompt, "RES");
@@ -265,6 +265,25 @@ test("T2.2 resolveTeam: unknown member, unknown lead, and over-cap roster each =
   );
   assert.equal(overCap.ok, false);
   assert.ok(!overCap.ok && /\d/.test(overCap.error), "error mentions the cap");
+});
+
+test("T2.2 resolveTeam: an inline roster with an out-of-PATTERN_KEYS pattern is rejected (AC-3, design §4.2)", () => {
+  const templateCatalog: Template[] = [{ name: "researcher", description: "R.", systemPrompt: "RES" }];
+  // The inline path is not scan-validated, so resolveTeam must guard the pattern.
+  const bad = resolveTeam(
+    { name: "inline", description: "d", members: ["researcher"], mission: "m", pattern: "nope" },
+    [],
+    templateCatalog,
+  );
+  assert.equal(bad.ok, false);
+  assert.ok(!bad.ok && /pattern/.test(bad.error), "error names the pattern");
+  // A valid pinned pattern still resolves.
+  const good = resolveTeam(
+    { name: "inline", description: "d", members: ["researcher"], mission: "m", pattern: "consensus" },
+    [],
+    templateCatalog,
+  );
+  assert.equal(good.ok, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -374,7 +393,7 @@ test("T2.5 makeBoard: two concurrent posts via Promise.all get DISTINCT ids (AC-
   ]);
   assert.equal(a.isError, undefined);
   assert.equal(b.isError, undefined);
-  const ids = board.entries().map((e) => e.id);
+  const ids = board.entries().map((e: { id: number }) => e.id);
   assert.equal(new Set(ids).size, ids.length, "all ids are distinct");
   assert.equal(ids.length, 2);
 });
@@ -738,7 +757,7 @@ test("T2.8 EAGENT_TEAMS=off: run_team fails and /team run refuses (AC-9)", async
 
     const h = makeHarness({ fallback: "allow" });
     let parentSpawned = false;
-    h.provider.script((req) => {
+    h.provider.script(() => {
       if (!parentSpawned) {
         parentSpawned = true;
         return { toolCalls: [{ name: "run_team", arguments: { team: "solo", task: "go" } }] };
