@@ -535,6 +535,67 @@ test("T7 /template use sets fields (not provider); veto blocks outside allow-lis
   }
 });
 
+test("T7 become with NO tools allow-list leaves the veto disarmed — an arbitrary tool is not blocked (design §4.5 / §8)", async () => {
+  const savedDir = process.env.EAGENT_TEMPLATES_DIR;
+  const dir = mkdtempSync(join(tmpdir(), "templates-become-notools-"));
+  process.env.EAGENT_TEMPLATES_DIR = dir;
+  try {
+    // A persona-only template: no `tools` frontmatter — a very common shape.
+    writeFileSync(
+      join(dir, "persona.md"),
+      fenced({ name: "persona", description: "Be a careful reviewer." }, "PERSONA PROMPT"),
+    );
+
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("templates", templates);
+
+    const cmd = h.commands.get("template")!;
+    await runCommand(cmd, h.agent, "use persona");
+    assert.equal(h.agent.systemPrompt, "PERSONA PROMPT", "the persona prompt is adopted");
+
+    const decideOn = async (name: string): Promise<ToolDecision> => {
+      const call: ToolCallBlock = { type: "tool_call", id: "t", name, arguments: {} };
+      return h.agent.hooks.apply("beforeToolCall", { block: false, arguments: {} }, { call }, (d) => d.block);
+    };
+    // With no allow-list the veto stays disarmed: an arbitrary tool must NOT be
+    // blocked (the old `active = { tools: [] }` bricked every call).
+    assert.equal((await decideOn("read")).block, false, "no allow-list => an arbitrary tool is not blocked");
+    assert.equal((await decideOn("anything")).block, false, "no allow-list => even an unknown tool is not blocked");
+  } finally {
+    if (savedDir === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = savedDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("T7 /template show renders resolved fields and the 'use delegate' become caveat (design §4.5)", async () => {
+  const savedDir = process.env.EAGENT_TEMPLATES_DIR;
+  const dir = mkdtempSync(join(tmpdir(), "templates-show-"));
+  process.env.EAGENT_TEMPLATES_DIR = dir;
+  try {
+    writeFileSync(
+      join(dir, "specialist.md"),
+      fenced(
+        { name: "specialist", description: "Sp.", model: "spec-model", tools: "read, grep" },
+        "SPECIALIST PROMPT",
+      ),
+    );
+
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("templates", templates);
+
+    const out = (await runCommand(h.commands.get("template")!, h.agent, "show specialist")).join("\n");
+    assert.match(out, /name:\s+specialist/, "prints the resolved name field");
+    assert.match(out, /model:\s+spec-model/, "prints the resolved model field");
+    assert.match(out, /tools:\s+read, grep/, "prints the resolved tools allow-list");
+    assert.match(out, /for true scoping, use delegate/, "prints the become->delegate scoping caveat");
+  } finally {
+    if (savedDir === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = savedDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // T8 — registration + commands (AC-11)
 // ---------------------------------------------------------------------------
