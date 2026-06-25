@@ -604,13 +604,17 @@ export default function activate(e: ExtensionAPI): void {
   e.registerCommand({ ...command, name: "templates" });
 }
 
-/** Find the last assistant text block in a transcript. */
+/** The last assistant message's text, concatenating all of its text blocks. */
 function finalText(messages: readonly Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
     if (m.role !== "assistant") continue;
-    const block = m.content.find((b) => b.type === "text");
-    if (block && block.type === "text") return block.text;
+    // Concatenate every text block: a model may split its answer across blocks
+    // (or emit an empty leading text block before a thinking block), so taking
+    // only the first text block can drop the real answer.
+    let text = "";
+    for (const b of m.content) if (b.type === "text") text += b.text;
+    if (text.length > 0) return text;
   }
   return "";
 }
