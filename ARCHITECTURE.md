@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["29 extensions<br/>src/extensions/"]
+        EXTS["44 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -176,8 +176,8 @@ gates, and resource limits plug in without modifying the loop.
 The kernel runs LLM-directed — and optionally LLM-authored — code, so authority
 is explicit rather than ambient. A capability is a dotted string naming an
 authority: `fs:read`, `fs:write`, `shell:exec`, `code:exec`, `net:fetch`,
-`skill:read`, `skill:write`, `mcp:call`, `agent:spawn`, `pkg:install`,
-`workflow:run`, `self:read`, `self:extend`. Tools declare what they need; the
+`skill:read`, `skill:write`, `mcp:call`, `mcp:read`, `agent:spawn`, `pkg:install`,
+`workflow:run`, `self:read`, `self:extend`, `ui:ask`. Tools declare what they need; the
 dispatcher enforces the declaration before the body runs.
 
 ```mermaid
@@ -245,8 +245,10 @@ most-specific *last*, so a project extension wins over a user one of the same id
 ("later wins"). Files are loaded via `jiti`, which
 evaluates TypeScript with no build step; the loader uses `moduleCache: false` so
 re-importing on reload re-evaluates the module. `loadExtension` is the uniform
-seam through which built-in, discovered, self-authored, and package-installed
-extensions all flow, so reload and unload work on them identically.
+seam through which discovered, self-authored, and package-installed
+extensions all flow (built-ins activate via `host.use(id, activate)` from an
+inline factory), and all of them are tracked the same way, so reload and unload
+work on them identically.
 
 ## The provider abstraction
 
@@ -282,8 +284,8 @@ Four ship in `src/providers/`:
   `contents`/`parts` shape (name-correlated function responses, image `inlineData`).
 
 The live providers share `src/providers/http.ts`, which centralizes
-retry/backoff (429/5xx and network errors, honoring `retry-after`), SSE parsing,
-and usage accounting. Their `fetch` is injectable for testing. `cassette.ts` adds
+retry/backoff (429/5xx and network errors, honoring `retry-after`) and SSE
+parsing. Their `fetch` is injectable for testing. `cassette.ts` adds
 record/replay wrappers (`RecordingProvider`/`ReplayProvider`) for capturing a real
 model once and replaying it deterministically.
 
@@ -370,8 +372,10 @@ Each is a single file under `src/extensions/`, rides the `ExtensionAPI`, ships
 with offline tests, and gates privileged work behind a capability. They load in
 the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`,
 `skills`, `mcp`, `codeact`, `subagents`, `dynamic-workflow`, `memory`, `prune`,
-`recovery`, `planmode`, `session`, `packages`, `trace`, `context-files`,
-`microagents`, `limits`, `self`, `web`, `checkpoint`, `introspect`, `journal`,
+`compact`, `recovery`, `output-contract`, `content-guard`, `circuit-breaker`,
+`planmode`, `session`, `packages`, `trace`, `context-files`, `microagents`,
+`limits`, `cost`, `self`, `web`, `checkpoint`, `introspect`, `journal`,
 `todo`, `prompts`, `flow-guard`, `risk-guard`, `bash-policy`, `integrity`,
-`write-guard`. The README has a one-line description and capability for each;
+`write-guard`, `secret-guard`, `sweep-edit`, `citations`, `env-report`, `evals`,
+`handoff`, `drift-probe`, `skills-hardening`, `ask`, `routing`. The README has a one-line description and capability for each;
 `docs/EXTENSIONS.md` is the author's guide.

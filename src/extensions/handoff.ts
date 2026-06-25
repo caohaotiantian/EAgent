@@ -1,5 +1,5 @@
 /**
- * handoff — a session resume document written on `agent_end` / via `/handoff`.
+ * handoff — a session resume document written on `agent_end` / via `/handoff-doc`.
  *
  * EAgent already persists what happened (`memory`'s lossy k/v bag, `journal`'s
  * raw JSONL replay), but neither yields something you can *resume from* without
@@ -10,7 +10,7 @@
  * steps — plus a paste-ready reactivation paragraph, written to a gitignored
  * file. Resuming then costs a summary, not the raw log.
  *
- * This extension is an `agent_end` observer + a `/handoff` command. Both
+ * This extension is an `agent_end` observer + a `/handoff-doc` command. Both
  * summarize the live transcript via a recursion-safe, tool-less provider
  * sub-call (the `risk-guard`/`compact` pattern: `tools: []` cannot emit a tool
  * call, so the completion cannot re-enter any hook seam) into the fixed schema,
@@ -19,9 +19,9 @@
  * it only reads `e.agent.messages` and writes a file.
  *
  * Because the auto-trigger makes a paid, latency-adding model call on every
- * session end, it ships OFF and must be enabled (`/handoff on` or
+ * session end, it ships OFF and must be enabled (`/handoff-doc on` or
  * `e.store.set("enabled", true)`); `EAGENT_HANDOFF=off` is the hard env kill,
- * read inside the trigger. The manual `/handoff` command always works. The
+ * read inside the trigger. The manual `/handoff-doc` command always works. The
  * summarization fails OPEN: no provider / a throw / an empty reply degrades to a
  * deterministic provider-free digest, so a resume artifact is never lost.
  *
@@ -29,7 +29,7 @@
  * docs; this extension can also CONSUME the most recent one. On a fresh session's
  * first user turn it can inject the newest RELEVANT, FRESH handoff into context
  * once (a `transformContext` filter), so resuming costs a summary instead of
- * re-paying the raw transcript. This is a SEPARATE opt-in (`/handoff resume on`
+ * re-paying the raw transcript. This is a SEPARATE opt-in (`/handoff-doc resume on`
  * or `e.store.set("resume", true)`, default off, hard kill `EAGENT_HANDOFF_RESUME
  * =off`) INDEPENDENT of the writer's `enabled` flag — reading a prior session's
  * notes into a new one is a distinct, surprising behavior. The dominant risk is a

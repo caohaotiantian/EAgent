@@ -15,8 +15,8 @@ kernel is designed around that assumption rather than trusting the model.
 
 - **Capabilities.** Every privileged tool declares the authority it needs
   (`fs:read`, `fs:write`, `shell:exec`, `code:exec`, `net:fetch`, `skill:read`,
-  `skill:write`, `mcp:call`, `agent:spawn`, `workflow:run`, `pkg:install`,
-  `self:read`, `self:extend`). The dispatcher enforces the declaration before the tool body
+  `skill:write`, `mcp:call`, `mcp:read`, `agent:spawn`, `workflow:run`, `pkg:install`,
+  `self:read`, `self:extend`, `ui:ask`). The dispatcher enforces the declaration before the tool body
   runs. The *fallback* for anything not explicitly granted depends on the front
   end: the **CLI** defaults to *ask* (it prompts the human), while the **HTTP
   server** defaults to *allow* (`yolo` — every capability auto-granted, including
