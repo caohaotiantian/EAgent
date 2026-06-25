@@ -2,7 +2,7 @@
 
 Slug: `2026-06-25-templates`
 Status: closed
-Closing-commit: <pending>
+Closing-commit: cae8056
 Closed-on: 2026-06-25
 Deferred: none
 Design: `docs/design/2026-06-25-templates.md`
