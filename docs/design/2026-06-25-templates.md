@@ -1,7 +1,10 @@
 # Design: Agent Templates
 
 Slug: `2026-06-25-templates`
-Status: draft (L1)
+Status: closed
+Closing-commit: <pending>
+Closed-on: 2026-06-25
+Deferred: none
 
 ## 1. Background and Purpose
 
@@ -28,7 +31,7 @@ that consumes it (see §3 Scope Boundary).
 
 ## 2. Deliverables
 
-- [ ] `src/extensions/templates.ts` — a single extension exporting pure,
+- [x] `src/extensions/templates.ts` — a single extension exporting pure,
   offline-testable functions (`parseTemplate`, `validateTemplate`,
   `scanTemplates`, `resolveTemplate`, `injectCatalog`, `templateChildRegistry`)
   plus a default `activate(e)` that registers: an **opt-in** tier-1
@@ -37,19 +40,19 @@ that consumes it (see §3 Scope Boundary).
   (registered once at activate, inert until a template is active; §4.5), and a
   `/template` command (with `/templates` alias) for `list` / `show` / `use` /
   `reset` / `catalog on|off`.
-- [ ] `templates` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`), placed
+- [x] `templates` registered in `BUILTIN_EXTENSIONS` (`src/host.ts`), placed
   immediately **after `dynamic-workflow`** so the `subagents` →
   `dynamic-workflow` multi-agent pair stays adjacent. `templates` registers only
   new names (`spawn_template`, `/template`) and shadows nothing, so placement
   after the cluster is safe.
-- [ ] `test/templates.test.ts` — offline `node:test`/`tsx`/`MockProvider` suite,
+- [x] `test/templates.test.ts` — offline `node:test`/`tsx`/`MockProvider` suite,
   AC-numbered, covering every Acceptance Criterion in §7.
-- [ ] `README.md` — one extension-table row (in the built-in-extensions table
+- [x] `README.md` — one extension-table row (in the built-in-extensions table
   whose header is `| Extension | What it adds | Commands | Capability |`;
   Capability column = `agent:spawn`, the delegate gate — *become* adds no
   capability), and the three `44`→`45` count updates (`README.md:337`,
   `CLAUDE.md:65`, `CLAUDE.md:79`).
-- [ ] No kernel change; no new npm dependency; no new capability in the kernel
+- [x] No kernel change; no new npm dependency; no new capability in the kernel
   vocabulary.
 
 ## 3. Scope Boundary (NOT in scope)
