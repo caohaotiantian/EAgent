@@ -499,6 +499,7 @@ async function runAgentStep(step: WorkflowStep, outputs: Record<string, string>,
       systemPrompt: system,
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
       tools: workflowChildRegistry(e.agent.tools.list()),
+      hooks: e.agent.hooks.childScope(),
     });
 
   try {
