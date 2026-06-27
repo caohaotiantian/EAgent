@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createAgentHost, loadEnvFile, selectProvider, thinkingFromEnv } from "../src/host.js";
+import { BUILTIN_EXTENSIONS, createAgentHost, loadEnvFile, selectProvider, thinkingFromEnv } from "../src/host.js";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { silentLogger } from "./helpers.js";
 
@@ -143,4 +143,23 @@ test("thinkingFromEnv accepts known levels and falls back to off", () => {
 test("createAgentHost threads an explicit thinking level onto the agent", async () => {
   const { agent } = await createAgentHost({ provider: "mock", logger: silentLogger, thinking: "low" });
   assert.equal(agent.thinking, "low");
+});
+
+test("loads the full canonical extension set with no failures or duplicate names", async () => {
+  const { agent, host, commands, failures } = await createAgentHost({
+    provider: "mock",
+    logger: silentLogger,
+    discoverDirs: [],
+    storeRoot: mkdtempSync(join(tmpdir(), "eagent-store-")),
+  });
+  try {
+    assert.equal(host.list().length, BUILTIN_EXTENSIONS.length, "every built-in extension activates");
+    assert.equal(failures.length, 0, "no built-in extension fails to activate");
+    const toolNames = agent.tools.list().map((t) => t.spec.name);
+    assert.equal(new Set(toolNames).size, toolNames.length, "no duplicate active tool names");
+    const commandNames = commands.list().map((c) => c.name);
+    assert.equal(new Set(commandNames).size, commandNames.length, "no duplicate active command names");
+  } finally {
+    await host.dispose();
+  }
 });

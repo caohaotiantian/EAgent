@@ -163,6 +163,8 @@ export interface AgentHost {
   live: boolean;
   /** The resolved default model. */
   model: string;
+  /** Built-in extensions that failed to activate (logged and skipped, not fatal). */
+  failures: { id: string; err: unknown }[];
 }
 
 /**
@@ -232,12 +234,14 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     store: new FileBackend(opts.storeRoot ?? join(homedir(), ".eagent", "state")),
   });
 
-  // A failing built-in must not take down the whole agent: log and skip it.
+  // A failing built-in must not take down the whole agent: log, record, and skip it.
+  const failures: { id: string; err: unknown }[] = [];
   for (const [id, activate] of BUILTIN_EXTENSIONS) {
     try {
       await host.use(id, activate);
     } catch (err) {
       (opts.logger ?? console).error?.(`extension "${id}" failed to activate:`, err);
+      failures.push({ id, err });
     }
   }
 
@@ -252,7 +256,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   await host.discover(dirs);
   for (const path of opts.extraExtensions ?? []) await host.loadFile(path);
 
-  return { agent, host, commands, live, model };
+  return { agent, host, commands, live, model, failures };
 }
 
 /**
