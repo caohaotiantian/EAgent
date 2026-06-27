@@ -14,7 +14,7 @@ Status legend: ⬜ not started · 🟡 in progress (L1/L2/L3) · ✅ done (accep
 |---|---|---|---|
 | 1 | **Phase 0 — Foundation pack** | P0.1 CI gate+strict host · P0.2 Usage/caching accounting · P0.3 cap-set unification (mcp:call) · P0.4 validator hardening + re-validate · P0.5 bounded concurrency | ✅ |
 | 2 | **transformRequest keystone** | P1.1 `transformRequest` filter (kernel seam #1) | ✅ |
-| 3 | **Governed sub-agents** | P1.2 child-scoped HookBus + usage bubbling (closes HIGH guard-bypass) | ⬜ |
+| 3 | **Governed sub-agents** | P1.2 child-scoped HookBus + usage bubbling (closes HIGH guard-bypass) | ✅ |
 | 4 | **Forkable state** | P1.3 snapshot/restore + step ids + frozen handle.messages + per-session server isolation | ⬜ |
 | 5 | **Reliability boundary** | P1.4 `onProviderError` repair seam + reliability ext + StopReason enrichment | ⬜ |
 | 6 | **Governance on new seams** | P2.1 provenance/taint (ext) · P2.2 `beforeDispatch` wave seam · P2.3 ExecutionTarget tiers · P2.4 reasoning replay-fidelity | ⬜ |
@@ -36,7 +36,7 @@ with slug `YYYY-MM-DD-<item>`. Acceptance = item's `<ACCEPT-CMD>` + full `npm te
 ### Wave 2 — transformRequest  ✅ (closed 2026-06-28; commit 53ad0b2)
 - **P1.1** Add `transformRequest` filter: value = `{systemPrompt, messages, tools, model, toolChoice, thinking}`, ctx = `{turn, cumulativeUsage}`, applied after req build in `streamTurn`; `transformContext` kept (applied to `req.messages` first). Wrap context/request/afterTool filters in the same containment `beforeToolCall` has. Pin new export + default byte-identity in kernel-surface test.
 
-### Wave 3 — Governed sub-agents  ⬜
+### Wave 3 — Governed sub-agents  ✅ (closed 2026-06-28; commits 270fe18…c24d596)
 - **P1.2** `HookBus.childScope({agentId,depth})` view sharing handler arrays (filters govern children) + tagging events for attribution; `AgentHandle.spawnChild`; parent folds child usage; spawn/fan-out budget. Refactor subagents/teams/templates off hand-rolled child construction.
 
 ### Wave 4 — Forkable state  ⬜
@@ -65,3 +65,4 @@ with slug `YYYY-MM-DD-<item>`. Acceptance = item's `<ACCEPT-CMD>` + full `npm te
 - **2026-06-28** — Blueprint synthesized (code-as-truth audit + research + critique). Roadmap created. Branch `feat/redesign-superpowers` cut from `init`. Baseline `npm test` green. Starting Wave 1.
 - **2026-06-28** — **Wave 1 (Phase 0) CLOSED.** L1 design (4 rounds incl. corroborating) + L2 impl (3 rounds), both fresh-reviewer closed; L3 all 5 phases dev→review→accept; F whole-project review **pass** (clean, blast-radius verified). Test suite 906→**948 pass** (+42 new), typecheck clean, kernel 1826→1914 lines (< 2200). Shipped: AgentHost activation-failure reporting + CI gate; cache/reasoning-aware `Usage` + correct cache pricing across all 3 providers; validator hardening (additionalProperties/min-max/pattern/enum-coercion) + single re-validate gate honoring guard arg-repair; `maxConcurrency` bounded dispatch; `mcp:call` egress/leak guard fix. Deferred findings: RW1-1/RW1-2 (limits/trace cache display). Next: Wave 2 — transformRequest.
 - **2026-06-28** — **Wave 2 (transformRequest) CLOSED.** L1 (4 rounds incl. corroborating) + L2 (2 rounds), fresh-reviewer gated; L3 single phase dev→review→accept (clean first round). Added the 4th kernel filter point `transformRequest` (value: systemPrompt/messages/tools/model/toolChoice/thinking; ctx: turn+cumulativeUsage), applied in `streamTurn` with default byte-identity. Test suite **952 pass** (+4), typecheck clean, kernel 1914→1961 lines. CLAUDE.md reconciled (three→four filter hooks). No deferred findings. Next: Wave 3 — governed sub-agents.
+- **2026-06-28** — **Wave 3 (governed sub-agents) CLOSED.** L1 (4 rounds, 2 severe redesigns) + L2 (4 rounds, 2 severe) + L3 (2 phases) + F whole-project review **pass**. Added `HookBus.childScope()` (shares gate filters {beforeToolCall,afterToolCall} + intra-run events; suppresses run-lifecycle events; constructor-seed mechanism), wired all 4 child-spawn sites + teams. Closes the HIGH-severity guard-bypass hole (children now governed by bash-policy/risk/secret/content/flow-capability/write guards; per-run observers not reset by children; usage counted once via shared event). Test suite **961 pass** (+5), kernel 1961→2023 lines. Deferred residuals RW3-1..RW3-4 (flow-guard data-taint for children, steer/followUp routing, spawnChild, event tagging). Next: Wave 4 — forkable state.

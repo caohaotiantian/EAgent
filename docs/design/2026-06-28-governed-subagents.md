@@ -1,5 +1,13 @@
 # Design — Governed sub-agents (scoped hook inheritance)
 
+```
+Status: closed
+Closing-commit: c24d596
+Closed-on: 2026-06-28
+Deferred: finding — flow-guard data-taint for children (RW3-1); finding — steer/followUp routes to parent (RW3-2);
+          deliverable — AgentHandle.spawnChild (RW3-3); deliverable — agentId/depth event tagging (RW3-4) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-28-governed-subagents` · **Wave:** 3 · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P1.2
 

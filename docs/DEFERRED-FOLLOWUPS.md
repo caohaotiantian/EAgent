@@ -54,3 +54,16 @@ fresh/non-cached input; cache tokens are disjoint siblings). Both are non-blocki
 |---|---|---|---|---|
 | RW1-1 | `limits.ts:207` per-run token budget omits cache tokens on a cached run (`usage.inputTokens + usage.outputTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | No test exercises a cached run through `limits`. Fix: sum via `totalTokens(usage)` so cache tokens count. |
 | RW1-2 | `trace.ts:206` `in=`/`out=` split display shows fresh input only on a cached run (cosmetic; `total=` already cache-aware via `totalTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | Display-only. Fix: add a `cache=` field or fold cache into the `in=` display. |
+
+## Re-design Wave 3 (governed sub-agents) — deferred residuals
+
+From `docs/design/2026-06-28-governed-subagents.md` (KDD-6, §3). `childScope` governs children via the
+gate filters + intra-run events; these residuals need a deeper per-agent rework and are each their own
+design. All are **strictly more** governance than the prior fresh-bus status quo — none is a regression.
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW3-1 | `flow-guard` **data-taint** does not fire for a child (read a sensitive file *without* `shell:exec`, then egress): the gate scans `e.agent.messages` = **parent** transcript (`flow-guard.ts:164`); a child's tagged message is in the child transcript. The **capability** trigger (shell:exec→egress) IS governed. | `docs/design/2026-06-28-governed-subagents.md` (§3, KDD-6) | M · M | Needs flow-guard to track data-taint in shared closure state (like the capability `tainted` Set), or per-agent guard state. |
+| RW3-2 | `e.agent.handle.steer`/`followUp` **writes** route to the **parent** when a *child* triggers them (`circuit-breaker.ts:156` nudge, `budget-cap.ts:298`, `output-contract.ts:170`); `output-contract.ts:187` `e.agent.stop()` stops the parent. Hard guards still block the child's call; only the soft nudge/stop misroutes. | same (§3, KDD-6) | M · M | Part of the per-agent guard-state rework: guards should act on the *acting* agent (pass it in the hook context) rather than the closure's parent `e.agent`. |
+| RW3-3 | `AgentHandle.spawnChild` not added — the four sites still construct children directly (now with `childScope`). | same (KDD-5) | S · L | A first-class spawn helper is best designed once Wave 8's search controller has concrete needs. |
+| RW3-4 | `agentId`/`depth` event **attribution/tagging** not added (would change every `KernelEvents` payload). | same (KDD-6) | M · M | Add once a consumer needs to attribute/dedupe child vs parent lifecycle signals. |

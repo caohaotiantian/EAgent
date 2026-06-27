@@ -14,7 +14,7 @@ The kernel is **seven primitives and nothing more**, all under `src/kernel/`:
 
 | Primitive        | File                   | Responsibility |
 | ---------------- | ---------------------- | -------------- |
-| Hook bus         | `hooks.ts`             | Lifecycle events (observe) + filter hooks (intervene). |
+| Hook bus         | `hooks.ts`             | Lifecycle events (observe) + filter hooks (intervene); `childScope()` derives a governed bus for sub-agents (shares gate filters + intra-run events, suppresses run-lifecycle events). |
 | Tool registry    | `registry.ts`          | Register/shadow/dispose tools; later wins, disposing restores. Also holds the `ProviderRegistry` (registers by overwrite — no restore). |
 | Provider         | `types.ts` (interface) | The LLM abstraction: a request → a stream of events. Implementations live in `src/providers/`. |
 | Agent loop       | `agent.ts`             | Turns, streaming, guarded/ordered tool dispatch, steering, follow-up (default `maxTurns` 24). |

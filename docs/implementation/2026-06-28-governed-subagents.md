@@ -1,5 +1,12 @@
 # Implementation — Governed sub-agents (scoped hook inheritance)
 
+```
+Status: closed
+Closing-commit: c24d596
+Closed-on: 2026-06-28
+Deferred: RW3-1..RW3-4 (docs/DEFERRED-FOLLOWUPS.md)
+```
+
 **Slug:** `2026-06-28-governed-subagents` (matches design) · **Design:**
 [`design/2026-06-28-governed-subagents.md`](../design/2026-06-28-governed-subagents.md)
 
