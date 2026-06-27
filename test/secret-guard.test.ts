@@ -71,6 +71,15 @@ function shellTool(name = "run_shell") {
   });
 }
 
+function mcpTool(name = "mcp_call") {
+  return defineTool({
+    name,
+    description: "Call an MCP tool.",
+    capabilities: ["mcp:call"],
+    execute: () => ({ content: "ok" }),
+  });
+}
+
 function benignTool(name = "read_file") {
   return defineTool({
     name,
@@ -202,6 +211,17 @@ test("AC-5/§8: the confirm prompt never contains the literal value", async () =
   await applyHook(h, "post", { headers: ["Authorization: Bearer " + SK] });
   assert.equal(prompts.length, 1);
   assert.ok(!prompts[0]!.includes(SK), "the confirm prompt names the kind, not the value");
+});
+
+test("an mcp:call tool is in the leak set: a secret in its args is held (block mode)", async () => {
+  const h = makeHarness();
+  h.agent.tools.register(mcpTool());
+  await activate(h, { enabled: true, mode: "block" });
+
+  const out = await applyHook(h, "mcp_call", { headers: ["Authorization: Bearer " + SK] });
+  assert.equal(out.block, true);
+  assert.match(out.reason ?? "", /sk-|openai/);
+  assert.ok(!(out.reason ?? "").includes(SK), "the literal secret value is absent from the reason");
 });
 
 // -- Task 5: clean args pass without prompting (AC-7) ------------------------
