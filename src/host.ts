@@ -72,6 +72,12 @@ import driftProbe from "./extensions/drift-probe.js";
 import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
+import fallbackRouting from "./extensions/fallback-routing.js";
+import headlessFlags from "./extensions/headless-flags.js";
+import sandboxTiers from "./extensions/sandbox-tiers.js";
+import configHooks from "./extensions/config-hooks.js";
+import budgetCap from "./extensions/budget-cap.js";
+import goal from "./extensions/goal.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -100,16 +106,21 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["microagents", microagents],
   ["limits", limits],
   ["cost", cost],
+  ["budget-cap", budgetCap],
   ["self", self],
   ["web", web],
   ["checkpoint", checkpoint],
   ["introspect", introspect],
   ["journal", journal],
   ["todo", todo],
+  ["goal", goal],
   ["prompts", promptsExt],
   ["flow-guard", flowGuard],
   ["risk-guard", riskGuard],
+  ["headless-flags", headlessFlags],
   ["bash-policy", bashPolicy],
+  ["sandbox-tiers", sandboxTiers],
+  ["config-hooks", configHooks],
   ["integrity", integrity],
   ["write-guard", writeGuard],
   ["secret-guard", secretGuard],
@@ -122,6 +133,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["skills-hardening", skillsHardening],
   ["ask", ask],
   ["routing", routing],
+  ["fallback-routing", fallbackRouting],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */

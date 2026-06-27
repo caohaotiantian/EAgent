@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+Six new built-in extensions, each adapting a capability from the leading
+terminal coding agents (Claude Code, OpenAI Codex CLI, OpenCode) onto EAgent's
+existing seams — no kernel change, all capability-gated and offline-tested:
+
+- **`sandbox-tiers`** — OS-level confinement tiers for `shell:exec`, the analog
+  of Codex's `--sandbox` matrix. On `beforeToolCall` it rewrites the command to
+  wrap it in the host sandbox (`sandbox-exec` on macOS, `bwrap`/`firejail` on
+  Linux) enforcing `readonly` / `workspace-write` / `no-network`. Default tier
+  `off` (no-op); degrades gracefully (pass or block) when no backend exists.
+  `/sandbox-tiers`, `EAGENT_SANDBOX_TIERS=off`. This realizes the OS/VM boundary
+  `SECURITY.md` names as the missing seam over the unconfined `bash` tool.
+- **`config-hooks`** — declarative external hooks from `.eagent/hooks.json`, the
+  shared `settings.json`-hooks model of all three tools. Binds matcher→action
+  rules onto the kernel hook bus (`block`/`allow`/`inject`/`append`/`truncate`/
+  `notify`, plus an external `command` action gated on `shell:exec`), so
+  guardrails and formatters need no TypeScript. Ships off. `/config-hooks`,
+  `EAGENT_CONFIG_HOOKS=off`.
+- **`fallback-routing`** — model/provider fallback chains (Claude's
+  `--fallback-model`). A composite `fallback` provider streams an ordered
+  `{provider, model}` chain, failing over only *before* the first event is
+  emitted (the no-double-emit invariant), with a per-run circuit breaker. Off by
+  default. `/fallback-routing`, `EAGENT_FALLBACK_ROUTING=off`.
+- **`budget-cap`** — a hard **USD spend ceiling that enforces**, joining `cost`
+  (prices tokens, warn-only) and `limits` (caps tokens). Soft-warns then blocks
+  paid tool calls or aborts the run at a per-run or cumulative-session cap; both
+  caps default `0` = inert. `/budget-cap`, `EAGENT_BUDGET_CAP=off`.
+- **`goal`** — pins the run's objective + acceptance criteria in front of the
+  model every turn (anti-drift), and runs an advisory offline completion check
+  on `agent_end`; adds a `setgoal` tool and an opt-in model-judge. Inert until a
+  goal is set. `/goal`, `EAGENT_GOAL=off`.
+- **`headless-flags`** — a CI safety net: when no TTY / a `CI` signal is
+  detected, rewrites shell commands to their non-interactive form
+  (`apt-get install -y`, `npm init -y`) and prepends env guards
+  (`GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`) so a prompt or `$EDITOR` can't
+  hang an unattended run. Inert in an interactive TTY. `/headless`,
+  `EAGENT_HEADLESS_FLAGS=off`.
+
 ### Security
 
 - **`self.read_extension` path traversal fixed.** It built file candidates from

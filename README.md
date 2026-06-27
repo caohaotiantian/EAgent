@@ -39,7 +39,7 @@ flowchart TB
         X1["core-tools"]
         X2["skills · mcp · memory"]
         X3["self · web · checkpoint"]
-        X4["+ 37 more"]
+        X4["+ 43 more"]
     end
 
     subgraph PROVIDERS["Providers — src/providers/"]
@@ -215,16 +215,21 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `microagents` | keyword-triggered knowledge injection via `transformContext` — scans `*.md` files with `triggers:` frontmatter and injects a body when a trigger appears in the latest user message (`EAGENT_MICROAGENTS=off` to disable) | `/microagents` | — |
 | `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
 | `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
+| `budget-cap`   | hard **USD spend ceiling that enforces** — prices the `usage` stream via `cost`'s pricecard and, at a per-run or cumulative-session cap, soft-warns then **blocks** paid tool calls (`mode=block`) or **aborts** the run (`mode=stop`); both caps default `0` = inert (`EAGENT_BUDGET_CAP=off`) | `/budget-cap` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
 | `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |
 | `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
 | `todo`        | session-scoped in-memory todo list — `todowrite` replaces and echoes the list | `/todos` | — |
+| `goal`         | pins the run's **objective + acceptance criteria** in front of the model every turn (anti-drift `transformContext`) and runs an advisory, offline completion check on `agent_end`; adds a `setgoal` tool + opt-in model-judge; inert until a goal is set (`EAGENT_GOAL=off`) | `/goal` | — |
 | `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompt-remove`, `/prompts` | — |
 | `flow-guard`  | compositional egress gate: taints a session on a source capability (default `shell:exec`) or sensitive data, then holds egress (`net:fetch`) — ask or block | `/flow-guard` | — |
 | `risk-guard`  | LLM-based semantic risk analyzer on `beforeToolCall` — classifies sensitive calls (default `shell:exec`) via a tool-less provider sub-call and asks or blocks on a RISKY verdict (off by default; `EAGENT_RISK_GUARD=off`) | `/risk-guard` | — |
+| `headless-flags` | CI safety net — when no TTY / a `CI` signal is detected, rewrites shell commands to their non-interactive form (`apt-get install -y`, `npm init -y`) and prepends env guards (`GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`) so a prompt or `$EDITOR` can't hang an unattended run; loads before `bash-policy`, inert in an interactive TTY (`EAGENT_HEADLESS_FLAGS=off`) | `/headless` | — |
 | `bash-policy` | command-granular shell policy gate — reduces a command line to a command family and evaluates an allow/deny/ask ruleset (no-op by default; `EAGENT_BASH_POLICY=off`) | `/bash-policy` | — |
+| `sandbox-tiers` | **OS-level confinement tiers** for `shell:exec` — rewrites the command (on `beforeToolCall`) to wrap it in the host sandbox (`sandbox-exec` on macOS, `bwrap`/`firejail` on Linux) enforcing `readonly` / `workspace-write` / `no-network`; default tier `off` = no-op, degrades gracefully (pass or block) when no backend exists (`EAGENT_SANDBOX_TIERS=off`) | `/sandbox-tiers` | — |
+| `config-hooks` | **declarative external hooks** from `.eagent/hooks.json` — binds matcher→action rules onto the kernel hook bus (`block`/`allow`/`inject`/`append`/`truncate`/`notify`, plus an external `command` action gated on `shell:exec`), so guardrails and formatters need no TypeScript; ships off (`/config-hooks on`, `EAGENT_CONFIG_HOOKS=off`) | `/config-hooks` | — |
 | `integrity`   | sweeps every tool description for poisoning / hidden instructions, and flags descriptions that change across sessions (rug-pull guard) | `/integrity` | — |
 | `write-guard` | prompts before a *blind overwrite* — a full-content `write` to an existing file the session has not read — via `beforeToolCall` (`EAGENT_WRITE_GUARD=off` to disable) | — | — |
 | `secret-guard` | keeps secret *values* out of outgoing tool args — on `beforeToolCall`, scans leak-capable tools' args (default `net:fetch`/`shell:exec`) for credential patterns and asks/blocks without echoing the value (on by default, mode `ask`; `EAGENT_SECRET_GUARD=off`) | `/secret-guard` | — |
@@ -237,6 +242,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `skills-hardening` | guards the skill self-extension surface — `SKILL.md` body/script supply-chain scan + body rug-pull fingerprint (warn-only), frontmatter validation, `allowed-tools` `beforeToolCall` scoping for the active skill, and optional `triggers:`-gated tier-1 disclosure (`EAGENT_SKILL_TRIGGERS=off`) | `/skills` | — |
 | `ask`          | agent→host elicitation — an `ask_user_question` tool so the model can pause and ask the human (with options) before guessing, gated by `ui:ask` so batch runs auto-decline; calls an optional `UI.ask` (CLI readline), else falls back to "proceed with a stated assumption"; the HTTP server adds a durable channel (`action_required` stream event + `POST /answer`, timeout/disconnect fallback) | — (`ask_user_question`) | `ui:ask` |
 | `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
+| `fallback-routing` | **model/provider fallback chains** — registers a composite `fallback` provider that streams an ordered `{provider, model}` chain, failing over to the next entry only *before* the first event is emitted (the no-double-emit invariant), with a per-run circuit breaker; off by default (`/fallback-routing on`, `EAGENT_FALLBACK_ROUTING=off`) | `/fallback-routing` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -336,7 +342,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  46 built-in extensions, all riding the ExtensionAPI
+src/extensions/  52 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
