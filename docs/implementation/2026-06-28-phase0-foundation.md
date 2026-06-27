@@ -2,7 +2,7 @@
 
 ```
 Status: closed
-Closing-commit: ed087ff
+Closing-commit: 6332771
 Closed-on: 2026-06-28
 Deferred: finding — limits.ts:207 (RW1-1); finding — trace.ts:206 display (RW1-2) — docs/DEFERRED-FOLLOWUPS.md
 ```

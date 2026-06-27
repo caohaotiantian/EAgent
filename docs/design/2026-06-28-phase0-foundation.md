@@ -2,7 +2,7 @@
 
 ```
 Status: closed
-Closing-commit: ed087ff
+Closing-commit: 6332771
 Closed-on: 2026-06-28
 Deferred: finding — limits.ts:207 cache-token budget (RW1-1, docs/DEFERRED-FOLLOWUPS.md);
           finding — trace.ts:206 cached-token split display (RW1-2, docs/DEFERRED-FOLLOWUPS.md)
