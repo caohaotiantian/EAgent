@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { KernelEvents, KernelFilters } from "../src/kernel/events.js";
 import { HookBus, setHandlerErrorReporter } from "../src/kernel/hooks.js";
 import type { Message, ToolCallBlock } from "../src/kernel/types.js";
-import { ZERO_USAGE } from "../src/kernel/types.js";
+import { text, ZERO_USAGE } from "../src/kernel/types.js";
 
 type Events = { ping: { n: number } };
 type Filters = { refine: { value: number; context: { base: number } } };
@@ -98,14 +98,11 @@ test("childScope shares gate filters (beforeToolCall + afterToolCall)", async ()
 
 test("childScope does NOT share context filters (transformContext + transformRequest)", async () => {
   const parent = new HookBus<KernelEvents, KernelFilters>();
-  parent.filter("transformContext", (msgs) => [
-    ...msgs,
-    { role: "user", content: "INJECTED-CONTEXT" },
-  ]);
+  parent.filter("transformContext", (msgs) => [...msgs, text("user", "INJECTED-CONTEXT")]);
   parent.filter("transformRequest", (req) => ({ ...req, systemPrompt: "INJECTED-SYSTEM" }));
 
   const child = parent.childScope();
-  const msgs: Message[] = [{ role: "user", content: "hi" }];
+  const msgs: Message[] = [text("user", "hi")];
 
   // The point is absent on the child, so apply() passes the value through unchanged.
   const outMsgs = await child.apply("transformContext", msgs, { turn: 1, model: "m" });
@@ -148,11 +145,11 @@ test("childScope shares intra-run events but suppresses run-lifecycle events", a
   await child.emit("session_start", {});
   await child.emit("session_shutdown", {});
   await child.emit("reload", {});
-  await child.emit("agent_start", { input: { role: "user", content: "x" } });
+  await child.emit("agent_start", { input: text("user", "x") });
   await child.emit("agent_end", { reason: "end_turn" });
   await child.emit("turn_start", { turn: 1 });
   await child.emit("turn_end", { turn: 1 });
-  await child.emit("message", { message: { role: "user", content: "x" } });
+  await child.emit("message", { message: text("user", "x") });
   await child.emit("text_delta", { text: "x" });
   await child.emit("reasoning_delta", { text: "x" });
   await child.emit("tool_start", { call });
