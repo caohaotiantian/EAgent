@@ -105,7 +105,8 @@ because everything else hangs off it. A turn:
 flowchart TD
     A["agent.run(input)"] --> B["drain steering · emit turn_start"]
     B --> C["transformContext<br/>(filter hook: compaction · memory · RAG)"]
-    C --> D["provider.stream(request)"]
+    C --> C2["transformRequest<br/>(filter hook: tools · model · prompt · cache)"]
+    C2 --> D["provider.stream(request)"]
     D --> E["text_delta … done + usage"]
     E --> F{"tool calls?"}
     F -->|no| G{"follow-ups queued?"}
@@ -160,9 +161,10 @@ flowchart LR
     end
     subgraph INT["Filter hooks — e.hook() · intervene"]
         direction TB
-        H1["transformContext<br/>reshape the prompt"]
-        H2["beforeToolCall<br/>veto / rewrite a call"]
-        H3["afterToolCall<br/>transform a result"]
+        H1["transformContext<br/>reshape the message list"]
+        H2["transformRequest<br/>reshape the whole request"]
+        H3["beforeToolCall<br/>veto / rewrite a call"]
+        H4["afterToolCall<br/>transform a result"]
     end
 ```
 
@@ -178,8 +180,8 @@ e.hook("beforeToolCall", (decision, { call }) => {
 });
 ```
 
-These three seams are where memory strategies, plan-mode approvals, safety gates,
-and context engineering plug in — without touching the loop.
+These four seams are where memory strategies, model routing, plan-mode approvals,
+safety gates, and context engineering plug in — without touching the loop.
 
 ## Built-in extensions
 

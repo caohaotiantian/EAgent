@@ -1,5 +1,12 @@
 # Implementation — `transformRequest` keystone seam
 
+```
+Status: closed
+Closing-commit: 53ad0b2
+Closed-on: 2026-06-28
+Deferred: none
+```
+
 **Slug:** `2026-06-28-transform-request` (matches design) · **Design:**
 [`design/2026-06-28-transform-request.md`](../design/2026-06-28-transform-request.md)
 

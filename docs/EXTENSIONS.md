@@ -259,15 +259,16 @@ e.on("tool_end", ({ call, result }) => {
 ## Filter hooks (intervene)
 
 Install with `e.hook(point, handler)`. A filter hook threads a value through
-your handler, which returns the (possibly transformed) value. There are exactly
-three, and they are the seams where memory, plan-mode approvals, safety gates,
-and context engineering plug in without touching the loop. Here is where each one
-fires inside a turn:
+your handler, which returns the (possibly transformed) value. There are four,
+and they are the seams where memory, model routing, plan-mode approvals, safety
+gates, and context engineering plug in without touching the loop. Here is where
+each one fires inside a turn:
 
 ```mermaid
 flowchart LR
     M["transcript"] --> TC["transformContext<br/>messages ⇒ messages"]
-    TC --> P["provider.stream"]
+    TC --> TR["transformRequest<br/>request ⇒ request"]
+    TR --> P["provider.stream"]
     P --> TCALL["a tool call"]
     TCALL --> BT["beforeToolCall<br/>decision ⇒ decision"]
     BT -->|"block?"| X["error result"]
@@ -293,6 +294,24 @@ e.hook("transformContext", (messages /*, { turn, model } */) => [
   },
   ...messages,
 ]);
+```
+
+### `transformRequest`
+
+Reshape the whole outbound request — `systemPrompt`, `messages`, `tools`, `model`,
+`toolChoice`, `thinking` — just before the provider call. This is the deepest
+request seam: withhold tools from the model (least-privilege / progressive
+disclosure), route the model, assemble a dynamic system prompt, or set a cache
+boundary. `transformContext` runs first, so its output arrives as `value.messages`.
+The context carries `{ turn, cumulativeUsage }`. **Return the (possibly mutated)
+value.** With no handler registered the request is byte-identical to the default.
+
+```ts
+e.hook("transformRequest", (req, { turn, cumulativeUsage }) => {
+  // Plan mode: hide mutating tools from the model on the first turn.
+  if (turn === 1) req.tools = req.tools.filter((t) => !/^(write|edit|bash)$/.test(t.name));
+  return req;
+});
 ```
 
 ### `beforeToolCall`

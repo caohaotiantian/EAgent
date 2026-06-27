@@ -37,9 +37,11 @@ with zero opinions about tools, memory, prompts, or sub-agents.
 Extensions plug into the loop through the hook bus: they **observe** lifecycle
 events via `e.on(event, …)` (`agent_start`, `turn_start`/`turn_end`, `message`,
 `text_delta`, `tool_start`/`tool_end`/`tool_batch_end`, `usage`, `agent_end`,
-`error`, `session_start`/`session_shutdown`, …) and **intervene** via three
-filter hooks `e.hook(point, …)`: `transformContext` (reshape the prompt),
-`beforeToolCall` (veto/rewrite a call), and `afterToolCall` (transform a result).
+`error`, `session_start`/`session_shutdown`, …) and **intervene** via four
+filter hooks `e.hook(point, …)`: `transformContext` (reshape the message list),
+`transformRequest` (reshape the whole outbound request — system prompt, tools,
+model, toolChoice, thinking — just before the provider call), `beforeToolCall`
+(veto/rewrite a call), and `afterToolCall` (transform a result).
 
 ## Key commands
 

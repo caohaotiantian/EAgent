@@ -1,5 +1,12 @@
 # Design — `transformRequest` keystone seam
 
+```
+Status: closed
+Closing-commit: 53ad0b2
+Closed-on: 2026-06-28
+Deferred: none
+```
+
 **Slug:** `2026-06-28-transform-request` · **Wave:** 2 · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P1.1
 
