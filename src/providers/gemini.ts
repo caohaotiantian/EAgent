@@ -104,8 +104,17 @@ export class GeminiProvider implements Provider {
         continue;
       }
       if (parsed.usageMetadata) {
-        usage.inputTokens = parsed.usageMetadata.promptTokenCount ?? usage.inputTokens;
-        usage.outputTokens = parsed.usageMetadata.candidatesTokenCount ?? usage.outputTokens;
+        const u = parsed.usageMetadata;
+        // `cachedContentTokenCount` lies within `promptTokenCount`; subtract it out.
+        const cached = u.cachedContentTokenCount;
+        if (u.promptTokenCount !== undefined) usage.inputTokens = Math.max(0, u.promptTokenCount - (cached ?? 0));
+        if (cached !== undefined) usage.cacheReadTokens = cached;
+        // `thoughtsTokenCount` is DISJOINT from `candidatesTokenCount` and additive
+        // to the billed total, so fold it into outputTokens (and surface as reasoning).
+        const thoughts = u.thoughtsTokenCount;
+        if (u.candidatesTokenCount !== undefined || thoughts !== undefined)
+          usage.outputTokens = (u.candidatesTokenCount ?? 0) + (thoughts ?? 0);
+        if (thoughts !== undefined) usage.reasoningTokens = thoughts;
       }
       const candidate = parsed.candidates?.[0];
       if (!candidate) continue;
@@ -231,5 +240,12 @@ interface GeminiChunk {
     };
     finishReason?: string;
   }[];
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    /** Cached portion of `promptTokenCount` (subtracted out into cacheReadTokens). */
+    cachedContentTokenCount?: number;
+    /** Thinking tokens — disjoint from `candidatesTokenCount`, folded into outputTokens. */
+    thoughtsTokenCount?: number;
+  };
 }

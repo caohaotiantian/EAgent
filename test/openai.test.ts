@@ -61,6 +61,31 @@ test("parses a streaming text completion with usage", async () => {
   }
 });
 
+const CACHE_CHUNKS = [
+  { choices: [{ delta: { role: "assistant", content: "hi" } }] },
+  { choices: [{ delta: {}, finish_reason: "stop" }] },
+  {
+    choices: [],
+    usage: {
+      prompt_tokens: 100,
+      prompt_tokens_details: { cached_tokens: 40 },
+      completion_tokens: 20,
+      completion_tokens_details: { reasoning_tokens: 8 },
+    },
+  },
+];
+
+test("subtracts cached out of prompt tokens and surfaces reasoning tokens", async () => {
+  const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(CACHE_CHUNKS) });
+  const events = await collect(provider.stream(req()));
+  const done = events.at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    // inputTokens = prompt - cached = 100 - 40; cacheRead = 40; reasoning ⊆ output.
+    assert.deepEqual(done.usage, { inputTokens: 60, cacheReadTokens: 40, outputTokens: 20, reasoningTokens: 8 });
+  }
+});
+
 test("assembles a tool call from streamed argument deltas", async () => {
   const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(TOOL_CHUNKS) });
   const events = await collect(provider.stream(req()));

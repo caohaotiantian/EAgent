@@ -199,6 +199,29 @@ test("pricing reuse: costOf over the captured usage matches the manual formula",
 });
 
 // ---------------------------------------------------------------------------
+// 2b — budget-cap budgets on a cache-aware USD cost, not raw tokens (P0.2 task 7)
+// ---------------------------------------------------------------------------
+
+test("budget-cap inherits cache-aware spend: caps are USD (costOf), so a cached turn costs less", () => {
+  // budget-cap computes runUsd/sessionUsd via `costOf(p.usage|cumulative, row)`
+  // (budget-cap.ts:260-261) and feeds those USD figures to `assess`. costOf is now
+  // cache-aware, so the SAME tokens billed as cache-read cost strictly less — and
+  // the ladder (which budgets on USD, never a token count) inherits that for free.
+  const row = priceRow("claude-fable-5");
+  const N = 2_000_000;
+  const freshUsd = costOf({ inputTokens: N, outputTokens: 0 }, row);
+  const cachedUsd = costOf({ inputTokens: 0, outputTokens: 0, cacheReadTokens: N }, row);
+  assert.ok(cachedUsd > 0, "cache-read tokens are priced (not ignored) in the USD figure budget-cap budgets on");
+  assert.ok(cachedUsd < freshUsd, "the USD figure budget-cap budgets on is cache-aware");
+
+  // A cap placed between the two: fresh-input spend trips hard, the cheaper
+  // cache-read spend of the identical token count stays under the cap.
+  const cfg = CFG({ runMaxUsd: (cachedUsd + freshUsd) / 2 });
+  assert.equal(assess(freshUsd, 0, cfg), "hard", "fresh-input spend exceeds the cap");
+  assert.equal(assess(cachedUsd, 0, cfg), "ok", "the same tokens as cache-read stay under the cap");
+});
+
+// ---------------------------------------------------------------------------
 // 3 — live block: the post-cap tool call is vetoed; the pre-cap one ran
 // ---------------------------------------------------------------------------
 

@@ -118,6 +118,27 @@ test("costOf computes input/1e6*inputRate + output/1e6*outputRate exactly", () =
 });
 
 // ---------------------------------------------------------------------------
+// cache pricing (AC-5 / KDD-3): reads cheaper, writes premium vs fresh input
+// ---------------------------------------------------------------------------
+
+test("a turn's cache-read tokens cost strictly less than the same count as fresh input (AC-5)", () => {
+  const row = { inputPerMTok: 3, outputPerMTok: 15 };
+  const N = 1_000_000;
+  const fresh = costOf({ inputTokens: N, outputTokens: 0 }, row);
+  const cached = costOf({ inputTokens: 0, outputTokens: 0, cacheReadTokens: N }, row);
+  assert.ok(cached < fresh, `cache-read ${cached} must cost strictly less than fresh ${fresh}`);
+  assert.ok(cached > 0, "cache-read still costs something (reduced multiplier), not free");
+});
+
+test("cache-write tokens cost strictly more than the same count as fresh input (premium multiplier)", () => {
+  const row = { inputPerMTok: 3, outputPerMTok: 15 };
+  const N = 1_000_000;
+  const fresh = costOf({ inputTokens: N, outputTokens: 0 }, row);
+  const write = costOf({ inputTokens: 0, outputTokens: 0, cacheWriteTokens: N }, row);
+  assert.ok(write > fresh, `cache-write ${write} must cost strictly more than fresh ${fresh}`);
+});
+
+// ---------------------------------------------------------------------------
 // T4/T5 — priceRow lookup + fallback
 // ---------------------------------------------------------------------------
 

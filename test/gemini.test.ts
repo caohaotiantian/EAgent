@@ -53,6 +53,25 @@ test("parses streaming text and usage", async () => {
   }
 });
 
+const CACHE_CHUNKS = [
+  {
+    candidates: [{ content: { role: "model", parts: [{ text: "hi" }] }, finishReason: "STOP" }],
+    usageMetadata: { promptTokenCount: 100, cachedContentTokenCount: 30, candidatesTokenCount: 20, thoughtsTokenCount: 6 },
+  },
+];
+
+test("subtracts cached content out of prompt and folds thoughts into output tokens", async () => {
+  const provider = new GeminiProvider({ apiKey: "k", fetch: async () => sse(CACHE_CHUNKS) });
+  const events = await collect(provider.stream(req()));
+  const done = events.at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    // input = prompt - cached = 70; output = candidates + thoughts = 26 (thoughts
+    // are disjoint and additive in Gemini); reasoning = thoughts = 6 (⊆ output).
+    assert.deepEqual(done.usage, { inputTokens: 70, cacheReadTokens: 30, outputTokens: 26, reasoningTokens: 6 });
+  }
+});
+
 test("emits a tool call from a functionCall part", async () => {
   const provider = new GeminiProvider({ apiKey: "k", fetch: async () => sse(TOOL_CHUNKS) });
   const events = await collect(provider.stream(req()));

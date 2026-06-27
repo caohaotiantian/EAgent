@@ -114,8 +114,16 @@ export class OpenAIProvider implements Provider {
       }
 
       if (parsed.usage) {
-        usage.inputTokens = parsed.usage.prompt_tokens ?? usage.inputTokens;
-        usage.outputTokens = parsed.usage.completion_tokens ?? usage.outputTokens;
+        const u = parsed.usage;
+        // `cached_tokens` is a sub-field of `prompt_tokens`; subtract it out so
+        // inputTokens is the fresh (non-cached) input and cacheReadTokens is disjoint.
+        const cached = u.prompt_tokens_details?.cached_tokens;
+        if (u.prompt_tokens !== undefined) usage.inputTokens = Math.max(0, u.prompt_tokens - (cached ?? 0));
+        if (cached !== undefined) usage.cacheReadTokens = cached;
+        if (u.completion_tokens !== undefined) usage.outputTokens = u.completion_tokens;
+        // `reasoning_tokens` lies within `completion_tokens` (an informational subset).
+        const reasoning = u.completion_tokens_details?.reasoning_tokens;
+        if (reasoning !== undefined) usage.reasoningTokens = reasoning;
       }
 
       const choice = parsed.choices?.[0];
@@ -254,5 +262,12 @@ interface OpenAIChunk {
     };
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** Cached portion of `prompt_tokens` (subtracted out into cacheReadTokens). */
+    prompt_tokens_details?: { cached_tokens?: number };
+    /** Reasoning portion of `completion_tokens` (an informational subset). */
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 }
