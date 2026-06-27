@@ -408,6 +408,114 @@ test("unknown tools yield an error result, not a crash", async () => {
   assert.match((toolMsg.content[0] as { content: string }).content, /unknown tool/i);
 });
 
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+test("maxConcurrency=1 serializes a parallel wave and preserves requested order", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "work0", id: "c0" }, { name: "work1", id: "c1" }, { name: "work2", id: "c2" }] },
+      { text: "done" },
+    ],
+  });
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const started = [deferred(), deferred(), deferred()];
+  const release = [deferred(), deferred(), deferred()];
+  for (let i = 0; i < 3; i++) {
+    agent.tools.register(
+      defineTool({
+        name: `work${i}`,
+        description: "",
+        executionMode: "parallel",
+        execute: async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          started[i]!.resolve();
+          await release[i]!.promise;
+          inFlight--;
+          return { content: `r${i}` };
+        },
+      }),
+    );
+  }
+
+  agent.maxConcurrency = 1;
+
+  const runP = agent.run("go");
+  // With a cap of 1, only one tool can be in-flight; releasing it lets the next
+  // worker pick up the following call. Driving one-at-a-time would deadlock if
+  // the cap were not honored (the unreleased waves would all be in-flight).
+  for (let i = 0; i < 3; i++) {
+    await started[i]!.promise;
+    release[i]!.resolve();
+  }
+  await runP;
+
+  assert.equal(maxInFlight, 1, "a cap of 1 must serialize the wave");
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c0", "c1", "c2"],
+    "results must follow the order the model requested",
+  );
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { content: string }).content),
+    ["r0", "r1", "r2"],
+  );
+});
+
+test("maxConcurrency unset runs a parallel wave fully concurrently (fast-path == Promise.all)", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "work0", id: "c0" }, { name: "work1", id: "c1" }, { name: "work2", id: "c2" }] },
+      { text: "done" },
+    ],
+  });
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const started = [deferred(), deferred(), deferred()];
+  const release = [deferred(), deferred(), deferred()];
+  for (let i = 0; i < 3; i++) {
+    agent.tools.register(
+      defineTool({
+        name: `work${i}`,
+        description: "",
+        executionMode: "parallel",
+        execute: async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          started[i]!.resolve();
+          await release[i]!.promise;
+          inFlight--;
+          return { content: `r${i}` };
+        },
+      }),
+    );
+  }
+
+  const runP = agent.run("go");
+  // Default (unset) maxConcurrency is Infinity ⇒ the Promise.all fast-path, so
+  // all three reach in-flight before any is released.
+  await Promise.all(started.map((d) => d.promise));
+  assert.equal(maxInFlight, 3, "an unset cap must run the whole wave in parallel");
+  for (const d of release) d.resolve();
+  await runP;
+
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c0", "c1", "c2"],
+  );
+});
+
 test("forwards the thinking level and surfaces reasoning deltas as a hook event", async () => {
   const { agent, provider } = makeHarness({ responder: [{ reasoning: "thinking hard", text: "done" }] });
   agent.thinking = "high";

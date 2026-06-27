@@ -44,6 +44,8 @@ export interface AgentOptions {
   thinking?: ThinkingLevel;
   /** Safety bound on loop iterations within a single `run`. */
   maxTurns?: number;
+  /** Upper bound on tools run concurrently within one parallel wave; defaults to `Infinity`. */
+  maxConcurrency?: number;
   ui?: UI;
   logger?: Logger;
   tools?: ToolRegistry;
@@ -74,6 +76,8 @@ export class Agent {
   /** Reasoning effort forwarded to the provider on every turn. */
   thinking: ThinkingLevel;
   maxTurns: number;
+  /** Cap on tools dispatched concurrently within a parallel wave; `Infinity` (default) preserves full parallelism. */
+  maxConcurrency: number;
 
   /** Caller-set before run(): if present, output-contract registers a respond tool whose parameters are this schema. */
   outputSchema?: JSONSchema;
@@ -110,6 +114,7 @@ export class Agent {
     this.providerName = opts.provider;
     this.thinking = opts.thinking ?? "off";
     this.maxTurns = opts.maxTurns ?? 24;
+    this.maxConcurrency = opts.maxConcurrency ?? Infinity;
   }
 
   get messages(): readonly Message[] {
@@ -321,7 +326,24 @@ export class Agent {
       for (const call of calls) out.push(await this.runOne(call));
       return out;
     }
-    return Promise.all(calls.map((call) => this.runOne(call)));
+    if (this.maxConcurrency === Infinity) {
+      return Promise.all(calls.map((call) => this.runOne(call)));
+    }
+
+    // A finite cap: a fixed pool of workers pulls the next call off a shared
+    // cursor and writes its outcome at the call's original index, so the result
+    // array stays in requested order whichever worker finishes first.
+    const results = new Array<DispatchOutcome>(calls.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < calls.length) {
+        const index = next++;
+        results[index] = await this.runOne(calls[index]!);
+      }
+    };
+    const poolSize = Math.min(this.maxConcurrency, calls.length);
+    await Promise.all(Array.from({ length: poolSize }, worker));
+    return results;
   }
 
   private async runOne(call: ToolCallBlock): Promise<DispatchOutcome> {
