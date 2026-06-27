@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
 import { setHandlerErrorReporter } from "../src/kernel/hooks.js";
-import type { CompletionRequest, ToolCallBlock, ToolResult, UI } from "../src/kernel/types.js";
+import type { CompletionRequest, Message, ToolCallBlock, ToolResult, UI, Usage } from "../src/kernel/types.js";
 import { makeHarness, lastText } from "./helpers.js";
 
 test("runs a full tool-use turn: call -> result -> final answer", async () => {
@@ -529,4 +529,109 @@ test("forwards the thinking level and surfaces reasoning deltas as a hook event"
   // The signed thinking block is retained on the assistant message.
   const assistant = agent.messages.find((m) => m.role === "assistant")!;
   assert.equal(assistant.content[0]?.type, "thinking");
+});
+
+test("transformRequest: default byte-identity when no handler is registered", async () => {
+  let captured: CompletionRequest | undefined;
+  const { agent } = makeHarness({
+    responder: (req) => {
+      captured = req;
+      return { text: "ok" };
+    },
+  });
+  agent.tools.register(defineTool({ name: "noop", description: "no op", execute: () => ({ content: "" }) }));
+
+  await agent.run("hi");
+
+  assert.ok(captured, "the provider should have received a request");
+  assert.equal(captured!.systemPrompt, agent.systemPrompt);
+  assert.equal(captured!.model, agent.model);
+  assert.deepEqual(
+    captured!.tools.map((t) => t.name),
+    agent.tools.list().map((t) => t.spec.name),
+  );
+  assert.equal(captured!.toolChoice, undefined);
+  assert.equal(captured!.thinking, agent.thinking);
+  assert.deepEqual(captured!.messages, [{ role: "user", content: [{ type: "text", text: "hi" }] }]);
+});
+
+test("transformRequest: shapes every field of the outbound request", async () => {
+  let captured: CompletionRequest | undefined;
+  const { agent } = makeHarness({
+    responder: (req) => {
+      captured = req;
+      return { text: "ok" };
+    },
+  });
+  agent.tools.register(defineTool({ name: "keep", description: "kept", execute: () => ({ content: "" }) }));
+  agent.tools.register(defineTool({ name: "drop", description: "dropped", execute: () => ({ content: "" }) }));
+
+  agent.hooks.filter("transformRequest", (value) => ({
+    ...value,
+    model: "shaped-model",
+    systemPrompt: `${value.systemPrompt} [shaped]`,
+    tools: value.tools.filter((t) => t.name !== "drop"),
+    toolChoice: { type: "tool", name: "keep" },
+    thinking: "high",
+    messages: [...value.messages, { role: "user", content: [{ type: "text", text: "EXTRA" }] }],
+  }));
+
+  await agent.run("hi");
+
+  assert.ok(captured, "the provider should have received a request");
+  assert.equal(captured!.model, "shaped-model");
+  assert.ok(captured!.systemPrompt.endsWith(" [shaped]"), "appended systemPrompt should reach the provider");
+  assert.deepEqual(captured!.tools.map((t) => t.name), ["keep"], "the dropped tool must be withheld from the model");
+  assert.deepEqual(captured!.toolChoice, { type: "tool", name: "keep" });
+  assert.equal(captured!.thinking, "high");
+  assert.ok(
+    captured!.messages.some((m) => m.content.some((b) => b.type === "text" && b.text === "EXTRA")),
+    "the appended message should reach the provider",
+  );
+});
+
+test("transformContext before transformRequest: context output flows into request messages", async () => {
+  let observed: Message[] | undefined;
+  const { agent } = makeHarness({ responder: () => ({ text: "ok" }) });
+
+  agent.hooks.filter("transformContext", (messages) => [
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "M1" }] },
+  ]);
+  agent.hooks.filter("transformRequest", (value) => {
+    observed = value.messages;
+    return value;
+  });
+
+  await agent.run("hi");
+
+  assert.ok(observed, "transformRequest should have run");
+  assert.ok(
+    observed!.some((m) => m.content.some((b) => b.type === "text" && b.text === "M1")),
+    "transformRequest must observe the message transformContext appended (context runs first)",
+  );
+});
+
+test("transformRequest: sees a non-zero cumulativeUsage matching the accumulated usage", async () => {
+  let recorded: Usage | undefined;
+  let cumulativeAfterTurn1: Usage | undefined;
+  let usageEmits = 0;
+  const { agent } = makeHarness({
+    responder: (_req, i) => (i === 0 ? { toolCalls: [{ name: "noop" }] } : { text: "done" }),
+  });
+  agent.tools.register(defineTool({ name: "noop", description: "", execute: () => ({ content: "" }) }));
+
+  agent.hooks.on("usage", ({ cumulative }) => {
+    if (++usageEmits === 1) cumulativeAfterTurn1 = cumulative;
+  });
+  agent.hooks.filter("transformRequest", (value, ctx) => {
+    if (ctx.turn === 2) recorded = ctx.cumulativeUsage;
+    return value;
+  });
+
+  await agent.run("go");
+
+  assert.ok(recorded, "transformRequest should have recorded cumulativeUsage on turn 2");
+  assert.ok(recorded!.inputTokens > 0 || recorded!.outputTokens > 0, "cumulativeUsage should be non-zero");
+  assert.deepEqual(recorded, cumulativeAfterTurn1, "turn-2 cumulativeUsage equals usage accumulated after turn 1");
 });

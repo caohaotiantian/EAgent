@@ -6,7 +6,16 @@
  * (intervene): a value threaded through handlers that may transform or veto.
  */
 
-import type { Message, StopReason, ToolCallBlock, ToolResult, Usage } from "./types.js";
+import type {
+  Message,
+  StopReason,
+  ThinkingLevel,
+  ToolCallBlock,
+  ToolChoice,
+  ToolResult,
+  ToolSpec,
+  Usage,
+} from "./types.js";
 
 export type KernelEvents = {
   /** A fresh extension runtime has come up (also fired after a reload). */
@@ -52,6 +61,25 @@ export type KernelFilters = {
   transformContext: {
     value: Message[];
     context: { turn: number; model: string };
+  };
+  /**
+   * Reshape the whole outbound request (system prompt, messages, tools, model,
+   * toolChoice, thinking) right before the provider call. `transformContext`
+   * runs first, so its messages flow in here as `value.messages`. `signal` is
+   * excluded — it is abort control, re-attached by the loop after the hook. The
+   * `tools` list is advisory to the model: dropping a tool withholds it from the
+   * model but does not gate dispatch (resolution stays by name).
+   */
+  transformRequest: {
+    value: {
+      systemPrompt: string;
+      messages: Message[];
+      tools: ToolSpec[];
+      model: string;
+      toolChoice?: ToolChoice;
+      thinking?: ThinkingLevel;
+    };
+    context: { turn: number; cumulativeUsage: Usage };
   };
   /** Approve, rewrite, or veto a tool call before it runs. */
   beforeToolCall: {

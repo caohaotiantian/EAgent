@@ -283,7 +283,6 @@ export class Agent {
       messages: context,
       tools: this.tools.list().map((t) => t.spec),
       model: this.model,
-      signal: this.#abort!.signal,
       thinking: this.thinking,
       // Re-read each turn (like `model`): a set `forceTool` compels exactly that
       // tool this turn; `undefined` leaves `toolChoice` absent ⇒ the model's free
@@ -296,10 +295,30 @@ export class Agent {
           : undefined,
     };
 
+    // The request-shaping seam: hand the assembled request to extensions, then
+    // re-attach the live abort signal. `signal` is excluded from the filter value
+    // (it is abort control, not a shaping concern — a mutated signal could wedge
+    // abort) and `cumulativeUsage` is a defensive copy so a handler can't perturb
+    // the running total. With no handler `apply` returns the value unchanged, so
+    // the streamed request is byte-identical to a direct build.
+    const shaped = await this.hooks.apply(
+      "transformRequest",
+      {
+        systemPrompt: req.systemPrompt,
+        messages: req.messages,
+        tools: req.tools,
+        model: req.model,
+        toolChoice: req.toolChoice,
+        thinking: req.thinking,
+      },
+      { turn, cumulativeUsage: { ...this.#usage } },
+    );
+    const finalReq = { ...shaped, signal: this.#abort!.signal };
+
     let message: Message | undefined;
     let stopReason: StopReason = "end_turn";
     let usage: Usage = { ...ZERO_USAGE };
-    for await (const ev of provider.stream(req)) {
+    for await (const ev of provider.stream(finalReq)) {
       if (ev.type === "text_delta") {
         await this.hooks.emit("text_delta", { text: ev.text });
       } else if (ev.type === "reasoning_delta") {
