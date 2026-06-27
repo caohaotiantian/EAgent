@@ -343,7 +343,9 @@ export class Agent {
       return { content: `Unknown tool: ${call.name}`, isError: true };
     }
 
-    const { ok, value, errors } = validate(tool.spec.parameters, call.arguments);
+    const { ok, value } = validate(tool.spec.parameters, call.arguments);
+    // Seed the guard with coerced args when valid, raw args otherwise — a guard
+    // may repair an invalid call, so we don't reject yet.
     const args = (ok ? value : call.arguments) as Record<string, unknown>;
 
     const decision: ToolDecision = { block: false, arguments: args };
@@ -356,20 +358,18 @@ export class Agent {
     if (decided.block) {
       return { content: `Tool call blocked: ${decided.reason ?? "no reason given"}`, isError: true };
     }
-    if (!ok) {
-      return { content: `Invalid arguments for ${call.name}:\n- ${errors.join("\n- ")}`, isError: true };
+
+    // The single validation gate: re-validate the (possibly guard-rewritten) args
+    // so the tool receives schema-clean, coerced input. It runs BEFORE the
+    // capability check so an irreparably-invalid call fails without spuriously
+    // prompting for a capability, and a guard that fixes the args is honored.
+    const final = validate(tool.spec.parameters, decided.arguments);
+    if (!final.ok) {
+      return { content: `Invalid arguments for ${call.name}:\n- ${final.errors.join("\n- ")}`, isError: true };
     }
 
     for (const cap of tool.capabilities ?? []) {
       await this.capabilities.require(cap, tool.spec.name);
-    }
-
-    // A beforeToolCall guard may have rewritten the arguments; re-validate so the
-    // tool still receives schema-clean, coerced input — the kernel's contract —
-    // even after a guard injected or changed fields.
-    const final = validate(tool.spec.parameters, decided.arguments);
-    if (!final.ok) {
-      return { content: `Invalid arguments for ${call.name} (after guards):\n- ${final.errors.join("\n- ")}`, isError: true };
     }
 
     const ctx: ToolContext = {

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
 import { setHandlerErrorReporter } from "../src/kernel/hooks.js";
-import type { CompletionRequest, ToolCallBlock, ToolResult } from "../src/kernel/types.js";
+import type { CompletionRequest, ToolCallBlock, ToolResult, UI } from "../src/kernel/types.js";
 import { makeHarness, lastText } from "./helpers.js";
 
 test("runs a full tool-use turn: call -> result -> final answer", async () => {
@@ -199,6 +199,67 @@ test("beforeToolCall can rewrite arguments", async () => {
   agent.hooks.filter("beforeToolCall", (d) => ({ ...d, arguments: { ...d.arguments, msg: "rewritten" } }));
   await agent.run("go");
   assert.equal(seen, "rewritten");
+});
+
+test("guard repairs invalid args", async () => {
+  const { agent } = makeHarness({
+    responder: [{ toolCalls: [{ name: "needsNum", arguments: { n: "oops" } }] }, { text: "ok" }],
+  });
+  let seen: unknown;
+  agent.tools.register(
+    defineTool({
+      name: "needsNum",
+      description: "",
+      parameters: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+      execute: (args) => {
+        seen = args.n;
+        return { content: "ran" };
+      },
+    }),
+  );
+  // The model emitted an invalid `n`; a guard rewrites it to a valid value. The
+  // single re-validate gate must honor the repair rather than reject the original.
+  agent.hooks.filter("beforeToolCall", (d) => ({ ...d, arguments: { ...d.arguments, n: 7 } }));
+
+  await agent.run("go");
+  assert.equal(seen, 7, "the tool must run with the guard-repaired value");
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.equal((toolMsg.content[0] as { content: string }).content, "ran");
+});
+
+test("invalid args with no repairing guard still error before capability prompt", async () => {
+  let prompted = false;
+  const ui: UI = {
+    confirm: async () => {
+      prompted = true;
+      return true;
+    },
+    notify: () => {},
+  };
+  const { agent } = makeHarness({
+    responder: [{ toolCalls: [{ name: "gated", arguments: { n: "oops" } }] }, { text: "ok" }],
+    fallback: "ask",
+    ui,
+  });
+  let executed = false;
+  agent.tools.register(
+    defineTool({
+      name: "gated",
+      description: "",
+      capabilities: ["secret:use"],
+      parameters: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+      execute: () => {
+        executed = true;
+        return { content: "ran" };
+      },
+    }),
+  );
+
+  await agent.run("go");
+  assert.equal(executed, false, "an invalid-args call must not execute");
+  assert.equal(prompted, false, "the capability UI must not be consulted for invalid args");
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.match((toolMsg.content[0] as { content: string }).content, /Invalid arguments for gated/);
 });
 
 test("a tool returning terminate stops the loop without a follow-up call", async () => {
