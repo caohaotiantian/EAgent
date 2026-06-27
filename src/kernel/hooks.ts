@@ -27,6 +27,31 @@ interface Registration {
 }
 
 /**
+ * Run-lifecycle events a child scope must NOT re-fire to the parent's observers:
+ * re-firing them resets per-run guard state (e.g. `circuit-breaker`/`limits`
+ * reset on `agent_start`). Every other event is intra-run and IS shared, so the
+ * parent's event-fed guard state (`flow-guard` taint, `write-guard` seen-set,
+ * cost/budget counters) accumulates from a child's activity. (KDD-1/KDD-2.)
+ */
+const SUPPRESSED_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
+  "agent_start",
+  "agent_end",
+  "session_start",
+  "session_shutdown",
+  "reload",
+]);
+
+/**
+ * The only filter points a child scope shares with its parent: the gate guards.
+ * Context-shaping filters (`transformContext`/`transformRequest`) are absent by
+ * design so the child keeps a fresh, isolated context window. (KDD-1/KDD-2.)
+ */
+const SHARED_FILTER_POINTS: ReadonlySet<string> = new Set([
+  "beforeToolCall",
+  "afterToolCall",
+]);
+
+/**
  * @typeParam Events  map of event name -> payload type (notifications)
  * @typeParam Filters map of hook name -> `{ value; context }` (filters)
  */
@@ -36,6 +61,20 @@ export class HookBus<
 > {
   readonly #events = new Map<keyof Events, Set<Registration>>();
   readonly #filters = new Map<keyof Filters, Registration[]>();
+
+  /**
+   * @param seed  optional pre-population for a derived bus (see `childScope`).
+   *   The provided `Set`/`Registration[]` references are shared, not deep-copied,
+   *   so the derived bus fires the parent's existing handlers. Children never
+   *   register their own (§5), so the shared structures stay read-only in use.
+   */
+  constructor(seed?: {
+    events?: Map<keyof Events, Set<Registration>>;
+    filters?: Map<keyof Filters, Registration[]>;
+  }) {
+    if (seed?.events) for (const [name, set] of seed.events) this.#events.set(name, set);
+    if (seed?.filters) for (const [point, list] of seed.filters) this.#filters.set(point, list);
+  }
 
   /** Subscribe to a lifecycle event. */
   on<K extends keyof Events>(event: K, handler: EventHandler<Events[K]>): Disposable {
@@ -112,6 +151,29 @@ export class HookBus<
       (this.#events.get(name as keyof Events)?.size ?? 0) +
       (this.#filters.get(name as keyof Filters)?.length ?? 0)
     );
+  }
+
+  /**
+   * Derive a child bus for a sub-agent. The child shares — by reference — the
+   * parent's gate filters (`beforeToolCall`/`afterToolCall`) and its intra-run
+   * event handlers, so the parent's guards and event-fed state govern the child.
+   * It does NOT carry the context-shaping filters (the child keeps a fresh,
+   * isolated context) or the run-lifecycle events (a child must not reset the
+   * parent's per-run guard state). Suppression is by absence: a point left out of
+   * the seed is a no-op under this bus's own semantics — `emit` returns on a
+   * missing event set and `apply` passes the value through on a missing filter
+   * list. (KDD-1/KDD-2.)
+   */
+  childScope(): HookBus<Events, Filters> {
+    const events = new Map<keyof Events, Set<Registration>>();
+    for (const [name, set] of this.#events) {
+      if (!SUPPRESSED_LIFECYCLE_EVENTS.has(name as string)) events.set(name, set);
+    }
+    const filters = new Map<keyof Filters, Registration[]>();
+    for (const [point, list] of this.#filters) {
+      if (SHARED_FILTER_POINTS.has(point as string)) filters.set(point, list);
+    }
+    return new HookBus<Events, Filters>({ events, filters });
   }
 }
 
