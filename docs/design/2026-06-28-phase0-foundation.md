@@ -1,5 +1,13 @@
 # Design — Phase 0 Foundation Pack
 
+```
+Status: closed
+Closing-commit: ed087ff
+Closed-on: 2026-06-28
+Deferred: finding — limits.ts:207 cache-token budget (RW1-1, docs/DEFERRED-FOLLOWUPS.md);
+          finding — trace.ts:206 cached-token split display (RW1-2, docs/DEFERRED-FOLLOWUPS.md)
+```
+
 **Slug:** `2026-06-28-phase0-foundation` · **Wave:** 1 · **Mode:** Full
 **Source roadmap:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`design/2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md)
 

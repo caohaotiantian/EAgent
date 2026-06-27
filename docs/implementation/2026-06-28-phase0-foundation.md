@@ -1,5 +1,12 @@
 # Implementation — Phase 0 Foundation Pack
 
+```
+Status: closed
+Closing-commit: ed087ff
+Closed-on: 2026-06-28
+Deferred: finding — limits.ts:207 (RW1-1); finding — trace.ts:206 display (RW1-2) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-28-phase0-foundation` (matches design doc) · **Design:**
 [`design/2026-06-28-phase0-foundation.md`](../design/2026-06-28-phase0-foundation.md)
 

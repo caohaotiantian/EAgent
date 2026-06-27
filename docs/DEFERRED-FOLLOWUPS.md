@@ -41,3 +41,16 @@ touch them.
   non-goal is a provider `responseFormat`/JSON-schema decode constraint, which
   Anthropic does not support; tool-choice forcing is sufficient because the
   `respond` tool's parameters *are* the schema. No further work tracked.
+
+## Re-design Wave 1 (Phase 0) — deferred findings
+
+From the F whole-project closeout review of `docs/design/2026-06-28-phase0-foundation.md`. These are the
+acknowledged out-of-scope ripples of the `Usage.inputTokens` redefinition (KDD-2: `inputTokens` is now
+fresh/non-cached input; cache tokens are disjoint siblings). Both are non-blocking and harmless today
+(no test or production path exercises a cached run through them); committed cache-aware scope was
+`cost.ts` + `budget-cap.ts` only (Surgical Changes).
+
+| # | Finding | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW1-1 | `limits.ts:207` per-run token budget omits cache tokens on a cached run (`usage.inputTokens + usage.outputTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | No test exercises a cached run through `limits`. Fix: sum via `totalTokens(usage)` so cache tokens count. |
+| RW1-2 | `trace.ts:206` `in=`/`out=` split display shows fresh input only on a cached run (cosmetic; `total=` already cache-aware via `totalTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | Display-only. Fix: add a `cache=` field or fold cache into the `in=` display. |

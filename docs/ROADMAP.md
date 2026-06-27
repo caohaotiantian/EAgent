@@ -12,7 +12,7 @@ Status legend: ⬜ not started · 🟡 in progress (L1/L2/L3) · ✅ done (accep
 
 | Wave | Scope | Items | Status |
 |---|---|---|---|
-| 1 | **Phase 0 — Foundation pack** | P0.1 CI gate+strict host · P0.2 Usage/caching accounting · P0.3 cap-set unification (mcp:call) · P0.4 validator hardening + re-validate · P0.5 bounded concurrency | ⬜ |
+| 1 | **Phase 0 — Foundation pack** | P0.1 CI gate+strict host · P0.2 Usage/caching accounting · P0.3 cap-set unification (mcp:call) · P0.4 validator hardening + re-validate · P0.5 bounded concurrency | ✅ |
 | 2 | **transformRequest keystone** | P1.1 `transformRequest` filter (kernel seam #1) | ⬜ |
 | 3 | **Governed sub-agents** | P1.2 child-scoped HookBus + usage bubbling (closes HIGH guard-bypass) | ⬜ |
 | 4 | **Forkable state** | P1.3 snapshot/restore + step ids + frozen handle.messages + per-session server isolation | ⬜ |
@@ -26,7 +26,7 @@ Status legend: ⬜ not started · 🟡 in progress (L1/L2/L3) · ✅ done (accep
 (Each item's L1 design doc and L2 impl doc live under `docs/design/` and `docs/implementation/`
 with slug `YYYY-MM-DD-<item>`. Acceptance = item's `<ACCEPT-CMD>` + full `npm test` + `npm run typecheck` green.)
 
-### Wave 1 — Phase 0 foundation pack  ⬜
+### Wave 1 — Phase 0 foundation pack  ✅ (closed 2026-06-28; commits 63fa0f0…0322c27)
 - **P0.1** `BUILTIN_EXTENSIONS` CI gate + strict host — load real set via `createAgentHost`, assert count==list-length, no dup tool/command names, surface activation errors. *No kernel change.*
 - **P0.2** Widen `Usage` (`cacheReadTokens?`, `cacheWriteTokens?`, `reasoningTokens?`); stop folding cache into `inputTokens` (anthropic.ts:153-154); populate openai/gemini; fix cost.ts/budget-cap.ts pricing. *Additive kernel type.*
 - **P0.3** Unify egress/foreign/leak capability sets incl. `mcp:call` (flow/secret/content guards). *No kernel change.*
@@ -63,3 +63,4 @@ with slug `YYYY-MM-DD-<item>`. Acceptance = item's `<ACCEPT-CMD>` + full `npm te
 ## Progress log
 
 - **2026-06-28** — Blueprint synthesized (code-as-truth audit + research + critique). Roadmap created. Branch `feat/redesign-superpowers` cut from `init`. Baseline `npm test` green. Starting Wave 1.
+- **2026-06-28** — **Wave 1 (Phase 0) CLOSED.** L1 design (4 rounds incl. corroborating) + L2 impl (3 rounds), both fresh-reviewer closed; L3 all 5 phases dev→review→accept; F whole-project review **pass** (clean, blast-radius verified). Test suite 906→**948 pass** (+42 new), typecheck clean, kernel 1826→1914 lines (< 2200). Shipped: AgentHost activation-failure reporting + CI gate; cache/reasoning-aware `Usage` + correct cache pricing across all 3 providers; validator hardening (additionalProperties/min-max/pattern/enum-coercion) + single re-validate gate honoring guard arg-repair; `maxConcurrency` bounded dispatch; `mcp:call` egress/leak guard fix. Deferred findings: RW1-1/RW1-2 (limits/trace cache display). Next: Wave 2 — transformRequest.
