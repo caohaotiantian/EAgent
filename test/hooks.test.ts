@@ -148,13 +148,13 @@ test("childScope shares intra-run events but suppresses run-lifecycle events", a
   await child.emit("agent_start", { input: text("user", "x") });
   await child.emit("agent_end", { reason: "end_turn" });
   await child.emit("turn_start", { turn: 1 });
-  await child.emit("turn_end", { turn: 1 });
+  await child.emit("turn_end", { turn: 1, step: 1 });
   await child.emit("message", { message: text("user", "x") });
   await child.emit("text_delta", { text: "x" });
   await child.emit("reasoning_delta", { text: "x" });
   await child.emit("tool_start", { call });
-  await child.emit("tool_end", { call, result: { content: "" } });
-  await child.emit("tool_batch_end", { batch: [] });
+  await child.emit("tool_end", { call, result: { content: "" }, step: 1 });
+  await child.emit("tool_batch_end", { batch: [], step: 1 });
   await child.emit("usage", { usage: ZERO_USAGE, cumulative: ZERO_USAGE });
   await child.emit("error", { error: new Error("x"), where: "test" });
 

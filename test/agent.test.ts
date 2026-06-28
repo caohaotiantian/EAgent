@@ -740,8 +740,12 @@ test("#step starts at 0, increments once per turn, and is stamped on turn_end/to
 
   const turnEndSteps: number[] = [];
   const toolEndSteps: number[] = [];
-  agent.hooks.on("turn_end", ({ step }) => turnEndSteps.push(step));
-  agent.hooks.on("tool_end", ({ step }) => toolEndSteps.push(step));
+  agent.hooks.on("turn_end", ({ step }) => {
+    turnEndSteps.push(step);
+  });
+  agent.hooks.on("tool_end", ({ step }) => {
+    toolEndSteps.push(step);
+  });
 
   await agent.run("go");
 
