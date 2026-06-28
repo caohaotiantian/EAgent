@@ -73,6 +73,7 @@ import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
 import fallbackRouting from "./extensions/fallback-routing.js";
+import reliability from "./extensions/reliability.js";
 import headlessFlags from "./extensions/headless-flags.js";
 import sandboxTiers from "./extensions/sandbox-tiers.js";
 import configHooks from "./extensions/config-hooks.js";
@@ -134,6 +135,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["ask", ask],
   ["routing", routing],
   ["fallback-routing", fallbackRouting],
+  ["reliability", reliability],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
