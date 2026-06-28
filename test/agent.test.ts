@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
 import { setHandlerErrorReporter } from "../src/kernel/hooks.js";
-import type { CompletionRequest, Message, ToolCallBlock, ToolResult, UI, Usage } from "../src/kernel/types.js";
+import type { CompletionRequest, Message, StopReason, ToolCallBlock, ToolResult, UI, Usage } from "../src/kernel/types.js";
 import { makeHarness, lastText } from "./helpers.js";
 
 test("runs a full tool-use turn: call -> result -> final answer", async () => {
@@ -755,4 +755,134 @@ test("#step starts at 0, increments once per turn, and is stamped on turn_end/to
 
   agent.clear();
   assert.equal(agent.snapshot().step, 0, "clear() resets step to 0");
+});
+
+// --- onProviderError seam (Phase 2) ---------------------------------------
+
+test("onProviderError default (no handler): a pre-commit throw ends with reason:error and rethrows", async () => {
+  const { agent } = makeHarness();
+  agent.providers.register(
+    {
+      name: "mock",
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        throw new Error("provider exploded");
+      },
+    },
+    { default: true },
+  );
+  let endReason: StopReason | undefined;
+  agent.hooks.on("agent_end", ({ reason }) => {
+    endReason = reason;
+  });
+  await assert.rejects(() => agent.run("go"), /provider exploded/);
+  assert.equal(endReason, "error", "with no handler the seam is inert: reason is error, byte-identical to today");
+});
+
+test("onProviderError retry: a pre-commit throw then success completes the run", async () => {
+  const { agent } = makeHarness();
+  let attempts = 0;
+  agent.providers.register(
+    {
+      name: "mock",
+      async *stream() {
+        attempts++;
+        if (attempts === 1) throw new Error("transient pre-commit");
+        yield {
+          type: "done",
+          message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+          stopReason: "end_turn",
+        } as const;
+      },
+    },
+    { default: true },
+  );
+  const seenAttempts: number[] = [];
+  agent.hooks.filter("onProviderError", (_value, ctx) => {
+    seenAttempts.push(ctx.attempt);
+    return { retry: true, fail: false };
+  });
+
+  const { reason } = await agent.run("go");
+  assert.equal(reason, "end_turn", "the run completes after the retry succeeds");
+  assert.equal(attempts, 2, "the provider stream was re-invoked exactly once");
+  assert.deepEqual(seenAttempts, [1], "the handler saw attempt=1 on the first (only) failure");
+});
+
+test("onProviderError downshift: the retried request carries the downshifted model", async () => {
+  const { agent } = makeHarness();
+  const reqModels: string[] = [];
+  let attempts = 0;
+  agent.providers.register(
+    {
+      name: "mock",
+      async *stream(req) {
+        reqModels.push(req.model);
+        attempts++;
+        if (attempts === 1) throw new Error("overloaded");
+        yield {
+          type: "done",
+          message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+          stopReason: "end_turn",
+        } as const;
+      },
+    },
+    { default: true },
+  );
+  const ctxModels: string[] = [];
+  agent.hooks.filter("transformContext", (msgs, ctx) => {
+    ctxModels.push(ctx.model);
+    return msgs;
+  });
+  agent.hooks.filter("onProviderError", () => ({ retry: true, downshiftModel: "small", fail: false }));
+
+  const { reason } = await agent.run("go");
+  assert.equal(reason, "end_turn");
+  assert.deepEqual(reqModels, ["mock", "small"], "the retried provider request used the downshifted model");
+  assert.deepEqual(ctxModels, ["mock", "small"], "transformContext context.model reflected the downshift on retry");
+});
+
+test("onProviderError post-commit: an emitted-then-throwing stream is not retried (no double-emit)", async () => {
+  const { agent } = makeHarness();
+  let attempts = 0;
+  agent.providers.register(
+    {
+      name: "mock",
+      async *stream() {
+        attempts++;
+        yield { type: "text_delta", text: "hello" } as const;
+        throw new Error("post-commit boom");
+      },
+    },
+    { default: true },
+  );
+  let deltas = 0;
+  agent.hooks.on("text_delta", () => {
+    deltas++;
+  });
+  agent.hooks.filter("onProviderError", () => ({ retry: true, fail: false }));
+
+  await assert.rejects(() => agent.run("go"), /post-commit boom/);
+  assert.equal(attempts, 1, "a post-commit throw is never retried, even with a retry handler");
+  assert.equal(deltas, 1, "exactly one text_delta reached observers (no double-emit)");
+});
+
+test("onProviderError hard bound: an always-retry handler terminates after MAX_PROVIDER_RETRIES", async () => {
+  const { agent } = makeHarness();
+  let attempts = 0;
+  agent.providers.register(
+    {
+      name: "mock",
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        attempts++;
+        throw new Error("always pre-commit");
+      },
+    },
+    { default: true },
+  );
+  agent.hooks.filter("onProviderError", () => ({ retry: true, fail: false }));
+
+  await assert.rejects(() => agent.run("go"), /always pre-commit/);
+  assert.equal(attempts, 6, "the kernel hard bound (MAX_PROVIDER_RETRIES=6) stops a perpetual-retry handler");
 });

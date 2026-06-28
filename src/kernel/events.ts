@@ -93,4 +93,17 @@ export type KernelFilters = {
     value: ToolResult;
     context: { call: ToolCallBlock };
   };
+  /**
+   * Offered when the provider stream throws BEFORE emitting any event
+   * (pre-commit). A handler may request a re-stream (`retry`), optionally
+   * swapping the model for the retry (`downshiftModel`), or let it fail (`fail`,
+   * the default). The default value `{ retry:false, fail:true }` is returned
+   * unchanged with no handler, so the loop rethrows — byte-identical to today. A
+   * post-commit throw is never offered here: retrying a partly-streamed turn
+   * would double-emit. `attempt` starts at 1 for the first failure.
+   */
+  onProviderError: {
+    value: { retry: boolean; downshiftModel?: string; fail: boolean };
+    context: { error: unknown; attempt: number };
+  };
 };

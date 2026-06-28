@@ -63,6 +63,13 @@ export interface RunResult {
 const DEFAULT_SYSTEM_PROMPT =
   "You are EAgent, a helpful, precise assistant. Use the available tools when they help. Keep answers tight.";
 
+/**
+ * Hard safety bound on `onProviderError` re-streams within a single turn,
+ * regardless of what a handler returns — a buggy handler returning perpetual
+ * `retry:true` cannot spin forever. `attempt` starts at 1.
+ */
+const MAX_PROVIDER_RETRIES = 6;
+
 export class Agent {
   readonly hooks: HookBus<KernelEvents, KernelFilters>;
   readonly tools: ToolRegistry;
@@ -316,67 +323,97 @@ export class Agent {
     const provider = this.providers.get(this.providerName);
     if (!provider) throw new Error(`no provider registered (looking for ${this.providerName ?? "default"})`);
 
-    const context = await this.hooks.apply(
-      "transformContext",
-      [...this.#messages],
-      { turn, model: this.model },
-    );
+    // The provider-error seam: rebuild the request and consume the stream inside a
+    // bounded retry loop. A pre-commit throw (no event yet emitted) is offered to
+    // `onProviderError`, which may re-stream (optionally downshifting `model`); a
+    // post-commit throw (the `committed` invariant, mirroring fallback-routing)
+    // always rethrows, since retrying a partly-rendered stream would double-emit.
+    // With no handler the applied value is the default unchanged, so the loop
+    // rethrows on the first failure — byte-identical to a bare provider call.
+    let attempt = 1;
+    let model = this.model;
+    for (;;) {
+      const context = await this.hooks.apply(
+        "transformContext",
+        [...this.#messages],
+        { turn, model },
+      );
 
-    const req = {
-      systemPrompt: this.systemPrompt,
-      messages: context,
-      tools: this.tools.list().map((t) => t.spec),
-      model: this.model,
-      thinking: this.thinking,
-      // Re-read each turn (like `model`): a set `forceTool` compels exactly that
-      // tool this turn; `undefined` leaves `toolChoice` absent ⇒ the model's free
-      // choice, byte-identical to a build without forcing. `forceTool` is public
-      // API, so guard it against an unregistered name (which would make a real
-      // provider 400) by only forcing a tool that is actually registered.
-      toolChoice:
-        this.forceTool && this.tools.get(this.forceTool)
-          ? { type: "tool" as const, name: this.forceTool }
-          : undefined,
-    };
+      const req = {
+        systemPrompt: this.systemPrompt,
+        messages: context,
+        tools: this.tools.list().map((t) => t.spec),
+        model,
+        thinking: this.thinking,
+        // Re-read each turn (like `model`): a set `forceTool` compels exactly that
+        // tool this turn; `undefined` leaves `toolChoice` absent ⇒ the model's free
+        // choice, byte-identical to a build without forcing. `forceTool` is public
+        // API, so guard it against an unregistered name (which would make a real
+        // provider 400) by only forcing a tool that is actually registered.
+        toolChoice:
+          this.forceTool && this.tools.get(this.forceTool)
+            ? { type: "tool" as const, name: this.forceTool }
+            : undefined,
+      };
 
-    // The request-shaping seam: hand the assembled request to extensions, then
-    // re-attach the live abort signal. `signal` is excluded from the filter value
-    // (it is abort control, not a shaping concern — a mutated signal could wedge
-    // abort) and `cumulativeUsage` is a defensive copy so a handler can't perturb
-    // the running total. With no handler `apply` returns the value unchanged, so
-    // the streamed request is byte-identical to a direct build.
-    const shaped = await this.hooks.apply(
-      "transformRequest",
-      {
-        systemPrompt: req.systemPrompt,
-        messages: req.messages,
-        tools: req.tools,
-        model: req.model,
-        toolChoice: req.toolChoice,
-        thinking: req.thinking,
-      },
-      { turn, cumulativeUsage: { ...this.#usage } },
-    );
-    const finalReq = { ...shaped, signal: this.#abort!.signal };
+      // The request-shaping seam: hand the assembled request to extensions, then
+      // re-attach the live abort signal. `signal` is excluded from the filter value
+      // (it is abort control, not a shaping concern — a mutated signal could wedge
+      // abort) and `cumulativeUsage` is a defensive copy so a handler can't perturb
+      // the running total. With no handler `apply` returns the value unchanged, so
+      // the streamed request is byte-identical to a direct build.
+      const shaped = await this.hooks.apply(
+        "transformRequest",
+        {
+          systemPrompt: req.systemPrompt,
+          messages: req.messages,
+          tools: req.tools,
+          model: req.model,
+          toolChoice: req.toolChoice,
+          thinking: req.thinking,
+        },
+        { turn, cumulativeUsage: { ...this.#usage } },
+      );
+      const finalReq = { ...shaped, signal: this.#abort!.signal };
 
-    let message: Message | undefined;
-    let stopReason: StopReason = "end_turn";
-    let usage: Usage = { ...ZERO_USAGE };
-    for await (const ev of provider.stream(finalReq)) {
-      if (ev.type === "text_delta") {
-        await this.hooks.emit("text_delta", { text: ev.text });
-      } else if (ev.type === "reasoning_delta") {
-        await this.hooks.emit("reasoning_delta", { text: ev.text });
-      } else if (ev.type === "done") {
-        message = ev.message;
-        stopReason = ev.stopReason;
-        if (ev.usage) usage = ev.usage;
+      let committed = false;
+      let message: Message | undefined;
+      let stopReason: StopReason = "end_turn";
+      let usage: Usage = { ...ZERO_USAGE };
+      try {
+        for await (const ev of provider.stream(finalReq)) {
+          committed = true;
+          if (ev.type === "text_delta") {
+            await this.hooks.emit("text_delta", { text: ev.text });
+          } else if (ev.type === "reasoning_delta") {
+            await this.hooks.emit("reasoning_delta", { text: ev.text });
+          } else if (ev.type === "done") {
+            message = ev.message;
+            stopReason = ev.stopReason;
+            if (ev.usage) usage = ev.usage;
+          }
+        }
+        if (!message) throw new Error(`provider "${provider.name}" stream ended without a "done" event`);
+      } catch (err) {
+        // Post-commit or out of retries → rethrow (run() turns it into reason:error).
+        if (committed || attempt >= MAX_PROVIDER_RETRIES) throw err;
+        const decision = await this.hooks.apply(
+          "onProviderError",
+          { retry: false, fail: true },
+          { error: err, attempt },
+        );
+        if (decision.retry && !decision.fail) {
+          attempt++;
+          if (decision.downshiftModel) model = decision.downshiftModel;
+          continue;
+        }
+        throw err;
       }
+      // Usage only accrues on a fully-consumed stream, so a pre-commit failure adds none.
+      this.#usage = addUsage(this.#usage, usage);
+      await this.hooks.emit("usage", { usage, cumulative: { ...this.#usage } });
+      return { message, stopReason };
     }
-    if (!message) throw new Error(`provider "${provider.name}" stream ended without a "done" event`);
-    this.#usage = addUsage(this.#usage, usage);
-    await this.hooks.emit("usage", { usage, cumulative: { ...this.#usage } });
-    return { message, stopReason };
   }
 
   private async dispatch(calls: ToolCallBlock[]): Promise<DispatchOutcome[]> {
