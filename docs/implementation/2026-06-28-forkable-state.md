@@ -1,5 +1,12 @@
 # Implementation — First-class forkable state (snapshot / restore / step ids)
 
+```
+Status: closed
+Closing-commit: 2bd6227
+Closed-on: 2026-06-28
+Deferred: RW4-1 (fork → Wave 8), RW4-2 (server capability/store bleed) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-28-forkable-state` (matches design) · **Design:**
 [`design/2026-06-28-forkable-state.md`](../design/2026-06-28-forkable-state.md)
 

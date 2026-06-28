@@ -137,7 +137,7 @@ All seven live in `src/kernel/` and form the entire public surface of the kernel
 | **Hook bus**         | `src/kernel/hooks.ts`        | Lifecycle events (observe) + filter hooks (intervene) — Emacs *hooks* & *advice*. |
 | **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools (and commands); a later definition wins, disposing restores the prior one. (Providers, in the same file, register by overwrite — no restore.) |
 | **Provider**         | `src/kernel/types.ts`        | The one thing the kernel knows about an LLM: a request → a stream of events. |
-| **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions. |
+| **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions; first-class state — `snapshot()`/`restore()` + a monotonic step. |
 | **Capability layer** | `src/kernel/capabilities.ts` | Per-capability allow / deny / ask, wildcards, an audit log. |
 | **Extension host**   | `src/kernel/extension.ts`    | Discovery, activation, the `ExtensionAPI`, hot reload via `jiti`. |
 | **Command registry** | `src/kernel/commands.ts`     | User-facing slash commands — `M-x` for agents. |

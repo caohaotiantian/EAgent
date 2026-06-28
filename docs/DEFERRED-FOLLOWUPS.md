@@ -67,3 +67,13 @@ design. All are **strictly more** governance than the prior fresh-bus status quo
 | RW3-2 | `e.agent.handle.steer`/`followUp` **writes** route to the **parent** when a *child* triggers them (`circuit-breaker.ts:156` nudge, `budget-cap.ts:298`, `output-contract.ts:170`); `output-contract.ts:187` `e.agent.stop()` stops the parent. Hard guards still block the child's call; only the soft nudge/stop misroutes. | same (§3, KDD-6) | M · M | Part of the per-agent guard-state rework: guards should act on the *acting* agent (pass it in the hook context) rather than the closure's parent `e.agent`. |
 | RW3-3 | `AgentHandle.spawnChild` not added — the four sites still construct children directly (now with `childScope`). | same (KDD-5) | S · L | A first-class spawn helper is best designed once Wave 8's search controller has concrete needs. |
 | RW3-4 | `agentId`/`depth` event **attribution/tagging** not added (would change every `KernelEvents` payload). | same (KDD-6) | M · M | Add once a consumer needs to attribute/dedupe child vs parent lifecycle signals. |
+
+## Re-design Wave 4 (forkable state) — deferred residuals
+
+From `docs/design/2026-06-28-forkable-state.md` (KDD-2, KDD-5). The kernel ships snapshot/restore/#step;
+these are scoped-out extensions/consumers, not gaps.
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW4-1 | `Agent.fork()` not added (a child Agent reusing registries with a deep-copied transcript). The Wave-4 consumer (the server) is sequential and needs restore-into-the-same-agent, not a second live agent. | `docs/design/2026-06-28-forkable-state.md` (KDD-2) | S · L | Designed with **Wave 8**'s reasoning-search controller, which needs governed branches (`new Agent({…registries, hooks: parent.hooks.childScope()}).restore(parent.snapshot())`). |
+| RW4-2 | Server **cross-session bleed of non-conversational state**: `done.usage`/model/systemPrompt/thinking are now per-session, but the `CapabilityManager` audit log, the namespaced `Store`, and `cost`/`budget-cap` accumulators remain process-shared across sessions. | same (KDD-5) | M · M | Needs `fork()` (RW4-1) or per-session `CapabilityManager`/`Store` instances — a larger server rework. snapshot/restore isolates conversational state + usage only. |

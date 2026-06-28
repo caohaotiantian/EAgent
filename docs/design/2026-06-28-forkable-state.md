@@ -1,5 +1,12 @@
 # Design — First-class forkable state (snapshot / restore / step ids)
 
+```
+Status: closed
+Closing-commit: 2bd6227
+Closed-on: 2026-06-28
+Deferred: deliverable — Agent.fork() (RW4-1, Wave 8); finding — server cross-session capability-audit/store bleed (RW4-2) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-28-forkable-state` · **Wave:** 4 · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P1.3
 
