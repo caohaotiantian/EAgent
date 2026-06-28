@@ -246,6 +246,8 @@ function mapFinishReason(reason: string): StopReason {
       return "tool_use";
     case "length":
       return "max_tokens";
+    case "content_filter":
+      return "content_filter";
     default:
       return "stop";
   }

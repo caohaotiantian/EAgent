@@ -261,6 +261,25 @@ test("maps thinking level to reasoning_effort, omitting it when off", async () =
   assert.equal(captured.reasoning_effort, undefined);
 });
 
+test("maps content_filter finish_reason to content_filter, preserving prior mappings (AC-7)", async () => {
+  async function stopReasonFor(finish: string): Promise<string> {
+    const chunks = [
+      { choices: [{ delta: { role: "assistant", content: "x" } }] },
+      { choices: [{ delta: {}, finish_reason: finish }] },
+    ];
+    const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(chunks) });
+    const done = (await collect(provider.stream(req()))).at(-1)!;
+    assert.equal(done.type, "done");
+    return done.type === "done" ? done.stopReason : "";
+  }
+  // A provider content-filter termination surfaces as content_filter.
+  assert.equal(await stopReasonFor("content_filter"), "content_filter");
+  // Pre-existing mappings are unchanged.
+  assert.equal(await stopReasonFor("stop"), "end_turn");
+  assert.equal(await stopReasonFor("tool_calls"), "tool_use");
+  assert.equal(await stopReasonFor("length"), "max_tokens");
+});
+
 test("surfaces reasoning_content deltas as reasoning events", async () => {
   const chunks = [
     { choices: [{ delta: { role: "assistant", reasoning_content: "hmm" } }] },

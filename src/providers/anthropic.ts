@@ -298,6 +298,8 @@ function mapStopReason(reason: string): StopReason {
       return "tool_use";
     case "max_tokens":
       return "max_tokens";
+    case "refusal":
+      return "refusal";
     default:
       return "stop";
   }

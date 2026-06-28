@@ -178,6 +178,27 @@ test("maps toolChoice to Gemini tool_config, omitting it for auto/absent", async
   assert.equal(captured.tool_config, undefined);
 });
 
+test("maps SAFETY and RECITATION finishReason to content_filter, preserving prior mappings (AC-7)", async () => {
+  async function stopReasonFor(finish: string): Promise<string> {
+    const chunks = [
+      {
+        candidates: [{ content: { role: "model", parts: [{ text: "x" }] }, finishReason: finish }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      },
+    ];
+    const provider = new GeminiProvider({ apiKey: "k", fetch: async () => sse(chunks) });
+    const done = (await collect(provider.stream(req()))).at(-1)!;
+    assert.equal(done.type, "done");
+    return done.type === "done" ? done.stopReason : "";
+  }
+  // Both safety and recitation blocks collapse to the neutral content_filter.
+  assert.equal(await stopReasonFor("SAFETY"), "content_filter");
+  assert.equal(await stopReasonFor("RECITATION"), "content_filter");
+  // Pre-existing mappings are unchanged.
+  assert.equal(await stopReasonFor("STOP"), "end_turn");
+  assert.equal(await stopReasonFor("MAX_TOKENS"), "max_tokens");
+});
+
 test("surfaces thought parts as reasoning, keeping them out of the answer", async () => {
   const chunks = [
     { candidates: [{ content: { role: "model", parts: [{ text: "planning", thought: true }, { text: "Hi" }] }, finishReason: "STOP" }] },

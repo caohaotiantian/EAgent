@@ -211,6 +211,9 @@ function mapFinishReason(reason: string): StopReason {
       return "end_turn";
     case "MAX_TOKENS":
       return "max_tokens";
+    case "SAFETY":
+    case "RECITATION":
+      return "content_filter";
     default:
       return "stop";
   }

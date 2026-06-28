@@ -167,7 +167,14 @@ export interface ToolContext {
 // Providers (LLM abstraction)
 // ---------------------------------------------------------------------------
 
-export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop" | "error";
+export type StopReason =
+  | "end_turn"
+  | "tool_use"
+  | "max_tokens"
+  | "stop"
+  | "error"
+  | "refusal"
+  | "content_filter";
 
 /**
  * How a turn's decoding should treat tool use. The kernel speaks one neutral
