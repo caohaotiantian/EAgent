@@ -165,6 +165,7 @@ flowchart LR
         H2["transformRequest<br/>reshape the whole request"]
         H3["beforeToolCall<br/>veto / rewrite a call"]
         H4["afterToolCall<br/>transform a result"]
+        H5["onProviderError<br/>retry / downshift on a stream failure"]
     end
 ```
 
@@ -180,8 +181,9 @@ e.hook("beforeToolCall", (decision, { call }) => {
 });
 ```
 
-These four seams are where memory strategies, model routing, plan-mode approvals,
-safety gates, and context engineering plug in — without touching the loop.
+These five seams are where memory strategies, model routing, plan-mode approvals,
+safety gates, context engineering, and reliability policy plug in — without touching the loop.
+(`onProviderError` is an error-path seam: it fires only when a provider stream throws.)
 
 ## Built-in extensions
 
@@ -245,6 +247,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `ask`          | agent→host elicitation — an `ask_user_question` tool so the model can pause and ask the human (with options) before guessing, gated by `ui:ask` so batch runs auto-decline; calls an optional `UI.ask` (CLI readline), else falls back to "proceed with a stated assumption"; the HTTP server adds a durable channel (`action_required` stream event + `POST /answer`, timeout/disconnect fallback) | — (`ask_user_question`) | `ui:ask` |
 | `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
 | `fallback-routing` | **model/provider fallback chains** — registers a composite `fallback` provider that streams an ordered `{provider, model}` chain, failing over to the next entry only *before* the first event is emitted (the no-double-emit invariant), with a per-run circuit breaker; off by default (`/fallback-routing on`, `EAGENT_FALLBACK_ROUTING=off`) | `/fallback-routing` | — |
+| `reliability` | **same-provider retry + model downshift** on the `onProviderError` seam — bounded exponential backoff-with-jitter retry of a transient pre-first-event stream failure (conservative allowlist; never re-retries `http.ts`-owned 429/5xx), optionally downshifting the model; a *different axis* from `fallback-routing` (cross-provider) — it never switches provider. Off by default (`/reliability on`, `EAGENT_RELIABILITY=off`) | `/reliability` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -344,7 +347,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  52 built-in extensions, all riding the ExtensionAPI
+src/extensions/  53 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

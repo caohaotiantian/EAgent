@@ -1,9 +1,9 @@
 /**
  * config-hooks — declarative, config-file-driven bridge to the kernel hook bus.
  *
- * EAgent already exposes three filter points (`transformContext`,
- * `beforeToolCall`, `afterToolCall`) and a dozen lifecycle events, but wiring
- * them requires authoring a TypeScript extension. This extension ports Claude
+ * EAgent already exposes its filter points (`transformContext`, `transformRequest`,
+ * `beforeToolCall`, `afterToolCall`, `onProviderError`) and a dozen lifecycle
+ * events, but wiring them requires authoring a TypeScript extension. This extension ports Claude
  * Code's `settings.json`-hooks model onto EAgent's primitives: it reads a small
  * JSON config that binds *matcher -> action* rules onto a named event/filter
  * point, validates it (a hand-written, zero-dep validator that never throws),

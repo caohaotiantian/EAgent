@@ -37,11 +37,12 @@ with zero opinions about tools, memory, prompts, or sub-agents.
 Extensions plug into the loop through the hook bus: they **observe** lifecycle
 events via `e.on(event, …)` (`agent_start`, `turn_start`/`turn_end`, `message`,
 `text_delta`, `tool_start`/`tool_end`/`tool_batch_end`, `usage`, `agent_end`,
-`error`, `session_start`/`session_shutdown`, …) and **intervene** via four
+`error`, `session_start`/`session_shutdown`, …) and **intervene** via five
 filter hooks `e.hook(point, …)`: `transformContext` (reshape the message list),
 `transformRequest` (reshape the whole outbound request — system prompt, tools,
 model, toolChoice, thinking — just before the provider call), `beforeToolCall`
-(veto/rewrite a call), and `afterToolCall` (transform a result).
+(veto/rewrite a call), `afterToolCall` (transform a result), and `onProviderError`
+(error-path: retry/downshift when a provider stream throws pre-first-event).
 
 ## Key commands
 
@@ -64,7 +65,7 @@ required. Keep it that way.
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` (retry/backoff + SSE parsing),
   and `cassette` (record/replay). All read config from `process.env`.
-- `src/extensions/` — the 52 built-in extensions, plus internal helpers in `lib/`.
+- `src/extensions/` — the 53 built-in extensions, plus internal helpers in `lib/`.
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
   defaulting (honors `*_MODEL` env vars), and the canonical `BUILTIN_EXTENSIONS`
   set and load order.
@@ -78,7 +79,7 @@ required. Keep it that way.
 
 ## Built-in extensions
 
-Everything outside `src/kernel/` is an extension. 52 ship in `BUILTIN_EXTENSIONS`
+Everything outside `src/kernel/` is an extension. 53 ship in `BUILTIN_EXTENSIONS`
 (`src/host.ts`), each a single file with offline tests that gates privileged work
 behind a capability. Conventions worth knowing:
 

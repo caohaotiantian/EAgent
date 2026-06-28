@@ -259,10 +259,11 @@ e.on("tool_end", ({ call, result }) => {
 ## Filter hooks (intervene)
 
 Install with `e.hook(point, handler)`. A filter hook threads a value through
-your handler, which returns the (possibly transformed) value. There are four,
-and they are the seams where memory, model routing, plan-mode approvals, safety
-gates, and context engineering plug in without touching the loop. Here is where
-each one fires inside a turn:
+your handler, which returns the (possibly transformed) value. There are five —
+four on the request/tool path (below) plus `onProviderError` (an error-path seam,
+covered after them) — the seams where memory, model routing, plan-mode approvals,
+safety gates, context engineering, and reliability policy plug in without touching
+the loop. Here is where the four request/tool ones fire inside a turn:
 
 ```mermaid
 flowchart LR
@@ -340,6 +341,25 @@ redaction, truncation, annotation.
 e.hook("afterToolCall", (result, { call }) => {
   if (result.content.length <= 4000) return result;
   return { ...result, content: result.content.slice(0, 4000) + "\n…(truncated)" };
+});
+```
+
+### `onProviderError` (error-path)
+
+Unlike the four above, this fires **only when the provider stream throws** — and
+only **before** any event has been emitted (a post-first-event failure can't be
+retried without double-emitting, so it always propagates). The threaded value is
+`{ retry, downshiftModel?, fail }` and the context is `{ error, attempt }`. Return
+`{ retry: true, fail: false }` (optionally with `downshiftModel`) to re-stream the
+turn; the default (no handler) is `{ retry: false, fail: true }`, so the run ends
+with `reason:"error"` exactly as before. The kernel caps re-streams per turn. This
+is the seam the `reliability` extension rides for same-provider backoff-retry +
+model downshift (cross-provider failover is `fallback-routing`'s job).
+
+```ts
+e.hook("onProviderError", (decision, { error, attempt }) => {
+  if (attempt < 3 && isTransient(error)) return { retry: true, fail: false };
+  return decision; // default: fail
 });
 ```
 

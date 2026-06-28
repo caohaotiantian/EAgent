@@ -1,5 +1,12 @@
 # Design — Reliability boundary (`onProviderError` seam + StopReason enrichment)
 
+```
+Status: closed
+Closing-commit: b8dd9c3
+Closed-on: 2026-06-28
+Deferred: deliverable — rewrite fallback-routing onto onProviderError (RW5-1) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-28-reliability-boundary` · **Wave:** 5 · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P1.4
 

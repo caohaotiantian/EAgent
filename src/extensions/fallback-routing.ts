@@ -5,11 +5,11 @@
  * `this.providers.get(this.providerName)` at the top of every `streamTurn`, and a
  * provider whose stream throws (auth 401, rate-limit-exhausted 429, a 5xx after
  * retries, a DNS/connection failure) propagates straight out of `run()` and ends
- * the session with `reason: "error"`. None of the three filter hooks wrap the
- * provider call and the `error` event is observe-only, so there is no in-loop seam
- * to retry on a different provider. The kernel, however, knows a provider only as
- * "request → a stream of events" — so a failover chain is itself just a
- * `Provider`. This extension registers a **composite provider** named `"fallback"`
+ * the session with `reason: "error"`. (The kernel's `onProviderError` filter is now
+ * the in-loop retry/downshift seam for the SAME provider — the `reliability`
+ * extension rides it — but cross-provider failover still has no dedicated seam: the
+ * kernel knows a provider only as "request → a stream of events", so a failover
+ * chain is itself just a `Provider`.) This extension registers a **composite provider** named `"fallback"`
  * and rides the public, mutable `Agent.providerName` field exactly as `routing`
  * rides `Agent.model`: on `agent_start` it captures the configured provider as the
  * chain head and (when enabled) points `agent.providerName` at the wrapper; on

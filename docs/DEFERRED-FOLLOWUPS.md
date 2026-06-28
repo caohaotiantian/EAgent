@@ -77,3 +77,11 @@ these are scoped-out extensions/consumers, not gaps.
 |---|---|---|---|---|
 | RW4-1 | `Agent.fork()` not added (a child Agent reusing registries with a deep-copied transcript). The Wave-4 consumer (the server) is sequential and needs restore-into-the-same-agent, not a second live agent. | `docs/design/2026-06-28-forkable-state.md` (KDD-2) | S · L | Designed with **Wave 8**'s reasoning-search controller, which needs governed branches (`new Agent({…registries, hooks: parent.hooks.childScope()}).restore(parent.snapshot())`). |
 | RW4-2 | Server **cross-session bleed of non-conversational state**: `done.usage`/model/systemPrompt/thinking are now per-session, but the `CapabilityManager` audit log, the namespaced `Store`, and `cost`/`budget-cap` accumulators remain process-shared across sessions. | same (KDD-5) | M · M | Needs `fork()` (RW4-1) or per-session `CapabilityManager`/`Store` instances — a larger server rework. snapshot/restore isolates conversational state + usage only. |
+
+## Re-design Wave 5 (reliability boundary) — deferred residual
+
+From `docs/design/2026-06-28-reliability-boundary.md` (KDD-4, §3).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW5-1 | Rewrite `fallback-routing` onto the new `onProviderError` seam (it currently uses the composite-`Provider` + mutable-`Agent.providerName` approach). | `docs/design/2026-06-28-reliability-boundary.md` (KDD-4, §3) | M · M | The seam now exists (Wave 5), but cross-provider failover via `onProviderError` would need the seam to expose/allow a provider swap (it currently does same-provider retry + model downshift). Migrating `fallback-routing` is a separate design; the composite approach works and stays until then. |

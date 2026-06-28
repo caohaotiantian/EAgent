@@ -1,5 +1,12 @@
 # Implementation — Reliability boundary (`onProviderError` + StopReason)
 
+```
+Status: closed
+Closing-commit: b8dd9c3
+Closed-on: 2026-06-28
+Deferred: RW5-1 (fallback-routing onto the seam) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-28-reliability-boundary` (matches design) · **Design:**
 [`design/2026-06-28-reliability-boundary.md`](../design/2026-06-28-reliability-boundary.md)
 
