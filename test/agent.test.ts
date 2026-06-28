@@ -635,3 +635,120 @@ test("transformRequest: sees a non-zero cumulativeUsage matching the accumulated
   assert.ok(recorded!.inputTokens > 0 || recorded!.outputTokens > 0, "cumulativeUsage should be non-zero");
   assert.deepEqual(recorded, cumulativeAfterTurn1, "turn-2 cumulativeUsage equals usage accumulated after turn 1");
 });
+
+test("snapshot() is a deep copy: mutating the returned state leaves the agent unchanged", async () => {
+  const { agent } = makeHarness({ responder: [{ text: "hi" }] });
+  await agent.run("hello");
+
+  const beforeLen = agent.messages.length;
+  const beforeInput = agent.usage.inputTokens;
+  const s = agent.snapshot();
+  s.messages.push({ role: "user", content: [{ type: "text", text: "injected" }] });
+  s.usage.inputTokens = 9999;
+
+  assert.equal(agent.messages.length, beforeLen, "mutating snapshot.messages must not affect the agent");
+  assert.equal(agent.usage.inputTokens, beforeInput, "mutating snapshot.usage must not affect the agent");
+});
+
+test("restore() round-trips messages, usage, model, systemPrompt, thinking, and step", async () => {
+  const { agent } = makeHarness({ responder: [{ text: "one" }, { text: "two" }] });
+  agent.systemPrompt = "sysA";
+  agent.thinking = "low";
+  await agent.run("first");
+
+  const s = agent.snapshot();
+  agent.model = "x";
+  agent.systemPrompt = "sysB";
+  agent.thinking = "high";
+  await agent.run("second");
+
+  agent.restore(s);
+
+  assert.deepEqual(agent.messages, s.messages, "messages restored");
+  assert.deepEqual(agent.usage, s.usage, "usage restored");
+  assert.equal(agent.model, s.model, "model restored");
+  assert.equal(agent.systemPrompt, s.systemPrompt, "systemPrompt restored");
+  assert.equal(agent.thinking, s.thinking, "thinking restored");
+  assert.equal(agent.snapshot().step, s.step, "step restored");
+});
+
+test("restore() throws when called while the agent is running", async () => {
+  const { agent } = makeHarness({
+    responder: [{ toolCalls: [{ name: "noop" }] }, { text: "done" }],
+  });
+  agent.tools.register(defineTool({ name: "noop", description: "", execute: () => ({ content: "" }) }));
+  const snap = agent.snapshot();
+
+  // The tool handle (ctx.agent) has no restore(), so capture the test-created
+  // Agent in a turn_start observer. An observer throw is swallowed, so catch it
+  // here and hoist the assert out of the handler (a bare throw would be false-green).
+  let threw = false;
+  agent.hooks.on("turn_start", () => {
+    try {
+      agent.restore(snap);
+    } catch {
+      threw = true;
+    }
+  });
+
+  await agent.run("go");
+  assert.ok(threw, "restore() must throw while the agent is running");
+});
+
+test("handle.messages is a frozen, distinct copy that cannot be structurally mutated", async () => {
+  let frozen = false;
+  let distinct = false;
+  let pushThrew = false;
+  let lenUnchanged = false;
+  const { agent } = makeHarness({
+    responder: [{ toolCalls: [{ name: "probe" }] }, { text: "done" }],
+  });
+  agent.tools.register(
+    defineTool({
+      name: "probe",
+      description: "",
+      execute: (_args, ctx) => {
+        const it = ctx.agent.messages;
+        frozen = Object.isFrozen(it);
+        distinct = it !== agent.messages;
+        const lenBefore = agent.messages.length;
+        try {
+          (it as Message[]).push({ role: "user", content: [{ type: "text", text: "x" }] });
+        } catch {
+          pushThrew = true;
+        }
+        lenUnchanged = agent.messages.length === lenBefore;
+        return { content: "" };
+      },
+    }),
+  );
+
+  await agent.run("go");
+  assert.ok(frozen, "handle.messages must be frozen");
+  assert.ok(distinct, "handle.messages must be a distinct array from the internal transcript");
+  assert.ok(pushThrew, "pushing to the frozen handle copy must throw in strict mode");
+  assert.ok(lenUnchanged, "the agent's transcript length must be unaffected");
+});
+
+test("#step starts at 0, increments once per turn, and is stamped on turn_end/tool_end", async () => {
+  const { agent } = makeHarness({
+    responder: [{ toolCalls: [{ name: "noop" }] }, { text: "done" }],
+  });
+  agent.tools.register(defineTool({ name: "noop", description: "", execute: () => ({ content: "" }) }));
+
+  assert.equal(agent.snapshot().step, 0, "a fresh agent has step 0");
+
+  const turnEndSteps: number[] = [];
+  const toolEndSteps: number[] = [];
+  agent.hooks.on("turn_end", ({ step }) => turnEndSteps.push(step));
+  agent.hooks.on("tool_end", ({ step }) => toolEndSteps.push(step));
+
+  await agent.run("go");
+
+  assert.deepEqual(turnEndSteps, [1, 2], "turn_end carries the post-increment step, +1 per turn");
+  assert.deepEqual(toolEndSteps, [0], "tool_end (mid turn 1) carries the call-time (pre-increment) step");
+  assert.equal(agent.snapshot().step, 2, "after a 2-turn run, step is 2");
+
+  agent.clear();
+  assert.equal(agent.snapshot().step, 0, "clear() resets step to 0");
+});

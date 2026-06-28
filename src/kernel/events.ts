@@ -28,7 +28,8 @@ export type KernelEvents = {
   agent_start: { input: Message };
   agent_end: { reason: StopReason };
   turn_start: { turn: number };
-  turn_end: { turn: number };
+  /** `step` carries the per-run counter after this turn's increment. */
+  turn_end: { turn: number; step: number };
 
   /** A completed message was appended to the transcript. */
   message: { message: Message };
@@ -38,9 +39,10 @@ export type KernelEvents = {
   reasoning_delta: { text: string };
 
   tool_start: { call: ToolCallBlock };
-  tool_end: { call: ToolCallBlock; result: ToolResult };
-  /** A parallel tool wave settled; carries the ordered {call,result} pairs. */
-  tool_batch_end: { batch: { call: ToolCallBlock; result: ToolResult }[] };
+  /** `step` carries the call-time (pre-increment) per-run counter. */
+  tool_end: { call: ToolCallBlock; result: ToolResult; step: number };
+  /** A parallel tool wave settled; carries the ordered {call,result} pairs and the call-time `step`. */
+  tool_batch_end: { batch: { call: ToolCallBlock; result: ToolResult }[]; step: number };
 
   /** Token usage for the just-finished model call, plus the running total. */
   usage: { usage: Usage; cumulative: Usage };

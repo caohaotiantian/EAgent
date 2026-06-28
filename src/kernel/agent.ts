@@ -18,6 +18,7 @@ import { HookBus } from "./hooks.js";
 import { ProviderRegistry, ToolRegistry } from "./registry.js";
 import {
   type AgentHandle,
+  type AgentState,
   type ContentBlock,
   type JSONSchema,
   type Logger,
@@ -101,6 +102,8 @@ export class Agent {
   #running = false;
   #abort: AbortController | undefined;
   #usage: Usage = { ...ZERO_USAGE };
+  /** Monotonic per-run turn counter, incremented once per turn at `turn_end`. */
+  #step = 0;
 
   constructor(opts: AgentOptions = {}) {
     this.hooks = opts.hooks ?? new HookBus();
@@ -134,7 +137,9 @@ export class Agent {
   get handle(): AgentHandle {
     return {
       model: this.model,
-      messages: this.#messages,
+      // A frozen shallow copy: a tool cannot add/remove/reorder transcript
+      // entries. Shallow by design — the elements are the same Message refs.
+      messages: Object.freeze(this.#messages.slice()),
       steer: (m) => this.steer(m),
       followUp: (m) => this.followUp(m),
     };
@@ -163,6 +168,41 @@ export class Agent {
   /** Drop the transcript, keeping all registrations (start a fresh topic). */
   clear(): void {
     this.#messages.length = 0;
+    this.#step = 0;
+  }
+
+  /**
+   * A self-contained, deep copy of the conversational state and accounting.
+   * Raw `structuredClone` (fail-loud) of `messages`/`usage` so the returned
+   * `AgentState` shares no references with the live agent.
+   */
+  snapshot(): AgentState {
+    return {
+      messages: structuredClone(this.#messages),
+      usage: structuredClone(this.#usage),
+      model: this.model,
+      providerName: this.providerName,
+      systemPrompt: this.systemPrompt,
+      thinking: this.thinking,
+      step: this.#step,
+    };
+  }
+
+  /**
+   * Replace the conversational state and accounting from a snapshot, deep-copying
+   * back in so the agent and the passed `AgentState` stay independent. Forbidden
+   * while running (mirrors `run()`'s guard) — restore is a between-turn operation.
+   */
+  restore(state: AgentState): void {
+    if (this.#running) throw new Error("cannot restore() while the agent is running");
+    this.#messages.length = 0;
+    this.#messages.push(...structuredClone(state.messages));
+    this.#usage = structuredClone(state.usage);
+    this.model = state.model;
+    this.providerName = state.providerName;
+    this.systemPrompt = state.systemPrompt;
+    this.thinking = state.thinking;
+    this.#step = state.step;
   }
 
   async run(input: string | Message): Promise<RunResult> {
@@ -210,11 +250,13 @@ export class Agent {
         if (calls.length === 0) {
           if (this.#followUps.length > 0) {
             this.drainInto(this.#followUps, this.#messages);
-            await this.hooks.emit("turn_end", { turn });
+            this.#step++;
+            await this.hooks.emit("turn_end", { turn, step: this.#step });
             continue;
           }
           reason = assistant.stopReason;
-          await this.hooks.emit("turn_end", { turn });
+          this.#step++;
+          await this.hooks.emit("turn_end", { turn, step: this.#step });
           break;
         }
 
@@ -224,6 +266,7 @@ export class Agent {
         // to tool_end (per-tool) and turn_end (per-turn); neither is perturbed.
         await this.hooks.emit("tool_batch_end", {
           batch: results.map((r) => ({ call: r.call, result: r.result })),
+          step: this.#step,
         });
         const toolMessage: Message = {
           role: "tool",
@@ -238,7 +281,8 @@ export class Agent {
         };
         this.#messages.push(toolMessage);
         await this.hooks.emit("message", { message: toolMessage });
-        await this.hooks.emit("turn_end", { turn });
+        this.#step++;
+        await this.hooks.emit("turn_end", { turn, step: this.#step });
 
         if (results.length > 0 && results.every((r) => r.result.terminate)) {
           reason = "stop";
@@ -374,7 +418,7 @@ export class Agent {
       result = { content: errorText(err), isError: true };
     }
     const finalResult = await this.hooks.apply("afterToolCall", result, { call });
-    await this.hooks.emit("tool_end", { call, result: finalResult });
+    await this.hooks.emit("tool_end", { call, result: finalResult, step: this.#step });
     return { call, result: finalResult };
   }
 

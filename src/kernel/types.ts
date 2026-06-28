@@ -304,6 +304,24 @@ export interface AgentHandle {
   followUp(message: Message): void;
 }
 
+/**
+ * A self-contained, copyable snapshot of where a conversation is and what it has
+ * cost: the transcript, accounting, and the per-turn config that shapes a turn.
+ * `messages` and `usage` are deep copies, so mutating an `AgentState` cannot
+ * touch the live agent. Transient/config fields (`maxTurns`, `forceTool`,
+ * `outputSchema`) are deliberately excluded — this is conversational state, not
+ * configuration. Produced by `Agent.snapshot()` and consumed by `Agent.restore()`.
+ */
+export interface AgentState {
+  messages: Message[];
+  usage: Usage;
+  model: string;
+  providerName: string | undefined;
+  systemPrompt: string;
+  thinking: ThinkingLevel;
+  step: number;
+}
+
 // ---------------------------------------------------------------------------
 // Disposables
 // ---------------------------------------------------------------------------
