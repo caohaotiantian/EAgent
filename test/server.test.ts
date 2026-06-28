@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import { createHttpServer, type HttpServer } from "../src/server.js";
 import type { MockProvider } from "../src/providers/mock.js";
+import type { Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
 
 async function withServer(
@@ -145,6 +146,72 @@ test("a session id makes /run accumulate conversation history", async () => {
     const health2 = await (await fetch(`${base}/health`)).json();
     assert.equal((health2 as { sessions: number }).sessions, 0);
   });
+});
+
+test("per-session usage and model are isolated across sessions (AC-8)", async () => {
+  // Routing's per-turn hooks (active even when its soft switch is off) would
+  // reset the agent's model each turn and mask the bleed this test pins, so kill
+  // it for the duration — the per-session isolation under test is orthogonal.
+  const prevRouting = process.env.EAGENT_ROUTING;
+  process.env.EAGENT_ROUTING = "off";
+  try {
+    await withServerHandle(async (base, http) => {
+      const initialModel = http.model;
+      const modelsSeen: string[] = [];
+      let changed = false;
+      // One-shot: mutate the shared agent's model DURING the first turn (session A).
+      // If model bled across sessions, B's turn would inherit it.
+      const sub = http.agent.hooks.on("turn_start", () => {
+        if (!changed) {
+          changed = true;
+          http.agent.model = "model-from-A";
+        }
+      });
+      // Record the model each provider turn actually saw, in call order.
+      mockOf(http).script((req) => {
+        modelsSeen.push(req.model);
+        return { text: "ok" };
+      });
+
+      const run = async (session: string, input: string): Promise<{ type: string; usage: Usage }> => {
+        const res = await fetch(`${base}/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ input, session }),
+        });
+        const lines = (await res.text())
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l) as { type: string; usage?: Usage });
+        return lines.at(-1) as { type: string; usage: Usage };
+      };
+
+      const a1 = await run("A", "alpha"); // session A, fresh
+      const a2 = await run("A", "beta"); // session A again, accumulates within the session
+      const b1 = await run("B", "alpha"); // session B, brand new
+
+      // Within-session accumulation still works: A's 2nd done.usage exceeds its 1st.
+      assert.ok(a2.usage.inputTokens > a1.usage.inputTokens, "session A accumulates across its own turns");
+
+      // USAGE ISOLATION: B's done.usage is B's own tokens, NOT the process-lifetime
+      // cumulative (A+B). The old shared-agent bug reported agent.usage = lifetime
+      // total, so B would exceed A's accumulated total; per-session it is far less.
+      assert.ok(b1.usage.inputTokens < a2.usage.inputTokens, "B's usage is its own, not A+B cumulative");
+
+      // FRESH SESSION FROM THE INITIAL SNAPSHOT: B starts from an empty transcript
+      // and zero usage, so its first-turn cost equals A's first-turn cost (same input).
+      assert.deepEqual(b1.usage, a1.usage);
+
+      // MODEL ISOLATION: the model change applied during A's turn did not bleed into B.
+      assert.equal(modelsSeen[0], "model-from-A", "the model change took effect during A's turn");
+      assert.equal(modelsSeen.at(-1), initialModel, "B's turn used the initial model (snapshot-isolated)");
+
+      sub.dispose();
+    });
+  } finally {
+    if (prevRouting === undefined) delete process.env.EAGENT_ROUTING;
+    else process.env.EAGENT_ROUTING = prevRouting;
+  }
 });
 
 test("POST /run rejects a missing input", async () => {
