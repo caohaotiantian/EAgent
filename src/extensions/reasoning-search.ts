@@ -101,6 +101,27 @@ function argmax(scores: readonly number[]): number {
   return best;
 }
 
+/**
+ * Drop a trailing assistant message that carries a `tool_call` block. `best_of_n`
+ * snapshots mid-dispatch: the kernel has already appended the parent assistant
+ * message holding the in-flight `best_of_n` tool_use (agent.ts pushes it before
+ * this execute runs) but appends its matching `tool_result` only after dispatch
+ * returns — so the snapshot ends with that tool_use dangling. A fork that
+ * `restore()`s it and then `run(task)`s would send `[…, assistant(tool_use), user(task)]`,
+ * which a live Anthropic/OpenAI provider 400s on (an assistant tool_use must be
+ * resolved by a following tool_result). Pruning it lets each fork continue from a
+ * clean prior context. The check is on the last message only: the loop keeps every
+ * earlier turn's tool_use/tool_result pairing intact, so this in-flight call is the
+ * only one that can dangle.
+ */
+function withoutDanglingToolUse(messages: readonly Message[]): Message[] {
+  const last = messages[messages.length - 1];
+  if (last?.role === "assistant" && last.content.some((b) => b.type === "tool_call")) {
+    return messages.slice(0, -1);
+  }
+  return [...messages];
+}
+
 export default function activate(e: ExtensionAPI): () => void {
   // Hard kill switch: register nothing so the extension is wholly absent.
   if (process.env.EAGENT_REASONING_SEARCH === "off") return () => {};
@@ -190,9 +211,13 @@ export default function activate(e: ExtensionAPI): () => void {
         const requested = typeof args.n === "number" && Number.isFinite(args.n) ? Math.floor(args.n) : DEFAULT_N;
         const k = Math.max(1, Math.min(requested, DEFAULT_MAX_N));
 
-        // Snapshot once; every fork restores the same state.
+        // Snapshot once; every fork restores the same state. Prune the in-flight
+        // best_of_n tool_use the snapshot ends on (its tool_result is not appended
+        // until this dispatch returns) so each fork starts from a provider-valid
+        // transcript rather than a dangling assistant tool_use.
         const snap = e.agent.snapshot();
-        const children = Array.from({ length: k }, () => forkChild(snap));
+        const forkState: AgentState = { ...snap, messages: withoutDanglingToolUse(snap.messages) };
+        const children = Array.from({ length: k }, () => forkChild(forkState));
         const outcomes = await Promise.all(children.map(async (c) => finalText((await c.run(task)).messages)));
 
         const scorer = pickScorer(args.scorer, task, ctx);

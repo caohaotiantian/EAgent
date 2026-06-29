@@ -40,6 +40,25 @@ function toolResults(messages: readonly Message[]): ToolResultBlock[] {
   return out;
 }
 
+/**
+ * The ids of assistant `tool_call` blocks with no matching `tool_result` — the
+ * live-provider failure mode: Anthropic/OpenAI 400 a request containing an
+ * assistant tool_use that is not resolved by a tool_result.
+ */
+function danglingToolUseIds(messages: readonly Message[]): string[] {
+  const resolved = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== "tool") continue;
+    for (const b of m.content) if (b.type === "tool_result") resolved.add(b.toolCallId);
+  }
+  const dangling: string[] = [];
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    for (const b of m.content) if (b.type === "tool_call" && !resolved.has(b.id)) dangling.push(b.id);
+  }
+  return dangling;
+}
+
 /** Flip the per-extension store flag the tool guards on. */
 function enable(host: { storeFor(id: string): { set(k: string, v: unknown): void } }): void {
   host.storeFor("reasoning-search").set("enabled", true);
@@ -247,6 +266,41 @@ test("AC-6: the parent transcript carries only the best_of_n call, not loser tur
     !JSON.stringify(agent.messages).includes("LOSER"),
     "the losing branch's text never appears in the parent transcript",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Live-provider hygiene — a fork's request carries no dangling tool_use
+// ---------------------------------------------------------------------------
+
+test("a fork's first request has no dangling best_of_n tool_use (valid for a live provider)", async () => {
+  let bestOfNCalled = false;
+  const forkRequests: CompletionRequest[] = [];
+  const responder = (req: CompletionRequest) => {
+    if (lastUserText(req) === TASK) {
+      forkRequests.push(req);
+      return { text: "cand" };
+    }
+    if (!bestOfNCalled) {
+      bestOfNCalled = true;
+      return { toolCalls: [{ name: "best_of_n", arguments: { task: TASK, n: 2, scorer: "longest" } }] };
+    }
+    return { text: "parent-done" };
+  };
+
+  const { agent, host } = makeHarness({ fallback: "allow", responder });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+
+  await agent.run("kickoff");
+
+  assert.ok(forkRequests.length > 0, "the forks ran");
+  for (const req of forkRequests) {
+    assert.deepEqual(
+      danglingToolUseIds(req.messages),
+      [],
+      "a fork must not inherit the in-flight best_of_n tool_use with no matching tool_result",
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
