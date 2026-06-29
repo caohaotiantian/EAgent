@@ -1,5 +1,12 @@
 # Design — Reasoning-search controller (best-of-N over forked agents)
 
+```
+Status: closed
+Closing-commit: 3bba4e4
+Closed-on: 2026-06-29
+Deferred: RW8a-1 (ToT/GoT multi-step tree/graph search) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-reasoning-search` · **Wave:** 8 (subsystem 1 of 2) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P4.1 · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md` §C (LangGraph branching / fork-as-primitive)
 

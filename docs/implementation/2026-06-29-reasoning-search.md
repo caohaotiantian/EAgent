@@ -1,5 +1,12 @@
 # Implementation — Reasoning-search controller (best-of-N)
 
+```
+Status: closed
+Closing-commit: 3bba4e4
+Closed-on: 2026-06-29
+Deferred: RW8a-1 (ToT/GoT) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-reasoning-search` (matches design) · **Design:**
 [`design/2026-06-29-reasoning-search.md`](../design/2026-06-29-reasoning-search.md)
 
