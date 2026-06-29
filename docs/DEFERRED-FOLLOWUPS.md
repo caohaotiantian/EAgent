@@ -94,3 +94,11 @@ From `docs/design/2026-06-29-before-dispatch.md` (KDD-2, KDD-6).
 |---|---|---|---|---|
 | RW6a-1 | `beforeDispatch` cannot **inject** brand-new tool-call ids (only reorder/drop the originals). | `docs/design/2026-06-29-before-dispatch.md` (KDD-2) | M · M | An injected id has no matching assistant `tool_use`, so its `tool_result` would orphan next turn — supporting it requires also mutating the already-emitted assistant message. A separate design that handles the assistant-message side. |
 | RW6a-2 | `beforeDispatch` is **not** shared to sub-agents (not in `SHARED_FILTER_POINTS`), so a child's wave runs its own empty→passthrough chain. | same (KDD-6) | S · L | One-line add to `SHARED_FILTER_POINTS` if wave-governance-for-children is wanted; deferred to avoid reaching into Wave 3's childScope contract with no current consumer. |
+
+## Re-design Wave 6b (provenance/taint) — deferred residual
+
+From `docs/design/2026-06-29-provenance-taint.md` (KDD-1).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW6b-1 | Consolidate `flow-guard`'s **data-taint** (sensitive-pattern → egress) into `provenance`'s source-taint model, so there is one taint mechanism instead of two overlapping ones. (Also would fold the Wave-3 RW3-1 child data-taint gap into provenance's already-child-governed closure store.) | `docs/design/2026-06-29-provenance-taint.md` (KDD-1) | M · M | The three guards occupy distinct axes today (ingress-label / pattern→egress / source→any-sink) and all work; consolidation is a separate refactor design once the provenance axis has proven out. Not a gap — a simplification opportunity. |

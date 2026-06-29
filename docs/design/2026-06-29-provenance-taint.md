@@ -1,5 +1,12 @@
 # Design — Provenance / taint (CaMeL-lite structural injection defense)
 
+```
+Status: closed
+Closing-commit: 80e7faa
+Closed-on: 2026-06-29
+Deferred: RW6b-1 (consolidate flow-guard data-taint into provenance) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-provenance-taint` · **Wave:** 6 (subsystem 2 of 4) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P2.1 · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md` §A
 

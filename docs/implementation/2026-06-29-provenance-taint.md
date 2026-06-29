@@ -1,5 +1,12 @@
 # Implementation — Provenance / taint (CaMeL-lite)
 
+```
+Status: closed
+Closing-commit: 80e7faa
+Closed-on: 2026-06-29
+Deferred: RW6b-1 (consolidate flow-guard data-taint into provenance) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-provenance-taint` (matches design) · **Design:**
 [`design/2026-06-29-provenance-taint.md`](../design/2026-06-29-provenance-taint.md)
 
