@@ -48,6 +48,9 @@ import { join, resolve } from "node:path";
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
+import { salientTokens } from "./lib/relevance.js";
+
+export { salientTokens } from "./lib/relevance.js";
 
 /**
  * The nine fixed schema section headers, in order, followed by the reactivation
@@ -235,32 +238,6 @@ export const DEFAULT_RESUME_MAX_AGE_HOURS = 24;
 export const DEFAULT_RESUME_MAX_BYTES = 4 * 1024;
 /** Minimum salient-token overlap required by the relevance gate (rule (b)). */
 export const RESUME_MIN_SHARED_TOKENS = 2;
-
-/**
- * A tiny, fixed stopword set dropped before relevance tokenization. Kept small
- * and explainable (no external word list, no dependency): just the highest-
- * frequency English function words that would otherwise inflate token overlap.
- */
-const STOPWORDS = new Set([
-  "the", "and", "for", "with", "that", "this", "from", "into", "your", "you",
-  "are", "was", "were", "has", "had", "have", "will", "would", "should", "can",
-  "but", "not", "all", "any", "out", "use", "via", "per", "its", "our",
-]);
-
-/**
- * Tokenize to lowercased salient tokens: split on non-`[a-z0-9]`, drop tokens
- * shorter than 3 chars and the fixed stopwords, dedupe. Deterministic and
- * dependency-free — the whole relevance gate is built on this.
- */
-export function salientTokens(s: string): Set<string> {
-  const out = new Set<string>();
-  for (const tok of s.toLowerCase().split(/[^a-z0-9]+/)) {
-    if (tok.length < 3) continue;
-    if (STOPWORDS.has(tok)) continue;
-    out.add(tok);
-  }
-  return out;
-}
 
 /**
  * Extract the candidate handoff's "goal text" for relevance scoring: the body of
