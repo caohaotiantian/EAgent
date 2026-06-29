@@ -53,6 +53,7 @@ npm run typecheck # tsc --noEmit   (alias: npm run lint)
 npm run build     # tsc -> dist/
 npm run dev       # node --import tsx src/cli.ts     (interactive REPL)
 npm run serve     # node --import tsx src/server.ts  (HTTP host)
+npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits non-zero on failure
 ```
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a
