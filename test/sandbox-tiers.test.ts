@@ -10,17 +10,23 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
 import type { Agent } from "../src/kernel/agent.js";
 import { makeHarness } from "./helpers.js";
+import { binExists } from "../src/extensions/lib/sandbox.js";
 import sandboxTiers, {
   detectBackend,
   wrapCommand,
   shquote,
   isWrapped,
   type Backend,
+  type Tier,
 } from "../src/extensions/sandbox-tiers.js";
 
 // -- pure unit tests --------------------------------------------------------
@@ -68,7 +74,15 @@ test("wrapCommand encodes network and write tiers per backend", () => {
   assert.ok(bwNoNet.includes("--unshare-net"), "bwrap no-network unshares the net namespace");
 
   const bwReadonly = wrapCommand("bwrap", "readonly", "ls", { root: "/work" });
-  assert.ok(!bwReadonly.includes("--bind /work"), "readonly omits the workspace bind");
+  assert.ok(
+    bwReadonly.includes(`--ro-bind ${shquote("/work")} ${shquote("/work")}`),
+    "readonly re-binds the root read-only so a snippet under it stays visible",
+  );
+  assert.ok(
+    bwReadonly.indexOf("--tmpfs /tmp") < bwReadonly.indexOf(`--ro-bind ${shquote("/work")}`),
+    "the read-only re-bind comes after --tmpfs /tmp so it re-exposes the shadowed dir",
+  );
+  assert.ok(!bwReadonly.includes("--bind /work"), "readonly omits the writable workspace bind");
   assert.ok(!bwReadonly.includes("--unshare-net"), "readonly keeps the network");
 
   const fjNoNet = wrapCommand("firejail", "no-network", "curl x", { root: "/work" });
@@ -83,6 +97,16 @@ test("wrapCommand shquotes a workspace root with a space so the outer re-parse c
   assert.ok(!bw.includes("--bind /Users/me/My Project"), "the bare, splittable root must not appear");
   const fj = wrapCommand("firejail", "workspace-write", "echo hi", { root });
   assert.ok(fj.includes(`--read-write=${shquote(root)}`), "firejail read-writes the quoted root");
+});
+
+test("wrapCommand escapes a sandbox-exec root with SBPL specials", () => {
+  const out = wrapCommand("sandbox-exec", "workspace-write", "echo hi", { root: '/a/b"c\\d' });
+  assert.ok(
+    out.includes('(subpath "/a/b\\"c\\\\d")'),
+    "the backslash and double quote in the root are escaped for the SBPL string literal",
+  );
+  const plain = wrapCommand("sandbox-exec", "workspace-write", "echo hi", { root: "/work" });
+  assert.ok(plain.includes('(subpath "/work")'), "a root without SBPL specials is byte-identical");
 });
 
 test("shquote escapes ' and embeds shell metacharacters literally", () => {
@@ -318,4 +342,80 @@ test("/sandbox-tiers tier rejects an unknown name with the valid list", async ()
   });
   assert.match(lines.at(-1)!, /unknown tier/);
   assert.match(lines.at(-1)!, /workspace-write/);
+});
+
+// -- real-backend confinement (gated on a detected backend) -----------------
+//
+// Unlike the string assertions above, these run a real command through
+// wrapCommand and assert observable confinement (exit codes / file presence).
+// The backend is the host's real one, so they EXECUTE on macOS (sandbox-exec)
+// and Linux-with-bwrap and skip only where no backend exists. The per-call root
+// is under os.tmpdir() so the readonly case exercises bwrap's `--tmpfs /tmp`
+// shadowing (the path the read-only re-bind has to re-expose).
+
+const realBackend = detectBackend(process.platform, binExists);
+const noBackend = realBackend === "none";
+
+function runWrapped(tier: Tier, command: string, root: string): { status: number | null; output: string } {
+  const wrapped = wrapCommand(realBackend, tier, command, { root });
+  const r = spawnSync("/bin/sh", ["-c", wrapped], { encoding: "utf8" });
+  return { status: r.status, output: (r.stdout ?? "") + (r.stderr ?? "") };
+}
+
+test("real backend: no-network denies a subprocess network connect", { skip: noBackend }, () => {
+  const root = mkdtempSync(join(tmpdir(), "eagent-sbtest-"));
+  try {
+    // Target a closed loopback port: any failure exits non-zero, no real egress.
+    const probe =
+      `node -e "const s=require('net').connect(1,'127.0.0.1');` +
+      `s.on('connect',()=>process.exit(0));s.on('error',()=>process.exit(3));` +
+      `setTimeout(()=>process.exit(4),3000)"`;
+    const { status } = runWrapped("no-network", probe, root);
+    assert.notEqual(status, 0, "a connect under no-network must not succeed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real backend: readonly runs an in-root snippet but denies writing to root", { skip: noBackend }, () => {
+  const root = mkdtempSync(join(tmpdir(), "eagent-sbtest-"));
+  try {
+    const snippet = join(root, "snippet.sh");
+    writeFileSync(snippet, "echo SNIPPET_RAN\n", "utf8");
+    const run = runWrapped("readonly", `/bin/sh ${shquote(snippet)}`, root);
+    assert.equal(run.status, 0, "the in-root snippet must run under readonly (no ENOENT)");
+    assert.match(run.output, /SNIPPET_RAN/);
+
+    const target = join(root, "should-not-write");
+    const write = runWrapped("readonly", `echo x > ${shquote(target)}`, root);
+    assert.notEqual(write.status, 0, "writing to root must fail under readonly");
+    assert.ok(!existsSync(target), "the denied write left no file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real backend: workspace-write allows an in-root write but denies an out-of-root write", { skip: noBackend }, () => {
+  const root = mkdtempSync(join(tmpdir(), "eagent-sbtest-"));
+  // A $HOME-based target is writable without a sandbox but outside every
+  // backend's write whitelist (root + the temp dirs), so confinement must deny it.
+  const outside = join(homedir(), `.eagent-sbtest-${process.pid}-${Date.now()}`);
+  try {
+    const inRoot = join(root, "in-root.txt");
+    const inWrite = runWrapped("workspace-write", `echo ok > ${shquote(inRoot)}`, root);
+    assert.equal(inWrite.status, 0, "an in-root write must succeed under workspace-write");
+    assert.ok(existsSync(inRoot), "the in-root write created the file");
+
+    const outWrite = runWrapped("workspace-write", `echo nope > ${shquote(outside)}`, root);
+    assert.notEqual(outWrite.status, 0, "an out-of-root ($HOME) write must be denied");
+    assert.ok(!existsSync(outside), "the denied out-of-root write left no file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { force: true });
+  }
+});
+
+test("binExists finds a standard bin and misses a bogus name", () => {
+  assert.equal(binExists("sh"), true, "/bin/sh is on the standard search path");
+  assert.equal(binExists("definitely-not-a-real-bin-xyz"), false);
 });
