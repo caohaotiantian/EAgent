@@ -1,5 +1,12 @@
 # Design — ExecutionTarget tiers for `code:exec` (unify sandbox confinement)
 
+```
+Status: closed
+Closing-commit: f0b85db
+Closed-on: 2026-06-29
+Deferred: RW6c-1 (container/microVM backend), RW6c-2 (dir-scoped macOS profile), RW6c-3 (real-host launcher smoke pre-Wave-8), RW6c-4 (readonly+bwrap snippet shadowing) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-execution-target` · **Wave:** 6 (subsystem 3 of 4) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P2.3 · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md` §B (DGM candidate isolation)
 

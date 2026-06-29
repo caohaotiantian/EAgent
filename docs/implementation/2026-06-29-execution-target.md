@@ -1,5 +1,12 @@
 # Implementation — ExecutionTarget tiers for `code:exec`
 
+```
+Status: closed
+Closing-commit: f0b85db
+Closed-on: 2026-06-29
+Deferred: RW6c-1, RW6c-2, RW6c-3, RW6c-4 — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-execution-target` (matches design) · **Design:**
 [`design/2026-06-29-execution-target.md`](../design/2026-06-29-execution-target.md)
 
@@ -127,8 +134,8 @@ green at each Phase end.
   only; no `node:crypto`/external sandbox dep); offline tests. **No kernel change.** codeact's tier is
   **off by default** (byte-identical) + fail-closed once opted in. Keep codeact's honest "not a full
   sandbox / best-effort" framing (R5/R6); the real-launcher path is **not** exercised offline (forced
-  backend + spawn spy, same as sandbox-tiers) — a real-host `bwrap`/`sandbox-exec` smoke is a pre-Wave-8
-  follow-up (L1 round-2 note).
+  backend + fake-launcher-on-PATH, *not* a spawn spy — the spy technique is unrealizable under `npm test`,
+  see the L2 log) — a real-host `bwrap`/`sandbox-exec` smoke is a pre-Wave-8 follow-up (RW6c-3).
 - **Four-corner subagent template:** `references/loop-3-development.md`.
 - **Commit conventions:** SKILL.md — `feat(phase1):`/`feat(phase2):`; no AI attribution.
 
