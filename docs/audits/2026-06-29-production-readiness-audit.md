@@ -2,6 +2,8 @@
 
 _Source: 6-lens fan-out audit of the merged Waves 1–8 `init`; 40 findings → 20 confirmed gaps, 20 by-design, 0 false-positives, each verified against source. This is the Wave 9 hardening backlog's authoritative input._
 
+> **✅ RESOLVED — Wave 9 (`feat/wave9-hardening`).** All 20 confirmed gaps below are now closed in source and pinned by tests (combined F closeout: zero severe; each gap mapped fix→test). The 20 by-design items (§4) were intentionally left unchanged. Three minor residuals surfaced during Wave 9 (otel hard-exit flush is best-effort; headless-fork guard-UI divergence — both fail-closed; a warn-only citations×reasoning-search cross-fork edge — both off-by-default) are registered in `docs/DEFERRED-FOLLOWUPS.md` as RW9-1/2/3, plus RW9.3-1 (a Linux bwrap CI job so the new sandbox confinement tests *execute* in CI rather than skip). Suite 1101 pass, kernel 2186/2200, no new dependency.
+
 # EAgent — production-readiness audit
 
 ## 1) Bottom line
