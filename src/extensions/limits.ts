@@ -22,6 +22,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { ToolResult } from "../kernel/types.js";
+import { totalTokens } from "../kernel/types.js";
 import type { ToolDecision } from "../kernel/events.js";
 
 /** Cap on a single tool's output, in bytes, before it is truncated. */
@@ -203,8 +204,10 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   // Track tokens consumed this run so the budget can stop a runaway agent.
+  // `totalTokens` is cache-aware (input + cache read/write + output) and already
+  // excludes reasoning tokens, so cached runs can't slip past the budget.
   const offUsage = e.on("usage", ({ usage }) => {
-    tokensThisRun += usage.inputTokens + usage.outputTokens;
+    tokensThisRun += totalTokens(usage);
   });
 
   const offBudget = e.hook("beforeToolCall", (decision: ToolDecision): ToolDecision => {

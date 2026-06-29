@@ -27,7 +27,7 @@
  * and a store `enabled` flag (default false) gates the tool until toggled on.
  */
 
-import { Agent } from "../kernel/agent.js";
+import { Agent, type RunResult } from "../kernel/agent.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
@@ -218,16 +218,44 @@ export default function activate(e: ExtensionAPI): () => void {
         const snap = e.agent.snapshot();
         const forkState: AgentState = { ...snap, messages: withoutDanglingToolUse(snap.messages) };
         const children = Array.from({ length: k }, () => forkChild(forkState));
-        const outcomes = await Promise.all(children.map(async (c) => finalText((await c.run(task)).messages)));
 
+        // A parent abort (ctx.signal) must tear every in-flight fork down: Agent.run
+        // takes no signal, so each child owns its own #abort — stop() them all on
+        // abort and unhook in the finally. `c.run` sets up the child's #abort
+        // synchronously, so an already-aborted signal is honored too.
+        const stopAll = (): void => {
+          for (const c of children) c.stop();
+        };
+        ctx.signal.addEventListener("abort", stopAll);
+        let settled: PromiseSettledResult<RunResult>[];
+        try {
+          const runs = children.map((c) => c.run(task));
+          if (ctx.signal.aborted) stopAll();
+          settled = await Promise.allSettled(runs);
+        } finally {
+          ctx.signal.removeEventListener("abort", stopAll);
+        }
+
+        // A rejected fork is scored -Infinity DIRECTLY — never through the scorer,
+        // since e.g. shortest("") is -0 and could win — so a failed fork can never
+        // be the argmax. A fulfilled fork's final text is scored normally.
         const scorer = pickScorer(args.scorer, task, ctx);
-        const scores = await Promise.all(outcomes.map(scorer));
-        const best = argmax(scores);
-
-        return ok(
-          outcomes[best] ?? "",
-          outcomes.map((text, i) => ({ text, score: scores[i] ?? 0 })),
+        const candidates = await Promise.all(
+          settled.map(async (r) => {
+            if (r.status === "rejected") return { text: "", score: -Infinity };
+            const text = finalText(r.value.messages);
+            return { text, score: await scorer(text) };
+          }),
         );
+
+        // Every fork failed: there is no survivor to select — return a clean fail
+        // (with the per-fork detail) rather than letting a reject escape.
+        if (settled.every((r) => r.status === "rejected")) {
+          return fail(`${BEST_OF_N}: all ${k} fork${k === 1 ? "" : "s"} failed.`, candidates);
+        }
+
+        const best = argmax(candidates.map((c) => c.score));
+        return ok(candidates[best]?.text ?? "", candidates);
       },
     }),
   );

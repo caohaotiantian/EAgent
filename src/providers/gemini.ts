@@ -205,7 +205,11 @@ function toGeminiContents(messages: Message[]): unknown[] {
         else if (b.url) parts.push({ fileData: { mimeType: b.mimeType, fileUri: b.url } });
       }
     }
-    out.push({ role, parts });
+    // A turn whose only blocks are unmappable (e.g. a MAX_TOKENS-truncated
+    // reasoning-only assistant turn — thinking is dropped on replay) maps to no
+    // parts; sending `parts: []` makes generateContent 400, so skip it. Turns
+    // with text/tool_call are non-empty, so tool_use/tool_result pairing holds.
+    if (parts.length > 0) out.push({ role, parts });
   }
   return out;
 }

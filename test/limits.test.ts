@@ -505,3 +505,24 @@ test("/limits prints and accepts the spill config keys", async () => {
   assert.ok(bad.some((l) => l === "spillToolOutput=false"), "bad input left spill flag unchanged");
   assert.ok(bad.some((l) => l === "toolOutputRetentionDays=3"), "bad input left retention unchanged");
 });
+
+// -- W9.5a: the per-run token budget counts disjoint cache tokens -------------
+
+test("the run token budget counts cache tokens (cache-inclusive total)", async () => {
+  const { agent, host, commands } = makeHarness({ fallback: "allow" });
+  await host.use("limits", activateLimits);
+
+  // A usage with disjoint cache-read input and reasoning tokens. The cache-aware
+  // total is input(10) + cacheRead(100) + output(5) = 115; reasoning(3) is a
+  // subset of output and must NOT be added again.
+  await agent.hooks.emit("usage", {
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, reasoningTokens: 3 },
+    cumulative: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, reasoningTokens: 3 },
+  });
+
+  const out = await runCommand(commands.get("limits")!, agent, "");
+  assert.ok(
+    out.some((l) => l === "tokensThisRun=115"),
+    "cache-read tokens are folded into the run budget (not just input+output)",
+  );
+});
