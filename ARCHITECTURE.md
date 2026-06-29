@@ -155,8 +155,11 @@ flowchart TB
     subgraph F["Filters — hook() / apply()"]
         direction LR
         FA["transformContext<br/>messages ⇒ messages"]
-        FB["beforeToolCall<br/>decision ⇒ decision (veto/rewrite)"]
-        FC["afterToolCall<br/>result ⇒ result"]
+        FB["transformRequest<br/>request ⇒ request"]
+        FC["beforeToolCall<br/>decision ⇒ decision (veto/rewrite)"]
+        FD["afterToolCall<br/>result ⇒ result"]
+        FE["beforeDispatch<br/>reorder/drop the tool-call wave"]
+        FF["onProviderError<br/>retry/downshift (error-path)"]
     end
     N -.->|"observe, cannot change"| OUT1["extensions: trace, journal, …"]
     F -.->|"transform or veto"| OUT2["extensions: memory, planmode, limits, …"]
@@ -168,8 +171,11 @@ flowchart TB
   predicate halts the chain once a terminal value (e.g. a veto) is produced, so a
   later filter cannot override a decision already made.
 
-These three filter seams are where memory strategies, plan-mode approvals, safety
-gates, and resource limits plug in without modifying the loop.
+These six filter seams are where memory strategies, model routing, plan-mode
+approvals, safety gates, resource limits, and reliability policy plug in without
+modifying the loop. (`transformContext`/`transformRequest`/`beforeToolCall`/
+`beforeDispatch`/`afterToolCall` are on the request/tool path; `onProviderError` is an
+error-path seam that fires only when a provider stream throws pre-first-event.)
 
 ## The capability model
 

@@ -41,3 +41,89 @@ touch them.
   non-goal is a provider `responseFormat`/JSON-schema decode constraint, which
   Anthropic does not support; tool-choice forcing is sufficient because the
   `respond` tool's parameters *are* the schema. No further work tracked.
+
+## Re-design Wave 1 (Phase 0) — deferred findings
+
+From the F whole-project closeout review of `docs/design/2026-06-28-phase0-foundation.md`. These are the
+acknowledged out-of-scope ripples of the `Usage.inputTokens` redefinition (KDD-2: `inputTokens` is now
+fresh/non-cached input; cache tokens are disjoint siblings). Both are non-blocking and harmless today
+(no test or production path exercises a cached run through them); committed cache-aware scope was
+`cost.ts` + `budget-cap.ts` only (Surgical Changes).
+
+| # | Finding | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW1-1 | `limits.ts:207` per-run token budget omits cache tokens on a cached run (`usage.inputTokens + usage.outputTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | No test exercises a cached run through `limits`. Fix: sum via `totalTokens(usage)` so cache tokens count. |
+| RW1-2 | `trace.ts:206` `in=`/`out=` split display shows fresh input only on a cached run (cosmetic; `total=` already cache-aware via `totalTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | Display-only. Fix: add a `cache=` field or fold cache into the `in=` display. |
+
+## Re-design Wave 3 (governed sub-agents) — deferred residuals
+
+From `docs/design/2026-06-28-governed-subagents.md` (KDD-6, §3). `childScope` governs children via the
+gate filters + intra-run events; these residuals need a deeper per-agent rework and are each their own
+design. All are **strictly more** governance than the prior fresh-bus status quo — none is a regression.
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW3-1 | `flow-guard` **data-taint** does not fire for a child (read a sensitive file *without* `shell:exec`, then egress): the gate scans `e.agent.messages` = **parent** transcript (`flow-guard.ts:164`); a child's tagged message is in the child transcript. The **capability** trigger (shell:exec→egress) IS governed. | `docs/design/2026-06-28-governed-subagents.md` (§3, KDD-6) | M · M | Needs flow-guard to track data-taint in shared closure state (like the capability `tainted` Set), or per-agent guard state. |
+| RW3-2 | `e.agent.handle.steer`/`followUp` **writes** route to the **parent** when a *child* triggers them (`circuit-breaker.ts:156` nudge, `budget-cap.ts:298`, `output-contract.ts:170`); `output-contract.ts:187` `e.agent.stop()` stops the parent. Hard guards still block the child's call; only the soft nudge/stop misroutes. | same (§3, KDD-6) | M · M | Part of the per-agent guard-state rework: guards should act on the *acting* agent (pass it in the hook context) rather than the closure's parent `e.agent`. |
+| RW3-3 | `AgentHandle.spawnChild` not added — the four sites still construct children directly (now with `childScope`). | same (KDD-5) | S · L | A first-class spawn helper is best designed once Wave 8's search controller has concrete needs. |
+| RW3-4 | `agentId`/`depth` event **attribution/tagging** not added (would change every `KernelEvents` payload). | same (KDD-6) | M · M | Add once a consumer needs to attribute/dedupe child vs parent lifecycle signals. |
+
+## Re-design Wave 4 (forkable state) — deferred residuals
+
+From `docs/design/2026-06-28-forkable-state.md` (KDD-2, KDD-5). The kernel ships snapshot/restore/#step;
+these are scoped-out extensions/consumers, not gaps.
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW4-1 | `Agent.fork()` not added (a child Agent reusing registries with a deep-copied transcript). The Wave-4 consumer (the server) is sequential and needs restore-into-the-same-agent, not a second live agent. | `docs/design/2026-06-28-forkable-state.md` (KDD-2) | S · L | Designed with **Wave 8**'s reasoning-search controller, which needs governed branches (`new Agent({…registries, hooks: parent.hooks.childScope()}).restore(parent.snapshot())`). |
+| RW4-2 | Server **cross-session bleed of non-conversational state**: `done.usage`/model/systemPrompt/thinking are now per-session, but the `CapabilityManager` audit log, the namespaced `Store`, and `cost`/`budget-cap` accumulators remain process-shared across sessions. | same (KDD-5) | M · M | Needs `fork()` (RW4-1) or per-session `CapabilityManager`/`Store` instances — a larger server rework. snapshot/restore isolates conversational state + usage only. |
+
+## Re-design Wave 5 (reliability boundary) — deferred residual
+
+From `docs/design/2026-06-28-reliability-boundary.md` (KDD-4, §3).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW5-1 | Rewrite `fallback-routing` onto the new `onProviderError` seam (it currently uses the composite-`Provider` + mutable-`Agent.providerName` approach). | `docs/design/2026-06-28-reliability-boundary.md` (KDD-4, §3) | M · M | The seam now exists (Wave 5), but cross-provider failover via `onProviderError` would need the seam to expose/allow a provider swap (it currently does same-provider retry + model downshift). Migrating `fallback-routing` is a separate design; the composite approach works and stays until then. |
+
+## Re-design Wave 6a (beforeDispatch) — deferred residuals
+
+From `docs/design/2026-06-29-before-dispatch.md` (KDD-2, KDD-6).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW6a-1 | `beforeDispatch` cannot **inject** brand-new tool-call ids (only reorder/drop the originals). | `docs/design/2026-06-29-before-dispatch.md` (KDD-2) | M · M | An injected id has no matching assistant `tool_use`, so its `tool_result` would orphan next turn — supporting it requires also mutating the already-emitted assistant message. A separate design that handles the assistant-message side. |
+| RW6a-2 | `beforeDispatch` is **not** shared to sub-agents (not in `SHARED_FILTER_POINTS`), so a child's wave runs its own empty→passthrough chain. | same (KDD-6) | S · L | One-line add to `SHARED_FILTER_POINTS` if wave-governance-for-children is wanted; deferred to avoid reaching into Wave 3's childScope contract with no current consumer. |
+
+## Re-design Wave 6b (provenance/taint) — deferred residual
+
+From `docs/design/2026-06-29-provenance-taint.md` (KDD-1).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW6b-1 | Consolidate `flow-guard`'s **data-taint** (sensitive-pattern → egress) into `provenance`'s source-taint model, so there is one taint mechanism instead of two overlapping ones. (Also would fold the Wave-3 RW3-1 child data-taint gap into provenance's already-child-governed closure store.) | `docs/design/2026-06-29-provenance-taint.md` (KDD-1) | M · M | The three guards occupy distinct axes today (ingress-label / pattern→egress / source→any-sink) and all work; consolidation is a separate refactor design once the provenance axis has proven out. Not a gap — a simplification opportunity. |
+
+## Re-design Wave 6c (ExecutionTarget / codeact sandbox tier) — deferred residuals
+
+From `docs/design/2026-06-29-execution-target.md` (§3, R6, L1 round-2 note).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW6c-1 | A real **container/microVM backend** (gVisor/Firecracker/Kata/E2B) wired into `lib/sandbox`'s `detectBackend`/`wrapCommand` plug-in point. | `docs/design/2026-06-29-execution-target.md` (§3) | H · H | Needs deps + infra and is not zero-dep/offline-testable; the lib is the documented seam where a deployment adds one. The shipped OS-launcher tiers (`sandbox-exec`/`bwrap`/`firejail`) are the best-effort zero-dep layer. |
+| RW6c-2 | A **`dir`-scoped** macOS `sandbox-exec` write profile for codeact (the current profile allows the whole `/private/tmp` + `/private/var/folders` tree). | same (R6) | M · M | The load-bearing guarantee (no home/project writes) holds; temp-wide write is ephemeral. Narrowing the profile when invoked from codeact is a refinement; `bwrap`/`firejail` are already `dir`-scoped. |
+| RW6c-3 | A **real-host launcher smoke test** (`bwrap`/`sandbox-exec` actually present) before Wave 8 relies on the wrap end-to-end — the offline suite uses a forced backend + fake-launcher-on-PATH, never a real launcher. | same (L1 round-2 note) | S · M | The pure `wrapCommand` is unit-pinned and the integration is proven via a PATH shim; a one-time real-host smoke de-risks the bwrap `--tmpfs /tmp` + temp-dir-root interaction before self-improvement candidates depend on it. |
+| RW8b-1 | **Real-evaluator integration test** for `self-improve` — the sandboxed candidate-eval subprocess (copy + `node_modules` symlink + real launcher + `runEvalDir`) is **integration-only / untested** (offline tests inject a stub via `setEvaluator`). | `docs/design/2026-06-29-self-improvement.md` (KDD-3, D4) | M · M | Offline CI can't spawn a real sandboxed `node --import tsx` subprocess against a real launcher deterministically; the state machine + veto + `ui.ask` gate are offline-pinned, the real path is honestly flagged. A real-host smoke (paired with RW6c-3) de-risks before reliance. |
+| RW8b-2 | A **failed `loadExtension` after the staged→live `renameSync`** (adopt) leaves the candidate file in the live extensions dir, where it auto-loads on the next host restart **without** re-passing the `ui.ask` gate. | `docs/design/2026-06-29-self-improvement.md` (D5; closing review) | S · L | The human already approved it at adopt, so it is not an unreviewed load; but a clean fix moves the file back (or records `adopted:false` + skips it) on a load failure. Low-likelihood (load fails only transiently after a passing veto+eval). |
+| RW8a-1 | **ToT / GoT multi-step tree/graph search** in `reasoning-search` (v1 ships single-step best-of-N). | `docs/design/2026-06-29-reasoning-search.md` (KDD-2, §3) | L · M | Tree/graph search adds expansion → evaluate → backtrack + frontier management — a much larger, more speculative design; best-of-N proves the fork→score→select spine it would reuse. |
+| RW7d-1 | **Broaden the committed eval-fixture set** beyond the initial 2 (`evals/`), and (paired with DEFERRED #5) add statistical pass@k. The CI gate is real but thin — more scenarios = more regression coverage. | `docs/design/2026-06-29-evals-ci.md` (D5, §3) | S–M · L | The gate + reuse mechanism is the deliverable; fixture breadth grows incrementally as behaviors are pinned. Statistical pass@k is the `evals` design's own deferral (#5). |
+| RW7c-1 | **Metrics/logs** OTLP signals (`otel-exporter` emits **traces** only in v1). | `docs/design/2026-06-29-otel-exporter.md` (§3) | M · L | Traces are the highest-value signal; metrics (`/v1/metrics`) + logs are additive follow-ups on the same transport. |
+| RW7c-2 | **Distributed-context propagation** — inject `traceparent` into outbound tool HTTP so EAgent traces link to downstream services. | `docs/design/2026-06-29-otel-exporter.md` (§3) | M · M | v1 emits its own root traces; cross-service propagation needs a tool-HTTP injection seam, its own design. |
+| RW7c-3 | **Real-collector smoke** — the offline suite stubs `fetch`/asserts the OTLP body shape; a one-time smoke against a live Jaeger/Tempo/OTLP collector validates the wire end-to-end. | `docs/design/2026-06-29-otel-exporter.md` (R2) | S · M | Offline can't validate a live backend; the body shape is unit-pinned, but a real-collector smoke de-risks before production reliance. |
+| RW7b-1 | **Semantic** retrieval tier (embeddings) for `memory` recall — an optional embed-provider so `recall(query)` ranks by meaning, not just token overlap. | `docs/design/2026-06-29-tiered-memory.md` (KDD-2, §3) | M–H · M | Forbidden by the zero-dep rule today (needs a network embed-provider + a provider abstraction); lexical `overlapScore` is the dependency-free v1. A later optional-provider design. |
+| RW7b-2 | An **archive-scoped `forget`** (delete an archived note in one step). | `docs/design/2026-06-29-tiered-memory.md` (§3) | S · L | v1 deletes an archived note via `/memory promote` then `/memory forget` (two steps); a direct archive-forget is a small follow-up. |
+| RW7b-3 | **Auto-promotion** archive→core (a relevance-trigger that pulls a frequently-recalled archived note back into core). | `docs/design/2026-06-29-tiered-memory.md` (§3) | M · M | Needs an access/relevance-trigger policy of its own; eviction (core→archive) is the load-bearing direction. Manual `/memory promote` covers v1. |
+| RW7a-1 | **Delta/incremental blob** storage for checkpoint nodes (each node stores a full `AgentState`, so a deep tree duplicates the growing transcript). | `docs/design/2026-06-29-time-travel.md` (§3) | M · M | The FIFO cap bounds disk today; delta storage (store only the message diff vs parent) is an optimization, not a correctness need. Deferred until disk pressure is real. |
+| RW7a-3 | Command polish (F-review): `/rewind`/`/fork` don't re-check the `enabled` flag (so enable→create→disable→`/fork` would still write a node — harmless in the shipped-off default since no nodes exist); and an ambiguous-step selector prints both `resolve()`'s "ambiguous step" line and the caller's "no such checkpoint" line. | `docs/design/2026-06-29-time-travel.md` (F review) | S · L | Cosmetic; off-by-default makes it inert in practice. A one-line `enabled` guard on fork + suppressing the caller's second message; not worth churning merged code for an edge. |
+| RW7a-2 | **Unify conversation rewind with workspace rollback** — `/rewind` restores agent state only; files are `checkpoint.ts`'s `/rollback`. A combined "rewind to step N AND roll the workspace back" needs an id-alignment design between the two extensions. | `docs/design/2026-06-29-time-travel.md` (KDD-5) | M · M | Coupling two extensions is fragile (git may be absent; step-ids ≠ workspace-checkpoint-ids). Documented; operator pairs them manually. A later design can align them. |
+| RW6d-1 | A **reasoning-only** assistant turn (reasoning streamed, no text, no tool call — e.g. `max_tokens` mid-thought) now persists `content:[{thinking}]`; on replay the unsigned thinking block is dropped, leaving OpenAI `content:null` (its existing text-less shape) and **Gemini `parts:[]`** (which the API may reject). | `docs/design/2026-06-29-reasoning-fidelity.md` (R4) | S · L | Low likelihood (requires snapshotting a truncated thinking-only turn then continuing). Fix: a "drop an assistant message whose replay yields empty content" guard in the builders, if it ever bites. Left unguarded in the Light fix. |
+| RW6c-4 | codeact `tier=readonly` is **non-functional on the `bwrap` backend**: `wrapCommand`'s bwrap branch mounts `--tmpfs /tmp` and only re-binds the writable root for *write* tiers, so the snippet (under `os.tmpdir()` = `/tmp` on Linux) is shadowed and the interpreter gets ENOENT. Fails **closed** (errors, no bypass); macOS `sandbox-exec` + Linux `firejail` are unaffected; codeact's recommended tiers (`workspace-write`/`no-network`) bind the dir and work. | `docs/design/2026-06-29-execution-target.md` (F review) | M · M | Fix needs a **read-only** bind of the per-call dir for non-write tiers — a `wrapCommand` contract extension (a readonly-bind param) that must not loosen the *shell* readonly tier. Deferred to a focused change; README notes the degradation. |

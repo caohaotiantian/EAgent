@@ -27,6 +27,7 @@ import evals, {
   parseJudgeReply,
   parseEvalScenario,
   getTrajectory,
+  runEvalDir,
   type Trajectory,
   type ExpectSpec,
 } from "../src/extensions/evals.js";
@@ -451,6 +452,43 @@ test("T14: /eval counts a malformed file as a failed scenario, never throwing", 
     });
     assert.match(out.join("\n"), /1\/2/);
     assert.match(out.join("\n"), /broken\.eval\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- runEvalDir: the extracted runner is non-vacuous (AC-4) ------------------
+
+test("runEvalDir reports one pass and one fail over a temp dir (AC-4)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eagent-evaldir-"));
+  try {
+    // passes: the scripted tool order matches the exact expectation
+    writeFileSync(
+      join(dir, "pass.eval.json"),
+      JSON.stringify({
+        input: "go",
+        mockScript: [{ toolCalls: [{ name: "A" }, { name: "B" }] }, { text: "done" }],
+        expect: { tools: ["A", "B"], order: "exact" },
+      }),
+    );
+    // fails: a tool-order mismatch (expects B before A)
+    writeFileSync(
+      join(dir, "fail.eval.json"),
+      JSON.stringify({
+        input: "go",
+        mockScript: [{ toolCalls: [{ name: "A" }, { name: "B" }] }, { text: "done" }],
+        expect: { tools: ["B", "A"], order: "exact" },
+      }),
+    );
+    const h = makeHarness({ fallback: "allow", responder: [{ text: "ignored" }] });
+    registerAB(h.agent);
+    const api = await activate(h);
+
+    const { passed, total, failures } = await runEvalDir(dir, h.agent, () => getTrajectory(api));
+    assert.equal(passed, 1, "exactly one scenario passes");
+    assert.equal(total, 2, "both files are counted");
+    assert.equal(failures.length, 1, "the gate is not vacuous — the failing scenario is reported");
+    assert.match(failures[0]!, /fail\.eval\.json/, "the failing scenario is named");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -18,7 +18,7 @@
  */
 
 import type { ExtensionAPI } from "../kernel/extension.js";
-import { totalTokens, type StopReason, type Usage } from "../kernel/types.js";
+import { addUsage, totalTokens, type StopReason, type Usage } from "../kernel/types.js";
 
 export type { Usage };
 
@@ -44,9 +44,10 @@ export type PriceCard = Record<string, PriceRow>;
  *
  * Rows are pinned for the model ids `host.ts` can default to (`claude-fable-5`,
  * `gpt-4o`, `gemini-2.0-flash`) plus the Anthropic families that may arrive via
- * `ANTHROPIC_MODEL` (`claude-opus-*`, `claude-sonnet-*`, prefix-matched). Only
- * `inputTokens`+`outputTokens` are priced (no cache/reasoning rows — that would
- * require widening the kernel `Usage` type; deferred). `mock` and any unknown id
+ * `ANTHROPIC_MODEL` (`claude-opus-*`, `claude-sonnet-*`, prefix-matched). Each row
+ * carries only an input and output rate; cache reads/writes are priced off the
+ * input rate via fixed multipliers (`costOf`), and reasoning is a subset of output
+ * already priced — so no extra rate columns are needed. `mock` and any unknown id
  * resolve to `FALLBACK_ROW`, clearly marked so `/cost` can label it.
  */
 export const DEFAULT_PRICE_CARD: PriceCard = {
@@ -99,13 +100,26 @@ export function priceRow(model: string, card: PriceCard = DEFAULT_PRICE_CARD): R
 }
 
 /**
- * Price a usage delta into USD: `input/1e6·inputPerMTok + output/1e6·outputPerMTok`.
- * Pure, no side effects. Cache/reasoning tokens are out of scope (the kernel
- * `Usage` type carries only input/output).
+ * Cache-read tokens bill at ~0.1x the fresh-input rate, cache-write (cache
+ * creation) at ~1.25x. These are the documented Anthropic-standard approximations
+ * (KDD-3): `cost` is an estimator, so a single multiplier off the existing input
+ * rate captures the dominant effect without a separate per-model rate column.
+ */
+const CACHE_READ_MULTIPLIER = 0.1;
+const CACHE_WRITE_MULTIPLIER = 1.25;
+
+/**
+ * Price a usage delta into USD. Fresh input and output are billed at the row's
+ * rates; cache-read/cache-write tokens (disjoint from input) are billed off the
+ * input rate via the reduced/premium multipliers above. `reasoningTokens` is a
+ * subset of `outputTokens` (already priced), so it is not added. Pure, no side
+ * effects; absent optional fields contribute 0.
  */
 export function costOf(usage: Usage, row: PriceRow): number {
   return (
     (usage.inputTokens / 1e6) * row.inputPerMTok +
+    ((usage.cacheReadTokens ?? 0) / 1e6) * row.inputPerMTok * CACHE_READ_MULTIPLIER +
+    ((usage.cacheWriteTokens ?? 0) / 1e6) * row.inputPerMTok * CACHE_WRITE_MULTIPLIER +
     (usage.outputTokens / 1e6) * row.outputPerMTok
   );
 }
@@ -221,10 +235,9 @@ export default function activate(e: ExtensionAPI): () => void {
           fallback: row.fallback,
         };
         entry.usd += deltaUsd;
-        entry.tokens = {
-          inputTokens: entry.tokens.inputTokens + p.usage.inputTokens,
-          outputTokens: entry.tokens.outputTokens + p.usage.outputTokens,
-        };
+        // addUsage aggregates the cache/reasoning fields per provider too, while
+        // preserving the omit-invariant for providers that report none.
+        entry.tokens = addUsage(entry.tokens, p.usage);
         entry.fallback = row.fallback;
         perModel.set(activeModel, entry);
       }),

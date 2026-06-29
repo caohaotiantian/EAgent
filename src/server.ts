@@ -33,7 +33,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { Agent } from "./kernel/agent.js";
-import type { Message, Logger, UI } from "./kernel/types.js";
+import type { AgentState, Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 
 export interface ServeOptions extends AgentHostOptions {
@@ -108,6 +108,10 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   const built = await createAgentHost({ ...opts, ui: serverUI, logger, yolo: opts.yolo ?? true });
   await built.agent.hooks.emit("session_start", {});
 
+  // The pristine state a brand-new session (or a sessionless /run) restores from:
+  // empty transcript, zero usage, the configured model/prompt/thinking.
+  const initial = built.agent.snapshot();
+
   const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
@@ -123,12 +127,12 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     );
   }
 
-  // Per-conversation transcripts, replayed into the shared agent on each turn.
-  const sessions = new Map<string, Message[]>();
+  // Per-conversation state snapshots, restored into the shared agent each turn.
+  const sessions = new Map<string, AgentState>();
   let busy = false;
 
   const server = createServer((req, res) => {
-    route(req, res, built.agent, built.host.list(), sessions, {
+    route(req, res, built.agent, built.host.list(), sessions, initial, {
       get busy() {
         return busy;
       },
@@ -163,7 +167,8 @@ async function route(
   res: ServerResponse,
   agent: Agent,
   extensions: string[],
-  sessions: Map<string, Message[]>,
+  sessions: Map<string, AgentState>,
+  initial: AgentState,
   lock: Lock,
   security: Security,
   elicit: Elicitation,
@@ -250,7 +255,7 @@ async function route(
     }
     lock.busy = true;
     try {
-      await streamRun(res, agent, input, sessions, session, elicit, askTimeoutMs);
+      await streamRun(res, agent, input, sessions, initial, session, elicit, askTimeoutMs);
     } finally {
       lock.busy = false;
     }
@@ -268,7 +273,8 @@ async function streamRun(
   res: ServerResponse,
   agent: Agent,
   input: string,
-  sessions: Map<string, Message[]>,
+  sessions: Map<string, AgentState>,
+  initial: AgentState,
   session: string | undefined,
   elicit: Elicitation,
   askTimeoutMs: number,
@@ -321,12 +327,10 @@ async function streamRun(
   };
   res.on("close", onClose);
 
-  // Replay this session's transcript so the turn has its conversation history.
-  agent.clear();
-  if (session) {
-    const history = sessions.get(session);
-    if (history && history.length) agent.load(history.map((m) => ({ ...m })));
-  }
+  // Restore this session's state (transcript, usage, model, prompt, thinking) so
+  // the turn resumes from exactly where the session left off. A new session — or a
+  // sessionless /run — restores the pristine `initial` snapshot.
+  agent.restore((session ? sessions.get(session) : undefined) ?? initial);
 
   const subs = [
     agent.hooks.on("text_delta", ({ text }) => write({ type: "text_delta", text })),
@@ -339,7 +343,9 @@ async function streamRun(
   ];
   try {
     const { reason } = await agent.run(input);
-    if (session) sessions.set(session, agent.messages.map((m) => ({ ...m })));
+    // Snapshot the post-turn state back into the session. `agent.usage` here is the
+    // session's cumulative (restored session usage + this turn), not process-lifetime.
+    if (session) sessions.set(session, agent.snapshot());
     write({ type: "done", reason, session, usage: agent.usage });
   } catch (err) {
     write({ type: "error", message: err instanceof Error ? err.message : String(err) });

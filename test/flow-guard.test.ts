@@ -53,6 +53,61 @@ test("blocks network egress after a shell command in the same session (block mod
   assert.ok(sawReason, "the model should see the flow-guard block reason");
 });
 
+test("an mcp:call tool is egress: it is gated after a shell taint (block mode)", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "run_shell" }] }, { toolCalls: [{ name: "mcp_call" }] }, { text: "done" }],
+  });
+  let called = false;
+  h.agent.tools.register(
+    defineTool({ name: "run_shell", description: "", capabilities: ["shell:exec"], execute: () => ({ content: "ran" }) }),
+  );
+  h.agent.tools.register(
+    defineTool({
+      name: "mcp_call",
+      description: "",
+      capabilities: ["mcp:call"],
+      execute: () => {
+        called = true;
+        return { content: "called" };
+      },
+    }),
+  );
+  await h.host.use("flow-guard", (e) => {
+    e.store.set("mode", "block");
+    return flowGuard(e);
+  });
+
+  await h.agent.run("run a shell command then exfiltrate via mcp");
+  assert.equal(called, false, "mcp:call egress after a sensitive source must be blocked");
+});
+
+test("shell:exec is source-only: a second shell call after a tainting shell call is NOT gated", async () => {
+  let runs = 0;
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "run_shell" }] }, { toolCalls: [{ name: "run_shell" }] }, { text: "done" }],
+  });
+  h.agent.tools.register(
+    defineTool({
+      name: "run_shell",
+      description: "",
+      capabilities: ["shell:exec"],
+      execute: () => {
+        runs++;
+        return { content: "ran" };
+      },
+    }),
+  );
+  await h.host.use("flow-guard", (e) => {
+    e.store.set("mode", "block");
+    return flowGuard(e);
+  });
+
+  await h.agent.run("run two shell commands");
+  assert.equal(runs, 2, "shell:exec must never be an egress cap: a second shell call after taint runs");
+});
+
 test("allows network egress when no sensitive source ran first", async () => {
   const h = makeHarness({
     fallback: "allow",

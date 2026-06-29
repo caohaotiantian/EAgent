@@ -85,6 +85,7 @@ export default function activate(e: ExtensionAPI): void {
       systemPrompt: system ?? DEFAULT_CHILD_SYSTEM,
       maxTurns,
       tools: buildChildRegistry(),
+      hooks: e.agent.hooks.childScope(),
     });
 
   /**

@@ -246,6 +246,7 @@ export default function activate(e: ExtensionAPI): () => void {
               systemPrompt: system,
               maxTurns: DEFAULT_MAX_TURNS,
               tools: childRegistry(read!, edit!),
+              hooks: e.agent.hooks.childScope(),
             });
             const prompt = `File: ${file}\nMatched line(s): ${matchedLines.join(", ")}\nInstruction: ${shared}`;
             const { messages } = await child.run(prompt);

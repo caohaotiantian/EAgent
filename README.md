@@ -105,7 +105,8 @@ because everything else hangs off it. A turn:
 flowchart TD
     A["agent.run(input)"] --> B["drain steering · emit turn_start"]
     B --> C["transformContext<br/>(filter hook: compaction · memory · RAG)"]
-    C --> D["provider.stream(request)"]
+    C --> C2["transformRequest<br/>(filter hook: tools · model · prompt · cache)"]
+    C2 --> D["provider.stream(request)"]
     D --> E["text_delta … done + usage"]
     E --> F{"tool calls?"}
     F -->|no| G{"follow-ups queued?"}
@@ -136,7 +137,7 @@ All seven live in `src/kernel/` and form the entire public surface of the kernel
 | **Hook bus**         | `src/kernel/hooks.ts`        | Lifecycle events (observe) + filter hooks (intervene) — Emacs *hooks* & *advice*. |
 | **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools (and commands); a later definition wins, disposing restores the prior one. (Providers, in the same file, register by overwrite — no restore.) |
 | **Provider**         | `src/kernel/types.ts`        | The one thing the kernel knows about an LLM: a request → a stream of events. |
-| **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions. |
+| **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions; first-class state — `snapshot()`/`restore()` + a monotonic step. |
 | **Capability layer** | `src/kernel/capabilities.ts` | Per-capability allow / deny / ask, wildcards, an audit log. |
 | **Extension host**   | `src/kernel/extension.ts`    | Discovery, activation, the `ExtensionAPI`, hot reload via `jiti`. |
 | **Command registry** | `src/kernel/commands.ts`     | User-facing slash commands — `M-x` for agents. |
@@ -160,9 +161,12 @@ flowchart LR
     end
     subgraph INT["Filter hooks — e.hook() · intervene"]
         direction TB
-        H1["transformContext<br/>reshape the prompt"]
-        H2["beforeToolCall<br/>veto / rewrite a call"]
-        H3["afterToolCall<br/>transform a result"]
+        H1["transformContext<br/>reshape the message list"]
+        H2["transformRequest<br/>reshape the whole request"]
+        H3["beforeToolCall<br/>veto / rewrite a call"]
+        H4["beforeDispatch<br/>reorder / drop the tool-call wave"]
+        H5["afterToolCall<br/>transform a result"]
+        H6["onProviderError<br/>retry / downshift on a stream failure"]
     end
 ```
 
@@ -178,8 +182,10 @@ e.hook("beforeToolCall", (decision, { call }) => {
 });
 ```
 
-These three seams are where memory strategies, plan-mode approvals, safety gates,
-and context engineering plug in — without touching the loop.
+These six seams are where memory strategies, model routing, plan-mode approvals,
+safety gates, context engineering, wave shaping, and reliability policy plug in — without touching the loop.
+(`beforeDispatch` reshapes the tool-call wave; `onProviderError` is an error-path seam that fires only
+when a provider stream throws.)
 
 ## Built-in extensions
 
@@ -195,12 +201,13 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `search`      | `glob` / `grep` — find files by pattern and search contents in pure Node, workspace-confined | — | `fs:read` |
 | `skills`      | LLM-authored skills via `SKILL.md` with progressive disclosure | `/skills` | `skill:read`, `skill:write` |
 | `mcp`         | Model Context Protocol client (stdio **and** Streamable HTTP); registers `mcp__<server>__<tool>` | `/mcp` | `mcp:call` |
-| `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary | `/code` | `code:exec` |
+| `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary, with an optional off-by-default **OS-sandbox isolation tier** (`workspace-write`/`no-network` recommended; `readonly` is degraded on the `bwrap` backend — RW6c-4) via the shared `lib/sandbox` launchers; **fails closed** once a tier is selected if no backend | `/code`, `/codeact` | `code:exec` |
 | `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
+| `reasoning-search` | **best-of-N over forked agents** — `best_of_n` snapshots the current state, forks N **governed** children (`childScope` gate filters + a pruned registry that removes `best_of_n`/`spawn_agent` so a fork can't re-fork), each restored from the snapshot and run on the sub-task, then scores (`judge`/`shortest`/`longest`) and returns the argmax; N-capped, losing branches never touch the parent transcript. Off by default (`/reasoning-search on`, `EAGENT_REASONING_SEARCH=off`) | `/reasoning-search` | `agent:spawn` |
 | `dynamic-workflow` | `run_workflow` executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
 | `templates`   | named, file-based, inheritable **agent templates** (`<name>.md` frontmatter + body = system prompt; single-parent `extends`); `spawn_template` delegates to a scoped isolated child, `/template use` reconfigures the live session (become) with a tool allow-list veto; opt-in name+description catalog (`/template catalog on`), `EAGENT_TEMPLATES=off` kill switch | `/template` | `agent:spawn` |
 | `teams`       | **team orchestration**: `run_team` runs a template-backed lead agent supervising template-backed member agents (file `<name>.md` roster **or** an inline roster) over a shared run-scoped board, selecting a coordination pattern (orchestrator, parallel, sequential, generator-verifier, consensus, blackboard) from a documented playbook (optionally pinned); members are leaf agents barred from any spawn/workflow tool; bounded (lead/member turns, delegate cap, roster cap, board caps), `EAGENT_TEAMS=off` kill switch | `/team` | `agent:spawn` |
-| `memory`      | store-backed `remember`/`recall` working-memory scratchpad with white-box per-entry provenance (`EAGENT_MEMORY_ENTRIES=off` to disable) — registers no `transformContext` hook | `/memory` | — |
+| `memory`      | store-backed `remember`/`recall` working-memory scratchpad with white-box per-entry provenance; **two tiers** (core `note:` + archival `archive:`) with auto-eviction oldest→archive at a cap, and **lexical `recall(query)`** (dependency-free token-overlap via `lib/relevance`, no embeddings) ranking across both tiers (`/memory recall|archive|promote`); `EAGENT_MEMORY_ENTRIES=off` to disable — registers no `transformContext` hook | `/memory` | — |
 | `prune`       | token-budget tool-output pruning via `transformContext` — truncates old, oversized tool results beyond a protected recent window (`EAGENT_PRUNE=off` to disable) | — | — |
 | `compact`     | token-gated structured conversation compaction via `transformContext` — folds the older prefix at a user-turn boundary into `## Decisions`/`## Files`/`## Open threads`, keeps the last K user turns, re-injects a byte-capped pinned block; off by default (`/compact on`, `EAGENT_COMPACT=off` to kill) | `/compact` | — |
 | `recovery`    | turns a *failed* tool result into a corrective nudge via `afterToolCall`, keyed to EAgent's own error strings, so the model self-corrects (`EAGENT_RECOVERY=off` to disable) | — | — |
@@ -211,20 +218,24 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `session`     | save / load / handoff for transcripts | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
 | `packages`    | install extensions from `path:` / `git:` / `npm:` (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
 | `trace`       | observability: per-run span tree, metrics, token usage — from the event bus | `/trace`, `/usage`, `/trace-save` | — |
+| `otel-exporter` | **OpenTelemetry (OTLP/HTTP-JSON) trace exporter** — folds agent/turn/tool lifecycle into OTLP spans (generated trace/span ids, parent nesting, GenAI semantic attrs: `gen_ai.system`/`request.model`/`usage.*`tokens) and POSTs to a collector via `fetch` (best-effort, swallow-all). Hand-rolled, zero-dep; metadata only (no prompt/result content). Off by default — inert unless `OTEL_EXPORTER_OTLP_ENDPOINT`/`_TRACES_ENDPOINT` is set (`EAGENT_OTEL=off`) | `/otel` | — |
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them | `/context`, `/context-reload` | — |
 | `microagents` | keyword-triggered knowledge injection via `transformContext` — scans `*.md` files with `triggers:` frontmatter and injects a body when a trigger appears in the latest user message (`EAGENT_MICROAGENTS=off` to disable) | `/microagents` | — |
 | `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
 | `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
 | `budget-cap`   | hard **USD spend ceiling that enforces** — prices the `usage` stream via `cost`'s pricecard and, at a per-run or cumulative-session cap, soft-warns then **blocks** paid tool calls (`mode=block`) or **aborts** the run (`mode=stop`); both caps default `0` = inert (`EAGENT_BUDGET_CAP=off`) | `/budget-cap` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
+| `self-improve` | **bounded, human-checkpointed self-improvement harness** (DGM-safety): `propose_improvement` stages a candidate (static-veto + bespoke write, never executed) → `evaluate_candidate` scores it as an **advisory, tamper-detected** signal in a **separate `no-network`-sandboxed subprocess** (the candidate is *never* loaded into the live agent to be judged) → `adopt_improvement` loads it **only after human source-review via `ui.ask`** (not `--yolo`-able), host-tracked + `unloadExtension`-reversible. The isolation boundary is the subprocess+sandbox; the gate is the human. Off by default (`/self-improve on`, `EAGENT_SELF_IMPROVE=off`) | `/self-improve` | `self:extend` |
 | `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |
 | `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
+| `time-travel` | agent-state **rewind + fork** — persists `Agent.snapshot()` as a branching checkpoint **tree** (LangGraph-style; rewind and fork are one `restore()` primitive) to `.eagent/timetravel/`; rewinds *conversation* state only (pair with `checkpoint`'s `/rollback` for files). Off by default (`/timetravel on`, `EAGENT_TIME_TRAVEL=off`) | `/timetravel`, `/rewind`, `/fork`, `/tree` | — |
 | `todo`        | session-scoped in-memory todo list — `todowrite` replaces and echoes the list | `/todos` | — |
 | `goal`         | pins the run's **objective + acceptance criteria** in front of the model every turn (anti-drift `transformContext`) and runs an advisory, offline completion check on `agent_end`; adds a `setgoal` tool + opt-in model-judge; inert until a goal is set (`EAGENT_GOAL=off`) | `/goal` | — |
 | `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompt-remove`, `/prompts` | — |
 | `flow-guard`  | compositional egress gate: taints a session on a source capability (default `shell:exec`) or sensitive data, then holds egress (`net:fetch`) — ask or block | `/flow-guard` | — |
+| `provenance`  | CaMeL-lite structural injection defense — tags foreign-source results (`net:fetch`/`mcp:call`/`mcp:read`) into a bounded segment store on `afterToolCall`, then on `beforeToolCall` gates a privileged **sink** (`shell:exec`/`net:fetch`/`mcp:call`/`fs:write`) whose string arg verbatim-derives (≥`minLen` segment) from untrusted content — prompts (default) or blocks (strict), redacted; a *different axis* from `flow-guard` (source-taint→any sink vs sensitive-pattern→egress) and `content-guard` (gate vs label). Off by default (`/provenance on`, `EAGENT_PROVENANCE=off`) | `/provenance` | — |
 | `risk-guard`  | LLM-based semantic risk analyzer on `beforeToolCall` — classifies sensitive calls (default `shell:exec`) via a tool-less provider sub-call and asks or blocks on a RISKY verdict (off by default; `EAGENT_RISK_GUARD=off`) | `/risk-guard` | — |
 | `headless-flags` | CI safety net — when no TTY / a `CI` signal is detected, rewrites shell commands to their non-interactive form (`apt-get install -y`, `npm init -y`) and prepends env guards (`GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`) so a prompt or `$EDITOR` can't hang an unattended run; loads before `bash-policy`, inert in an interactive TTY (`EAGENT_HEADLESS_FLAGS=off`) | `/headless` | — |
 | `bash-policy` | command-granular shell policy gate — reduces a command line to a command family and evaluates an allow/deny/ask ruleset (no-op by default; `EAGENT_BASH_POLICY=off`) | `/bash-policy` | — |
@@ -236,13 +247,14 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `sweep-edit`   | `sweep_edit` tool — regex-enumerated multi-site refactor: finds match sites via `search` (no shell), fans a scoped sub-agent per file that edits or declines, with a max-sites cap | `/sweeps` | `fs:write`, `agent:spawn` |
 | `citations`    | grounding — tags *retrieval* tool output (`net:fetch`/`fs:read`) with a visible `[src:N]` id and, on `agent_end`, warns (never blocks) on a *fabricated* citation in the final answer (off by default; `EAGENT_CITATIONS=off`) | `/citations` | — |
 | `env-report`   | classifies *environmental* tool failures (auth/missing-binary/network/permission), surfaces an `environment_issue` and replaces `recovery`'s retry-nudge with a "surface, don't retry" note so the model stops looping on infra faults (on by default; `EAGENT_ENV_REPORT=off`) | — (`env_report` tool) | — |
-| `evals`        | offline behavior-eval harness — `/expect` trajectory assertions, an `/eval <dir>` headless pass@k runner over `*.eval.json`, and a `judge` tool (recursion-safe sub-call); ships a `test/security/` guard-regression set | `/expect`, `/eval` | — |
+| `evals`        | offline behavior-eval harness — `/expect` trajectory assertions, an `/eval <dir>` headless runner over `*.eval.json` (also exposed as the `npm run eval` **CI gate** over `evals/`, exit non-zero on failure), and a `judge` tool (recursion-safe sub-call); ships a `test/security/` guard-regression set | `/expect`, `/eval` | — |
 | `handoff`      | session resume doc — on `agent_end` (or `/handoff-doc`) summarizes the transcript via a recursion-safe sub-call into a fixed schema + reactivation paragraph, written to `.eagent/handoffs/`; plus an opt-in, relevance- and freshness-gated read side that injects the newest matching handoff once into a fresh session's first turn (off by default; `EAGENT_HANDOFF=off`, resume side `EAGENT_HANDOFF_RESUME=off`) | `/handoff-doc` | — |
 | `drift-probe`  | reasoning-quality canary — every N turns probes a pinned question and warns (never blocks) on regression vs the turn-0 baseline, suggesting `/compact` or `/handoff` (off by default; `EAGENT_DRIFT_PROBE=off`) | `/drift-probe` | — |
 | `skills-hardening` | guards the skill self-extension surface — `SKILL.md` body/script supply-chain scan + body rug-pull fingerprint (warn-only), frontmatter validation, `allowed-tools` `beforeToolCall` scoping for the active skill, and optional `triggers:`-gated tier-1 disclosure (`EAGENT_SKILL_TRIGGERS=off`) | `/skills` | — |
 | `ask`          | agent→host elicitation — an `ask_user_question` tool so the model can pause and ask the human (with options) before guessing, gated by `ui:ask` so batch runs auto-decline; calls an optional `UI.ask` (CLI readline), else falls back to "proceed with a stated assumption"; the HTTP server adds a durable channel (`action_required` stream event + `POST /answer`, timeout/disconnect fallback) | — (`ask_user_question`) | `ui:ask` |
 | `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
 | `fallback-routing` | **model/provider fallback chains** — registers a composite `fallback` provider that streams an ordered `{provider, model}` chain, failing over to the next entry only *before* the first event is emitted (the no-double-emit invariant), with a per-run circuit breaker; off by default (`/fallback-routing on`, `EAGENT_FALLBACK_ROUTING=off`) | `/fallback-routing` | — |
+| `reliability` | **same-provider retry + model downshift** on the `onProviderError` seam — bounded exponential backoff-with-jitter retry of a transient pre-first-event stream failure (conservative allowlist; never re-retries `http.ts`-owned 429/5xx), optionally downshifting the model; a *different axis* from `fallback-routing` (cross-provider) — it never switches provider. Off by default (`/reliability on`, `EAGENT_RELIABILITY=off`) | `/reliability` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
 `~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
@@ -342,7 +354,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  52 built-in extensions, all riding the ExtensionAPI
+src/extensions/  58 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

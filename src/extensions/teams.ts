@@ -550,6 +550,7 @@ export default function activate(e: ExtensionAPI): void {
     model: string;
     providerName: string | undefined;
     tools: Tool[];
+    hooks: Agent["hooks"];
   } => ({
     providers: e.agent.providers,
     ui: e.agent.ui,
@@ -558,6 +559,7 @@ export default function activate(e: ExtensionAPI): void {
     model: e.agent.model,
     providerName: e.agent.providerName,
     tools: e.agent.tools.list(),
+    hooks: e.agent.hooks,
   });
 
   /** Run a resolved team on a task: build the board, the delegate tool, and the lead; run the lead. */

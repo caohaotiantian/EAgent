@@ -259,15 +259,18 @@ e.on("tool_end", ({ call, result }) => {
 ## Filter hooks (intervene)
 
 Install with `e.hook(point, handler)`. A filter hook threads a value through
-your handler, which returns the (possibly transformed) value. There are exactly
-three, and they are the seams where memory, plan-mode approvals, safety gates,
-and context engineering plug in without touching the loop. Here is where each one
-fires inside a turn:
+your handler, which returns the (possibly transformed) value. There are six —
+five on the request/tool path (incl. `beforeDispatch`, the wave-level seam) plus `onProviderError` (an error-path seam,
+covered after them) — the seams where memory, model routing, plan-mode approvals,
+safety gates, context engineering, and reliability policy plug in without touching
+the loop. Here is where the four **single-call** request/tool ones fire inside a turn (`beforeDispatch`
+acts on the whole tool-call wave before per-call dispatch — see its own subsection below):
 
 ```mermaid
 flowchart LR
     M["transcript"] --> TC["transformContext<br/>messages ⇒ messages"]
-    TC --> P["provider.stream"]
+    TC --> TR["transformRequest<br/>request ⇒ request"]
+    TR --> P["provider.stream"]
     P --> TCALL["a tool call"]
     TCALL --> BT["beforeToolCall<br/>decision ⇒ decision"]
     BT -->|"block?"| X["error result"]
@@ -293,6 +296,42 @@ e.hook("transformContext", (messages /*, { turn, model } */) => [
   },
   ...messages,
 ]);
+```
+
+### `transformRequest`
+
+Reshape the whole outbound request — `systemPrompt`, `messages`, `tools`, `model`,
+`toolChoice`, `thinking` — just before the provider call. This is the deepest
+request seam: withhold tools from the model (least-privilege / progressive
+disclosure), route the model, assemble a dynamic system prompt, or set a cache
+boundary. `transformContext` runs first, so its output arrives as `value.messages`.
+The context carries `{ turn, cumulativeUsage }`. **Return the (possibly mutated)
+value.** With no handler registered the request is byte-identical to the default.
+
+```ts
+e.hook("transformRequest", (req, { turn, cumulativeUsage }) => {
+  // Plan mode: hide mutating tools from the model on the first turn.
+  if (turn === 1) req.tools = req.tools.filter((t) => !/^(write|edit|bash)$/.test(t.name));
+  return req;
+});
+```
+
+### `beforeDispatch`
+
+Reshape the **whole tool-call wave** before it is dispatched (the per-call
+`beforeToolCall` sees one call; this sees them all). The threaded value is the
+`ToolCallBlock[]` to dispatch; the context carries `{ turn }`. Return a reordered
+and/or filtered subset — run a cheap validation call first, drop a now-redundant
+call. **Pairing is preserved by the kernel:** every *original* call id still gets a
+`tool_result` (a real one if dispatched, else a neutral `"(skipped…)"` synthetic),
+and ids you return that weren't in the originals are ignored (no injection). Drop a
+call as a *security veto* with `beforeToolCall` instead (it pairs via a proper error
+result); `beforeDispatch` is for wave shape.
+
+```ts
+e.hook("beforeDispatch", (calls /*, { turn } */) =>
+  // run any `read` before any `write`, and dedupe identical calls
+  dedupe(calls).sort((a, b) => rank(a.name) - rank(b.name)));
 ```
 
 ### `beforeToolCall`
@@ -321,6 +360,25 @@ redaction, truncation, annotation.
 e.hook("afterToolCall", (result, { call }) => {
   if (result.content.length <= 4000) return result;
   return { ...result, content: result.content.slice(0, 4000) + "\n…(truncated)" };
+});
+```
+
+### `onProviderError` (error-path)
+
+Unlike the four above, this fires **only when the provider stream throws** — and
+only **before** any event has been emitted (a post-first-event failure can't be
+retried without double-emitting, so it always propagates). The threaded value is
+`{ retry, downshiftModel?, fail }` and the context is `{ error, attempt }`. Return
+`{ retry: true, fail: false }` (optionally with `downshiftModel`) to re-stream the
+turn; the default (no handler) is `{ retry: false, fail: true }`, so the run ends
+with `reason:"error"` exactly as before. The kernel caps re-streams per turn. This
+is the seam the `reliability` extension rides for same-provider backoff-retry +
+model downshift (cross-provider failover is `fallback-routing`'s job).
+
+```ts
+e.hook("onProviderError", (decision, { error, attempt }) => {
+  if (attempt < 3 && isTransient(error)) return { retry: true, fail: false };
+  return decision; // default: fail
 });
 ```
 

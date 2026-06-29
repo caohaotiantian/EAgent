@@ -27,11 +27,18 @@ function walk(schema: JSONSchema, input: unknown, path: string, errors: string[]
     input = structuredCloneSafe(schema.default);
   }
 
-  if (schema.enum && !schema.enum.some((e) => e === input)) {
-    errors.push(`${path}: expected one of ${JSON.stringify(schema.enum)}, got ${render(input)}`);
-    return input;
+  const value = coerce(schema, input, path, errors);
+
+  // enum membership is checked AFTER coercion so a wire string ("2") matches a
+  // numeric enum ([1,2,3]) once the type rule has turned it into a number.
+  if (schema.enum && !schema.enum.some((e) => e === value)) {
+    errors.push(`${path}: expected one of ${JSON.stringify(schema.enum)}, got ${render(value)}`);
   }
 
+  return value;
+}
+
+function coerce(schema: JSONSchema, input: unknown, path: string, errors: string[]): unknown {
   switch (schema.type) {
     case "object":
       return walkObject(schema, input, path, errors);
@@ -40,7 +47,9 @@ function walk(schema: JSONSchema, input: unknown, path: string, errors: string[]
     case "string":
       if (typeof input !== "string") {
         errors.push(`${path}: expected string, got ${render(input)}`);
+        return input;
       }
+      checkString(schema, input, path, errors);
       return input;
     case "number":
     case "integer": {
@@ -52,6 +61,7 @@ function walk(schema: JSONSchema, input: unknown, path: string, errors: string[]
       if (schema.type === "integer" && !Number.isInteger(n)) {
         errors.push(`${path}: expected integer, got ${render(input)}`);
       }
+      checkNumber(schema, n, path, errors);
       return n;
     }
     case "boolean": {
@@ -71,6 +81,31 @@ function walk(schema: JSONSchema, input: unknown, path: string, errors: string[]
   }
 }
 
+// Numeric bounds — enforced only when the schema declares them.
+function checkNumber(schema: JSONSchema, n: number, path: string, errors: string[]): void {
+  const { minimum, maximum } = schema;
+  if (typeof minimum === "number" && n < minimum) {
+    errors.push(`${path}: ${n} is less than minimum ${minimum}`);
+  }
+  if (typeof maximum === "number" && n > maximum) {
+    errors.push(`${path}: ${n} is greater than maximum ${maximum}`);
+  }
+}
+
+// String length/pattern — enforced only when the schema declares them.
+function checkString(schema: JSONSchema, s: string, path: string, errors: string[]): void {
+  const { minLength, maxLength, pattern } = schema;
+  if (typeof minLength === "number" && s.length < minLength) {
+    errors.push(`${path}: string length ${s.length} is below minLength ${minLength}`);
+  }
+  if (typeof maxLength === "number" && s.length > maxLength) {
+    errors.push(`${path}: string length ${s.length} exceeds maxLength ${maxLength}`);
+  }
+  if (typeof pattern === "string" && !new RegExp(pattern).test(s)) {
+    errors.push(`${path}: ${render(s)} does not match pattern ${pattern}`);
+  }
+}
+
 function walkObject(schema: JSONSchema, input: unknown, path: string, errors: string[]): unknown {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     errors.push(`${path}: expected object, got ${render(input)}`);
@@ -86,10 +121,14 @@ function walkObject(schema: JSONSchema, input: unknown, path: string, errors: st
       out[key] = walk(propSchema, src[key], childPath, errors);
     }
   }
-  // Preserve unknown properties rather than dropping them — tools may accept
-  // open-ended input, and silently discarding data is worse than passing it on.
+  // Unknown properties: rejected when the schema sets `additionalProperties:false`,
+  // otherwise preserved — tools may accept open-ended input, and silently
+  // discarding data is worse than passing it on.
+  const closed = schema.additionalProperties === false;
   for (const [key, val] of Object.entries(src)) {
-    if (!(key in props)) out[key] = val;
+    if (key in props) continue;
+    if (closed) errors.push(`${path}.${key}: unexpected property (additionalProperties is false)`);
+    else out[key] = val;
   }
 
   for (const req of schema.required ?? []) {

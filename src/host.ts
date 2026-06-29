@@ -41,6 +41,7 @@ import compact from "./extensions/compact.js";
 import recovery from "./extensions/recovery.js";
 import outputContract from "./extensions/output-contract.js";
 import contentGuard from "./extensions/content-guard.js";
+import provenance from "./extensions/provenance.js";
 import circuitBreaker from "./extensions/circuit-breaker.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
@@ -73,11 +74,16 @@ import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
 import fallbackRouting from "./extensions/fallback-routing.js";
+import reliability from "./extensions/reliability.js";
 import headlessFlags from "./extensions/headless-flags.js";
 import sandboxTiers from "./extensions/sandbox-tiers.js";
 import configHooks from "./extensions/config-hooks.js";
 import budgetCap from "./extensions/budget-cap.js";
 import goal from "./extensions/goal.js";
+import timeTravel from "./extensions/time-travel.js";
+import otelExporter from "./extensions/otel-exporter.js";
+import reasoningSearch from "./extensions/reasoning-search.js";
+import selfImprove from "./extensions/self-improve.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -97,6 +103,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["recovery", recovery],
   ["output-contract", outputContract],
   ["content-guard", contentGuard],
+  ["provenance", provenance],
   ["circuit-breaker", circuitBreaker],
   ["planmode", planmode],
   ["session", session],
@@ -134,6 +141,11 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["ask", ask],
   ["routing", routing],
   ["fallback-routing", fallbackRouting],
+  ["reliability", reliability],
+  ["time-travel", timeTravel],
+  ["otel-exporter", otelExporter],
+  ["reasoning-search", reasoningSearch],
+  ["self-improve", selfImprove],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
@@ -163,6 +175,8 @@ export interface AgentHost {
   live: boolean;
   /** The resolved default model. */
   model: string;
+  /** Built-in extensions that failed to activate (logged and skipped, not fatal). */
+  failures: { id: string; err: unknown }[];
 }
 
 /**
@@ -232,12 +246,14 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     store: new FileBackend(opts.storeRoot ?? join(homedir(), ".eagent", "state")),
   });
 
-  // A failing built-in must not take down the whole agent: log and skip it.
+  // A failing built-in must not take down the whole agent: log, record, and skip it.
+  const failures: { id: string; err: unknown }[] = [];
   for (const [id, activate] of BUILTIN_EXTENSIONS) {
     try {
       await host.use(id, activate);
     } catch (err) {
       (opts.logger ?? console).error?.(`extension "${id}" failed to activate:`, err);
+      failures.push({ id, err });
     }
   }
 
@@ -252,7 +268,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   await host.discover(dirs);
   for (const path of opts.extraExtensions ?? []) await host.loadFile(path);
 
-  return { agent, host, commands, live, model };
+  return { agent, host, commands, live, model, failures };
 }
 
 /**

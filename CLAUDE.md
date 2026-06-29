@@ -14,10 +14,10 @@ The kernel is **seven primitives and nothing more**, all under `src/kernel/`:
 
 | Primitive        | File                   | Responsibility |
 | ---------------- | ---------------------- | -------------- |
-| Hook bus         | `hooks.ts`             | Lifecycle events (observe) + filter hooks (intervene). |
+| Hook bus         | `hooks.ts`             | Lifecycle events (observe) + filter hooks (intervene); `childScope()` derives a governed bus for sub-agents (shares gate filters + intra-run events, suppresses run-lifecycle events). |
 | Tool registry    | `registry.ts`          | Register/shadow/dispose tools; later wins, disposing restores. Also holds the `ProviderRegistry` (registers by overwrite — no restore). |
 | Provider         | `types.ts` (interface) | The LLM abstraction: a request → a stream of events. Implementations live in `src/providers/`. |
-| Agent loop       | `agent.ts`             | Turns, streaming, guarded/ordered tool dispatch, steering, follow-up (default `maxTurns` 24). |
+| Agent loop       | `agent.ts`             | Turns, streaming, guarded/ordered tool dispatch (bounded by `maxConcurrency`), steering, follow-up (default `maxTurns` 24); first-class state via `snapshot()`/`restore()` + a monotonic `#step`. |
 | Capability layer | `capabilities.ts`      | Per-capability grant/deny/ask, wildcards, audit log. |
 | Extension host   | `extension.ts`         | Discovery, activation, the `ExtensionAPI`, hot reload via `jiti`. |
 | Command registry | `commands.ts`          | User-facing slash commands. |
@@ -37,9 +37,13 @@ with zero opinions about tools, memory, prompts, or sub-agents.
 Extensions plug into the loop through the hook bus: they **observe** lifecycle
 events via `e.on(event, …)` (`agent_start`, `turn_start`/`turn_end`, `message`,
 `text_delta`, `tool_start`/`tool_end`/`tool_batch_end`, `usage`, `agent_end`,
-`error`, `session_start`/`session_shutdown`, …) and **intervene** via three
-filter hooks `e.hook(point, …)`: `transformContext` (reshape the prompt),
-`beforeToolCall` (veto/rewrite a call), and `afterToolCall` (transform a result).
+`error`, `session_start`/`session_shutdown`, …) and **intervene** via six
+filter hooks `e.hook(point, …)`: `transformContext` (reshape the message list),
+`transformRequest` (reshape the whole outbound request — system prompt, tools,
+model, toolChoice, thinking — just before the provider call), `beforeToolCall`
+(veto/rewrite a call), `beforeDispatch` (reorder/drop the tool-call wave before
+dispatch, pairing-safe), `afterToolCall` (transform a result), and `onProviderError`
+(error-path: retry/downshift when a provider stream throws pre-first-event).
 
 ## Key commands
 
@@ -49,6 +53,7 @@ npm run typecheck # tsc --noEmit   (alias: npm run lint)
 npm run build     # tsc -> dist/
 npm run dev       # node --import tsx src/cli.ts     (interactive REPL)
 npm run serve     # node --import tsx src/server.ts  (HTTP host)
+npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits non-zero on failure
 ```
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a
@@ -62,7 +67,7 @@ required. Keep it that way.
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` (retry/backoff + SSE parsing),
   and `cassette` (record/replay). All read config from `process.env`.
-- `src/extensions/` — the 52 built-in extensions, plus internal helpers in `lib/`.
+- `src/extensions/` — the 58 built-in extensions, plus internal helpers in `lib/`.
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
   defaulting (honors `*_MODEL` env vars), and the canonical `BUILTIN_EXTENSIONS`
   set and load order.
@@ -76,7 +81,7 @@ required. Keep it that way.
 
 ## Built-in extensions
 
-Everything outside `src/kernel/` is an extension. 52 ship in `BUILTIN_EXTENSIONS`
+Everything outside `src/kernel/` is an extension. 58 ship in `BUILTIN_EXTENSIONS`
 (`src/host.ts`), each a single file with offline tests that gates privileged work
 behind a capability. Conventions worth knowing:
 

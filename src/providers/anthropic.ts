@@ -146,12 +146,13 @@ export class AnthropicProvider implements Provider {
 
       switch (parsed.type) {
         case "message_start": {
-          // Initial usage. Cached and freshly-created prefix tokens are still
-          // input tokens for accounting; fold them in.
+          // Initial usage. inputTokens is the fresh (non-cached) input; cache
+          // read/creation tokens are disjoint siblings, set only when reported.
           const u = parsed.message?.usage;
           if (u) {
-            usage.inputTokens =
-              (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+            usage.inputTokens = u.input_tokens ?? 0;
+            if (u.cache_read_input_tokens !== undefined) usage.cacheReadTokens = u.cache_read_input_tokens;
+            if (u.cache_creation_input_tokens !== undefined) usage.cacheWriteTokens = u.cache_creation_input_tokens;
             usage.outputTokens = u.output_tokens ?? 0;
           }
           break;
@@ -297,6 +298,8 @@ function mapStopReason(reason: string): StopReason {
       return "tool_use";
     case "max_tokens":
       return "max_tokens";
+    case "refusal":
+      return "refusal";
     default:
       return "stop";
   }

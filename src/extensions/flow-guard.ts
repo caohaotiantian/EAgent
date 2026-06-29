@@ -33,7 +33,7 @@ type Mode = "ask" | "block";
 /** Capabilities whose use marks the session as having touched sensitive data. */
 const DEFAULT_SOURCE_CAPS = ["shell:exec"];
 /** Capabilities that move data off the machine (where a chain would exfiltrate). */
-const DEFAULT_EGRESS_CAPS = ["net:fetch"];
+const DEFAULT_EGRESS_CAPS = ["net:fetch", "mcp:call"];
 
 /**
  * Data confinement (the second trigger): reading one of these path patterns, or

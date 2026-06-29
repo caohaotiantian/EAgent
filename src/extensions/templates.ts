@@ -35,8 +35,9 @@ import { join } from "node:path";
 import { Agent } from "../kernel/agent.js";
 import type { CapabilityManager } from "../kernel/capabilities.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
-import type { ToolDecision } from "../kernel/events.js";
+import type { KernelEvents, KernelFilters, ToolDecision } from "../kernel/events.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { HookBus } from "../kernel/hooks.js";
 import { ProviderRegistry, ToolRegistry } from "../kernel/registry.js";
 import type { Logger, Message, ThinkingLevel, Tool, UI } from "../kernel/types.js";
 
@@ -347,6 +348,13 @@ export function buildTemplateChild(
     model: string;
     providerName: string | undefined;
     tools: Tool[];
+    /**
+     * Optional parent hook bus. When supplied, the child is built on a scoped
+     * child bus (`childScope`) so the parent's gate guards + intra-run events
+     * govern it; when absent (e.g. a construct-only test caller) the `Agent`
+     * constructor falls back to a fresh bus — the prior, ungoverned behavior.
+     */
+    hooks?: HookBus<KernelEvents, KernelFilters>;
   },
   opts?: {
     baseRegistry?: ToolRegistry;
@@ -387,6 +395,7 @@ export function buildTemplateChild(
     maxTurns,
     systemPrompt: resolved.systemPrompt,
     tools: registry,
+    hooks: parent.hooks?.childScope(),
   });
 }
 
@@ -473,6 +482,7 @@ export default function activate(e: ExtensionAPI): void {
           model: e.agent.model,
           providerName: e.agent.providerName,
           tools: e.agent.tools.list(),
+          hooks: e.agent.hooks,
         });
         const { messages } = await child.run(prompt);
         return ok(finalText(messages), { template: t.name });

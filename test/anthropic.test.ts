@@ -70,6 +70,34 @@ test("parses a streaming text completion with usage", async () => {
   }
 });
 
+const CACHE_EVENTS = [
+  {
+    event: "message_start",
+    data: {
+      type: "message_start",
+      message: {
+        usage: { input_tokens: 10, cache_read_input_tokens: 90, cache_creation_input_tokens: 5, output_tokens: 7 },
+      },
+    },
+  },
+  { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text" } } },
+  { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } } },
+  { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+  { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn" } } },
+  { event: "message_stop", data: { type: "message_stop" } },
+];
+
+test("maps cache tokens to disjoint Usage fields, no longer folding them into inputTokens", async () => {
+  const provider = new AnthropicProvider({ apiKey: "test", fetch: async () => sseResponse(CACHE_EVENTS) });
+  const events = await collect(provider.stream(req()));
+  const done = events.at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    // inputTokens is the FRESH input only (10), cache reads/writes are disjoint.
+    assert.deepEqual(done.usage, { inputTokens: 10, cacheReadTokens: 90, cacheWriteTokens: 5, outputTokens: 7 });
+  }
+});
+
 test("assembles a tool call from streamed input_json deltas", async () => {
   const provider = new AnthropicProvider({ apiKey: "test", fetch: async () => sseResponse(TOOL_EVENTS) });
   const events = await collect(provider.stream(req()));
@@ -431,4 +459,27 @@ test("gives up after maxRetries on persistent 5xx", async () => {
   });
   await assert.rejects(() => collect(provider.stream(req())), /Anthropic API error 503/);
   assert.equal(calls, 3, "initial attempt + 2 retries");
+});
+
+test("maps native stop reasons to StopReason, including refusal (AC-7)", async () => {
+  async function stopReasonFor(native: string): Promise<string> {
+    const events = [
+      { event: "message_start", data: { type: "message_start", message: { usage: { input_tokens: 1, output_tokens: 0 } } } },
+      { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text" } } },
+      { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "x" } } },
+      { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+      { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: native }, usage: { output_tokens: 1 } } },
+      { event: "message_stop", data: { type: "message_stop" } },
+    ];
+    const provider = new AnthropicProvider({ apiKey: "test", fetch: async () => sseResponse(events) });
+    const done = (await collect(provider.stream(req()))).at(-1)!;
+    assert.equal(done.type, "done");
+    return done.type === "done" ? done.stopReason : "";
+  }
+  // A model policy refusal surfaces as its own StopReason.
+  assert.equal(await stopReasonFor("refusal"), "refusal");
+  // Pre-existing mappings are unchanged.
+  assert.equal(await stopReasonFor("end_turn"), "end_turn");
+  assert.equal(await stopReasonFor("tool_use"), "tool_use");
+  assert.equal(await stopReasonFor("max_tokens"), "max_tokens");
 });

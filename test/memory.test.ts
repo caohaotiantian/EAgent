@@ -394,6 +394,126 @@ test("AC 12: host.unload removes registrations and never throws", async () => {
   assert.equal(h.commands.get("memory"), undefined);
 });
 
+// ---------------------------------------------------------------------------
+// tiered memory: archival tier + lexical query recall + eviction (AC 4–7)
+// ---------------------------------------------------------------------------
+
+interface Match {
+  key: string;
+  tier: string;
+  text: string;
+  score: number;
+}
+
+test("AC-4: recall({query}) returns a ranked list of token-overlap matches, top-K, score>0", async () => {
+  const h = await loadMem();
+  await execTool(h.agent, "remember", { key: "auth", value: "fix the login auth flow" });
+  await execTool(h.agent, "remember", { key: "auth2", value: "login auth token refresh session" });
+  await execTool(h.agent, "remember", { key: "db", value: "database migration schema" });
+
+  const res = await execTool(h.agent, "recall", { query: "login auth session token" });
+  const details = res.details as Match[];
+  assert.ok(Array.isArray(details), "details is a ranked array, not a map");
+  assert.equal(details.length, 2, "only score>0 matches returned (db excluded)");
+  assert.equal(details[0]!.key, "auth2", "highest overlap ranks first");
+  assert.equal(details[1]!.key, "auth");
+  assert.ok(details[0]!.score > details[1]!.score, "sorted by score descending");
+  assert.equal(details[0]!.tier, "core", "core-tier note tagged core");
+  assert.ok(details.every((d) => d.score > 0), "no score-0 entries");
+
+  // A no-overlap query returns no matches — never a dump of every note.
+  const none = await execTool(h.agent, "recall", { query: "kubernetes helm chart" });
+  assert.deepEqual(none.details, [], "no-overlap query returns an empty list");
+  assert.doesNotMatch(none.content, /database migration|login auth/, "not a dump of all notes");
+});
+
+test("AC-5: no-query recall stays byte-identical (exact key + dump-all)", async () => {
+  const h = await loadMem();
+  await execTool(h.agent, "remember", { key: "color", value: "blue" });
+  await execTool(h.agent, "remember", { key: "size", value: "large" });
+
+  const exact = await execTool(h.agent, "recall", { key: "color" });
+  assert.equal(exact.content, "blue", "exact-key path unchanged");
+
+  const dump = await execTool(h.agent, "recall", {});
+  assert.deepEqual(dump.details, { color: "blue", size: "large" }, "dump-all map unchanged");
+  assert.deepEqual(JSON.parse(dump.content), { color: "blue", size: "large" });
+});
+
+test("AC-6: remember past coreCap evicts the oldest note to archive; recall finds it", async () => {
+  const h = await loadMem();
+  h.store.set("coreCap", 2);
+  h.store.set("note:n1", { id: "e1", text: "alpha apple", source: "tool:remember", ts: "2026-01-01T00:00:00.000Z" });
+  h.store.set("note:n2", { id: "e2", text: "beta banana", source: "tool:remember", ts: "2026-01-02T00:00:00.000Z" });
+
+  await execTool(h.agent, "remember", { key: "n3", value: "gamma grape" });
+
+  const noteCount = h.store.keys().filter((k) => k.startsWith("note:")).length;
+  assert.ok(noteCount <= 2, `core stays within cap (got ${noteCount})`);
+  assert.equal(rawNote(h.store, "n1"), undefined, "oldest note evicted from core");
+  const archived = h.store.get<{ text: string }>("archive:n1");
+  assert.equal(archived?.text, "alpha apple", "oldest note moved to archive");
+
+  const res = await execTool(h.agent, "recall", { query: "alpha apple" });
+  const details = res.details as Match[];
+  assert.equal(details.length, 1, "the evicted note is found by query");
+  assert.equal(details[0]!.key, "n1");
+  assert.equal(details[0]!.tier, "archive", "found in the archive tier");
+});
+
+test("AC-6: kill switch disables eviction", async () => {
+  const prev = process.env.EAGENT_MEMORY_ENTRIES;
+  process.env.EAGENT_MEMORY_ENTRIES = "off";
+  try {
+    const h = await loadMem();
+    h.store.set("coreCap", 1);
+    await execTool(h.agent, "remember", { key: "a", value: "one" });
+    await execTool(h.agent, "remember", { key: "b", value: "two" });
+    await execTool(h.agent, "remember", { key: "c", value: "three" });
+
+    const noteCount = h.store.keys().filter((k) => k.startsWith("note:")).length;
+    assert.equal(noteCount, 3, "no eviction under the kill switch");
+    const archiveCount = h.store.keys().filter((k) => k.startsWith("archive:")).length;
+    assert.equal(archiveCount, 0, "nothing archived under the kill switch");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MEMORY_ENTRIES;
+    else process.env.EAGENT_MEMORY_ENTRIES = prev;
+  }
+});
+
+test("AC-7: /memory archive lists the archive; /memory promote restores a note; list stays core-scoped", async () => {
+  const h = await loadMem();
+  h.store.set("coreCap", 1);
+  h.store.set("note:n1", { id: "e1", text: "alpha apple", source: "tool:remember", ts: "2026-01-01T00:00:00.000Z" });
+  await execTool(h.agent, "remember", { key: "n2", value: "beta banana" });
+  assert.ok(h.store.get("archive:n1"), "precondition: n1 evicted to archive");
+
+  const archiveOut = await runMemory(h.commands, h.agent, "archive");
+  assert.ok(archiveOut.join("\n").includes("n1"), "/memory archive lists the archived key");
+  assert.match(archiveOut.join("\n"), /1/, "/memory archive shows a count");
+
+  // Existing subcommands stay note:-scoped: list shows only the core note.
+  const listOut = await runMemory(h.commands, h.agent, "list");
+  assert.ok(!listOut.some((l) => l.includes("n1")), "list excludes the archived note");
+  assert.ok(listOut.some((l) => l.includes("n2")), "list shows the core note");
+
+  const promoteOut = await runMemory(h.commands, h.agent, "promote n1");
+  assert.ok(rawNote(h.store, "n1"), "promote moves n1 back into core");
+  assert.equal(h.store.get("archive:n1"), undefined, "promote removes n1 from archive");
+  assert.ok(promoteOut.join("\n").length > 0, "promote prints a confirmation");
+});
+
+test("AC-7: /memory recall searches across tiers and prints ranked matches", async () => {
+  const h = await loadMem();
+  await execTool(h.agent, "remember", { key: "auth", value: "fix the login auth flow" });
+  await execTool(h.agent, "remember", { key: "db", value: "database migration schema" });
+
+  const out = await runMemory(h.commands, h.agent, "recall login auth");
+  const joined = out.join("\n");
+  assert.ok(joined.includes("auth"), "ranked output includes the matching key");
+  assert.ok(!joined.includes("database migration"), "non-matching note excluded");
+});
+
 // -- shared helpers for the white-box tests ---------------------------------
 
 /** Execute a registered tool directly with a minimal ToolContext. */

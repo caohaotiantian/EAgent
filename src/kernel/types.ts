@@ -167,7 +167,14 @@ export interface ToolContext {
 // Providers (LLM abstraction)
 // ---------------------------------------------------------------------------
 
-export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop" | "error";
+export type StopReason =
+  | "end_turn"
+  | "tool_use"
+  | "max_tokens"
+  | "stop"
+  | "error"
+  | "refusal"
+  | "content_filter";
 
 /**
  * How a turn's decoding should treat tool use. The kernel speaks one neutral
@@ -193,20 +200,47 @@ export type ToolChoice = "auto" | "required" | { type: "tool"; name: string };
  */
 export type ThinkingLevel = "off" | "low" | "medium" | "high";
 
-/** Token accounting for a completion. Providers report it; the agent sums it. */
+/**
+ * Token accounting for a completion. Providers report it; the agent sums it.
+ *
+ * `inputTokens` is the **fresh, non-cached** prompt input. The cache and reasoning
+ * fields are optional and **omitted when the provider does not report them** — a
+ * value built from a provider that has none stays deep-equal to a plain
+ * `{inputTokens, outputTokens}` object (the omit-invariant the provider tests pin).
+ * `cacheReadTokens`/`cacheWriteTokens` are disjoint from `inputTokens` (and from
+ * each other); `reasoningTokens` is an informational subset already counted inside
+ * `outputTokens` (`reasoningTokens <= outputTokens`).
+ */
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
+  /** Cached-prompt (cache-read) tokens, disjoint from `inputTokens`. */
+  cacheReadTokens?: number;
+  /** Cache-creation (cache-write) tokens, disjoint from `inputTokens`. */
+  cacheWriteTokens?: number;
+  /** Reasoning ("thinking") tokens — a subset of `outputTokens`, never added to a total. */
+  reasoningTokens?: number;
 }
 
 export const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
 
 export function addUsage(a: Usage, b: Usage): Usage {
-  return { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens };
+  const sum: Usage = { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens };
+  // Sum each optional field only when present in either operand, so adding two
+  // plain 2-field usages yields a 2-field object (the omit-invariant).
+  if (a.cacheReadTokens !== undefined || b.cacheReadTokens !== undefined)
+    sum.cacheReadTokens = (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0);
+  if (a.cacheWriteTokens !== undefined || b.cacheWriteTokens !== undefined)
+    sum.cacheWriteTokens = (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0);
+  if (a.reasoningTokens !== undefined || b.reasoningTokens !== undefined)
+    sum.reasoningTokens = (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0);
+  return sum;
 }
 
 export function totalTokens(u: Usage): number {
-  return u.inputTokens + u.outputTokens;
+  // Cache read/write are disjoint billable input; reasoning is already inside
+  // outputTokens, so it is not added again.
+  return u.inputTokens + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0) + u.outputTokens;
 }
 
 export type StreamEvent =
@@ -275,6 +309,24 @@ export interface AgentHandle {
   steer(message: Message): void;
   /** Queue a message to be processed once the loop would otherwise idle. */
   followUp(message: Message): void;
+}
+
+/**
+ * A self-contained, copyable snapshot of where a conversation is and what it has
+ * cost: the transcript, accounting, and the per-turn config that shapes a turn.
+ * `messages` and `usage` are deep copies, so mutating an `AgentState` cannot
+ * touch the live agent. Transient/config fields (`maxTurns`, `forceTool`,
+ * `outputSchema`) are deliberately excluded — this is conversational state, not
+ * configuration. Produced by `Agent.snapshot()` and consumed by `Agent.restore()`.
+ */
+export interface AgentState {
+  messages: Message[];
+  usage: Usage;
+  model: string;
+  providerName: string | undefined;
+  systemPrompt: string;
+  thinking: ThinkingLevel;
+  step: number;
 }
 
 // ---------------------------------------------------------------------------

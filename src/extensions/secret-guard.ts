@@ -49,7 +49,7 @@ const SECRET_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
 ];
 
 /** Capabilities that move data off the machine — where a leak would happen. */
-const DEFAULT_LEAK_CAPS = ["net:fetch", "shell:exec"];
+const DEFAULT_LEAK_CAPS = ["net:fetch", "shell:exec", "mcp:call"];
 
 /**
  * Scan a single string for known credential shapes, returning the de-duplicated

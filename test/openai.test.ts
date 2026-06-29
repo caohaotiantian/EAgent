@@ -61,6 +61,31 @@ test("parses a streaming text completion with usage", async () => {
   }
 });
 
+const CACHE_CHUNKS = [
+  { choices: [{ delta: { role: "assistant", content: "hi" } }] },
+  { choices: [{ delta: {}, finish_reason: "stop" }] },
+  {
+    choices: [],
+    usage: {
+      prompt_tokens: 100,
+      prompt_tokens_details: { cached_tokens: 40 },
+      completion_tokens: 20,
+      completion_tokens_details: { reasoning_tokens: 8 },
+    },
+  },
+];
+
+test("subtracts cached out of prompt tokens and surfaces reasoning tokens", async () => {
+  const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(CACHE_CHUNKS) });
+  const events = await collect(provider.stream(req()));
+  const done = events.at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    // inputTokens = prompt - cached = 100 - 40; cacheRead = 40; reasoning ⊆ output.
+    assert.deepEqual(done.usage, { inputTokens: 60, cacheReadTokens: 40, outputTokens: 20, reasoningTokens: 8 });
+  }
+});
+
 test("assembles a tool call from streamed argument deltas", async () => {
   const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(TOOL_CHUNKS) });
   const events = await collect(provider.stream(req()));
@@ -236,6 +261,25 @@ test("maps thinking level to reasoning_effort, omitting it when off", async () =
   assert.equal(captured.reasoning_effort, undefined);
 });
 
+test("maps content_filter finish_reason to content_filter, preserving prior mappings (AC-7)", async () => {
+  async function stopReasonFor(finish: string): Promise<string> {
+    const chunks = [
+      { choices: [{ delta: { role: "assistant", content: "x" } }] },
+      { choices: [{ delta: {}, finish_reason: finish }] },
+    ];
+    const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(chunks) });
+    const done = (await collect(provider.stream(req()))).at(-1)!;
+    assert.equal(done.type, "done");
+    return done.type === "done" ? done.stopReason : "";
+  }
+  // A provider content-filter termination surfaces as content_filter.
+  assert.equal(await stopReasonFor("content_filter"), "content_filter");
+  // Pre-existing mappings are unchanged.
+  assert.equal(await stopReasonFor("stop"), "end_turn");
+  assert.equal(await stopReasonFor("tool_calls"), "tool_use");
+  assert.equal(await stopReasonFor("length"), "max_tokens");
+});
+
 test("surfaces reasoning_content deltas as reasoning events", async () => {
   const chunks = [
     { choices: [{ delta: { role: "assistant", reasoning_content: "hmm" } }] },
@@ -249,6 +293,83 @@ test("surfaces reasoning_content deltas as reasoning events", async () => {
     ["hmm"],
   );
   const done = events.at(-1)!;
-  // Reasoning must not leak into the assistant text.
-  assert.ok(done.type === "done" && (done.message.content[0] as { text: string }).text === "answer");
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    // Reasoning must not leak into the assistant text.
+    const textBlock = done.message.content.find((b) => b.type === "text");
+    assert.equal((textBlock as { text: string }).text, "answer");
+    // …but it must be persisted as a thinking block for snapshot/restore fidelity.
+    const thinkingBlock = done.message.content.find((b) => b.type === "thinking");
+    assert.equal((thinkingBlock as { thinking: string }).thinking, "hmm");
+  }
+});
+
+test("AC-3: persists reasoning as a thinking block (first) plus the text block", async () => {
+  const chunks = [
+    { choices: [{ delta: { role: "assistant", reasoning_content: "th" } }] },
+    { choices: [{ delta: { reasoning_content: "inking" } }] },
+    { choices: [{ delta: { content: "answer" } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+  ];
+  const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(chunks) });
+  const events = await collect(provider.stream(req({ thinking: "low" })));
+  // Streaming is unchanged: reasoning_delta events still fire per chunk.
+  assert.deepEqual(
+    events.filter((e) => e.type === "reasoning_delta").map((e) => (e as { text: string }).text),
+    ["th", "inking"],
+  );
+  const done = events.at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    const content = done.message.content;
+    // Thinking block FIRST, carrying the concatenated reasoning.
+    assert.equal(content[0]?.type, "thinking");
+    assert.equal((content[0] as { thinking: string }).thinking, "thinking");
+    // Text block present and clean.
+    const textBlock = content.find((b) => b.type === "text");
+    assert.equal((textBlock as { text: string }).text, "answer");
+  }
+});
+
+test("AC-6: a stream with no reasoning has no thinking block (byte-identity)", async () => {
+  const provider = new OpenAIProvider({ apiKey: "test", fetch: async () => sse(TEXT_CHUNKS) });
+  const done = (await collect(provider.stream(req()))).at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    assert.ok(!done.message.content.some((b) => b.type === "thinking"));
+    assert.deepEqual(done.message.content, [{ type: "text", text: "Hello" }]);
+  }
+});
+
+test("AC-5: a persisted thinking block is dropped on replay (never sent on the wire)", async () => {
+  let captured: any;
+  const provider = new OpenAIProvider({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hi" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "secret reasoning" },
+              { type: "text", text: "answer" },
+            ],
+          },
+        ],
+      }),
+    ),
+  );
+  // No assistant message carries the reasoning anywhere on the wire.
+  assert.ok(!JSON.stringify(captured.messages).includes("secret reasoning"));
+  const assistant = captured.messages.find((m: any) => m.role === "assistant");
+  // assistant content is text||null + tool_calls only — no thinking field.
+  assert.equal(assistant.content, "answer");
+  assert.equal(assistant.thinking, undefined);
 });

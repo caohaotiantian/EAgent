@@ -91,6 +91,7 @@ export class GeminiProvider implements Provider {
     });
 
     let text = "";
+    let reasoningBuffer = "";
     const toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] = [];
     let stopReason: StopReason = "end_turn";
     const usage: Usage = { inputTokens: 0, outputTokens: 0 };
@@ -104,14 +105,24 @@ export class GeminiProvider implements Provider {
         continue;
       }
       if (parsed.usageMetadata) {
-        usage.inputTokens = parsed.usageMetadata.promptTokenCount ?? usage.inputTokens;
-        usage.outputTokens = parsed.usageMetadata.candidatesTokenCount ?? usage.outputTokens;
+        const u = parsed.usageMetadata;
+        // `cachedContentTokenCount` lies within `promptTokenCount`; subtract it out.
+        const cached = u.cachedContentTokenCount;
+        if (u.promptTokenCount !== undefined) usage.inputTokens = Math.max(0, u.promptTokenCount - (cached ?? 0));
+        if (cached !== undefined) usage.cacheReadTokens = cached;
+        // `thoughtsTokenCount` is DISJOINT from `candidatesTokenCount` and additive
+        // to the billed total, so fold it into outputTokens (and surface as reasoning).
+        const thoughts = u.thoughtsTokenCount;
+        if (u.candidatesTokenCount !== undefined || thoughts !== undefined)
+          usage.outputTokens = (u.candidatesTokenCount ?? 0) + (thoughts ?? 0);
+        if (thoughts !== undefined) usage.reasoningTokens = thoughts;
       }
       const candidate = parsed.candidates?.[0];
       if (!candidate) continue;
       for (const part of candidate.content?.parts ?? []) {
         if (typeof part.text === "string" && part.thought === true) {
           // A thought summary part — surfaced as reasoning, kept out of the answer.
+          reasoningBuffer += part.text;
           yield { type: "reasoning_delta", text: part.text };
         } else if (typeof part.text === "string") {
           text += part.text;
@@ -131,6 +142,9 @@ export class GeminiProvider implements Provider {
     // preserve that signal so the loop can surface it.
     if (toolCalls.length > 0 && stopReason === "end_turn") stopReason = "tool_use";
     const content: ContentBlock[] = [];
+    // Persist the chain of thought (unsigned) so snapshot/restore keeps it; every
+    // request-builder ignores an unsigned thinking block, so replay is unaffected.
+    if (reasoningBuffer) content.push({ type: "thinking", thinking: reasoningBuffer });
     if (text) content.push({ type: "text", text });
     for (const tc of toolCalls) content.push({ type: "tool_call", id: tc.id, name: tc.name, arguments: tc.arguments });
 
@@ -202,6 +216,9 @@ function mapFinishReason(reason: string): StopReason {
       return "end_turn";
     case "MAX_TOKENS":
       return "max_tokens";
+    case "SAFETY":
+    case "RECITATION":
+      return "content_filter";
     default:
       return "stop";
   }
@@ -231,5 +248,12 @@ interface GeminiChunk {
     };
     finishReason?: string;
   }[];
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    /** Cached portion of `promptTokenCount` (subtracted out into cacheReadTokens). */
+    cachedContentTokenCount?: number;
+    /** Thinking tokens — disjoint from `candidatesTokenCount`, folded into outputTokens. */
+    thoughtsTokenCount?: number;
+  };
 }

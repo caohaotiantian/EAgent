@@ -6,7 +6,16 @@
  * (intervene): a value threaded through handlers that may transform or veto.
  */
 
-import type { Message, StopReason, ToolCallBlock, ToolResult, Usage } from "./types.js";
+import type {
+  Message,
+  StopReason,
+  ThinkingLevel,
+  ToolCallBlock,
+  ToolChoice,
+  ToolResult,
+  ToolSpec,
+  Usage,
+} from "./types.js";
 
 export type KernelEvents = {
   /** A fresh extension runtime has come up (also fired after a reload). */
@@ -19,7 +28,8 @@ export type KernelEvents = {
   agent_start: { input: Message };
   agent_end: { reason: StopReason };
   turn_start: { turn: number };
-  turn_end: { turn: number };
+  /** `step` carries the per-run counter after this turn's increment. */
+  turn_end: { turn: number; step: number };
 
   /** A completed message was appended to the transcript. */
   message: { message: Message };
@@ -29,9 +39,10 @@ export type KernelEvents = {
   reasoning_delta: { text: string };
 
   tool_start: { call: ToolCallBlock };
-  tool_end: { call: ToolCallBlock; result: ToolResult };
-  /** A parallel tool wave settled; carries the ordered {call,result} pairs. */
-  tool_batch_end: { batch: { call: ToolCallBlock; result: ToolResult }[] };
+  /** `step` carries the call-time (pre-increment) per-run counter. */
+  tool_end: { call: ToolCallBlock; result: ToolResult; step: number };
+  /** A parallel tool wave settled; carries the ordered {call,result} pairs and the call-time `step`. */
+  tool_batch_end: { batch: { call: ToolCallBlock; result: ToolResult }[]; step: number };
 
   /** Token usage for the just-finished model call, plus the running total. */
   usage: { usage: Usage; cumulative: Usage };
@@ -53,6 +64,39 @@ export type KernelFilters = {
     value: Message[];
     context: { turn: number; model: string };
   };
+  /**
+   * Reshape the whole outbound request (system prompt, messages, tools, model,
+   * toolChoice, thinking) right before the provider call. `transformContext`
+   * runs first, so its messages flow in here as `value.messages`. `signal` is
+   * excluded — it is abort control, re-attached by the loop after the hook. The
+   * `tools` list is advisory to the model: dropping a tool withholds it from the
+   * model but does not gate dispatch (resolution stays by name).
+   */
+  transformRequest: {
+    value: {
+      systemPrompt: string;
+      messages: Message[];
+      tools: ToolSpec[];
+      model: string;
+      toolChoice?: ToolChoice;
+      thinking?: ThinkingLevel;
+    };
+    context: { turn: number; cumulativeUsage: Usage };
+  };
+  /**
+   * Reshape the whole tool-call WAVE just before dispatch: reorder it or drop a
+   * call by returning a subset/permutation of the calls. The kernel dispatches
+   * only returned calls whose id is among the originals (unknown injected ids are
+   * ignored — a result with no matching assistant `tool_use` would break pairing),
+   * and ALWAYS pairs every original id with a result: the real result if
+   * dispatched, a neutral synthetic skip-result if dropped. Applied only when the
+   * assistant actually emitted `tool_call` blocks; with no handler the wave is
+   * returned unchanged — byte-identical to a direct dispatch.
+   */
+  beforeDispatch: {
+    value: ToolCallBlock[];
+    context: { turn: number };
+  };
   /** Approve, rewrite, or veto a tool call before it runs. */
   beforeToolCall: {
     value: ToolDecision;
@@ -62,5 +106,18 @@ export type KernelFilters = {
   afterToolCall: {
     value: ToolResult;
     context: { call: ToolCallBlock };
+  };
+  /**
+   * Offered when the provider stream throws BEFORE emitting any event
+   * (pre-commit). A handler may request a re-stream (`retry`), optionally
+   * swapping the model for the retry (`downshiftModel`), or let it fail (`fail`,
+   * the default). The default value `{ retry:false, fail:true }` is returned
+   * unchanged with no handler, so the loop rethrows — byte-identical to today. A
+   * post-commit throw is never offered here: retrying a partly-streamed turn
+   * would double-emit. `attempt` starts at 1 for the first failure.
+   */
+  onProviderError: {
+    value: { retry: boolean; downshiftModel?: string; fail: boolean };
+    context: { error: unknown; attempt: number };
   };
 };
