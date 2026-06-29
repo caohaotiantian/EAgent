@@ -110,7 +110,14 @@ function hashFixtures(dir: string): string {
 function runScored(backend: Backend, candidateDir: string, fixturesDir: string, root: string, cwd: string): number {
   const cmd = `node --import tsx ${join("src", "self-improve-eval.ts")} ${candidateDir} ${fixturesDir} ${root}`;
   const wrapped = wrapCommand(backend, "no-network", cmd, { root });
-  const out = execSync(wrapped, { cwd, env: { PATH: process.env.PATH ?? "" } }).toString();
+  // Bounded: a hanging candidate eval must not block the agent. A timeout throws
+  // (ETIMEDOUT), which the caller's try/catch turns into a clean eval failure.
+  const out = execSync(wrapped, {
+    cwd,
+    env: { PATH: process.env.PATH ?? "" },
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024,
+  }).toString();
   const m = /eval:\s*(\d+)\s*\/\s*\d+\s*passed/.exec(out);
   return m && m[1] ? Number.parseInt(m[1], 10) : 0;
 }

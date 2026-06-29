@@ -26,7 +26,6 @@ async function main(): Promise<void> {
   if (!stagingCandidateDir || !fixturesDir || !stagingRoot) {
     console.error("usage: self-improve-eval <candidateDir> <fixturesDir> <stagingRoot>");
     process.exit(1);
-    return;
   }
   const { agent, host } = await createAgentHost({
     discoverDirs: [stagingCandidateDir],
