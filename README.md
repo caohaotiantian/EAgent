@@ -217,6 +217,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `session`     | save / load / handoff for transcripts | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
 | `packages`    | install extensions from `path:` / `git:` / `npm:` (Emacs `package.el` analog) | `/pkg-add`, `/pkg-list`, `/pkg-remove` | `pkg:install` |
 | `trace`       | observability: per-run span tree, metrics, token usage — from the event bus | `/trace`, `/usage`, `/trace-save` | — |
+| `otel-exporter` | **OpenTelemetry (OTLP/HTTP-JSON) trace exporter** — folds agent/turn/tool lifecycle into OTLP spans (generated trace/span ids, parent nesting, GenAI semantic attrs: `gen_ai.system`/`request.model`/`usage.*`tokens) and POSTs to a collector via `fetch` (best-effort, swallow-all). Hand-rolled, zero-dep; metadata only (no prompt/result content). Off by default — inert unless `OTEL_EXPORTER_OTLP_ENDPOINT`/`_TRACES_ENDPOINT` is set (`EAGENT_OTEL=off`) | `/otel` | — |
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them | `/context`, `/context-reload` | — |
 | `microagents` | keyword-triggered knowledge injection via `transformContext` — scans `*.md` files with `triggers:` frontmatter and injects a body when a trigger appears in the latest user message (`EAGENT_MICROAGENTS=off` to disable) | `/microagents` | — |
 | `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
@@ -351,7 +352,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  55 built-in extensions, all riding the ExtensionAPI
+src/extensions/  56 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

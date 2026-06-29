@@ -1,5 +1,12 @@
 # Design — OpenTelemetry (OTLP) trace exporter
 
+```
+Status: closed
+Closing-commit: c5c5281
+Closed-on: 2026-06-29
+Deferred: RW7c-1 (metrics/logs OTLP signals), RW7c-2 (distributed traceparent propagation), RW7c-3 (real-collector smoke) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-otel-exporter` · **Wave:** 7 (subsystem 3 of 4) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P3.3 (exporter half) · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md`
 

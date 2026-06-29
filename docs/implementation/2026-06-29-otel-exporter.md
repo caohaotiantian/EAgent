@@ -1,5 +1,12 @@
 # Implementation — OpenTelemetry (OTLP) trace exporter
 
+```
+Status: closed
+Closing-commit: c5c5281
+Closed-on: 2026-06-29
+Deferred: RW7c-1, RW7c-2, RW7c-3 — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-otel-exporter` (matches design) · **Design:**
 [`design/2026-06-29-otel-exporter.md`](../design/2026-06-29-otel-exporter.md)
 
