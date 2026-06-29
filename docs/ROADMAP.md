@@ -101,7 +101,7 @@ item), then the independent subsystems.
 | W9.3 | **sandbox hardening** — RW6c-4 readonly bwrap re-bind, `binExists`-gated real-backend integration tests, SBPL `root` escaping. | RW6c-4, +2 | no | L3 ✅ (1085) |
 | W9.4 | **reasoning-search fork robustness** — abort→`child.stop()` propagation; `allSettled` so one fork's throw doesn't discard the rest. | 2 | no | L3 ✅ |
 | W9.5 | **accounting & provider edges** — RW1-1 cache tokens in the per-run budget; RW6d-1 Gemini reasoning-only empty-`parts` replay 400; provenance nested-arg scan. | RW1-1, RW6d-1, +1 | no | L3 ✅ (1092) |
-| W9.6 | **HTTP bind safety + minor batch** — refuse non-loopback bind with empty token; otel await-on-shutdown; memory `consolidate` lowest-`ts`; time-travel snapshot guard + blob shape check. | +4 | no | L1 ✅ |
+| W9.6 | **HTTP bind safety + minor batch** — refuse non-loopback bind with empty token; otel await-on-shutdown; memory `consolidate` lowest-`ts`; time-travel snapshot guard + blob shape check. | +4 | no | L3 ✅ (1101) |
 
 **Kernel-ceiling note:** kernel is **2187/2200** (13 lines). W9.1's seam must either fit, or the L1 must
 surface a ceiling-raise decision (a deliberate amendment to the small-kernel bet) vs. the extension-only
