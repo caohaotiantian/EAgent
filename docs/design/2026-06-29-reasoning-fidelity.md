@@ -1,5 +1,12 @@
 # Design + Impl (Light Mode) — Reasoning replay-fidelity (OpenAI/Gemini)
 
+```
+Status: closed
+Closing-commit: e2e21f2
+Closed-on: 2026-06-29
+Deferred: RW6d-1 (reasoning-only-turn replays to empty wire content) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-reasoning-fidelity` · **Wave:** 6 (subsystem 4 of 4) · **Mode:** Light
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P2.4
 
