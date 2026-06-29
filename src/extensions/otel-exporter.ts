@@ -114,10 +114,13 @@ export default function activate(e: ExtensionAPI): () => void {
     e.log.warn("failed to POST traces to the collector (export is best-effort)");
   };
 
-  const flush = (): void => {
-    if (!enabled() || finished.length === 0) return;
+  // Returns the export POST so a caller (session_shutdown) can await it; the
+  // intra-run agent_end caller leaves it unawaited (fire-and-forget). The 5s
+  // AbortSignal.timeout bounds the await if the collector is unresponsive.
+  const flush = (): Promise<void> => {
+    if (!enabled() || finished.length === 0) return Promise.resolve();
     const url = endpoint();
-    if (!url) return;
+    if (!url) return Promise.resolve();
     // Best-effort close: stamp an end ts on any still-open span (a child root that
     // never fired agent_end, or a span left open by an aborted run).
     const end = nanos();
@@ -130,13 +133,14 @@ export default function activate(e: ExtensionAPI): () => void {
         },
       ],
     };
-    void fetch(url, {
+    const pending = fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...parseHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(5000),
-    }).catch(() => warnOnce());
+    }).then(() => {}, () => warnOnce());
     finished = [];
+    return pending;
   };
 
   const disposers = [
@@ -215,10 +219,17 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
 
     // Drain at the parent's agent_end (children complete within this run, so their
-    // spans are already in `finished`); flush stamps any still-open root.
-    e.on("agent_end", () => flush()),
+    // spans are already in `finished`); flush stamps any still-open root. Left
+    // unawaited so the agent loop is never blocked on the network.
+    e.on("agent_end", () => {
+      void flush();
+    }),
 
-    e.on("session_shutdown", () => flush()),
+    // Awaited (emit runs handlers serially): blocks shutdown until the final
+    // batch is exported, so a hard exit can't drop it. Bounded by flush's 5s timeout.
+    e.on("session_shutdown", async () => {
+      await flush();
+    }),
   ];
 
   const command = e.registerCommand({

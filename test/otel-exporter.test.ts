@@ -343,6 +343,47 @@ test("AC-7: a rejecting fetch is swallowed; the agent run still completes normal
 });
 
 // ---------------------------------------------------------------------------
+// D-W9.6b — session_shutdown awaits the export (final batch not dropped)
+// ---------------------------------------------------------------------------
+test("D-W9.6b: session_shutdown performs the export AND awaits it before resolving", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  // A slow fetch: record ordering so we can prove the shutdown handler awaited
+  // the POST (fetch-end must precede shutdown-resolved), not fire-and-forget.
+  const order: string[] = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    order.push("fetch-start");
+    await new Promise((r) => setTimeout(r, 10));
+    order.push("fetch-end");
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  try {
+    const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
+    await host.use("otel-exporter", otelExporter);
+
+    // Buffer spans WITHOUT firing agent_end (which would pre-flush): a turn span
+    // and the eager-pushed root land in the shared `finished` buffer.
+    await agent.hooks.emit("turn_start", { turn: 1 });
+    await agent.hooks.emit("turn_end", { turn: 1, step: 1 });
+
+    await agent.hooks.emit("session_shutdown", {});
+    order.push("shutdown-resolved");
+    assert.deepEqual(
+      order,
+      ["fetch-start", "fetch-end", "shutdown-resolved"],
+      "session_shutdown exported the buffered spans and awaited the POST before resolving",
+    );
+
+    await host.dispose();
+  } finally {
+    globalThis.fetch = orig;
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // R4 — no content leak (only metadata: tool name + status)
 // ---------------------------------------------------------------------------
 test("R4: no span attribute leaks tool arguments or result content", async () => {

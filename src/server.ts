@@ -38,6 +38,10 @@ import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
+  /** Bind address. Defaults to `EAGENT_HOST` or `127.0.0.1` (loopback). A
+   *  non-loopback bind with an empty token is refused (fail-closed) — see the
+   *  guard in `createHttpServer`. */
+  host?: string;
   /** Require `Authorization: Bearer <token>` on mutating routes. Defaults to
    *  `EAGENT_TOKEN`; when unset, the server is open (suitable only for trusted
    *  local use — see SECURITY.md). */
@@ -88,6 +92,20 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     error: (...a) => console.error("✗", ...a),
   };
 
+  const host = opts.host ?? process.env.EAGENT_HOST ?? "127.0.0.1";
+  const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
+
+  // Fail-closed on the dangerous combination: a non-loopback bind exposes the
+  // server off-box, and with an empty token /run is unauthenticated AND runs
+  // tools with full capabilities under yolo. Refuse to start rather than warn.
+  // Guarded here (before any listen) so the check is pre-bind and unit-testable.
+  if (!isLoopback(host) && !token) {
+    throw new Error(
+      `refusing to bind ${host} without EAGENT_TOKEN: a non-loopback bind with no token exposes an ` +
+        "unauthenticated, full-capability agent. Set EAGENT_TOKEN, or bind a loopback address (127.0.0.1).",
+    );
+  }
+
   // The mid-turn elicitation channel (see the `Elicitation` doc). `serverUI.ask`
   // delegates to the turn-installed sink so the `ask` extension's conditional
   // grant of `ui:ask` fires (its activation sees a function-valued `ask`) and
@@ -112,7 +130,6 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   // empty transcript, zero usage, the configured model/prompt/thinking.
   const initial = built.agent.snapshot();
 
-  const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
 
@@ -399,13 +416,18 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** A loopback bind address (off-box unreachable): 127.0.0.1, ::1, or localhost. */
+function isLoopback(host: string): boolean {
+  return ["127.0.0.1", "::1", "localhost"].includes(host.trim().toLowerCase());
+}
+
 async function main(): Promise<void> {
   loadEnvFile();
   const port = Number(process.env.PORT ?? 8787);
   // Bind loopback by default so an unauthenticated server is not reachable
   // off-box. Set EAGENT_HOST=0.0.0.0 to expose it deliberately (use a token).
   const host = process.env.EAGENT_HOST ?? "127.0.0.1";
-  const http = await createHttpServer({ port });
+  const http = await createHttpServer({ port, host });
   http.server.listen(port, host, () => {
     console.error(`eagent server on http://${host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
   });

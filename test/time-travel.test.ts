@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -321,5 +321,84 @@ test("AC-8 cap evicts an ancestor, re-parents survivors, prunes its blob, keeps 
     // head resolves to a live node.
     const head = slice.store.get<string>("head");
     assert.ok(head !== undefined && head in nodes, "head resolves to a surviving node");
+  });
+});
+
+// -- D-W9.6d: malformed-blob rejection before the non-atomic restore ----------
+
+test("D-W9.6d /rewind REJECTS a malformed blob before restore — transcript intact", async () => {
+  await withEnv(async (dir) => {
+    const slice = makeSlice({ responder: { text: "ok" } });
+    await slice.host.use("time-travel", timeTravel);
+    await slice.run("timetravel", "on");
+
+    await slice.agent.run("first");
+    const id = /checkpoint (\d+)/.exec((await slice.run("timetravel", "checkpoint")).join("\n"))?.[1];
+    assert.ok(id);
+
+    // Grow the live transcript past the checkpoint, then snapshot what's live now.
+    await slice.agent.run("second");
+    const liveLen = slice.agent.messages.length;
+    const liveStep = slice.agent.snapshot().step;
+    assert.ok(liveLen > 0);
+
+    // Corrupt the blob to valid JSON but a malformed AgentState: `messages` is not
+    // an array. readBlob parses it; Agent.restore is non-atomic (clears #messages
+    // BEFORE the throwing spread of a non-iterable), so without a pre-check the
+    // transcript is wiped. The shape check must reject it before restore runs.
+    writeFileSync(
+      join(dir, `${id}.json`),
+      JSON.stringify({ messages: 42, usage: {}, model: "mock", systemPrompt: "", thinking: "off", step: 0 }),
+      "utf8",
+    );
+
+    const out = await slice.run("rewind", id!);
+    assert.match(out.join("\n"), /malformed|refus/i, "a clear rejection message, not a restore");
+    assert.equal(slice.agent.messages.length, liveLen, "transcript NOT wiped (restore never ran)");
+    assert.equal(slice.agent.snapshot().step, liveStep, "step unchanged");
+  });
+});
+
+test("D-W9.6d /rewind accepts a valid snapshot with providerName undefined", async () => {
+  await withEnv(async (dir) => {
+    const slice = makeSlice({ responder: { text: "ok" } });
+    await slice.host.use("time-travel", timeTravel);
+    await slice.run("timetravel", "on");
+
+    await slice.agent.run("first");
+    const checkpointLen = slice.agent.messages.length;
+    const id = /checkpoint (\d+)/.exec((await slice.run("timetravel", "checkpoint")).join("\n"))?.[1];
+    assert.ok(id);
+
+    // Rewrite the blob as a real, valid AgentState whose providerName is OMITTED
+    // (the field is string | undefined) — the shape check must NOT over-reject it.
+    const blob: Record<string, unknown> = { ...slice.agent.snapshot() };
+    delete blob.providerName;
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify(blob), "utf8");
+
+    await slice.agent.run("second");
+    assert.ok(slice.agent.messages.length > checkpointLen, "transcript grew past the checkpoint");
+
+    const out = await slice.run("rewind", id!);
+    assert.match(out.join("\n"), /rewound to/, "the valid snapshot restored");
+    assert.equal(slice.agent.messages.length, checkpointLen, "transcript restored to the checkpoint");
+  });
+});
+
+test("D-W9.6d /checkpoint over a non-cloneable transcript fails cleanly (no throw out of the command)", async () => {
+  await withEnv(async () => {
+    const slice = makeSlice({ responder: { text: "ok" } });
+    await slice.host.use("time-travel", timeTravel);
+    await slice.run("timetravel", "on");
+
+    // Poison the transcript: a message whose meta holds a function is not
+    // structuredClone-able, so snapshot() throws. Steering injects it; the run
+    // drains it into the live transcript.
+    slice.agent.steer({ role: "user", content: [{ type: "text", text: "x" }], meta: { fn: () => {} } });
+    await slice.agent.run("first");
+
+    const out = await slice.run("timetravel", "checkpoint");
+    assert.match(out.join("\n"), /cannot checkpoint/i, "the failed snapshot surfaces a clean error, not a throw");
+    assert.deepEqual(readNodes(slice), {}, "no node written when the snapshot fails");
   });
 });

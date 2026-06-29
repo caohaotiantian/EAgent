@@ -258,18 +258,27 @@ function runScratchpad(
       return;
     }
     case "consolidate": {
-      // Opt-in exact-text dedupe (D5): group by normalized text, keep the
-      // earliest note per group, drop later exact duplicates.
-      const seen = new Map<string, string>(); // normalized text → kept key
-      let merged = 0;
+      // Opt-in exact-text dedupe (D5): group keys by normalized text, then keep
+      // the LOWEST-`ts` entry per group (the genuinely earliest copy; legacy
+      // `ts:""` first) and drop the rest. `ts` is last-write time, so an overwrite
+      // can bump it without changing key-iteration order — hence survivor-by-`ts`
+      // rather than survivor-by-first-iterated.
+      const groups = new Map<string, string[]>(); // normalized text → keys
       for (const key of noteKeys(store)) {
         const entry = readEntry(store, key)!;
         const norm = normalize(entry.text);
-        if (seen.has(norm)) {
+        let keys = groups.get(norm);
+        if (!keys) groups.set(norm, (keys = []));
+        keys.push(key);
+      }
+      let merged = 0;
+      for (const keys of groups.values()) {
+        if (keys.length < 2) continue;
+        const survivor = lowestByTs(keys, (k) => readEntry(store, k));
+        for (const key of keys) {
+          if (survivor && key === survivor.key) continue;
           store.delete(NOTE_PREFIX + key);
           merged++;
-        } else {
-          seen.set(norm, key);
         }
       }
       print(`Consolidated: merged ${merged} duplicate note(s).`);
