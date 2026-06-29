@@ -157,19 +157,20 @@ export async function runScored(
     else signal.addEventListener("abort", abort, { once: true });
   }
 
-  const child = spawnImpl(wrapped, {
-    cwd,
-    env: { PATH: process.env.PATH ?? "" },
-    shell: true,
-    signal: controller.signal,
-  });
-
   try {
+    // Never spawn under an already-aborted signal: node's `spawn` emits an async
+    // AbortError on the child, and with no 'error' listener yet attached that
+    // error is unhandled and crashes the host as an uncaughtException.
+    if (controller.signal.aborted) {
+      throw new Error("self-improve eval aborted before launch");
+    }
+    const child = spawnImpl(wrapped, {
+      cwd,
+      env: { PATH: process.env.PATH ?? "" },
+      shell: true,
+      signal: controller.signal,
+    });
     const out = await new Promise<string>((resolve, reject) => {
-      if (controller.signal.aborted) {
-        reject(new Error("self-improve eval aborted before launch"));
-        return;
-      }
       let buf = "";
       child.stdout?.on("data", (chunk: Buffer | string) => {
         buf += String(chunk);

@@ -227,19 +227,30 @@ test("adopt_improvement folds the candidate source + advisory into the ui.ask pr
 
 // -- AC-D2: the evaluator is async and honors an aborted signal promptly -------
 
-test("runScored rejects promptly on an already-aborted signal, never waiting out the 120s timeout (AC-D2)", async () => {
+test("runScored rejects promptly on an already-aborted signal, never spawning an unwired child (AC-D2)", async () => {
+  // Mirror node's real `spawn`: handed an already-aborted signal it emits an
+  // async 'error' (AbortError) on the child. The crash this guards against was
+  // runScored returning before attaching an 'error' listener, leaving that
+  // AbortError unhandled — an EventEmitter 'error' with no listener throws as an
+  // uncaughtException and kills the host. The fix is to not spawn under an
+  // already-aborted signal at all, so this faithful fake's child is never made.
   let spawned = false;
-  // A child that never emits 'close': only the abort path can settle the await.
-  const neverResolves = Object.assign(new EventEmitter(), { stdout: null, kill: () => {} });
-  setSpawn(() => {
+  setSpawn((_cmd, opts) => {
     spawned = true;
-    return neverResolves as never;
+    const child = Object.assign(new EventEmitter(), { stdout: null, kill: () => {} });
+    if ((opts.signal as AbortSignal | undefined)?.aborted) {
+      queueMicrotask(() => child.emit("error", Object.assign(new Error("The operation was aborted"), { name: "AbortError" })));
+    }
+    return child as never;
   });
   const ac = new AbortController();
   ac.abort();
   const start = Date.now();
   await assert.rejects(() => runScored("none", "/cand", "/fix", "/root", "/cwd", ac.signal), /abort/i);
-  assert.ok(spawned, "the spawn seam was invoked");
+  // Drain the microtask/timer queue: on the buggy path the queued AbortError
+  // would fire here with no listener and crash the process.
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(!spawned, "no child is spawned under an already-aborted signal (its async AbortError would be unhandled)");
   assert.ok(Date.now() - start < 1000, "it rejects at once, not after the 120s timeout");
 });
 
