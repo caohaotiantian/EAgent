@@ -16,4 +16,5 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run eval
       - run: npm run build

@@ -145,6 +145,28 @@ test("createAgentHost threads an explicit thinking level onto the agent", async 
   assert.equal(agent.thinking, "low");
 });
 
+test("storeFor exposes the same namespaced Store an extension writes to (AC-6)", async () => {
+  const { host } = await createAgentHost({
+    provider: "mock",
+    logger: silentLogger,
+    discoverDirs: [],
+    storeRoot: mkdtempSync(join(tmpdir(), "eagent-store-")),
+  });
+  try {
+    // The evals built-in publishes an (empty) trajectory at activation, so
+    // storeFor("evals") reads exactly the Store instance that extension wrote to.
+    const store = host.storeFor("evals");
+    const t = store.get<{ tools: string[] }>("trajectory");
+    assert.ok(t, "storeFor('evals') reads the evals extension's published trajectory");
+    assert.deepEqual(t.tools, []);
+    // Same live instance: a write through one handle is visible through another.
+    store.set("probe", 7);
+    assert.equal(host.storeFor("evals").get("probe"), 7);
+  } finally {
+    await host.dispose();
+  }
+});
+
 test("loads the full canonical extension set with no failures or duplicate names", async () => {
   const { agent, host, commands, failures } = await createAgentHost({
     provider: "mock",

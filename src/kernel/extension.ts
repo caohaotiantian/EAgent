@@ -194,6 +194,11 @@ export class ExtensionHost {
     return this.#loaded.has(id);
   }
 
+  /** The namespaced store an extension is handed at activation, for host-level reads. */
+  storeFor(id: string): Store {
+    return this.#store.open(id);
+  }
+
   /** Tear everything down (e.g. on process exit). */
   async dispose(): Promise<void> {
     await this.agent.hooks.emit("session_shutdown", {});

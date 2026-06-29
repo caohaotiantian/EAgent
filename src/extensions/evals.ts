@@ -28,6 +28,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { Agent } from "../kernel/agent.js";
 import type { CommandContext } from "../kernel/commands.js";
 import { defineTool, ok, fail } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
@@ -105,7 +106,7 @@ function emptyTrajectory(): Trajectory {
 }
 
 /** Read the live trajectory published by a loaded `evals` extension, or undefined. */
-export function getTrajectory(api: ExtensionAPI): Trajectory | undefined {
+export function getTrajectory(api: Pick<ExtensionAPI, "store">): Trajectory | undefined {
   return api.store.get<Trajectory>(TRAJECTORY_KEY);
 }
 
@@ -209,6 +210,73 @@ export function parseEvalScenario(obj: unknown): EvalScenario | undefined {
     mockScript: o.mockScript as MockTurn[],
     expect: o.expect as ExpectSpec,
   };
+}
+
+/**
+ * Run every `*.eval.json` scenario in `dir` headlessly and return a structured
+ * scorecard — the shared core of the `/eval` command and the `npm run eval` CI
+ * gate (so the gate never parses display strings). Owns the `readdir` so `total`
+ * counts every scenario file. `readTraj` reads the live trajectory after each
+ * run; an `undefined` reading is a failed scenario, not a thrown runner.
+ *
+ * Each scenario re-scripts the agent's default provider and clears its
+ * transcript, and the loop deliberately leaves the last scenario's (consumed)
+ * queue and an empty transcript in place on return rather than restoring the
+ * prior script — the scriptable provider exposes no read accessor to snapshot,
+ * so a faithful save is not possible through the public API. Run it as a
+ * terminal action, not interleaved with interactive turns that depend on a
+ * pre-existing queue.
+ */
+export async function runEvalDir(
+  dir: string,
+  agent: Agent,
+  readTraj: () => Trajectory | undefined,
+): Promise<{ passed: number; total: number; failures: string[] }> {
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".eval.json"))
+    .sort();
+  const provider = agent.providers.get();
+  let passed = 0;
+  const failures: string[] = [];
+
+  for (const file of files) {
+    const path = join(dir, file);
+    let scenario: EvalScenario | undefined;
+    try {
+      scenario = parseEvalScenario(JSON.parse(readFileSync(path, "utf8")) as unknown);
+    } catch {
+      scenario = undefined;
+    }
+    // A malformed/invalid file is a failed scenario, not a thrown runner.
+    if (!scenario) {
+      failures.push(`${file}: invalid scenario (malformed *.eval.json)`);
+      continue;
+    }
+    if (!provider || typeof (provider as { script?: unknown }).script !== "function") {
+      failures.push(`${file}: no scriptable provider available`);
+      continue;
+    }
+    try {
+      (provider as unknown as { script(s: MockTurn[]): unknown }).script(scenario.mockScript);
+      agent.clear();
+      await agent.run(scenario.input);
+      const traj = readTraj();
+      if (!traj) {
+        failures.push(`${file}: no trajectory`);
+        continue;
+      }
+      const { pass, reasons } = checkExpect(traj, scenario.expect);
+      if (pass) {
+        passed += 1;
+      } else {
+        failures.push(`${file}: ${reasons.join("; ")}`);
+      }
+    } catch (err) {
+      failures.push(`${file}: run error — ${String(err)}`);
+    }
+  }
+
+  return { passed, total: files.length, failures };
 }
 
 // ---------------------------------------------------------------------------
@@ -370,50 +438,11 @@ export default function activate(e: ExtensionAPI): () => void {
         return;
       }
 
-      // `/eval` is a headless harness: each scenario re-scripts the agent's
-      // default provider and clears its transcript, and the loop deliberately
-      // leaves the last scenario's (consumed) queue and an empty transcript in
-      // place on return rather than restoring the prior script — the scriptable
-      // provider exposes no read accessor to snapshot, so a faithful save is not
-      // possible through the public API. Run `/eval` as a terminal action, not
-      // interleaved with interactive turns that depend on a pre-existing queue.
-      const provider = e.agent.providers.get();
-      let passed = 0;
-      const failures: string[] = [];
-
-      for (const file of files) {
-        const path = join(dir, file);
-        let scenario: EvalScenario | undefined;
-        try {
-          scenario = parseEvalScenario(JSON.parse(readFileSync(path, "utf8")) as unknown);
-        } catch {
-          scenario = undefined;
-        }
-        // A malformed/invalid file is a failed scenario, not a thrown runner.
-        if (!scenario) {
-          failures.push(`${file}: invalid scenario (malformed *.eval.json)`);
-          continue;
-        }
-        if (!provider || typeof (provider as { script?: unknown }).script !== "function") {
-          failures.push(`${file}: no scriptable provider available`);
-          continue;
-        }
-        try {
-          (provider as unknown as { script(s: MockTurn[]): unknown }).script(scenario.mockScript);
-          e.agent.clear();
-          await e.agent.run(scenario.input);
-          const { pass, reasons } = checkExpect(traj, scenario.expect);
-          if (pass) {
-            passed += 1;
-          } else {
-            failures.push(`${file}: ${reasons.join("; ")}`);
-          }
-        } catch (err) {
-          failures.push(`${file}: run error — ${String(err)}`);
-        }
-      }
-
-      ctx.print(`eval: ${passed}/${files.length} passed`);
+      // The happy path is the shared runner; the command keeps its own guard
+      // outputs above and prints the same scorecard. `traj` is the live (always
+      // defined) closure object, so the runner never sees an undefined reading.
+      const { passed, total, failures } = await runEvalDir(dir, e.agent, () => traj);
+      ctx.print(`eval: ${passed}/${total} passed`);
       for (const f of failures) ctx.print(`  FAIL ${f}`);
     },
   });
