@@ -30,6 +30,17 @@ import { tmpdir } from "node:os";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import {
+  wrapCommand,
+  detectBackend,
+  binExists,
+  isBackend,
+  shquote,
+  isWrapped,
+  TIERS,
+  type Backend,
+  type Tier,
+} from "./lib/sandbox.js";
 
 type Language = "javascript" | "python";
 
@@ -37,6 +48,20 @@ interface RunOutcome {
   output: string;
   isError: boolean;
   details: { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; language: Language };
+}
+
+/**
+ * The resolved isolation tier for one `code:exec` run. `tier === "off"` (the
+ * default) keeps the byte-identical direct spawn; otherwise the interpreter is
+ * wrapped through `backend`'s launcher, or — when no backend exists — handled
+ * per `missingBackend` (`block` = fail closed, `pass` = run unwrapped + warn).
+ */
+interface SandboxConfig {
+  tier: Tier;
+  backend: Backend;
+  missingBackend: "block" | "pass";
+  /** Emit the one-time "running unsandboxed" warning for the missing=pass path. */
+  warnDegraded: () => void;
 }
 
 /** Lazily resolved: is a `python3` interpreter present on this machine? */
@@ -61,7 +86,13 @@ function hasPython3(): boolean {
  * is scrubbed down to a minimal allowlist so secrets in the parent process env
  * are never handed to generated code.
  */
-async function runCode(language: Language, code: string, timeout: number, signal: AbortSignal): Promise<RunOutcome> {
+async function runCode(
+  language: Language,
+  code: string,
+  timeout: number,
+  signal: AbortSignal,
+  sandbox: SandboxConfig,
+): Promise<RunOutcome> {
   const dir = mkdtempSync(join(tmpdir(), "eagent-codeact-"));
   const isJs = language === "javascript";
   const file = join(dir, isJs ? "snippet.mjs" : "snippet.py");
@@ -76,8 +107,34 @@ async function runCode(language: Language, code: string, timeout: number, signal
     // reads of the real home/project directories (a soft boundary, not a sandbox).
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: tmpdir() };
 
+    // tier=off spawns the interpreter directly (the unwrapped path). Once a tier
+    // is selected, route the interpreter through the host's sandbox launcher
+    // (writable root = the per-call temp dir), failing closed when no backend
+    // exists unless missingBackend=pass degrades it to an unwrapped run.
+    let spawnCmd = command;
+    let spawnArgs: string[] = [file];
+    if (sandbox.tier !== "off") {
+      if (sandbox.backend === "none") {
+        if (sandbox.missingBackend === "block") {
+          // Fail closed: refuse rather than run model-authored code unsandboxed.
+          // (No RunOutcome helper exists — fail()/ok() produce ToolResult.)
+          return {
+            output: `[codeact] refusing to run code:exec unsandboxed: no sandbox backend (tier=${sandbox.tier})`,
+            isError: true,
+            details: { exitCode: null, signal: null, timedOut: false, language },
+          };
+        }
+        sandbox.warnDegraded(); // missing=pass: degrade to an unwrapped run
+      } else {
+        const inner = `${command} ${shquote(file)}`;
+        const wrapped = isWrapped(inner) ? inner : wrapCommand(sandbox.backend, sandbox.tier, inner, { root: dir });
+        spawnCmd = "/bin/sh";
+        spawnArgs = ["-c", wrapped];
+      }
+    }
+
     return await new Promise<RunOutcome>((resolve) => {
-      const child = spawn(command, [file], { cwd: dir, env, signal, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(spawnCmd, spawnArgs, { cwd: dir, env, signal, stdio: ["ignore", "pipe", "pipe"] });
       const chunks: Buffer[] = [];
       let timedOut = false;
       let settled = false;
@@ -121,6 +178,38 @@ export default function activate(e: ExtensionAPI): void {
   // is exactly the authority the capability layer exists to mediate, so we make
   // the host opt in (grant/allow) rather than ship it on by default.
 
+  // One-time "running unsandboxed" warning for the missing=pass degraded path.
+  let warnedMissing = false;
+
+  /**
+   * Resolve the isolation tier for a run. The tier (off by default) comes from
+   * the store, overridable by `EAGENT_CODEACT_TIER`; `missingBackend` defaults to
+   * `block` (fail closed). The backend is host-level, shared with sandbox-tiers
+   * via `EAGENT_SANDBOX_BACKEND`: a recognized value is used, an unrecognized one
+   * coerces to `none` (routes through the missing-backend policy rather than
+   * falling through `wrapCommand`'s switch), and an unset value is detected.
+   */
+  const resolveSandbox = (): SandboxConfig => {
+    const envTier = process.env.EAGENT_CODEACT_TIER;
+    const tier: Tier =
+      envTier !== undefined && (TIERS as readonly string[]).includes(envTier)
+        ? (envTier as Tier)
+        : (e.store.get<Tier>("tier", "off") ?? "off");
+    const missingBackend = e.store.get<"block" | "pass">("missingBackend", "block") ?? "block";
+    const raw = process.env.EAGENT_SANDBOX_BACKEND;
+    const backend: Backend = raw ? (isBackend(raw) ? raw : "none") : detectBackend(process.platform, binExists);
+    return {
+      tier,
+      backend,
+      missingBackend,
+      warnDegraded: () => {
+        if (warnedMissing) return;
+        warnedMissing = true;
+        e.log.warn(`no sandbox backend available; running code:exec unsandboxed (tier=${tier})`);
+      },
+    };
+  };
+
   e.registerTool(
     defineTool({
       name: "run_code",
@@ -157,7 +246,7 @@ export default function activate(e: ExtensionAPI): void {
           return fail("python3 is not available on this machine; cannot run python code.");
         }
 
-        const { output, isError, details } = await runCode(language, code, timeout, ctx.signal);
+        const { output, isError, details } = await runCode(language, code, timeout, ctx.signal, resolveSandbox());
         const text = output.trim() || "(no output)";
         return isError ? fail(text, details) : ok(text, details);
       },
@@ -196,9 +285,52 @@ export default function activate(e: ExtensionAPI): void {
         return;
       }
 
-      const { output, isError } = await runCode(language, code, 30000, new AbortController().signal);
+      const { output, isError } = await runCode(language, code, 30000, new AbortController().signal, resolveSandbox());
       const text = output.trim() || "(no output)";
       ctx.print(isError ? `error: ${text}` : text);
+    },
+  });
+
+  // Tier control surface, mirroring sandbox-tiers' command grammar. Distinct
+  // from the one-off `/code` runner: this configures the code:exec isolation
+  // tier (off by default; fail-closed once selected). No new capability.
+  e.registerCommand({
+    name: "codeact",
+    description: "code:exec isolation tier. Usage: /codeact [status|tier <name>|missing <block|pass>]",
+    run: (c) => {
+      const raw = c.args.trim();
+      const space = raw.indexOf(" ");
+      const sub = space < 0 ? raw : raw.slice(0, space);
+      const arg = space < 0 ? "" : raw.slice(space + 1).trim();
+
+      switch (sub) {
+        case "":
+        case "status": {
+          const s = resolveSandbox();
+          c.print(`codeact tier=${s.tier}; backend=${s.backend}; missing=${s.missingBackend}`);
+          break;
+        }
+        case "tier": {
+          if (!(TIERS as readonly string[]).includes(arg)) {
+            c.print(`codeact: unknown tier "${arg}"; valid: ${TIERS.join(", ")}`);
+            break;
+          }
+          e.store.set("tier", arg);
+          c.print(`codeact tier=${arg}`);
+          break;
+        }
+        case "missing": {
+          if (arg !== "block" && arg !== "pass") {
+            c.print(`codeact: missing must be "block" or "pass"`);
+            break;
+          }
+          e.store.set("missingBackend", arg);
+          c.print(`codeact missing=${arg}`);
+          break;
+        }
+        default:
+          c.print(`codeact: unknown subcommand "${sub}"`);
+      }
     },
   });
 }

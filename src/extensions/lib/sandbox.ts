@@ -1,14 +1,14 @@
 /**
  * sandbox — shared OS-launcher confinement helpers.
  *
- * The launcher core extracted from `sandbox-tiers.ts` so both the shell tier
- * (`sandbox-tiers`) and the code tier (`codeact`) reuse one tested wrapper
- * instead of duplicating security-critical string logic. Pure and stateless:
- * `wrapCommand`/`detectBackend`/`shquote`/`isWrapped` are pure, `workspaceRoot`
- * reads `process.env`/`cwd`, and `binExists` does a non-throwing PATH lookup —
- * none holds module state, and the lib imports no `ExtensionAPI` (no coupling,
- * no circular import). The stateful machinery (backend memoization, the
- * `beforeToolCall` hook, the command) stays in each extension's `activate()`.
+ * The launcher core both the shell tier (`sandbox-tiers`) and the code tier
+ * (`codeact`) build on, kept in one place so the security-critical string logic
+ * is written and tested once. Pure and stateless: `wrapCommand`/`detectBackend`/
+ * `shquote`/`isWrapped` are pure, `workspaceRoot` reads `process.env`/`cwd`, and
+ * `binExists` does a non-throwing PATH lookup — none holds module state, and the
+ * lib imports no `ExtensionAPI`, so it never couples to an extension or risks a
+ * circular import. The stateful machinery (backend memoization, the hooks, the
+ * commands) lives in each consumer's `activate()`.
  */
 
 import { existsSync } from "node:fs";

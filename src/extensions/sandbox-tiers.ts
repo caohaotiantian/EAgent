@@ -60,9 +60,8 @@ import {
   type Tier,
 } from "./lib/sandbox.js";
 
-// Re-export the launcher core (now in lib/sandbox.ts) under the names this
-// extension has always exported, so test/sandbox-tiers.test.ts imports the same
-// surface. Behavior-identical: the helpers only moved files.
+// Re-export the launcher core from the lib under the names this extension's
+// public surface exposes, so importers depending on them are unaffected.
 export { detectBackend, wrapCommand, shquote, isWrapped, workspaceRoot, TIERS } from "./lib/sandbox.js";
 export type { Backend, Tier } from "./lib/sandbox.js";
 
