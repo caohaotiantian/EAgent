@@ -17,13 +17,21 @@
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Store } from "../kernel/store.js";
+import { overlapScore } from "./lib/relevance.js";
 
 /** Defaults; each is overridable via `e.store`. Surfaced by the `/memory` view. */
 const DEFAULT_THRESHOLD = 12;
 const DEFAULT_KEEP_RECENT = 4;
 
-/** Store-key prefix for the `remember`/`recall` scratchpad. */
+/** Tier caps and retrieval width; each overridable via `e.store`. */
+const DEFAULT_CORE_CAP = 64;
+const DEFAULT_ARCHIVE_CAP = 512;
+const DEFAULT_RECALL_TOPK = 5;
+
+/** Store-key prefix for the always-available `note:` core tier. */
 const NOTE_PREFIX = "note:";
+/** Store-key prefix for the searchable `archive:` overflow tier. */
+const ARCHIVE_PREFIX = "archive:";
 
 // ---------------------------------------------------------------------------
 // White-box scratchpad: provenance-tagged entries (edit / forget / rollback)
@@ -77,6 +85,77 @@ function noteKeys(store: Store): string[] {
     .keys()
     .filter((k) => k.startsWith(NOTE_PREFIX))
     .map((k) => k.slice(NOTE_PREFIX.length));
+}
+
+/** Read the entry stored at `archive:<key>`, or `undefined` (mirrors `readEntry`). */
+function readArchive(store: Store, key: string): Entry | undefined {
+  const v = store.get<unknown>(ARCHIVE_PREFIX + key);
+  if (v === undefined) return undefined;
+  if (typeof v === "string") return { id: key, text: v, source: LEGACY_SOURCE, ts: "" };
+  return v as Entry;
+}
+
+/** Every archive key currently in the store, sans the `archive:` prefix. */
+function archiveKeys(store: Store): string[] {
+  return store
+    .keys()
+    .filter((k) => k.startsWith(ARCHIVE_PREFIX))
+    .map((k) => k.slice(ARCHIVE_PREFIX.length));
+}
+
+/** A scored retrieval hit: which tier it came from, the note value, and its overlap score. */
+interface Match {
+  key: string;
+  tier: "core" | "archive";
+  text: string;
+  score: number;
+}
+
+/**
+ * Rank both tiers by lexical overlap with `query`: score every core and archive
+ * entry via `overlapScore(query, entry.text)`, keep score > 0, sort descending,
+ * and return the top `topK`. A key present in BOTH tiers yields two distinct
+ * hits (no map collapse) since each tier is scored independently.
+ */
+function searchTiers(store: Store, query: string, topK: number): Match[] {
+  const matches: Match[] = [];
+  for (const key of noteKeys(store)) {
+    const entry = readEntry(store, key);
+    if (!entry) continue;
+    const score = overlapScore(query, entry.text);
+    if (score > 0) matches.push({ key, tier: "core", text: entry.text, score });
+  }
+  for (const key of archiveKeys(store)) {
+    const entry = readArchive(store, key);
+    if (!entry) continue;
+    const score = overlapScore(query, entry.text);
+    if (score > 0) matches.push({ key, tier: "archive", text: entry.text, score });
+  }
+  matches.sort((a, b) => b.score - a.score);
+  return matches.slice(0, topK);
+}
+
+/** Render a ranked match as one human-readable line for tool/command output. */
+function renderMatch(m: Match): string {
+  return `[${m.tier}] ${m.key} (score ${m.score}): ${m.text}`;
+}
+
+/**
+ * The `(key, entry)` pair with the lowest `ts` among `keys`, reading each via
+ * `read` and skipping any that no longer resolve (the `undefined` guard required
+ * by `noUncheckedIndexedAccess`). Legacy `ts:""` entries sort first.
+ */
+function lowestByTs(
+  keys: string[],
+  read: (key: string) => Entry | undefined,
+): { key: string; entry: Entry } | undefined {
+  let best: { key: string; entry: Entry } | undefined;
+  for (const key of keys) {
+    const entry = read(key);
+    if (!entry) continue;
+    if (best === undefined || entry.ts < best.entry.ts) best = { key, entry };
+  }
+  return best;
 }
 
 /** Find the `(key, entry)` pair whose entry id matches `id`, or `undefined`. */
@@ -196,10 +275,50 @@ function runScratchpad(
       print(`Consolidated: merged ${merged} duplicate note(s).`);
       return;
     }
+    case "recall": {
+      const query = rest.join(" ").trim();
+      if (query.length === 0) {
+        print("usage: /memory recall <query>");
+        return;
+      }
+      const topK = store.get<number>("recallTopK", DEFAULT_RECALL_TOPK) ?? DEFAULT_RECALL_TOPK;
+      const top = searchTiers(store, query, topK);
+      if (top.length === 0) {
+        print(`No notes match "${query}".`);
+        return;
+      }
+      for (const m of top) print(renderMatch(m));
+      return;
+    }
+    case "archive": {
+      const keys = archiveKeys(store);
+      print(`archive: ${keys.length} note(s)`);
+      for (const key of keys) {
+        const entry = readArchive(store, key);
+        if (entry) print(`${key}: ${entry.text}`);
+      }
+      return;
+    }
+    case "promote": {
+      const key = rest[0];
+      if (key === undefined) {
+        print("usage: /memory promote <key>");
+        return;
+      }
+      const entry = readArchive(store, key);
+      if (!entry) {
+        print(`no archived note "${key}".`);
+        return;
+      }
+      store.set(NOTE_PREFIX + key, entry);
+      store.delete(ARCHIVE_PREFIX + key);
+      print(`Promoted "${key}" to core.`);
+      return;
+    }
     default:
       print(
         `unknown /memory sub-command "${sub}"; ` +
-          "expected list | edit | forget | rollback | consolidate.",
+          "expected list | edit | forget | rollback | consolidate | recall | archive | promote.",
       );
       return;
   }
@@ -209,7 +328,31 @@ export default function activate(e: ExtensionAPI): () => void {
   const config = () => ({
     threshold: e.store.get<number>("threshold", DEFAULT_THRESHOLD) ?? DEFAULT_THRESHOLD,
     keepRecent: e.store.get<number>("keepRecent", DEFAULT_KEEP_RECENT) ?? DEFAULT_KEEP_RECENT,
+    coreCap: e.store.get<number>("coreCap", DEFAULT_CORE_CAP) ?? DEFAULT_CORE_CAP,
+    archiveCap: e.store.get<number>("archiveCap", DEFAULT_ARCHIVE_CAP) ?? DEFAULT_ARCHIVE_CAP,
+    recallTopK: e.store.get<number>("recallTopK", DEFAULT_RECALL_TOPK) ?? DEFAULT_RECALL_TOPK,
   });
+
+  /**
+   * Keep the core tier at most `coreCap`: move oldest-by-`ts` notes to `archive:`
+   * until core fits, then FIFO-drop the oldest archive entries past `archiveCap`.
+   * No-op under the kill switch (legacy bare-string mode never evicts).
+   */
+  const evictIfOverCap = (): void => {
+    if (entriesDisabled()) return;
+    const { coreCap, archiveCap } = config();
+    while (noteKeys(e.store).length > coreCap) {
+      const oldest = lowestByTs(noteKeys(e.store), (k) => readEntry(e.store, k));
+      if (!oldest) break;
+      e.store.set(ARCHIVE_PREFIX + oldest.key, oldest.entry);
+      e.store.delete(NOTE_PREFIX + oldest.key);
+    }
+    while (archiveKeys(e.store).length > archiveCap) {
+      const oldest = lowestByTs(archiveKeys(e.store), (k) => readArchive(e.store, k));
+      if (!oldest) break;
+      e.store.delete(ARCHIVE_PREFIX + oldest.key);
+    }
+  };
 
   /**
    * Monotonic entry-id generator. Pure Node (no `crypto`, zero-dep rule): a
@@ -232,7 +375,8 @@ export default function activate(e: ExtensionAPI): () => void {
       name: "memory",
       description:
         "Show memory config, or inspect the scratchpad: " +
-        "list | edit <id> <text> | forget <id> | rollback <id> | consolidate.",
+        "list | edit <id> <text> | forget <id> | rollback <id> | consolidate | " +
+        "recall <query> | archive | promote <key>.",
       run: (ctx: CommandContext) => {
         const tokens = ctx.args.trim().split(/\s+/).filter((t) => t.length > 0);
         const sub = tokens[0];
@@ -293,6 +437,7 @@ export default function activate(e: ExtensionAPI): () => void {
         };
         if (existing) entry.prevText = existing.text;
         e.store.set(NOTE_PREFIX + key, entry);
+        evictIfOverCap();
         return { content: `Remembered "${key}".` };
       },
     }),
@@ -302,11 +447,17 @@ export default function activate(e: ExtensionAPI): () => void {
     e.registerTool({
       spec: {
         name: "recall",
-        description: "Read a note from working memory by key, or list all notes when no key is given.",
+        description:
+          "Read a note by key, search both tiers by query (ranked lexical matches), " +
+          "or list all core notes when neither is given.",
         parameters: {
           type: "object",
           properties: {
             key: { type: "string", description: "The note's key. Omit to return every note." },
+            query: {
+              type: "string",
+              description: "Lexical search across the core and archive tiers; returns ranked matches.",
+            },
           },
         },
       },
@@ -318,6 +469,13 @@ export default function activate(e: ExtensionAPI): () => void {
           return entry === undefined
             ? { content: `No note for "${key}".`, isError: true }
             : { content: entry.text };
+        }
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (query.length > 0) {
+          const top = searchTiers(e.store, query, config().recallTopK);
+          return top.length === 0
+            ? { content: `No notes match "${query}".`, details: [] }
+            : { content: top.map(renderMatch).join("\n"), details: top };
         }
         // No-key list keeps its `{ key → text }` contract (D4): unwrap `.text`
         // from entries, pass legacy bare strings through, never serialize an
