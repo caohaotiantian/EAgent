@@ -98,6 +98,7 @@ export class OpenAIProvider implements Provider {
     });
 
     let textBuffer = "";
+    let reasoningBuffer = "";
     // Tool calls arrive as deltas keyed by index; assemble name + arg JSON.
     const toolCalls = new Map<number, { id: string; name: string; args: string }>();
     let stopReason: StopReason = "end_turn";
@@ -136,6 +137,7 @@ export class OpenAIProvider implements Provider {
       // Some reasoning endpoints stream the chain of thought on a sibling
       // `reasoning_content` field. Surface it without folding it into the answer.
       if (choice.delta?.reasoning_content) {
+        reasoningBuffer += choice.delta.reasoning_content;
         yield { type: "reasoning_delta", text: choice.delta.reasoning_content };
       }
       for (const tc of choice.delta?.tool_calls ?? []) {
@@ -149,6 +151,9 @@ export class OpenAIProvider implements Provider {
     }
 
     const content: ContentBlock[] = [];
+    // Persist the chain of thought (unsigned) so snapshot/restore keeps it; every
+    // request-builder ignores an unsigned thinking block, so replay is unaffected.
+    if (reasoningBuffer) content.push({ type: "thinking", thinking: reasoningBuffer });
     if (textBuffer) content.push({ type: "text", text: textBuffer });
     for (const [index, slot] of [...toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
       let args: Record<string, unknown> = {};

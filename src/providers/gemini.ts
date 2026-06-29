@@ -91,6 +91,7 @@ export class GeminiProvider implements Provider {
     });
 
     let text = "";
+    let reasoningBuffer = "";
     const toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] = [];
     let stopReason: StopReason = "end_turn";
     const usage: Usage = { inputTokens: 0, outputTokens: 0 };
@@ -121,6 +122,7 @@ export class GeminiProvider implements Provider {
       for (const part of candidate.content?.parts ?? []) {
         if (typeof part.text === "string" && part.thought === true) {
           // A thought summary part — surfaced as reasoning, kept out of the answer.
+          reasoningBuffer += part.text;
           yield { type: "reasoning_delta", text: part.text };
         } else if (typeof part.text === "string") {
           text += part.text;
@@ -140,6 +142,9 @@ export class GeminiProvider implements Provider {
     // preserve that signal so the loop can surface it.
     if (toolCalls.length > 0 && stopReason === "end_turn") stopReason = "tool_use";
     const content: ContentBlock[] = [];
+    // Persist the chain of thought (unsigned) so snapshot/restore keeps it; every
+    // request-builder ignores an unsigned thinking block, so replay is unaffected.
+    if (reasoningBuffer) content.push({ type: "thinking", thinking: reasoningBuffer });
     if (text) content.push({ type: "text", text });
     for (const tc of toolCalls) content.push({ type: "tool_call", id: tc.id, name: tc.name, arguments: tc.arguments });
 

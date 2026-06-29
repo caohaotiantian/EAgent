@@ -210,5 +210,83 @@ test("surfaces thought parts as reasoning, keeping them out of the answer", asyn
     ["planning"],
   );
   const done = events.at(-1)!;
-  assert.ok(done.type === "done" && (done.message.content[0] as { text: string }).text === "Hi");
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    // Thought stays out of the answer text…
+    const textBlock = done.message.content.find((b) => b.type === "text");
+    assert.equal((textBlock as { text: string }).text, "Hi");
+    // …but is persisted as a thinking block for snapshot/restore fidelity.
+    const thinkingBlock = done.message.content.find((b) => b.type === "thinking");
+    assert.equal((thinkingBlock as { thinking: string }).thinking, "planning");
+  }
+});
+
+test("AC-4: persists thought parts as a thinking block (first) plus the text block", async () => {
+  const chunks = [
+    {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "plan", thought: true }, { text: "ning", thought: true }, { text: "Hi" }] },
+          finishReason: "STOP",
+        },
+      ],
+    },
+  ];
+  const provider = new GeminiProvider({ apiKey: "k", fetch: async () => sse(chunks) });
+  const events = await collect(provider.stream(req({ thinking: "low" })));
+  // Streaming is unchanged: reasoning_delta events still fire per thought part.
+  assert.deepEqual(
+    events.filter((e) => e.type === "reasoning_delta").map((e) => (e as { text: string }).text),
+    ["plan", "ning"],
+  );
+  const done = events.at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    const content = done.message.content;
+    assert.equal(content[0]?.type, "thinking");
+    assert.equal((content[0] as { thinking: string }).thinking, "planning");
+    const textBlock = content.find((b) => b.type === "text");
+    assert.equal((textBlock as { text: string }).text, "Hi");
+  }
+});
+
+test("AC-6: a stream with no thought parts has no thinking block (byte-identity)", async () => {
+  const provider = new GeminiProvider({ apiKey: "k", fetch: async () => sse(TEXT_CHUNKS) });
+  const done = (await collect(provider.stream(req()))).at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type === "done") {
+    assert.ok(!done.message.content.some((b) => b.type === "thinking"));
+    assert.deepEqual(done.message.content, [{ type: "text", text: "Hello" }]);
+  }
+});
+
+test("AC-5: a persisted thinking block is dropped on replay (no thought on the wire)", async () => {
+  let captured: any;
+  const provider = new GeminiProvider({
+    apiKey: "k",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hi" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "secret reasoning" },
+              { type: "text", text: "Hi" },
+            ],
+          },
+        ],
+      }),
+    ),
+  );
+  // The thinking block is in no model-role parts (nor anywhere on the wire).
+  assert.ok(!JSON.stringify(captured.contents).includes("secret reasoning"));
+  const model = captured.contents.find((c: any) => c.role === "model");
+  assert.deepEqual(model.parts, [{ text: "Hi" }]);
 });
