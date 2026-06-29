@@ -83,6 +83,7 @@ import goal from "./extensions/goal.js";
 import timeTravel from "./extensions/time-travel.js";
 import otelExporter from "./extensions/otel-exporter.js";
 import reasoningSearch from "./extensions/reasoning-search.js";
+import selfImprove from "./extensions/self-improve.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -144,6 +145,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["time-travel", timeTravel],
   ["otel-exporter", otelExporter],
   ["reasoning-search", reasoningSearch],
+  ["self-improve", selfImprove],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
