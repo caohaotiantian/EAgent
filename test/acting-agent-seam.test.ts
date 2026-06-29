@@ -22,10 +22,12 @@ import { defineTool, ok } from "../src/kernel/define.js";
 import { ProviderRegistry, ToolRegistry } from "../src/kernel/registry.js";
 import type { CompletionRequest, Message, Tool, ToolResult } from "../src/kernel/types.js";
 import budgetCap from "../src/extensions/budget-cap.js";
+import citations from "../src/extensions/citations.js";
 import circuitBreaker from "../src/extensions/circuit-breaker.js";
 import flowGuard from "../src/extensions/flow-guard.js";
 import otelExporter from "../src/extensions/otel-exporter.js";
 import outputContract from "../src/extensions/output-contract.js";
+import routing from "../src/extensions/routing.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
 import { makeHarness } from "./helpers.js";
 
@@ -177,6 +179,71 @@ test("AC-4 output-contract: a child's invalid `respond` reask writes the CHILD, 
   });
 });
 
+test("AC-4 routing: an enabled child turn routes the CHILD's model, leaving the parent untouched", async () => {
+  await withEnv(["EAGENT_ROUTING"], async () => {
+    delete process.env.EAGENT_ROUTING;
+    const { agent: parent, host } = makeHarness({ fallback: "allow" });
+    parent.model = "mock-parent";
+    await host.use("routing", (e) => {
+      e.store.set("enabled", true);
+      e.store.set("tiers", { cheap: "mock-cheap", flagship: "mock-flagship" });
+      return routing(e);
+    });
+
+    // A trivial single-turn child: the heuristic routes "cheap". The script
+    // records the model each turn streamed with (the post-routing value).
+    const childModels: string[] = [];
+    const child = makeChild(
+      parent,
+      "CHILD",
+      (req) => {
+        childModels.push(req.model);
+        return { text: "done" };
+      },
+      [],
+    );
+    child.model = "mock-child";
+
+    await child.run("rename this variable");
+
+    assert.equal(childModels[0], "mock-cheap", "the child's turn streamed with the routed (cheap) model — routing acted on the child");
+    assert.equal(parent.model, "mock-parent", "the parent's model was never touched");
+  });
+});
+
+test("AC-4 routing: a soft-disabled child turn restores the CHILD's own baseline, not the parent's", async () => {
+  await withEnv(["EAGENT_ROUTING"], async () => {
+    delete process.env.EAGENT_ROUTING;
+    const { agent: parent, host } = makeHarness({ fallback: "allow" });
+    parent.model = "mock-parent";
+    // Soft switch OFF (enabled=false): the turn_start listener still fires and
+    // restores the baseline — but it must restore the CHILD's own baseline, not
+    // the parent's (the shared-closure-var bug this guards against).
+    await host.use("routing", (e) => {
+      e.store.set("enabled", false);
+      e.store.set("tiers", { cheap: "mock-cheap", flagship: "mock-flagship" });
+      return routing(e);
+    });
+
+    const childModels: string[] = [];
+    const child = makeChild(
+      parent,
+      "CHILD",
+      (req) => {
+        childModels.push(req.model);
+        return { text: "done" };
+      },
+      [],
+    );
+    child.model = "mock-child";
+
+    await child.run("go");
+
+    assert.equal(childModels[0], "mock-child", "the disabled branch restored the child's OWN baseline, not the parent's");
+    assert.equal(parent.model, "mock-parent", "the parent's model was never touched");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // AC-5 — no per-run state collision under concurrency (WeakMap partition)
 // ---------------------------------------------------------------------------
@@ -254,6 +321,44 @@ test("AC-5 budget-cap: two concurrent children's run spend is partitioned per ag
 
     assert.equal(ran, 2, "each child ran its single tool call — run spend is per-agent");
     assert.equal(blocked, 0, "no budget-cap block fired (no shared-counter trip)");
+  });
+});
+
+test("AC-5 citations: two concurrent children's source ids are partitioned (each starts at [src:1])", async () => {
+  await withEnv(["EAGENT_CITATIONS"], async () => {
+    delete process.env.EAGENT_CITATIONS;
+    const { agent: parent, host } = makeHarness({ fallback: "allow" });
+    await host.use("citations", (e) => {
+      e.store.set("enabled", true);
+      return citations(e);
+    });
+
+    const grab = defineTool({
+      name: "grab",
+      description: "x",
+      capabilities: ["net:fetch"],
+      parameters: { type: "object", properties: {} },
+      execute: () => ok("body"),
+    });
+    // citations.isRetrieval reads the PARENT registry — register the tool there
+    // too (the flow-guard cross-agent pattern).
+    parent.tools.register(grab);
+
+    const script: MockResponder = (req) => (toolMsgCount(req) === 0 ? { toolCalls: [{ name: "grab", arguments: {} }] } : { text: "done" });
+    const a = makeChild(parent, "CHILD-A", script, [grab]);
+    const b = makeChild(parent, "CHILD-B", script, [grab]);
+
+    await Promise.all([a.run("a"), b.run("b")]);
+
+    const firstResult = (agent: Agent): string => {
+      const m = agent.messages.find((mm) => mm.role === "tool");
+      const blk = m?.content.find((bb) => bb.type === "tool_result");
+      return blk && blk.type === "tool_result" ? blk.content : "";
+    };
+    // With a single shared counter the two forks would commingle to [src:1]/[src:2];
+    // the per-agent WeakMap partition gives each its own counter starting at 1.
+    assert.ok(firstResult(a).startsWith("[src:1] "), `child A's first retrieval is [src:1]; got: ${firstResult(a)}`);
+    assert.ok(firstResult(b).startsWith("[src:1] "), `child B's first retrieval is [src:1]; got: ${firstResult(b)}`);
   });
 });
 
