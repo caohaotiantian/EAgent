@@ -97,7 +97,7 @@ item), then the independent subsystems.
 | Sub | Scope | Audit items | Kernel? | Status |
 |---|---|---|---|---|
 | W9.1 | **childScope acting-agent seam** — thread the acting agent into the hook context so soft-guards act on the child that triggered them, not the parent. Fix flow-guard transcript read, circuit-breaker/budget-cap/output-contract steer/stop misroute, otel span keying. | RW3-1, RW3-2, otel-keying | **YES (ceiling-gating)** | L3 ✅ (2186) |
-| W9.2 | **self-improve hardening** — B1 blocker (render candidate source to the human-review prompt), `execSync`→async+abortable, `realEvaluate` path via `import.meta.url` + unit coverage, RW8b-2 failed-load rollback, `evaluate_candidate` capability. | B1, RW8b-2, +3 | no | L1 ✅ |
+| W9.2 | **self-improve hardening** — B1 blocker (render candidate source to the human-review prompt), `execSync`→async+abortable, `realEvaluate` path via `import.meta.url` + unit coverage, RW8b-2 failed-load rollback, `evaluate_candidate` capability. | B1, RW8b-2, +3 | no | L3 ✅ (1080) |
 | W9.3 | **sandbox hardening** — RW6c-4 readonly bwrap re-bind, `binExists`-gated real-backend integration tests, SBPL `root` escaping. | RW6c-4, +2 | no | L1 ✅ |
 | W9.4 | **reasoning-search fork robustness** — abort→`child.stop()` propagation; `allSettled` so one fork's throw doesn't discard the rest. | 2 | no | L1 ✅ |
 | W9.5 | **accounting & provider edges** — RW1-1 cache tokens in the per-run budget; RW6d-1 Gemini reasoning-only empty-`parts` replay 400; provenance nested-arg scan. | RW1-1, RW6d-1, +1 | no | L1 ✅ |
