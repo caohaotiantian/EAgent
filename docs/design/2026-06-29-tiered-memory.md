@@ -1,5 +1,12 @@
 # Design — Tiered self-editing memory (archival tier + lexical retrieval)
 
+```
+Status: closed
+Closing-commit: 5bf41df
+Closed-on: 2026-06-29
+Deferred: RW7b-1 (embed-provider semantic tier), RW7b-2 (archive-forget), RW7b-3 (auto-promotion archive→core) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-tiered-memory` · **Wave:** 7 (subsystem 2 of 3) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P3.2 · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md` §D (Letta/MemGPT, A-MEM)
 

@@ -1,5 +1,12 @@
 # Implementation — Tiered self-editing memory
 
+```
+Status: closed
+Closing-commit: 5bf41df
+Closed-on: 2026-06-29
+Deferred: RW7b-1, RW7b-2, RW7b-3 — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-tiered-memory` (matches design) · **Design:**
 [`design/2026-06-29-tiered-memory.md`](../design/2026-06-29-tiered-memory.md)
 
