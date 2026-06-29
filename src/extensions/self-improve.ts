@@ -108,7 +108,7 @@ function hashFixtures(dir: string): string {
 
 /** Run the candidate-loading eval runner once under the sandbox, returning the passed count. */
 function runScored(backend: Backend, candidateDir: string, fixturesDir: string, root: string, cwd: string): number {
-  const cmd = `node --import tsx ${join("src", "self-improve-eval.ts")} ${candidateDir} ${fixturesDir}`;
+  const cmd = `node --import tsx ${join("src", "self-improve-eval.ts")} ${candidateDir} ${fixturesDir} ${root}`;
   const wrapped = wrapCommand(backend, "no-network", cmd, { root });
   const out = execSync(wrapped, { cwd, env: { PATH: process.env.PATH ?? "" } }).toString();
   const m = /eval:\s*(\d+)\s*\/\s*\d+\s*passed/.exec(out);

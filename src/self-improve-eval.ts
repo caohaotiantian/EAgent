@@ -10,18 +10,29 @@
  * tests inject a stub evaluator instead).
  */
 
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+
 import { createAgentHost } from "./host.js";
 import { getTrajectory, runEvalDir } from "./extensions/evals.js";
 
 async function main(): Promise<void> {
   const stagingCandidateDir = process.argv[2];
   const fixturesDir = process.argv[3];
-  if (!stagingCandidateDir || !fixturesDir) {
-    console.error("usage: self-improve-eval <candidateDir> <fixturesDir>");
+  // The staging root is the only path the harness's `no-network` sandbox makes
+  // writable, so the file-backed store must live under it — the default
+  // `~/.eagent/state` is denied, and the `evals` extension writes at activation.
+  const stagingRoot = process.argv[4];
+  if (!stagingCandidateDir || !fixturesDir || !stagingRoot) {
+    console.error("usage: self-improve-eval <candidateDir> <fixturesDir> <stagingRoot>");
     process.exit(1);
     return;
   }
-  const { agent, host } = await createAgentHost({ discoverDirs: [stagingCandidateDir], provider: "mock" });
+  const { agent, host } = await createAgentHost({
+    discoverDirs: [stagingCandidateDir],
+    provider: "mock",
+    storeRoot: mkdtempSync(join(stagingRoot, "eval-store-")),
+  });
   const { passed, total } = await runEvalDir(fixturesDir, agent, () =>
     getTrajectory({ store: host.storeFor("evals") }),
   );
