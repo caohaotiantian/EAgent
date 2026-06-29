@@ -21,6 +21,7 @@ import * as kernel from "../src/kernel/index.js";
 const EXPECTED_EXPORTS = [
   // The runtime classes — the seven primitives and their support types.
   "Agent",
+  "currentActingAgent",
   "HookBus",
   "ToolRegistry",
   "ProviderRegistry",

@@ -25,6 +25,7 @@
  * Off by default; disable or tune it with `/routing`, or set `EAGENT_ROUTING=off`.
  */
 
+import { currentActingAgent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
 
@@ -227,14 +228,15 @@ export default function activate(e: ExtensionAPI): () => void {
    */
   async function classifyLlm(messages: readonly Message[]): Promise<Tier | undefined> {
     try {
-      const provider = e.agent.providers.get();
+      const agent = currentActingAgent() ?? e.agent;
+      const provider = agent.providers.get();
       if (!provider) return undefined;
       let reply = "";
       for await (const ev of provider.stream({
         systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
         messages: [...messages],
         tools: [],
-        model: e.agent.model,
+        model: agent.model,
         signal: new AbortController().signal,
       })) {
         if (ev.type === "done") reply = textOf(ev.message);
@@ -253,9 +255,12 @@ export default function activate(e: ExtensionAPI): () => void {
 
     e.on("turn_start", async () => {
       const c = cfg();
+      // Route the ACTING agent (a running child under the shared bus), not the
+      // parent bound at activation. (W9.1.)
+      const agent = currentActingAgent() ?? e.agent;
       // Disabled (soft switch): restore the baseline and assign no tier.
       if (!c.enabled) {
-        e.agent.model = baseline;
+        agent.model = baseline;
         return;
       }
 
@@ -263,12 +268,12 @@ export default function activate(e: ExtensionAPI): () => void {
       // conservative rule) to flagship — never a throw.
       let tier: Tier;
       if (c.mode === "llm") {
-        const verdict = await classifyLlm(e.agent.messages);
+        const verdict = await classifyLlm(agent.messages);
         tier =
           verdict ??
-          classify(e.agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
+          classify(agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
       } else {
-        tier = classify(e.agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
+        tier = classify(agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
       }
 
       // Resolve the tier name against the configured map (the SOLE resolution
@@ -281,10 +286,10 @@ export default function activate(e: ExtensionAPI): () => void {
           `routing: tier "${tier}" has no usable model id in the tier map; ` +
             `falling back to the configured model "${baseline}"`,
         );
-        e.agent.model = baseline;
+        agent.model = baseline;
         return;
       }
-      e.agent.model = model;
+      agent.model = model;
     }),
 
     // Restore the configured model when the run ends (fires in the loop's

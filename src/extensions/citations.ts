@@ -26,6 +26,7 @@
  * is the hard kill switch checked at activation (returns a no-op disposer).
  */
 
+import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { ToolResult } from "../kernel/types.js";
 
@@ -95,9 +96,19 @@ export default function activate(e: ExtensionAPI): () => void {
     warnMissing: e.store.get<boolean>("warnMissing", false) ?? false,
   });
 
-  // Per-run state — reset on agent_start, in-memory only (no persistence).
-  let sources = new Map<number, Source>();
-  let nextId = 1;
+  // Per-run state, keyed by the ACTING agent so concurrent forks don't commingle
+  // ids. Reset on the parent's agent_start; a child seeds lazily on its first
+  // tagged result (agent_start is suppressed for children). (W9.1.)
+  interface CiteState {
+    sources: Map<number, Source>;
+    nextId: number;
+  }
+  const states = new WeakMap<Agent, CiteState>();
+  const stateFor = (agent: Agent): CiteState => {
+    let s = states.get(agent);
+    if (!s) states.set(agent, (s = { sources: new Map(), nextId: 1 }));
+    return s;
+  };
   let lastRun: LastRun | undefined;
 
   /** A result is retrieval iff its producing tool declares an intersecting cap. */
@@ -122,9 +133,9 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   const onStart = e.on("agent_start", () => {
-    // A fresh run starts a fresh id map and counter (per-run scoping, D4).
-    sources = new Map();
-    nextId = 1;
+    // A fresh run starts a fresh id map and counter (per-run scoping) for the
+    // acting (parent) agent.
+    states.set(currentActingAgent() ?? e.agent, { sources: new Map(), nextId: 1 });
   });
 
   const offFilter = e.hook("afterToolCall", (result: ToolResult, ctx): ToolResult => {
@@ -135,9 +146,10 @@ export default function activate(e: ExtensionAPI): () => void {
       if (result.content.startsWith(SRC_PREFIX)) return result;
       if (!isRetrieval(ctx.call.name, c.retrievalCaps)) return result;
 
-      const id = nextId++;
+      const st = stateFor(currentActingAgent() ?? e.agent);
+      const id = st.nextId++;
       const locator = locatorOf(result.content);
-      sources.set(id, { tool: ctx.call.name, locator });
+      st.sources.set(id, { tool: ctx.call.name, locator });
       const header = `${SRC_PREFIX}${id}] ${ctx.call.name} — ${locator}\n`;
       return { ...result, content: header + result.content };
     } catch {
@@ -153,7 +165,7 @@ export default function activate(e: ExtensionAPI): () => void {
       const answer = finalAnswer();
       if (answer === "") return; // nothing to validate (§5 assumption)
 
-      const emitted = new Set(sources.keys());
+      const emitted = new Set(stateFor(currentActingAgent() ?? e.agent).sources.keys());
 
       // Authoritative stem — these can introduce a fabricated id.
       const srcCited = parseSrcCitations(answer);

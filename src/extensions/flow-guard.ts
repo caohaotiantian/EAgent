@@ -26,6 +26,7 @@
  * Disable or tune it at runtime with `/flow-guard`, or set `EAGENT_FLOW_GUARD=off`.
  */
 
+import { currentActingAgent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 
 type Mode = "ask" | "block";
@@ -161,7 +162,11 @@ export default function activate(e: ExtensionAPI): () => void {
   const offHook = e.hook("beforeToolCall", async (decision, ctx) => {
     const { enabled, mode, egressCaps } = cfg();
     if (!enabled || decision.block) return decision;
-    const dataTainted = e.agent.messages.some((m) => (taintArray(m)?.length ?? 0) > 0);
+    // Read the ACTING agent's transcript: a child that read a secret and egresses
+    // is caught on its OWN transcript, not the parent's. The capability `tainted`
+    // Set stays shared (cross-agent exfiltration catch — KDD-3). (W9.1.)
+    const agent = currentActingAgent() ?? e.agent;
+    const dataTainted = agent.messages.some((m) => (taintArray(m)?.length ?? 0) > 0);
     if (tainted.size === 0 && !dataTainted) return decision;
     const isEgress = capsOf(ctx.call.name).some((c) => egressCaps.includes(c));
     if (!isEgress) return decision;
@@ -211,14 +216,14 @@ export default function activate(e: ExtensionAPI): () => void {
           tainted.clear();
           pending.clear();
           // Data taint rides the messages, so a true clear-all strips it there too.
-          for (const m of e.agent.messages) {
+          for (const m of (currentActingAgent() ?? e.agent).messages) {
             if (m.meta && "flowGuardTaint" in m.meta) delete (m.meta as Record<string, unknown>).flowGuardTaint;
           }
           c.print("flow-guard: session taint cleared");
           break;
         default: {
           const { enabled, mode, sourceCaps, egressCaps } = cfg();
-          const dataCount = e.agent.messages.filter((m) => (taintArray(m)?.length ?? 0) > 0).length;
+          const dataCount = (currentActingAgent() ?? e.agent).messages.filter((m) => (taintArray(m)?.length ?? 0) > 0).length;
           c.print(
             `flow-guard ${enabled ? "on" : "off"} (mode=${mode}); ` +
               `source=${sourceCaps.join(",")} -> egress=${egressCaps.join(",")}; ` +

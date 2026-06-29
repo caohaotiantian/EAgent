@@ -12,6 +12,7 @@
  * through the registries and hooks that extensions populate.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { CapabilityManager } from "./capabilities.js";
 import { type KernelEvents, type KernelFilters, type ToolDecision } from "./events.js";
 import { HookBus } from "./hooks.js";
@@ -69,6 +70,10 @@ const DEFAULT_SYSTEM_PROMPT =
  * `retry:true` cannot spin forever. `attempt` starts at 1.
  */
 const MAX_PROVIDER_RETRIES = 6;
+
+/** Ambient acting-agent context (W9.1): `run()` binds `this`, so a childScope guard reads the running agent + a `WeakMap` key under concurrent forks. */
+const actingAgentStore = new AsyncLocalStorage<Agent>();
+export const currentActingAgent = (): Agent | undefined => actingAgentStore.getStore();
 
 export class Agent {
   readonly hooks: HookBus<KernelEvents, KernelFilters>;
@@ -213,132 +218,134 @@ export class Agent {
   }
 
   async run(input: string | Message): Promise<RunResult> {
-    if (this.#running) throw new Error("agent is already running");
-    const userMessage: Message =
-      typeof input === "string" ? { role: "user", content: [{ type: "text", text: input }] } : input;
-    this.#messages.push(userMessage);
+    return actingAgentStore.run(this, async (): Promise<RunResult> => {
+      if (this.#running) throw new Error("agent is already running");
+      const userMessage: Message =
+        typeof input === "string" ? { role: "user", content: [{ type: "text", text: input }] } : input;
+      this.#messages.push(userMessage);
 
-    this.#abort = new AbortController();
-    this.#running = true;
-    let reason: StopReason = "end_turn";
+      this.#abort = new AbortController();
+      this.#running = true;
+      let reason: StopReason = "end_turn";
 
-    await this.hooks.emit("agent_start", { input: userMessage });
-    // The user's message is a completed message appended to the transcript, so
-    // it emits `message` like any other — observers (journal, renderers) see
-    // every message uniformly.
-    await this.hooks.emit("message", { message: userMessage });
-    try {
-      for (let turn = 1; turn <= this.maxTurns; turn++) {
-        // Honor stop()/abort directly in the loop. The signal is passed to the
-        // provider and tools, but a provider that doesn't reject on abort would
-        // otherwise let the loop run on; checking here makes stop() reliable.
-        // Two checks guard a turn: this one at the top of the loop, and a second
-        // immediately after streamTurn (below) so an abort that lands mid-stream
-        // stops us before the assistant message is appended and dispatched.
-        if (this.#abort!.signal.aborted) {
-          reason = "stop";
-          break;
-        }
-        this.drainInto(this.#steering, this.#messages);
-        await this.hooks.emit("turn_start", { turn });
+      await this.hooks.emit("agent_start", { input: userMessage });
+      // The user's message is a completed message appended to the transcript, so
+      // it emits `message` like any other — observers (journal, renderers) see
+      // every message uniformly.
+      await this.hooks.emit("message", { message: userMessage });
+      try {
+        for (let turn = 1; turn <= this.maxTurns; turn++) {
+          // Honor stop()/abort directly in the loop. The signal is passed to the
+          // provider and tools, but a provider that doesn't reject on abort would
+          // otherwise let the loop run on; checking here makes stop() reliable.
+          // Two checks guard a turn: this one at the top of the loop, and a second
+          // immediately after streamTurn (below) so an abort that lands mid-stream
+          // stops us before the assistant message is appended and dispatched.
+          if (this.#abort!.signal.aborted) {
+            reason = "stop";
+            break;
+          }
+          this.drainInto(this.#steering, this.#messages);
+          await this.hooks.emit("turn_start", { turn });
 
-        const assistant = await this.streamTurn(turn);
-        if (this.#abort!.signal.aborted) {
-          reason = "stop";
-          break;
-        }
-        this.#messages.push(assistant.message);
-        await this.hooks.emit("message", { message: assistant.message });
+          const assistant = await this.streamTurn(turn);
+          if (this.#abort!.signal.aborted) {
+            reason = "stop";
+            break;
+          }
+          this.#messages.push(assistant.message);
+          await this.hooks.emit("message", { message: assistant.message });
 
-        const calls = assistant.message.content.filter(
-          (b): b is ToolCallBlock => b.type === "tool_call",
-        );
+          const calls = assistant.message.content.filter(
+            (b): b is ToolCallBlock => b.type === "tool_call",
+          );
 
-        if (calls.length === 0) {
-          if (this.#followUps.length > 0) {
-            this.drainInto(this.#followUps, this.#messages);
+          if (calls.length === 0) {
+            if (this.#followUps.length > 0) {
+              this.drainInto(this.#followUps, this.#messages);
+              this.#step++;
+              await this.hooks.emit("turn_end", { turn, step: this.#step });
+              continue;
+            }
+            reason = assistant.stopReason;
             this.#step++;
             await this.hooks.emit("turn_end", { turn, step: this.#step });
-            continue;
+            break;
           }
-          reason = assistant.stopReason;
+
+          // The wave-shaping seam: hand the whole tool-call wave to extensions,
+          // which may reorder or drop calls (return a subset/permutation). Only
+          // returned calls whose id is among the originals are dispatched; an
+          // unknown injected id is ignored (a tool_result with no matching
+          // assistant tool_use would 400 the next turn). The defensive copy keeps
+          // an in-place-mutating handler from corrupting the originals; with no
+          // handler `apply` returns the wave unchanged — byte-identical to today.
+          const originalCalls = calls;
+          const wanted = await this.hooks.apply("beforeDispatch", [...originalCalls], { turn });
+          const dispatchSet = wanted.filter((c) => originalCalls.some((o) => o.id === c.id));
+          const results = await this.dispatch(dispatchSet);
+          // A wave-settled, observe-only signal: the whole dispatch group as one
+          // ordered value, before anything commits it to the transcript. Additive
+          // to tool_end (per-tool) and turn_end (per-turn); neither is perturbed.
+          await this.hooks.emit("tool_batch_end", {
+            batch: results.map((r) => ({ call: r.call, result: r.result })),
+            step: this.#step,
+          });
+          // Pairing reconciliation: every original id must get exactly one result.
+          // A dispatched call contributes its real result; a dropped one a neutral
+          // synthetic skip-result (isError:false, so error accounting stays clean).
+          // Built in ORIGINAL order — `tool_batch_end` above and the terminate check
+          // below intentionally read the EXECUTED set (`results`), not this all-id
+          // set, so a synthetic skip can't mask a real terminate. The `??` is
+          // required: `.find` is `T | undefined` under noUncheckedIndexedAccess.
+          const reconciled: DispatchOutcome[] = originalCalls.map(
+            (oc) =>
+              results.find((r) => r.call.id === oc.id) ?? {
+                call: oc,
+                result: { content: "(skipped by a beforeDispatch hook)", isError: false },
+              },
+          );
+          const toolMessage: Message = {
+            role: "tool",
+            content: reconciled.map(
+              (r): ToolResultBlock => ({
+                type: "tool_result",
+                toolCallId: r.call.id,
+                content: r.result.content,
+                isError: r.result.isError,
+              }),
+            ),
+          };
+          this.#messages.push(toolMessage);
+          await this.hooks.emit("message", { message: toolMessage });
           this.#step++;
           await this.hooks.emit("turn_end", { turn, step: this.#step });
-          break;
-        }
 
-        // The wave-shaping seam: hand the whole tool-call wave to extensions,
-        // which may reorder or drop calls (return a subset/permutation). Only
-        // returned calls whose id is among the originals are dispatched; an
-        // unknown injected id is ignored (a tool_result with no matching
-        // assistant tool_use would 400 the next turn). The defensive copy keeps
-        // an in-place-mutating handler from corrupting the originals; with no
-        // handler `apply` returns the wave unchanged — byte-identical to today.
-        const originalCalls = calls;
-        const wanted = await this.hooks.apply("beforeDispatch", [...originalCalls], { turn });
-        const dispatchSet = wanted.filter((c) => originalCalls.some((o) => o.id === c.id));
-        const results = await this.dispatch(dispatchSet);
-        // A wave-settled, observe-only signal: the whole dispatch group as one
-        // ordered value, before anything commits it to the transcript. Additive
-        // to tool_end (per-tool) and turn_end (per-turn); neither is perturbed.
-        await this.hooks.emit("tool_batch_end", {
-          batch: results.map((r) => ({ call: r.call, result: r.result })),
-          step: this.#step,
-        });
-        // Pairing reconciliation: every original id must get exactly one result.
-        // A dispatched call contributes its real result; a dropped one a neutral
-        // synthetic skip-result (isError:false, so error accounting stays clean).
-        // Built in ORIGINAL order — `tool_batch_end` above and the terminate check
-        // below intentionally read the EXECUTED set (`results`), not this all-id
-        // set, so a synthetic skip can't mask a real terminate. The `??` is
-        // required: `.find` is `T | undefined` under noUncheckedIndexedAccess.
-        const reconciled: DispatchOutcome[] = originalCalls.map(
-          (oc) =>
-            results.find((r) => r.call.id === oc.id) ?? {
-              call: oc,
-              result: { content: "(skipped by a beforeDispatch hook)", isError: false },
-            },
-        );
-        const toolMessage: Message = {
-          role: "tool",
-          content: reconciled.map(
-            (r): ToolResultBlock => ({
-              type: "tool_result",
-              toolCallId: r.call.id,
-              content: r.result.content,
-              isError: r.result.isError,
-            }),
-          ),
-        };
-        this.#messages.push(toolMessage);
-        await this.hooks.emit("message", { message: toolMessage });
-        this.#step++;
-        await this.hooks.emit("turn_end", { turn, step: this.#step });
+          if (results.length > 0 && results.every((r) => r.result.terminate)) {
+            reason = "stop";
+            break;
+          }
 
-        if (results.length > 0 && results.every((r) => r.result.terminate)) {
-          reason = "stop";
-          break;
+          if (turn === this.maxTurns) {
+            reason = "stop";
+            await this.hooks.emit("error", {
+              where: "agent.run",
+              error: new Error(`maxTurns (${this.maxTurns}) reached`),
+            });
+          }
         }
-
-        if (turn === this.maxTurns) {
-          reason = "stop";
-          await this.hooks.emit("error", {
-            where: "agent.run",
-            error: new Error(`maxTurns (${this.maxTurns}) reached`),
-          });
-        }
+      } catch (err) {
+        reason = "error";
+        await this.hooks.emit("error", { where: "agent.run", error: err });
+        throw err;
+      } finally {
+        this.#running = false;
+        this.#abort = undefined;
+        await this.hooks.emit("agent_end", { reason });
       }
-    } catch (err) {
-      reason = "error";
-      await this.hooks.emit("error", { where: "agent.run", error: err });
-      throw err;
-    } finally {
-      this.#running = false;
-      this.#abort = undefined;
-      await this.hooks.emit("agent_end", { reason });
-    }
 
-    return { reason, messages: this.#messages };
+      return { reason, messages: this.#messages };
+    });
   }
 
   // -- internals ----------------------------------------------------------
@@ -347,13 +354,10 @@ export class Agent {
     const provider = this.providers.get(this.providerName);
     if (!provider) throw new Error(`no provider registered (looking for ${this.providerName ?? "default"})`);
 
-    // The provider-error seam: rebuild the request and consume the stream inside a
-    // bounded retry loop. A pre-commit throw (no event yet emitted) is offered to
-    // `onProviderError`, which may re-stream (optionally downshifting `model`); a
-    // post-commit throw (the `committed` invariant, mirroring fallback-routing)
-    // always rethrows, since retrying a partly-rendered stream would double-emit.
-    // With no handler the applied value is the default unchanged, so the loop
-    // rethrows on the first failure — byte-identical to a bare provider call.
+    // The provider-error seam: rebuild + consume the stream in a bounded retry loop.
+    // A pre-commit throw (no event emitted) is offered to `onProviderError`, which may
+    // re-stream (optionally downshifting `model`); a post-commit throw always rethrows
+    // (retrying a partly-rendered stream double-emits). No handler ⇒ rethrow on first.
     let attempt = 1;
     let model = this.model;
     for (;;) {
@@ -369,23 +373,18 @@ export class Agent {
         tools: this.tools.list().map((t) => t.spec),
         model,
         thinking: this.thinking,
-        // Re-read each turn (like `model`): a set `forceTool` compels exactly that
-        // tool this turn; `undefined` leaves `toolChoice` absent ⇒ the model's free
-        // choice, byte-identical to a build without forcing. `forceTool` is public
-        // API, so guard it against an unregistered name (which would make a real
-        // provider 400) by only forcing a tool that is actually registered.
+        // Re-read each turn (like `model`): a set `forceTool` compels that tool;
+        // `undefined` leaves `toolChoice` absent ⇒ free choice. Only force a registered
+        // name (forcing an unregistered public-API value would 400 a real provider).
         toolChoice:
           this.forceTool && this.tools.get(this.forceTool)
             ? { type: "tool" as const, name: this.forceTool }
             : undefined,
       };
 
-      // The request-shaping seam: hand the assembled request to extensions, then
-      // re-attach the live abort signal. `signal` is excluded from the filter value
-      // (it is abort control, not a shaping concern — a mutated signal could wedge
-      // abort) and `cumulativeUsage` is a defensive copy so a handler can't perturb
-      // the running total. With no handler `apply` returns the value unchanged, so
-      // the streamed request is byte-identical to a direct build.
+      // The request-shaping seam: hand the request to extensions, then re-attach the
+      // live abort `signal` (excluded from the filter value — a mutated signal could
+      // wedge abort). `cumulativeUsage` is a defensive copy; no handler ⇒ unchanged.
       const shaped = await this.hooks.apply(
         "transformRequest",
         {
