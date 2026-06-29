@@ -1,5 +1,12 @@
 # Design — `beforeDispatch` wave-level seam
 
+```
+Status: closed
+Closing-commit: b0141ec
+Closed-on: 2026-06-29
+Deferred: deliverable — inject new call ids (RW6a-1); deliverable — share beforeDispatch to children (RW6a-2) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-before-dispatch` · **Wave:** 6 (subsystem 1 of 4) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P2.2
 

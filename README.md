@@ -164,8 +164,9 @@ flowchart LR
         H1["transformContext<br/>reshape the message list"]
         H2["transformRequest<br/>reshape the whole request"]
         H3["beforeToolCall<br/>veto / rewrite a call"]
-        H4["afterToolCall<br/>transform a result"]
-        H5["onProviderError<br/>retry / downshift on a stream failure"]
+        H4["beforeDispatch<br/>reorder / drop the tool-call wave"]
+        H5["afterToolCall<br/>transform a result"]
+        H6["onProviderError<br/>retry / downshift on a stream failure"]
     end
 ```
 
@@ -181,9 +182,10 @@ e.hook("beforeToolCall", (decision, { call }) => {
 });
 ```
 
-These five seams are where memory strategies, model routing, plan-mode approvals,
-safety gates, context engineering, and reliability policy plug in — without touching the loop.
-(`onProviderError` is an error-path seam: it fires only when a provider stream throws.)
+These six seams are where memory strategies, model routing, plan-mode approvals,
+safety gates, context engineering, wave shaping, and reliability policy plug in — without touching the loop.
+(`beforeDispatch` reshapes the tool-call wave; `onProviderError` is an error-path seam that fires only
+when a provider stream throws.)
 
 ## Built-in extensions
 

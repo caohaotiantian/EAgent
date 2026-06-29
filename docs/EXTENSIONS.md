@@ -259,11 +259,12 @@ e.on("tool_end", ({ call, result }) => {
 ## Filter hooks (intervene)
 
 Install with `e.hook(point, handler)`. A filter hook threads a value through
-your handler, which returns the (possibly transformed) value. There are five —
-four on the request/tool path (below) plus `onProviderError` (an error-path seam,
+your handler, which returns the (possibly transformed) value. There are six —
+five on the request/tool path (incl. `beforeDispatch`, the wave-level seam) plus `onProviderError` (an error-path seam,
 covered after them) — the seams where memory, model routing, plan-mode approvals,
 safety gates, context engineering, and reliability policy plug in without touching
-the loop. Here is where the four request/tool ones fire inside a turn:
+the loop. Here is where the four **single-call** request/tool ones fire inside a turn (`beforeDispatch`
+acts on the whole tool-call wave before per-call dispatch — see its own subsection below):
 
 ```mermaid
 flowchart LR
@@ -313,6 +314,24 @@ e.hook("transformRequest", (req, { turn, cumulativeUsage }) => {
   if (turn === 1) req.tools = req.tools.filter((t) => !/^(write|edit|bash)$/.test(t.name));
   return req;
 });
+```
+
+### `beforeDispatch`
+
+Reshape the **whole tool-call wave** before it is dispatched (the per-call
+`beforeToolCall` sees one call; this sees them all). The threaded value is the
+`ToolCallBlock[]` to dispatch; the context carries `{ turn }`. Return a reordered
+and/or filtered subset — run a cheap validation call first, drop a now-redundant
+call. **Pairing is preserved by the kernel:** every *original* call id still gets a
+`tool_result` (a real one if dispatched, else a neutral `"(skipped…)"` synthetic),
+and ids you return that weren't in the originals are ignored (no injection). Drop a
+call as a *security veto* with `beforeToolCall` instead (it pairs via a proper error
+result); `beforeDispatch` is for wave shape.
+
+```ts
+e.hook("beforeDispatch", (calls /*, { turn } */) =>
+  // run any `read` before any `write`, and dedupe identical calls
+  dedupe(calls).sort((a, b) => rank(a.name) - rank(b.name)));
 ```
 
 ### `beforeToolCall`

@@ -85,3 +85,12 @@ From `docs/design/2026-06-28-reliability-boundary.md` (KDD-4, §3).
 | # | Residual | Home design | Effort · Risk | Why deferred / fix |
 |---|---|---|---|---|
 | RW5-1 | Rewrite `fallback-routing` onto the new `onProviderError` seam (it currently uses the composite-`Provider` + mutable-`Agent.providerName` approach). | `docs/design/2026-06-28-reliability-boundary.md` (KDD-4, §3) | M · M | The seam now exists (Wave 5), but cross-provider failover via `onProviderError` would need the seam to expose/allow a provider swap (it currently does same-provider retry + model downshift). Migrating `fallback-routing` is a separate design; the composite approach works and stays until then. |
+
+## Re-design Wave 6a (beforeDispatch) — deferred residuals
+
+From `docs/design/2026-06-29-before-dispatch.md` (KDD-2, KDD-6).
+
+| # | Residual | Home design | Effort · Risk | Why deferred / fix |
+|---|---|---|---|---|
+| RW6a-1 | `beforeDispatch` cannot **inject** brand-new tool-call ids (only reorder/drop the originals). | `docs/design/2026-06-29-before-dispatch.md` (KDD-2) | M · M | An injected id has no matching assistant `tool_use`, so its `tool_result` would orphan next turn — supporting it requires also mutating the already-emitted assistant message. A separate design that handles the assistant-message side. |
+| RW6a-2 | `beforeDispatch` is **not** shared to sub-agents (not in `SHARED_FILTER_POINTS`), so a child's wave runs its own empty→passthrough chain. | same (KDD-6) | S · L | One-line add to `SHARED_FILTER_POINTS` if wave-governance-for-children is wanted; deferred to avoid reaching into Wave 3's childScope contract with no current consumer. |

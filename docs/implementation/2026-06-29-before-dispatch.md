@@ -1,5 +1,12 @@
 # Implementation — `beforeDispatch` wave-level seam
 
+```
+Status: closed
+Closing-commit: b0141ec
+Closed-on: 2026-06-29
+Deferred: RW6a-1 (inject), RW6a-2 (share to children) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-before-dispatch` (matches design) · **Design:**
 [`design/2026-06-29-before-dispatch.md`](../design/2026-06-29-before-dispatch.md)
 
