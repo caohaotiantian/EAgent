@@ -1,5 +1,12 @@
 # Design — Self-improvement harness (bounded, sandboxed, human-checkpointed)
 
+```
+Status: closed
+Closing-commit: cee89f8
+Closed-on: 2026-06-29
+Deferred: RW8b-1 (real-evaluator integration test), RW8b-2 (failed-adopt-load leaves the file live) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-self-improvement` · **Wave:** 8 (subsystem 2 of 2) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P4.2 · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md` §B (Darwin Gödel Machine safety)
 

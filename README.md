@@ -225,6 +225,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
 | `budget-cap`   | hard **USD spend ceiling that enforces** — prices the `usage` stream via `cost`'s pricecard and, at a per-run or cumulative-session cap, soft-warns then **blocks** paid tool calls (`mode=block`) or **aborts** the run (`mode=stop`); both caps default `0` = inert (`EAGENT_BUDGET_CAP=off`) | `/budget-cap` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
+| `self-improve` | **bounded, human-checkpointed self-improvement harness** (DGM-safety): `propose_improvement` stages a candidate (static-veto + bespoke write, never executed) → `evaluate_candidate` scores it as an **advisory, tamper-detected** signal in a **separate `no-network`-sandboxed subprocess** (the candidate is *never* loaded into the live agent to be judged) → `adopt_improvement` loads it **only after human source-review via `ui.ask`** (not `--yolo`-able), host-tracked + `unloadExtension`-reversible. The isolation boundary is the subprocess+sandbox; the gate is the human. Off by default (`/self-improve on`, `EAGENT_SELF_IMPROVE=off`) | `/self-improve` | `self:extend` |
 | `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |
@@ -353,7 +354,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  57 built-in extensions, all riding the ExtensionAPI
+src/extensions/  58 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

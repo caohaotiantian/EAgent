@@ -1,5 +1,12 @@
 # Implementation — Self-improvement harness
 
+```
+Status: closed
+Closing-commit: cee89f8
+Closed-on: 2026-06-29
+Deferred: RW8b-1, RW8b-2 — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-self-improvement` (matches design) · **Design:**
 [`design/2026-06-29-self-improvement.md`](../design/2026-06-29-self-improvement.md)
 
