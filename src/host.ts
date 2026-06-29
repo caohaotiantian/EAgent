@@ -41,6 +41,7 @@ import compact from "./extensions/compact.js";
 import recovery from "./extensions/recovery.js";
 import outputContract from "./extensions/output-contract.js";
 import contentGuard from "./extensions/content-guard.js";
+import provenance from "./extensions/provenance.js";
 import circuitBreaker from "./extensions/circuit-breaker.js";
 import planmode from "./extensions/planmode.js";
 import session from "./extensions/session.js";
@@ -98,6 +99,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["recovery", recovery],
   ["output-contract", outputContract],
   ["content-guard", contentGuard],
+  ["provenance", provenance],
   ["circuit-breaker", circuitBreaker],
   ["planmode", planmode],
   ["session", session],
