@@ -1,5 +1,12 @@
 # Design — Time-travel checkpoint tree (agent-state rewind + fork)
 
+```
+Status: closed
+Closing-commit: f04d424
+Closed-on: 2026-06-29
+Deferred: RW7a-1 (delta-blob compression), RW7a-2 (conversation+workspace rewind unification), RW7a-3 (command-gating polish) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-time-travel` · **Wave:** 7 (subsystem 1 of 3) · **Mode:** Full
 **Source:** [`docs/ROADMAP.md`](../ROADMAP.md) · **Strategy:** [`2026-06-28-eagent-redesign-blueprint.md`](2026-06-28-eagent-redesign-blueprint.md) §3 P3.1 · **Research:** scratchpad `RESEARCH-FINDINGS-waves-6-8.md` §C (LangGraph branching checkpoints)
 

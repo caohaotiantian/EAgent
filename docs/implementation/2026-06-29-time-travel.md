@@ -1,5 +1,12 @@
 # Implementation — Time-travel checkpoint tree
 
+```
+Status: closed
+Closing-commit: f04d424
+Closed-on: 2026-06-29
+Deferred: RW7a-1, RW7a-2, RW7a-3 — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-29-time-travel` (matches design) · **Design:**
 [`design/2026-06-29-time-travel.md`](../design/2026-06-29-time-travel.md)
 

@@ -227,6 +227,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |
 | `journal`     | durable, append-only run journal; crash-recover with `/resume` (opt-in) | `/journal`, `/resume` | `fs:read`, `fs:write` |
+| `time-travel` | agent-state **rewind + fork** — persists `Agent.snapshot()` as a branching checkpoint **tree** (LangGraph-style; rewind and fork are one `restore()` primitive) to `.eagent/timetravel/`; rewinds *conversation* state only (pair with `checkpoint`'s `/rollback` for files). Off by default (`/timetravel on`, `EAGENT_TIME_TRAVEL=off`) | `/timetravel`, `/rewind`, `/fork`, `/tree` | — |
 | `todo`        | session-scoped in-memory todo list — `todowrite` replaces and echoes the list | `/todos` | — |
 | `goal`         | pins the run's **objective + acceptance criteria** in front of the model every turn (anti-drift `transformContext`) and runs an advisory, offline completion check on `agent_end`; adds a `setgoal` tool + opt-in model-judge; inert until a goal is set (`EAGENT_GOAL=off`) | `/goal` | — |
 | `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompt-remove`, `/prompts` | — |
@@ -350,7 +351,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  54 built-in extensions, all riding the ExtensionAPI
+src/extensions/  55 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
