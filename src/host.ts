@@ -81,6 +81,7 @@ import configHooks from "./extensions/config-hooks.js";
 import budgetCap from "./extensions/budget-cap.js";
 import goal from "./extensions/goal.js";
 import timeTravel from "./extensions/time-travel.js";
+import otelExporter from "./extensions/otel-exporter.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -140,6 +141,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["fallback-routing", fallbackRouting],
   ["reliability", reliability],
   ["time-travel", timeTravel],
+  ["otel-exporter", otelExporter],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
