@@ -267,7 +267,17 @@ export class Agent {
           break;
         }
 
-        const results = await this.dispatch(calls);
+        // The wave-shaping seam: hand the whole tool-call wave to extensions,
+        // which may reorder or drop calls (return a subset/permutation). Only
+        // returned calls whose id is among the originals are dispatched; an
+        // unknown injected id is ignored (a tool_result with no matching
+        // assistant tool_use would 400 the next turn). The defensive copy keeps
+        // an in-place-mutating handler from corrupting the originals; with no
+        // handler `apply` returns the wave unchanged — byte-identical to today.
+        const originalCalls = calls;
+        const wanted = await this.hooks.apply("beforeDispatch", [...originalCalls], { turn });
+        const dispatchSet = wanted.filter((c) => originalCalls.some((o) => o.id === c.id));
+        const results = await this.dispatch(dispatchSet);
         // A wave-settled, observe-only signal: the whole dispatch group as one
         // ordered value, before anything commits it to the transcript. Additive
         // to tool_end (per-tool) and turn_end (per-turn); neither is perturbed.
@@ -275,9 +285,23 @@ export class Agent {
           batch: results.map((r) => ({ call: r.call, result: r.result })),
           step: this.#step,
         });
+        // Pairing reconciliation: every original id must get exactly one result.
+        // A dispatched call contributes its real result; a dropped one a neutral
+        // synthetic skip-result (isError:false, so error accounting stays clean).
+        // Built in ORIGINAL order — `tool_batch_end` above and the terminate check
+        // below intentionally read the EXECUTED set (`results`), not this all-id
+        // set, so a synthetic skip can't mask a real terminate. The `??` is
+        // required: `.find` is `T | undefined` under noUncheckedIndexedAccess.
+        const reconciled: DispatchOutcome[] = originalCalls.map(
+          (oc) =>
+            results.find((r) => r.call.id === oc.id) ?? {
+              call: oc,
+              result: { content: "(skipped by a beforeDispatch hook)", isError: false },
+            },
+        );
         const toolMessage: Message = {
           role: "tool",
-          content: results.map(
+          content: reconciled.map(
             (r): ToolResultBlock => ({
               type: "tool_result",
               toolCallId: r.call.id,

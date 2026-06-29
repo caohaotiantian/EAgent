@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { Agent } from "../src/kernel/agent.js";
 import { defineTool } from "../src/kernel/define.js";
 import { setHandlerErrorReporter } from "../src/kernel/hooks.js";
 import type { CompletionRequest, Message, StopReason, ToolCallBlock, ToolResult, UI, Usage } from "../src/kernel/types.js";
@@ -885,4 +886,265 @@ test("onProviderError hard bound: an always-retry handler terminates after MAX_P
 
   await assert.rejects(() => agent.run("go"), /always pre-commit/);
   assert.equal(attempts, 6, "the kernel hard bound (MAX_PROVIDER_RETRIES=6) stops a perpetual-retry handler");
+});
+
+// --- beforeDispatch wave seam (Phase 1) -----------------------------------
+
+const SKIP_NOTE = /skipped by a beforeDispatch hook/;
+
+function registerNamed(agent: Agent, names: string[], ran?: string[]): void {
+  for (const name of names) {
+    agent.tools.register(
+      defineTool({
+        name,
+        description: "",
+        execute: () => {
+          ran?.push(name);
+          return { content: `r-${name}` };
+        },
+      }),
+    );
+  }
+}
+
+test("beforeDispatch reorders execution but the transcript pairs by id in original order (AC-3)", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "t1", id: "c1" }, { name: "t2", id: "c2" }, { name: "t3", id: "c3" }] },
+      { text: "done" },
+    ],
+  });
+  registerNamed(agent, ["t1", "t2", "t3"]);
+  const started: string[] = [];
+  agent.hooks.on("tool_start", ({ call }) => {
+    started.push(call.id);
+  });
+
+  agent.hooks.filter("beforeDispatch", (calls) => [...calls].reverse());
+
+  await agent.run("go");
+
+  assert.deepEqual(started, ["c3", "c2", "c1"], "execution order follows the reordered dispatch set");
+
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c1", "c2", "c3"],
+    "transcript tool_results are keyed 1:1 to original ids, in ORIGINAL order",
+  );
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { content: string }).content),
+    ["r-t1", "r-t2", "r-t3"],
+    "each original id pairs with its own result content",
+  );
+});
+
+test("beforeDispatch drops one call: it never runs but its id still pairs with a neutral skip result (AC-4)", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "t1", id: "c1" }, { name: "t2", id: "c2" }, { name: "t3", id: "c3" }] },
+      { text: "done" },
+    ],
+  });
+  const ran: string[] = [];
+  registerNamed(agent, ["t1", "t2", "t3"], ran);
+  const started: string[] = [];
+  agent.hooks.on("tool_start", ({ call }) => {
+    started.push(call.id);
+  });
+
+  agent.hooks.filter("beforeDispatch", (calls) => calls.filter((c) => c.id !== "c2"));
+
+  await agent.run("go");
+
+  assert.deepEqual(ran.sort(), ["t1", "t3"], "the dropped tool must not execute");
+  assert.ok(!started.includes("c2"), "no tool_start fires for the dropped call");
+
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c1", "c2", "c3"],
+    "every original id still receives a tool_result, in original order",
+  );
+  const byId = (id: string) =>
+    toolMsg.content.find((b) => (b as { toolCallId: string }).toolCallId === id) as {
+      content: string;
+      isError?: boolean;
+    };
+  assert.match(byId("c2").content, SKIP_NOTE, "the dropped id gets the neutral skip note");
+  assert.ok(!byId("c2").isError, "a dropped call's synthetic result is neutral (isError falsy)");
+  assert.equal(byId("c1").content, "r-t1", "the surviving calls pair to their real results");
+  assert.equal(byId("c3").content, "r-t3");
+});
+
+test("beforeDispatch drop-all still emits an all-synthetic tool message and the loop continues (AC-5)", async () => {
+  let providerCalls = 0;
+  const { agent } = makeHarness({
+    responder: (_req, i) => {
+      providerCalls++;
+      return i === 0
+        ? { toolCalls: [{ name: "t1", id: "c1" }, { name: "t2", id: "c2" }, { name: "t3", id: "c3" }] }
+        : { text: "after-drop" };
+    },
+  });
+  const ran: string[] = [];
+  registerNamed(agent, ["t1", "t2", "t3"], ran);
+
+  agent.hooks.filter("beforeDispatch", () => []);
+
+  const { reason } = await agent.run("go");
+
+  // (a) nothing ran; (c) the loop continued to the next streamTurn, not the no-calls/end path.
+  assert.deepEqual(ran, [], "no tool executes when the whole wave is dropped");
+  assert.equal(reason, "end_turn", "the loop continued past the drop-all rather than taking the no-calls path");
+  assert.equal(providerCalls, 2, "the model was called again after the drop-all (loop continued)");
+  assert.equal(lastText(agent), "after-drop");
+
+  // (b) a tool message with exactly one synthetic skip-result per original id.
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.equal(toolMsg.content.length, 3, "one tool_result per original id");
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c1", "c2", "c3"],
+  );
+  for (const b of toolMsg.content) {
+    assert.match((b as { content: string }).content, SKIP_NOTE);
+    assert.ok(!(b as { isError?: boolean }).isError, "synthetic skip results are neutral");
+  }
+
+  // (d) no orphan: every assistant tool_use id has a matching tool_result.
+  const assistant = agent.messages.find((m) => m.role === "assistant")!;
+  const useIds = assistant.content.filter((b): b is ToolCallBlock => b.type === "tool_call").map((b) => b.id);
+  const resultIds = toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId);
+  assert.deepEqual([...resultIds].sort(), [...useIds].sort(), "every tool_use id has a matching tool_result");
+});
+
+test("beforeDispatch: a terminate:true call surviving a partial drop still terminates the run (AC-5)", async () => {
+  const { agent } = makeHarness({
+    responder: (_req, i) =>
+      i === 0
+        ? { toolCalls: [{ name: "halt", id: "h1" }, { name: "noop", id: "n1" }] }
+        : { text: "should-not-reach" },
+  });
+  agent.tools.register(defineTool({ name: "halt", description: "", execute: () => ({ content: "stopped", terminate: true }) }));
+  agent.tools.register(defineTool({ name: "noop", description: "", execute: () => ({ content: "ok" }) }));
+  // Drop the non-terminating call; keep halt. The executed set ([halt]) drives terminate.
+  agent.hooks.filter("beforeDispatch", (calls) => calls.filter((c) => c.id === "h1"));
+
+  const { reason } = await agent.run("go");
+  assert.equal(reason, "stop", "the surviving terminate:true call still terminates (executed set drives terminate)");
+
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId).sort(),
+    ["h1", "n1"],
+    "both original ids pair even though one was dropped",
+  );
+});
+
+test("beforeDispatch: a fully-dropped wave does NOT terminate even if the dropped call was terminate:true (AC-5)", async () => {
+  let providerCalls = 0;
+  const { agent } = makeHarness({
+    responder: (_req, i) => {
+      providerCalls++;
+      return i === 0 ? { toolCalls: [{ name: "halt", id: "h1" }] } : { text: "continued" };
+    },
+  });
+  agent.tools.register(defineTool({ name: "halt", description: "", execute: () => ({ content: "stopped", terminate: true }) }));
+  agent.hooks.filter("beforeDispatch", () => []);
+
+  const { reason } = await agent.run("go");
+  // Empty executed set: `[].every(...)` is vacuously true, so the length>0 guard
+  // is what keeps a drop-all from spuriously terminating.
+  assert.equal(reason, "end_turn", "an empty executed set must not be treated as all-terminate");
+  assert.equal(providerCalls, 2, "the loop continued past the fully-dropped wave");
+});
+
+test("beforeDispatch: an injected call whose id is not among the originals is ignored (AC-6)", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "t1", id: "c1" }, { name: "t2", id: "c2" }] },
+      { text: "done" },
+    ],
+  });
+  const ran: string[] = [];
+  registerNamed(agent, ["t1", "t2", "injected"], ran);
+
+  agent.hooks.filter("beforeDispatch", (calls) => [
+    ...calls,
+    { type: "tool_call", id: "x99", name: "injected", arguments: {} },
+  ]);
+
+  await agent.run("go");
+
+  assert.ok(!ran.includes("injected"), "an injected (unknown-id) call must not execute");
+  assert.deepEqual(ran.sort(), ["t1", "t2"]);
+
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c1", "c2"],
+    "no extra/orphan tool_result appears for the injected id",
+  );
+});
+
+test("beforeDispatch: default (no handler) dispatches in original order, 1:1, no synthetics (AC-7)", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "t1", id: "c1" }, { name: "t2", id: "c2" }, { name: "t3", id: "c3" }] },
+      { text: "done" },
+    ],
+  });
+  registerNamed(agent, ["t1", "t2", "t3"]);
+  const started: string[] = [];
+  agent.hooks.on("tool_start", ({ call }) => {
+    started.push(call.id);
+  });
+
+  await agent.run("go");
+
+  assert.deepEqual(started, ["c1", "c2", "c3"], "no handler -> original dispatch order");
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId), ["c1", "c2", "c3"]);
+  assert.deepEqual(toolMsg.content.map((b) => (b as { content: string }).content), ["r-t1", "r-t2", "r-t3"]);
+  for (const b of toolMsg.content) {
+    assert.doesNotMatch((b as { content: string }).content, SKIP_NOTE, "no synthetic results with no handler");
+  }
+});
+
+test("beforeDispatch divergence: tool_batch_end carries only executed results; transcript carries all original ids in original order (AC-9)", async () => {
+  const { agent } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "t1", id: "c1" }, { name: "t2", id: "c2" }, { name: "t3", id: "c3" }] },
+      { text: "done" },
+    ],
+  });
+  registerNamed(agent, ["t1", "t2", "t3"]);
+  // Drop c2 AND reverse the survivors: exercise both divergence and the
+  // original-order transcript against a reordered dispatch.
+  agent.hooks.filter("beforeDispatch", (calls) => calls.filter((c) => c.id !== "c2").reverse());
+
+  let batch: { call: ToolCallBlock; result: ToolResult }[] | undefined;
+  agent.hooks.on("tool_batch_end", ({ batch: b }) => {
+    batch = b;
+  });
+
+  await agent.run("go");
+
+  // tool_batch_end is "what ran": only c3, c1, in execution order; c2 absent.
+  assert.deepEqual(batch!.map((p) => p.call.id), ["c3", "c1"], "tool_batch_end carries only executed results, in execution order");
+  assert.ok(!batch!.some((p) => p.call.id === "c2"), "the dropped id is absent from tool_batch_end");
+
+  // The transcript is "every original id paired", in ORIGINAL order.
+  const toolMsg = agent.messages.find((m) => m.role === "tool")!;
+  assert.deepEqual(
+    toolMsg.content.map((b) => (b as { toolCallId: string }).toolCallId),
+    ["c1", "c2", "c3"],
+    "the transcript tool message carries every original id in original order regardless of reorder/drop",
+  );
+  assert.match(
+    (toolMsg.content.find((b) => (b as { toolCallId: string }).toolCallId === "c2") as { content: string }).content,
+    SKIP_NOTE,
+    "the dropped id carries the synthetic skip note in the transcript",
+  );
 });

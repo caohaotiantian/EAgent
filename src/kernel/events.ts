@@ -83,6 +83,20 @@ export type KernelFilters = {
     };
     context: { turn: number; cumulativeUsage: Usage };
   };
+  /**
+   * Reshape the whole tool-call WAVE just before dispatch: reorder it or drop a
+   * call by returning a subset/permutation of the calls. The kernel dispatches
+   * only returned calls whose id is among the originals (unknown injected ids are
+   * ignored — a result with no matching assistant `tool_use` would break pairing),
+   * and ALWAYS pairs every original id with a result: the real result if
+   * dispatched, a neutral synthetic skip-result if dropped. Applied only when the
+   * assistant actually emitted `tool_call` blocks; with no handler the wave is
+   * returned unchanged — byte-identical to a direct dispatch.
+   */
+  beforeDispatch: {
+    value: ToolCallBlock[];
+    context: { turn: number };
+  };
   /** Approve, rewrite, or veto a tool call before it runs. */
   beforeToolCall: {
     value: ToolDecision;
