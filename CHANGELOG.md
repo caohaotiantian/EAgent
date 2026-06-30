@@ -130,6 +130,10 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   auto-snapshot runs synchronous git on every mutating tool call; the (default-on)
   extension now honors the house opt-out convention so an operator can disable it
   (e.g. to avoid blocking the shared HTTP host's event loop).
+- **`otel-exporter` emits a third metric: `gen_ai.client.operation.duration`** — the
+  OTel GenAI semconv Histogram of per-call inference latency (seconds, advisory
+  buckets), giving an SLO/alerting consumer the latency *distribution* (p50/p90/p99)
+  that the existing Sum counters cannot. Additive; inert without a metrics endpoint.
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

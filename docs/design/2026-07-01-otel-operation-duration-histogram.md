@@ -1,5 +1,11 @@
 # Design — otel-exporter operation-duration histogram (RW7c-4)
 
+Status: closed
+Closing-commit: be0154a
+Closed-on: 2026-07-01
+Deferred: none (RW7c-4 fully resolved). Siblings RW7c-2 (traceparent propagation) and RW7c-3
+(live-collector smoke) remain independently deferred — not deferred by this task.
+
 **Slug:** `2026-07-01-otel-operation-duration-histogram` · **Tier:** Full (a histogram is a new OTLP
 data-point shape, and the bucket boundaries are a threshold/magic-number decision to surface). Source:
 `docs/DEFERRED-FOLLOWUPS.md` RW7c-4 (deferred from the OTLP metrics/logs design,

@@ -1,5 +1,12 @@
 # Implementation — otel-exporter operation-duration histogram (RW7c-4)
 
+Status: closed
+Closing-commit: be0154a
+Closed-on: 2026-07-01
+Deferred: none. Phase 1 = commit be0154a (L3 closed in 3 rounds). Whole-project F review: pass (zero
+severe). Suite 1147 pass / 0 fail / 1 skip; otel-exporter 19 pass; typecheck 0; eval 5/5; kernel
+untouched.
+
 **Slug:** `2026-07-01-otel-operation-duration-histogram` (identical to the design doc). **Design:**
 `docs/design/2026-07-01-otel-operation-duration-histogram.md`.
 
