@@ -223,3 +223,38 @@ ceiling. Suite 1136 → **1143 pass / 0 fail / 1 skip**; typecheck 0; eval 5/5.
 resolves `reason:"stop"` (scored normally) instead of rejecting (scored `-Infinity`) — only during
 parent cancellation when the fork's result is moot; offline tests use graceful-break providers and are
 unchanged.
+
+## Finish-deferred-followups program — Waves B/C/D (2026-07-01)
+
+Completing the genuinely-valuable, feasible deferred work surfaced by the 2026-06-30 verification audit,
+on branch `chore/finish-deferred-followups`. Wave A (the kernel pass, FRESH-1/2/4 + KR-1) is the section
+above; B/C/D below. Each wave fresh-reviewer-gated (Full L1→L2→L3→F for A + C; Light four-field brief +
+fresh-review for B + D). Suite 1136 → **1151 pass / 0 fail / 1 skip**; typecheck 0; eval 5/5; kernel
+2199/2200 (Wave A's +1; B/C/D no kernel change); no new dependency.
+
+**Resolved:**
+- **FRESH-50** (Wave B) — `checkpoint` gained an `EAGENT_CHECKPOINT=off` kill switch (early no-op
+  return in `activate`; the auto-snapshot runs synchronous git on every mutating tool call, so the
+  default-on extension now honors the house opt-out convention). On-by-default preserved. Commit 5e26fa1.
+- **RW7c-4** (Wave C) — `otel-exporter` now emits the OTel GenAI semconv **Histogram**
+  `eagent.gen_ai.client.operation.duration` (per-call inference latency, seconds, the published advisory
+  buckets) alongside the two Sums — the latency *distribution* (p50/p90/p99) a Sum can't give. Measured
+  `turn_start → usage` (before tool dispatch), `(performance.now() − start)/1000` s, gated `anyEnabled()`.
+  `docs/{design,implementation}/2026-07-01-otel-operation-duration-histogram.md`. Commit be0154a.
+- **RW8a-2** (Wave D) — `tree_search` optional `goalScore?` early-termination (break after the per-depth
+  best-update once `best.score >= goalScore`; default-absent ⇒ byte-identical). Commit 1b1722c.
+- **RW7b-2** (Wave D) — `memory` `forget-archive <key>` verb (delete an archived note in one step).
+  Commit 1b1722c.
+- **RW7a-3** (Wave D) — `time-travel` command polish: an ambiguous bare-step selector prints **one** line
+  (`resolve()` returns an `"ambiguous"` sentinel, callers suppress the duplicate `no such checkpoint`);
+  `/fork` honors `cfg().enabled` (the write path). Commit 1b1722c.
+
+**Still deferred (verified infeasible or intentional Simplicity-First cut — unchanged):** the audit
+confirmed these stay deferred — they break the zero-dep / offline-testable / tiny-seam constraints or
+have no current consumer: **RW6c-1** (container backend), **RW7b-1** (embedding/semantic memory),
+**RW7c-2** (traceparent propagation — needs a new tool-HTTP egress seam), **RW7c-3** (live-collector
+smoke — un-offline-testable), **RW7a-1/2** (delta blobs, rewind↔workspace unification), **RW6a-1/2**,
+**RW3-3/4**, **RW4-1/2**, **RW5-1**, **RW6b-1**, **RW8a-3** (GoT DSL/multi-round), **RW9-2/3**, the six
+top "correctly cut" items (`DEFERRED-1..6`), and the new **KR-1** (server snapshot-on-abort bare-`[user]`
+guard, registered above). Building these would spend kernel headroom on no-consumer seams or violate the
+zero-dep/offline posture.
