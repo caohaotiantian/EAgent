@@ -1,5 +1,12 @@
 # Design — Tree-of-Thought search (multi-step beam search over forked agents)
 
+```
+Status: closed
+Closing-commit: 5bd173a
+Closed-on: 2026-06-30
+Deferred: RW8a-1 narrowed to GoT-only (ToT shipped); RW8a-2 (early goal-termination, design R5) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-30-tree-search` · **Mode:** Full · **Source:** `docs/DEFERRED-FOLLOWUPS.md` RW8a-1
 (reasoning-search's registered follow-up). **Research:** Tree of Thoughts (Yao et al., 2023, arXiv 2305.10601);
 Graph of Thoughts (Besta et al., 2023, arXiv 2308.09687).

@@ -1,5 +1,12 @@
 # Implementation — Tree-of-Thought search (`tree_search`)
 
+```
+Status: closed
+Closing-commit: 5bd173a
+Closed-on: 2026-06-30
+Deferred: RW8a-1 (GoT), RW8a-2 (early goal-termination) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-30-tree-search` (matches design) · **Design:**
 [`design/2026-06-30-tree-search.md`](../design/2026-06-30-tree-search.md)
 
@@ -146,3 +153,13 @@ Order-invariant `longest`/`shortest` scorers keep AC-3's *winning text* determin
   let depth-1 complete + block at depth ≥ 2) + clarifications (AC-3 key on whole `req.messages`; AC-4 provider
   call-counter not the closure `forkFrom`; baseline count). All folded.
 - **Round 2 (confirming)** — **zero severe, zero general.** Two-generation satisfied. **L2 closed.**
+
+## F Closeout Review
+
+- **F end-to-end review** — **pass, zero severe.** The beam loop verified correct on every axis (exact
+  budget clip, global-best tracked across all depths, moving-frontier abort genuinely exercised, rejected
+  children excluded, intermediate forks pruned); `best_of_n` byte-identical; in scope (no GoT/MCTS/kernel
+  change). 4 generals (non-blocking): two coverage gaps (KDD-5 cross-depth best, R2 dangling-prune) now
+  **closed** by added tests; AC-4 bound tightened to exact; doc-drift reconciled (README row, RW8a-1→GoT,
+  RW8a-2 registered). Gates: typecheck 0, `npm test` 1117 pass / 1 skip, kernel 2186, ext 58 (new tool, not
+  extension), `npm run eval` 5/5.
