@@ -53,4 +53,4 @@ Three independent low-risk follow-ups from the post-Wave-9 register, each in a d
 
 ## Closure
 
-_(filled at accept: closing-commit + per-RW one-liner.)_
+**Closed** (commit 8f191b7): RW9-1 — `lastFlush` tracked at agent_end, awaited at session_shutdown then a final flush. RW1-2 — `cache=` field in the trace token line, shown only when cache tokens > 0 (uncached output byte-identical). RW7d-1 — 3 new fixtures (parallel-wave, subsequence-in-order, text-only-budget); `npm run eval` 5/5. typecheck 0, npm test 1104, kernel 2186, no new dep.
