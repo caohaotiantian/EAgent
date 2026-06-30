@@ -17,6 +17,8 @@ import { makeHarness } from "./helpers.js";
 const ENV_KEYS = [
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
   "OTEL_EXPORTER_OTLP_HEADERS",
   "EAGENT_OTEL",
 ] as const;
@@ -100,13 +102,60 @@ function attr(span: OtlpSpan, key: string): { stringValue?: string; intValue?: s
   return span.attributes.find((a) => a.key === key)?.value;
 }
 
+// --- metrics + logs (sibling signals) -------------------------------------
+
+type KV = { key: string; value: { stringValue?: string; intValue?: string } };
+interface NumberDataPoint {
+  attributes: KV[];
+  asInt?: string;
+  startTimeUnixNano: string;
+  timeUnixNano: string;
+}
+interface OtlpMetric {
+  name: string;
+  unit?: string;
+  sum?: { dataPoints: NumberDataPoint[]; aggregationTemporality: number; isMonotonic: boolean };
+}
+interface OtlpLogRecord {
+  timeUnixNano: string;
+  severityNumber: number;
+  severityText: string;
+  body: { stringValue: string };
+  attributes: KV[];
+  traceId?: string;
+  spanId?: string;
+}
+
+/** Captured calls whose URL path contains `path` (route the per-signal POSTs by URL). */
+function callsTo(calls: Captured[], path: string): Captured[] {
+  return calls.filter((c) => c.url.includes(path));
+}
+function metricsOf(call: Captured): OtlpMetric[] {
+  const body = JSON.parse(String(call.init.body)) as {
+    resourceMetrics: { resource: { attributes: KV[] }; scopeMetrics: { scope: { name: string }; metrics: OtlpMetric[] }[] }[];
+  };
+  return body.resourceMetrics[0]!.scopeMetrics[0]!.metrics;
+}
+function metricNamed(call: Captured, name: string): OtlpMetric | undefined {
+  return metricsOf(call).find((m) => m.name === name);
+}
+function dpBy(metric: OtlpMetric, key: string, value: string): NumberDataPoint | undefined {
+  return metric.sum?.dataPoints.find((dp) => dp.attributes.some((a) => a.key === key && a.value.stringValue === value));
+}
+function logRecordsOf(call: Captured): OtlpLogRecord[] {
+  const body = JSON.parse(String(call.init.body)) as {
+    resourceLogs: { resource: { attributes: KV[] }; scopeLogs: { scope: { name: string }; logRecords: OtlpLogRecord[] }[] }[];
+  };
+  return body.resourceLogs[0]!.scopeLogs[0]!.logRecords;
+}
+
 // ---------------------------------------------------------------------------
 // AC-3 — OTLP body shape + KeyValue/AnyValue encoding
 // ---------------------------------------------------------------------------
 test("AC-3: posts one OTLP/HTTP-JSON body with the resourceSpans envelope and KeyValue resource attrs", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   const { calls, restore } = captureFetch();
   try {
     const { agent, host } = makeHarness({
@@ -144,7 +193,7 @@ test("AC-3: posts one OTLP/HTTP-JSON body with the resourceSpans envelope and Ke
 test("AC-4: one 32-hex traceId, 16-hex spanIds, agent->turn->tool nesting, decimal-string wall-clock nanos", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   const { calls, restore } = captureFetch();
   try {
     const { agent, host } = makeHarness({
@@ -192,7 +241,7 @@ test("AC-4: one 32-hex traceId, 16-hex spanIds, agent->turn->tool nesting, decim
 test("AC-5: agent span carries gen_ai.system/model + usage ints; failed tool span has status 2; parallel pair id-keyed", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   const { calls, restore } = captureFetch();
   try {
     const { agent, host } = makeHarness({
@@ -264,7 +313,7 @@ test("AC-6: inert with no endpoint and with EAGENT_OTEL=off; traces var used as-
   {
     const saved = saveEnv();
     clearEnv();
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
     process.env.EAGENT_OTEL = "off";
     const { calls, restore } = captureFetch();
     try {
@@ -298,7 +347,8 @@ test("AC-6: inert with no endpoint and with EAGENT_OTEL=off; traces var used as-
     }
   }
 
-  // (d) base var with a trailing slash -> single-slash .../v1/traces (no //).
+  // (d) base var with a trailing slash -> fires all three signals, each at its
+  // single-slash derived path (no //). Route the captured POSTs by URL.
   {
     const saved = saveEnv();
     clearEnv();
@@ -308,8 +358,16 @@ test("AC-6: inert with no endpoint and with EAGENT_OTEL=off; traces var used as-
       const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
       await host.use("otel-exporter", otelExporter);
       await agent.run("go");
-      assert.equal(calls.length, 1, "base var exports");
-      assert.equal(calls[0]!.url, "http://collector.test:4318/v1/traces", "trailing slash stripped, single /v1/traces");
+      // The base var serves all three signals via /v1/<signal> (correct OTLP).
+      const tr = callsTo(calls, "/v1/traces");
+      const me = callsTo(calls, "/v1/metrics");
+      const lo = callsTo(calls, "/v1/logs");
+      assert.equal(tr.length, 1, "base var derives a /v1/traces POST");
+      assert.equal(tr[0]!.url, "http://collector.test:4318/v1/traces", "trailing slash stripped, single /v1/traces");
+      assert.equal(me.length, 1, "base var derives a /v1/metrics POST");
+      assert.equal(me[0]!.url, "http://collector.test:4318/v1/metrics", "trailing slash stripped, single /v1/metrics");
+      assert.equal(lo.length, 1, "base var derives a /v1/logs POST");
+      assert.equal(lo[0]!.url, "http://collector.test:4318/v1/logs", "trailing slash stripped, single /v1/logs");
       await host.dispose();
     } finally {
       restore();
@@ -324,7 +382,7 @@ test("AC-6: inert with no endpoint and with EAGENT_OTEL=off; traces var used as-
 test("AC-7: a rejecting fetch is swallowed; the agent run still completes normally", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   const { calls, restore } = rejectingFetch();
   try {
     const { agent, host } = makeHarness({
@@ -348,7 +406,7 @@ test("AC-7: a rejecting fetch is swallowed; the agent run still completes normal
 test("D-W9.6b: session_shutdown performs the export AND awaits it before resolving", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   // A slow fetch: record ordering so we can prove the shutdown handler awaited
   // the POST (fetch-end must precede shutdown-resolved), not fire-and-forget.
   const order: string[] = [];
@@ -389,7 +447,7 @@ test("D-W9.6b: session_shutdown performs the export AND awaits it before resolvi
 test("RW9-1: session_shutdown awaits the last run's in-flight agent_end POST before resolving", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   // A slow fetch records ordering. agent_end drains the buffer with a fire-and-
   // forget POST; the fix tracks that promise so session_shutdown awaits it (the
   // hard-exit window where a process.exit right after a run could drop the batch).
@@ -432,7 +490,7 @@ test("RW9-1: session_shutdown awaits the last run's in-flight agent_end POST bef
 test("R4: no span attribute leaks tool arguments or result content", async () => {
   const saved = saveEnv();
   clearEnv();
-  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
   const { calls, restore } = captureFetch();
   try {
     const { agent, host } = makeHarness({
@@ -448,6 +506,334 @@ test("R4: no span attribute leaks tool arguments or result content", async () =>
     // The tool name (metadata) is allowed and present.
     assert.ok(serialized.includes("gen_ai.tool.name"), "tool name metadata is folded");
 
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ===========================================================================
+// OTLP metrics + logs sibling signals (design 2026-06-30-otlp-metrics-logs).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// AC-3 (metrics) — token-usage Sum (by type) + tool-call Sum (by error)
+// ---------------------------------------------------------------------------
+test("AC-3 metrics: posts an eagent.gen_ai.token.usage Sum (by token type) + eagent.tool.calls Sum (by error)", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({
+      responder: [
+        { toolCalls: [{ name: "ping", arguments: {} }, { name: "ping", arguments: { fail: true } }] },
+        { text: "done" },
+      ],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    // MockProvider's usage carries only input/output, so emit the cache tokens directly.
+    await agent.hooks.emit("usage", {
+      usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 30, cacheWriteTokens: 20 },
+      cumulative: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 30, cacheWriteTokens: 20 },
+    });
+    await agent.run("go");
+
+    const metricsCalls = callsTo(calls, "/v1/metrics");
+    assert.equal(metricsCalls.length, 1, "exactly one POST to the metrics endpoint");
+    assert.equal((metricsCalls[0]!.init.headers as Record<string, string>)["content-type"], "application/json");
+
+    const tokenMetric = metricNamed(metricsCalls[0]!, "eagent.gen_ai.token.usage");
+    assert.ok(tokenMetric, "token-usage metric present");
+    assert.equal(tokenMetric!.unit, "{token}");
+    assert.equal(tokenMetric!.sum!.aggregationTemporality, 2, "cumulative temporality");
+    assert.equal(tokenMetric!.sum!.isMonotonic, true);
+    for (const type of ["input", "output", "cache_read", "cache_write"]) {
+      const dp = dpBy(tokenMetric!, "gen_ai.token.type", type);
+      assert.ok(dp, `data point for token type ${type}`);
+      assert.match(dp!.asInt!, /^\d+$/, "asInt is a decimal string");
+    }
+    assert.ok(Number(dpBy(tokenMetric!, "gen_ai.token.type", "cache_read")!.asInt) >= 30, "cache_read accumulated");
+
+    const toolMetric = metricNamed(metricsCalls[0]!, "eagent.tool.calls");
+    assert.ok(toolMetric, "tool-calls metric present");
+    assert.equal(toolMetric!.unit, "{call}");
+    assert.equal(dpBy(toolMetric!, "error", "false")!.asInt, "1", "one ok tool call");
+    assert.equal(dpBy(toolMetric!, "error", "true")!.asInt, "1", "one errored tool call");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC-4 (logs) — in-run error (maxTurns path) + agent_end, both trace-correlated
+// ---------------------------------------------------------------------------
+test("AC-4 logs: maxTurns error -> ERROR record (class name, no message) + agent_end INFO record, both trace-correlated", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
+  process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+  const { calls, restore } = captureFetch();
+  try {
+    // A responder that keeps wanting a tool so the loop runs to maxTurns.
+    const { agent, host } = makeHarness({ responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }] });
+    agent.tools.register(pingTool());
+    agent.maxTurns = 1; // turn 1 dispatches, then the maxTurns error path emits `error` in-run.
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    const logsCalls = callsTo(calls, "/v1/logs");
+    assert.equal(logsCalls.length, 1, "exactly one POST to the logs endpoint");
+    const records = logRecordsOf(logsCalls[0]!);
+
+    const err = records.find((r) => r.severityNumber === 17);
+    assert.ok(err, "an ERROR record");
+    assert.equal(err!.severityText, "ERROR");
+    assert.equal(err!.body.stringValue, "agent.run: Error", "body is where + error class name, not the raw message");
+    assert.equal(err!.attributes.find((a) => a.key === "error.where")?.value.stringValue, "agent.run");
+    assert.match(err!.traceId!, /^[0-9a-f]{32}$/, "ERROR record correlated to the run trace");
+    assert.match(err!.spanId!, /^[0-9a-f]{16}$/);
+
+    const info = records.find((r) => r.severityNumber === 9);
+    assert.ok(info, "an INFO record");
+    assert.equal(info!.severityText, "INFO");
+    assert.equal(info!.body.stringValue, "agent_end");
+    assert.equal(
+      info!.attributes.find((a) => a.key === "gen_ai.response.finish_reason")?.value.stringValue,
+      "stop",
+    );
+    assert.equal(info!.traceId, err!.traceId, "both records share the run's traceId");
+    assert.equal(info!.spanId, err!.spanId, "both records carry the root spanId");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC-5 (no content leak — strengthened over metrics + logs)
+// ---------------------------------------------------------------------------
+test("AC-5 no-leak: an error message fragment + a tool arg marker never reach the metrics/logs wire", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: { marker: "ARGMARKER" } }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    // An error whose message embeds an argument-like fragment must NOT leak.
+    await agent.hooks.emit("error", { where: "tool.exec", error: new Error("secret=" + "XYZ") });
+    await agent.run("go");
+
+    const bodies = [...callsTo(calls, "/v1/metrics"), ...callsTo(calls, "/v1/logs")];
+    assert.ok(callsTo(calls, "/v1/logs").length >= 1, "a logs POST occurred (real content to scan)");
+    for (const c of bodies) {
+      const body = String(c.init.body);
+      assert.ok(!body.includes("secret="), "the error message must not leak");
+      assert.ok(!body.includes("XYZ"), "the error message fragment must not leak");
+      assert.ok(!body.includes("ARGMARKER"), "the tool argument must not leak");
+      assert.ok(!body.includes("RESULTBODY"), "the tool result content must not leak");
+    }
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC-6 (independent signals) — each endpoint exports only its own signal
+// ---------------------------------------------------------------------------
+test("AC-6 independent: metrics-only posts only /v1/metrics; logs-only posts only /v1/logs", async () => {
+  // (a) only the metrics endpoint set.
+  {
+    const saved = saveEnv();
+    clearEnv();
+    process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+    const { calls, restore } = captureFetch();
+    try {
+      const { agent, host } = makeHarness({
+        responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+      });
+      agent.tools.register(pingTool());
+      await host.use("otel-exporter", otelExporter);
+      await agent.run("go");
+      assert.equal(callsTo(calls, "/v1/metrics").length, 1, "a metrics POST");
+      assert.equal(callsTo(calls, "/v1/logs").length, 0, "no logs POST");
+      assert.equal(callsTo(calls, "/v1/traces").length, 0, "no traces POST");
+      await host.dispose();
+    } finally {
+      restore();
+      restoreEnv(saved);
+    }
+  }
+  // (b) only the logs endpoint set.
+  {
+    const saved = saveEnv();
+    clearEnv();
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+    const { calls, restore } = captureFetch();
+    try {
+      const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
+      await host.use("otel-exporter", otelExporter);
+      await agent.run("go");
+      assert.equal(callsTo(calls, "/v1/logs").length, 1, "a logs POST (the agent_end INFO record)");
+      assert.equal(callsTo(calls, "/v1/metrics").length, 0, "no metrics POST");
+      assert.equal(callsTo(calls, "/v1/traces").length, 0, "no traces POST");
+      await host.dispose();
+    } finally {
+      restore();
+      restoreEnv(saved);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC-7 (off-by-default inert across all signals)
+// ---------------------------------------------------------------------------
+test("AC-7 off: no endpoints => zero POSTs; EAGENT_OTEL=off with all endpoints set => zero POSTs", async () => {
+  // (a) no endpoints at all.
+  {
+    const saved = saveEnv();
+    clearEnv();
+    const { calls, restore } = captureFetch();
+    try {
+      const { agent, host } = makeHarness({
+        responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+      });
+      agent.tools.register(pingTool());
+      await host.use("otel-exporter", otelExporter);
+      await agent.run("go");
+      assert.equal(calls.length, 0, "no endpoint => inert, zero POSTs");
+      await host.dispose();
+    } finally {
+      restore();
+      restoreEnv(saved);
+    }
+  }
+  // (b) all three endpoints set but the kill switch is off.
+  {
+    const saved = saveEnv();
+    clearEnv();
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
+    process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+    process.env.EAGENT_OTEL = "off";
+    const { calls, restore } = captureFetch();
+    try {
+      const { agent, host } = makeHarness({
+        responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+      });
+      agent.tools.register(pingTool());
+      await host.use("otel-exporter", otelExporter);
+      await agent.run("go");
+      assert.equal(calls.length, 0, "EAGENT_OTEL=off kill switch => inert across all signals");
+      await host.dispose();
+    } finally {
+      restore();
+      restoreEnv(saved);
+    }
+  }
+});
+
+// AC-7 off (kill switch is inert, not just silent): with the switch engaged and
+// a logs endpoint set, the `error`/`agent_end` handlers must not buffer records
+// into `logRecords` (flush early-returns and never drains them => a leak).
+test("AC-7 off: EAGENT_OTEL=off with a logs endpoint does not buffer log records (no leak)", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+  process.env.EAGENT_OTEL = "off";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    // An in-run error plus the agent_end at the run's close — both would push.
+    await agent.hooks.emit("error", { where: "tool.exec", error: new Error("boom") });
+    await agent.run("go");
+
+    assert.equal(calls.length, 0, "kill switch => zero POSTs");
+    const lines: string[] = [];
+    await commands.get("otel")!.run({ agent, args: "status", print: (l) => lines.push(l) });
+    assert.match(lines.join("\n"), /logRecords=0\b/, "kill switch must not buffer log records");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC-8 (cumulative + decimal strings) — token Sum data points
+// ---------------------------------------------------------------------------
+test("AC-8 cumulative: token Sum data points are cumulative/monotonic, asInt decimal, start <= time", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
+    await host.use("otel-exporter", otelExporter);
+    await agent.hooks.emit("usage", {
+      usage: { inputTokens: 7, outputTokens: 3 },
+      cumulative: { inputTokens: 7, outputTokens: 3 },
+    });
+    await agent.run("go");
+
+    const tokenMetric = metricNamed(callsTo(calls, "/v1/metrics")[0]!, "eagent.gen_ai.token.usage")!;
+    assert.equal(tokenMetric.sum!.aggregationTemporality, 2);
+    assert.equal(tokenMetric.sum!.isMonotonic, true);
+    assert.ok(tokenMetric.sum!.dataPoints.length > 0, "at least one token data point");
+    for (const dp of tokenMetric.sum!.dataPoints) {
+      assert.match(dp.asInt!, /^\d+$/, "asInt is a decimal string");
+      assert.match(dp.startTimeUnixNano, /^\d+$/);
+      assert.match(dp.timeUnixNano, /^\d+$/);
+      assert.ok(Number(dp.startTimeUnixNano) <= Number(dp.timeUnixNano), "session start <= now");
+    }
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC-9 (collector-down never breaks the run) — over metrics + logs
+// ---------------------------------------------------------------------------
+test("AC-9 collector-down: a rejecting fetch on every signal is swallowed; the run still completes normally", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+  const { calls, restore } = rejectingFetch();
+  try {
+    const { agent, host } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    const result = await agent.run("go");
+    assert.equal(result.reason, "end_turn", "the run completes normally despite the export failures");
+    assert.equal(callsTo(calls, "/v1/metrics").length, 1, "a metrics export was attempted (then swallowed)");
+    assert.equal(callsTo(calls, "/v1/logs").length, 1, "a logs export was attempted (then swallowed)");
+    assert.equal(callsTo(calls, "/v1/traces").length, 1, "the traces export was attempted and unaffected");
     await host.dispose();
   } finally {
     restore();
