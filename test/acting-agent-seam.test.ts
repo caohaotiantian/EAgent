@@ -386,8 +386,8 @@ function toolName(s: OtlpSpan): string | undefined {
 
 test("AC-6 otel: two concurrent forks under one parent emit distinct, correctly-parented traces", async () => {
   await withEnv(["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "EAGENT_OTEL"], async () => {
-    for (const k of ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "EAGENT_OTEL"]) delete process.env[k];
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+    for (const k of ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "EAGENT_OTEL"]) delete process.env[k];
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
 
     const bodies: string[] = [];
     const origFetch = globalThis.fetch;

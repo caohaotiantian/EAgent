@@ -42,6 +42,19 @@ interface OtlpSpan {
   status?: { code: 1 | 2 };
 }
 
+/** An OTLP log record. `severityNumber` 9 is INFO, 17 is ERROR. */
+interface OtlpLogRecord {
+  /** OTLP fixed64 nanoseconds, emitted as a decimal string. */
+  timeUnixNano: string;
+  severityNumber: number;
+  severityText: string;
+  body: { stringValue: string };
+  attributes: KeyValue[];
+  /** Correlated to the acting agent's trace when one is live. */
+  traceId?: string;
+  spanId?: string;
+}
+
 export default function activate(e: ExtensionAPI): () => void {
   // Per-agent trace state so concurrent forks don't collide on a shared
   // `openSpans["1"]` or traceId. Keyed by the ACTING agent; lazily created on the
@@ -109,42 +122,157 @@ export default function activate(e: ExtensionAPI): () => void {
     return undefined;
   };
 
-  const enabled = (): boolean =>
-    !!endpoint() && process.env.EAGENT_OTEL !== "off" && (e.store.get<boolean>("enabled", true) ?? true);
+  /** The metrics endpoint: the signal-specific var as-is, else the base var + `/v1/metrics`. */
+  const metricsEndpoint = (): string | undefined => {
+    const metrics = process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT;
+    if (metrics) return metrics;
+    const base = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    if (base) return `${base.replace(/\/+$/, "")}/v1/metrics`;
+    return undefined;
+  };
+
+  /** The logs endpoint: the signal-specific var as-is, else the base var + `/v1/logs`. */
+  const logsEndpoint = (): string | undefined => {
+    const logs = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+    if (logs) return logs;
+    const base = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    if (base) return `${base.replace(/\/+$/, "")}/v1/logs`;
+    return undefined;
+  };
+
+  const notSuppressed = (): boolean =>
+    process.env.EAGENT_OTEL !== "off" && (e.store.get<boolean>("enabled", true) ?? true);
+
+  // The traces gate (the trace handlers + the trace flush branch).
+  const enabled = (): boolean => !!endpoint() && notSuppressed();
+  // Any signal enabled — gates the shared usage/tool_end accumulation, since a
+  // metrics-only run (no traces endpoint) creates no RunTrace yet must still count.
+  const anyEnabled = (): boolean =>
+    (!!endpoint() || !!metricsEndpoint() || !!logsEndpoint()) && notSuppressed();
+
+  // Cumulative session counters (the Sum totals). `sessionStart` is the Sum's
+  // startTimeUnixNano; counters keep growing (the Sum re-sends the running total).
+  const tokenUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const toolCalls = { ok: 0, error: 0 };
+  const sessionStart = nanos();
+  const hasMetricData = (): boolean =>
+    tokenUsage.input > 0 ||
+    tokenUsage.output > 0 ||
+    tokenUsage.cache_read > 0 ||
+    tokenUsage.cache_write > 0 ||
+    toolCalls.ok > 0 ||
+    toolCalls.error > 0;
+  // Buffered log records, drained (cleared) only after a /v1/logs POST.
+  const logRecords: OtlpLogRecord[] = [];
 
   const warnOnce = (): void => {
     if (warned) return;
     warned = true;
-    e.log.warn("failed to POST traces to the collector (export is best-effort)");
+    e.log.warn("failed to POST telemetry to the collector (export is best-effort)");
   };
 
-  // Returns the export POST so a caller (session_shutdown) can await it; the
-  // intra-run agent_end caller leaves it unawaited (fire-and-forget). The 5s
-  // AbortSignal.timeout bounds the await if the collector is unresponsive.
-  const flush = (): Promise<void> => {
-    if (!enabled() || finished.length === 0) return Promise.resolve();
-    const url = endpoint();
-    if (!url) return Promise.resolve();
-    // Best-effort close: stamp an end ts on any still-open span (a child root that
-    // never fired agent_end, or a span left open by an aborted run).
-    const end = nanos();
-    for (const s of finished) if (!s.endTimeUnixNano) s.endTimeUnixNano = end;
-    const body = {
-      resourceSpans: [
-        {
-          resource: { attributes: [attr("service.name", "eagent")] },
-          scopeSpans: [{ scope: { name: "eagent" }, spans: finished }],
-        },
-      ],
-    };
-    const pending = fetch(url, {
+  // The shared per-signal POST: best-effort (a 5s timeout + a swallow-all
+  // warnOnce). Returns the promise so session_shutdown can await the in-flight
+  // batch. The body is serialized synchronously here (before any caller-side
+  // buffer clear), so a caller may clear its buffer right after this returns.
+  const flushSignal = (url: string, body: unknown): Promise<void> =>
+    fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...parseHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(5000),
     }).then(() => {}, () => warnOnce());
-    finished = [];
-    return pending;
+
+  // A cumulative Sum NumberDataPoint: `startTimeUnixNano` is the session start,
+  // `asInt` the running total as a decimal string.
+  const sumPoint = (kv: KeyValue, n: number, now: string) => ({
+    attributes: [kv],
+    asInt: String(n),
+    startTimeUnixNano: sessionStart,
+    timeUnixNano: now,
+  });
+
+  const metricsBody = (): unknown => {
+    const now = nanos();
+    const metrics: unknown[] = [];
+    const tokenPoints = (Object.entries(tokenUsage) as [string, number][])
+      .filter(([, n]) => n > 0)
+      .map(([type, n]) => sumPoint(attr("gen_ai.token.type", type), n, now));
+    if (tokenPoints.length > 0)
+      metrics.push({
+        name: "eagent.gen_ai.token.usage",
+        unit: "{token}",
+        sum: { dataPoints: tokenPoints, aggregationTemporality: 2, isMonotonic: true },
+      });
+    if (toolCalls.ok > 0 || toolCalls.error > 0)
+      metrics.push({
+        name: "eagent.tool.calls",
+        unit: "{call}",
+        sum: {
+          dataPoints: [
+            sumPoint(attr("error", "false"), toolCalls.ok, now),
+            sumPoint(attr("error", "true"), toolCalls.error, now),
+          ],
+          aggregationTemporality: 2,
+          isMonotonic: true,
+        },
+      });
+    return {
+      resourceMetrics: [
+        {
+          resource: { attributes: [attr("service.name", "eagent")] },
+          scopeMetrics: [{ scope: { name: "eagent" }, metrics }],
+        },
+      ],
+    };
+  };
+
+  const logsBody = (): unknown => ({
+    resourceLogs: [
+      {
+        resource: { attributes: [attr("service.name", "eagent")] },
+        scopeLogs: [{ scope: { name: "eagent" }, logRecords }],
+      },
+    ],
+  });
+
+  // Flush all three signals; each exports only when ITS endpoint resolves AND it
+  // has data. Returns a promise that resolves when every started POST settles, so
+  // session_shutdown can await the last in-flight batch (RW9-1). The intra-run
+  // agent_end caller leaves it unawaited (fire-and-forget).
+  const flush = (): Promise<void> => {
+    if (!notSuppressed()) return Promise.resolve();
+    const pending: Promise<void>[] = [];
+
+    const tracesUrl = endpoint();
+    if (tracesUrl && finished.length > 0) {
+      // Best-effort close: stamp an end ts on any still-open span (a child root
+      // that never fired agent_end, or a span left open by an aborted run).
+      const end = nanos();
+      for (const s of finished) if (!s.endTimeUnixNano) s.endTimeUnixNano = end;
+      const body = {
+        resourceSpans: [
+          {
+            resource: { attributes: [attr("service.name", "eagent")] },
+            scopeSpans: [{ scope: { name: "eagent" }, spans: finished }],
+          },
+        ],
+      };
+      finished = [];
+      pending.push(flushSignal(tracesUrl, body));
+    }
+
+    const metricsUrl = metricsEndpoint();
+    if (metricsUrl && hasMetricData()) pending.push(flushSignal(metricsUrl, metricsBody()));
+
+    const logsUrl = logsEndpoint();
+    if (logsUrl && logRecords.length > 0) {
+      const sent = flushSignal(logsUrl, logsBody()); // serialized synchronously
+      logRecords.length = 0; // cumulative counters stay; the log buffer drains
+      pending.push(sent);
+    }
+
+    return Promise.all(pending).then(() => {});
   };
 
   const disposers = [
@@ -190,6 +318,9 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
 
     e.on("tool_end", ({ call, result }) => {
+      // Metric accumulation runs above the trace guard: a metrics-only run never
+      // creates a RunTrace, but its tool calls must still be counted.
+      if (anyEnabled()) toolCalls[result.isError ? "error" : "ok"]++;
       if (!enabled()) return;
       const t = traces.get(currentActingAgent() ?? e.agent);
       if (!t) return;
@@ -202,6 +333,14 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
 
     e.on("usage", ({ usage }) => {
+      // Accumulate the per-call usage into the cumulative session Sum, above the
+      // trace guard (a metrics-only run has no RunTrace but still counts tokens).
+      if (anyEnabled()) {
+        tokenUsage.input += usage.inputTokens;
+        tokenUsage.output += usage.outputTokens;
+        tokenUsage.cache_read += usage.cacheReadTokens ?? 0;
+        tokenUsage.cache_write += usage.cacheWriteTokens ?? 0;
+      }
       if (!enabled()) return;
       const t = traces.get(currentActingAgent() ?? e.agent);
       if (!t) return;
@@ -222,11 +361,43 @@ export default function activate(e: ExtensionAPI): () => void {
       finished.push(span);
     }),
 
+    // An operational ERROR log record — metadata only: the `where` + the error
+    // CLASS name, never the raw `Error.message` (which could embed a tool arg or
+    // result fragment). Correlated to the acting agent's live trace if one exists.
+    // Gated on `logsEndpoint()` (not `anyEnabled()`): `logRecords` drains only on
+    // a /v1/logs POST, so a config with no logs endpoint must not buffer it.
+    e.on("error", ({ error, where }) => {
+      if (!logsEndpoint()) return;
+      const acting = currentActingAgent();
+      const t = acting ? traces.get(acting) : undefined;
+      logRecords.push({
+        timeUnixNano: nanos(),
+        severityNumber: 17,
+        severityText: "ERROR",
+        body: { stringValue: `${where}: ${(error as Error)?.constructor?.name ?? "Error"}` },
+        attributes: [attr("error.where", where)],
+        ...(t ? { traceId: t.traceId, spanId: t.rootSpanId } : {}),
+      });
+    }),
+
     // Drain at the parent's agent_end (children complete within this run, so their
     // spans are already in `finished`); flush stamps any still-open root. Not
     // awaited here so the agent loop is never blocked on the network, but tracked
-    // in `lastFlush` so shutdown can await this run's POST.
-    e.on("agent_end", () => {
+    // in `lastFlush` so shutdown can await this run's POST. First buffer an
+    // operational INFO outcome record (gated on the logs endpoint, like `error`).
+    e.on("agent_end", ({ reason }) => {
+      const agent = currentActingAgent() ?? e.agent;
+      if (logsEndpoint()) {
+        const t = traces.get(agent);
+        logRecords.push({
+          timeUnixNano: nanos(),
+          severityNumber: 9,
+          severityText: "INFO",
+          body: { stringValue: "agent_end" },
+          attributes: [attr("gen_ai.response.finish_reason", reason)],
+          ...(t ? { traceId: t.traceId, spanId: t.rootSpanId } : {}),
+        });
+      }
       lastFlush = flush();
     }),
 
@@ -251,8 +422,11 @@ export default function activate(e: ExtensionAPI): () => void {
         e.store.set("enabled", false);
         ctx.print("otel: export disabled");
       } else {
+        const tokens = tokenUsage.input + tokenUsage.output + tokenUsage.cache_read + tokenUsage.cache_write;
         ctx.print(
-          `otel: ${enabled() ? "enabled" : "disabled"} endpoint=${endpoint() ?? "(none)"} queued=${finished.length}`,
+          `otel: ${anyEnabled() ? "enabled" : "disabled"} ` +
+            `traces=${endpoint() ?? "(none)"} metrics=${metricsEndpoint() ?? "(none)"} logs=${logsEndpoint() ?? "(none)"} ` +
+            `queued=${finished.length} tokens=${tokens} tools=${toolCalls.ok + toolCalls.error} logRecords=${logRecords.length}`,
         );
       }
     },
