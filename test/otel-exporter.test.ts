@@ -111,10 +111,20 @@ interface NumberDataPoint {
   startTimeUnixNano: string;
   timeUnixNano: string;
 }
+interface HistogramDataPoint {
+  attributes: KV[];
+  startTimeUnixNano: string;
+  timeUnixNano: string;
+  count: string;
+  sum: number;
+  bucketCounts: string[];
+  explicitBounds: number[];
+}
 interface OtlpMetric {
   name: string;
   unit?: string;
   sum?: { dataPoints: NumberDataPoint[]; aggregationTemporality: number; isMonotonic: boolean };
+  histogram?: { aggregationTemporality: number; dataPoints: HistogramDataPoint[] };
 }
 interface OtlpLogRecord {
   timeUnixNano: string;
@@ -834,6 +844,123 @@ test("AC-9 collector-down: a rejecting fetch on every signal is swallowed; the r
     assert.equal(callsTo(calls, "/v1/metrics").length, 1, "a metrics export was attempted (then swallowed)");
     assert.equal(callsTo(calls, "/v1/logs").length, 1, "a logs export was attempted (then swallowed)");
     assert.equal(callsTo(calls, "/v1/traces").length, 1, "the traces export was attempted and unaffected");
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ===========================================================================
+// gen_ai.client.operation.duration histogram (design 2026-07-01-otel-operation-duration-histogram).
+// ===========================================================================
+
+const OP_DURATION_BOUNDS = [
+  0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
+];
+
+// ---------------------------------------------------------------------------
+// AC#1 — operation-duration histogram present + well-formed
+// ---------------------------------------------------------------------------
+test("AC#1 duration: posts an eagent.gen_ai.client.operation.duration Histogram, cumulative, unit s, well-formed", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    const metric = metricNamed(callsTo(calls, "/v1/metrics")[0]!, "eagent.gen_ai.client.operation.duration");
+    assert.ok(metric, "operation-duration metric present");
+    assert.equal(metric!.unit, "s");
+    assert.equal(metric!.histogram!.aggregationTemporality, 2, "cumulative temporality");
+    assert.equal(metric!.histogram!.dataPoints.length, 1, "one data point");
+
+    const dp = metric!.histogram!.dataPoints[0]!;
+    assert.ok(Number(dp.count) >= 1, "at least one duration recorded");
+    assert.match(dp.count, /^\d+$/, "count is a decimal string");
+    for (const bc of dp.bucketCounts) assert.match(bc, /^\d+$/, "each bucketCount is a decimal string");
+    assert.equal(
+      dp.bucketCounts.reduce((a, b) => a + Number(b), 0),
+      Number(dp.count),
+      "bucketCounts sum to count",
+    );
+    assert.equal(dp.bucketCounts.length, dp.explicitBounds.length + 1, "one overflow bucket beyond the bounds");
+    assert.deepEqual(dp.explicitBounds, OP_DURATION_BOUNDS, "the semconv advisory bucket boundaries");
+    assert.equal(
+      dp.attributes.find((a) => a.key === "gen_ai.operation.name")?.value.stringValue,
+      "chat",
+      "operation name is chat",
+    );
+    assert.ok(typeof dp.sum === "number" && Number.isFinite(dp.sum) && dp.sum >= 0, "sum is a finite number >= 0");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC#2a — the histogram is additive: the two existing Sums are unperturbed
+// ---------------------------------------------------------------------------
+test("AC#2 additive: the duration histogram coexists with the two Sums, which stay unchanged", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: {} }, { name: "ping", arguments: { fail: true } }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    const call = callsTo(calls, "/v1/metrics")[0]!;
+
+    const tokenMetric = metricNamed(call, "eagent.gen_ai.token.usage");
+    assert.ok(tokenMetric, "token-usage Sum still present");
+    assert.equal(tokenMetric!.unit, "{token}");
+    assert.equal(tokenMetric!.sum!.aggregationTemporality, 2);
+    assert.equal(tokenMetric!.sum!.isMonotonic, true);
+
+    const toolMetric = metricNamed(call, "eagent.tool.calls");
+    assert.ok(toolMetric, "tool-calls Sum still present");
+    assert.equal(toolMetric!.unit, "{call}");
+    assert.equal(dpBy(toolMetric!, "error", "false")!.asInt, "1", "one ok tool call");
+    assert.equal(dpBy(toolMetric!, "error", "true")!.asInt, "1", "one errored tool call");
+
+    assert.ok(
+      metricNamed(call, "eagent.gen_ai.client.operation.duration"),
+      "the duration histogram is present alongside the two Sums",
+    );
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC#2b — default inert: with no metrics endpoint, no /v1/metrics POST occurs
+// ---------------------------------------------------------------------------
+test("AC#2 inert: a duration is recorded but no metrics endpoint => no /v1/metrics POST", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    assert.equal(callsTo(calls, "/v1/metrics").length, 0, "no metrics endpoint => no histogram POST");
+    assert.equal(callsTo(calls, "/v1/traces").length, 1, "the traces signal still exports");
+
     await host.dispose();
   } finally {
     restore();
