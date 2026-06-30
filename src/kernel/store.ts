@@ -6,7 +6,7 @@
  * mutable state). A reload preserves the store; a teardown does not wipe it.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface Store {
@@ -79,9 +79,11 @@ class FileStore implements Store {
     return Object.keys(this.#data);
   }
   private read(): Record<string, unknown> {
+    if (!existsSync(this.path)) return {};
     try {
       return JSON.parse(readFileSync(this.path, "utf8")) as Record<string, unknown>;
     } catch {
+      try { renameSync(this.path, `${this.path}.corrupt-${process.pid}-${Date.now()}`); } catch { /* best effort */ }
       return {};
     }
   }
