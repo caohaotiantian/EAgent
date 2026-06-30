@@ -1,5 +1,14 @@
 # Implementation — kernel defensive-robustness pass (FRESH-1, FRESH-2, FRESH-4)
 
+Status: closed
+Closing-commit: 335e701
+Closed-on: 2026-07-01
+Deferred: finding — server snapshot-on-abort bare-`[user]` guard (KR-1, see `docs/DEFERRED-FOLLOWUPS.md`).
+Phases: Phase 1 (agent.ts FRESH-1+FRESH-2 + fallback-routing test) = commit f6b5148; Phase 2 (store.ts
+FRESH-4 + test/store.test.ts) = commit 335e701. L3 Phase 1 first run hit a design-conflict
+(fallback-routing.test.ts blast-radius); resolved by amending scope (no rolled-back commits, so no
+Deprecated section) and re-running clean.
+
 **Slug:** `2026-06-30-kernel-robustness` (identical to the design doc). **Design:**
 `docs/design/2026-06-30-kernel-robustness.md`.
 

@@ -180,3 +180,46 @@ share — no current consumer). Larger designs remain correctly deferred: **RW8a
 (semantic/embedding memory — zero-dep rule), **RW7c-2/3/4** (OTLP context-propagation, live-collector smoke, histograms; RW7c-1 metrics/logs shipped 2026-06-30), **RW6c-1/2** (container backend, dir-scoped macOS profile), **RW4-1/2** (`Agent.fork`, per-session server
 state), **RW5-1** (fallback-routing onto `onProviderError`), **RW3-3/4** (`spawnChild`, event attribution),
 **RW6a-1 / RW6b-1** (beforeDispatch injection, taint consolidation), and the six top "correctly cut" items.
+
+## Kernel defensive-robustness pass (2026-07-01, branch `chore/finish-deferred-followups`)
+
+From the 2026-06-30 production-readiness verification audit's register-blind kernel sweep — three *new*
+defects in the kernel primitives (not previously in this register), closed via the full three-loop
+(L1 4 rounds incl. corroborating; L2 2 rounds + an L2-restart for a design-conflict; L3 per-Phase
+dev→review→accept; F whole-project review **pass**, zero severe). Design/impl:
+`docs/{design,implementation}/2026-06-30-kernel-robustness.md`.
+
+**Resolved:**
+- **FRESH-1** (HIGH) — a user `stop()`/abort that lands *during* an in-flight provider stream surfaced
+  as `reason:"error"` + an `"error"` event + a thrown `run()` (a real `fetch` provider rejects the
+  stream; `MockProvider` breaks gracefully, so the offline suite never caught it). `run()`'s catch now
+  reports `reason:"stop"` with no event and no re-throw when `signal.aborted`; a genuine error (signal
+  not aborted) keeps the exact `reason:"error"` + emit + throw path. **Blast-radius:** the sole test
+  pinning the old contract (`fallback-routing.test.ts`) was updated (keeps its `spy.calls===0`
+  no-failover invariant); CLI cancel UX **improved** (no spurious red `✗`); server `streamRun` already
+  handled `reason:"stop"`. Commit f6b5148.
+- **FRESH-2** — `maxConcurrency <= 0` spawned an empty worker pool → sparse `results` → `TypeError` at
+  the reconcile `.find` (`agent.ts:303`). Clamped to a floor of `1` in the constructor
+  (`Math.max(1, … ?? Infinity)`; default `Infinity` and the fast path unchanged). Commit f6b5148.
+- **FRESH-4** — `FileStore.read()` conflated an absent file (normal first run) with corrupt JSON and
+  let the next `flush()` atomically overwrite/destroy the corrupt file. Now an `existsSync` guard keeps
+  absent silent, and a corrupt file is **best-effort** renamed aside to `*.corrupt-<pid>-<ts>` before
+  returning `{}` (recoverable; `flush()` untouched). Commit 335e701.
+
+Kernel stayed `< 2200` (2198 → **2199**) by compressing the `run()` abort comment, not raising the
+ceiling. Suite 1136 → **1143 pass / 0 fail / 1 skip**; typecheck 0; eval 5/5.
+
+**New finding registered (deferred):**
+- **KR-1** — server `streamRun` snapshots the session inside the `reason:"stop"` path, so a *first* turn
+  aborted before any assistant output persists a bare dangling `[user]` transcript (then a later turn
+  could form two consecutive user messages). **Pre-existing** (already reachable via an early
+  between-call abort, which also resolves `reason:"stop"`); FRESH-1 only widens the timing window to
+  mid-stream aborts. **Fix (deferred):** a server snapshot-on-abort guard that skips persisting a
+  transcript whose last turn is a bare `[user]`. Sev·Likelihood: S·L (HTTP server + session + first-turn
+  mid-stream abort + reconnect). A separate server-session-robustness change, out of the kernel pass
+  (Simplicity First / Surgical Changes).
+
+**Documented, benign, no action:** under a real provider, a parent-aborted `reasoning-search` fork now
+resolves `reason:"stop"` (scored normally) instead of rejecting (scored `-Infinity`) — only during
+parent cancellation when the fork's result is moot; offline tests use graceful-break providers and are
+unchanged.

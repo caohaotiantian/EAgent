@@ -1,5 +1,14 @@
 # Design — kernel defensive-robustness pass (FRESH-1, FRESH-2, FRESH-4)
 
+Status: closed
+Closing-commit: 335e701
+Closed-on: 2026-07-01
+Deferred: finding — server `streamRun` snapshots a bare dangling `[user]` transcript when a first turn
+is aborted before any assistant output (pre-existing, widened by FRESH-1's timing); a server
+snapshot-on-abort guard is the fix (KR-1, registered in `docs/DEFERRED-FOLLOWUPS.md`). Benign-and-documented
+(no action): a parent-aborted `reasoning-search` fork under a real provider now scores normally vs
+`-Infinity` (§6). Not-this-change: a pre-existing `test/agent.test.ts` reasoning_delta type error.
+
 **Slug:** `2026-06-30-kernel-robustness` · **Tier:** Full · **Branch:** off `init`
 **Source:** the 2026-06-30 deferred/production-readiness verification audit (register-blind fresh
 sweep of `src/kernel/`). These three are *not* in `docs/DEFERRED-FOLLOWUPS.md` — they are newly
@@ -16,9 +25,13 @@ the offline test suite never exercises produces a wrong outcome:
   *during* an in-flight provider stream, a real `fetch`-based provider rejects the stream with an
   `AbortError`. `streamTurn` rethrows it (post-commit, `agent.ts:420-422`) and `run()`'s catch
   (`agent.ts:337-340`) turns it into `reason:"error"`, **emits an `"error"` event**, and **rethrows**
-  so `run()` rejects. A normal cancellation therefore (a) emits spurious error telemetry that trips
-  error-counting guards (`circuit-breaker`, `limits`), and (b) makes the caller's `await run()`
-  throw. The only existing `stop()` test (`agent.test.ts:282-303`) aborts *between* provider calls,
+  so `run()` rejects. A normal cancellation therefore (a) emits a spurious `"error"` event — consumed by
+  `otel-exporter` (`otel-exporter.ts:371`, logged at ERROR severity) and `cli.ts` (`:304`, a red `✗`) —
+  and (b) makes the caller's `await run()`
+  throw. (Note: the `circuit-breaker`/`limits` guards count *tool-call* outcomes via
+  `beforeToolCall`/`afterToolCall`, **not** the agent `"error"` event, so they are unaffected either
+  way — an earlier draft named them imprecisely.) The only existing `stop()` test
+  (`agent.test.ts:282-303`) aborts *between* provider calls,
   and `MockProvider` breaks gracefully on `signal.aborted` instead of throwing (`mock.ts:81,90`), so
   the offline suite is green while production diverges silently.
 
@@ -258,9 +271,17 @@ preserved for recovery.
 - **`docs/design/2026-06-28-forkable-state.md`** (snapshot/restore, `#step`) — unaffected; FRESH-1 only
   changes how an already-aborted run reports `reason`/throws, not transcript or step state.
 - **`docs/design/2026-06-29-governed-subagents.md` / W9.1 acting-agent seam** — FRESH-1 makes
-  cancellation *not* emit `"error"`, which is the correct direction for the error-counting guards
-  (`circuit-breaker`, `limits`) wired in W9.1: a user cancel must not increment their error tallies.
+  cancellation *not* emit `"error"`, which is the correct direction for the `"error"`-event consumers
+  (`otel-exporter` ERROR-severity log; `cli`'s red `✗`): a user cancel must not be logged or rendered as
+  a failure. (`circuit-breaker`/`limits` count *tool* outcomes, not this event, so they are orthogonal.)
   Reinforces, does not conflict.
+- **`docs/design/2026-06-30-tree-search.md` / reasoning-search forks (benign nuance, recorded at F)** —
+  under a **real** `fetch` provider, a child fork stopped by a *parent* abort now resolves
+  `reason:"stop"` (partial transcript) instead of rejecting, so `reasoning-search` scores it normally
+  rather than as `-Infinity` (`reasoning-search.ts:293,301`). This occurs only during parent
+  cancellation (the whole run is tearing down and the fork's result is moot), and the offline tests use
+  graceful-break fork providers (already non-throwing on abort), so they are unchanged. Not a
+  regression — a benign consequence of the unified cancellation contract, noted for completeness.
 - **`docs/DEFERRED-FOLLOWUPS.md`** — none of FRESH-1/2/4 appears there; they are new findings. No prior
   design models `FileStore.read()`'s corrupt-file behavior. No terminology conflict; "acting agent",
   "wave", "dispatch", "flush" all used per existing usage.
