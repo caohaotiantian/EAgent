@@ -38,11 +38,24 @@ import { parseJudgeReply } from "./evals.js";
 const BEST_OF_N = "best_of_n";
 /** subagents' spawn tool, likewise pruned so a fork cannot spawn either. */
 const SPAWN_TOOL = "spawn_agent";
+/** The tree-search tool name — also pruned from every child registry (recursion guard). */
+const TREE_SEARCH = "tree_search";
 
 /** Default number of forks when `n` is omitted. */
 const DEFAULT_N = 3;
 /** Default upper bound on forks — the only fan-out bound. */
 const DEFAULT_MAX_N = 5;
+
+/** tree_search bounding: default + clamped cap for each search dimension, plus the
+ *  hard ceiling on total child runs (the analog of best_of_n's N cap). */
+const DEFAULT_BRANCH = 3;
+const DEFAULT_MAX_BRANCH = 4;
+const DEFAULT_BEAM = 2;
+const DEFAULT_MAX_BEAM = 3;
+const DEFAULT_DEPTH = 2;
+const DEFAULT_MAX_DEPTH = 3;
+const DEFAULT_MAX_NODES = 16;
+const HARD_MAX_NODES = 32;
 
 /**
  * The grader's instruction for the `judge` scorer's tool-less sub-call. It pins
@@ -60,16 +73,18 @@ const JUDGE_SYSTEM_PROMPT =
 type Scorer = (candidate: string) => number | Promise<number>;
 
 /**
- * Copy a parent's active tools into a fresh registry, omitting `best_of_n` and
- * `spawn_agent`. This is the recursion guard (a fork cannot re-fork), factored
- * out so tests can assert it directly — exactly `subagents`' `childRegistryFrom`,
- * extended to drop `best_of_n`. A fresh per-child registry also keeps a fork's
- * own registrations from leaking to the parent or its siblings.
+ * Copy a parent's active tools into a fresh registry, omitting `best_of_n`,
+ * `spawn_agent`, and `tree_search`. This is the recursion guard (a fork cannot
+ * re-fork or re-search), factored out so tests can assert it directly — exactly
+ * `subagents`' `childRegistryFrom`, extended to drop `best_of_n`/`tree_search`. A
+ * fresh per-child registry also keeps a fork's own registrations from leaking to
+ * the parent or its siblings.
  */
 export function childRegistryFrom(parentTools: Tool[]): ToolRegistry {
   const registry = new ToolRegistry();
   for (const tool of parentTools) {
-    if (tool.spec.name === BEST_OF_N || tool.spec.name === SPAWN_TOOL) continue;
+    const name = tool.spec.name;
+    if (name === BEST_OF_N || name === SPAWN_TOOL || name === TREE_SEARCH) continue;
     registry.register(tool);
   }
   return registry;
@@ -99,6 +114,16 @@ function argmax(scores: readonly number[]): number {
   let best = 0;
   for (let i = 1; i < scores.length; i++) if (scores[i]! > scores[best]!) best = i;
   return best;
+}
+
+/** Clamp `v` into the inclusive range [lo, hi]. */
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(v, hi));
+}
+
+/** Read an integer argument, falling back to `dflt` when absent or non-finite. */
+function intArg(value: unknown, dflt: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : dflt;
 }
 
 /**
@@ -146,6 +171,12 @@ export default function activate(e: ExtensionAPI): () => void {
     child.restore(snapshot);
     return child;
   };
+
+  /** Fork from any node state (root or intermediate), pruning the in-flight
+   *  tool_use the snapshot ends on so every fork starts from a provider-valid
+   *  transcript. best_of_n keeps its own external prune; tree_search forks here. */
+  const forkFrom = (state: AgentState): Agent =>
+    forkChild({ ...state, messages: withoutDanglingToolUse(state.messages) });
 
   /** Grade one candidate via a recursion-safe, tool-less provider sub-call.
    *  Fail-soft: an absent provider, a stream throw, or an unparseable reply → 0. */
@@ -260,6 +291,117 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
   );
 
+  const offTree = e.registerTool(
+    defineTool<{ task?: string; branch?: number; beam?: number; depth?: number; scorer?: string; maxNodes?: number }>({
+      name: TREE_SEARCH,
+      description:
+        "Tree-of-Thought beam search: fork child agents from the current state, run " +
+        "each on `task` as a 'thought', score them, keep the top `beam`, then expand " +
+        "those to `depth`, returning the best-scoring thought found. Bounded by " +
+        "`maxNodes` total child runs; forks share this agent's providers and " +
+        "permissions but cannot themselves re-search or re-fork.",
+      capabilities: ["agent:spawn"],
+      parameters: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "The sub-task each thought node attempts." },
+          branch: { type: "integer", description: `Children per node (default ${DEFAULT_BRANCH}; capped at ${DEFAULT_MAX_BRANCH}).` },
+          beam: { type: "integer", description: `Nodes kept per depth (default ${DEFAULT_BEAM}; capped at ${DEFAULT_MAX_BEAM}).` },
+          depth: { type: "integer", description: `Search depth (default ${DEFAULT_DEPTH}; capped at ${DEFAULT_MAX_DEPTH}).` },
+          scorer: {
+            type: "string",
+            enum: ["judge", "shortest", "longest"],
+            description: "How to rank thoughts; default judge.",
+          },
+          maxNodes: { type: "integer", description: `Hard cap on total child runs (default ${DEFAULT_MAX_NODES}; capped at ${HARD_MAX_NODES}).` },
+        },
+        required: ["task"],
+      },
+      execute: async (args, ctx) => {
+        if (!isEnabled()) {
+          return fail("tree_search: disabled — enable with `/reasoning-search on`.");
+        }
+        const task = typeof args.task === "string" ? args.task : "";
+        if (task.length === 0) return fail(`${TREE_SEARCH} requires a non-empty string \`task\`.`);
+
+        const branch = clamp(intArg(args.branch, DEFAULT_BRANCH), 1, DEFAULT_MAX_BRANCH);
+        const beam = clamp(intArg(args.beam, DEFAULT_BEAM), 1, DEFAULT_MAX_BEAM);
+        const depth = clamp(intArg(args.depth, DEFAULT_DEPTH), 1, DEFAULT_MAX_DEPTH);
+        // Lower-bound maxNodes by `branch` so the first depth always runs the root expansion.
+        const maxNodes = clamp(intArg(args.maxNodes, DEFAULT_MAX_NODES), branch, HARD_MAX_NODES);
+        const scorer = pickScorer(args.scorer, task, ctx);
+
+        interface Node {
+          state: AgentState;
+          text: string;
+          score: number;
+        }
+        const root: AgentState = e.agent.snapshot();
+        let frontier: Node[] = [{ state: root, text: "", score: -Infinity }];
+        let best: { text: string; score: number } | null = null;
+        let used = 0;
+        const details: { score: number; text: string }[][] = [];
+
+        // The abort handler stops the CURRENT live wave: `live` is reassigned each
+        // depth, so a parent abort at depth d tears down depth-d's children, not the
+        // already-settled depth-(d-1) set.
+        let live: Agent[] = [];
+        const stopLive = (): void => {
+          for (const c of live) c.stop();
+        };
+        ctx.signal.addEventListener("abort", stopLive);
+        try {
+          for (let d = 0; d < depth; d++) {
+            if (ctx.signal.aborted) break;
+
+            // Expand the frontier into children, clipped to the remaining node budget.
+            const children: Agent[] = [];
+            for (const node of frontier) {
+              if (used >= maxNodes) break;
+              for (let b = 0; b < branch; b++) {
+                if (used >= maxNodes) break;
+                children.push(forkFrom(node.state));
+                used++;
+              }
+            }
+            if (children.length === 0) break;
+            live = children;
+
+            const settled = await Promise.allSettled(
+              children.map(async (c) => {
+                await c.run(task);
+                return { text: finalText(c.messages), state: c.snapshot() };
+              }),
+            );
+
+            // A rejected child is dropped (never scored, never selected); a fulfilled
+            // child's final text is scored to a number.
+            const scored: Node[] = [];
+            for (const r of settled) {
+              if (r.status !== "fulfilled") continue;
+              const score = await scorer(r.value.text);
+              scored.push({ state: r.value.state, text: r.value.text, score });
+            }
+
+            // Track the global best leaf across ALL depths, so an early high-scoring
+            // thought is never lost to a weaker-but-deeper one.
+            for (const c of scored) if (!best || c.score > best.score) best = { text: c.text, score: c.score };
+            details.push(scored.map((c) => ({ score: c.score, text: c.text.slice(0, 120) })));
+
+            scored.sort((a, b) => b.score - a.score);
+            frontier = scored.slice(0, beam);
+            if (frontier.length === 0) break;
+          }
+        } finally {
+          ctx.signal.removeEventListener("abort", stopLive);
+        }
+
+        if (!best) return fail("tree_search: every branch failed.");
+        return ok(best.text, details);
+      },
+    }),
+  );
+
   const offCmd = e.registerCommand({
     name: "reasoning-search",
     description: "Toggle best-of-N reasoning search. Usage: /reasoning-search [on|off|status]",
@@ -272,13 +414,15 @@ export default function activate(e: ExtensionAPI): () => void {
         e.store.set("enabled", false);
         cmdCtx.print("reasoning-search: off");
       } else {
-        cmdCtx.print(`reasoning-search: ${isEnabled() ? "on" : "off"} (cap ${DEFAULT_MAX_N} forks)`);
+        cmdCtx.print(
+          `reasoning-search: ${isEnabled() ? "on" : "off"} (best_of_n + tree_search; cap ${DEFAULT_MAX_N} forks / ${HARD_MAX_NODES} nodes)`,
+        );
       }
     },
   });
 
   return () => {
-    for (const d of [offTool, offCmd]) {
+    for (const d of [offTool, offTree, offCmd]) {
       try {
         d.dispose();
       } catch {
