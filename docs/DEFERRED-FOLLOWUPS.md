@@ -151,3 +151,30 @@ branch `chore/sandbox-ci-bwrap`). A dedicated `ubuntu-22.04` job installs `bubbl
 can create namespaces (fails loudly — never a silent skip), and runs `test/sandbox-tiers.test.ts` under the
 real backend, so the security-critical wrappers (`--unshare-net`, write confinement, the readonly re-bind) are
 exercised against a real launcher in CI, not only on local macOS sandbox-exec. Fresh-reviewer pass (zero severe).
+
+## Deferred cleanup (2026-06-30, branch `chore/finish-deferred`)
+
+Closed the genuinely-valuable small follow-ups via Light-Mode (four-field brief → fresh-reviewer dev→review
+→accept). Briefs: `docs/design/2026-06-30-deferred-cleanup-batch1.md`, `2026-06-30-self-improve-real-eval-test.md`.
+
+**Resolved:**
+- **RW9-1** — otel last-batch hard-exit flush: `agent_end`'s flush promise is tracked in `lastFlush`;
+  `session_shutdown` awaits it (then a final flush), so a `process.exit` right after a run can't drop the batch.
+- **RW1-2** — `trace.ts` token line now shows a `cache=` field (sum of cache read/write) when > 0; uncached
+  output byte-identical.
+- **RW7d-1** — eval fixtures broadened 2→5 (`parallel-wave`, `subsequence-in-order`, `text-only-budget`),
+  pinning the `order:in_order` / `maxSpans` / `maxTokens` / parallel-wave predicates; `npm run eval` 5/5.
+- **RW8b-1** — self-improve's production `realEvaluate` now has a backend-gated, `EAGENT_SI_INTEGRATION`-opt-in
+  integration test exercising the real spawn+sandbox+subprocess+`runEvalDir`+tamper path end-to-end (verified
+  executing on macOS sandbox-exec; runs in the `sandbox-linux` bwrap CI job). The default `npm test` skips it
+  (kept fast). Closes "the production eval path ships untested".
+
+**Reviewed and kept deferred** (Simplicity First — changing working/fail-closed code for no clear win, or a
+larger design with no current consumer): **RW9-2** (headless-fork guard-UI divergence — the Wave-9 F-review
+judged it "arguably correct"; a fork auto-denying is fail-closed), **RW9-3** (warn-only citations×fork edge,
+off-by-default), **RW7a-3 / RW7b-2** (cosmetic / minor UX, off-by-default), **RW6a-2** (one-line beforeDispatch
+share — no current consumer). Larger designs remain correctly deferred: **RW8a-1** (ToT/GoT), **RW7b-1**
+(semantic/embedding memory — zero-dep rule), **RW7c-1/2/3** (OTLP metrics/logs, context-propagation, live-collector
+smoke), **RW6c-1/2** (container backend, dir-scoped macOS profile), **RW4-1/2** (`Agent.fork`, per-session server
+state), **RW5-1** (fallback-routing onto `onProviderError`), **RW3-3/4** (`spawnChild`, event attribution),
+**RW6a-1 / RW6b-1** (beforeDispatch injection, taint consolidation), and the six top "correctly cut" items.
