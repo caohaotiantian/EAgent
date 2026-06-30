@@ -145,3 +145,9 @@ to staging), RW1-1 (per-run token budget counts cache tokens), RW6d-1 (Gemini em
 | RW9-1 | **otel last-batch hard-exit flush** — `session_shutdown` now awaits `flush()`, but `agent_end`'s eager `void flush()` usually drains the buffer first, so the last run's batch still rides the unawaited `agent_end` POST and can be cut by an immediate `process.exit`. | `otel-exporter.ts` (F-review G1) | S · L | Telemetry-only, best-effort by design; closing the window fully needs an awaited per-run flush or a shutdown drain barrier. |
 | RW9-2 | **Headless-fork guard-UI divergence** — circuit-breaker prompts via the *acting* agent's `ui.confirm` (a headless fork auto-denies in `ask` mode) while flow-guard/provenance prompt via the *parent* `ui`. | `circuit-breaker.ts` (F-review G2) | S · L | Both directions are fail-closed/safe; arguably correct (no N human prompts per fork). Pick one convention if unified UX is wanted. |
 | RW9-3 | **citations × reasoning-search cross-fork warn** — a fork's `[src:N]` ids live in the child's per-agent state; if the parent's final answer echoes one, `agent_end` validation may log a spurious "fabricated source id" warning. | `citations.ts` (F-review G3) | S · L | Warn-only; both extensions default off. |
+
+**2026-06-30:** RW9.3-1 **and** RW6c-3 RESOLVED by the `sandbox-linux` bwrap CI job (`.github/workflows/ci.yml`,
+branch `chore/sandbox-ci-bwrap`). A dedicated `ubuntu-22.04` job installs `bubblewrap`, smoke-checks that bwrap
+can create namespaces (fails loudly — never a silent skip), and runs `test/sandbox-tiers.test.ts` under the
+real backend, so the security-critical wrappers (`--unshare-net`, write confinement, the readonly re-bind) are
+exercised against a real launcher in CI, not only on local macOS sandbox-exec. Fresh-reviewer pass (zero severe).

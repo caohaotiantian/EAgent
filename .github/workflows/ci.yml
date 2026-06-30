@@ -18,3 +18,32 @@ jobs:
       - run: npm test
       - run: npm run eval
       - run: npm run build
+
+  # Real-backend sandbox confinement coverage (RW9.3-1 / RW6c-3). The
+  # `test/sandbox-tiers.test.ts` real-backend cases gate on
+  # `detectBackend(process.platform, binExists)` and SKIP when no OS sandbox is
+  # present — which is the default on the `build` runner. This job installs the
+  # bwrap backend so those cases EXECUTE and the security-critical wrappers
+  # (`--unshare-net`, write confinement, the readonly re-bind) are exercised
+  # against a real launcher, not just string-asserted.
+  #
+  # Runner: ubuntu-22.04 deliberately. bwrap needs unprivileged user namespaces;
+  # ubuntu-24.04 (today's `ubuntu-latest`) restricts them via AppArmor, breaking
+  # bwrap without an extra sysctl. The smoke step below fails the job loudly if
+  # the backend cannot create namespaces, so a silently-skipping run can't masquerade
+  # as coverage.
+  sandbox-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install the bwrap sandbox backend
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Smoke-check bwrap can confine (fail loudly, never skip silently)
+        run: bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net true
+      - name: Run the sandbox confinement tests under a real bwrap backend
+        run: node --import tsx --test "test/sandbox-tiers.test.ts"
