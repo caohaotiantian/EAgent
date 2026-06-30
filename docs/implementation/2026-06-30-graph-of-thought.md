@@ -1,5 +1,12 @@
 # Implementation — Graph-of-Thought (`graph_search`)
 
+```
+Status: closed
+Closing-commit: 575a287
+Closed-on: 2026-06-30
+Deferred: RW8a-3 (GoO DSL / multi-round refine / cross-tool) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-30-graph-of-thought` (matches design) · **Design:**
 [`design/2026-06-30-graph-of-thought.md`](../design/2026-06-30-graph-of-thought.md)
 
@@ -143,3 +150,12 @@ scorers keep selection deterministic. Offline; no new fixtures.
   **outer flow** (mirrors `tree_search:388`); `if (!ctx.signal.aborted)` guards before aggregate/refine;
   `intArg`; flat `ok`; README reconciliation in exit.
 - **Round 2 (confirming)** — **zero severe, zero general.** Two-generation satisfied. **L2 closed.**
+
+## F Closeout Review
+
+- **F end-to-end review** — **pass, zero severe.** Pipeline correct on every axis (cross-op global-best with
+  strict `>`, `best` updated only in the outer flow [the L2 compile-trap avoided], the 3-phase moving-`live`
+  abort with `if(!aborted)` guards proven no-hang, single-op try/catch fault isolation, all-fail→clean fail);
+  `best_of_n`/`tree_search` byte-identical (only the additive guard/teardown/status edits). All ACs met with
+  real non-tautological tests (AC-5 genuinely exercises the cross-op max). Consolidation: README row + RW8a-1
+  SHIPPED-mark + RW8a-3 registered. Gates: typecheck 0, `npm test` 1128 pass / 1 skip, kernel 2186, ext 58.

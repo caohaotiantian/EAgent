@@ -1,5 +1,12 @@
 # Design — Graph-of-Thought operations (`graph_search`: aggregate + refine)
 
+```
+Status: closed
+Closing-commit: 575a287
+Closed-on: 2026-06-30
+Deferred: RW8a-1 RESOLVED (ToT+GoT both shipped); RW8a-3 (configurable GoO DSL / multi-round refine / cross-tool composition) — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-30-graph-of-thought` · **Mode:** Full · **Source:** `docs/DEFERRED-FOLLOWUPS.md` RW8a-1
 (the GoT half; ToT shipped 2026-06-30 as `tree_search`). **Research:** Graph of Thoughts (Besta et al.,
 2023, arXiv 2308.09687).
