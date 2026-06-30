@@ -157,3 +157,50 @@ test("non-git directory: commands print 'not a git repository' and never throw",
     assert.equal(lines[0], "not a git repository", `${cmd} reports non-repo`);
   }
 });
+
+test("EAGENT_CHECKPOINT=off disables the extension: no commands, no auto-snapshot", async () => {
+  const { dir } = makeRepo("v1");
+  const prev = process.env.EAGENT_CHECKPOINT;
+  process.env.EAGENT_CHECKPOINT = "off";
+  try {
+    // Script the model to call a mutating tool once, then stop.
+    let turn = 0;
+    const responder = (_req: CompletionRequest) => {
+      turn++;
+      if (turn === 1) return { toolCalls: [{ name: "writer", arguments: { content: "changed" } }] };
+      return { text: "done" };
+    };
+    const h = makeHarness({ responder });
+    let captured: import("../src/kernel/extension.js").ExtensionAPI | undefined;
+    await h.host.use("checkpoint", (e) => {
+      e.store.set("workspaceDir", dir);
+      captured = e;
+      return activate(e);
+    });
+
+    // Off ⇒ activate early-returns ⇒ no commands registered.
+    assert.equal(h.commands.get("checkpoint"), undefined, "no /checkpoint command when off");
+    assert.equal(h.commands.get("checkpoints"), undefined, "no /checkpoints command when off");
+    assert.equal(h.commands.get("rollback"), undefined, "no /rollback command when off");
+
+    // A mutating tool runs, but the absent auto-snapshot hook records nothing.
+    h.agent.tools.register({
+      spec: {
+        name: "writer",
+        description: "Write content into the workspace file.",
+        parameters: { type: "object", properties: { content: { type: "string" } }, required: ["content"] },
+      },
+      capabilities: ["fs:write"],
+      execute: async (args) => {
+        writeFileSync(join(dir, "file.txt"), String(args.content));
+        return { content: "wrote" };
+      },
+    });
+    await h.agent.run("please write");
+
+    assert.deepEqual(captured!.store.get("checkpoints", []), [], "no auto-snapshot recorded when off");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_CHECKPOINT;
+    else process.env.EAGENT_CHECKPOINT = prev;
+  }
+});

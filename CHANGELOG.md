@@ -126,6 +126,10 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   now distinguishes an absent file (a silent first run) from unparseable JSON; a
   corrupt file is moved aside to `*.corrupt-<pid>-<ts>` before the store starts
   empty, so the next write can no longer destroy persisted keys.
+- **`checkpoint` gained an `EAGENT_CHECKPOINT=off` kill switch.** Its
+  auto-snapshot runs synchronous git on every mutating tool call; the (default-on)
+  extension now honors the house opt-out convention so an operator can disable it
+  (e.g. to avoid blocking the shared HTTP host's event loop).
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.
