@@ -58,6 +58,10 @@ export default function activate(e: ExtensionAPI): () => void {
   // The WeakMap is not enumerable, so flush scans only this.
   let finished: OtlpSpan[] = [];
   let warned = false;
+  // The in-flight agent_end flush, tracked so session_shutdown can await the
+  // actual POST (agent_end drains the shared buffer, so by shutdown that buffer
+  // is empty and a plain flush() would no-op while the POST is still in flight).
+  let lastFlush: Promise<void> = Promise.resolve();
 
   const hex = (bytes: number): string => randomBytes(bytes).toString("hex");
   // Wall-clock ms -> ns as a decimal string by appending six zeros: never
@@ -219,15 +223,18 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
 
     // Drain at the parent's agent_end (children complete within this run, so their
-    // spans are already in `finished`); flush stamps any still-open root. Left
-    // unawaited so the agent loop is never blocked on the network.
+    // spans are already in `finished`); flush stamps any still-open root. Not
+    // awaited here so the agent loop is never blocked on the network, but tracked
+    // in `lastFlush` so shutdown can await this run's POST.
     e.on("agent_end", () => {
-      void flush();
+      lastFlush = flush();
     }),
 
-    // Awaited (emit runs handlers serially): blocks shutdown until the final
-    // batch is exported, so a hard exit can't drop it. Bounded by flush's 5s timeout.
+    // Awaited (emit runs handlers serially): first the in-flight last-run POST,
+    // then anything still buffered, so a hard exit can't drop the final batch.
+    // Bounded by flush's 5s timeout.
     e.on("session_shutdown", async () => {
+      await lastFlush;
       await flush();
     }),
   ];

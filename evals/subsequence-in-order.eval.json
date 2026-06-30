@@ -1,0 +1,37 @@
+{
+  "input": "do several tracked steps",
+  "mockScript": [
+    {
+      "toolCalls": [
+        {
+          "name": "todowrite",
+          "arguments": {
+            "todos": [{ "content": "step one", "status": "in_progress", "priority": "high" }]
+          }
+        }
+      ]
+    },
+    {
+      "toolCalls": [
+        {
+          "name": "todowrite",
+          "arguments": {
+            "todos": [{ "content": "step two", "status": "in_progress", "priority": "high" }]
+          }
+        }
+      ]
+    },
+    {
+      "toolCalls": [
+        {
+          "name": "todowrite",
+          "arguments": {
+            "todos": [{ "content": "step three", "status": "completed", "priority": "high" }]
+          }
+        }
+      ]
+    },
+    { "text": "all three steps tracked" }
+  ],
+  "expect": { "tools": ["todowrite", "todowrite"], "order": "in_order" }
+}

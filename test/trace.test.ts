@@ -95,6 +95,37 @@ test("usage shows non-zero input/output token counts", async () => {
   assert.equal(Number(m![3]), Number(m![1]) + Number(m![2]));
 });
 
+test("usage shows a cache= field on a cached run, summing read+write tokens", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("trace", activate);
+
+  // The MockProvider reports no cache fields, so synthesize a cached-run reading
+  // straight through the bus (the trace handler mirrors `cumulative`).
+  await h.agent.hooks.emit("usage", {
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20 },
+    cumulative: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20 },
+  });
+
+  const out = (await runCommand(h, "usage")).join("\n");
+  const line = out.split("\n").find((l) => l.startsWith("tokens:"));
+  // cache = 100 + 20 = 120; total = 10 + 100 + 20 + 5 = 135.
+  assert.equal(line, "tokens: in=10 cache=120 out=5 total=135");
+});
+
+test("usage line is byte-identical (no cache= field) when there are no cache tokens", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("trace", activate);
+
+  await h.agent.hooks.emit("usage", {
+    usage: { inputTokens: 10, outputTokens: 5 },
+    cumulative: { inputTokens: 10, outputTokens: 5 },
+  });
+
+  const out = (await runCommand(h, "usage")).join("\n");
+  const line = out.split("\n").find((l) => l.startsWith("tokens:"));
+  assert.equal(line, "tokens: in=10 out=5 total=15");
+});
+
 test("trace-save writes valid JSONL of spans", async () => {
   const h = makeHarness({
     fallback: "allow",

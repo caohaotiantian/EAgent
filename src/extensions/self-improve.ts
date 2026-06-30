@@ -204,7 +204,7 @@ export async function runScored(
  * subprocess (refusing when no sandbox backend exists — harness-chosen
  * fail-closed). Integration-only; offline tests inject a stub via `setEvaluator`.
  */
-async function realEvaluate(candidatePath: string, signal?: AbortSignal): Promise<EvalResult> {
+export async function realEvaluate(candidatePath: string, signal?: AbortSignal): Promise<EvalResult> {
   const backend = detectBackend(process.platform, binExists);
   if (backend === "none") {
     throw new Error("no sandbox backend available — refusing to evaluate (fail-closed)");
