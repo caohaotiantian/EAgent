@@ -129,7 +129,7 @@ export class Agent {
     this.providerName = opts.provider;
     this.thinking = opts.thinking ?? "off";
     this.maxTurns = opts.maxTurns ?? 24;
-    this.maxConcurrency = opts.maxConcurrency ?? Infinity;
+    this.maxConcurrency = Math.max(1, opts.maxConcurrency ?? Infinity);
   }
 
   get messages(): readonly Message[] {
@@ -235,12 +235,8 @@ export class Agent {
       await this.hooks.emit("message", { message: userMessage });
       try {
         for (let turn = 1; turn <= this.maxTurns; turn++) {
-          // Honor stop()/abort directly in the loop. The signal is passed to the
-          // provider and tools, but a provider that doesn't reject on abort would
-          // otherwise let the loop run on; checking here makes stop() reliable.
-          // Two checks guard a turn: this one at the top of the loop, and a second
-          // immediately after streamTurn (below) so an abort that lands mid-stream
-          // stops us before the assistant message is appended and dispatched.
+          // Honor stop()/abort directly: three guards end the run reason:"stop" — this
+          // check, the post-streamTurn check below, and run()'s catch (FRESH-1, mid-stream).
           if (this.#abort!.signal.aborted) {
             reason = "stop";
             break;
@@ -335,9 +331,12 @@ export class Agent {
           }
         }
       } catch (err) {
-        reason = "error";
-        await this.hooks.emit("error", { where: "agent.run", error: err });
-        throw err;
+        if (this.#abort?.signal.aborted) reason = "stop";
+        else {
+          reason = "error";
+          await this.hooks.emit("error", { where: "agent.run", error: err });
+          throw err;
+        }
       } finally {
         this.#running = false;
         this.#abort = undefined;

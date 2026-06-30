@@ -260,7 +260,7 @@ test("a mid-stream failure is fatal: no failover, no duplicated deltas", async (
 
 // -- abort during the head is not a failover trigger -------------------------
 
-test("an abort during the head propagates and does NOT fail over", async () => {
+test("an abort during the head is a clean stop and does NOT fail over", async () => {
   const h = makeHarness();
   const down = new FailFast("down", () => h.agent.stop());
   const spy = new RecordingProvider("spy");
@@ -269,7 +269,9 @@ test("an abort during the head propagates and does NOT fail over", async () => {
   h.agent.providerName = "down";
   await activate(h, { enabled: true, chain: [{ provider: "spy", model: "x" }] });
 
-  await assert.rejects(h.agent.run("hello"), "the aborted head error propagated");
+  // FRESH-1 (kernel-robustness): an aborted run now resolves reason:"stop" rather than rejecting.
+  const { reason } = await h.agent.run("hello");
+  assert.equal(reason, "stop", "an aborted run ends reason:stop, not a rejection");
   assert.equal(spy.calls, 0, "the next entry was not tried after an abort");
 });
 

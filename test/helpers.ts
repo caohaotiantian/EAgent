@@ -40,7 +40,7 @@ export interface Harness {
 }
 
 export function makeHarness(
-  opts: { responder?: MockResponder; fallback?: "allow" | "deny" | "ask"; ui?: UI; logger?: Logger } = {},
+  opts: { responder?: MockResponder; fallback?: "allow" | "deny" | "ask"; ui?: UI; logger?: Logger; maxConcurrency?: number } = {},
 ): Harness {
   const ui = opts.ui ?? autoUI(true);
   const logger = opts.logger ?? silentLogger;
@@ -51,6 +51,8 @@ export function makeHarness(
     capabilities,
     provider: "mock",
     model: "mock",
+    // Passed through so a test can exercise the constructor's clamp path.
+    maxConcurrency: opts.maxConcurrency,
   });
   const provider = new MockProvider(opts.responder);
   agent.providers.register(provider, { default: true });
