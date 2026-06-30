@@ -40,6 +40,8 @@ const BEST_OF_N = "best_of_n";
 const SPAWN_TOOL = "spawn_agent";
 /** The tree-search tool name — also pruned from every child registry (recursion guard). */
 const TREE_SEARCH = "tree_search";
+/** The graph-search tool name — also pruned from every child registry (recursion guard). */
+const GRAPH_SEARCH = "graph_search";
 
 /** Default number of forks when `n` is omitted. */
 const DEFAULT_N = 3;
@@ -74,9 +76,9 @@ type Scorer = (candidate: string) => number | Promise<number>;
 
 /**
  * Copy a parent's active tools into a fresh registry, omitting `best_of_n`,
- * `spawn_agent`, and `tree_search`. This is the recursion guard (a fork cannot
- * re-fork or re-search), factored out so tests can assert it directly — exactly
- * `subagents`' `childRegistryFrom`, extended to drop `best_of_n`/`tree_search`. A
+ * `spawn_agent`, `tree_search`, and `graph_search`. This is the recursion guard (a
+ * fork cannot re-fork or re-search), factored out so tests can assert it directly —
+ * exactly `subagents`' `childRegistryFrom`, extended to drop the search tools. A
  * fresh per-child registry also keeps a fork's own registrations from leaking to
  * the parent or its siblings.
  */
@@ -84,7 +86,7 @@ export function childRegistryFrom(parentTools: Tool[]): ToolRegistry {
   const registry = new ToolRegistry();
   for (const tool of parentTools) {
     const name = tool.spec.name;
-    if (name === BEST_OF_N || name === SPAWN_TOOL || name === TREE_SEARCH) continue;
+    if (name === BEST_OF_N || name === SPAWN_TOOL || name === TREE_SEARCH || name === GRAPH_SEARCH) continue;
     registry.register(tool);
   }
   return registry;
@@ -145,6 +147,21 @@ function withoutDanglingToolUse(messages: readonly Message[]): Message[] {
     return messages.slice(0, -1);
   }
   return [...messages];
+}
+
+/** The synthesis prompt for an aggregate node: embeds the task + every candidate. */
+function aggregatePrompt(task: string, thoughts: string[]): string {
+  return (
+    "Combine these candidate answers into one best answer.\n" +
+    `Task: ${task}\n\n` +
+    thoughts.map((t, i) => `Candidate ${i + 1}:\n${t}`).join("\n\n") +
+    "\n\nReturn a single improved answer that combines their strengths."
+  );
+}
+
+/** The improve prompt for a refine node: embeds the task + the answer to better. */
+function refinePrompt(task: string, answer: string): string {
+  return `Improve this answer.\nTask: ${task}\n\nCurrent answer:\n${answer}\n\nReturn a better version.`;
 }
 
 export default function activate(e: ExtensionAPI): () => void {
@@ -402,6 +419,110 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
   );
 
+  const offGraph = e.registerTool(
+    defineTool<{ task?: string; branch?: number; scorer?: string; refine?: boolean }>({
+      name: GRAPH_SEARCH,
+      description:
+        "Graph-of-Thought: generate `branch` thoughts from the current state, " +
+        "aggregate them into one combined answer, then (optionally) refine the best, " +
+        "returning the global best across generate/aggregate/refine. scorer=judge " +
+        "(default) grades each with an LLM sub-call; shortest/longest are deterministic. " +
+        "Forks share this agent's providers and permissions but cannot themselves re-search or re-fork.",
+      capabilities: ["agent:spawn"],
+      parameters: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "The sub-task each generated thought attempts." },
+          branch: { type: "integer", description: `Thoughts to generate (default ${DEFAULT_BRANCH}; capped at ${DEFAULT_MAX_BRANCH}).` },
+          scorer: {
+            type: "string",
+            enum: ["judge", "shortest", "longest"],
+            description: "How to rank nodes; default judge.",
+          },
+          refine: { type: "boolean", description: "Run a refine pass on the best node (default true)." },
+        },
+        required: ["task"],
+      },
+      execute: async (args, ctx) => {
+        if (!isEnabled()) {
+          return fail("graph_search: disabled — enable with `/reasoning-search on`.");
+        }
+        const task = typeof args.task === "string" ? args.task : "";
+        if (task.length === 0) return fail(`${GRAPH_SEARCH} requires a non-empty string \`task\`.`);
+
+        const branch = clamp(intArg(args.branch, DEFAULT_BRANCH), 1, DEFAULT_MAX_BRANCH);
+        const refine = args.refine !== false;
+        const scorer = pickScorer(args.scorer, task, ctx);
+
+        const root: AgentState = e.agent.snapshot();
+        let best: { text: string; score: number } | null = null;
+        const details: { op: string; score: number; text: string }[] = [];
+
+        // Score a node's text and record it; the `best` update stays in the outer
+        // flow so strict control-flow narrowing of `best` holds (mirrors tree_search).
+        const record = async (op: string, text: string): Promise<{ text: string; score: number }> => {
+          const score = await scorer(text);
+          details.push({ op, score, text: text.slice(0, 120) });
+          return { text, score };
+        };
+
+        // The abort handler stops the CURRENT live phase: `live` is reassigned across
+        // the generate array → the aggregate fork → the refine fork.
+        let live: Agent[] = [];
+        const stopLive = (): void => {
+          for (const c of live) c.stop();
+        };
+        ctx.signal.addEventListener("abort", stopLive);
+        try {
+          const gen = Array.from({ length: branch }, () => forkFrom(root));
+          live = gen;
+          const settled = await Promise.allSettled(
+            gen.map(async (c) => {
+              await c.run(task);
+              return finalText(c.messages);
+            }),
+          );
+          const thoughts: string[] = [];
+          for (const r of settled) {
+            if (r.status !== "fulfilled") continue;
+            thoughts.push(r.value);
+            const node = await record("generate", r.value);
+            if (!best || node.score > best.score) best = node;
+          }
+
+          if (!ctx.signal.aborted) {
+            try {
+              const agg = forkFrom(root);
+              live = [agg];
+              await agg.run(aggregatePrompt(task, thoughts));
+              const node = await record("aggregate", finalText(agg.messages));
+              if (!best || node.score > best.score) best = node;
+            } catch {
+              // dropped — a failed op never fails the search
+            }
+          }
+
+          if (refine && best && !ctx.signal.aborted) {
+            try {
+              const ref = forkFrom(root);
+              live = [ref];
+              await ref.run(refinePrompt(task, best.text));
+              const node = await record("refine", finalText(ref.messages));
+              if (!best || node.score > best.score) best = node;
+            } catch {
+              // dropped
+            }
+          }
+        } finally {
+          ctx.signal.removeEventListener("abort", stopLive);
+        }
+
+        if (!best) return fail("graph_search: every operation failed.");
+        return ok(best.text, details);
+      },
+    }),
+  );
+
   const offCmd = e.registerCommand({
     name: "reasoning-search",
     description: "Toggle best-of-N reasoning search. Usage: /reasoning-search [on|off|status]",
@@ -415,14 +536,14 @@ export default function activate(e: ExtensionAPI): () => void {
         cmdCtx.print("reasoning-search: off");
       } else {
         cmdCtx.print(
-          `reasoning-search: ${isEnabled() ? "on" : "off"} (best_of_n + tree_search; cap ${DEFAULT_MAX_N} forks / ${HARD_MAX_NODES} nodes)`,
+          `reasoning-search: ${isEnabled() ? "on" : "off"} (best_of_n + tree_search + graph_search; cap ${DEFAULT_MAX_N} forks / ${HARD_MAX_NODES} nodes)`,
         );
       }
     },
   });
 
   return () => {
-    for (const d of [offTool, offTree, offCmd]) {
+    for (const d of [offTool, offTree, offGraph, offCmd]) {
       try {
         d.dispose();
       } catch {
