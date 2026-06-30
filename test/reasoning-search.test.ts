@@ -12,7 +12,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { CompletionRequest, Message, ToolResult, ToolResultBlock } from "../src/kernel/types.js";
+import type {
+  CompletionRequest,
+  ContentBlock,
+  Message,
+  Provider,
+  StopReason,
+  StreamEvent,
+  ToolResult,
+  ToolResultBlock,
+} from "../src/kernel/types.js";
 import { defineTool } from "../src/kernel/define.js";
 import reasoningSearch, { childRegistryFrom } from "../src/extensions/reasoning-search.js";
 import { lastText, makeHarness } from "./helpers.js";
@@ -395,4 +404,166 @@ test("/reasoning-search on|off|status toggles and reports the enabled flag", asy
   assert.equal(host.storeFor("reasoning-search").get("enabled"), true, "on sets the store flag");
   assert.match(await run("off"), /off/i, "disabling reports off");
   assert.equal(host.storeFor("reasoning-search").get("enabled"), false, "off clears the store flag");
+});
+
+// ---------------------------------------------------------------------------
+// W9.4 — fork robustness: abort wiring + per-fork fault isolation. These need a
+// CUSTOM provider (MockProvider has no block/throw primitive and one shared
+// provider drives forks + the judge), so we script the parent/fork/judge turns
+// by request shape — exactly the discriminators the existing ACs already use.
+// ---------------------------------------------------------------------------
+
+/** A single `done` stream event carrying `content` (the loop reads the message). */
+function done(content: ContentBlock[], stopReason: StopReason = "end_turn"): StreamEvent {
+  return {
+    type: "done",
+    message: { role: "assistant", content },
+    stopReason,
+    usage: { inputTokens: 0, outputTokens: 0 },
+  };
+}
+
+/** Race `p` against a timer so a never-resolving best_of_n fails fast (not hangs). */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Each fork turn (last user message === TASK) records its request signal and
+ * blocks until that signal aborts; the parent kickoff turn fires the best_of_n
+ * call. Used to prove a parent abort tears every fork down promptly.
+ */
+class BlockingForkProvider implements Provider {
+  readonly name = "mock";
+  readonly forkSignals: AbortSignal[] = [];
+  #bestOfNCalled = false;
+  constructor(private readonly onFork: () => void) {}
+  async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
+    if (lastUserText(req) === TASK) {
+      this.forkSignals.push(req.signal);
+      this.onFork();
+      await new Promise<void>((resolve) => {
+        if (req.signal.aborted) resolve();
+        else req.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      yield done([]); // aborted: end the fork turn cleanly with no answer
+      return;
+    }
+    if (!this.#bestOfNCalled) {
+      this.#bestOfNCalled = true;
+      yield done([{ type: "tool_call", id: "bon", name: "best_of_n", arguments: { task: TASK, n: 3, scorer: "longest" } }], "tool_use");
+      return;
+    }
+    yield done([{ type: "text", text: "parent-done" }]);
+  }
+}
+
+test("W9.4a: a parent abort tears down every in-flight fork and best_of_n returns promptly", async () => {
+  let started = 0;
+  let resolveStarted!: () => void;
+  const allForksStarted = new Promise<void>((r) => {
+    resolveStarted = r;
+  });
+  const provider = new BlockingForkProvider(() => {
+    if (++started === 3) resolveStarted();
+  });
+
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+
+  const runPromise = agent.run("kickoff");
+  await allForksStarted; // every fork's stream is now blocked on its own signal
+  assert.equal(provider.forkSignals.length, 3, "three forks started and blocked");
+  assert.ok(provider.forkSignals.every((s) => !s.aborted), "forks run until the parent aborts");
+
+  agent.stop(); // abort the parent: the fix must propagate stop() to every fork
+
+  await withTimeout(runPromise, 2000, "best_of_n did not return promptly after a parent abort");
+  for (const s of provider.forkSignals) {
+    assert.ok(s.aborted, "every in-flight fork received stop() on the parent abort");
+  }
+});
+
+/**
+ * Throws inside a fork's stream (pre-first-event) for one or all forks, while a
+ * judge sub-call (systemPrompt pins the SCORE grammar) never throws and scores a
+ * candidate by its x-count so a longer survivor wins.
+ */
+class ThrowingForkProvider implements Provider {
+  readonly name = "mock";
+  #bestOfNCalled = false;
+  #forkRuns = 0;
+  constructor(private readonly throwAll: boolean) {}
+  async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
+    if (req.systemPrompt.includes("SCORE")) {
+      // A judge sub-call — discriminated from a fork run by its system prompt.
+      const xs = (lastUserText(req).match(/x/g) ?? []).length;
+      yield done([{ type: "text", text: `SCORE ${Math.min(10, xs)}/10 PASS sized` }]);
+      return;
+    }
+    if (lastUserText(req) === TASK) {
+      const i = this.#forkRuns++;
+      if (this.throwAll || i === 0) throw new Error(`fork ${i} stream boom`);
+      yield done([{ type: "text", text: "x".repeat(i + 1) }]); // distinct survivor candidates
+      return;
+    }
+    if (!this.#bestOfNCalled) {
+      this.#bestOfNCalled = true;
+      yield done([{ type: "tool_call", id: "bon", name: "best_of_n", arguments: { task: TASK, n: 3 } }], "tool_use");
+      return;
+    }
+    yield done([{ type: "text", text: "parent-done" }]);
+  }
+}
+
+test("W9.4b: one fork that throws does not fail best_of_n — the best survivor wins", async () => {
+  const provider = new ThrowingForkProvider(false);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+
+  let captured: ToolResult | undefined;
+  agent.hooks.on("tool_end", (p) => {
+    if (p.call.name === "best_of_n") captured = p.result;
+  });
+
+  await assert.doesNotReject(() => agent.run("kickoff"), "a single fork throw must not reject best_of_n");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, undefined, "best_of_n still succeeds with one failed fork");
+  assert.equal(result.content, "xxx", "the highest-scoring SURVIVOR (not the thrown fork) is returned");
+
+  const details = captured!.details as { text: string; score: number }[];
+  assert.equal(details.length, 3, "one entry per fork, including the failure");
+  assert.equal(details.filter((d) => d.score === -Infinity).length, 1, "the thrown fork is scored -Infinity, never argmax");
+});
+
+test("W9.4b: when every fork throws, best_of_n returns a clean fail (no unhandled throw)", async () => {
+  const provider = new ThrowingForkProvider(true);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+
+  let captured: ToolResult | undefined;
+  agent.hooks.on("tool_end", (p) => {
+    if (p.call.name === "best_of_n") captured = p.result;
+  });
+
+  await assert.doesNotReject(() => agent.run("kickoff"), "all forks failing must surface as a result, not a throw");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, true, "all-forks-failed returns an error result");
+  assert.match(result.content, /fork/i, "the failure result mentions the forks");
+  // A clean fail() carries the per-fork detail list; a Promise.all reject caught
+  // by the dispatcher would produce a details-less error result instead.
+  const details = captured!.details as { text: string; score: number }[];
+  assert.ok(Array.isArray(details) && details.length === 3, "the clean fail reports all three failed forks as detail");
 });

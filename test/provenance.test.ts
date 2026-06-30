@@ -276,3 +276,41 @@ test("/provenance [on|strict|off|status] toggles and reports without throwing", 
     assert.doesNotThrow(() => run(arg), `'${arg}' must not throw`);
   }
 });
+
+// -- W9.5c: a tainted string nested inside a structured arg is still detected --
+
+test("W9.5c: a tainted segment nested in an object/array sink arg is gated", async () => {
+  let confirms = 0;
+  const ui: UI = { confirm: async () => ((confirms++), false), notify: () => {} };
+  const h = makeHarness({ ui });
+  h.agent.tools.register(foreignTool());
+  // mcp:call is a default sink and routinely takes arbitrary nested params.
+  h.agent.tools.register(
+    defineTool({ name: "mcp_tool", description: "", capabilities: ["mcp:call"], execute: () => ({ content: "ran" }) }),
+  );
+  await activate(h, { enabled: true });
+
+  await taint(h, "fetch_page", "leading " + S + " trailing");
+  // The tainted segment is buried inside an object, then an array — never a
+  // top-level string value, which the old top-level-only scan would miss.
+  const out = await gate(h, "mcp_tool", { params: { items: ["safe", "prefix " + S + " suffix"] } });
+  assert.equal(out.block, true, "a nested tainted arg is detected and gated on confirm=false");
+  assert.equal(confirms, 1, "the gate escalated via ui.confirm exactly once");
+  assert.ok(!(out.reason ?? "").includes(S), "the reason still never echoes the untrusted value");
+});
+
+test("W9.5c: a clean nested arg with no untrusted segment is not escalated", async () => {
+  let confirms = 0;
+  const ui: UI = { confirm: async () => ((confirms++), false), notify: () => {} };
+  const h = makeHarness({ ui });
+  h.agent.tools.register(foreignTool());
+  h.agent.tools.register(
+    defineTool({ name: "mcp_tool", description: "", capabilities: ["mcp:call"], execute: () => ({ content: "ran" }) }),
+  );
+  await activate(h, { enabled: true });
+
+  await taint(h, "fetch_page", "leading " + S + " trailing");
+  const out = await gate(h, "mcp_tool", { params: { items: ["nothing", "tainted", "here at all"] } });
+  assert.equal(out.block, false, "a clean nested arg passes through");
+  assert.equal(confirms, 0, "no escalation for a clean nested arg");
+});

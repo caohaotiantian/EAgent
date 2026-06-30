@@ -290,3 +290,35 @@ test("AC-5: a persisted thinking block is dropped on replay (no thought on the w
   const model = captured.contents.find((c: any) => c.role === "model");
   assert.deepEqual(model.parts, [{ text: "Hi" }]);
 });
+
+test("W9.5b: a thinking-only assistant turn is omitted, never sent as empty parts", async () => {
+  let captured: any;
+  const provider = new GeminiProvider({
+    apiKey: "k",
+    fetch: async (_url, init) => {
+      captured = JSON.parse(String(init?.body));
+      return sse(TEXT_CHUNKS);
+    },
+  });
+  await collect(
+    provider.stream(
+      req({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "q" }] },
+          // A MAX_TOKENS-truncated turn: reasoning only, no text/tool_call. Its
+          // thinking block maps to no part, so the builder must skip it rather
+          // than push `parts: []` (which generateContent rejects with a 400).
+          { role: "assistant", content: [{ type: "thinking", thinking: "only reasoning here" }] },
+          { role: "user", content: [{ type: "text", text: "follow up" }] },
+        ],
+      }),
+    ),
+  );
+  const contents = captured.contents as { role: string; parts: unknown[] }[];
+  assert.ok(
+    contents.every((c) => c.parts.length > 0),
+    "no content entry is sent with empty parts",
+  );
+  assert.ok(!contents.some((c) => c.role === "model"), "the reasoning-only model turn is omitted entirely");
+  assert.equal(contents.length, 2, "only the two user turns remain on the wire");
+});

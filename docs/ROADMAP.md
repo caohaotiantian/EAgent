@@ -84,3 +84,31 @@ with slug `YYYY-MM-DD-<item>`. Acceptance = item's `<ACCEPT-CMD>` + full `npm te
 ## ✅ PROGRAM COMPLETE — Waves 1–8 (first-principles re-design)
 
 All eight waves closed on `feat/redesign-superpowers`. **906→1061 tests** (+155), **typecheck 0**, `npm run eval` gate green. Kernel **1826→2187 lines** (under the 2,200 ceiling throughout) — grown **only** by deepening shared seams, never by features: the 6 filter points (`transformContext`/`transformRequest`/`beforeToolCall`/`beforeDispatch`/`afterToolCall`/`onProviderError`), `snapshot()`/`restore()`+`#step`, `childScope()`, widened `Usage`, `maxConcurrency`, and the 2-line `storeFor` accessor. **Everything else shipped as an extension** (52→58): provenance, time-travel, tiered memory, otel-exporter, reasoning-search, self-improve, + the `evals`-as-CI gate, + `lib/sandbox`/`lib/relevance` helpers. Every subsystem fresh-reviewer-gated (L1→L2→L3→F); the reviews caught real severes on nearly every wave (drop-all pairing break, fail-open escalation, an unrealizable test technique, OTLP timestamp corruption, a recursion hole, three self-improvement safety holes + an unimplementable restricted-API). Research (CaMeL, DGM, LangGraph, Letta) was load-bearing: CaMeL-lite provenance, the DGM-safety self-improvement posture (subprocess boundary + human gate, not an in-process sandbox), and LangGraph's fork-as-one-primitive (time-travel tree + reasoning-search). Branch is ready for review/PR (never pushed — awaiting the user). Residuals tracked in `docs/DEFERRED-FOLLOWUPS.md`.
+
+---
+
+## Wave 9 — Hardening program (post-audit)
+
+Driven by `docs/audits/2026-06-29-production-readiness-audit.md` (20 confirmed gaps). Same three-loop
+discipline (L1→L2→L3→F, fresh-reviewer gated). Branch `feat/wave9-hardening` off `init`. Sequenced so the
+foundational kernel seam lands first (it is the root cause of the governance leaks AND the one ceiling-risk
+item), then the independent subsystems.
+
+| Sub | Scope | Audit items | Kernel? | Status |
+|---|---|---|---|---|
+| W9.1 | **childScope acting-agent seam** — thread the acting agent into the hook context so soft-guards act on the child that triggered them, not the parent. Fix flow-guard transcript read, circuit-breaker/budget-cap/output-contract steer/stop misroute, otel span keying. | RW3-1, RW3-2, otel-keying | **YES (ceiling-gating)** | L3 ✅ (2186) |
+| W9.2 | **self-improve hardening** — B1 blocker (render candidate source to the human-review prompt), `execSync`→async+abortable, `realEvaluate` path via `import.meta.url` + unit coverage, RW8b-2 failed-load rollback, `evaluate_candidate` capability. | B1, RW8b-2, +3 | no | L3 ✅ (1080) |
+| W9.3 | **sandbox hardening** — RW6c-4 readonly bwrap re-bind, `binExists`-gated real-backend integration tests, SBPL `root` escaping. | RW6c-4, +2 | no | L3 ✅ (1085) |
+| W9.4 | **reasoning-search fork robustness** — abort→`child.stop()` propagation; `allSettled` so one fork's throw doesn't discard the rest. | 2 | no | L3 ✅ |
+| W9.5 | **accounting & provider edges** — RW1-1 cache tokens in the per-run budget; RW6d-1 Gemini reasoning-only empty-`parts` replay 400; provenance nested-arg scan. | RW1-1, RW6d-1, +1 | no | L3 ✅ (1092) |
+| W9.6 | **HTTP bind safety + minor batch** — refuse non-loopback bind with empty token; otel await-on-shutdown; memory `consolidate` lowest-`ts`; time-travel snapshot guard + blob shape check. | +4 | no | L3 ✅ (1101) |
+
+**Kernel-ceiling note:** kernel is **2187/2200** (13 lines). W9.1's seam must either fit, or the L1 must
+surface a ceiling-raise decision (a deliberate amendment to the small-kernel bet) vs. the extension-only
+fallback (gate soft-guards to the root agent — simpler, but forfeits child soft-governance). Resolved in
+W9.1 L1.
+
+**Out of scope (by-design, audit §4):** the 20 documented-deliberate items (sandbox fail-open, codeact
+`tier:off`, secret-guard regex, full-authority adoption, offline-only provider tests, etc.) — left as-is.
+
+- **2026-06-29** — **Wave 9 (post-audit hardening) COMPLETE.** Driven by `docs/audits/2026-06-29-production-readiness-audit.md` (20 confirmed gaps). All 6 subsystems through the three-loop (L1 design fresh-reviewer-gated — W9.1 + W9.3 took a corrective round each; L3 dev→review→accept; combined F closeout **pass**, zero severe, every gap mapped fix→test). **W9.1** acting-agent seam: a ~7-line `AsyncLocalStorage` `currentActingAgent()` kernel seam (the one kernel touch — net kernel 2187→**2186**, the `run()` body wrapped so every hook resolves the acting agent) + 7 guards (flow-guard/circuit-breaker/budget-cap/output-contract/otel/routing/citations) now act on the child that triggered them with `WeakMap` per-agent state. **W9.2** self-improve: the **B1 blocker** (consent gate showed the human nothing) fixed — source folded into the `ui.ask` prompt; + async-abortable eval, `import.meta.url` path, RW8b-2 rollback, `code:exec` gate. **W9.3** sandbox: RW6c-4 readonly `--ro-bind`, SBPL `root` escaping, and **real-backend confinement tests that execute + pass on macOS sandbox-exec** (no longer just string-asserting the security wrappers). **W9.4** reasoning-search abort+`allSettled`; **W9.5** RW1-1 cache-token budget + Gemini empty-`parts` + provenance nested-arg scan; **W9.6** HTTP non-loopback bind-refuse + otel flush-on-shutdown + memory `lowestByTs` + time-travel blob shape check. Test suite **1092→1101** (program total **906→1101**, +195), typecheck 0, eval 2/2, kernel **2186/2200**, ext **58** (no new extension — pure hardening). Deferred RW9.3-1 + RW9-1/2/3 (all non-blocking). Branch `feat/wave9-hardening` ready for review/PR.

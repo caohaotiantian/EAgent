@@ -30,7 +30,7 @@ import { join } from "node:path";
 
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
-import type { AgentState } from "../kernel/types.js";
+import { isMessage, type AgentState } from "../kernel/types.js";
 
 /** Light index node — the heavy `AgentState` lives in a per-node blob file. */
 interface Node {
@@ -40,6 +40,19 @@ interface Node {
   label?: string;
   /** Wall-clock creation time, display only. */
   ts: number;
+}
+
+/**
+ * Reject a malformed blob BEFORE it reaches `Agent.restore`. `restore` is
+ * non-atomic — it clears the transcript before re-pushing it — so a blob whose
+ * `messages` is not an array of valid `Message`s would wipe the conversation even
+ * though `/rewind` catches the throw. Mirrors the boundary check in `session.ts`;
+ * `providerName` is intentionally `string | undefined`, so it is left unconstrained.
+ */
+function isRestorable(state: unknown): state is AgentState {
+  if (typeof state !== "object" || state === null) return false;
+  const s = state as { messages?: unknown };
+  return Array.isArray(s.messages) && s.messages.every(isMessage);
 }
 
 export default function activate(e: ExtensionAPI): () => void {
@@ -205,7 +218,13 @@ export default function activate(e: ExtensionAPI): () => void {
             return;
           }
           const label = rest.join(" ").trim() || undefined;
-          ctx.print(`checkpoint ${addNode(e.agent.snapshot(), label)}`);
+          // Wrap like the auto/fork paths: a poisoned Message.meta that fails
+          // structuredClone must surface cleanly, not throw out of the command.
+          try {
+            ctx.print(`checkpoint ${addNode(e.agent.snapshot(), label)}`);
+          } catch (err) {
+            ctx.print(`cannot checkpoint: ${(err as Error).message}`);
+          }
           return;
         }
         default:
@@ -232,6 +251,12 @@ export default function activate(e: ExtensionAPI): () => void {
       const state = readBlob(node.id);
       if (!state) {
         ctx.print(`corrupt or missing checkpoint blob for ${node.id}`);
+        return;
+      }
+      // Shape-check before restore: restore is non-atomic, so a malformed blob
+      // would wipe the live transcript mid-restore. Reject it first.
+      if (!isRestorable(state)) {
+        ctx.print(`refusing to rewind: checkpoint ${node.id} is malformed (bad transcript)`);
         return;
       }
       try {
@@ -263,6 +288,11 @@ export default function activate(e: ExtensionAPI): () => void {
       const state = readBlob(node.id);
       if (!state) {
         ctx.print(`corrupt or missing checkpoint blob for ${node.id}`);
+        return;
+      }
+      // Same non-atomic-restore guard as /rewind: reject a malformed blob first.
+      if (!isRestorable(state)) {
+        ctx.print(`refusing to fork: checkpoint ${node.id} is malformed (bad transcript)`);
         return;
       }
       try {

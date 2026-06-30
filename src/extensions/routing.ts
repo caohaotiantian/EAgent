@@ -25,6 +25,7 @@
  * Off by default; disable or tune it with `/routing`, or set `EAGENT_ROUTING=off`.
  */
 
+import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
 
@@ -193,10 +194,19 @@ export default function activate(e: ExtensionAPI): () => void {
   // command, `Agent.model` never touched (the cost.ts:150 / recovery.ts pattern).
   if (process.env.EAGENT_ROUTING === "off") return () => {};
 
-  // The configured model captured at run start — the restore baseline. Seeded
-  // eagerly so a unit-level command dispatch (`/routing off`) before any run can
-  // still restore to a sane value.
-  let baseline = e.agent.model;
+  // The configured model captured per ACTING agent — each agent's restore
+  // baseline. Keyed per agent so a routed child restores to ITS OWN model, not
+  // the parent's, and concurrent forks don't share one var (W9.1). The parent is
+  // seeded eagerly so a unit-level command dispatch (`/routing off`) before any
+  // run can still restore; a child seeds lazily on its first turn (it never fires
+  // agent_start), capturing its model before routing first mutates it.
+  const baselines = new WeakMap<Agent, string>();
+  baselines.set(e.agent, e.agent.model);
+  const baselineFor = (agent: Agent): string => {
+    let b = baselines.get(agent);
+    if (b === undefined) baselines.set(agent, (b = agent.model));
+    return b;
+  };
 
   const cfg = () => ({
     enabled: e.store.get<boolean>("enabled", false) ?? false,
@@ -227,14 +237,15 @@ export default function activate(e: ExtensionAPI): () => void {
    */
   async function classifyLlm(messages: readonly Message[]): Promise<Tier | undefined> {
     try {
-      const provider = e.agent.providers.get();
+      const agent = currentActingAgent() ?? e.agent;
+      const provider = agent.providers.get();
       if (!provider) return undefined;
       let reply = "";
       for await (const ev of provider.stream({
         systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
         messages: [...messages],
         tools: [],
-        model: e.agent.model,
+        model: agent.model,
         signal: new AbortController().signal,
       })) {
         if (ev.type === "done") reply = textOf(ev.message);
@@ -248,14 +259,20 @@ export default function activate(e: ExtensionAPI): () => void {
   const disposers = [
     // Capture the configured model as the restore baseline (the cost.ts:203 move).
     e.on("agent_start", () => {
-      baseline = e.agent.model;
+      baselines.set(e.agent, e.agent.model);
     }),
 
     e.on("turn_start", async () => {
       const c = cfg();
+      // Route the ACTING agent (a running child under the shared bus), not the
+      // parent bound at activation. (W9.1.)
+      const agent = currentActingAgent() ?? e.agent;
+      // The acting agent's own baseline (seeded here on a child's first turn,
+      // before any branch below mutates its model).
+      const baseline = baselineFor(agent);
       // Disabled (soft switch): restore the baseline and assign no tier.
       if (!c.enabled) {
-        e.agent.model = baseline;
+        agent.model = baseline;
         return;
       }
 
@@ -263,12 +280,12 @@ export default function activate(e: ExtensionAPI): () => void {
       // conservative rule) to flagship — never a throw.
       let tier: Tier;
       if (c.mode === "llm") {
-        const verdict = await classifyLlm(e.agent.messages);
+        const verdict = await classifyLlm(agent.messages);
         tier =
           verdict ??
-          classify(e.agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
+          classify(agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
       } else {
-        tier = classify(e.agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
+        tier = classify(agent.messages, c.cues, c.hardCharLen, c.hardToolResultBytes);
       }
 
       // Resolve the tier name against the configured map (the SOLE resolution
@@ -281,16 +298,18 @@ export default function activate(e: ExtensionAPI): () => void {
           `routing: tier "${tier}" has no usable model id in the tier map; ` +
             `falling back to the configured model "${baseline}"`,
         );
-        e.agent.model = baseline;
+        agent.model = baseline;
         return;
       }
-      e.agent.model = model;
+      agent.model = model;
     }),
 
     // Restore the configured model when the run ends (fires in the loop's
-    // `finally`, so it also restores after an errored/aborted run).
+    // `finally`, so it also restores after an errored/aborted run). agent_end is
+    // suppressed for children, so this only fires for the parent — restore its
+    // own baseline.
     e.on("agent_end", () => {
-      e.agent.model = baseline;
+      e.agent.model = baselineFor(e.agent);
     }),
   ];
 
@@ -310,7 +329,7 @@ export default function activate(e: ExtensionAPI): () => void {
         case "off":
           e.store.set("enabled", false);
           // Soft switch: immediately restore the configured baseline.
-          e.agent.model = baseline;
+          e.agent.model = baselineFor(e.agent);
           ctx.print("routing off");
           break;
         case "tier": {

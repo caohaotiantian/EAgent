@@ -22,6 +22,7 @@
 
 import { randomBytes } from "node:crypto";
 
+import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 
 /** An OTLP attribute (`KeyValue` with an `AnyValue`): string or int64 (decimal string). */
@@ -42,9 +43,19 @@ interface OtlpSpan {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  let currentTraceId = "";
-  let currentTurnSpanId = "";
-  const openSpans = new Map<string, OtlpSpan>();
+  // Per-agent trace state so concurrent forks don't collide on a shared
+  // `openSpans["1"]` or traceId. Keyed by the ACTING agent; lazily created on the
+  // first intra-run event, since children never fire agent_start. (W9.1.)
+  interface RunTrace {
+    traceId: string;
+    rootSpanId: string;
+    currentTurnSpanId: string;
+    openSpans: Map<string, OtlpSpan>;
+  }
+  const traces = new WeakMap<Agent, RunTrace>();
+  // Shared drain buffer: every closed span — and each lazily-created root, eager-
+  // pushed while still open — lands here and is flushed at the parent's agent_end.
+  // The WeakMap is not enumerable, so flush scans only this.
   let finished: OtlpSpan[] = [];
   let warned = false;
 
@@ -61,6 +72,28 @@ export default function activate(e: ExtensionAPI): () => void {
     const i = span.attributes.findIndex((a) => a.key === kv.key);
     if (i >= 0) span.attributes[i] = kv;
     else span.attributes.push(kv);
+  };
+
+  /** The trace for an agent, lazily created with a fresh root span on first use. */
+  const traceFor = (agent: Agent): RunTrace => {
+    let t = traces.get(agent);
+    if (!t) {
+      const traceId = hex(16);
+      const rootSpanId = hex(8);
+      const system = agent.providers.get(agent.providerName)?.name ?? agent.providerName ?? "unknown";
+      const root: OtlpSpan = {
+        traceId,
+        spanId: rootSpanId,
+        name: "agent",
+        kind: 1,
+        startTimeUnixNano: nanos(),
+        attributes: [attr("gen_ai.system", system), attr("gen_ai.request.model", agent.model)],
+      };
+      t = { traceId, rootSpanId, currentTurnSpanId: "", openSpans: new Map([["agent", root]]) };
+      traces.set(agent, t);
+      finished.push(root); // eager-push the open root so flush emits it
+    }
+    return t;
   };
 
   /** The traces endpoint: the signal-specific var as-is, else the base var + `/v1/traces`. */
@@ -81,10 +114,17 @@ export default function activate(e: ExtensionAPI): () => void {
     e.log.warn("failed to POST traces to the collector (export is best-effort)");
   };
 
-  const flush = (): void => {
-    if (!enabled() || finished.length === 0) return;
+  // Returns the export POST so a caller (session_shutdown) can await it; the
+  // intra-run agent_end caller leaves it unawaited (fire-and-forget). The 5s
+  // AbortSignal.timeout bounds the await if the collector is unresponsive.
+  const flush = (): Promise<void> => {
+    if (!enabled() || finished.length === 0) return Promise.resolve();
     const url = endpoint();
-    if (!url) return;
+    if (!url) return Promise.resolve();
+    // Best-effort close: stamp an end ts on any still-open span (a child root that
+    // never fired agent_end, or a span left open by an aborted run).
+    const end = nanos();
+    for (const s of finished) if (!s.endTimeUnixNano) s.endTimeUnixNano = end;
     const body = {
       resourceSpans: [
         {
@@ -93,56 +133,51 @@ export default function activate(e: ExtensionAPI): () => void {
         },
       ],
     };
-    void fetch(url, {
+    const pending = fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...parseHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(5000),
-    }).catch(() => warnOnce());
+    }).then(() => {}, () => warnOnce());
     finished = [];
+    return pending;
   };
 
   const disposers = [
+    // The parent seeds its trace here (a fresh root + a clean buffer for the run);
+    // children never fire agent_start, so they seed lazily on their first turn.
     e.on("agent_start", () => {
       if (!enabled()) return;
-      currentTraceId = hex(16);
-      currentTurnSpanId = "";
-      openSpans.clear();
+      const agent = currentActingAgent() ?? e.agent;
+      traces.delete(agent);
       finished = [];
-      const system = e.agent.providers.get(e.agent.providerName)?.name ?? e.agent.providerName ?? "unknown";
-      openSpans.set("agent", {
-        traceId: currentTraceId,
-        spanId: hex(8),
-        name: "agent",
-        kind: 1,
-        startTimeUnixNano: nanos(),
-        attributes: [attr("gen_ai.system", system), attr("gen_ai.request.model", e.agent.model)],
-      });
+      traceFor(agent);
     }),
 
     e.on("turn_start", ({ turn }) => {
       if (!enabled()) return;
-      const agent = openSpans.get("agent");
-      if (!agent) return;
+      const t = traceFor(currentActingAgent() ?? e.agent);
       const span: OtlpSpan = {
-        traceId: currentTraceId,
+        traceId: t.traceId,
         spanId: hex(8),
-        parentSpanId: agent.spanId,
+        parentSpanId: t.rootSpanId,
         name: `turn ${turn}`,
         kind: 1,
         startTimeUnixNano: nanos(),
         attributes: [],
       };
-      currentTurnSpanId = span.spanId;
-      openSpans.set(String(turn), span);
+      t.currentTurnSpanId = span.spanId;
+      t.openSpans.set(String(turn), span);
     }),
 
     e.on("tool_start", ({ call }) => {
-      if (!enabled() || !currentTurnSpanId) return;
-      openSpans.set(call.id, {
-        traceId: currentTraceId,
+      if (!enabled()) return;
+      const t = traceFor(currentActingAgent() ?? e.agent);
+      if (!t.currentTurnSpanId) return;
+      t.openSpans.set(call.id, {
+        traceId: t.traceId,
         spanId: hex(8),
-        parentSpanId: currentTurnSpanId,
+        parentSpanId: t.currentTurnSpanId,
         name: call.name,
         kind: 1,
         startTimeUnixNano: nanos(),
@@ -152,44 +187,49 @@ export default function activate(e: ExtensionAPI): () => void {
 
     e.on("tool_end", ({ call, result }) => {
       if (!enabled()) return;
-      const span = openSpans.get(call.id);
+      const t = traces.get(currentActingAgent() ?? e.agent);
+      if (!t) return;
+      const span = t.openSpans.get(call.id);
       if (!span) return;
       span.endTimeUnixNano = nanos();
       if (result.isError) span.status = { code: 2 };
-      openSpans.delete(call.id);
+      t.openSpans.delete(call.id);
       finished.push(span);
     }),
 
     e.on("usage", ({ usage }) => {
       if (!enabled()) return;
-      const agent = openSpans.get("agent");
-      if (!agent) return;
-      upsert(agent, attr("gen_ai.usage.input_tokens", usage.inputTokens));
-      upsert(agent, attr("gen_ai.usage.output_tokens", usage.outputTokens));
+      const t = traces.get(currentActingAgent() ?? e.agent);
+      if (!t) return;
+      const root = t.openSpans.get("agent");
+      if (!root) return;
+      upsert(root, attr("gen_ai.usage.input_tokens", usage.inputTokens));
+      upsert(root, attr("gen_ai.usage.output_tokens", usage.outputTokens));
     }),
 
     e.on("turn_end", ({ turn }) => {
       if (!enabled()) return;
-      const span = openSpans.get(String(turn));
+      const t = traces.get(currentActingAgent() ?? e.agent);
+      if (!t) return;
+      const span = t.openSpans.get(String(turn));
       if (!span) return;
       span.endTimeUnixNano = nanos();
-      openSpans.delete(String(turn));
+      t.openSpans.delete(String(turn));
       finished.push(span);
     }),
 
+    // Drain at the parent's agent_end (children complete within this run, so their
+    // spans are already in `finished`); flush stamps any still-open root. Left
+    // unawaited so the agent loop is never blocked on the network.
     e.on("agent_end", () => {
-      if (enabled()) {
-        const agent = openSpans.get("agent");
-        if (agent) {
-          agent.endTimeUnixNano = nanos();
-          openSpans.delete("agent");
-          finished.push(agent);
-        }
-      }
-      flush();
+      void flush();
     }),
 
-    e.on("session_shutdown", () => flush()),
+    // Awaited (emit runs handlers serially): blocks shutdown until the final
+    // batch is exported, so a hard exit can't drop it. Bounded by flush's 5s timeout.
+    e.on("session_shutdown", async () => {
+      await flush();
+    }),
   ];
 
   const command = e.registerCommand({

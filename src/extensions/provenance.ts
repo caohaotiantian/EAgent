@@ -44,6 +44,25 @@ const DEFAULT_SINK_CAPS = ["shell:exec", "net:fetch", "mcp:call", "fs:write"];
 const DEFAULT_MIN_LEN = 24;
 /** Hard cap on the closure store (FIFO eviction past it) to bound growth. */
 const DEFAULT_MAX_SEGMENTS = 256;
+/** Max nesting the arg scan descends into (bounds a pathologically deep arg). */
+const MAX_SCAN_DEPTH = 8;
+
+/**
+ * Yield every string leaf of an args value, descending into objects and arrays
+ * up to `depth` levels. A privileged sink (e.g. `mcp:call`) takes arbitrary
+ * nested params, so a tainted segment can hide below the top level; the depth
+ * bound keeps a hostile deeply-nested arg from blowing the stack.
+ */
+function* stringLeaves(value: unknown, depth: number): Iterable<string> {
+  if (typeof value === "string") {
+    yield value;
+    return;
+  }
+  if (depth <= 0 || value === null || typeof value !== "object") return;
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    yield* stringLeaves(v, depth - 1);
+  }
+}
 
 /** A short, non-crypto hash (djb2) — a redacted marker that never echoes the value. */
 function djb2(s: string): string {
@@ -96,8 +115,7 @@ export default function activate(e: ExtensionAPI): () => void {
     const c = cfg();
     if (!c.enabled || decision.block) return decision;
     if (!intersects(capsOf(ctx.call.name), c.sinkCaps)) return decision;
-    for (const v of Object.values(decision.arguments)) {
-      if (typeof v !== "string") continue;
+    for (const v of stringLeaves(decision.arguments, MAX_SCAN_DEPTH)) {
       for (const seg of untrusted) {
         if (!v.includes(seg)) continue;
         const reason = `provenance: ${ctx.call.name} arg derives from untrusted content (len=${seg.length}, h=${djb2(seg)})`;

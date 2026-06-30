@@ -24,6 +24,7 @@
  * `/circuit-breaker [on|off|ask|block|status|reset|threshold=<n>]`.
  */
 
+import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, ToolResult } from "../kernel/types.js";
 import type { ToolDecision } from "../kernel/events.js";
@@ -80,10 +81,12 @@ export default function activate(e: ExtensionAPI): () => void {
   if (process.env.EAGENT_CIRCUIT_BREAKER === "off") return () => {};
 
   /**
-   * Per-run signature buckets. In-memory and reset on `agent_start`, because the
-   * budget is "this run", not "ever" — the same lifecycle `limits` uses.
+   * Per-run signature buckets, keyed by the ACTING agent (`WeakMap<Agent,…>`) so
+   * concurrent parent + child forks don't share a bucket. In-memory; the parent's
+   * entry is reset on `agent_start` (a child's is suppressed, so it lazily inits
+   * on its first call) and self-evicts on GC. (W9.1.)
    */
-  const buckets = new Map<string, Bucket>();
+  const buckets = new WeakMap<Agent, Map<string, Bucket>>();
 
   /** Read a positive integer from the store, falling back for missing/NaN/<=0. */
   const readThreshold = (): number => {
@@ -99,13 +102,18 @@ export default function activate(e: ExtensionAPI): () => void {
     threshold: readThreshold(),
   });
 
-  /** Fetch (creating if absent) the bucket for a signature. */
-  const bucketFor = (sig: string): Bucket => {
-    let b = buckets.get(sig);
-    if (!b) {
-      b = { count: 0, consecutiveFailures: 0 };
-      buckets.set(sig, b);
-    }
+  /** The signature→bucket map for an agent, lazily created on first use. */
+  const bucketsFor = (agent: Agent): Map<string, Bucket> => {
+    let m = buckets.get(agent);
+    if (!m) buckets.set(agent, (m = new Map<string, Bucket>()));
+    return m;
+  };
+
+  /** Fetch (creating if absent) the bucket for a signature on an agent. */
+  const bucketFor = (agent: Agent, sig: string): Bucket => {
+    const m = bucketsFor(agent);
+    let b = m.get(sig);
+    if (!b) m.set(sig, (b = { count: 0, consecutiveFailures: 0 }));
     return b;
   };
 
@@ -117,13 +125,16 @@ export default function activate(e: ExtensionAPI): () => void {
       // Never un-block an existing block.
       if (!enabled || decision.block) return decision;
 
+      // Steer/track the ACTING agent (the running child under a shared bus), not
+      // the parent bound at activation. (W9.1.)
+      const agent = currentActingAgent() ?? e.agent;
       // Key on the RAW model arguments (`ctx.call.arguments`), exactly as
       // `afterToolCall` does, so both hooks address the same bucket. Keying on
       // `decision.arguments` here would use the validate-coerced shape ("3"->3,
       // filled defaults), diverging from the after-hook for any coercing schema
       // and splitting the count and the failure streak across two buckets.
       const sig = stableSignature(ctx.call.name, ctx.call.arguments);
-      const b = bucketFor(sig);
+      const b = bucketFor(agent, sig);
       b.count += 1;
 
       // Failure trip first (so its framing wins when both branches apply): once
@@ -133,7 +144,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // by `afterToolCall` and reset on a success of this signature.
       if (b.consecutiveFailures >= threshold) {
         const reason = `circuit-breaker: ${ctx.call.name} failed ${b.consecutiveFailures}x — halting the retry loop`;
-        return await halt(decision, reason, mode);
+        return await halt(agent, decision, reason, mode);
       }
 
       // Hard repetition trip at the threshold — the useless-but-not-erroring
@@ -143,7 +154,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // trips on the 2nd occurrence rather than only nudging.
       if (b.count >= threshold && b.consecutiveFailures === 0) {
         const reason = `circuit-breaker: ${ctx.call.name} called ${b.count}x with identical args`;
-        return await halt(decision, reason, mode);
+        return await halt(agent, decision, reason, mode);
       }
 
       // Soft steer at the 2nd occurrence (when 2 is strictly below threshold):
@@ -153,7 +164,7 @@ export default function activate(e: ExtensionAPI): () => void {
           `circuit-breaker: you are repeating an identical call to ${ctx.call.name} with the same arguments. ` +
           `Re-issuing the identical call is unlikely to make progress — change the arguments or try a different approach.`;
         const message: Message = { role: "user", content: [{ type: "text", text }] };
-        e.agent.handle.steer(message);
+        agent.handle.steer(message);
         return decision;
       }
 
@@ -165,9 +176,9 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   /** Block in `block` mode; ask the human in `ask` mode (allow on confirm). */
-  const halt = async (decision: ToolDecision, reason: string, mode: Mode): Promise<ToolDecision> => {
+  const halt = async (agent: Agent, decision: ToolDecision, reason: string, mode: Mode): Promise<ToolDecision> => {
     if (mode === "block") return { ...decision, block: true, reason };
-    const allow = await e.agent.ui.confirm(`${reason}. Allow this call anyway?`);
+    const allow = await agent.ui.confirm(`${reason}. Allow this call anyway?`);
     return allow ? decision : { ...decision, block: true, reason };
   };
 
@@ -175,8 +186,9 @@ export default function activate(e: ExtensionAPI): () => void {
   const offAfter = e.hook("afterToolCall", (result: ToolResult, ctx): ToolResult => {
     try {
       if (!cfg().enabled) return result;
+      const agent = currentActingAgent() ?? e.agent;
       const sig = stableSignature(ctx.call.name, ctx.call.arguments);
-      const b = bucketFor(sig);
+      const b = bucketFor(agent, sig);
       if (result.isError === true) b.consecutiveFailures += 1;
       else b.consecutiveFailures = 0; // the *failure streak* resets on success
       return result;
@@ -186,9 +198,10 @@ export default function activate(e: ExtensionAPI): () => void {
     }
   });
 
-  // --- 3. Per-run reset ----------------------------------------------------
+  // --- 3. Per-run reset (the acting agent's entry only; children never fire
+  // agent_start, so a child's bucket is born fresh on its first call). ---------
   const offReset = e.on("agent_start", () => {
-    buckets.clear();
+    buckets.delete(currentActingAgent() ?? e.agent);
   });
 
   // --- 4. /circuit-breaker command -----------------------------------------
@@ -224,7 +237,7 @@ export default function activate(e: ExtensionAPI): () => void {
           c.print(`circuit-breaker mode = ${arg}`);
           break;
         case "reset":
-          buckets.clear();
+          buckets.delete(currentActingAgent() ?? e.agent);
           c.print("circuit-breaker: per-run state cleared");
           break;
         case "":
@@ -234,7 +247,7 @@ export default function activate(e: ExtensionAPI): () => void {
           c.print(`enabled=${enabled}`);
           c.print(`mode=${mode}`);
           c.print(`threshold=${threshold}`);
-          c.print(`buckets=${buckets.size}`);
+          c.print(`buckets=${buckets.get(currentActingAgent() ?? e.agent)?.size ?? 0}`);
         }
       }
     },

@@ -12,7 +12,7 @@ export * from "./events.js";
 export { HookBus, setHandlerErrorReporter } from "./hooks.js";
 export type { EventHandler, FilterHandler } from "./hooks.js";
 export { ToolRegistry, ProviderRegistry } from "./registry.js";
-export { Agent } from "./agent.js";
+export { Agent, currentActingAgent } from "./agent.js";
 export type { AgentOptions, RunResult } from "./agent.js";
 export {
   CapabilityManager,

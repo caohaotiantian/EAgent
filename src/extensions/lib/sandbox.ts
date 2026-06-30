@@ -44,6 +44,15 @@ export function shquote(s: string): string {
 }
 
 /**
+ * Escape a string for embedding inside an SBPL double-quoted literal (e.g. a
+ * sandbox-exec `(subpath "…")`). A different grammar from `/bin/sh` single
+ * quotes: escape `\` first, then `"`, so a literal backslash isn't re-escaped.
+ */
+function sbplString(s: string): string {
+  return s.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+/**
  * Pure backend selection: which launcher to use on `platform`, given a presence
  * predicate `has`. macOS prefers `sandbox-exec`; Linux prefers `bwrap`, falling
  * back to `firejail`; every other platform (including `win32`) has no backend.
@@ -97,7 +106,7 @@ export function wrapCommand(backend: Backend, tier: Tier, command: string, opts:
       let profile = "(version 1)(allow default)(deny file-write*)";
       if (writeTier) {
         profile +=
-          `(allow file-write* (subpath "${root}")` +
+          `(allow file-write* (subpath "${sbplString(root)}")` +
           ` (subpath "/private/tmp") (subpath "/private/var/folders"))`;
       }
       if (noNet) profile += "(deny network*)";
@@ -109,6 +118,7 @@ export function wrapCommand(backend: Backend, tier: Tier, command: string, opts:
       // "/Users/me/My Project") would otherwise word-split and mis-bind.
       const parts = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"];
       if (writeTier) parts.push("--bind", shquote(root), shquote(root));
+      else parts.push("--ro-bind", shquote(root), shquote(root));
       if (noNet) parts.push("--unshare-net");
       parts.push(inner);
       return parts.join(" ");

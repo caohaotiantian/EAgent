@@ -294,6 +294,36 @@ test("AC 9: /memory consolidate is opt-in exact-text dedupe", async () => {
   assert.ok(rawNote(h.store, "d"), "distinct text d kept");
 });
 
+test("D-W9.6c: consolidate keeps the LOWEST-ts entry per group, not first-by-iteration", async () => {
+  const h = await loadMem();
+  // Two normalized-identical notes. Key "a" is written/iterated first but carries
+  // the HIGHER ts; key "b" carries the LOWER ts. The genuinely earliest copy is b,
+  // so the survivor must be b — proving the rule is lowest-ts, not first-by-key.
+  h.store.set("note:a", { id: "id-a", text: "Hello", source: "tool:remember", ts: "2026-06-29T12:00:00.000Z" });
+  h.store.set("note:b", { id: "id-b", text: " hello ", source: "tool:remember", ts: "2026-06-29T10:00:00.000Z" });
+
+  const out = await runMemory(h.commands, h.agent, "consolidate");
+
+  const remaining = h.store.keys().filter((k) => k.startsWith("note:"));
+  assert.equal(remaining.length, 1, "exactly one survivor after consolidate");
+  assert.equal(remaining[0], "note:b", "the lowest-ts entry survived (not the first-iterated higher-ts one)");
+  assert.equal((rawNote(h.store, "b") as Entry).id, "id-b", "the surviving entry is b's");
+  assert.match(out.join("\n"), /merged 1/i, "reports one merged duplicate");
+});
+
+test("D-W9.6c: a legacy (ts:\"\") duplicate is preferred as the survivor", async () => {
+  const h = await loadMem();
+  // "new" is written/iterated first (first-by-iteration would keep it), but the
+  // legacy bare-string note sorts first (ts:"") so lowest-ts keeps the legacy one.
+  h.store.set("note:new", { id: "id-new", text: "hello", source: "tool:remember", ts: "2026-06-29T10:00:00.000Z" });
+  h.store.set("note:legacy", "Hello"); // bare string => readEntry wraps with ts:""
+
+  await runMemory(h.commands, h.agent, "consolidate");
+
+  const remaining = h.store.keys().filter((k) => k.startsWith("note:"));
+  assert.deepEqual(remaining, ["note:legacy"], "the legacy ts:\"\" entry is the lowest-ts survivor");
+});
+
 test("AC 10: kill switch writes a bare string and disables sub-commands", async () => {
   const prev = process.env.EAGENT_MEMORY_ENTRIES;
   process.env.EAGENT_MEMORY_ENTRIES = "off";

@@ -251,6 +251,56 @@ test("a configured token gates mutating routes but not /health", async () => {
   );
 });
 
+// -- D-W9.6a: fail-closed on a dangerous bind (non-loopback + no token) --------
+
+/** Run `body` with EAGENT_TOKEN and EAGENT_HOST cleared, restoring both after. */
+async function withClearBindEnv(body: () => Promise<void>): Promise<void> {
+  const prevToken = process.env.EAGENT_TOKEN;
+  const prevHost = process.env.EAGENT_HOST;
+  delete process.env.EAGENT_TOKEN;
+  delete process.env.EAGENT_HOST;
+  try {
+    await body();
+  } finally {
+    if (prevToken === undefined) delete process.env.EAGENT_TOKEN;
+    else process.env.EAGENT_TOKEN = prevToken;
+    if (prevHost === undefined) delete process.env.EAGENT_HOST;
+    else process.env.EAGENT_HOST = prevHost;
+  }
+}
+
+test("createHttpServer REFUSES a non-loopback bind with no token (fail-closed)", async () => {
+  await withClearBindEnv(async () => {
+    await assert.rejects(
+      () => createHttpServer({ provider: "mock", logger: silentLogger, host: "0.0.0.0" }),
+      /token/i,
+      "a 0.0.0.0 bind with an empty token must throw before listening",
+    );
+  });
+});
+
+test("createHttpServer allows a non-loopback bind WHEN a token is set", async () => {
+  await withClearBindEnv(async () => {
+    const http = await createHttpServer({
+      provider: "mock",
+      logger: silentLogger,
+      host: "0.0.0.0",
+      token: "secret",
+    });
+    // It constructs (never listens); just tear the host down.
+    await http.close();
+  });
+});
+
+test("createHttpServer allows a loopback bind with no token (dev posture unaffected)", async () => {
+  await withClearBindEnv(async () => {
+    for (const host of ["127.0.0.1", "::1", "localhost"]) {
+      const http = await createHttpServer({ provider: "mock", logger: silentLogger, host });
+      await http.close();
+    }
+  });
+});
+
 test("an oversized request body is rejected with 413", async () => {
   await withServer(
     async (base) => {

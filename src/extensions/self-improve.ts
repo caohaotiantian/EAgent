@@ -27,11 +27,12 @@
  *     trust-on-human-review, reversible via host-tracked `unloadExtension`.
  */
 
-import { execSync } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
@@ -63,7 +64,7 @@ export interface EvalResult {
   tamper: boolean;
 }
 
-export type Evaluator = (candidatePath: string) => Promise<EvalResult>;
+export type Evaluator = (candidatePath: string, signal?: AbortSignal) => Promise<EvalResult>;
 
 /**
  * Reject candidate source that obviously self-modifies the host or its judge.
@@ -93,7 +94,7 @@ function slugify(name: string): string {
 }
 
 /** A sha256 over a fixtures directory's filenames and contents, for tamper-detection. */
-function hashFixtures(dir: string): string {
+export function hashFixtures(dir: string): string {
   const h = createHash("sha256");
   for (const f of readdirSync(dir).sort()) {
     h.update(f);
@@ -106,20 +107,94 @@ function hashFixtures(dir: string): string {
   return h.digest("hex");
 }
 
-/** Run the candidate-loading eval runner once under the sandbox, returning the passed count. */
-function runScored(backend: Backend, candidateDir: string, fixturesDir: string, root: string, cwd: string): number {
-  const cmd = `node --import tsx ${join("src", "self-improve-eval.ts")} ${candidateDir} ${fixturesDir} ${root}`;
+/**
+ * The candidate-loading eval runner, resolved from THIS module's own location
+ * (`self-improve.ts` → its sibling `src/self-improve-eval.ts`) rather than the
+ * volatile `process.cwd()`, so the evaluator works from a built `dist` or any cwd.
+ */
+export const EVAL_RUNNER_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "self-improve-eval.ts");
+
+/** Parse the `eval: X/Y passed` scorecard the runner prints; absent → zero/zero. */
+export function parseScorecard(out: string): { passed: number; total: number } {
+  const m = /eval:\s*(\d+)\s*\/\s*(\d+)\s*passed/.exec(out);
+  if (!m || m[1] === undefined || m[2] === undefined) return { passed: 0, total: 0 };
+  return { passed: Number.parseInt(m[1], 10), total: Number.parseInt(m[2], 10) };
+}
+
+/** The subprocess spawn boundary, mirroring `setEvaluator` so offline tests can inject a fake. */
+type SpawnFn = (command: string, options: SpawnOptions) => ChildProcess;
+let spawnImpl: SpawnFn = spawn;
+
+/** Test hook: swap the spawn boundary (default node's `spawn`) for a fake. */
+export function setSpawn(fn: SpawnFn): void {
+  spawnImpl = fn;
+}
+
+const EVAL_TIMEOUT_MS = 120_000;
+
+/**
+ * Spawn the candidate-loading eval runner once under the sandbox and resolve with
+ * the passed count. Async and abortable so the event loop stays live across the
+ * eval: the child is killed on EITHER the 120s ceiling OR an upstream abort (the
+ * agent loop's `stop()`/disconnect, threaded in via `signal`).
+ */
+export async function runScored(
+  backend: Backend,
+  candidateDir: string,
+  fixturesDir: string,
+  root: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<number> {
+  const cmd = `node --import tsx ${EVAL_RUNNER_PATH} ${candidateDir} ${fixturesDir} ${root}`;
   const wrapped = wrapCommand(backend, "no-network", cmd, { root });
-  // Bounded: a hanging candidate eval must not block the agent. A timeout throws
-  // (ETIMEDOUT), which the caller's try/catch turns into a clean eval failure.
-  const out = execSync(wrapped, {
-    cwd,
-    env: { PATH: process.env.PATH ?? "" },
-    timeout: 120_000,
-    maxBuffer: 8 * 1024 * 1024,
-  }).toString();
-  const m = /eval:\s*(\d+)\s*\/\s*\d+\s*passed/.exec(out);
-  return m && m[1] ? Number.parseInt(m[1], 10) : 0;
+
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  const timer = setTimeout(abort, EVAL_TIMEOUT_MS);
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+
+  try {
+    // Never spawn under an already-aborted signal: node's `spawn` emits an async
+    // AbortError on the child, and with no 'error' listener yet attached that
+    // error is unhandled and crashes the host as an uncaughtException.
+    if (controller.signal.aborted) {
+      throw new Error("self-improve eval aborted before launch");
+    }
+    const child = spawnImpl(wrapped, {
+      cwd,
+      env: { PATH: process.env.PATH ?? "" },
+      shell: true,
+      signal: controller.signal,
+    });
+    const out = await new Promise<string>((resolve, reject) => {
+      let buf = "";
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        buf += String(chunk);
+      });
+      controller.signal.addEventListener(
+        "abort",
+        () => {
+          try {
+            child.kill();
+          } catch {
+            // best effort: the child may already have exited
+          }
+          reject(new Error("self-improve eval aborted (timeout or stop)"));
+        },
+        { once: true },
+      );
+      child.once("error", reject);
+      child.once("close", () => resolve(buf));
+    });
+    return parseScorecard(out).passed;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abort);
+  }
 }
 
 /**
@@ -129,7 +204,7 @@ function runScored(backend: Backend, candidateDir: string, fixturesDir: string, 
  * subprocess (refusing when no sandbox backend exists — harness-chosen
  * fail-closed). Integration-only; offline tests inject a stub via `setEvaluator`.
  */
-async function realEvaluate(candidatePath: string): Promise<EvalResult> {
+async function realEvaluate(candidatePath: string, signal?: AbortSignal): Promise<EvalResult> {
   const backend = detectBackend(process.platform, binExists);
   if (backend === "none") {
     throw new Error("no sandbox backend available — refusing to evaluate (fail-closed)");
@@ -151,8 +226,8 @@ async function realEvaluate(candidatePath: string): Promise<EvalResult> {
     cpSync(candidatePath, join(candidateDir, "candidate.ts"));
 
     const pre = hashFixtures(fixturesDir);
-    const baseline = runScored(backend, emptyDir, fixturesDir, staging, cwd);
-    const candidate = runScored(backend, candidateDir, fixturesDir, staging, cwd);
+    const baseline = await runScored(backend, emptyDir, fixturesDir, staging, cwd, signal);
+    const candidate = await runScored(backend, candidateDir, fixturesDir, staging, cwd, signal);
     const post = hashFixtures(fixturesDir);
 
     const tamper = pre !== post;
@@ -261,12 +336,13 @@ export default function activate(e: ExtensionAPI): () => void {
       description:
         "Score a staged candidate's fitness in an isolated sandboxed subprocess and record the advisory delta. " +
         "Does NOT load the candidate into the live agent.",
+      capabilities: ["code:exec"],
       parameters: {
         type: "object",
         properties: { name: { type: "string", description: "The candidate name to evaluate." } },
         required: ["name"],
       },
-      execute: async (args) => {
+      execute: async (args, ctx) => {
         if (!isEnabled()) return fail("self-improve: disabled — enable with `/self-improve on`.");
         const slug = slugify(typeof args.name === "string" ? args.name : "");
         const list = load();
@@ -276,7 +352,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
         let result: EvalResult;
         try {
-          result = await evaluator(join(candidatesDir(), `${slug}.ts`));
+          result = await evaluator(join(candidatesDir(), `${slug}.ts`), ctx.signal);
         } catch (err) {
           return fail(`evaluate_candidate: evaluation failed — ${(err as Error).message}`);
         }
@@ -323,10 +399,16 @@ export default function activate(e: ExtensionAPI): () => void {
         }
         const advisory =
           rec.delta === undefined ? "(not evaluated)" : `delta=${rec.delta}, improved=${rec.improved}, tamper=${rec.tamper}`;
-        ctx.progress(`Candidate "${slug}" source:\n${source}\nAdvisory eval: ${advisory}\n`);
-        const answer = e.agent.ui.ask
-          ? await e.agent.ui.ask(`Adopt "${slug}"? Review the source above. Loads in-process with full authority. yes/no`)
-          : null;
+        // The source must reach the human at the decision point. `ctx.progress`
+        // routes to `logger.debug`, which both front ends silence, so fold the
+        // source + advisory INTO the consent prompt itself (rl.question renders
+        // it before waiting) and also log it for the record (`log.warn` surfaces).
+        ctx.log.warn(`adopt_improvement: candidate "${slug}" under human review:\n${source}\nAdvisory eval: ${advisory}`);
+        const prompt =
+          `Adopt "${slug}"? Review the FULL source below before approving.\n\n` +
+          `--- source ---\n${source}\n--- advisory: ${advisory} ---\n\n` +
+          `This loads in-process with FULL authority. Type 'yes' to adopt:`;
+        const answer = ctx.ui.ask ? await ctx.ui.ask(prompt) : null;
         if (typeof answer !== "string" || !/^\s*y/i.test(answer)) {
           return fail(`adopt_improvement: "${slug}" not adopted — human approval was not granted (fail-closed).`);
         }
@@ -342,8 +424,16 @@ export default function activate(e: ExtensionAPI): () => void {
         try {
           id = await e.loadExtension(livePath);
         } catch (err) {
-          return fail(`adopt_improvement: moved ${livePath} but loading it failed: ${(err as Error).message}`, {
-            path: livePath,
+          // Revert the live→staging move: host discovery scans the live dir by
+          // filename (never this store), so a left-behind orphan would auto-load
+          // next restart. Moving it back keeps the reviewed source retryable.
+          try {
+            renameSync(livePath, stagedPath);
+          } catch {
+            // best effort: the record is still not marked adopted
+          }
+          return fail(`adopt_improvement: loading "${slug}" failed — reverted to staging: ${(err as Error).message}`, {
+            path: stagedPath,
             loaded: false,
           });
         }

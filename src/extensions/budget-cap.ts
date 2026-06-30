@@ -45,6 +45,7 @@
  * it guards is worse than no guardrail.
  */
 
+import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, Usage } from "../kernel/types.js";
 import { text } from "../kernel/types.js";
@@ -161,17 +162,29 @@ export default function activate(e: ExtensionAPI): () => void {
   // `/budget-cap off` flipping the env makes the installed hooks pass through.
   if (process.env.EAGENT_BUDGET_CAP === "off") return () => {};
 
-  // --- run-/session-scoped state (closure-captured; the `cost`/`limits` shape) -
-  /** Per-run USD spend; reset on every `agent_start`. */
-  let runUsd = 0;
-  /** Cumulative-session USD; mirrored from the authoritative `usage` cumulative. */
+  // --- run-scoped state, keyed by the ACTING agent (`WeakMap<Agent,…>`) so
+  // concurrent parent + child forks don't commingle spend. The parent's entry is
+  // reset on `agent_start`; a child's is lazily created (with `activeModel` stamped
+  // from its own `model`) on its first `usage`, since `agent_start` is suppressed
+  // for children. (W9.1.) -----------------------------------------------------
+  interface RunState {
+    /** Per-run USD spend; reset on `agent_start`. */
+    runUsd: number;
+    /** Set once a hard cap trips this run. */
+    tripped: boolean;
+    /** Set once the soft pre-warn has fired this run (so it nudges only once). */
+    softWarned: boolean;
+    /** The model stamped when this agent's state was created (the pricing key). */
+    activeModel: string;
+  }
+  const states = new WeakMap<Agent, RunState>();
+  const stateFor = (agent: Agent): RunState => {
+    let s = states.get(agent);
+    if (!s) states.set(agent, (s = { runUsd: 0, tripped: false, softWarned: false, activeModel: agent.model }));
+    return s;
+  };
+  /** Cumulative-session USD; cross-run, shared, mirrored from the ROOT's `usage`. */
   let sessionUsd = 0;
-  /** Set once a hard cap trips this run; cleared on `agent_start`/`reset`. */
-  let tripped = false;
-  /** Set once the soft pre-warn has fired this run (so it nudges only once). */
-  let softWarned = false;
-  /** The model stamped at the start of the current run (the pricing key). */
-  let activeModel = e.agent.model;
 
   // Each handler is wrapped so a thrown error never escapes the bus (the `cost`
   // `safe` wrapper). A budget-cap failure can at worst drop a number, never a turn.
@@ -240,10 +253,12 @@ export default function activate(e: ExtensionAPI): () => void {
   const offStart = e.on(
     "agent_start",
     safe(() => {
-      runUsd = 0;
-      tripped = false;
-      softWarned = false;
-      activeModel = e.agent.model;
+      const agent = currentActingAgent() ?? e.agent;
+      const s = stateFor(agent);
+      s.runUsd = 0;
+      s.tripped = false;
+      s.softWarned = false;
+      s.activeModel = agent.model;
     }),
   );
 
@@ -253,22 +268,27 @@ export default function activate(e: ExtensionAPI): () => void {
     safe((p: { usage: Usage; cumulative: Usage }) => {
       const c = cfg();
       if (!c.enabled) return;
-      const row = priceRow(activeModel, activeCard());
+      const agent = currentActingAgent() ?? e.agent;
+      const s = stateFor(agent);
+      const row = priceRow(s.activeModel, activeCard());
       // Per-run accumulates from per-event deltas; the session figure mirrors the
       // authoritative cumulative (avoids float drift across a long session — the
-      // exact approach `cost` takes).
-      runUsd += costOf(p.usage, row);
-      sessionUsd = costOf(p.cumulative, row);
+      // exact approach `cost` takes). Only the ROOT agent updates the shared
+      // `sessionUsd`, so a child's smaller cumulative can't clobber it. (W9.1.)
+      s.runUsd += costOf(p.usage, row);
+      if (currentActingAgent() === undefined || currentActingAgent() === e.agent) {
+        sessionUsd = costOf(p.cumulative, row);
+      }
 
-      const verdict = assess(runUsd, sessionUsd, c);
+      const verdict = assess(s.runUsd, sessionUsd, c);
       if (verdict === "hard") {
         // Fire the warn/stop side-effects once, on the ok→hard transition — the
         // gate keeps blocking every later call, so re-warning (and re-calling
         // stop()) on each post-trip usage event would be noise. Mirrors the soft
-        // branch's single-shot `!softWarned` discipline.
-        if (!tripped) {
-          tripped = true;
-          const b = bindingCap(runUsd, sessionUsd, c);
+        // branch's single-shot `softWarned` discipline.
+        if (!s.tripped) {
+          s.tripped = true;
+          const b = bindingCap(s.runUsd, sessionUsd, c);
           if (b) {
             e.log.warn(
               `budget-cap: ${b.which} budget (${fmtUsd(b.cap)}) exceeded — spent ${fmtUsd(b.spend)} ` +
@@ -276,26 +296,26 @@ export default function activate(e: ExtensionAPI): () => void {
             );
           }
           // Only `mode === "stop"` acts here; `block` is handled in the gate, and
-          // `warn` logs only. stop() aborts at the next turn boundary.
-          if (c.mode === "stop") e.agent.stop();
+          // `warn` logs only. stop() aborts the ACTING agent at its next turn boundary.
+          if (c.mode === "stop") agent.stop();
         }
-      } else if (verdict === "soft" && !softWarned) {
-        softWarned = true;
+      } else if (verdict === "soft" && !s.softWarned) {
+        s.softWarned = true;
         // The soft band: nudge once, never block. Frame on whichever cap is
         // actually in its soft band (run preferred) — not unconditionally the run
         // cap — so the figures match the cap that tripped. A pre-warn nudges the
         // model to wrap up before the hard wall (the only mitigation for the
         // intrinsic post-spend detection lag).
-        const b = softBinding(runUsd, sessionUsd, c);
+        const b = softBinding(s.runUsd, sessionUsd, c);
         const cap = b ? b.cap : c.runMaxUsd > 0 ? c.runMaxUsd : c.sessionMaxUsd;
-        const spend = b ? b.spend : c.runMaxUsd > 0 ? runUsd : sessionUsd;
+        const spend = b ? b.spend : c.runMaxUsd > 0 ? s.runUsd : sessionUsd;
         e.log.warn(`budget-cap: soft warning — spent ${fmtUsd(spend)} of ${fmtUsd(cap)} budget`);
         const msg: Message = text(
           "user",
           `budget-cap: you have spent ${fmtUsd(spend)} of your ${fmtUsd(cap)} budget. ` +
             `Wrap up now and produce your final answer rather than starting new tool work.`,
         );
-        e.agent.handle.steer(msg);
+        agent.handle.steer(msg);
       }
     }),
   );
@@ -309,8 +329,10 @@ export default function activate(e: ExtensionAPI): () => void {
     try {
       if (decision.block) return decision; // already vetoed by another guard
       const c = cfg();
-      if (!c.enabled || c.mode === "warn" || !tripped) return decision;
-      const b = bindingCap(runUsd, sessionUsd, c);
+      if (!c.enabled || c.mode === "warn") return decision;
+      const s = stateFor(currentActingAgent() ?? e.agent);
+      if (!s.tripped) return decision;
+      const b = bindingCap(s.runUsd, sessionUsd, c);
       const reason = b
         ? `budget-cap: ${b.which} budget (${fmtUsd(b.cap)}) exhausted — spent ${fmtUsd(b.spend)}; ` +
           `halting paid tool work`
@@ -325,14 +347,15 @@ export default function activate(e: ExtensionAPI): () => void {
   // --- 4. /budget-cap command ----------------------------------------------
   const renderStatus = (print: (line: string) => void): void => {
     const c = cfg();
+    const s = stateFor(currentActingAgent() ?? e.agent);
     print(`enabled=${c.enabled}`);
     print(`mode=${c.mode}`);
     print(`runMaxUsd=${c.runMaxUsd}${c.runMaxUsd === 0 ? " (disabled)" : ""}`);
     print(`sessionMaxUsd=${c.sessionMaxUsd}${c.sessionMaxUsd === 0 ? " (disabled)" : ""}`);
     print(`softFraction=${c.softFraction}`);
-    print(`runUsd=${fmtUsd(runUsd)}`);
+    print(`runUsd=${fmtUsd(s.runUsd)}`);
     print(`sessionUsd=${fmtUsd(sessionUsd)}`);
-    print(`tripped=${tripped}`);
+    print(`tripped=${s.tripped}`);
   };
 
   const setPriceCard = (parts: string[], print: (line: string) => void): void => {
@@ -414,9 +437,10 @@ export default function activate(e: ExtensionAPI): () => void {
         return;
       }
       if (head === "reset") {
-        runUsd = 0;
-        tripped = false;
-        softWarned = false;
+        const s = stateFor(currentActingAgent() ?? e.agent);
+        s.runUsd = 0;
+        s.tripped = false;
+        s.softWarned = false;
         ctx.print("budget-cap: per-run state cleared (runUsd, tripped, softWarned)");
         return;
       }

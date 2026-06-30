@@ -127,3 +127,21 @@ From `docs/design/2026-06-29-execution-target.md` (§3, R6, L1 round-2 note).
 | RW7a-2 | **Unify conversation rewind with workspace rollback** — `/rewind` restores agent state only; files are `checkpoint.ts`'s `/rollback`. A combined "rewind to step N AND roll the workspace back" needs an id-alignment design between the two extensions. | `docs/design/2026-06-29-time-travel.md` (KDD-5) | M · M | Coupling two extensions is fragile (git may be absent; step-ids ≠ workspace-checkpoint-ids). Documented; operator pairs them manually. A later design can align them. |
 | RW6d-1 | A **reasoning-only** assistant turn (reasoning streamed, no text, no tool call — e.g. `max_tokens` mid-thought) now persists `content:[{thinking}]`; on replay the unsigned thinking block is dropped, leaving OpenAI `content:null` (its existing text-less shape) and **Gemini `parts:[]`** (which the API may reject). | `docs/design/2026-06-29-reasoning-fidelity.md` (R4) | S · L | Low likelihood (requires snapshotting a truncated thinking-only turn then continuing). Fix: a "drop an assistant message whose replay yields empty content" guard in the builders, if it ever bites. Left unguarded in the Light fix. |
 | RW6c-4 | codeact `tier=readonly` is **non-functional on the `bwrap` backend**: `wrapCommand`'s bwrap branch mounts `--tmpfs /tmp` and only re-binds the writable root for *write* tiers, so the snippet (under `os.tmpdir()` = `/tmp` on Linux) is shadowed and the interpreter gets ENOENT. Fails **closed** (errors, no bypass); macOS `sandbox-exec` + Linux `firejail` are unaffected; codeact's recommended tiers (`workspace-write`/`no-network`) bind the dir and work. | `docs/design/2026-06-29-execution-target.md` (F review) | M · M | Fix needs a **read-only** bind of the per-call dir for non-write tiers — a `wrapCommand` contract extension (a readonly-bind param) that must not loosen the *shell* readonly tier. Deferred to a focused change; README notes the degradation. |
+
+---
+
+## Wave 9 reconciliation (2026-06-29)
+
+**Resolved by Wave 9** (closed in source + pinned by tests; F closeout pass): RW3-1 (flow-guard child
+data-taint reads the acting transcript), RW3-2 (circuit-breaker/budget-cap/output-contract no longer
+misroute to the parent), RW6c-4 (codeact readonly bwrap `--ro-bind`), RW8b-2 (failed adopt-load rolls back
+to staging), RW1-1 (per-run token budget counts cache tokens), RW6d-1 (Gemini empty-`parts` replay skip).
+
+**New residuals registered by Wave 9** (all low-priority / non-blocking):
+
+| ID | Item | Source | Sev·Likelihood | Why deferred |
+|----|------|--------|----------------|--------------|
+| RW9.3-1 | **Linux bwrap CI job** so the new sandbox real-backend confinement tests (`test/sandbox-tiers.test.ts`) *execute* in CI rather than skip (they execute locally on macOS sandbox-exec; a Linux runner has no sandbox by default). | `docs/design/2026-06-29-sandbox-hardening.md` §3 | M · — | Infra/CI change, environment-specific; the tests skip-not-fail without a backend, so the suite stays green. |
+| RW9-1 | **otel last-batch hard-exit flush** — `session_shutdown` now awaits `flush()`, but `agent_end`'s eager `void flush()` usually drains the buffer first, so the last run's batch still rides the unawaited `agent_end` POST and can be cut by an immediate `process.exit`. | `otel-exporter.ts` (F-review G1) | S · L | Telemetry-only, best-effort by design; closing the window fully needs an awaited per-run flush or a shutdown drain barrier. |
+| RW9-2 | **Headless-fork guard-UI divergence** — circuit-breaker prompts via the *acting* agent's `ui.confirm` (a headless fork auto-denies in `ask` mode) while flow-guard/provenance prompt via the *parent* `ui`. | `circuit-breaker.ts` (F-review G2) | S · L | Both directions are fail-closed/safe; arguably correct (no N human prompts per fork). Pick one convention if unified UX is wanted. |
+| RW9-3 | **citations × reasoning-search cross-fork warn** — a fork's `[src:N]` ids live in the child's per-agent state; if the parent's final answer echoes one, `agent_end` validation may log a spurious "fabricated source id" warning. | `citations.ts` (F-review G3) | S · L | Warn-only; both extensions default off. |
