@@ -309,7 +309,7 @@ export default function activate(e: ExtensionAPI): () => void {
   );
 
   const offTree = e.registerTool(
-    defineTool<{ task?: string; branch?: number; beam?: number; depth?: number; scorer?: string; maxNodes?: number }>({
+    defineTool<{ task?: string; branch?: number; beam?: number; depth?: number; scorer?: string; maxNodes?: number; goalScore?: number }>({
       name: TREE_SEARCH,
       description:
         "Tree-of-Thought beam search: fork child agents from the current state, run " +
@@ -331,6 +331,7 @@ export default function activate(e: ExtensionAPI): () => void {
             description: "How to rank thoughts; default judge.",
           },
           maxNodes: { type: "integer", description: `Hard cap on total child runs (default ${DEFAULT_MAX_NODES}; capped at ${HARD_MAX_NODES}).` },
+          goalScore: { type: "number", description: "Stop early once a thought scores at or above this; default off (run to depth)." },
         },
         required: ["task"],
       },
@@ -347,6 +348,9 @@ export default function activate(e: ExtensionAPI): () => void {
         // Lower-bound maxNodes by `branch` so the first depth always runs the root expansion.
         const maxNodes = clamp(intArg(args.maxNodes, DEFAULT_MAX_NODES), branch, HARD_MAX_NODES);
         const scorer = pickScorer(args.scorer, task, ctx);
+        // Optional early-termination bar: when a thought scores at/above it, stop
+        // before expanding the next depth. Off by default (run to `depth`).
+        const goalScore = typeof args.goalScore === "number" ? args.goalScore : undefined;
 
         interface Node {
           state: AgentState;
@@ -404,6 +408,10 @@ export default function activate(e: ExtensionAPI): () => void {
             // thought is never lost to a weaker-but-deeper one.
             for (const c of scored) if (!best || c.score > best.score) best = { text: c.text, score: c.score };
             details.push(scored.map((c) => ({ score: c.score, text: c.text.slice(0, 120) })));
+
+            // Early goal-termination: a thought already meets the bar, so stop
+            // before paying for another depth of forks.
+            if (goalScore !== undefined && best && best.score >= goalScore) break;
 
             scored.sort((a, b) => b.score - a.score);
             frontier = scored.slice(0, beam);

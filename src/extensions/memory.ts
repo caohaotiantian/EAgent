@@ -324,10 +324,24 @@ function runScratchpad(
       print(`Promoted "${key}" to core.`);
       return;
     }
+    case "forget-archive": {
+      const key = rest[0];
+      if (key === undefined) {
+        print("usage: /memory forget-archive <key>");
+        return;
+      }
+      if (!readArchive(store, key)) {
+        print(`no archived note "${key}".`);
+        return;
+      }
+      store.delete(ARCHIVE_PREFIX + key);
+      print(`Forgot archived "${key}".`);
+      return;
+    }
     default:
       print(
         `unknown /memory sub-command "${sub}"; ` +
-          "expected list | edit | forget | rollback | consolidate | recall | archive | promote.",
+          "expected list | edit | forget | rollback | consolidate | recall | archive | promote | forget-archive.",
       );
       return;
   }
@@ -385,7 +399,7 @@ export default function activate(e: ExtensionAPI): () => void {
       description:
         "Show memory config, or inspect the scratchpad: " +
         "list | edit <id> <text> | forget <id> | rollback <id> | consolidate | " +
-        "recall <query> | archive | promote <key>.",
+        "recall <query> | archive | promote <key> | forget-archive <key>.",
       run: (ctx: CommandContext) => {
         const tokens = ctx.args.trim().split(/\s+/).filter((t) => t.length > 0);
         const sub = tokens[0];
