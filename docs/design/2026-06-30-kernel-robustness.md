@@ -230,6 +230,31 @@ preserved for recovery.
   check (`agent.ts:252-255`). End state is `reason:"stop"` either way. FRESH-1's catch governs the
   abort-throw that actually escapes to `run()` — the post-commit case (the common one) and the
   no-handler pre-commit case.
+  - **Blast-radius (existing test pin, found at L3 dev):** `fallback-routing` exercises exactly this
+    pre-commit-abort path — `test/fallback-routing.test.ts` ("an abort during the head … does NOT fail
+    over") drives a `FailFast` head that calls `agent.stop()` then throws pre-commit, and **asserted
+    the run rejects** (the old contract). Under FRESH-1 that aborted run now *resolves* `reason:"stop"`,
+    so this test's run-resolution assertion is intentionally updated to `assert.equal(reason, "stop")`
+    while **keeping** its real invariant `assert.equal(spy.calls, 0)` (an abort never triggers
+    failover; `fallback-routing.ts:222` re-throws on `req.signal.aborted` *before* any failover, and is
+    unchanged). A `test/`-wide sweep confirmed this is the **only** consumer asserting an aborted
+    `Agent.run()` rejects (`http.test.ts`/`self-improve.test.ts` `assert.rejects`-on-abort are at the
+    HTTP/`runScored` layers, not `Agent.run`; the search-fork tests use graceful-break providers that
+    yield `done` on abort and never reach `run()`'s catch). This is realized in the impl doc's Phase 1
+    (task 4b) — the design's original blast-radius analysis missed it.
+  - **Production consumers (CLI + server) — verified compatible/improved.** `cli.ts`'s `runTurn`
+    (`:326-332`) wraps `run()` in a `try/catch` that prints a red `✗`; under FRESH-1 a Ctrl-C cancel
+    resolves instead of throwing, so the catch no longer fires and the user sees only the SIGINT
+    handler's "⏹ interrupted" rather than that **plus** a spurious error line — an **improvement**, no
+    breakage. `server.ts`'s `streamRun` (`:361-366`) already handles `reason:"stop"` by snapshotting the
+    session inside the `try` (a between-call abort already resolves `reason:"stop"` today, so the server
+    already persists on cancel — by design, for resume-after-cancel); FRESH-1 only makes a *mid-stream*
+    abort consistent with that path, with no server code change. **Out of scope (pre-existing,
+    registered as a follow-up):** the server does not guard against snapshotting a transcript whose last
+    turn is a bare dangling `[user]` (a first turn aborted before any assistant output) — already
+    reachable today via an early between-call abort; FRESH-1 merely widens the timing window. Fixing the
+    server's snapshot-on-abort guard is a separate server-session-robustness change, not part of this
+    kernel pass (Simplicity First / Surgical Changes).
 - **`docs/design/2026-06-28-forkable-state.md`** (snapshot/restore, `#step`) — unaffected; FRESH-1 only
   changes how an already-aborted run reports `reason`/throws, not transcript or step state.
 - **`docs/design/2026-06-29-governed-subagents.md` / W9.1 acting-agent seam** — FRESH-1 makes
@@ -279,6 +304,13 @@ preserved for recovery.
   a user `stop()`. **Mitigation:** this only happens when the user actually requested cancellation, so
   reporting `reason:"stop"` is defensible; the genuine-error path (no abort) is unchanged and pinned by
   AC#2. **Rollback:** revert the catch to the 3-line original.
+- **Risk (blast-radius — surfaced at L3 dev, now mitigated):** FRESH-1 changes the observable
+  run-resolution contract for aborted runs (reject→resolve `reason:"stop"`), which an existing
+  downstream test relied on. **Mitigation:** a `test/`-wide sweep identified the sole consumer
+  (`test/fallback-routing.test.ts`'s abort test); it is updated to the new contract while preserving its
+  real `spy.calls === 0` invariant (impl Phase 1 task 4b, §6 blast-radius note). No production consumer
+  (only a test) depended on the old rejection, and no `fallback-routing.ts` behavior changes. **Rollback:**
+  reverting FRESH-1 also reverts the test edit; both are in the same Phase-1 diff.
 - **Risk:** FRESH-2 masks a real misconfiguration by clamping silently. **Mitigation:** `<= 0` is never
   a valid concurrency, so the clamp can only improve on a crash; the value is rarely set. **Rollback:**
   revert the one-line constructor change.

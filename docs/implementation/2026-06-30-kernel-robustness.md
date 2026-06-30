@@ -21,8 +21,28 @@
 
 ### Phase 1 — `agent.ts` loop robustness (FRESH-1 + FRESH-2)
 
+**Files:** `src/kernel/agent.ts`, `test/agent.test.ts`, **and `test/fallback-routing.test.ts`** (one
+existing test pins the *old* aborted-run contract — see task 4b; this is the only such consumer, per
+the blast-radius sweep below).
+
 **Entry condition:** clean tree on `init`; baseline `npm test` green (1136 pass / 0 fail / 1 skip),
 `npm run typecheck` 0, kernel metric 2198.
+
+**Blast-radius note (why `fallback-routing.test.ts` is in scope):** FRESH-1 changes the run-resolution
+contract for an aborted run from *reject + `reason:"error"` + `"error"` event* to *resolve +
+`reason:"stop"` + no event* — for **all** abort-throw cases that reach `run()`'s catch, i.e. the
+post-commit (mid-stream) case AND the no-handler **pre-commit** case. A sweep of `test/` for consumers
+that assert an *aborted* `Agent.run()` rejects found exactly **one**: `test/fallback-routing.test.ts`
+(`an abort during the head … does NOT fail over`, `:263-274`), which uses a `FailFast` head that calls
+`agent.stop()` then throws pre-commit, and asserted `assert.rejects`. Every other `assert.rejects`
+hit on `Agent.run()` is a **non-abort genuine error** (signal not aborted ⇒ FRESH-1's else-branch
+preserves the reject), so all stay green: `reliability.test.ts` (×5: socket-hang-up / 504 / unexpected
+— no `stop()`); the *second* reject in `fallback-routing.test.ts:256` (the `MidStreamFail` mid-stream-fatal
+test — throws without aborting, so task 4b leaves it untouched); and the `agent.test.ts` pre-commit /
+MAX_PROVIDER_RETRIES tests. `http.test.ts` / `self-improve.test.ts` `assert.rejects`-on-abort are at the
+HTTP transport / `runScored` child-process layers, not `Agent.run`; reasoning-search/tree-search/
+graph-of-thought forks use graceful-break providers that yield `done` on abort (never throw), and
+budget-cap calls `stop()` only at turn boundaries — none reach `run()`'s catch via an abort-throw.
 
 **Design references:** D1 (FRESH-1, design §4 "D1 —"), D2 (FRESH-2, "D2 —"), D4 (line-ceiling offset,
 "D4 —"), AC#1/#2/#3 (§7), Scope Boundary (§3).
@@ -56,8 +76,17 @@
    does **not** emit `"error"` and does **not** re-throw (control falls through to `finally` then the
    `return`); otherwise it keeps the exact existing behavior (`reason = "error"`; `await
    this.hooks.emit("error", { where: "agent.run", error: err })`; `throw err`).
+4b. **[test/regression] update `test/fallback-routing.test.ts` to the new aborted-run contract.** The
+   existing test `an abort during the head … does NOT fail over` (≈ `:263`) asserts
+   `await assert.rejects(h.agent.run("hello"), …)`. FRESH-1 makes that aborted head a clean stop, so
+   change the run-resolution assertion to `const { reason } = await h.agent.run("hello");
+   assert.equal(reason, "stop", …)` and **keep** the load-bearing assertion `assert.equal(spy.calls, 0,
+   …)` (the test's real invariant: an abort still never triggers failover). Rename the test title to
+   `… is a clean stop and does NOT fail over`. Add a one-line comment crediting FRESH-1. This is the
+   *only* such consumer (blast-radius note above); do **not** touch `fallback-routing.ts` itself (its
+   `req.signal.aborted` re-throw-before-failover at `:222` is unchanged and still correct).
 5. **[impl] FRESH-1 comment offset (D4)** — rewrite the in-loop abort-handling comment at
-   `agent.ts:238-243` (6 lines) to ~2 lines, updated to state there are now **three** abort-handling
+   `agent.ts:238-243` (6 lines) to ~2-3 lines, updated to state there are now **three** abort-handling
    sites (the two in-loop checks + the `run()` catch), all ending the run `reason:"stop"`. This offsets
    the FRESH-1 catch growth. **Do not touch `flush()` or any unrelated comment** (Scope §3).
 6. **[impl] FRESH-2** — change `agent.ts:132` from `this.maxConcurrency = opts.maxConcurrency ??
@@ -74,11 +103,15 @@
 
 **Per-task acceptance commands:**
 - `node --import tsx --test test/agent.test.ts` exit 0 (existing + the 3 new tests).
+- `node --import tsx --test test/fallback-routing.test.ts` exit 0 (the updated abort-contract test +
+  the rest unchanged).
 - `node --import tsx --test test/kernel-surface.test.ts` exit 0 (the `< 2200` assertion + export pins).
-- `npm run typecheck` exit 0.
+- `npm run typecheck` exit 0; `npm test` exit 0 (full suite).
 
-**Exit condition:** the three new `agent.test.ts` tests pass; `agent.test.ts:763` still passes;
-kernel-surface green (`< 2200`); typecheck 0; `npm test` green.
+**Exit condition:** the three new `agent.test.ts` tests pass; the updated `fallback-routing.test.ts`
+abort test passes (asserts `reason:"stop"` + `spy.calls === 0`); the genuine-error regression
+(`agent.test.ts`, "a real failure (no abort) still ends reason:error") still passes; kernel-surface
+green (`< 2200`); typecheck 0; `npm test` green.
 
 ### Phase 2 — `store.ts` corrupt-file safety (FRESH-4)
 
@@ -155,8 +188,14 @@ green (`< 2200`); typecheck 0; `npm test` green; `npm run eval` 5/5.
 ## 5. Regression Protection
 
 - **Must stay green:** `test/agent.test.ts:282-303` (between-call `stop()` ⇒ `reason:"stop"`, unchanged
-  path); `test/agent.test.ts:763` (pre-commit genuine error ⇒ reject + `reason:"error"`); the
-  `maxConcurrency` tests (`:420,:475`); the full `test/kernel-surface.test.ts` (export pins + `< 2200`);
-  `test/memory.test.ts` (exercises `FileBackend`); `npm run eval` (5/5).
+  path); `test/agent.test.ts:763` (pre-commit genuine error, **no abort** ⇒ reject + `reason:"error"` —
+  preserved by FRESH-1's else-branch); the `maxConcurrency` tests (`:420,:475`); the full
+  `test/kernel-surface.test.ts` (export pins + `< 2200`); `test/memory.test.ts` (exercises
+  `FileBackend`); `npm run eval` (5/5).
+- **Intentionally updated (not a regression — a contract change):** `test/fallback-routing.test.ts`'s
+  abort test (task 4b). Its run-resolution assertion moves from `assert.rejects` to
+  `reason === "stop"`; its real invariant (`spy.calls === 0` — no failover on abort) is **unchanged and
+  must stay green**. The whole `fallback-routing.test.ts` file must pass (the other failover tests are
+  untouched by FRESH-1).
 - **Whole suite:** `npm test` must end at ≥ 1136 pass / 0 fail (new tests add to the count), 1 skip
   (the backend-gated self-improve integration test) unchanged.
