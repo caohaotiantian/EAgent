@@ -171,8 +171,9 @@ test("AC-4: a worst-case config is clipped to maxNodes and returns the best leaf
 
   await agent.run("kickoff");
 
-  // Worst case is branch + (depth-1)*beam*branch = 4 + 2*3*4 = 28; maxNodes:5 clips it.
-  assert.ok(childRuns <= 5, `child runs clipped to maxNodes:5 (ran ${childRuns})`);
+  // Worst case is branch + (depth-1)*beam*branch = 4 + 2*3*4 = 28; maxNodes:5 clips it to
+  // exactly 4 (depth-0) + 1 (depth-1, budget hit) = 5.
+  assert.equal(childRuns, 5, `child runs clipped to exactly maxNodes:5 (ran ${childRuns})`);
   const result = toolResults(agent.messages)[0]!;
   assert.equal(result.isError, undefined, "budget exhaustion returns the best leaf so far, not a fail");
 });
@@ -498,4 +499,80 @@ test("AC-10: the parent transcript carries only the tree_search call, not loser 
     !JSON.stringify(agent.messages).includes(D1_LOSE),
     "the losing branch's text never appears in the parent transcript",
   );
+});
+
+// ---------------------------------------------------------------------------
+// KDD-5 — the answer is the GLOBAL best across all depths (a running best),
+// never lost to a weaker-but-deeper final frontier.
+// ---------------------------------------------------------------------------
+
+test("KDD-5: a higher-scoring early thought wins over every deeper one", async () => {
+  const D1_BEST = "x".repeat(20); // depth-1 thought — the global best overall
+  const D1_LOSE = "x".repeat(5);
+  let d1 = 0;
+  let calledTree = false;
+  const responder = (req: CompletionRequest) => {
+    if (lastUserText(req) === TASK) {
+      if (assistantTexts(req).length === 0) return { text: d1++ === 0 ? D1_BEST : D1_LOSE };
+      return { text: "x".repeat(3) }; // every depth-2 leaf scores below D1_BEST
+    }
+    if (!calledTree) {
+      calledTree = true;
+      return {
+        toolCalls: [
+          { name: "tree_search", arguments: { task: TASK, branch: 2, beam: 1, depth: 2, scorer: "longest" } },
+        ],
+      };
+    }
+    return { text: "parent-done" };
+  };
+
+  const { agent, host } = makeHarness({ fallback: "allow", responder });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+
+  await agent.run("kickoff");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, undefined, "tree_search succeeded");
+  assert.equal(result.content, D1_BEST, "the depth-1 global best wins, not a shorter depth-2 leaf");
+});
+
+// ---------------------------------------------------------------------------
+// R2 — forkFrom internalizes the dangling-tool_use prune, so every fork (root +
+// intermediate) starts from a provider-valid transcript. A child whose restored
+// state ended on the in-flight tree_search tool_use would otherwise send a
+// dangling assistant tool_call.
+// ---------------------------------------------------------------------------
+
+test("R2: every fork starts provider-valid (no dangling tool_use reaches a child)", async () => {
+  let calledTree = false;
+  const responder = (req: CompletionRequest) => {
+    if (lastUserText(req) === TASK) {
+      // The restored fork state (the message before the appended user task) must
+      // not end on an unresolved tool_call — forkFrom must have pruned the
+      // in-flight tree_search tool_use from the root snapshot.
+      const prior = req.messages[req.messages.length - 2];
+      if (prior?.role === "assistant" && prior.content.some((b) => b.type === "tool_call")) {
+        throw new Error("a child fork received a dangling tool_use (forkFrom did not prune)");
+      }
+      return { text: "thought" };
+    }
+    if (!calledTree) {
+      calledTree = true;
+      return {
+        toolCalls: [{ name: "tree_search", arguments: { task: TASK, branch: 2, beam: 1, depth: 2 } }],
+      };
+    }
+    return { text: "parent-done" };
+  };
+
+  const { agent, host } = makeHarness({ fallback: "allow", responder });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+
+  await agent.run("kickoff");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, undefined, "the prune held end-to-end; no fork saw a dangling tool_use");
 });
