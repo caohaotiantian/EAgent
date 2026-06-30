@@ -1,5 +1,12 @@
 # Implementation — OTLP metrics + logs (otel-exporter)
 
+```
+Status: closed
+Closing-commit: bb75a2d
+Closed-on: 2026-06-30
+Deferred: RW7c-2, RW7c-3, histograms — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-30-otlp-metrics-logs` (matches design) · **Design:**
 [`design/2026-06-30-otlp-metrics-logs.md`](../design/2026-06-30-otlp-metrics-logs.md)
 
@@ -177,3 +184,14 @@ Offline; no new fixtures.
   two rounds, no design flaw). One non-blocking finding folded as an impl fix: gate the log-record push on
   `logsEndpoint()` (not `anyEnabled()`) so a traces-only config doesn't accumulate an unbounded `logRecords`
   buffer it never flushes. **L2 closed.**
+
+## F Closeout Review
+
+- **F end-to-end review** — **pass, zero severe.** OTLP metrics + logs bodies wire-correct (Sum{NumberDataPoint,
+  aggregationTemporality:2, isMonotonic:true}, asInt/nanos decimal strings; resourceLogs/severityNumber
+  9/17/traceId/spanId); the no-content invariant upheld (error body = `where` + class name, never
+  `Error.message` — AC-5 strong); the traces `/v1/traces` wire byte-identical (only the `fetch` wrapped in
+  `flushSignal`); the r3 leak fix applied (log pushes gated on `logsEndpoint()`); RW9-1 shutdown-await
+  preserved via `Promise.all`. All 10 ACs real-tested + Task 0 migration complete (no traces test broken).
+  Consolidation: README otel row + RW7c-1 RESOLVED. Gates: typecheck 0, `npm test` 1136 pass / 1 skip,
+  kernel 2186, ext 58.

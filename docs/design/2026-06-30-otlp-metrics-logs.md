@@ -1,5 +1,12 @@
 # Design — OTLP metrics + logs signals (otel-exporter)
 
+```
+Status: closed
+Closing-commit: bb75a2d
+Closed-on: 2026-06-30
+Deferred: RW7c-1 RESOLVED (traces+metrics+logs); RW7c-2 (traceparent propagation), RW7c-3 (live-collector smoke), histograms — docs/DEFERRED-FOLLOWUPS.md
+```
+
 **Slug:** `2026-06-30-otlp-metrics-logs` · **Mode:** Full · **Source:** `docs/DEFERRED-FOLLOWUPS.md` RW7c-1
 (otel-exporter v1 emits **traces** only). **Research:** OpenTelemetry OTLP/HTTP spec (the three signals:
 `/v1/traces`, `/v1/metrics`, `/v1/logs`); OTel GenAI semantic conventions (token-usage metric, GenAI events).
