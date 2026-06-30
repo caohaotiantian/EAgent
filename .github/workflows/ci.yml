@@ -47,3 +47,7 @@ jobs:
         run: bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net true
       - name: Run the sandbox confinement tests under a real bwrap backend
         run: node --import tsx --test "test/sandbox-tiers.test.ts"
+      - name: Run the self-improve real-evaluator integration test under bwrap
+        env:
+          EAGENT_SI_INTEGRATION: "1"
+        run: node --import tsx --test "test/self-improve-integration.test.ts"
