@@ -748,6 +748,37 @@ test("AC-7 off: no endpoints => zero POSTs; EAGENT_OTEL=off with all endpoints s
   }
 });
 
+// AC-7 off (kill switch is inert, not just silent): with the switch engaged and
+// a logs endpoint set, the `error`/`agent_end` handlers must not buffer records
+// into `logRecords` (flush early-returns and never drains them => a leak).
+test("AC-7 off: EAGENT_OTEL=off with a logs endpoint does not buffer log records (no leak)", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "http://collector.test:4318/v1/logs";
+  process.env.EAGENT_OTEL = "off";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host, commands } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    // An in-run error plus the agent_end at the run's close — both would push.
+    await agent.hooks.emit("error", { where: "tool.exec", error: new Error("boom") });
+    await agent.run("go");
+
+    assert.equal(calls.length, 0, "kill switch => zero POSTs");
+    const lines: string[] = [];
+    await commands.get("otel")!.run({ agent, args: "status", print: (l) => lines.push(l) });
+    assert.match(lines.join("\n"), /logRecords=0\b/, "kill switch must not buffer log records");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // AC-8 (cumulative + decimal strings) — token Sum data points
 // ---------------------------------------------------------------------------

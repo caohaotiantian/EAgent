@@ -364,10 +364,12 @@ export default function activate(e: ExtensionAPI): () => void {
     // An operational ERROR log record — metadata only: the `where` + the error
     // CLASS name, never the raw `Error.message` (which could embed a tool arg or
     // result fragment). Correlated to the acting agent's live trace if one exists.
-    // Gated on `logsEndpoint()` (not `anyEnabled()`): `logRecords` drains only on
-    // a /v1/logs POST, so a config with no logs endpoint must not buffer it.
+    // Gated on `notSuppressed() && logsEndpoint()` (equivalently `anyEnabled() &&
+    // logsEndpoint()`): `logRecords` drains only on a /v1/logs POST, and `flush`
+    // early-returns when suppressed — so a no-logs config OR an engaged kill
+    // switch must not buffer, or the array leaks unbounded.
     e.on("error", ({ error, where }) => {
-      if (!logsEndpoint()) return;
+      if (!notSuppressed() || !logsEndpoint()) return;
       const acting = currentActingAgent();
       const t = acting ? traces.get(acting) : undefined;
       logRecords.push({
@@ -387,7 +389,7 @@ export default function activate(e: ExtensionAPI): () => void {
     // operational INFO outcome record (gated on the logs endpoint, like `error`).
     e.on("agent_end", ({ reason }) => {
       const agent = currentActingAgent() ?? e.agent;
-      if (logsEndpoint()) {
+      if (notSuppressed() && logsEndpoint()) {
         const t = traces.get(agent);
         logRecords.push({
           timeUnixNano: nanos(),
