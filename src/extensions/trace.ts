@@ -203,7 +203,13 @@ export default function activate(e: ExtensionAPI): () => void {
   const renderUsage = (): string[] => {
     const u = metrics.usage;
     const lines: string[] = [];
-    lines.push(`tokens: in=${u.inputTokens} out=${u.outputTokens} total=${totalTokens(u)}`);
+    // `in=` is fresh input only while `total=` is cache-inclusive; surface the
+    // cache tokens so the two never read as contradictory. Shown only when > 0,
+    // so an uncached run's line stays byte-identical.
+    const cache = (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+    lines.push(
+      `tokens: in=${u.inputTokens} ${cache > 0 ? `cache=${cache} ` : ""}out=${u.outputTokens} total=${totalTokens(u)}`,
+    );
     lines.push(
       `runs=${metrics.runs} turns=${metrics.turns} toolCalls=${metrics.toolCalls} ` +
         `toolErrors=${metrics.toolErrors} wallMs=${metrics.wallMs.toFixed(1)}`,

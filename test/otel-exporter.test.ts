@@ -384,6 +384,49 @@ test("D-W9.6b: session_shutdown performs the export AND awaits it before resolvi
 });
 
 // ---------------------------------------------------------------------------
+// RW9-1 — session_shutdown awaits the in-flight agent_end flush of the last run
+// ---------------------------------------------------------------------------
+test("RW9-1: session_shutdown awaits the last run's in-flight agent_end POST before resolving", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.test:4318";
+  // A slow fetch records ordering. agent_end drains the buffer with a fire-and-
+  // forget POST; the fix tracks that promise so session_shutdown awaits it (the
+  // hard-exit window where a process.exit right after a run could drop the batch).
+  const order: string[] = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    order.push("fetch-start");
+    await new Promise((r) => setTimeout(r, 10));
+    order.push("fetch-end");
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  try {
+    const { agent, host } = makeHarness({ responder: [{ text: "hi" }] });
+    await host.use("otel-exporter", otelExporter);
+
+    // A full run buffers the root+turn spans and drains them at agent_end, whose
+    // POST is in flight (started, not awaited) when the run resolves.
+    await agent.run("go");
+    assert.deepEqual(order, ["fetch-start"], "agent_end started the POST but did not await it");
+
+    // Shutdown immediately after the run must await that in-flight POST.
+    await agent.hooks.emit("session_shutdown", {});
+    order.push("shutdown-resolved");
+    assert.deepEqual(
+      order,
+      ["fetch-start", "fetch-end", "shutdown-resolved"],
+      "session_shutdown awaited the last run's in-flight agent_end POST before resolving",
+    );
+
+    await host.dispose();
+  } finally {
+    globalThis.fetch = orig;
+    restoreEnv(saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // R4 — no content leak (only metadata: tool name + status)
 // ---------------------------------------------------------------------------
 test("R4: no span attribute leaks tool arguments or result content", async () => {
