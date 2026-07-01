@@ -10,6 +10,31 @@ fold into the shipped slice.
 Verdicts below are from a dedicated assessment pass (build-vs-defer, weighing
 minimalist fit / value / effort / risk).
 
+## Closure ledger — finish-followups program (2026-07-01)
+
+**This ledger is the authoritative status; where a per-item row below still reads "deferred", this
+ledger supersedes it.** Under the "finish every deferred item" directive, the register was driven to
+exhaustion: each item was either **built** (through the three-loop, fresh-reviewer-gated) or **closed
+won't-build** (validated by an adversarial reviewer briefed to *find* a buildable non-degrading
+offline-testable slice — closed only when none exists, each with a deployment alternative).
+
+**Built (resolved):** KR-1 (server abort-snapshot), FRESH-1/2/4, FRESH-50, RW7c-4 (histogram),
+RW8a-2 (goalScore), RW7b-1 (semantic memory recall), DEFERRED-1 (risk-guard per-value decode),
+RW7b-3 (memory auto-promotion), RW8a-3 *refine-to-convergence* (`graph_search` `refineRounds`),
+RW7c-2 (OTel traceparent propagation into tool HTTP), plus the earlier Waves 1–9 and finish-deferred
+follow-ups. Each has a `docs/design/2026-07-01-*.md` (or earlier) closure block.
+
+**Closed (won't-build, validated 2026-07-01):**
+- Batch 1 — `docs/design/2026-07-01-deferred-closures.md`: **RW6c-2**, **RW6b-1**, **DEFERRED-5**.
+- Batch 2 — `docs/design/2026-07-01-deferred-closures-batch2.md`: the kernel-headroom cluster
+  **RW4-1**, **RW3-3**, **RW3-4**, **RW6a-1**, **RW6a-2**, **RW5-1**; correctness-hazard/no-consumer
+  **RW7a-1**, **RW7a-2**, **DEFERRED-2**, **RW6c-1**, **DEFERRED-6**; inert/speculative **DEFERRED-3**,
+  **DEFERRED-4**, **RW7c-3**; working-guard/cosmetic **RW9-2**, **RW9-3**, **RW4-2**. Also the
+  RW8a-3 sub-parts (GoT operations-DSL + `tree_search→graph_search` composition).
+
+Every closed item has a validated deployment alternative in its closure doc — none leaves a capability
+gap. **The register is exhausted: no item remains open.**
+
 ## Kept deferred (correctly cut — Simplicity First)
 
 | # | Sub-feature | Home design doc | Effort · Risk | Why it stays deferred |
@@ -120,7 +145,7 @@ From `docs/design/2026-06-29-execution-target.md` (§3, R6, L1 round-2 note).
 | RW7d-1 | **Broaden the committed eval-fixture set** beyond the initial 2 (`evals/`), and (paired with DEFERRED #5) add statistical pass@k. The CI gate is real but thin — more scenarios = more regression coverage. | `docs/design/2026-06-29-evals-ci.md` (D5, §3) | S–M · L | The gate + reuse mechanism is the deliverable; fixture breadth grows incrementally as behaviors are pinned. Statistical pass@k is the `evals` design's own deferral (#5). |
 | ~~RW7c-1~~ | **RESOLVED 2026-06-30.** `otel-exporter` now emits all three OTLP signals — traces + **metrics** (`/v1/metrics`: `eagent.gen_ai.token.usage` + `eagent.tool.calls` cumulative Sums) + **logs** (`/v1/logs`: metadata-only error/outcome records, trace-correlated). `docs/design/2026-06-30-otlp-metrics-logs.md`. | — | — | — |
 | ~~RW7c-4~~ | **RESOLVED 2026-07-01** (Wave C). otel-exporter now emits the OTel GenAI semconv Histogram `eagent.gen_ai.client.operation.duration` (per-call inference latency, the published advisory buckets, no config) alongside the two Sums. `docs/design/2026-07-01-otel-operation-duration-histogram.md`. | — | — | — |
-| RW7c-2 | **Distributed-context propagation** — inject `traceparent` into outbound tool HTTP so EAgent traces link to downstream services. | `docs/design/2026-06-29-otel-exporter.md` (§3) | M · M | v1 emits its own root traces; cross-service propagation needs a tool-HTTP injection seam, its own design. |
+| ~~RW7c-2~~ | **RESOLVED 2026-07-01** (`docs/design/2026-07-01-otel-traceparent-propagation.md`). otel-exporter publishes each tool-call span's W3C `traceparent`; web + mcp inject it onto outbound tool HTTP — gated on otel-on **and** an `EAGENT_OTEL_PROPAGATE_HOSTS` allowlist (default empty ⇒ inert, byte-identical). No kernel change. | — | — | — |
 | RW7c-3 | **Real-collector smoke** — the offline suite stubs `fetch`/asserts the OTLP body shape; a one-time smoke against a live Jaeger/Tempo/OTLP collector validates the wire end-to-end. | `docs/design/2026-06-29-otel-exporter.md` (R2) | S · M | Offline can't validate a live backend; the body shape is unit-pinned, but a real-collector smoke de-risks before production reliance. |
 | ~~RW7b-1~~ | **RESOLVED 2026-07-01.** Optional **semantic (embedding)** recall for `memory`: an injectable `Embedder` (`setEmbedder`) + a `fetch`-based real embedder from `EAGENT_MEMORY_EMBED_ENDPOINT`, embed-on-recall cosine ranking, **off by default → lexical byte-identical**, **fail-soft** to lexical, `EAGENT_MEMORY_EMBED=off` kill switch. `docs/design/2026-07-01-semantic-memory-recall.md`. **The "forbidden by the zero-dep rule" premise was wrong** — the chat providers already do zero-dep `fetch`, so a fetch embedder + a deterministic mock is feasible offline (no kernel change). | — | — | — |
 | RW7b-2 | An **archive-scoped `forget`** (delete an archived note in one step). | `docs/design/2026-06-29-tiered-memory.md` (§3) | S · L | v1 deletes an archived note via `/memory promote` then `/memory forget` (two steps); a direct archive-forget is a small follow-up. |
