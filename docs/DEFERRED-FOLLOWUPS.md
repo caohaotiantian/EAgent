@@ -18,22 +18,45 @@ exhaustion: each item was either **built** (through the three-loop, fresh-review
 won't-build** (validated by an adversarial reviewer briefed to *find* a buildable non-degrading
 offline-testable slice — closed only when none exists, each with a deployment alternative).
 
-**Built (resolved):** KR-1 (server abort-snapshot), FRESH-1/2/4, FRESH-50, RW7c-4 (histogram),
-RW8a-2 (goalScore), RW7b-1 (semantic memory recall), DEFERRED-1 (risk-guard per-value decode),
-RW7b-3 (memory auto-promotion), RW8a-3 *refine-to-convergence* (`graph_search` `refineRounds`),
-RW7c-2 (OTel traceparent propagation into tool HTTP), plus the earlier Waves 1–9 and finish-deferred
-follow-ups. Each has a `docs/design/2026-07-01-*.md` (or earlier) closure block.
+This ledger accounts for **every** register ID. (A late audit re-checked four upper-table rows that
+still read "deferred" — RW1-2, RW8b-1, RW7d-1, RW9-1 — and confirmed all four were **already resolved**
+by the 2026-06-30 "Deferred cleanup" section below; their upper rows were merely stale. Several other
+detail rows are likewise superseded by the Wave-9 reconciliation / Deferred-cleanup sections. This
+ledger is authoritative over any such stale row.)
 
-**Closed (won't-build, validated 2026-07-01):**
+**Built / resolved:**
+- *This finish-followups program:* RW7b-1 (semantic memory recall), DEFERRED-1 (risk-guard per-value
+  decode), RW7b-3 (memory auto-promotion), RW8a-3 *refine-to-convergence* (`graph_search`
+  `refineRounds`), RW7c-2 (OTel traceparent propagation). Each has a `docs/design/2026-07-01-*.md`
+  closure block.
+- *Earlier (finish-deferred / Wave A–D):* KR-1, FRESH-1/2/4, FRESH-50, RW7c-1/RW7c-4 (metrics/logs +
+  histogram), RW8a-1/RW8a-2 (ToT/GoT + goalScore), RW7b-2 (archive-scoped forget), RW7a-3 (time-travel
+  polish).
+- *Resolved by Wave 9* (see the Wave-9 reconciliation section below; detail rows above are stale):
+  RW1-1 (budget counts cache tokens), RW3-1 (flow-guard reads the acting transcript), RW3-2 (guards act
+  on the acting agent), RW6c-4 (codeact readonly bwrap `--ro-bind`), RW8b-2 (failed adopt-load rolls
+  back), RW6d-1 (Gemini empty-`parts` replay skip).
+- *Resolved by the `sandbox-linux` CI job:* RW6c-3, RW9.3-1.
+- *Resolved by the 2026-06-30 "Deferred cleanup" (stale upper rows):* RW1-2 (trace `cache=` field,
+  `trace.ts:209-211`), RW7d-1 (eval fixtures broadened 2→5, every assertion predicate pinned; the
+  open-ended "add more" remainder is not a bounded feature; pass@k = closed DEFERRED-5), RW8b-1
+  (self-improve `realEvaluate` integration test — `test/self-improve-integration.test.ts`, run in the
+  `sandbox-linux` CI job, backend-gated + `EAGENT_SI_INTEGRATION`-opt-in so `npm test` stays offline),
+  RW9-1 (otel `session_shutdown` awaits `lastFlush` + a final `flush()`; the only residual — a hard
+  `process.exit` with no shutdown emitted — is inherently unflushable, best-effort telemetry by design).
+
+**Closed (won't-build, adversarially validated):**
 - Batch 1 — `docs/design/2026-07-01-deferred-closures.md`: **RW6c-2**, **RW6b-1**, **DEFERRED-5**.
-- Batch 2 — `docs/design/2026-07-01-deferred-closures-batch2.md`: the kernel-headroom cluster
+- Batch 2 — `docs/design/2026-07-01-deferred-closures-batch2.md`: kernel-headroom cluster
   **RW4-1**, **RW3-3**, **RW3-4**, **RW6a-1**, **RW6a-2**, **RW5-1**; correctness-hazard/no-consumer
   **RW7a-1**, **RW7a-2**, **DEFERRED-2**, **RW6c-1**, **DEFERRED-6**; inert/speculative **DEFERRED-3**,
-  **DEFERRED-4**, **RW7c-3**; working-guard/cosmetic **RW9-2**, **RW9-3**, **RW4-2**. Also the
-  RW8a-3 sub-parts (GoT operations-DSL + `tree_search→graph_search` composition).
+  **DEFERRED-4**, **RW7c-3**; working-guard/cosmetic **RW9-2**, **RW9-3**, **RW4-2**; plus the RW8a-3
+  sub-parts (GoT operations-DSL + `tree_search→graph_search` composition).
 
 Every closed item has a validated deployment alternative in its closure doc — none leaves a capability
-gap. **The register is exhausted: no item remains open.**
+gap. **The register is now fully accounted for: every ID is built, resolved, or validated-closed** — a
+late audit re-verified the four apparently-open upper rows (RW1-2, RW7d-1, RW8b-1, RW9-1) and found all
+four already shipped (2026-06-30 cleanup), confirming no open item remains.
 
 ## Kept deferred (correctly cut — Simplicity First)
 
@@ -78,7 +101,7 @@ fresh/non-cached input; cache tokens are disjoint siblings). Both are non-blocki
 | # | Finding | Home design | Effort · Risk | Why deferred / fix |
 |---|---|---|---|---|
 | RW1-1 | `limits.ts:207` per-run token budget omits cache tokens on a cached run (`usage.inputTokens + usage.outputTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | No test exercises a cached run through `limits`. Fix: sum via `totalTokens(usage)` so cache tokens count. |
-| RW1-2 | `trace.ts:206` `in=`/`out=` split display shows fresh input only on a cached run (cosmetic; `total=` already cache-aware via `totalTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | Display-only. Fix: add a `cache=` field or fold cache into the `in=` display. |
+| ~~RW1-2~~ | **RESOLVED** (already fixed; row was stale). `trace.ts:209-211` computes `cache = cacheRead + cacheWrite` and renders a `cache=${cache}` field (shown only when >0, so an uncached line stays byte-identical) alongside `in=`/`out=`/`total=`, so the split never reads as contradictory. | — | — | — |
 
 ## Re-design Wave 3 (governed sub-agents) — deferred residuals
 
@@ -137,12 +160,12 @@ From `docs/design/2026-06-29-execution-target.md` (§3, R6, L1 round-2 note).
 | RW6c-1 | A real **container/microVM backend** (gVisor/Firecracker/Kata/E2B) wired into `lib/sandbox`'s `detectBackend`/`wrapCommand` plug-in point. | `docs/design/2026-06-29-execution-target.md` (§3) | H · H | Needs deps + infra and is not zero-dep/offline-testable; the lib is the documented seam where a deployment adds one. The shipped OS-launcher tiers (`sandbox-exec`/`bwrap`/`firejail`) are the best-effort zero-dep layer. |
 | ~~RW6c-2~~ | **CLOSED (won't-build) 2026-07-01** — dir-scoped macOS sandbox-exec write profile. `docs/design/2026-07-01-deferred-closures.md`; fresh adversarial review confirmed every narrowing risks an **offline-uncatchable fail-closed EPERM/ENOENT**: codeact spawns the interpreter with a scrubbed env (`HOME=os.tmpdir()` under `/private/var/folders`, `TMPDIR` unset → Node `os.tmpdir()`=`/tmp`), so dropping *either* temp subpath breaks a legit snippet; the only string-testable variant is a trap knob. `bwrap`/`firejail` are already dir-scoped; the no-home/project-writes guarantee already holds. | — | — | — |
 | RW6c-3 | A **real-host launcher smoke test** (`bwrap`/`sandbox-exec` actually present) before Wave 8 relies on the wrap end-to-end — the offline suite uses a forced backend + fake-launcher-on-PATH, never a real launcher. | same (L1 round-2 note) | S · M | The pure `wrapCommand` is unit-pinned and the integration is proven via a PATH shim; a one-time real-host smoke de-risks the bwrap `--tmpfs /tmp` + temp-dir-root interaction before self-improvement candidates depend on it. |
-| RW8b-1 | **Real-evaluator integration test** for `self-improve` — the sandboxed candidate-eval subprocess (copy + `node_modules` symlink + real launcher + `runEvalDir`) is **integration-only / untested** (offline tests inject a stub via `setEvaluator`). | `docs/design/2026-06-29-self-improvement.md` (KDD-3, D4) | M · M | Offline CI can't spawn a real sandboxed `node --import tsx` subprocess against a real launcher deterministically; the state machine + veto + `ui.ask` gate are offline-pinned, the real path is honestly flagged. A real-host smoke (paired with RW6c-3) de-risks before reliance. |
+| ~~RW8b-1~~ | **RESOLVED** (2026-06-30 cleanup; row was stale). `test/self-improve-integration.test.ts` exercises the real `realEvaluate` (spawn + sandbox + subprocess + `runEvalDir` + tamper path) end-to-end; it runs in the `sandbox-linux` bwrap CI job (`ci.yml:50-53`), backend-gated + `EAGENT_SI_INTEGRATION`-opt-in so default `npm test` stays fast/offline. | — | — | — |
 | RW8b-2 | A **failed `loadExtension` after the staged→live `renameSync`** (adopt) leaves the candidate file in the live extensions dir, where it auto-loads on the next host restart **without** re-passing the `ui.ask` gate. | `docs/design/2026-06-29-self-improvement.md` (D5; closing review) | S · L | The human already approved it at adopt, so it is not an unreviewed load; but a clean fix moves the file back (or records `adopted:false` + skips it) on a load failure. Low-likelihood (load fails only transiently after a passing veto+eval). |
 | ~~RW8a-1~~ | **RESOLVED 2026-06-30.** Both halves shipped: ToT as `tree_search` (multi-step beam search) and GoT as `graph_search` (generate → aggregate → refine), `docs/design/2026-06-30-tree-search.md` + `docs/design/2026-06-30-graph-of-thought.md`. | — | — | — |
 | RW8a-3 | **GoT extensions** beyond `graph_search` v1. **Multi-round iterative refinement (refine→score→refine to convergence): RESOLVED 2026-07-01** (`docs/design/2026-07-01-graph-search-refine-rounds.md` — optional `refineRounds?`, default 1 = byte-identical, stops the first non-improving round). The other two sub-parts **CLOSED (won't-build)**: the configurable Graph-of-Operations DSL and cross-tool `tree_search→graph_search` composition are speculative generality with no consumer, and the composition entangles the shared recursion-guard registry pruning (`reasoning-search.ts:89`). | `docs/design/2026-06-30-graph-of-thought.md` (§3, KDD-2) | — | Refine-to-convergence shipped; DSL/composition won't-build (speculative). |
 | RW8a-2 | **Early goal-termination** in `tree_search` — v1 always runs to `depth`; a goal-threshold (or classifier) that stops once a thought scores above a bar would cut cost on easy problems. | `docs/design/2026-06-30-tree-search.md` (R5, KDD-5) | S–M · L | v1's termination is purely depth-bounded by design (KDD-5); the global best-so-far is already tracked, so an early-exit is additive. |
-| RW7d-1 | **Broaden the committed eval-fixture set** beyond the initial 2 (`evals/`), and (paired with DEFERRED #5) add statistical pass@k. The CI gate is real but thin — more scenarios = more regression coverage. | `docs/design/2026-06-29-evals-ci.md` (D5, §3) | S–M · L | The gate + reuse mechanism is the deliverable; fixture breadth grows incrementally as behaviors are pinned. Statistical pass@k is the `evals` design's own deferral (#5). |
+| ~~RW7d-1~~ | **RESOLVED** (2026-06-30 cleanup; row was stale). Eval fixtures broadened 2→5 (`parallel-wave`, `subsequence-in-order`, `text-only-budget`), pinning every assertion predicate (`order:in_order`/`exact`, `maxSpans`, `maxTokens`, `finishReason`, `noToolErrors`); `npm run eval` 5/5. The open-ended "keep adding fixtures" remainder is incremental-by-nature (not a bounded feature); statistical pass@k = **closed** DEFERRED-5 (inert against the deterministic MockProvider). | — | — | — |
 | ~~RW7c-1~~ | **RESOLVED 2026-06-30.** `otel-exporter` now emits all three OTLP signals — traces + **metrics** (`/v1/metrics`: `eagent.gen_ai.token.usage` + `eagent.tool.calls` cumulative Sums) + **logs** (`/v1/logs`: metadata-only error/outcome records, trace-correlated). `docs/design/2026-06-30-otlp-metrics-logs.md`. | — | — | — |
 | ~~RW7c-4~~ | **RESOLVED 2026-07-01** (Wave C). otel-exporter now emits the OTel GenAI semconv Histogram `eagent.gen_ai.client.operation.duration` (per-call inference latency, the published advisory buckets, no config) alongside the two Sums. `docs/design/2026-07-01-otel-operation-duration-histogram.md`. | — | — | — |
 | ~~RW7c-2~~ | **RESOLVED 2026-07-01** (`docs/design/2026-07-01-otel-traceparent-propagation.md`). otel-exporter publishes each tool-call span's W3C `traceparent`; web + mcp inject it onto outbound tool HTTP — gated on otel-on **and** an `EAGENT_OTEL_PROPAGATE_HOSTS` allowlist (default empty ⇒ inert, byte-identical). No kernel change. | — | — | — |
@@ -170,7 +193,7 @@ to staging), RW1-1 (per-run token budget counts cache tokens), RW6d-1 (Gemini em
 | ID | Item | Source | Sev·Likelihood | Why deferred |
 |----|------|--------|----------------|--------------|
 | RW9.3-1 | **Linux bwrap CI job** so the new sandbox real-backend confinement tests (`test/sandbox-tiers.test.ts`) *execute* in CI rather than skip (they execute locally on macOS sandbox-exec; a Linux runner has no sandbox by default). | `docs/design/2026-06-29-sandbox-hardening.md` §3 | M · — | Infra/CI change, environment-specific; the tests skip-not-fail without a backend, so the suite stays green. |
-| RW9-1 | **otel last-batch hard-exit flush** — `session_shutdown` now awaits `flush()`, but `agent_end`'s eager `void flush()` usually drains the buffer first, so the last run's batch still rides the unawaited `agent_end` POST and can be cut by an immediate `process.exit`. | `otel-exporter.ts` (F-review G1) | S · L | Telemetry-only, best-effort by design; closing the window fully needs an awaited per-run flush or a shutdown drain barrier. |
+| ~~RW9-1~~ | **RESOLVED** (2026-06-30 cleanup; row was stale). `agent_end`'s flush promise is tracked in `lastFlush`; `session_shutdown` awaits it then a final `flush()` (`otel-exporter.ts:462,468-471`), so a `process.exit` right after a run can't drop the batch. The only residual — a hard `process.exit` with no `session_shutdown` emitted at all — is inherently unflushable (best-effort telemetry by design). | — | — | — |
 | RW9-2 | **Headless-fork guard-UI divergence** — circuit-breaker prompts via the *acting* agent's `ui.confirm` (a headless fork auto-denies in `ask` mode) while flow-guard/provenance prompt via the *parent* `ui`. | `circuit-breaker.ts` (F-review G2) | S · L | Both directions are fail-closed/safe; arguably correct (no N human prompts per fork). Pick one convention if unified UX is wanted. |
 | RW9-3 | **citations × reasoning-search cross-fork warn** — a fork's `[src:N]` ids live in the child's per-agent state; if the parent's final answer echoes one, `agent_end` validation may log a spurious "fabricated source id" warning. | `citations.ts` (F-review G3) | S · L | Warn-only; both extensions default off. |
 
@@ -196,6 +219,11 @@ Closed the genuinely-valuable small follow-ups via Light-Mode (four-field brief 
   integration test exercising the real spawn+sandbox+subprocess+`runEvalDir`+tamper path end-to-end (verified
   executing on macOS sandbox-exec; runs in the `sandbox-linux` bwrap CI job). The default `npm test` skips it
   (kept fast). Closes "the production eval path ships untested".
+
+> **Superseded 2026-07-01:** every item this paragraph names as "kept deferred" (RW8a-3, RW7c-2/3,
+> RW6c-1/2, RW4-1/2, RW5-1, RW3-3/4, RW6a-1/RW6b-1, RW9-2/3, RW7a-3/RW7b-2, RW6a-2) was subsequently
+> **built or validated-closed** by the finish-followups program — see the **Closure ledger** at the top
+> of this file. This paragraph is retained as historical context only.
 
 **Reviewed and kept deferred** (Simplicity First — changing working/fail-closed code for no clear win, or a
 larger design with no current consumer): **RW9-2** (headless-fork guard-UI divergence — the Wave-9 F-review
