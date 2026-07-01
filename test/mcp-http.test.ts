@@ -17,6 +17,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
 import activate from "../src/extensions/mcp.js";
+import { clearTraceparent, setTraceparent, traceparent } from "../src/extensions/lib/otel-context.js";
 import { makeHarness } from "./helpers.js";
 
 const SESSION_ID = "sess-http-fixture-1";
@@ -152,5 +153,41 @@ test("the /mcp command lists the connected HTTP server", async () => {
     assert.match(output, /1 tool/);
   } finally {
     await host.dispose();
+  }
+});
+
+test("RW7c-2: an MCP tool call injects the traceparent for an allowlisted host, not otherwise", async () => {
+  const prevAllow = process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
+  const TP = traceparent("c".repeat(32), "d".repeat(16));
+  // Simulate otel by publishing a traceparent at tool_start (its real writer).
+  const publish = (h: { agent: { hooks: { on(ev: string, fn: (p: { call: { id: string } }) => void): void } } }): void => {
+    h.agent.hooks.on("tool_start", ({ call }) => setTraceparent(call.id, TP));
+    h.agent.hooks.on("tool_end", ({ call }) => clearTraceparent(call.id));
+  };
+  try {
+    process.env.EAGENT_OTEL_PROPAGATE_HOSTS = "127.0.0.1";
+    const h1 = makeHarness({
+      responder: [{ toolCalls: [{ name: "mcp__httpfix__ping", arguments: { msg: "hi" } }] }, { text: "done" }],
+      fallback: "allow",
+    });
+    publish(h1);
+    await h1.host.use("mcp", activate);
+    await h1.agent.run("please ping");
+    assert.equal(seenHeaders["tools/call"]?.["traceparent"], TP, "allowlisted MCP host receives the traceparent");
+    await h1.host.dispose();
+
+    delete process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
+    const h2 = makeHarness({
+      responder: [{ toolCalls: [{ name: "mcp__httpfix__ping", arguments: { msg: "yo" } }] }, { text: "done" }],
+      fallback: "allow",
+    });
+    publish(h2);
+    await h2.host.use("mcp", activate);
+    await h2.agent.run("please ping");
+    assert.equal(seenHeaders["tools/call"]?.["traceparent"], undefined, "non-allowlisted MCP host gets no traceparent");
+    await h2.host.dispose();
+  } finally {
+    if (prevAllow === undefined) delete process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
+    else process.env.EAGENT_OTEL_PROPAGATE_HOSTS = prevAllow;
   }
 });

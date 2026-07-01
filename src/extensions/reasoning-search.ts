@@ -428,7 +428,7 @@ export default function activate(e: ExtensionAPI): () => void {
   );
 
   const offGraph = e.registerTool(
-    defineTool<{ task?: string; branch?: number; scorer?: string; refine?: boolean }>({
+    defineTool<{ task?: string; branch?: number; scorer?: string; refine?: boolean; refineRounds?: number }>({
       name: GRAPH_SEARCH,
       description:
         "Graph-of-Thought: generate `branch` thoughts from the current state, " +
@@ -448,6 +448,7 @@ export default function activate(e: ExtensionAPI): () => void {
             description: "How to rank nodes; default judge.",
           },
           refine: { type: "boolean", description: "Run a refine pass on the best node (default true)." },
+          refineRounds: { type: "integer", description: `Max refine rounds; stops early once a round doesn't improve the best (default 1; capped at ${DEFAULT_MAX_BRANCH}).` },
         },
         required: ["task"],
       },
@@ -460,6 +461,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
         const branch = clamp(intArg(args.branch, DEFAULT_BRANCH), 1, DEFAULT_MAX_BRANCH);
         const refine = args.refine !== false;
+        const refineRounds = clamp(intArg(args.refineRounds, 1), 1, DEFAULT_MAX_BRANCH);
         const scorer = pickScorer(args.scorer, task, ctx);
 
         const root: AgentState = e.agent.snapshot();
@@ -510,15 +512,23 @@ export default function activate(e: ExtensionAPI): () => void {
             }
           }
 
-          if (refine && best && !ctx.signal.aborted) {
-            try {
-              const ref = forkFrom(root);
-              live = [ref];
-              await ref.run(refinePrompt(task, best.text));
-              const node = await record("refine", finalText(ref.messages));
-              if (!best || node.score > best.score) best = node;
-            } catch {
-              // dropped
+          // Refine to convergence: up to `refineRounds` passes, stopping early the
+          // first round that doesn't improve the best (or on abort / a failed op).
+          if (refine) {
+            for (let r = 0; r < refineRounds; r++) {
+              if (!best || ctx.signal.aborted) break;
+              const before = best.score;
+              const seed = best.text;
+              try {
+                const ref = forkFrom(root);
+                live = [ref];
+                await ref.run(refinePrompt(task, seed));
+                const node = await record("refine", finalText(ref.messages));
+                if (!best || node.score > best.score) best = node;
+              } catch {
+                break; // a failed refine ends the loop
+              }
+              if (!best || best.score <= before) break; // no improvement ⇒ converged
             }
           }
         } finally {

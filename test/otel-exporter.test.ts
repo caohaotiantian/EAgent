@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import otelExporter from "../src/extensions/otel-exporter.js";
+import { getTraceparent } from "../src/extensions/lib/otel-context.js";
 import type { Tool } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
 
@@ -960,6 +961,46 @@ test("AC#2 inert: a duration is recorded but no metrics endpoint => no /v1/metri
 
     assert.equal(callsTo(calls, "/v1/metrics").length, 0, "no metrics endpoint => no histogram POST");
     assert.equal(callsTo(calls, "/v1/traces").length, 1, "the traces signal still exports");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// RW7c-2 — otel-exporter publishes a per-call traceparent at tool_start, clears at tool_end
+test("RW7c-2: a traceparent is published during a tool call and cleared after (matches the span)", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
+  const { calls, restore } = captureFetch();
+  let publishedDuring: string | undefined;
+  let capturedCallId = "";
+  const probeTool: Tool = {
+    spec: { name: "probe", description: "probe", parameters: { type: "object", properties: {} } },
+    execute: async (_args, ctx) => {
+      capturedCallId = ctx.toolCallId;
+      publishedDuring = getTraceparent(ctx.toolCallId); // what web/mcp would read
+      return { content: "ok" };
+    },
+  };
+  try {
+    const { agent, host } = makeHarness({
+      responder: [{ toolCalls: [{ name: "probe", arguments: {} }] }, { text: "done" }],
+    });
+    agent.tools.register(probeTool);
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    // During the tool call the map carried a well-formed traceparent for this call.
+    assert.match(publishedDuring ?? "", /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/, "traceparent published during execute");
+    // Its traceId is the run's trace; its spanId is the tool-call span, not the turn.
+    const spans = spansOf(calls[0]!);
+    const toolSpan = spans.find((s) => s.name === "probe")!;
+    assert.equal(publishedDuring, `00-${toolSpan.traceId}-${toolSpan.spanId}-01`, "traceparent = the tool-call span");
+    // After tool_end the entry is cleared (no leak).
+    assert.equal(getTraceparent(capturedCallId), undefined, "traceparent cleared at tool_end");
 
     await host.dispose();
   } finally {

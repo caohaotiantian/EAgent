@@ -19,6 +19,7 @@
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import { getTraceparent, isTrustedHost, propagateAllowlist } from "./lib/otel-context.js";
 
 /** Default cap on the response body we will read into memory: 1 MiB. */
 const DEFAULT_MAX_BYTES = 1024 * 1024;
@@ -179,10 +180,18 @@ export default function activate(e: ExtensionAPI): void {
         // today's behavior: ignore start_index and re-emit the legacy marker.
         const paginate = process.env.EAGENT_WEB_PAGINATE !== "off";
         const startIndex = paginate ? Math.max(0, Number(args.start_index ?? 0)) : 0;
-        const headers =
+        const baseHeaders =
           args.headers && typeof args.headers === "object"
             ? (args.headers as Record<string, string>)
             : undefined;
+        // RW7c-2: propagate this tool call's OTel span as a `traceparent` — only for
+        // an allowlisted host and only while otel traces are on (the map's writer);
+        // otherwise `headers` is byte-identical to the caller's (undefined by default).
+        const tp = getTraceparent(ctx.toolCallId);
+        const headers =
+          tp && isTrustedHost(url.href, propagateAllowlist())
+            ? { ...(baseHeaders ?? {}), traceparent: tp }
+            : baseHeaders;
         const body = method === "GET" || method === "HEAD" ? undefined : (args.body as string | undefined);
 
         let res: Response;

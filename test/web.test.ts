@@ -4,7 +4,8 @@ import { type AddressInfo } from "node:net";
 import { test, after, before } from "node:test";
 
 import web, { readCapped, continuationHint } from "../src/extensions/web.js";
-import type { Message } from "../src/kernel/types.js";
+import { clearTraceparent, setTraceparent, traceparent } from "../src/extensions/lib/otel-context.js";
+import type { Message, ToolContext } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
 
 // In-memory stream helpers for the readCapped unit tests — no network.
@@ -399,4 +400,46 @@ test("loading web and disposing does not throw (no new registration leaks)", asy
   const { host } = makeHarness({ responder: [], fallback: "allow" });
   await host.use("web", web);
   await assert.doesNotReject(host.dispose());
+});
+
+// RW7c-2 — the fetch tool propagates the OTel traceparent to allowlisted hosts only
+test("RW7c-2: fetch_url injects traceparent for an allowlisted host, and never otherwise", async () => {
+  const prevAllow = process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
+  const origFetch = globalThis.fetch;
+  const calls: { url: string; headers: Record<string, string> }[] = [];
+  globalThis.fetch = (async (u: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(u), headers: (init?.headers ?? {}) as Record<string, string> });
+    return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
+  }) as typeof fetch;
+  try {
+    const { agent, host } = makeHarness({ responder: [], fallback: "allow" });
+    await host.use("web", web);
+    const tool = agent.tools.get("fetch_url")!;
+    const run = (callId: string, url: string) =>
+      tool.execute({ url }, { toolCallId: callId, signal: new AbortController().signal } as unknown as ToolContext);
+    const TP = traceparent("a".repeat(32), "b".repeat(16));
+
+    // otel published a traceparent for this call AND the host is allowlisted ⇒ injected.
+    process.env.EAGENT_OTEL_PROPAGATE_HOSTS = "trusted.test";
+    setTraceparent("tc-a", TP);
+    await run("tc-a", "http://trusted.test/data");
+    assert.equal(calls.find((c) => c.url.startsWith("http://trusted.test"))!.headers.traceparent, TP);
+
+    // Published, but the host is NOT on the allowlist ⇒ no header.
+    setTraceparent("tc-b", TP);
+    await run("tc-b", "http://untrusted.test/data");
+    assert.equal(calls.find((c) => c.url.startsWith("http://untrusted.test"))!.headers.traceparent, undefined);
+
+    // No published traceparent (otel off) ⇒ no header even for an allowlisted host.
+    await run("tc-none", "http://trusted.test/other");
+    assert.equal(calls.find((c) => c.url === "http://trusted.test/other")!.headers.traceparent, undefined);
+
+    clearTraceparent("tc-a");
+    clearTraceparent("tc-b");
+    await host.dispose();
+  } finally {
+    globalThis.fetch = origFetch;
+    if (prevAllow === undefined) delete process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
+    else process.env.EAGENT_OTEL_PROPAGATE_HOSTS = prevAllow;
+  }
 });
