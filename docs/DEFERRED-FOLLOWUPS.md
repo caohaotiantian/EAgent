@@ -210,14 +210,13 @@ Kernel stayed `< 2200` (2198 → **2199**) by compressing the `run()` abort comm
 ceiling. Suite 1136 → **1143 pass / 0 fail / 1 skip**; typecheck 0; eval 5/5.
 
 **New finding registered (deferred):**
-- **KR-1** — server `streamRun` snapshots the session inside the `reason:"stop"` path, so a *first* turn
-  aborted before any assistant output persists a bare dangling `[user]` transcript (then a later turn
-  could form two consecutive user messages). **Pre-existing** (already reachable via an early
-  between-call abort, which also resolves `reason:"stop"`); FRESH-1 only widens the timing window to
-  mid-stream aborts. **Fix (deferred):** a server snapshot-on-abort guard that skips persisting a
-  transcript whose last turn is a bare `[user]`. Sev·Likelihood: S·L (HTTP server + session + first-turn
-  mid-stream abort + reconnect). A separate server-session-robustness change, out of the kernel pass
-  (Simplicity First / Surgical Changes).
+- ~~**KR-1**~~ — **RESOLVED 2026-07-01** (branch `chore/finish-followups-2`). Server `streamRun`
+  snapshotted the session inside the `reason:"stop"` path, so a *first* turn aborted before any
+  assistant output persisted a bare dangling `[user]` transcript (a later turn could then form two
+  consecutive user messages). Fixed: `streamRun` skips `sessions.set(...)` when `agent.messages` ends on
+  a `user` turn (`server.ts:363-371`), keeping the session's last valid state; the aborted turn is
+  discarded. Light-Mode brief `docs/design/2026-07-01-server-abort-snapshot-guard.md`; fresh review
+  confirmed the heuristic cannot false-positive (no resumable state ends on a `user` message).
 
 **Documented, benign, no action:** under a real provider, a parent-aborted `reasoning-search` fork now
 resolves `reason:"stop"` (scored normally) instead of rejecting (scored `-Infinity`) — only during
@@ -254,7 +253,7 @@ confirmed these stay deferred — they break the zero-dep / offline-testable / t
 have no current consumer: **RW6c-1** (container backend), **RW7b-1** (embedding/semantic memory),
 **RW7c-2** (traceparent propagation — needs a new tool-HTTP egress seam), **RW7c-3** (live-collector
 smoke — un-offline-testable), **RW7a-1/2** (delta blobs, rewind↔workspace unification), **RW6a-1/2**,
-**RW3-3/4**, **RW4-1/2**, **RW5-1**, **RW6b-1**, **RW8a-3** (GoT DSL/multi-round), **RW9-2/3**, the six
-top "correctly cut" items (`DEFERRED-1..6`), and the new **KR-1** (server snapshot-on-abort bare-`[user]`
-guard, registered above). Building these would spend kernel headroom on no-consumer seams or violate the
-zero-dep/offline posture.
+**RW3-3/4**, **RW4-1/2**, **RW5-1**, **RW6b-1**, **RW8a-3** (GoT DSL/multi-round), **RW9-2/3**, and the six
+top "correctly cut" items (`DEFERRED-1..6`). Building these would spend kernel headroom on no-consumer
+seams or violate the zero-dep/offline posture. (**KR-1**, the one new finding registered above, was
+subsequently **resolved 2026-07-01** on `chore/finish-followups-2`.)

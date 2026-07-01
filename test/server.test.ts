@@ -148,6 +148,32 @@ test("a session id makes /run accumulate conversation history", async () => {
   });
 });
 
+test("KR-1: an aborted first turn is not persisted with a dangling [user] transcript", async () => {
+  await withServerHandle(async (base, http) => {
+    // Abort mid-first-turn: a text_delta listener stops the agent, so the turn
+    // ends reason:"stop" with the assistant message NOT appended (the post-
+    // streamTurn abort check) → transcript = [user]. Same code path a client
+    // disconnect hits (onClose → agent.stop()), but deterministic.
+    http.agent.hooks.on("text_delta", () => http.agent.stop());
+    mockOf(http).script({ text: "partial" });
+
+    const res = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "hi", session: "s-abort" }),
+    });
+    const lines: Record<string, unknown>[] = [];
+    await readNdjson(res, (o) => lines.push(o));
+    const done = lines.at(-1) as { type?: string; reason?: string };
+    assert.equal(done.type, "done", "the stream ends with a done event");
+    assert.equal(done.reason, "stop", "the aborted first turn resolves reason:stop");
+
+    // KR-1: the dangling [user] snapshot is NOT persisted → no tracked session.
+    const health = await (await fetch(`${base}/health`)).json();
+    assert.equal((health as { sessions: number }).sessions, 0, "an aborted first turn is not persisted");
+  });
+});
+
 test("per-session usage and model are isolated across sessions (AC-8)", async () => {
   // Routing's per-turn hooks (active even when its soft switch is off) would
   // reset the agent's model each turn and mask the bleed this test pins, so kill
