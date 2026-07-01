@@ -1,7 +1,8 @@
 /**
  * Dependency-free lexical relevance scoring shared by `handoff` (resume-injection
- * gate) and `memory` (archival query recall). The zero-runtime-dependency rule
- * forbids vector embeddings, so retrieval is token-overlap over salient words.
+ * gate) and `memory` (archival query recall). Retrieval here is token-overlap over
+ * salient words; `memory` layers optional semantic (embedding) recall on top via a
+ * zero-dep `fetch` embedder.
  */
 
 /**

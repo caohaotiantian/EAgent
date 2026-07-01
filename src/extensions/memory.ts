@@ -103,7 +103,90 @@ function archiveKeys(store: Store): string[] {
     .map((k) => k.slice(ARCHIVE_PREFIX.length));
 }
 
-/** A scored retrieval hit: which tier it came from, the note value, and its overlap score. */
+// ---------------------------------------------------------------------------
+// Optional semantic recall: an injectable embedder ranks by cosine similarity,
+// off by default and fail-soft to the lexical path below.
+// ---------------------------------------------------------------------------
+
+/** Batch text → comparable vectors. Injected in tests; env-resolved in production. */
+export type Embedder = (texts: string[]) => Promise<number[][]>;
+
+/** Default embedding model for the OpenAI-compatible endpoint. */
+const DEFAULT_EMBED_MODEL = "text-embedding-3-small";
+
+let injected: Embedder | undefined = undefined;
+
+/** Test hook: swap in a deterministic embedder (or `undefined` to clear). */
+export function setEmbedder(fn: Embedder | undefined): void {
+  injected = fn;
+}
+
+/**
+ * Parse an OpenAI-compatible `{ data: [{ embedding: number[] }, …] }` body into
+ * `number[][]`, preserving order. Throws on a malformed body so the recall call
+ * site fails soft to the lexical ranking.
+ */
+export function parseEmbeddings(body: unknown): number[][] {
+  const data = (body as { data?: unknown }).data;
+  if (!Array.isArray(data)) throw new Error("embed response has no data[] array");
+  return data.map((d) => {
+    const embedding = (d as { embedding?: unknown }).embedding;
+    if (!Array.isArray(embedding) || !embedding.every((n) => typeof n === "number")) {
+      throw new Error("embed response entry has no numeric embedding[]");
+    }
+    return embedding as number[];
+  });
+}
+
+/**
+ * A `fetch`-based embedder resolved from env, or `undefined` when
+ * `EAGENT_MEMORY_EMBED_ENDPOINT` is unset. POSTs `{ model, input }` to the
+ * OpenAI-compatible endpoint under a bounded timeout; zero-dep (global `fetch`).
+ */
+function resolveEmbedder(): Embedder | undefined {
+  const endpoint = process.env.EAGENT_MEMORY_EMBED_ENDPOINT;
+  if (!endpoint) return undefined;
+  const model = process.env.EAGENT_MEMORY_EMBED_MODEL ?? DEFAULT_EMBED_MODEL;
+  const apiKey = process.env.EAGENT_MEMORY_EMBED_API_KEY ?? process.env.OPENAI_API_KEY;
+  return async (texts) => {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model, input: texts }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw new Error(`embed endpoint returned ${res.status}`);
+    return parseEmbeddings(await res.json());
+  };
+}
+
+/**
+ * The embedder to use for this recall, resolved at call time: `undefined` (⇒
+ * lexical) under the `EAGENT_MEMORY_EMBED=off` kill switch, else the injected
+ * mock or the env-resolved `fetch` embedder.
+ */
+function activeEmbedder(): Embedder | undefined {
+  if (process.env.EAGENT_MEMORY_EMBED === "off") return undefined;
+  return injected ?? resolveEmbedder();
+}
+
+/** Cosine similarity of two vectors; 0 when either has zero norm. */
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) na += (a[i] ?? 0) ** 2;
+  for (let i = 0; i < b.length; i++) nb += (b[i] ?? 0) ** 2;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) dot += (a[i] ?? 0) * (b[i] ?? 0);
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/** A scored retrieval hit: which tier it came from, the note value, and its score. */
 interface Match {
   key: string;
   tier: "core" | "archive";
@@ -117,7 +200,7 @@ interface Match {
  * and return the top `topK`. A key present in BOTH tiers yields two distinct
  * hits (no map collapse) since each tier is scored independently.
  */
-function searchTiers(store: Store, query: string, topK: number): Match[] {
+function lexicalRank(store: Store, query: string, topK: number): Match[] {
   const matches: Match[] = [];
   for (const key of noteKeys(store)) {
     const entry = readEntry(store, key);
@@ -133,6 +216,46 @@ function searchTiers(store: Store, query: string, topK: number): Match[] {
   }
   matches.sort((a, b) => b.score - a.score);
   return matches.slice(0, topK);
+}
+
+/**
+ * Rank both tiers for `query`. When an embedder is active, rank by cosine
+ * similarity over embeddings of the query and every candidate note; otherwise —
+ * and on any embed failure — fall back to the lexical ranking.
+ */
+async function searchTiers(store: Store, query: string, topK: number): Promise<Match[]> {
+  const embedder = activeEmbedder();
+  if (embedder) {
+    try {
+      // Enumerate every candidate from the FULL tier iteration — not the lexical
+      // score>0 filter — so a zero-overlap paraphrase can still rank.
+      const candidates: { key: string; tier: "core" | "archive"; text: string }[] = [];
+      for (const key of noteKeys(store)) {
+        const entry = readEntry(store, key);
+        if (entry) candidates.push({ key, tier: "core", text: entry.text });
+      }
+      for (const key of archiveKeys(store)) {
+        const entry = readArchive(store, key);
+        if (entry) candidates.push({ key, tier: "archive", text: entry.text });
+      }
+      const vecs = await embedder([query, ...candidates.map((c) => c.text)]);
+      const queryVec = vecs[0];
+      if (queryVec === undefined) throw new Error("embed response has no query vector");
+      const matches: Match[] = [];
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i]!;
+        const vec = vecs[i + 1];
+        if (vec === undefined) throw new Error("embed response has no candidate vector");
+        const score = cosine(queryVec, vec);
+        if (score > 0) matches.push({ key: c.key, tier: c.tier, text: c.text, score });
+      }
+      matches.sort((a, b) => b.score - a.score);
+      return matches.slice(0, topK);
+    } catch {
+      // fail-soft: any embed error degrades to the lexical ranking below.
+    }
+  }
+  return lexicalRank(store, query, topK);
 }
 
 /** Render a ranked match as one human-readable line for tool/command output. */
@@ -177,12 +300,12 @@ function normalize(t: string): string {
  * over `(store, args)` → printed lines, so the command handler stays a thin
  * shell. Operates only on the `note:` keyspace; never touches the summary path.
  */
-function runScratchpad(
+async function runScratchpad(
   store: Store,
   sub: string,
   rest: string[],
   print: (line: string) => void,
-): void {
+): Promise<void> {
   switch (sub) {
     case "list": {
       const keys = noteKeys(store);
@@ -291,7 +414,7 @@ function runScratchpad(
         return;
       }
       const topK = store.get<number>("recallTopK", DEFAULT_RECALL_TOPK) ?? DEFAULT_RECALL_TOPK;
-      const top = searchTiers(store, query, topK);
+      const top = await searchTiers(store, query, topK);
       if (top.length === 0) {
         print(`No notes match "${query}".`);
         return;
@@ -417,7 +540,7 @@ export default function activate(e: ExtensionAPI): () => void {
           ctx.print(`/memory ${sub}: scratchpad entries are disabled (EAGENT_MEMORY_ENTRIES=off).`);
           return;
         }
-        runScratchpad(e.store, sub, tokens.slice(1), ctx.print);
+        return runScratchpad(e.store, sub, tokens.slice(1), ctx.print);
       },
     }),
   );
@@ -495,7 +618,7 @@ export default function activate(e: ExtensionAPI): () => void {
         }
         const query = typeof args.query === "string" ? args.query.trim() : "";
         if (query.length > 0) {
-          const top = searchTiers(e.store, query, config().recallTopK);
+          const top = await searchTiers(e.store, query, config().recallTopK);
           return top.length === 0
             ? { content: `No notes match "${query}".`, details: [] }
             : { content: top.map(renderMatch).join("\n"), details: top };
