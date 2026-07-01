@@ -681,3 +681,41 @@ test("RW7b-2: /memory forget-archive <key> deletes an archived note, leaving cor
   const miss = await runMemory(h.commands, h.agent, "forget-archive nope");
   assert.match(miss.join("\n"), /no archived note "nope"/, "an unknown key reports not-found, no delete");
 });
+
+test("RW7b-3: EAGENT_MEMORY_PROMOTE_AT auto-promotes a hot archived note to core", async () => {
+  const prev = process.env.EAGENT_MEMORY_PROMOTE_AT;
+  process.env.EAGENT_MEMORY_PROMOTE_AT = "2";
+  try {
+    const h = await loadMem();
+    h.store.set("archive:hot", { id: "id-hot", text: "quantum encryption keys", source: "test", ts: "2026-07-01T00:00:00.000Z" });
+
+    await execTool(h.agent, "recall", { query: "quantum" }); // recalls -> 1, still archived
+    assert.ok(h.store.get("archive:hot"), "still archived after 1 recall");
+    assert.equal(h.store.get("note:hot"), undefined, "not yet in core");
+
+    await execTool(h.agent, "recall", { query: "quantum" }); // recalls -> 2 == threshold, promoted
+    assert.equal(h.store.get("archive:hot"), undefined, "archived copy removed on promotion");
+    const promoted = h.store.get("note:hot") as { text: string; recalls?: number } | undefined;
+    assert.ok(promoted, "promoted to core");
+    assert.equal(promoted!.text, "quantum encryption keys");
+    assert.equal(promoted!.recalls, undefined, "transient recall counter dropped on promotion");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MEMORY_PROMOTE_AT;
+    else process.env.EAGENT_MEMORY_PROMOTE_AT = prev;
+  }
+});
+
+test("RW7b-3: default (EAGENT_MEMORY_PROMOTE_AT unset) never promotes — recall stays read-only", async () => {
+  const prev = process.env.EAGENT_MEMORY_PROMOTE_AT;
+  delete process.env.EAGENT_MEMORY_PROMOTE_AT;
+  try {
+    const h = await loadMem();
+    h.store.set("archive:hot", { id: "id-hot", text: "quantum encryption keys", source: "test", ts: "2026-07-01T00:00:00.000Z" });
+    for (let i = 0; i < 5; i++) await execTool(h.agent, "recall", { query: "quantum" });
+    assert.ok(h.store.get("archive:hot"), "stays archived by default");
+    assert.equal(h.store.get("note:hot"), undefined, "never auto-promoted by default");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MEMORY_PROMOTE_AT;
+    else process.env.EAGENT_MEMORY_PROMOTE_AT = prev;
+  }
+});

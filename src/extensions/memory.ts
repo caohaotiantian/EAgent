@@ -51,6 +51,8 @@ interface Entry {
   source: string;
   ts: string;
   prevText?: string;
+  /** RW7b-3: recall count while in the archive tier; dropped on promotion to core. */
+  recalls?: number;
 }
 
 /** Sentinel source for a legacy bare-string note read through the new path. */
@@ -219,11 +221,46 @@ function lexicalRank(store: Store, query: string, topK: number): Match[] {
 }
 
 /**
- * Rank both tiers for `query`. When an embedder is active, rank by cosine
- * similarity over embeddings of the query and every candidate note; otherwise —
- * and on any embed failure — fall back to the lexical ranking.
+ * Rank both tiers for `query`, then (RW7b-3) auto-promote any archived note that
+ * has now been recalled `EAGENT_MEMORY_PROMOTE_AT` times back to core. The ranking
+ * itself is a pure read (`rankTiers`); the promotion is the recall path's only
+ * write, gated off by default (`EAGENT_MEMORY_PROMOTE_AT` unset/0 ⇒ no-op).
  */
 async function searchTiers(store: Store, query: string, topK: number): Promise<Match[]> {
+  const matches = await rankTiers(store, query, topK);
+  autoPromote(store, matches);
+  return matches;
+}
+
+/**
+ * Bump the recall count of every returned archive-tier note; at
+ * `EAGENT_MEMORY_PROMOTE_AT` promote it to core (dropping the transient counter),
+ * mirroring `/memory promote`. Off (no write) when the env is unset/≤0.
+ */
+function autoPromote(store: Store, matches: Match[]): void {
+  const at = Number(process.env.EAGENT_MEMORY_PROMOTE_AT) || 0;
+  if (at <= 0) return;
+  for (const m of matches) {
+    if (m.tier !== "archive") continue;
+    const entry = readArchive(store, m.key);
+    if (!entry) continue;
+    const recalls = (entry.recalls ?? 0) + 1;
+    if (recalls >= at) {
+      const promoted: Entry = { ...entry };
+      delete promoted.recalls;
+      store.set(NOTE_PREFIX + m.key, promoted);
+      store.delete(ARCHIVE_PREFIX + m.key);
+    } else {
+      store.set(ARCHIVE_PREFIX + m.key, { ...entry, recalls });
+    }
+  }
+}
+
+/**
+ * The ranking (a pure read): cosine over embeddings when an embedder is active,
+ * else — and on any embed failure — the lexical ranking.
+ */
+async function rankTiers(store: Store, query: string, topK: number): Promise<Match[]> {
   const embedder = activeEmbedder();
   if (embedder) {
     try {
