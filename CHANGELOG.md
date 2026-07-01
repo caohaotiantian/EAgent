@@ -113,6 +113,27 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 - **`stop()` is now honored by the agent loop** directly, not just forwarded to
   the provider, so an abort reliably halts the run.
+- **Cancelling a run mid-stream is now a clean stop, not an error.** When a
+  `stop()`/abort lands while the provider stream is in flight (a real `fetch`
+  provider rejects it), the run ends `reason:"stop"` with no `"error"` event and
+  no thrown `run()` — matching a between-call cancel. A genuine provider failure
+  (no abort) still surfaces as `reason:"error"`. Removes a spurious red error on
+  CLI Ctrl-C and a false ERROR telemetry record.
+- **`maxConcurrency <= 0` no longer crashes tool dispatch.** An invalid value is
+  clamped to a floor of `1` at construction (the default `Infinity` and the
+  parallel fast path are unchanged).
+- **A corrupt store file is preserved, not silently overwritten.** `FileStore`
+  now distinguishes an absent file (a silent first run) from unparseable JSON; a
+  corrupt file is moved aside to `*.corrupt-<pid>-<ts>` before the store starts
+  empty, so the next write can no longer destroy persisted keys.
+- **`checkpoint` gained an `EAGENT_CHECKPOINT=off` kill switch.** Its
+  auto-snapshot runs synchronous git on every mutating tool call; the (default-on)
+  extension now honors the house opt-out convention so an operator can disable it
+  (e.g. to avoid blocking the shared HTTP host's event loop).
+- **`otel-exporter` emits a third metric: `gen_ai.client.operation.duration`** — the
+  OTel GenAI semconv Histogram of per-call inference latency (seconds, advisory
+  buckets), giving an SLO/alerting consumer the latency *distribution* (p50/p90/p99)
+  that the existing Sum counters cannot. Additive; inert without a metrics endpoint.
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

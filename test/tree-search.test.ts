@@ -143,6 +143,41 @@ test("AC-3: tree_search beam follows the highest-scoring lineage and reports eac
 });
 
 // ---------------------------------------------------------------------------
+// RW8a-2 — optional goalScore early-termination (off by default)
+// ---------------------------------------------------------------------------
+
+test("RW8a-2: goalScore stops tree_search after the first depth that meets the bar", async () => {
+  // scorer:"longest" ⇒ score = text length (>= 1 for any non-empty thought), so
+  // goalScore:1 is satisfied at depth 0 and the search breaks before depth 1;
+  // the same setup without goalScore runs the full depth 2 (byte-identical default).
+  const depthsRun = async (goalScore?: number): Promise<number> => {
+    let calledTree = false;
+    const responder = (req: CompletionRequest) => {
+      if (lastUserText(req) === TASK) return { text: "answer" }; // length 6
+      if (!calledTree) {
+        calledTree = true;
+        const args: Record<string, unknown> = { task: TASK, branch: 2, beam: 1, depth: 2, scorer: "longest" };
+        if (goalScore !== undefined) args.goalScore = goalScore;
+        return { toolCalls: [{ name: "tree_search", arguments: args }] };
+      }
+      return { text: "parent-done" };
+    };
+    const { agent, host } = makeHarness({ fallback: "allow", responder });
+    await host.use("reasoning-search", reasoningSearch);
+    enable(host);
+    let captured: ToolResult | undefined;
+    agent.hooks.on("tool_end", (p) => {
+      if (p.call.name === "tree_search") captured = p.result;
+    });
+    await agent.run("kickoff");
+    return (captured!.details as unknown[][]).length;
+  };
+
+  assert.equal(await depthsRun(1), 1, "goalScore:1 stops after depth 0 (the bar is met)");
+  assert.equal(await depthsRun(undefined), 2, "without goalScore the search runs the full depth 2");
+});
+
+// ---------------------------------------------------------------------------
 // AC-4 — bounded by maxNodes (clip to budget), clamping, best-so-far on exhaustion
 // ---------------------------------------------------------------------------
 

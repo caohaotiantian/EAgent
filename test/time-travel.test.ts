@@ -402,3 +402,40 @@ test("D-W9.6d /checkpoint over a non-cloneable transcript fails cleanly (no thro
     assert.deepEqual(readNodes(slice), {}, "no node written when the snapshot fails");
   });
 });
+
+// -- RW7a-3: command polish (single ambiguity message; /fork honors `enabled`) --
+
+test("RW7a-3 an ambiguous bare-step selector prints exactly one line, not a contradictory pair", async () => {
+  await withEnv(async () => {
+    const slice = makeSlice({ responder: { text: "ok" } });
+    await slice.host.use("time-travel", timeTravel);
+    // Two distinct nodes at the SAME step 7; "7" is not a node id, so resolve()
+    // falls through to the step match and finds both ⇒ ambiguous.
+    slice.store.set("nodes", {
+      a: { id: "a", step: 7, ts: 1 },
+      b: { id: "b", step: 7, ts: 2 },
+    });
+
+    const out = await slice.run("rewind", "7");
+    assert.equal(out.length, 1, "exactly one line is printed (no double message)");
+    assert.match(out[0]!, /ambiguous step 7/, "the ambiguity line is shown");
+    assert.ok(!out.join("\n").includes("no such checkpoint"), "no contradictory 'no such checkpoint' line");
+  });
+});
+
+test("RW7a-3 /fork is a no-op when time-travel is disabled (writes no node)", async () => {
+  await withEnv(async () => {
+    const slice = makeSlice({ responder: { text: "ok" } });
+    await slice.host.use("time-travel", timeTravel);
+    await slice.run("timetravel", "on");
+    await slice.agent.run("first");
+    const id = /checkpoint (\d+)/.exec((await slice.run("timetravel", "checkpoint")).join("\n"))?.[1];
+    assert.ok(id, "a checkpoint node exists");
+    const before = Object.keys(readNodes(slice)).length;
+
+    await slice.run("timetravel", "off");
+    const out = await slice.run("fork", id!);
+    assert.match(out.join("\n"), /time-travel is off/, "fork refuses while disabled");
+    assert.equal(Object.keys(readNodes(slice)).length, before, "no fork node was written while disabled");
+  });
+});

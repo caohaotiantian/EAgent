@@ -17,6 +17,11 @@
  *
  * Every git call is best-effort and wrapped: a failure is logged or printed,
  * never thrown out of a hook or command.
+ *
+ * On by default, but the auto-snapshot hook runs synchronous git on every
+ * mutating tool call, so it ships an `EAGENT_CHECKPOINT=off` kill switch
+ * (per the house convention) that disables the extension entirely — no hook,
+ * no commands.
  */
 
 import { execFileSync } from "node:child_process";
@@ -48,6 +53,11 @@ interface Checkpoint {
 }
 
 export default function activate(e: ExtensionAPI): void {
+  // Kill switch: the auto-snapshot hook runs synchronous git on every mutating
+  // tool call, so an operator must be able to opt out. When off, register
+  // nothing (no hook, no commands) — mirrors time-travel's EAGENT_TIME_TRAVEL.
+  if (process.env.EAGENT_CHECKPOINT === "off") return;
+
   /** Resolve the workspace root, allowing a store override for tests. */
   const workspace = (): string =>
     e.store.get<string>("workspaceDir") ?? process.env.EAGENT_WORKSPACE ?? process.cwd();

@@ -148,17 +148,19 @@ export default function activate(e: ExtensionAPI): () => void {
   /**
    * Resolve a selector to a node: an exact `id` wins; otherwise a bare `step`
    * matching exactly one node selects it. An AMBIGUOUS step (more than one node
-   * at that step, across branches) prints the candidate ids and refuses — `id`
-   * is the unambiguous selector (no silent auto-pick).
+   * at that step, across branches) prints the candidate ids and returns the
+   * `"ambiguous"` sentinel — `id` is the unambiguous selector (no silent
+   * auto-pick). The sentinel lets a caller suppress its own "no such checkpoint"
+   * message (which would otherwise double up with the ambiguity line).
    */
-  const resolve = (sel: string, print: (line: string) => void): Node | undefined => {
+  const resolve = (sel: string, print: (line: string) => void): Node | "ambiguous" | undefined => {
     const nodes = readNodes();
     const exact = nodes[sel];
     if (exact) return exact;
     const matches = Object.values(nodes).filter((n) => String(n.step) === sel);
     if (matches.length > 1) {
       print(`ambiguous step ${sel}; specify an id: ${matches.map((m) => m.id).join(", ")}`);
-      return undefined;
+      return "ambiguous";
     }
     return matches[0];
   };
@@ -244,6 +246,7 @@ export default function activate(e: ExtensionAPI): () => void {
         return;
       }
       const node = resolve(sel, ctx.print);
+      if (node === "ambiguous") return; // resolve already printed the candidate ids
       if (!node) {
         ctx.print(`no such checkpoint: ${sel}`);
         return;
@@ -275,12 +278,19 @@ export default function activate(e: ExtensionAPI): () => void {
     name: "fork",
     description: "Fork a new branch from a checkpoint. Usage: /fork <id|step> [label]",
     run: (ctx: CommandContext) => {
+      // /fork writes a branch node, so it honors the enabled flag like
+      // /timetravel checkpoint (enable -> create -> disable must not still write).
+      if (!cfg().enabled) {
+        ctx.print("time-travel is off; enable it with /timetravel on");
+        return;
+      }
       const [sel, ...rest] = ctx.args.trim().split(/\s+/);
       if (!sel) {
         ctx.print("usage: /fork <id|step> [label]");
         return;
       }
       const node = resolve(sel, ctx.print);
+      if (node === "ambiguous") return; // resolve already printed the candidate ids
       if (!node) {
         ctx.print(`no such checkpoint: ${sel}`);
         return;

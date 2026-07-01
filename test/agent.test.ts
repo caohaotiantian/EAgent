@@ -303,6 +303,67 @@ test("stop() halts the loop before the next turn", async () => {
   assert.equal(providerCalls, 1, "the loop must not call the provider again after stop()");
 });
 
+// FRESH-1 (kernel-robustness): a user cancel landing *mid-stream* is a clean
+// stop, not a failure — a real fetch provider rejects the in-flight stream with
+// an AbortError, which must NOT become reason:error / an "error" event / a throw.
+test("FRESH-1: a stop() landing mid-stream ends reason:stop with no error event or throw", async () => {
+  const { agent } = makeHarness();
+  agent.providers.register(
+    {
+      name: "mock",
+      async *stream(req: CompletionRequest) {
+        yield { type: "text_delta", text: "hi" } as const;
+        // The next pull emulates a fetch provider rejecting an aborted stream.
+        if (req.signal.aborted) throw new DOMException("aborted", "AbortError");
+        yield {
+          type: "done",
+          message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+          stopReason: "end_turn",
+        } as const;
+      },
+    },
+    { default: true },
+  );
+  let errorCalls = 0;
+  agent.hooks.on("error", () => {
+    errorCalls++;
+  });
+  // Abort while the stream is being consumed, so the provider's next yield throws.
+  agent.hooks.on("text_delta", () => agent.stop());
+
+  const result = await agent.run("go");
+  assert.equal(result.reason, "stop", "a mid-stream cancel ends reason:stop");
+  assert.equal(errorCalls, 0, "a clean cancel must not emit an 'error' event");
+});
+
+// FRESH-1 regression: a genuine pre-commit failure (signal NOT aborted) still
+// escalates — reason:error, one "error" event, and run() rejects. This pins the
+// else-branch of the new catch (same semantics as the :763 onProviderError test).
+test("FRESH-1: a genuine pre-commit error (no abort) still ends reason:error and rejects", async () => {
+  const { agent } = makeHarness();
+  agent.providers.register(
+    {
+      name: "mock",
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        throw new Error("genuine failure");
+      },
+    },
+    { default: true },
+  );
+  let endReason: StopReason | undefined;
+  let errorCalls = 0;
+  agent.hooks.on("agent_end", ({ reason }) => {
+    endReason = reason;
+  });
+  agent.hooks.on("error", () => {
+    errorCalls++;
+  });
+  await assert.rejects(() => agent.run("go"), /genuine failure/);
+  assert.equal(endReason, "error", "a non-abort failure still escalates to reason:error");
+  assert.equal(errorCalls, 1, "the genuine-error path still emits exactly one 'error' event");
+});
+
 test("transformContext can inject a message before the model call", async () => {
   let sawInjected = false;
   const { agent } = makeHarness({
@@ -516,6 +577,35 @@ test("maxConcurrency unset runs a parallel wave fully concurrently (fast-path ==
     ["c0", "c1", "c2"],
   );
 });
+
+// FRESH-2 (kernel-robustness): an invalid maxConcurrency (<= 0) once spawned an
+// empty worker pool, leaving `results` sparse and crashing the reconcile `.find`
+// with a TypeError. The constructor now clamps to a floor of 1, so dispatch still
+// runs the whole wave. Both 0 and a negative value hit the same crash path.
+for (const cap of [0, -1]) {
+  test(`FRESH-2: maxConcurrency=${cap} clamps to 1 and dispatches the whole wave`, async () => {
+    const { agent } = makeHarness({
+      responder: [
+        { toolCalls: [{ name: "a", id: "c0" }, { name: "b", id: "c1" }] },
+        { text: "done" },
+      ],
+      maxConcurrency: cap,
+    });
+    let ranA = 0;
+    let ranB = 0;
+    agent.tools.register(
+      defineTool({ name: "a", description: "", executionMode: "parallel", execute: () => ((ranA++), { content: "ra" }) }),
+    );
+    agent.tools.register(
+      defineTool({ name: "b", description: "", executionMode: "parallel", execute: () => ((ranB++), { content: "rb" }) }),
+    );
+
+    const { reason } = await agent.run("go");
+    assert.equal(reason, "end_turn", "an invalid concurrency must not crash dispatch");
+    assert.equal(ranA, 1, "tool a still ran under the clamped concurrency");
+    assert.equal(ranB, 1, "tool b still ran under the clamped concurrency");
+  });
+}
 
 test("forwards the thinking level and surfaces reasoning deltas as a hook event", async () => {
   const { agent, provider } = makeHarness({ responder: [{ reasoning: "thinking hard", text: "done" }] });

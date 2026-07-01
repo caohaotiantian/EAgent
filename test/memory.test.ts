@@ -560,3 +560,17 @@ async function execTool(agent: Agent, name: string, args: Record<string, unknown
     log: silentLogger,
   });
 }
+
+test("RW7b-2: /memory forget-archive <key> deletes an archived note, leaving core notes", async () => {
+  const h = await loadMem();
+  h.store.set("archive:old", "an archived thought"); // bare string => readArchive wraps it
+  h.store.set("note:keep", { id: "id-keep", text: "core note", source: "tool:remember", ts: "2026-07-01T00:00:00.000Z" });
+
+  const out = await runMemory(h.commands, h.agent, "forget-archive old");
+  assert.match(out.join("\n"), /Forgot archived "old"/);
+  assert.equal(h.store.get("archive:old"), undefined, "the archived note is deleted");
+  assert.ok(h.store.get("note:keep"), "the core note keyspace is untouched");
+
+  const miss = await runMemory(h.commands, h.agent, "forget-archive nope");
+  assert.match(miss.join("\n"), /no archived note "nope"/, "an unknown key reports not-found, no delete");
+});

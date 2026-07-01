@@ -155,13 +155,32 @@ export default function activate(e: ExtensionAPI): () => void {
   const tokenUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   const toolCalls = { ok: 0, error: 0 };
   const sessionStart = nanos();
+
+  // The OTel GenAI semconv advisory bucket boundaries (seconds) for
+  // `gen_ai.client.operation.duration`. The last bucket is the overflow.
+  const OP_DURATION_BOUNDS = [
+    0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
+  ];
+  // Cumulative inference-latency histogram (seconds), and the per-acting-agent
+  // turn-start stamp (performance.now() ms) the `usage` handler closes against.
+  const opDuration = { count: 0, sum: 0, buckets: new Array(OP_DURATION_BOUNDS.length + 1).fill(0) as number[] };
+  const turnStartMs = new WeakMap<Agent, number>();
+  const recordDuration = (seconds: number): void => {
+    opDuration.count++;
+    opDuration.sum += seconds;
+    let i = OP_DURATION_BOUNDS.findIndex((b) => seconds <= b);
+    if (i < 0) i = OP_DURATION_BOUNDS.length;
+    opDuration.buckets[i]!++;
+  };
+
   const hasMetricData = (): boolean =>
     tokenUsage.input > 0 ||
     tokenUsage.output > 0 ||
     tokenUsage.cache_read > 0 ||
     tokenUsage.cache_write > 0 ||
     toolCalls.ok > 0 ||
-    toolCalls.error > 0;
+    toolCalls.error > 0 ||
+    opDuration.count > 0;
   // Buffered log records, drained (cleared) only after a /v1/logs POST.
   const logRecords: OtlpLogRecord[] = [];
 
@@ -215,6 +234,25 @@ export default function activate(e: ExtensionAPI): () => void {
           ],
           aggregationTemporality: 2,
           isMonotonic: true,
+        },
+      });
+    if (opDuration.count > 0)
+      metrics.push({
+        name: "eagent.gen_ai.client.operation.duration",
+        unit: "s",
+        histogram: {
+          aggregationTemporality: 2,
+          dataPoints: [
+            {
+              attributes: [attr("gen_ai.operation.name", "chat")],
+              startTimeUnixNano: sessionStart,
+              timeUnixNano: now,
+              count: String(opDuration.count),
+              sum: opDuration.sum,
+              bucketCounts: opDuration.buckets.map(String),
+              explicitBounds: OP_DURATION_BOUNDS,
+            },
+          ],
         },
       });
     return {
@@ -287,8 +325,13 @@ export default function activate(e: ExtensionAPI): () => void {
     }),
 
     e.on("turn_start", ({ turn }) => {
+      // Stamp the inference start above the trace guard so a metrics-only run
+      // (no traces endpoint) still measures duration. The `usage` handler closes
+      // this delta when the provider stream completes.
+      const acting = currentActingAgent() ?? e.agent;
+      if (anyEnabled()) turnStartMs.set(acting, performance.now());
       if (!enabled()) return;
-      const t = traceFor(currentActingAgent() ?? e.agent);
+      const t = traceFor(acting);
       const span: OtlpSpan = {
         traceId: t.traceId,
         spanId: hex(8),
@@ -340,6 +383,16 @@ export default function activate(e: ExtensionAPI): () => void {
         tokenUsage.output += usage.outputTokens;
         tokenUsage.cache_read += usage.cacheReadTokens ?? 0;
         tokenUsage.cache_write += usage.cacheWriteTokens ?? 0;
+        // Close the inference latency the matching turn_start opened. The usage
+        // event fires once the provider stream is fully consumed, before tool
+        // dispatch — so this delta is the pure inference time. /1000: perf.now()
+        // is ms, the metric unit is seconds.
+        const acting = currentActingAgent() ?? e.agent;
+        const start = turnStartMs.get(acting);
+        if (start !== undefined) {
+          recordDuration((performance.now() - start) / 1000);
+          turnStartMs.delete(acting);
+        }
       }
       if (!enabled()) return;
       const t = traces.get(currentActingAgent() ?? e.agent);
