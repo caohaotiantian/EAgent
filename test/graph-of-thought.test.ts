@@ -544,3 +544,81 @@ test("AC-11: the parent transcript carries only the graph_search call, not op tu
     "an op-internal generated thought never appears in the parent transcript",
   );
 });
+
+// ---------------------------------------------------------------------------
+// RW8a-3 — multi-round refine to convergence (optional refineRounds; default 1)
+// ---------------------------------------------------------------------------
+
+test("RW8a-3: graph_search refines to convergence (stops the first non-improving round)", async () => {
+  // scorer=longest ⇒ score = text length. Refine round 1 returns a LONGER answer
+  // (improves), round 2 a shorter one (no gain) ⇒ 2 refine ops recorded, then the
+  // loop converges before round 3.
+  let refineCalls = 0;
+  let calledGraph = false;
+  const responder = (req: CompletionRequest) => {
+    switch (turnKind(req)) {
+      case "generate":
+        return { text: "gen" };
+      case "aggregate":
+        return { text: "aggr" };
+      case "refine":
+        refineCalls++;
+        return refineCalls === 1 ? { text: "refined-longer-answer" } : { text: "short" };
+      default:
+        if (!calledGraph) {
+          calledGraph = true;
+          return {
+            toolCalls: [{ name: "graph_search", arguments: { task: TASK, branch: 1, scorer: "longest", refineRounds: 3 } }],
+          };
+        }
+        return { text: "parent-done" };
+    }
+  };
+  const { agent, host } = makeHarness({ fallback: "allow", responder });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+  let captured: ToolResult | undefined;
+  agent.hooks.on("tool_end", (p) => {
+    if (p.call.name === "graph_search") captured = p.result;
+  });
+
+  await agent.run("kickoff");
+
+  const details = captured!.details as { op: string; score: number; text: string }[];
+  assert.equal(details.filter((d) => d.op === "refine").length, 2, "two refine rounds, then converged (round 2 no gain)");
+  assert.equal(toolResults(agent.messages)[0]!.content, "refined-longer-answer", "returns the round-1 best");
+});
+
+test("RW8a-3: default (no refineRounds) runs exactly one refine pass (byte-identical)", async () => {
+  let refineCalls = 0;
+  let calledGraph = false;
+  const responder = (req: CompletionRequest) => {
+    switch (turnKind(req)) {
+      case "generate":
+        return { text: "gen" };
+      case "aggregate":
+        return { text: "aggr" };
+      case "refine":
+        refineCalls++;
+        return { text: "refined-longer-answer" };
+      default:
+        if (!calledGraph) {
+          calledGraph = true;
+          return { toolCalls: [{ name: "graph_search", arguments: { task: TASK, branch: 1, scorer: "longest" } }] };
+        }
+        return { text: "parent-done" };
+    }
+  };
+  const { agent, host } = makeHarness({ fallback: "allow", responder });
+  await host.use("reasoning-search", reasoningSearch);
+  enable(host);
+  let captured: ToolResult | undefined;
+  agent.hooks.on("tool_end", (p) => {
+    if (p.call.name === "graph_search") captured = p.result;
+  });
+
+  await agent.run("kickoff");
+
+  const details = captured!.details as { op: string }[];
+  assert.equal(details.filter((d) => d.op === "refine").length, 1, "default is a single refine pass");
+});

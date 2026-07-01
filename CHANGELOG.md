@@ -152,6 +152,9 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 - **`memory` can auto-promote a hot archived note back to core.** Set
   `EAGENT_MEMORY_PROMOTE_AT=<n>` and a note returned by `recall` `n` times moves from
   the archive tier back to core. Off by default (recall stays read-only).
+- **`graph_search` can refine to convergence.** A new optional `refineRounds` runs the
+  refine pass up to N times, stopping early the first round that doesn't improve the
+  best node. Default 1 (a single pass, unchanged).
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.
