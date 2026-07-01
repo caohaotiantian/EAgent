@@ -139,6 +139,12 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   once persisted, would form two consecutive user messages on the next `/run` (which
   strict providers reject); the server now skips persisting a transcript that ends on
   a user turn, keeping the session's last valid state.
+- **`memory` recall gained an optional semantic (embedding) tier.** When
+  `EAGENT_MEMORY_EMBED_ENDPOINT` is set, `recall(query)` ranks notes by embedding
+  cosine similarity (a zero-dep `fetch` embedder, like the chat providers) instead of
+  lexical token overlap — finding paraphrases lexical misses. Off by default (lexical
+  unchanged), **fail-soft** (any embed error falls back to lexical), `EAGENT_MEMORY_EMBED=off`
+  kill switch.
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

@@ -1,5 +1,14 @@
 # Implementation — optional semantic (embedding) memory recall (RW7b-1)
 
+Status: closed
+Closing-commit: 76dd386
+Closed-on: 2026-07-01
+Deferred: none in this slice (see the design closure for the deferred follow-ups). Phase 1 = commit
+76dd386 (L3 closed in 1 clean round). Whole-project F review: pass (zero severe; searchTiers's 2 callers
+both awaited, default byte-identical, no server break, no dep, no kernel change). Suite 1156 pass / 0
+fail / 1 skip; memory 29/29; typecheck 0; eval 5/5. (Test-file IDE diagnostics were confirmed stale —
+direct tsc exit 0.)
+
 **Slug:** `2026-07-01-semantic-memory-recall` (identical to the design doc). **Design:**
 `docs/design/2026-07-01-semantic-memory-recall.md`.
 

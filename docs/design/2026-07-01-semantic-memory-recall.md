@@ -1,5 +1,12 @@
 # Design — optional semantic (embedding) memory recall (RW7b-1)
 
+Status: closed
+Closing-commit: 76dd386
+Closed-on: 2026-07-01
+Deferred: embed-on-write vector caching (store per-note vectors + async `remember`; the efficiency
+follow-up for large note sets — v1 is embed-on-recall). Real-collector wire smoke (opt-in). Hybrid
+lexical+semantic score fusion.
+
 **Slug:** `2026-07-01-semantic-memory-recall` · **Tier:** Full (new config surface + an injectable
 provider abstraction + a >1-option ranking decision; a user-facing recall-quality change). Source:
 `docs/DEFERRED-FOLLOWUPS.md` RW7b-1. Branch: `chore/finish-followups-3`.
