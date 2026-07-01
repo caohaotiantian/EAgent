@@ -362,7 +362,12 @@ async function streamRun(
     const { reason } = await agent.run(input);
     // Snapshot the post-turn state back into the session. `agent.usage` here is the
     // session's cumulative (restored session usage + this turn), not process-lifetime.
-    if (session) sessions.set(session, agent.snapshot());
+    // Skip a transcript left on a bare `user` turn (a turn aborted before any
+    // assistant output): restoring it and appending the next input would form two
+    // consecutive user messages. Keep the session's last valid state instead.
+    const msgs = agent.messages;
+    const danglingUser = msgs.length > 0 && msgs[msgs.length - 1]!.role === "user";
+    if (session && !danglingUser) sessions.set(session, agent.snapshot());
     write({ type: "done", reason, session, usage: agent.usage });
   } catch (err) {
     write({ type: "error", message: err instanceof Error ? err.message : String(err) });

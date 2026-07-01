@@ -134,6 +134,11 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   OTel GenAI semconv Histogram of per-call inference latency (seconds, advisory
   buckets), giving an SLO/alerting consumer the latency *distribution* (p50/p90/p99)
   that the existing Sum counters cannot. Additive; inert without a metrics endpoint.
+- **The HTTP server no longer persists a session on a turn aborted before any
+  response.** A `/run` cancelled mid-first-turn left a bare `[user]` transcript that,
+  once persisted, would form two consecutive user messages on the next `/run` (which
+  strict providers reject); the server now skips persisting a transcript that ends on
+  a user turn, keeping the session's last valid state.
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.
