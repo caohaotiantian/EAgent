@@ -24,6 +24,7 @@ import { randomBytes } from "node:crypto";
 
 import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import { clearTraceparent, setTraceparent, traceparent } from "./lib/otel-context.js";
 
 /** An OTLP attribute (`KeyValue` with an `AnyValue`): string or int64 (decimal string). */
 type KeyValue = { key: string; value: { stringValue: string } | { intValue: string } };
@@ -349,21 +350,26 @@ export default function activate(e: ExtensionAPI): () => void {
       if (!enabled()) return;
       const t = traceFor(currentActingAgent() ?? e.agent);
       if (!t.currentTurnSpanId) return;
+      const spanId = hex(8);
       t.openSpans.set(call.id, {
         traceId: t.traceId,
-        spanId: hex(8),
+        spanId,
         parentSpanId: t.currentTurnSpanId,
         name: call.name,
         kind: 1,
         startTimeUnixNano: nanos(),
         attributes: [attr("gen_ai.tool.name", call.name)],
       });
+      // RW7c-2: publish this tool-call span as a traceparent for web/mcp to
+      // propagate onto outbound tool HTTP (consumed only for allowlisted hosts).
+      setTraceparent(call.id, traceparent(t.traceId, spanId));
     }),
 
     e.on("tool_end", ({ call, result }) => {
       // Metric accumulation runs above the trace guard: a metrics-only run never
       // creates a RunTrace, but its tool calls must still be counted.
       if (anyEnabled()) toolCalls[result.isError ? "error" : "ok"]++;
+      clearTraceparent(call.id); // RW7c-2: drop the published traceparent (paired with tool_start)
       if (!enabled()) return;
       const t = traces.get(currentActingAgent() ?? e.agent);
       if (!t) return;

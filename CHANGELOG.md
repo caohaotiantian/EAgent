@@ -155,6 +155,11 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 - **`graph_search` can refine to convergence.** A new optional `refineRounds` runs the
   refine pass up to N times, stopping early the first round that doesn't improve the
   best node. Default 1 (a single pass, unchanged).
+- **OTel trace-context propagation into tool HTTP.** When traces are on, `otel-exporter`
+  publishes each tool-call span as a W3C `traceparent`; `web` (the fetch tool) and `mcp`
+  inject it onto outbound requests to hosts in `EAGENT_OTEL_PROPAGATE_HOSTS`, so a
+  downstream instrumented service becomes a child span of the tool call. Allowlist is
+  empty by default (nothing injected; headers byte-identical).
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

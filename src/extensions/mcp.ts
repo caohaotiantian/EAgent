@@ -31,6 +31,7 @@ import { createInterface, type Interface } from "node:readline";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { JSONSchema } from "../kernel/types.js";
+import { getTraceparent, isTrustedHost, propagateAllowlist } from "./lib/otel-context.js";
 
 /** A stdio server entry as found in `EAGENT_MCP_SERVERS`. */
 interface StdioServerDef {
@@ -154,7 +155,7 @@ interface Transport {
    * Send a JSON-RPC request and await its correlated response result. An
    * optional `signal` lets a caller (e.g. an aborted agent turn) cancel it.
    */
-  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
+  request(method: string, params: unknown, signal?: AbortSignal, callId?: string): Promise<unknown>;
   /** Send a JSON-RPC notification (no id, no response expected). */
   notify(method: string, params?: unknown): Promise<void>;
   /** Tear down the transport, rejecting anything still pending. */
@@ -282,10 +283,10 @@ class HttpTransport implements Transport {
     this.#headers = def.headers ?? {};
   }
 
-  async request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+  async request(method: string, params: unknown, signal?: AbortSignal, callId?: string): Promise<unknown> {
     if (this.#closed) throw new Error(`MCP server "${this.#name}" is closed`);
     const id = this.#nextId++;
-    const res = await this.#post({ jsonrpc: "2.0", id, method, params }, signal);
+    const res = await this.#post({ jsonrpc: "2.0", id, method, params }, signal, callId);
     if (!res.ok) {
       throw new Error(`MCP HTTP ${method} failed: ${res.status} ${res.statusText}`);
     }
@@ -310,13 +311,17 @@ class HttpTransport implements Transport {
     this.#closed = true;
   }
 
-  #post(message: unknown, signal?: AbortSignal): Promise<Response> {
+  #post(message: unknown, signal?: AbortSignal, callId?: string): Promise<Response> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
       ...this.#headers,
     };
     if (this.#sessionId) headers["mcp-session-id"] = this.#sessionId;
+    // RW7c-2: propagate the tool-call traceparent to an allowlisted MCP host (only
+    // while otel traces are on — the map's sole writer). Notifications pass no callId.
+    const tp = callId ? getTraceparent(callId) : undefined;
+    if (tp && isTrustedHost(this.#url, propagateAllowlist())) headers["traceparent"] = tp;
 
     // Bound every request with a timeout, and also honor a caller's abort, by
     // driving one AbortController from both. (Manual rather than
@@ -451,8 +456,8 @@ class McpConnection {
   }
 
   /** Proxy a JSON-RPC request to the underlying transport. */
-  request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
-    return this.#transport.request(method, params, signal);
+  request(method: string, params: unknown, signal?: AbortSignal, callId?: string): Promise<unknown> {
+    return this.#transport.request(method, params, signal, callId);
   }
 
   dispose(): void {
@@ -517,6 +522,7 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
                 "tools/call",
                 { name: toolName, arguments: args },
                 ctx.signal,
+                ctx.toolCallId, // RW7c-2: lets HttpTransport inject the traceparent
               )) as McpCallResult | undefined;
               const content = (result?.content ?? [])
                 .filter((c) => typeof c.text === "string")
