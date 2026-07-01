@@ -22,7 +22,8 @@ import { CapabilityManager } from "../src/kernel/capabilities.js";
 import { CommandRegistry } from "../src/kernel/commands.js";
 import { FileBackend, MemoryBackend } from "../src/kernel/store.js";
 import type { Store, StoreBackend } from "../src/kernel/store.js";
-import activate from "../src/extensions/memory.js";
+import activate, { parseEmbeddings, setEmbedder } from "../src/extensions/memory.js";
+import type { Embedder } from "../src/extensions/memory.js";
 import type { CompletionRequest, Message } from "../src/kernel/types.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
 import { autoUI, makeHarness, silentLogger } from "./helpers.js";
@@ -561,6 +562,112 @@ async function execTool(agent: Agent, name: string, args: Record<string, unknown
   });
 }
 
+// ---------------------------------------------------------------------------
+// RW7b-1: optional semantic (embedding) recall — off by default, fail-soft
+// ---------------------------------------------------------------------------
+
+/**
+ * A deterministic mock embedder over a tiny 4-dim concept vocabulary. Each text
+ * becomes a concept-count vector (dim 0 vehicle, 1 cost, 2 database, 3 food), so
+ * a paraphrase that shares a CONCEPT with the query — but no ≥3-char surface
+ * token — earns a high cosine, while a note that only shares a surface token
+ * earns a lower one. This inverts the lexical order.
+ */
+const CONCEPT: Record<string, number> = {
+  car: 0, automobile: 0, vehicle: 0, sedan: 0,
+  cost: 1, price: 1, pricing: 1, budget: 1,
+  database: 2, postgres: 2, sql: 2,
+  recipe: 3, food: 3, meal: 3,
+};
+
+const mockEmbedder: Embedder = (texts) =>
+  Promise.resolve(
+    texts.map((t) => {
+      const v = [0, 0, 0, 0];
+      for (const tok of t.toLowerCase().split(/[^a-z0-9]+/)) {
+        const dim = CONCEPT[tok];
+        if (dim !== undefined) v[dim] += 1;
+      }
+      return v;
+    }),
+  );
+
+const throwingEmbedder: Embedder = async () => {
+  throw new Error("embed down");
+};
+
+/** Seed the paraphrase (zero lexical overlap) + incidental (one shared token) pair. */
+async function seedSemanticNotes(h: MemHarness): Promise<void> {
+  // paraphrase: shares the vehicle+cost CONCEPT with "automobile pricing" but no salient token.
+  await execTool(h.agent, "remember", { key: "para", value: "car budget estimate" });
+  // incidental: shares the surface token "automobile" (overlapScore>0) but a weaker concept.
+  await execTool(h.agent, "remember", { key: "inc", value: "automobile assembly plant" });
+}
+
+test("RW7b-1 AC#1: semantic recall surfaces a paraphrase note that lexical drops", async () => {
+  const h = await loadMem();
+  await seedSemanticNotes(h);
+  const query = "automobile pricing";
+
+  // (i) lexical (no embedder): the zero-overlap paraphrase is omitted entirely.
+  const lex = await execTool(h.agent, "recall", { query });
+  const lexKeys = (lex.details as Match[]).map((m) => m.key);
+  assert.deepEqual(lexKeys, ["inc"], "lexical recall omits the zero-overlap paraphrase");
+
+  // (ii) semantic (mock injected): the paraphrase surfaces AND ranks first.
+  setEmbedder(mockEmbedder);
+  try {
+    const sem = await execTool(h.agent, "recall", { query });
+    const semKeys = (sem.details as Match[]).map((m) => m.key);
+    assert.equal(semKeys[0], "para", "semantic ranks the paraphrase first");
+    assert.ok(semKeys.includes("inc"), "the incidental note is still present");
+  } finally {
+    setEmbedder(undefined);
+  }
+});
+
+test("RW7b-1 AC#2: EAGENT_MEMORY_EMBED=off forces lexical even with an embedder injected", async () => {
+  const prev = process.env.EAGENT_MEMORY_EMBED;
+  const h = await loadMem();
+  await seedSemanticNotes(h);
+  const query = "automobile pricing";
+  const lex = await execTool(h.agent, "recall", { query });
+
+  setEmbedder(mockEmbedder);
+  process.env.EAGENT_MEMORY_EMBED = "off";
+  try {
+    const killed = await execTool(h.agent, "recall", { query });
+    assert.deepEqual(killed.details, lex.details, "the kill switch yields the lexical ranking");
+  } finally {
+    setEmbedder(undefined);
+    if (prev === undefined) delete process.env.EAGENT_MEMORY_EMBED;
+    else process.env.EAGENT_MEMORY_EMBED = prev;
+  }
+});
+
+test("RW7b-1 AC#3: a throwing embedder fails soft to a result deep-equal to lexical", async () => {
+  const h = await loadMem();
+  await seedSemanticNotes(h);
+  const query = "automobile pricing";
+  const lex = await execTool(h.agent, "recall", { query });
+
+  setEmbedder(throwingEmbedder);
+  try {
+    const soft = await execTool(h.agent, "recall", { query });
+    assert.deepEqual(soft.details, lex.details, "fail-soft recall deep-equals the lexical result");
+  } finally {
+    setEmbedder(undefined);
+  }
+});
+
+test("RW7b-1: parseEmbeddings maps an OpenAI-shaped body to number[][], order-preserving", () => {
+  const body = { data: [{ embedding: [1, 2, 3] }, { embedding: [4, 5, 6] }] };
+  assert.deepEqual(parseEmbeddings(body), [[1, 2, 3], [4, 5, 6]]);
+  assert.throws(() => parseEmbeddings({}), /data/i, "missing data[] throws");
+  assert.throws(() => parseEmbeddings({ data: [{}] }), /embedding/i, "missing embedding[] throws");
+  assert.throws(() => parseEmbeddings({ data: "nope" }), /data/i, "non-array data throws");
+});
+
 test("RW7b-2: /memory forget-archive <key> deletes an archived note, leaving core notes", async () => {
   const h = await loadMem();
   h.store.set("archive:old", "an archived thought"); // bare string => readArchive wraps it
@@ -573,4 +680,42 @@ test("RW7b-2: /memory forget-archive <key> deletes an archived note, leaving cor
 
   const miss = await runMemory(h.commands, h.agent, "forget-archive nope");
   assert.match(miss.join("\n"), /no archived note "nope"/, "an unknown key reports not-found, no delete");
+});
+
+test("RW7b-3: EAGENT_MEMORY_PROMOTE_AT auto-promotes a hot archived note to core", async () => {
+  const prev = process.env.EAGENT_MEMORY_PROMOTE_AT;
+  process.env.EAGENT_MEMORY_PROMOTE_AT = "2";
+  try {
+    const h = await loadMem();
+    h.store.set("archive:hot", { id: "id-hot", text: "quantum encryption keys", source: "test", ts: "2026-07-01T00:00:00.000Z" });
+
+    await execTool(h.agent, "recall", { query: "quantum" }); // recalls -> 1, still archived
+    assert.ok(h.store.get("archive:hot"), "still archived after 1 recall");
+    assert.equal(h.store.get("note:hot"), undefined, "not yet in core");
+
+    await execTool(h.agent, "recall", { query: "quantum" }); // recalls -> 2 == threshold, promoted
+    assert.equal(h.store.get("archive:hot"), undefined, "archived copy removed on promotion");
+    const promoted = h.store.get("note:hot") as { text: string; recalls?: number } | undefined;
+    assert.ok(promoted, "promoted to core");
+    assert.equal(promoted!.text, "quantum encryption keys");
+    assert.equal(promoted!.recalls, undefined, "transient recall counter dropped on promotion");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MEMORY_PROMOTE_AT;
+    else process.env.EAGENT_MEMORY_PROMOTE_AT = prev;
+  }
+});
+
+test("RW7b-3: default (EAGENT_MEMORY_PROMOTE_AT unset) never promotes — recall stays read-only", async () => {
+  const prev = process.env.EAGENT_MEMORY_PROMOTE_AT;
+  delete process.env.EAGENT_MEMORY_PROMOTE_AT;
+  try {
+    const h = await loadMem();
+    h.store.set("archive:hot", { id: "id-hot", text: "quantum encryption keys", source: "test", ts: "2026-07-01T00:00:00.000Z" });
+    for (let i = 0; i < 5; i++) await execTool(h.agent, "recall", { query: "quantum" });
+    assert.ok(h.store.get("archive:hot"), "stays archived by default");
+    assert.equal(h.store.get("note:hot"), undefined, "never auto-promoted by default");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MEMORY_PROMOTE_AT;
+    else process.env.EAGENT_MEMORY_PROMOTE_AT = prev;
+  }
 });

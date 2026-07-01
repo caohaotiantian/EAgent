@@ -241,7 +241,7 @@ test("AC11: risk-guard annotates the judge prompt with the decoded payload for a
   assert.match(c.userText, /rm -rf \//, "the decoded rm -rf / is shown to the judge");
 });
 
-test("AC11 (negative): a rot13'd arg is NOT surfaced to risk-guard (whole-blob asymmetry)", async () => {
+test("AC11 (per-value): a rot13'd arg VALUE is surfaced per-value (DEFERRED-1)", async () => {
   const h = makeHarness();
   shellTool(h.agent);
   const c = new Capturing("SAFE");
@@ -254,10 +254,11 @@ test("AC11 (negative): a rot13'd arg is NOT surfaced to risk-guard (whole-blob a
     { call: toolCall("bash", { cmd: "ez -es /" }) },
   );
 
-  // The whole-string rot13/known-command gate sees the JSON wrapper token
-  // `{"cmd":"ez` as the first token, which is not a known command, so nothing is
-  // surfaced — the deliberate asymmetry vs bash-policy (Deliverable 3, D5).
-  assert.doesNotMatch(c.userText, /\[decoded payload:/, "rot13-in-arg is intentionally out of reach for risk-guard");
+  // DEFERRED-1: the whole-blob rot13 sees `{"cmd":"ez` (not a known command), but
+  // risk-guard now ALSO decode-normalizes each arg VALUE — so `ez -es /` → rot13 →
+  // `rm -rf /` (first token `rm` is a known command) is surfaced to the judge. The
+  // previous whole-blob asymmetry vs bash-policy is resolved.
+  assert.match(c.userText, /\[decoded payload: rm -rf \/\]/, "per-value rot13 surfaces the real command");
 });
 
 // -- T19: kill switch leaves the risk-guard prompt unchanged --------------------
