@@ -306,3 +306,58 @@ test("AC-9: command toggles state and gates only when on", async () => {
   assert.equal(out.block, false);
   assert.equal(c.calls, 0);
 });
+
+// -- DEFERRED-1: per-value decode surfaces a rot13'd command hidden in an arg value --
+
+/** A classifier that also captures the last classification prompt text. */
+class CapturingClassifier extends MockProvider {
+  lastPrompt = "";
+  constructor(verdict = "SAFE") {
+    super(() => ({ text: verdict }));
+  }
+  override async *stream(req: CompletionRequest) {
+    const first = req.messages[0];
+    this.lastPrompt = first
+      ? first.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("")
+      : "";
+    yield* super.stream(req);
+  }
+}
+
+test("DEFERRED-1: a rot13'd command in an arg VALUE is decoded per-value", async () => {
+  const h = makeHarness();
+  const clf = new CapturingClassifier("SAFE");
+  h.agent.providers.register(clf, { default: true });
+  await activate(h, { enabled: true });
+  h.agent.tools.register(shellTool("run_shell"));
+
+  // The whole blob {"cmd":"ez -es /"} rot13s to {"pzq":"rm -rf /"} whose first
+  // token is not a command, so ONLY the per-value pass surfaces the payload.
+  await applyHook(h, "run_shell", { cmd: "ez -es /" }); // rot13("rm -rf /")
+  assert.match(clf.lastPrompt, /\[decoded payload: rm -rf \/\]/, "per-value rot13 surfaced the real command");
+
+  // Control: a value that rot13s to a non-command surfaces nothing.
+  clf.lastPrompt = "";
+  await applyHook(h, "run_shell", { cmd: "hello world" });
+  assert.ok(!/\[decoded payload:/.test(clf.lastPrompt), "a benign value surfaces no decoded payload");
+});
+
+test("DEFERRED-1: EAGENT_DECODE_NORMALIZE=off leaves the prompt un-annotated", async () => {
+  const prev = process.env.EAGENT_DECODE_NORMALIZE;
+  process.env.EAGENT_DECODE_NORMALIZE = "off";
+  try {
+    const h = makeHarness();
+    const clf = new CapturingClassifier("SAFE");
+    h.agent.providers.register(clf, { default: true });
+    await activate(h, { enabled: true });
+    h.agent.tools.register(shellTool("run_shell"));
+    await applyHook(h, "run_shell", { cmd: "ez -es /" });
+    assert.ok(!/\[decoded payload:/.test(clf.lastPrompt), "decode off => no annotation");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_DECODE_NORMALIZE;
+    else process.env.EAGENT_DECODE_NORMALIZE = prev;
+  }
+});

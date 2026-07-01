@@ -145,6 +145,10 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   lexical token overlap — finding paraphrases lexical misses. Off by default (lexical
   unchanged), **fail-soft** (any embed error falls back to lexical), `EAGENT_MEMORY_EMBED=off`
   kill switch.
+- **`risk-guard` now decodes obfuscated payloads hidden in individual arg values.**
+  Its pre-inspection decode previously scanned only the whole args blob, so a rot13'd
+  command tucked in one argument value slipped past; it now also decode-normalizes each
+  string-leaf value (base64/hex/rot13), surfacing the real command to the judge.
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

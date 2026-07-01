@@ -75,6 +75,16 @@ function textOf(message: Message): string {
     .join("");
 }
 
+/** Every string leaf of `v` (recursing through arrays/objects), so each arg value
+ *  can be decode-normalized on its own — catching a rot13'd command hidden in one
+ *  value that the whole-blob scan cannot surface. */
+function stringLeaves(v: unknown, out: string[] = []): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) for (const x of v) stringLeaves(x, out);
+  else if (v && typeof v === "object") for (const x of Object.values(v)) stringLeaves(x, out);
+  return out;
+}
+
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
     enabled:
@@ -98,18 +108,28 @@ export default function activate(e: ExtensionAPI): () => void {
       const provider = e.agent.providers.get();
       if (!provider) return undefined;
 
-      // Pre-inspection decode (decode-normalize): the decode SUBJECT is the WHOLE
-      // stringified-arguments blob (risk-guard has no per-value `commandArgKey`),
-      // so the substring-scanning idiom/base64 matchers still find a payload
-      // embedded inside the JSON wrapper. Prepend a `[decoded payload: …]` line for
-      // each decode that differs from that raw blob, so the judge sees the real
-      // command. `EAGENT_DECODE_NORMALIZE=off` leaves the prompt byte-identical.
+      // Pre-inspection decode (decode-normalize): normalize the WHOLE stringified
+      // blob AND each string-leaf value. The whole-blob pass lets the substring
+      // idiom/base64 matchers find a payload embedded in the JSON wrapper; the
+      // per-value pass makes each value the *whole* subject, so a rot13'd command
+      // hidden in one arg value (which the gate can't surface from the whole blob,
+      // whose first token is `{"…":`) is decoded (`ez -es /` → `rm -rf /`). Emit a
+      // deduped `[decoded payload: …]` line for each decode differing from the raw
+      // blob. `EAGENT_DECODE_NORMALIZE=off` leaves the prompt byte-identical.
       const rawArgs = JSON.stringify(call.arguments);
       let prefix = "";
       if (process.env.EAGENT_DECODE_NORMALIZE !== "off") {
-        for (const decoded of normalizeForInspection(rawArgs)) {
-          if (decoded !== rawArgs) prefix += `[decoded payload: ${decoded}]\n`;
-        }
+        const seen = new Set<string>();
+        const annotate = (subject: string): void => {
+          for (const decoded of normalizeForInspection(subject)) {
+            if (decoded !== rawArgs && !seen.has(decoded)) {
+              seen.add(decoded);
+              prefix += `[decoded payload: ${decoded}]\n`;
+            }
+          }
+        };
+        annotate(rawArgs);
+        for (const value of stringLeaves(call.arguments)) annotate(value);
       }
 
       const messages: Message[] = [
