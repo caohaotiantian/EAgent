@@ -61,7 +61,7 @@ kernel is designed around that assumption rather than trusting the model.
   does **not** defend against SSRF: requests to internal, link-local, or
   cloud-metadata hosts are not blocked, and redirects are followed without
   re-validating the final URL. For the compositional read→exfiltrate risk, the
-  `flow-guard` extension holds later egress (default `net:fetch`) once a session
+  `flow-guard` extension holds later egress (default `net:fetch` and `mcp:call`) once a session
   is tainted by a source capability (default `shell:exec`) or sensitive data in
   the transcript — confirming in `ask` mode or refusing in `block` mode.
 

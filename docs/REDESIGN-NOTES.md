@@ -52,7 +52,7 @@ fork**:
   data-bearing tool-result message), and the `beforeToolCall` filter (intervene
   before egress). Once a session is tainted — by a source capability
   (default `shell:exec`) or by sensitive data in the transcript — a later egress
-  call (default `net:fetch`) is held: confirmed in `ask` mode, refused in `block`
+  call (default `net:fetch` / `mcp:call`) is held: confirmed in `ask` mode, refused in `block`
   mode. The data taint is genuine *information-flow*: it is pinned to the
   tool-result message (`meta.flowGuardTaint`) and egress is gated only while that
   message is in the live transcript, so `/clear` and `/handoff` un-gate. Taint

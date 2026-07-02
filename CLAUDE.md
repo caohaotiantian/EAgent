@@ -1,12 +1,15 @@
 # CLAUDE.md
 
-Orientation for an AI agent working in this repository.
+Orientation for an AI agent working in this repository. **The code is the source
+of truth**; where this file and the code disagree, the code wins — fix this file.
 
 ## What this is
 
-EAgent is a minimalist AI-agent kernel: a tiny, stable core plus an Emacs-grade
-extension surface. The bet is that a small, observable, malleable core beats a
-big one — new behavior is always an extension, never a fork.
+EAgent is a minimalist AI-agent kernel: a tiny, stable, observable core plus an
+Emacs-grade extension surface. The bet is that a small, malleable core beats a big
+one — **new behavior is always an extension, never a fork of the core.** That
+scarcity is enforced, not aspirational: the kernel is held under a hard line
+ceiling by a test, so every new capability is pushed out into an extension.
 
 ## Architecture
 
@@ -17,7 +20,7 @@ The kernel is **seven primitives and nothing more**, all under `src/kernel/`:
 | Hook bus         | `hooks.ts`             | Lifecycle events (observe) + filter hooks (intervene); `childScope()` derives a governed bus for sub-agents (shares gate filters + intra-run events, suppresses run-lifecycle events). |
 | Tool registry    | `registry.ts`          | Register/shadow/dispose tools; later wins, disposing restores. Also holds the `ProviderRegistry` (registers by overwrite — no restore). |
 | Provider         | `types.ts` (interface) | The LLM abstraction: a request → a stream of events. Implementations live in `src/providers/`. |
-| Agent loop       | `agent.ts`             | Turns, streaming, guarded/ordered tool dispatch (bounded by `maxConcurrency`), steering, follow-up (default `maxTurns` 24); first-class state via `snapshot()`/`restore()` + a monotonic `#step`. |
+| Agent loop       | `agent.ts`             | Turns, streaming, guarded/ordered tool dispatch (bounded by `maxConcurrency`), steering, follow-up (default `maxTurns` 24); first-class state via `snapshot()`/`restore()` + a monotonic `#step`; the `currentActingAgent()` seam so soft-guards act on the acting sub-agent. |
 | Capability layer | `capabilities.ts`      | Per-capability grant/deny/ask, wildcards, audit log. |
 | Extension host   | `extension.ts`         | Discovery, activation, the `ExtensionAPI`, hot reload via `jiti`. |
 | Command registry | `commands.ts`          | User-facing slash commands. |
@@ -27,8 +30,10 @@ accounting), `events.ts` (the event/filter maps), `define.ts` (`defineTool` +
 result helpers), `validate.ts` (JSON-Schema argument validation), `store.ts`
 (the namespaced `Store`), and `index.ts` (the public barrel). The whole core is
 held minimal on purpose: `test/kernel-surface.test.ts` pins the public exports
-and keeps `src/kernel/` under a hard line ceiling (2,200 lines). New capability
-is an extension, not a core change.
+and keeps `src/kernel/` under a hard line ceiling (2,200 lines; the metric is
+`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,198 — one to two
+lines of slack). Adding to the kernel means golfing something else out or an
+explicit decision; new capability is an extension, not a core change.
 
 **Everything else is an extension** — even the four "built-in" tools (`read`,
 `write`, `edit`, `bash`) live in `src/extensions/core-tools.ts`. The kernel ships
@@ -36,14 +41,15 @@ with zero opinions about tools, memory, prompts, or sub-agents.
 
 Extensions plug into the loop through the hook bus: they **observe** lifecycle
 events via `e.on(event, …)` (`agent_start`, `turn_start`/`turn_end`, `message`,
-`text_delta`, `tool_start`/`tool_end`/`tool_batch_end`, `usage`, `agent_end`,
-`error`, `session_start`/`session_shutdown`, …) and **intervene** via six
-filter hooks `e.hook(point, …)`: `transformContext` (reshape the message list),
-`transformRequest` (reshape the whole outbound request — system prompt, tools,
-model, toolChoice, thinking — just before the provider call), `beforeToolCall`
-(veto/rewrite a call), `beforeDispatch` (reorder/drop the tool-call wave before
-dispatch, pairing-safe), `afterToolCall` (transform a result), and `onProviderError`
-(error-path: retry/downshift when a provider stream throws pre-first-event).
+`text_delta`/`reasoning_delta`, `tool_start`/`tool_end`/`tool_batch_end`, `usage`,
+`agent_end`, `error`, `session_start`/`session_shutdown`/`reload`, …) and
+**intervene** via six filter hooks `e.hook(point, …)`: `transformContext`
+(reshape the message list), `transformRequest` (reshape the whole outbound
+request — system prompt, tools, model, toolChoice, thinking — just before the
+provider call), `beforeToolCall` (veto/rewrite a call), `beforeDispatch`
+(reorder/drop the tool-call wave before dispatch, pairing-safe), `afterToolCall`
+(transform a result), and `onProviderError` (error-path: retry/downshift when a
+provider stream throws pre-first-event).
 
 ## Key commands
 
@@ -58,7 +64,7 @@ npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits n
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a
 scriptable, deterministic LLM, so no network and no `ANTHROPIC_API_KEY` are
-required. Keep it that way.
+required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`.
 
 ## Where things live
 
@@ -67,14 +73,17 @@ required. Keep it that way.
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` (retry/backoff + SSE parsing),
   and `cassette` (record/replay). All read config from `process.env`.
-- `src/extensions/` — the 58 built-in extensions, plus internal helpers in `lib/`.
+- `src/extensions/` — the 58 built-in extensions, plus shared helpers in `lib/`
+  (`decode`, `edit-match`, `otel-context`, `read-capped`, `relevance`, `sandbox`).
+  A helper that two extensions share goes in `lib/`, not imported peer-to-peer.
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
   defaulting (honors `*_MODEL` env vars), and the canonical `BUILTIN_EXTENSIONS`
   set and load order.
 - `src/cli.ts` — the terminal host: interactive REPL, batch, one-shot, `--json`.
 - `src/complete.ts` — the REPL Tab-completion engine: a pure, offline-testable
   `complete(line, ctx)`.
-- `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `DELETE /sessions/:id`).
+- `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `POST /answer`
+  for a mid-turn elicitation reply, `DELETE /sessions/:id`).
 - `test/` — the full offline suite, roughly one file per primitive/extension.
 - `examples/extensions/` — worked example extensions.
 - `docs/EXTENSIONS.md` — the extension author's guide.
@@ -142,3 +151,16 @@ every registration so reload/unload stays a clean swap); gate side effects behin
 a capability; add an `EAGENT_<NAME>=off` kill switch when it observes or
 intervenes by default; append it to `BUILTIN_EXTENSIONS` in `src/host.ts`; and
 add an offline test. See `docs/EXTENSIONS.md` for the full author's guide.
+
+## Working here
+
+- **Process.** Non-trivial functional changes go through the `three-loop-workflow`
+  skill (design → implementation → dev/review/accept → end-to-end review),
+  fresh-reviewer-gated at each stage. Accumulate a batch on a `chore/<slug>`
+  branch and PR to `init` (the trunk).
+- **Status.** `docs/HANDOFF.md` is the session-orientation + status doc; the
+  authoritative "what's built vs. deferred-by-design" record is the Closure ledger
+  + audit-gaps table atop `docs/DEFERRED-FOLLOWUPS.md`. `docs/ROADMAP.md` is the
+  per-wave history. When these disagree with the code, the code wins.
+- **macOS gotcha.** `grep` silently skips source files containing non-ASCII glyphs
+  (`→`/`σ`/`≥`); use `grep -a` or the Read tool for audits.

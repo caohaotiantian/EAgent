@@ -126,10 +126,13 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   now distinguishes an absent file (a silent first run) from unparseable JSON; a
   corrupt file is moved aside to `*.corrupt-<pid>-<ts>` before the store starts
   empty, so the next write can no longer destroy persisted keys.
-- **`checkpoint` gained an `EAGENT_CHECKPOINT=off` kill switch.** Its
-  auto-snapshot runs synchronous git on every mutating tool call; the (default-on)
-  extension now honors the house opt-out convention so an operator can disable it
-  (e.g. to avoid blocking the shared HTTP host's event loop).
+- **`checkpoint` auto-snapshot now runs git asynchronously, serialized, plus an
+  `EAGENT_CHECKPOINT=off` kill switch.** The per-mutating-call snapshot no longer
+  blocks the event loop (`promisify(execFile)` instead of `execFileSync`), and every
+  snapshot — the auto-hook and the manual `/checkpoint` — is serialized through one
+  per-activation queue so concurrent tool-call waves can't race on checkpoint ids or
+  refs; snapshot-before-mutation ordering is preserved. The (default-on) extension
+  also honors the house opt-out convention via the kill switch.
 - **`otel-exporter` emits a third metric: `gen_ai.client.operation.duration`** — the
   OTel GenAI semconv Histogram of per-call inference latency (seconds, advisory
   buckets), giving an SLO/alerting consumer the latency *distribution* (p50/p90/p99)
@@ -167,6 +170,12 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 - **Provider SSE reads are bounded.** The shared `parseSSE` reader (openai/anthropic/gemini) caps a
   single un-terminated event at `EAGENT_MAX_SSE_EVENT_BYTES` (default 16 MiB) instead of buffering a
   no-terminator stream without bound — an OOM/DoS guard.
+- **MCP transport reads are bounded (SRV-4b).** A hostile or broken MCP server can no longer OOM the
+  host: both MCP transports cap a single read at `EAGENT_MAX_MCP_READ_BYTES` (default 16 MiB). The HTTP
+  transport bounds its SSE/JSON response read and throws on overflow; the stdio transport replaces the
+  unbounded readline with a byte-bounded line reader (discard-to-newline, whole-line UTF-8 decode). The
+  shared byte-window reader `readCapped` moved to `src/extensions/lib/read-capped.ts` so both `web` and
+  `mcp` reuse it — mirroring the SSE cap above.
 - **Security-guard hardening.** `secret-guard`/`flow-guard` arg scans are depth-bounded (a deeply-nested
   payload can't overflow the stack past a scannable secret / nest a sensitive path out of reach), and
   `risk-guard`'s classifier sub-call is bounded by a timeout (a hung provider fails open instead of

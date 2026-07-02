@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["44 extensions<br/>src/extensions/"]
+        EXTS["58 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -377,11 +377,14 @@ flowchart TB
 Each is a single file under `src/extensions/`, rides the `ExtensionAPI`, ships
 with offline tests, and gates privileged work behind a capability. They load in
 the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`,
-`skills`, `mcp`, `codeact`, `subagents`, `dynamic-workflow`, `memory`, `prune`,
-`compact`, `recovery`, `output-contract`, `content-guard`, `circuit-breaker`,
-`planmode`, `session`, `packages`, `trace`, `context-files`, `microagents`,
-`limits`, `cost`, `self`, `web`, `checkpoint`, `introspect`, `journal`,
-`todo`, `prompts`, `flow-guard`, `risk-guard`, `bash-policy`, `integrity`,
-`write-guard`, `secret-guard`, `sweep-edit`, `citations`, `env-report`, `evals`,
-`handoff`, `drift-probe`, `skills-hardening`, `ask`, `routing`. The README has a one-line description and capability for each;
-`docs/EXTENSIONS.md` is the author's guide.
+`skills`, `mcp`, `codeact`, `subagents`, `dynamic-workflow`, `templates`, `teams`,
+`memory`, `prune`, `compact`, `recovery`, `output-contract`, `content-guard`,
+`provenance`, `circuit-breaker`, `planmode`, `session`, `packages`, `trace`,
+`context-files`, `microagents`, `limits`, `cost`, `budget-cap`, `self`, `web`,
+`checkpoint`, `introspect`, `journal`, `todo`, `goal`, `prompts`, `flow-guard`,
+`risk-guard`, `headless-flags`, `bash-policy`, `sandbox-tiers`, `config-hooks`,
+`integrity`, `write-guard`, `secret-guard`, `sweep-edit`, `citations`, `env-report`,
+`evals`, `handoff`, `drift-probe`, `skills-hardening`, `ask`, `routing`,
+`fallback-routing`, `reliability`, `time-travel`, `otel-exporter`,
+`reasoning-search`, `self-improve`. The README has a one-line description and
+capability for each; `docs/EXTENSIONS.md` is the author's guide.
