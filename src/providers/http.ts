@@ -13,6 +13,13 @@ export interface SSEMessage {
   data: string;
 }
 
+/** OOM-safety cap on a single un-terminated SSE event (`EAGENT_MAX_SSE_EVENT_BYTES`,
+ *  default 16 MiB — far above any legitimate event; invalid/≤0 falls back to the default). */
+export function maxSseEventBytes(): number {
+  const n = Number(process.env.EAGENT_MAX_SSE_EVENT_BYTES);
+  return Number.isInteger(n) && n > 0 ? n : 16 * 1024 * 1024;
+}
+
 /**
  * Parse a `ReadableStream` of SSE bytes into `{ event?, data }` messages.
  * Tolerates both LF and CRLF line endings (the spec permits CRLF, and some
@@ -22,6 +29,7 @@ export interface SSEMessage {
 export async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEMessage> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const maxEvent = maxSseEventBytes();
   let buffer = "";
   for (;;) {
     const { done, value } = await reader.read();
@@ -42,6 +50,14 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable
       }
       msg.data = dataLines.join("\n");
       yield msg;
+    }
+    // OOM guard: whatever remains is one not-yet-terminated event. A stream that
+    // never sends `\n\n` would grow `buffer` without bound, so cap a single
+    // incomplete event and abort the stream (surfaces as a provider error).
+    // `buffer.length` is UTF-16 code units (≈ bytes; over-approximates memory —
+    // the JS string, at ≤2 bytes/unit, is what can OOM), which is what we bound.
+    if (buffer.length > maxEvent) {
+      throw new Error(`parseSSE: an SSE event exceeded ${maxEvent} bytes with no terminator`);
     }
   }
 }

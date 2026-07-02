@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseSSE, fetchWithRetry } from "../src/providers/http.js";
+import { parseSSE, fetchWithRetry, maxSseEventBytes } from "../src/providers/http.js";
 
 /** A stream that emits exactly the given byte chunks, in order. */
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
@@ -75,4 +75,51 @@ test("fetchWithRetry aborts cleanly during backoff", async () => {
       }),
     /aborted/,
   );
+});
+
+// -- SRV-4: parseSSE bounds a single un-terminated event (OOM guard) --
+
+test("SRV-4: parseSSE throws on an un-terminated event that exceeds the cap (bounds OOM)", async () => {
+  const prev = process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+  process.env.EAGENT_MAX_SSE_EVENT_BYTES = "64";
+  try {
+    await assert.rejects(
+      () => collect(streamOf(["data: " + "x".repeat(200)])), // no "\n\n", > 64 bytes
+      /exceeded 64 bytes/,
+      "an un-terminated oversized event must throw, not grow the buffer without bound",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+    else process.env.EAGENT_MAX_SSE_EVENT_BYTES = prev;
+  }
+});
+
+test("SRV-4: a long stream of terminated small events does NOT hit the cap (only the incomplete buffer is bounded)", async () => {
+  const prev = process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+  process.env.EAGENT_MAX_SSE_EVENT_BYTES = "64";
+  try {
+    const chunks = Array.from({ length: 50 }, (_, i) => `data: e${i}\n\n`);
+    const data = await collect(streamOf(chunks));
+    assert.equal(data.length, 50, "all terminated events yield; the cap is per incomplete event, not total throughput");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+    else process.env.EAGENT_MAX_SSE_EVENT_BYTES = prev;
+  }
+});
+
+test("SRV-4: maxSseEventBytes parses the env with a 16 MiB default", () => {
+  const prev = process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+  try {
+    delete process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+    assert.equal(maxSseEventBytes(), 16 * 1024 * 1024, "unset → 16 MiB");
+    for (const bad of ["abc", "0", "-5", "1.5", ""]) {
+      process.env.EAGENT_MAX_SSE_EVENT_BYTES = bad;
+      assert.equal(maxSseEventBytes(), 16 * 1024 * 1024, `${JSON.stringify(bad)} → default`);
+    }
+    process.env.EAGENT_MAX_SSE_EVENT_BYTES = "1024";
+    assert.equal(maxSseEventBytes(), 1024, "a positive integer overrides");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MAX_SSE_EVENT_BYTES;
+    else process.env.EAGENT_MAX_SSE_EVENT_BYTES = prev;
+  }
 });
