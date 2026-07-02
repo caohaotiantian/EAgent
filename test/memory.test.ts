@@ -22,7 +22,7 @@ import { CapabilityManager } from "../src/kernel/capabilities.js";
 import { CommandRegistry } from "../src/kernel/commands.js";
 import { FileBackend, MemoryBackend } from "../src/kernel/store.js";
 import type { Store, StoreBackend } from "../src/kernel/store.js";
-import activate, { parseEmbeddings, setEmbedder } from "../src/extensions/memory.js";
+import activate, { parseEmbeddings, resolveEmbedder, setEmbedder } from "../src/extensions/memory.js";
 import type { Embedder } from "../src/extensions/memory.js";
 import type { CompletionRequest, Message } from "../src/kernel/types.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
@@ -717,5 +717,93 @@ test("RW7b-3: default (EAGENT_MEMORY_PROMOTE_AT unset) never promotes — recall
   } finally {
     if (prev === undefined) delete process.env.EAGENT_MEMORY_PROMOTE_AT;
     else process.env.EAGENT_MEMORY_PROMOTE_AT = prev;
+  }
+});
+
+// -- TEST-1: resolveEmbedder wire coverage (the real fetch embedder, previously untested) --
+
+const EMBED_ENV = [
+  "EAGENT_MEMORY_EMBED_ENDPOINT",
+  "EAGENT_MEMORY_EMBED_MODEL",
+  "EAGENT_MEMORY_EMBED_API_KEY",
+  "EAGENT_MEMORY_EMBED",
+  "OPENAI_API_KEY",
+] as const;
+function withEmbedEnv(set: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of EMBED_ENV) saved[k] = process.env[k];
+  for (const k of EMBED_ENV) delete process.env[k];
+  for (const [k, v] of Object.entries(set)) if (v !== undefined) process.env[k] = v;
+  const restore = (): void => {
+    for (const k of EMBED_ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  };
+  return fn().finally(restore);
+}
+
+test("TEST-1: resolveEmbedder POSTs {model,input} with a Bearer header and parses the embeddings", async () => {
+  const origFetch = globalThis.fetch;
+  let captured: { url: string; init: RequestInit } | undefined;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    captured = { url: String(url), init: init ?? {} };
+    return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await withEmbedEnv(
+      {
+        EAGENT_MEMORY_EMBED_ENDPOINT: "https://embed.test/v1/embeddings",
+        EAGENT_MEMORY_EMBED_MODEL: "text-embedding-test",
+        EAGENT_MEMORY_EMBED_API_KEY: "sk-key",
+      },
+      async () => {
+        const embed = resolveEmbedder();
+        assert.ok(embed, "endpoint set → an embedder is resolved");
+        const vecs = await embed!(["hello"]);
+        assert.deepEqual(vecs, [[0.1, 0.2]], "returns the parsed embeddings");
+        assert.equal(captured!.url, "https://embed.test/v1/embeddings");
+        assert.equal(captured!.init.method, "POST");
+        const headers = captured!.init.headers as Record<string, string>;
+        assert.equal(headers["content-type"], "application/json");
+        assert.equal(headers.authorization, "Bearer sk-key");
+        assert.deepEqual(JSON.parse(String(captured!.init.body)), { model: "text-embedding-test", input: ["hello"] });
+      },
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("TEST-1: resolveEmbedder throws on a non-ok response (upstream fail-soft to lexical)", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("nope", { status: 500 })) as typeof fetch;
+  try {
+    await withEmbedEnv({ EAGENT_MEMORY_EMBED_ENDPOINT: "https://embed.test/v1/embeddings" }, async () => {
+      const embed = resolveEmbedder();
+      await assert.rejects(() => embed!(["x"]), /500/, "a non-ok embed response throws");
+    });
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("TEST-1: resolveEmbedder is undefined when the endpoint is unset; no Bearer without a key", async () => {
+  await withEmbedEnv({}, async () => {
+    assert.equal(resolveEmbedder(), undefined, "no endpoint → no embedder");
+  });
+  const origFetch = globalThis.fetch;
+  let headers: Record<string, string> = {};
+  globalThis.fetch = (async (_u: string | URL | Request, init?: RequestInit) => {
+    headers = (init?.headers ?? {}) as Record<string, string>;
+    return new Response(JSON.stringify({ data: [{ embedding: [1] }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await withEmbedEnv({ EAGENT_MEMORY_EMBED_ENDPOINT: "https://embed.test/v1/embeddings" }, async () => {
+      await resolveEmbedder()!(["x"]);
+      assert.equal(headers.authorization, undefined, "no api key (and no OPENAI_API_KEY) → no authorization header");
+    });
+  } finally {
+    globalThis.fetch = origFetch;
   }
 });

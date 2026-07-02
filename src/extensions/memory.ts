@@ -145,7 +145,7 @@ export function parseEmbeddings(body: unknown): number[][] {
  * `EAGENT_MEMORY_EMBED_ENDPOINT` is unset. POSTs `{ model, input }` to the
  * OpenAI-compatible endpoint under a bounded timeout; zero-dep (global `fetch`).
  */
-function resolveEmbedder(): Embedder | undefined {
+export function resolveEmbedder(): Embedder | undefined {
   const endpoint = process.env.EAGENT_MEMORY_EMBED_ENDPOINT;
   if (!endpoint) return undefined;
   const model = process.env.EAGENT_MEMORY_EMBED_MODEL ?? DEFAULT_EMBED_MODEL;

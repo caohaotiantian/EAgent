@@ -324,3 +324,21 @@ test("AC-9: no /secret-guard subcommand throws (including unknown args)", async 
     assert.doesNotThrow(() => runCommand(h, arg), `'${arg}' must not throw`);
   }
 });
+
+// -- GUARD-1: scanArgs is depth-bounded (a deep payload can't RangeError past a scannable secret) --
+
+test("GUARD-1: a pathologically deep arg doesn't overflow the scan; a shallow secret is still detected", () => {
+  let deep: unknown = "leaf";
+  for (let i = 0; i < 25000; i++) deep = { n: deep };
+  const args = { key: "AKIAIOSFODNN7EXAMPLE", blob: deep };
+  let kinds: string[] = [];
+  assert.doesNotThrow(() => {
+    kinds = scanArgs(args);
+  }, "a deeply-nested arg must not overflow the recursive scan");
+  assert.ok(kinds.includes("aws-access-key-id"), "the shallow secret is still surfaced (not lost to a fail-open throw)");
+});
+
+test("GUARD-1: a normally-nested secret (within the depth bound) is still detected", () => {
+  const args = { a: { b: { c: { d: "AKIAIOSFODNN7EXAMPLE" } } } }; // depth 4, well within the bound
+  assert.ok(scanArgs(args).includes("aws-access-key-id"));
+});

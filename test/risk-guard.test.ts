@@ -361,3 +361,34 @@ test("DEFERRED-1: EAGENT_DECODE_NORMALIZE=off leaves the prompt un-annotated", a
     else process.env.EAGENT_DECODE_NORMALIZE = prev;
   }
 });
+
+// -- GUARD-3: a hung classifier times out and fails open (never blocks the gate forever) --
+
+/** A classifier whose stream hangs until its abort signal fires, then throws. */
+class Hanging extends MockProvider {
+  override async *stream(req: CompletionRequest): AsyncGenerator<never> {
+    await new Promise<void>((_, reject) => {
+      if (req.signal.aborted) {
+        reject(new Error("classifier aborted"));
+        return;
+      }
+      req.signal.addEventListener("abort", () => reject(new Error("classifier aborted")), { once: true });
+    });
+  }
+}
+
+test("GUARD-3: a hung classifier times out and fails open, not blocking the gate forever", { timeout: 3000 }, async () => {
+  const prev = process.env.EAGENT_RISK_GUARD_TIMEOUT_MS;
+  process.env.EAGENT_RISK_GUARD_TIMEOUT_MS = "50";
+  try {
+    const h = makeHarness({ fallback: "allow" });
+    h.agent.providers.register(new Hanging(() => ({ text: "" })), { default: true });
+    await activate(h, { enabled: true });
+    h.agent.tools.register(shellTool("run_shell"));
+    const out = await applyHook(h, "run_shell", { cmd: "x" });
+    assert.equal(out.block, false, "a hung classifier must time out and fail open, not block the gate forever");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_RISK_GUARD_TIMEOUT_MS;
+    else process.env.EAGENT_RISK_GUARD_TIMEOUT_MS = prev;
+  }
+});

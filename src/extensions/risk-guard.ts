@@ -32,6 +32,13 @@ type Mode = "ask" | "block";
 /** Capabilities whose tools are semantically analyzed before they run. */
 const DEFAULT_SENSITIVE_CAPS = ["shell:exec"];
 
+/** Classifier sub-call timeout (ms). `EAGENT_RISK_GUARD_TIMEOUT_MS`, default 10000
+ *  (matches memory's network sub-call bound); invalid/≤0 falls back to the default. */
+function classifyTimeoutMs(): number {
+  const n = Number(process.env.EAGENT_RISK_GUARD_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : 10000;
+}
+
 /** The fixed instruction for the classification sub-call. */
 const CLASSIFIER_SYSTEM_PROMPT =
   "You are a security analyzer for an autonomous agent. You are given a single " +
@@ -146,7 +153,10 @@ export default function activate(e: ExtensionAPI): () => void {
         messages,
         tools: [],
         model: e.agent.model,
-        signal: new AbortController().signal,
+        // Bound the classifier sub-call: a hung provider must not block this
+        // (blocking) gate forever. On timeout the stream throws → the catch below
+        // fails open (like classifier-unavailable), now bounded instead of infinite.
+        signal: AbortSignal.timeout(classifyTimeoutMs()),
       })) {
         if (ev.type === "done") reply = textOf(ev.message);
       }

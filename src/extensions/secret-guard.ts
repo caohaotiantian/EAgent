@@ -51,6 +51,10 @@ const SECRET_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
 /** Capabilities that move data off the machine — where a leak would happen. */
 const DEFAULT_LEAK_CAPS = ["net:fetch", "shell:exec", "mcp:call"];
 
+/** Max nesting the arg scan descends into (mirrors provenance's bound; keeps a
+ *  pathologically deep arg from overflowing the stack → fail-open secret bypass). */
+const MAX_SCAN_DEPTH = 8;
+
 /**
  * Scan a single string for known credential shapes, returning the de-duplicated
  * list of KIND labels that matched. Pure. Returns `[]` for a non-string or no
@@ -78,17 +82,23 @@ export function scanArgs(args: Record<string, unknown>): string[] {
   const add = (found: string[]) => {
     for (const k of found) if (!kinds.includes(k)) kinds.push(k);
   };
-  const walk = (v: unknown): void => {
+  const walk = (v: unknown, depth: number): void => {
     if (typeof v === "string") {
       add(scanSecrets(v));
-    } else if (Array.isArray(v)) {
-      for (const item of v) walk(item);
+      return;
+    }
+    // Depth bound (matches provenance's MAX_SCAN_DEPTH): a hostile deeply-nested
+    // arg must not blow the stack — that would throw and the fail-open catch would
+    // then skip the scan, letting a co-located secret through unscanned.
+    if (depth <= 0) return;
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item, depth - 1);
     } else if (v !== null && typeof v === "object") {
-      for (const item of Object.values(v)) walk(item);
+      for (const item of Object.values(v)) walk(item, depth - 1);
     }
     // numbers/booleans/null/undefined carry no secret string
   };
-  walk(args);
+  walk(args, MAX_SCAN_DEPTH);
   return kinds;
 }
 
