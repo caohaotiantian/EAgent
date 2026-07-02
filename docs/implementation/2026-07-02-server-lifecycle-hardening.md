@@ -112,4 +112,10 @@ Files: `src/server.ts`, `src/cli.ts`, `test/server.test.ts`. No kernel change, n
 
 ## Closure
 
-(filled at F)
+Status: closed
+Closing-commit: 6d3ef80 (Phase 1), fde1517 (Phase 2)
+Closed-on: 2026-07-02
+Deferred: SRV-4 → Wave 3. See the design doc's closure for the full deferred/residual list.
+
+Both phases closed clean-first-round in L3; F whole-project review pass. `maxSessions` + `sendJson`
+exported for their unit tests; `HttpServer.close` made idempotent as the testable SRV-6 seam.

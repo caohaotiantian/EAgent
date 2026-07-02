@@ -179,4 +179,15 @@ path; otherwise pin it via the server path and note the CLI change as a symmetri
 
 ## Closure
 
-(filled at F)
+Status: closed
+Closing-commit: 6d3ef80 (Phase 1 — SRV-1/2), fde1517 (Phase 2 — SRV-3/5/6)
+Closed-on: 2026-07-02
+Deferred: SRV-4 (stream-input caps → Wave 3); a global `uncaughtException`/`unhandledRejection` handler
+(D1 non-goal); the CLI interactive-REPL SIGTERM gap (G3) + the SRV-5 pre-`http` orphan window (§7
+residuals). No multi-tenant isolation / auth-posture change.
+
+**Shipped (SRV-1/2/3/5/6), all in `src/server.ts` + `src/cli.ts`, no kernel change, no new dependency.**
+L1 (4 rounds) resolved 2 severe + a new class-wide crash-class finding (S1) + 2 parse hazards
+(G1/G-new-1); L2 (3 rounds) resolved a compile error + a testability gap + 4 acceptance-precision
+issues; L3 both phases closed clean-first-round; F whole-project review pass. Gates: 9 new SRV tests +
+`npm test` 1181 pass / 0 fail / 1 skip, typecheck 0, eval 5/5, kernel untouched.
