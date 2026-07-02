@@ -18,16 +18,20 @@
  * Every git call is best-effort and wrapped: a failure is logged or printed,
  * never thrown out of a hook or command.
  *
- * On by default, but the auto-snapshot hook runs synchronous git on every
- * mutating tool call, so it ships an `EAGENT_CHECKPOINT=off` kill switch
- * (per the house convention) that disables the extension entirely — no hook,
- * no commands.
+ * On by default. The auto-snapshot hook runs git ASYNCHRONOUSLY (never blocking
+ * the event loop), serialized through a per-activation queue so concurrent
+ * mutating tool calls cannot race on checkpoint ids or refs. It ships an
+ * `EAGENT_CHECKPOINT=off` kill switch (per the house convention) that disables
+ * the extension entirely — no hook, no commands.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Capabilities whose tools mutate the workspace and so warrant a snapshot. */
 const MUTATING_CAPABILITIES = new Set(["fs:write", "shell:exec", "code:exec"]);
@@ -53,9 +57,9 @@ interface Checkpoint {
 }
 
 export default function activate(e: ExtensionAPI): void {
-  // Kill switch: the auto-snapshot hook runs synchronous git on every mutating
-  // tool call, so an operator must be able to opt out. When off, register
-  // nothing (no hook, no commands) — mirrors time-travel's EAGENT_TIME_TRAVEL.
+  // Kill switch: the auto-snapshot hook runs git on every mutating tool call, so
+  // an operator must be able to opt out. When off, register nothing (no hook, no
+  // commands) — mirrors time-travel's EAGENT_TIME_TRAVEL.
   if (process.env.EAGENT_CHECKPOINT === "off") return;
 
   /** Resolve the workspace root, allowing a store override for tests. */
@@ -63,30 +67,28 @@ export default function activate(e: ExtensionAPI): void {
     e.store.get<string>("workspaceDir") ?? process.env.EAGENT_WORKSPACE ?? process.cwd();
 
   /** Run a git subcommand in the workspace; return trimmed stdout or null on failure. */
-  const git = (args: string[]): string | null => {
+  const git = async (args: string[]): Promise<string | null> => {
     try {
-      return execFileSync("git", args, {
-        cwd: workspace(),
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
+      const { stdout } = await execFileAsync("git", args, { cwd: workspace(), encoding: "utf8" });
+      return stdout.trim();
     } catch {
       return null;
     }
   };
 
   /** True when the workspace is inside a git work tree. */
-  const isRepo = (): boolean => git(["rev-parse", "--is-inside-work-tree"]) === "true";
+  const isRepo = async (): Promise<boolean> =>
+    (await git(["rev-parse", "--is-inside-work-tree"])) === "true";
 
   const list = (): Checkpoint[] => e.store.get<Checkpoint[]>(LIST_KEY, []) ?? [];
 
   /** Append a checkpoint, capping the stored list to the most recent N and
    *  deleting the git refs of any snapshots that fall off the end. */
-  const record = (cp: Checkpoint): void => {
+  const record = async (cp: Checkpoint): Promise<void> => {
     const all = [...list(), cp];
     const kept = all.slice(-MAX_CHECKPOINTS);
     for (const dropped of all.slice(0, all.length - kept.length)) {
-      git(["update-ref", "-d", `${REF_PREFIX}${dropped.id}`]);
+      await git(["update-ref", "-d", `${REF_PREFIX}${dropped.id}`]);
     }
     e.store.set(LIST_KEY, kept);
   };
@@ -104,33 +106,44 @@ export default function activate(e: ExtensionAPI): void {
    * checkpoint always points at something restorable. Returns the checkpoint
    * or null if not a repo / git failed.
    */
-  const snapshot = (label: string, toolName?: string): Checkpoint | null => {
-    if (!isRepo()) return null;
-    let sha = git(["stash", "create"]) ?? "";
+  const snapshot = async (label: string, toolName?: string): Promise<Checkpoint | null> => {
+    if (!(await isRepo())) return null;
+    let sha = (await git(["stash", "create"])) ?? "";
     if (sha === "") {
       // Clean tree (or stash-create no-op): pin HEAD as the restore point.
-      sha = git(["rev-parse", "HEAD"]) ?? "";
+      sha = (await git(["rev-parse", "HEAD"])) ?? "";
     }
     if (sha === "") return null;
     const id = nextId();
     // Anchor the (otherwise dangling) stash-create commit under a real ref so it
     // survives `git gc` between snapshot and rollback. HEAD-pinned snapshots are
     // already reachable, but anchoring uniformly keeps restore simple.
-    git(["update-ref", `${REF_PREFIX}${id}`, sha]);
+    await git(["update-ref", `${REF_PREFIX}${id}`, sha]);
     const cp: Checkpoint = { id, sha, label, at: new Date().toISOString(), toolName };
-    record(cp);
+    await record(cp);
     return cp;
   };
 
+  // Serialize every snapshot (auto-hook + manual command) through one promise
+  // chain so concurrent mutating tool calls cannot interleave nextId()/
+  // update-ref/record() and race on ids or refs. The tail is de-fanged so a
+  // hypothetical rejection cannot poison the chain for the next snapshot.
+  let tail: Promise<unknown> = Promise.resolve();
+  const enqueueSnapshot = (label: string, toolName?: string): Promise<Checkpoint | null> => {
+    const p = tail.then(() => snapshot(label, toolName));
+    tail = p.then(() => {}, () => {});
+    return p;
+  };
+
   // -- auto-snapshot before mutating tool calls -----------------------------
-  // Best-effort: snapshot then return the decision unchanged. We never block,
-  // and any failure is logged rather than thrown out of the hook.
-  e.hook("beforeToolCall", (decision, ctx) => {
+  // Best-effort: snapshot then return the decision unchanged. We never block the
+  // event loop, and any failure is logged rather than thrown out of the hook.
+  e.hook("beforeToolCall", async (decision, ctx) => {
     try {
       const name = ctx.call.name;
       const caps = e.agent.tools.get(name)?.capabilities ?? [];
       if (caps.some((c) => MUTATING_CAPABILITIES.has(c))) {
-        const cp = snapshot(`auto: ${name}`, name);
+        const cp = await enqueueSnapshot(`auto: ${name}`, name);
         if (cp) e.log.debug(`checkpoint ${cp.id} before ${name}`);
       }
     } catch (err) {
@@ -144,13 +157,13 @@ export default function activate(e: ExtensionAPI): void {
   e.registerCommand({
     name: "checkpoint",
     description: "Snapshot the workspace now (git-backed); prints the checkpoint id.",
-    run: (ctx: CommandContext) => {
-      if (!isRepo()) {
+    run: async (ctx: CommandContext) => {
+      if (!(await isRepo())) {
         ctx.print("not a git repository");
         return;
       }
       const label = ctx.args.trim() || "manual";
-      const cp = snapshot(label);
+      const cp = await enqueueSnapshot(label);
       if (!cp) {
         ctx.print("checkpoint failed: could not create a snapshot");
         return;
@@ -162,8 +175,8 @@ export default function activate(e: ExtensionAPI): void {
   e.registerCommand({
     name: "checkpoints",
     description: "List recorded workspace checkpoints (id, label, time, tool).",
-    run: (ctx: CommandContext) => {
-      if (!isRepo()) {
+    run: async (ctx: CommandContext) => {
+      if (!(await isRepo())) {
         ctx.print("not a git repository");
         return;
       }
@@ -182,8 +195,8 @@ export default function activate(e: ExtensionAPI): void {
   e.registerCommand({
     name: "rollback",
     description: "Restore the working tree to a checkpoint (latest if no id given).",
-    run: (ctx: CommandContext) => {
-      if (!isRepo()) {
+    run: async (ctx: CommandContext) => {
+      if (!(await isRepo())) {
         ctx.print("not a git repository");
         return;
       }
@@ -202,7 +215,7 @@ export default function activate(e: ExtensionAPI): void {
       // files that were newly created after the snapshot — that is a deliberate,
       // safe limitation (we never run `git clean` by default, so a rollback can
       // never silently destroy untracked work).
-      const ok = git(["checkout", cp.sha, "--", "."]);
+      const ok = await git(["checkout", cp.sha, "--", "."]);
       if (ok === null) {
         ctx.print(`rollback failed: could not restore checkpoint ${cp.id}`);
         return;
