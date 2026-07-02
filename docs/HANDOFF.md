@@ -104,22 +104,26 @@ A whole-project inventory (2026-07-02) found **almost everything is deferred-by-
 there is very little genuinely-unfinished work. Ranked:
 
 ### Needs a decision or finishing
-- **① [MEDIUM] `checkpoint` auto-snapshot runs synchronous git** (`checkpoint.ts:66-68`, `execFileSync`)
-  from the `beforeToolCall` auto-snapshot on **every** `fs:write`/`shell:exec`/`code:exec` call — on the
-  shared HTTP host this stalls the event loop for *all* sessions. Only the `EAGENT_CHECKPOINT=off` kill
-  switch shipped; the async-git follow-up is explicitly "not built" (`docs/design/2026-07-01-checkpoint-
-  kill-switch.md:34-36,67-68`). **The one item with real runtime cost.** Decide: make the snapshot async
-  (`execFile`/`await`), or ratify sync-git + opt-out as final. Likely a Full three-loop wave (a
-  snapshot-ordering/error-handling decision).
+_All three ranked items below are now **RESOLVED** (2026-07-02, branch `chore/finish-open-items`, Full
+three-loop each, F-review pass). Nothing in this subsection remains open._
+- **① [RESOLVED 2026-07-02] `checkpoint` auto-snapshot now runs async, serialized git.** Was:
+  synchronous `execFileSync` on every mutating call, stalling the shared HTTP host's event loop. Now:
+  the shared `git()` helper is async (`promisify(execFile)`), and every snapshot — the auto-hook **and**
+  the manual `/checkpoint` command — is serialized through one per-activation promise-chain queue so
+  concurrent tool-call waves cannot race on checkpoint ids/refs; snapshot-before-mutation ordering is
+  preserved (the async hook awaits its snapshot before the tool runs). Was chosen (over ratify-sync) per
+  a user decision. `docs/design/2026-07-02-checkpoint-async-git.md`.
 - **② [DONE — safe-cleanup pass] Stale docs fixed:** the `reasoning-search.ts` header docstring now
   states `tree_search`/`graph_search` ship; `edit-match.ts` was **moved into `lib/`** (making
   `CLAUDE.md:70`'s "helpers in `lib/`" accurate — no CLAUDE.md edit needed); the register drift was fixed
   (SRV-4 cap ref → `http.ts:16-21`, RW3-3 "4"→"5"); and the env-conditional `codeact.test.ts:121`
   python3-skip is now recorded as a known test-coverage caveat in `DEFERRED-FOLLOWUPS.md`.
-- **③ [LOW] SRV-4b — MCP transport reads uncapped** (`mcp.ts:354` `await res.text()`; `mcp.ts:189`
-  uncapped stdio readline). A hostile MCP server could OOM the host. `readCapped` exists (`web.ts:62`)
-  but isn't wired into `mcp.ts`. Tracked (`DEFERRED-FOLLOWUPS.md`, "SRV-4b"). **Still open** — a distinct
-  mechanism (readCapped relocation / byte-counting readline).
+- **③ [RESOLVED 2026-07-02] SRV-4b — MCP transport reads now capped.** `readCapped` was relocated to
+  `src/extensions/lib/read-capped.ts` (shared helper); the HTTP transport (`#readResponse`) bounds both
+  the SSE and JSON reads via `maxMcpReadBytes()` (`EAGENT_MAX_MCP_READ_BYTES`, default 16 MiB) and throws
+  on overflow; the stdio transport uses a byte-bounded `createBoundedLineReader` (discard-to-newline,
+  whole-line UTF-8 decode) in place of the unbounded `createInterface`, so a hostile server cannot OOM
+  the host. `docs/design/2026-07-02-mcp-read-caps.md`.
 
 ### Tracked deferrals & by-design cuts (the honest "what's not there")
 All intentional, each with a rationale + alternative in `DEFERRED-FOLLOWUPS.md` / a design-doc closure:
@@ -138,8 +142,10 @@ All intentional, each with a rationale + alternative in `DEFERRED-FOLLOWUPS.md` 
 
 ### Test-coverage caveats
 Real-backend confinement + real self-improve eval run only in the `sandbox-linux` CI job (every push).
-The 1 suite skip is `self-improve-integration.test.ts`. Live-endpoint smokes (embeddings, OTLP, the
-SRV-4b MCP caps) are un-offline-testable by design.
+The 1 suite skip is `self-improve-integration.test.ts`. Live-endpoint smokes (embeddings, OTLP) are
+un-offline-testable by design. For the SRV-4b MCP read caps, only a live hostile-server smoke is
+un-offline-testable — the cap-enforcement logic itself is offline-tested (`test/mcp.test.ts`,
+`test/mcp-http.test.ts`).
 
 ---
 

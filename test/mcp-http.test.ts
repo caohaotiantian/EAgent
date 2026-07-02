@@ -87,7 +87,18 @@ before(async () => {
       });
     } else if (method === "tools/call") {
       const args = params?.arguments ?? {};
-      json({ content: [{ type: "text", text: "pong: " + args.msg }] });
+      // Designated args drive the HTTP read-cap tests (AC2/AC3): an oversized or
+      // within-cap SSE body, or an oversized JSON body. The default is the echo.
+      if (args.msg === "__oversize_sse__" || args.msg === "__small_sse__") {
+        const text = args.msg === "__oversize_sse__" ? "x".repeat(8 * 1024) : "ok";
+        const data = JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } });
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(`data: ${data}\n\n`);
+      } else if (args.msg === "__oversize_json__") {
+        json({ content: [{ type: "text", text: "x".repeat(8 * 1024) }] });
+      } else {
+        json({ content: [{ type: "text", text: "pong: " + args.msg }] });
+      }
     } else {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } }));
@@ -137,6 +148,87 @@ test("calling the MCP tool over HTTP returns the server's textual result", async
     assert.ok(!block.isError, "result should not be an error");
   } finally {
     await host.dispose();
+  }
+});
+
+test("AC2: an oversized SSE HTTP reply is capped and surfaced as an 'exceeded' error", async () => {
+  const prev = process.env.EAGENT_MAX_MCP_READ_BYTES;
+  // Cap above the handshake/reply sizes (so the handshake registers the tool) but
+  // far below the ~8 KiB oversized SSE body.
+  process.env.EAGENT_MAX_MCP_READ_BYTES = "2048";
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__httpfix__ping", arguments: { msg: "__oversize_sse__" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  try {
+    await host.use("mcp", activate);
+    // The handshake read the same #readResponse path under the cap and succeeded.
+    assert.ok(agent.tools.has("mcp__httpfix__ping"), "expected the handshake to register the tool under the cap");
+    await agent.run("please ping");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    const block = toolMsg?.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.ok(block.isError, "an oversized SSE reply must surface as an error");
+    assert.match(block.content, /exceeded/);
+  } finally {
+    await host.dispose();
+    if (prev === undefined) delete process.env.EAGENT_MAX_MCP_READ_BYTES;
+    else process.env.EAGENT_MAX_MCP_READ_BYTES = prev;
+  }
+});
+
+test("AC2: a within-cap SSE HTTP reply parses and resolves normally", async () => {
+  const prev = process.env.EAGENT_MAX_MCP_READ_BYTES;
+  process.env.EAGENT_MAX_MCP_READ_BYTES = "2048";
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__httpfix__ping", arguments: { msg: "__small_sse__" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  try {
+    await host.use("mcp", activate);
+    await agent.run("please ping");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    const block = toolMsg?.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.ok(!block.isError, "a within-cap SSE reply should not be an error");
+    assert.match(block.content, /ok/);
+  } finally {
+    await host.dispose();
+    if (prev === undefined) delete process.env.EAGENT_MAX_MCP_READ_BYTES;
+    else process.env.EAGENT_MAX_MCP_READ_BYTES = prev;
+  }
+});
+
+test("AC3: an oversized JSON HTTP reply is capped and surfaced as an 'exceeded' error", async () => {
+  const prev = process.env.EAGENT_MAX_MCP_READ_BYTES;
+  process.env.EAGENT_MAX_MCP_READ_BYTES = "2048";
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__httpfix__ping", arguments: { msg: "__oversize_json__" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  try {
+    await host.use("mcp", activate);
+    // The handshake (also JSON on this path) registered the tool under the cap.
+    assert.ok(agent.tools.has("mcp__httpfix__ping"), "expected the handshake to register the tool under the cap");
+    await agent.run("please ping");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    const block = toolMsg?.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.ok(block.isError, "an oversized JSON reply must surface as an error");
+    assert.match(block.content, /exceeded/);
+  } finally {
+    await host.dispose();
+    if (prev === undefined) delete process.env.EAGENT_MAX_MCP_READ_BYTES;
+    else process.env.EAGENT_MAX_MCP_READ_BYTES = prev;
   }
 });
 
