@@ -149,6 +149,11 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   let busy = false;
 
   const server = createServer((req, res) => {
+    // Absorb an OutgoingMessage 'error' (a socket reset — ECONNRESET/EPIPE) on
+    // any response, streaming or single-write. Without a listener it throws as an
+    // uncaught exception and takes the whole process down; route(...).catch only
+    // catches promise rejections, not EventEmitter errors.
+    res.on("error", () => {});
     route(req, res, built.agent, built.host.list(), sessions, initial, {
       get busy() {
         return busy;
@@ -343,22 +348,27 @@ async function streamRun(
     if (agent.running) agent.stop();
   };
   res.on("close", onClose);
+  res.on("error", onClose); // a mid-stream socket error runs the same teardown
 
-  // Restore this session's state (transcript, usage, model, prompt, thinking) so
-  // the turn resumes from exactly where the session left off. A new session — or a
-  // sessionless /run — restores the pristine `initial` snapshot.
-  agent.restore((session ? sessions.get(session) : undefined) ?? initial);
-
-  const subs = [
-    agent.hooks.on("text_delta", ({ text }) => write({ type: "text_delta", text })),
-    agent.hooks.on("message", ({ message }) => write({ type: "message", role: message.role, content: message.content })),
-    agent.hooks.on("tool_start", ({ call }) => write({ type: "tool_start", name: call.name, arguments: call.arguments })),
-    agent.hooks.on("tool_end", ({ call, result }) =>
-      write({ type: "tool_end", name: call.name, isError: result.isError ?? false, content: result.content }),
-    ),
-    agent.hooks.on("usage", ({ usage, cumulative }) => write({ type: "usage", usage, cumulative })),
-  ];
+  // Restore + subscribe inside the try so a setup-window throw (e.g. restore)
+  // streams a {type:"error"} line and hits the finally, not a silent 200 with no
+  // terminal line. `subs` is declared out here so the finally can dispose it.
+  let subs: { dispose(): void }[] = [];
   try {
+    // Restore this session's state (transcript, usage, model, prompt, thinking) so
+    // the turn resumes from exactly where the session left off. A new session — or a
+    // sessionless /run — restores the pristine `initial` snapshot.
+    agent.restore((session ? sessions.get(session) : undefined) ?? initial);
+
+    subs = [
+      agent.hooks.on("text_delta", ({ text }) => write({ type: "text_delta", text })),
+      agent.hooks.on("message", ({ message }) => write({ type: "message", role: message.role, content: message.content })),
+      agent.hooks.on("tool_start", ({ call }) => write({ type: "tool_start", name: call.name, arguments: call.arguments })),
+      agent.hooks.on("tool_end", ({ call, result }) =>
+        write({ type: "tool_end", name: call.name, isError: result.isError ?? false, content: result.content }),
+      ),
+      agent.hooks.on("usage", ({ usage, cumulative }) => write({ type: "usage", usage, cumulative })),
+    ];
     const { reason } = await agent.run(input);
     // Snapshot the post-turn state back into the session. `agent.usage` here is the
     // session's cumulative (restored session usage + this turn), not process-lifetime.
@@ -374,6 +384,7 @@ async function streamRun(
   } finally {
     drainElicitations(); // clear the sink + any leftover resolver before the next turn
     res.off("close", onClose);
+    res.off("error", onClose);
     for (const s of subs) s.dispose();
     if (!closed) res.end();
   }
@@ -416,7 +427,8 @@ function authorized(req: IncomingMessage, token: string): boolean {
   return timingSafeEqual(provided, expected);
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+export function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  if (res.headersSent) return; // the stream already owns this response; never re-writeHead
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
 }

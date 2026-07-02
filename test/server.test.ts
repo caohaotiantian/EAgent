@@ -5,11 +5,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import net from "node:net";
+import type { ServerResponse } from "node:http";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createHttpServer, type HttpServer } from "../src/server.js";
+import { createHttpServer, sendJson, type HttpServer } from "../src/server.js";
 import type { MockProvider } from "../src/providers/mock.js";
 import type { Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
@@ -579,4 +581,148 @@ test("a guard's confirm prompt is DENIED on the server (fail-safe, not auto-appr
     else process.env.EAGENT_WORKSPACE = prev;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// -- SRV-1 / SRV-2: request-lifecycle crash prevention -------------------------
+
+/** Poll `GET /health` until it answers 200 (the host is still alive). */
+async function healthyWithin(base: string, tries = 50): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(`${base}/health`);
+      if (r.status === 200) {
+        await r.text();
+        return true;
+      }
+      await r.text();
+    } catch {
+      /* server not answering yet */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
+}
+
+/** Poll `POST /run` until it returns 200 (the single-flight lock is free). */
+async function runFreeWithin(base: string, tries = 100): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    const r = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "again" }),
+    });
+    await r.text();
+    if (r.status === 200) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
+}
+
+test("SRV-1a/1b: an 'error' on a response is absorbed, never crashing the host", async () => {
+  // The exact EventEmitter-error crash path SRV-1 guards: an unlistened 'error'
+  // on a ServerResponse throws as an uncaught exception and takes the whole
+  // process down. The class-wide res.on('error') registered at the top of the
+  // createServer callback must absorb it. (This injects the event directly: a
+  // raw-socket abort is handled by Node's http layer as res 'close', so it does
+  // not surface a response 'error' to exercise this path — see the concern noted
+  // by the dev.) Without the fix this test crashes the process.
+  await withServerHandle(async (base, http) => {
+    http.server.once("request", (_req, res) => {
+      res.emit("error", new Error("simulated socket reset"));
+    });
+    await fetch(`${base}/health`).then((r) => r.text());
+    assert.ok(await healthyWithin(base), "the host survived an 'error' emitted on a response");
+  });
+});
+
+test("SRV-1b: a mid-stream client abort tears the turn down without crashing the host", async () => {
+  await withServerHandle(async (base, http) => {
+    // A large first-turn payload keeps the server writing continuously (the mock
+    // chunks text into many text_delta events). A raw-socket abort mid-stream
+    // must tear the turn down (single-flight lock freed) and leave the host up.
+    // Later turns are small so the busy-release probe finishes fast.
+    mockOf(http).script((_req, i) => (i === 0 ? { text: "x".repeat(2_000_000) } : { text: "ok" }));
+
+    const url = new URL(base);
+    const socket = net.connect(Number(url.port), url.hostname);
+    socket.on("error", () => {}); // ignore the client-side reset we cause below
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+
+    const reqBody = JSON.stringify({ input: "stream a lot" });
+    socket.write(
+      `POST /run HTTP/1.1\r\nHost: ${url.host}\r\ncontent-type: application/json\r\n` +
+        `content-length: ${Buffer.byteLength(reqBody)}\r\nconnection: close\r\n\r\n${reqBody}`,
+    );
+
+    // Wait until the stream is flowing, then abort ungracefully (no drain) so the
+    // server is left with pending writes that fail when the reset arrives.
+    await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+    socket.destroy();
+
+    assert.ok(await healthyWithin(base), "the host survived the mid-stream socket error");
+    assert.ok(await runFreeWithin(base), "the turn tore down and released the single-flight lock");
+  });
+});
+
+test("SRV-1a: destroying the socket during a non-streaming response does not crash the host", async () => {
+  // Best-effort, class-wide coverage: a small /health response may fully buffer
+  // and emit no 'error', so this cannot fail-first on its own (design §6 caveat).
+  // The deterministic no-crash proof is SRV-1b; this pins the class-wide listener
+  // over a non-streaming route without asserting a false-green outcome.
+  await withServerHandle(async (base) => {
+    const url = new URL(base);
+    const socket = net.connect(Number(url.port), url.hostname);
+    socket.on("error", () => {});
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+    socket.write(`GET /health HTTP/1.1\r\nHost: ${url.host}\r\nconnection: close\r\n\r\n`);
+    socket.destroy();
+    assert.ok(await healthyWithin(base), "the host survived a socket reset on a non-streaming response");
+  });
+});
+
+test("SRV-2a: sendJson no-ops when headers are already sent (no throw, no second writeHead)", () => {
+  let writeHeadCalls = 0;
+  let endCalls = 0;
+  const stub = {
+    headersSent: true,
+    writeHead: () => {
+      writeHeadCalls++;
+    },
+    end: () => {
+      endCalls++;
+    },
+  } as unknown as ServerResponse;
+  assert.doesNotThrow(() => sendJson(stub, 500, { error: "boom" }));
+  assert.equal(writeHeadCalls, 0, "writeHead must not be called once headers are sent");
+  assert.equal(endCalls, 0, "no second body is written");
+});
+
+test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a silent 200", async () => {
+  await withServerHandle(async (base, http) => {
+    const original = http.agent.restore.bind(http.agent);
+    http.agent.restore = () => {
+      throw new Error("boom");
+    };
+    try {
+      const lines: Record<string, unknown>[] = [];
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "hi" }),
+      });
+      assert.equal(res.status, 200, "headers were already committed before the setup throw");
+      await readNdjson(res, (o) => lines.push(o)); // resolves only when the stream closes
+      const err = lines.find((l) => l.type === "error");
+      assert.ok(err, "the setup throw was written as a terminal {type:'error'} line");
+      assert.match(String(err.message), /boom/, "the error line carries the thrown message");
+    } finally {
+      http.agent.restore = original;
+    }
+  });
 });
