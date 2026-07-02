@@ -33,22 +33,15 @@ export class CapabilityError extends Error {
 export interface AuditEntry {
   capability: string;
   decision: "allow" | "deny";
-  /** Who asked — a tool name or extension id. */
-  source: string;
-  /** Whether a human was prompted for this decision. */
-  prompted: boolean;
+  source: string; // who asked — a tool name or extension id
+  prompted: boolean; // whether a human was prompted for this decision
   at: number;
 }
 
 export interface CapabilityOptions {
-  /** Patterns auto-allowed without prompting. */
-  grant?: string[];
-  /** Patterns always denied (takes precedence over grants). */
-  deny?: string[];
-  /**
-   * Fallback decision for capabilities matching neither list. Default `"ask"`.
-   * Set to `"allow"` for trusted/automated runs, `"deny"` for locked-down ones.
-   */
+  grant?: string[]; // patterns auto-allowed without prompting
+  deny?: string[]; // patterns always denied (takes precedence over grants)
+  /** Fallback for caps matching neither list. Default `"ask"`; `"allow"` for trusted runs, `"deny"` for locked-down. */
   fallback?: Decision;
   ui?: UI;
 }
@@ -59,8 +52,9 @@ export class CapabilityManager {
   #fallback: Decision;
   #ui: UI | undefined;
   readonly #audit: AuditEntry[] = [];
-  /** Remembered answers to prompts within a session, keyed by capability. */
+  /** Session prompt-answer memo + its in-flight dedup map, keyed by capability. */
   readonly #remembered = new Map<string, boolean>();
+  readonly #pending = new Map<string, Promise<boolean>>();
 
   constructor(opts: CapabilityOptions = {}) {
     this.#grant = [...(opts.grant ?? [])];
@@ -113,8 +107,13 @@ export class CapabilityManager {
       this.record(capability, "deny", source, false);
       throw new CapabilityError(capability, "not granted and no UI to prompt");
     }
-    const ok = await this.#ui.confirm(`Allow ${source} to use capability "${capability}"?`);
-    this.#remembered.set(capability, ok);
+    // Concurrent callers needing the same unremembered cap share ONE confirm.
+    let ask = this.#pending.get(capability);
+    if (!ask) {
+      this.#pending.set(capability, (ask = this.#ui.confirm(`Allow ${source} to use capability "${capability}"?`).then((ok) => (this.#remembered.set(capability, ok), ok))));
+      void ask.finally(() => this.#pending.delete(capability));
+    }
+    const ok = await ask;
     this.record(capability, ok ? "allow" : "deny", source, true);
     if (!ok) throw new CapabilityError(capability, "declined by user");
   }

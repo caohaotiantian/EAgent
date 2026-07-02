@@ -164,6 +164,16 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   host (a response `'error'` is absorbed); the 500 fallback can't throw `ERR_HTTP_HEADERS_SENT`;
   the per-session state map is now **LRU-bounded** at `EAGENT_MAX_SESSIONS` (default 1000;
   `0` disables); the server and CLI dispose the host on an error exit; and shutdown is idempotent.
+- **Provider SSE reads are bounded.** The shared `parseSSE` reader (openai/anthropic/gemini) caps a
+  single un-terminated event at `EAGENT_MAX_SSE_EVENT_BYTES` (default 16 MiB) instead of buffering a
+  no-terminator stream without bound — an OOM/DoS guard.
+- **Security-guard hardening.** `secret-guard`/`flow-guard` arg scans are depth-bounded (a deeply-nested
+  payload can't overflow the stack past a scannable secret / nest a sensitive path out of reach), and
+  `risk-guard`'s classifier sub-call is bounded by a timeout (a hung provider fails open instead of
+  blocking the tool gate forever).
+- **Concurrent capability prompts are de-duplicated.** Under a parallel tool wave, two calls needing the
+  same not-yet-granted `ask`-fallback capability now share **one** confirm instead of prompting the human
+  twice (an in-flight memo in the kernel `CapabilityManager`).
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.
