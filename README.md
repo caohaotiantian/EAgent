@@ -320,6 +320,7 @@ curl -s localhost:8787/run -d '{"input":"now in one line","session":"abc"}'
 
 The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
 `Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
+Per-session state is LRU-bounded at `EAGENT_MAX_SESSIONS` (default 1000; `0` disables the cap).
 To run sandboxed (the posture `SECURITY.md` recommends) there is a `Dockerfile`
 (non-root, workspace-confined):
 

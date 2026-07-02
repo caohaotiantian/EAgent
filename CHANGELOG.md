@@ -160,6 +160,10 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   inject it onto outbound requests to hosts in `EAGENT_OTEL_PROPAGATE_HOSTS`, so a
   downstream instrumented service becomes a child span of the tool call. Allowlist is
   empty by default (nothing injected; headers byte-identical).
+- **HTTP server request-lifecycle hardening.** A client socket reset no longer crashes the
+  host (a response `'error'` is absorbed); the 500 fallback can't throw `ERR_HTTP_HEADERS_SENT`;
+  the per-session state map is now **LRU-bounded** at `EAGENT_MAX_SESSIONS` (default 1000;
+  `0` disables); the server and CLI dispose the host on an error exit; and shutdown is idempotent.
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

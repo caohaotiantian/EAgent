@@ -159,59 +159,75 @@ async function main(): Promise<void> {
     extraExtensions: args.extensions,
   });
 
-  registerHostCommands(commands, host, agent);
+  try {
+    registerHostCommands(commands, host, agent);
 
-  // Tab completion reads the live registries at completion time, so the
-  // interface is built now that commands and the host exist.
-  const completer = (line: string): [string[], string] =>
-    complete(line, {
-      commandNames: () => commands.list().map((c) => c.name),
-      extensionIds: () => host.list(),
-      providerNames: PROVIDER_NAMES,
-      readDir: (dir) => readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, isDirectory: d.isDirectory() })),
-      homedir,
-    });
-  rl = interactive ? createInterface({ input: stdin, output: stdout, completer }) : undefined;
+    // Tab completion reads the live registries at completion time, so the
+    // interface is built now that commands and the host exist.
+    const completer = (line: string): [string[], string] =>
+      complete(line, {
+        commandNames: () => commands.list().map((c) => c.name),
+        extensionIds: () => host.list(),
+        providerNames: PROVIDER_NAMES,
+        readDir: (dir) => readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, isDirectory: d.isDirectory() })),
+        homedir,
+      });
+    rl = interactive ? createInterface({ input: stdin, output: stdout, completer }) : undefined;
 
-  await agent.hooks.emit("session_start", {});
+    await agent.hooks.emit("session_start", {});
 
-  if (args.json) wireJsonRendering(agent);
-  else wireRendering(agent);
+    if (args.json) wireJsonRendering(agent);
+    else wireRendering(agent);
 
-  // Ctrl-C aborts the in-flight turn rather than killing the process; a second
-  // press at an idle prompt exits.
-  if (rl) {
-    rl.on("SIGINT", () => {
-      if (agent.running) {
-        agent.stop();
-        console.log(C.yellow("\n⏹ interrupted"));
-      } else {
-        console.log();
-        rl.close();
-      }
-    });
-  } else {
-    // Non-interactive modes (--eval, piped batch) have no readline SIGINT
-    // handler, so a bare Ctrl-C/SIGTERM would skip host.dispose() and orphan
-    // extension resources (MCP child processes, temp dirs). Tear the host down
-    // on signal before exiting; a second signal falls through to the default.
-    const shutdown = (): void => {
-      if (agent.running) agent.stop();
-      void host.dispose().finally(() => process.exit(130));
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
-  }
+    // Ctrl-C aborts the in-flight turn rather than killing the process; a second
+    // press at an idle prompt exits.
+    if (rl) {
+      // Capture the narrowed handle: TS doesn't keep a captured `let`'s narrowing
+      // inside a closure declared within this try, so bind it to a const first.
+      const readline = rl;
+      readline.on("SIGINT", () => {
+        if (agent.running) {
+          agent.stop();
+          console.log(C.yellow("\n⏹ interrupted"));
+        } else {
+          console.log();
+          readline.close();
+        }
+      });
+    } else {
+      // Non-interactive modes (--eval, piped batch) have no readline SIGINT
+      // handler, so a bare Ctrl-C/SIGTERM would skip host.dispose() and orphan
+      // extension resources (MCP child processes, temp dirs). Tear the host down
+      // on signal before exiting; the shared shuttingDown guard makes
+      // SIGINT-then-SIGTERM dispose once instead of racing two disposes.
+      let shuttingDown = false;
+      const shutdown = (): void => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        if (agent.running) agent.stop();
+        void host.dispose().finally(() => process.exit(130));
+      };
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
+    }
 
-  if (!args.json) banner(agent, host, live);
+    if (!args.json) banner(agent, host, live);
 
-  if (args.eval !== undefined) {
-    await runTurn(agent, args.eval);
-  } else if (rl) {
-    await repl(rl, agent, commands, host);
-  } else {
-    // Piped, non-interactive stdin: treat each line as a command or a turn.
-    await batch(agent, commands, host);
+    if (args.eval !== undefined) {
+      await runTurn(agent, args.eval);
+    } else if (rl) {
+      await repl(rl, agent, commands, host);
+    } else {
+      // Piped, non-interactive stdin: treat each line as a command or a turn.
+      await batch(agent, commands, host);
+    }
+  } catch (err) {
+    // An error before the normal-path dispose must still tear the host down so
+    // session_shutdown fires (symmetric with the signal path); rethrow to the
+    // outer main().catch. The success-path dispose below stays outside this try
+    // so a dispose throw can't re-enter here and double-dispose.
+    await host.dispose();
+    throw err;
   }
 
   await host.dispose();
