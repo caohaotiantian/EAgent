@@ -222,10 +222,12 @@ that authority without prompting. The dotted names in use across the project:
 | `net:fetch` | `web` (`fetch_url`) |
 | `skill:read` / `skill:write` | `skills` (reading / authoring a `SKILL.md`) |
 | `mcp:call` | `mcp` (calling a remote MCP tool) |
+| `mcp:read` | `mcp` (reading a remote MCP resource body) |
 | `agent:spawn` | `subagents` |
-| `workflow:run` | `dynamic-workflow` (`run_workflow`) |
+| `workflow:run` | `dynamic-workflow` (`workflow`) |
 | `pkg:install` | `packages` |
 | `self:read` / `self:extend` | `self` (reading / authoring & loading new TypeScript extensions) |
+| `ui:ask` | `ask` (blocking to ask the human a question) |
 
 ## Lifecycle events (observe)
 
@@ -240,13 +242,13 @@ change anything. From `src/kernel/events.ts`:
 | `agent_start` | `{ input }` | A run begins. |
 | `agent_end` | `{ reason }` | A run ends (with its `StopReason`). |
 | `turn_start` | `{ turn }` | A turn begins. |
-| `turn_end` | `{ turn }` | A turn ends. |
+| `turn_end` | `{ turn, step }` | A turn ends. |
 | `message` | `{ message }` | A completed message was appended to the transcript. |
 | `text_delta` | `{ text }` | Incremental assistant text during streaming. |
 | `reasoning_delta` | `{ text }` | Incremental reasoning ("thinking") text during streaming, for models that expose it. |
 | `tool_start` | `{ call }` | A tool call is about to run. |
-| `tool_end` | `{ call, result }` | A tool call finished. |
-| `tool_batch_end` | `{ batch }` | A parallel tool wave settled (the ordered `{call,result}` pairs). |
+| `tool_end` | `{ call, result, step }` | A tool call finished. |
+| `tool_batch_end` | `{ batch, step }` | A parallel tool wave settled (the ordered `{call,result}` pairs). |
 | `usage` | `{ usage, cumulative }` | Token usage for the just-finished model call, plus the running total. |
 | `error` | `{ error, where }` | Something threw. |
 

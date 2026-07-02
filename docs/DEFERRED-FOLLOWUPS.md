@@ -64,10 +64,11 @@ four already shipped (2026-06-30 cleanup). A subsequent **register-blind product
 A 63-agent register-blind audit (6 dimension scanners → adversarial verification) surfaced 13 genuine
 gaps (0 high, 1 medium, 12 low) outside the existing register — the HTTP host was the least
 production-ready surface, plus a handful of guard/kernel/test edges. **All 13 are now RESOLVED** across
-six three-loop waves (each fresh-reviewer-gated; RED/mutation-verified). The only partial is SRV-4: the
-shared `parseSSE` reader is capped (protecting all 3 providers); the MCP-transport reads are a documented
-follow-up (**SRV-4b**). KERN-1 was a user-directed BUILD (kernel dedup + comment-golf to hold the < 2200
-ceiling) over the adversarial assessment's close recommendation.
+six three-loop waves (each fresh-reviewer-gated; RED/mutation-verified). SRV-4 is now fully resolved: the
+shared `parseSSE` reader was capped in Wave 3 (protecting all 3 providers), and the MCP-transport reads
+(**SRV-4b**) were capped 2026-07-02 (PR #34, `docs/design/2026-07-02-mcp-read-caps.md`). KERN-1 was a
+user-directed BUILD (kernel dedup + comment-golf to hold the < 2200 ceiling) over the adversarial
+assessment's close recommendation.
 
 | ID | Gap | Location | Sev | Status |
 |----|-----|----------|-----|--------|
@@ -144,7 +145,7 @@ design. All are **strictly more** governance than the prior fresh-bus status quo
 
 | # | Residual | Home design | Effort · Risk | Why deferred / fix |
 |---|---|---|---|---|
-| ~~RW3-1~~ | **RESOLVED** (Wave 9; row was stale) — flow-guard data-taint now reads the acting-agent transcript via `currentActingAgent()` (`flow-guard.ts:168`), so a child that reads a sensitive file is governed. | — | — | — |
+| ~~RW3-1~~ | **RESOLVED** (Wave 9; row was stale) — flow-guard data-taint now reads the acting-agent transcript via `currentActingAgent()` (`flow-guard.ts:181,232`), so a child that reads a sensitive file is governed. | — | — | — |
 | ~~RW3-2~~ | **RESOLVED** (Wave 9; row was stale) — circuit-breaker/budget-cap/output-contract now act on the acting agent via `currentActingAgent()`, so a child's soft nudge/stop no longer misroutes to the parent. | — | — | — |
 | RW3-3 | `AgentHandle.spawnChild` not added — the five child sites still construct children directly (now with `childScope`). | same (KDD-5) | S · L | A first-class spawn helper is best designed once Wave 8's search controller has concrete needs. (Closed won't-build — see the Closure ledger; the sites' options diverge, so a helper saves ~2 lines for an 8-field bag.) |
 | RW3-4 | `agentId`/`depth` event **attribution/tagging** not added (would change every `KernelEvents` payload). | same (KDD-6) | M · M | Add once a consumer needs to attribute/dedupe child vs parent lifecycle signals. |
@@ -182,7 +183,7 @@ From `docs/design/2026-06-29-provenance-taint.md` (KDD-1).
 
 | # | Residual | Home design | Effort · Risk | Why deferred / fix |
 |---|---|---|---|---|
-| ~~RW6b-1~~ | **CLOSED (won't-build) 2026-07-01** — consolidate flow-guard data-taint into provenance. `docs/design/2026-07-01-deferred-closures.md`; fresh adversarial review confirmed it's a pure internal refactor with **no user-visible gain** and **regression risk to a default-ON guard**: flow-guard (read-sensitive→egress, pattern, default-ON, clears on `/clear`) and provenance (fetch-foreign→sink, verbatim-segment, default-OFF, doesn't clear) are genuinely dual axes. The RW3-1 child-gap is already closed by W9.1 (`flow-guard.ts:168-169`). | — | — | — |
+| ~~RW6b-1~~ | **CLOSED (won't-build) 2026-07-01** — consolidate flow-guard data-taint into provenance. `docs/design/2026-07-01-deferred-closures.md`; fresh adversarial review confirmed it's a pure internal refactor with **no user-visible gain** and **regression risk to a default-ON guard**: flow-guard (read-sensitive→egress, pattern, default-ON, clears on `/clear`) and provenance (fetch-foreign→sink, verbatim-segment, default-OFF, doesn't clear) are genuinely dual axes. The RW3-1 child-gap is already closed by W9.1 (`flow-guard.ts:181,232`). | — | — | — |
 
 ## Re-design Wave 6c (ExecutionTarget / codeact sandbox tier) — deferred residuals
 
@@ -318,8 +319,10 @@ fresh-review for B + D). Suite 1136 → **1151 pass / 0 fail / 1 skip**; typeche
 
 **Resolved:**
 - **FRESH-50** (Wave B) — `checkpoint` gained an `EAGENT_CHECKPOINT=off` kill switch (early no-op
-  return in `activate`; the auto-snapshot runs synchronous git on every mutating tool call, so the
+  return in `activate`; the auto-snapshot then ran synchronous git on every mutating tool call, so the
   default-on extension now honors the house opt-out convention). On-by-default preserved. Commit 5e26fa1.
+  *(Superseded 2026-07-02, PR #34: that auto-snapshot git is now asynchronous + serialized — see the ①
+  row above / `docs/design/2026-07-02-checkpoint-async-git.md`.)*
 - **RW7c-4** (Wave C) — `otel-exporter` now emits the OTel GenAI semconv **Histogram**
   `eagent.gen_ai.client.operation.duration` (per-call inference latency, seconds, the published advisory
   buckets) alongside the two Sums — the latency *distribution* (p50/p90/p99) a Sum can't give. Measured

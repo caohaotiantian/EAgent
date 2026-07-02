@@ -20,9 +20,10 @@ npm install
 ```bash
 npm test         # offline test suite (node:test via tsx) — no network, no API key
 npm run typecheck # tsc --noEmit, strict
+npm run eval     # offline evals-as-CI gate (runs evals/*.eval.json; exits non-zero on failure)
 npm run build    # tsc -> dist/
 npm run dev      # interactive REPL (src/cli.ts via tsx)
-npm run serve    # HTTP server (src/server.ts; GET /health, POST /run, DELETE /sessions/:id; PORT=8787)
+npm run serve    # HTTP server (src/server.ts; GET /health, POST /run, POST /answer, DELETE /sessions/:id; PORT=8787)
 ```
 
 `npm test` drives everything through `MockProvider` (`src/providers/mock.ts`), a
@@ -93,10 +94,16 @@ Keep PRs tight and focused. Before opening one:
 ```bash
 npm run typecheck
 npm test
+npm run eval
+npm run build
 ```
 
-Both must be green — CI runs them on every PR. Include or update offline tests
-for any new behavior, keep the kernel minimal (prefer an extension), and follow
-the conventions above. The security model in [`SECURITY.md`](SECURITY.md) is
-authoritative for anything that touches the filesystem, the shell, the network,
-or LLM-authored code.
+All four must be green — CI runs typecheck, test, eval, and build on every PR.
+Include or update offline tests for any new behavior, keep the kernel minimal
+(prefer an extension), and follow the conventions above. The security model in
+[`SECURITY.md`](SECURITY.md) is authoritative for anything that touches the
+filesystem, the shell, the network, or LLM-authored code.
+
+Commits and PRs land under the human author's own identity only — no
+`Co-Authored-By: Claude`, `Claude-Session:` trailers, or claude.ai links in
+commit messages or PR bodies.

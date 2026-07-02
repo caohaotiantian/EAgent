@@ -7,8 +7,8 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~1,800 lines, held under a
-line ceiling by a test). There are no built-in tools, no hard-coded prompt
+The kernel is **seven primitives and nothing more** (~2,200 lines, held just
+under a hard 2,200-line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
 want to change is a hot-reloadable extension you can edit while the agent runs.
@@ -23,7 +23,7 @@ flowchart TB
         HTTP["HTTP server"]
     end
 
-    subgraph KERNEL["Kernel — src/kernel/ · 7 primitives, ~1.8k lines"]
+    subgraph KERNEL["Kernel — src/kernel/ · 7 primitives, ~2.2k lines"]
         direction LR
         HOOKS["Hook bus"]
         REG["Tool registry"]
@@ -39,7 +39,7 @@ flowchart TB
         X1["core-tools"]
         X2["skills · mcp · memory"]
         X3["self · web · checkpoint"]
-        X4["+ 43 more"]
+        X4["+ 51 more"]
     end
 
     subgraph PROVIDERS["Providers — src/providers/"]
@@ -135,7 +135,7 @@ All seven live in `src/kernel/` and form the entire public surface of the kernel
 | Primitive            | File                         | Responsibility |
 | -------------------- | ---------------------------- | -------------- |
 | **Hook bus**         | `src/kernel/hooks.ts`        | Lifecycle events (observe) + filter hooks (intervene) — Emacs *hooks* & *advice*. |
-| **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools (and commands); a later definition wins, disposing restores the prior one. (Providers, in the same file, register by overwrite — no restore.) |
+| **Tool registry**    | `src/kernel/registry.ts`     | Register/shadow/dispose tools; a later definition wins, disposing restores the prior one. (Providers, in the same file, register by overwrite — no restore. Commands follow the same shadow/dispose model but live in `commands.ts`.) |
 | **Provider**         | `src/kernel/types.ts`        | The one thing the kernel knows about an LLM: a request → a stream of events. |
 | **Agent loop**       | `src/kernel/agent.ts`        | Turns, streaming, guarded & ordered tool dispatch, steering, follow-up, stop conditions; first-class state — `snapshot()`/`restore()` + a monotonic step. |
 | **Capability layer** | `src/kernel/capabilities.ts` | Per-capability allow / deny / ask, wildcards, an audit log. |
@@ -193,18 +193,19 @@ Everything below is an extension — none is in the kernel, and any can be repla
 or removed. Each is a single file under `src/extensions/`, ships with offline
 tests, and gates privileged work behind a capability.
 
-They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
+They are grouped by theme below; see `BUILTIN_EXTENSIONS` in `src/host.ts` for the
+authoritative load order (which is load-bearing — a later extension can shadow an earlier one).
 
 | Extension     | What it adds | Commands | Capability |
 | ------------- | ------------ | -------- | ---------- |
 | `core-tools`  | `read`, `write`, `edit`, `bash` (workspace-confined) | `/tools` | `fs:read`, `fs:write`, `shell:exec` |
 | `search`      | `glob` / `grep` — find files by pattern and search contents in pure Node, workspace-confined | — | `fs:read` |
 | `skills`      | LLM-authored skills via `SKILL.md` with progressive disclosure | `/skills` | `skill:read`, `skill:write` |
-| `mcp`         | Model Context Protocol client (stdio **and** Streamable HTTP); registers `mcp__<server>__<tool>` | `/mcp` | `mcp:call` |
+| `mcp`         | Model Context Protocol client (stdio **and** Streamable HTTP); registers `mcp__<server>__<tool>` (calling tools) and a `mcp__<server>__read_resource` tool (reading resource bodies) | `/mcp` | `mcp:call`, `mcp:read` |
 | `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary, with an optional off-by-default **OS-sandbox isolation tier** (`workspace-write`/`no-network` recommended; `readonly` is degraded on the `bwrap` backend — RW6c-4) via the shared `lib/sandbox` launchers; **fails closed** once a tier is selected if no backend | `/code`, `/codeact` | `code:exec` |
 | `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
 | `reasoning-search` | **search over forked agents** — `best_of_n` snapshots the current state, forks N **governed** children (`childScope` gate filters + a pruned registry that removes `best_of_n`/`tree_search`/`spawn_agent` so a fork can't re-fork), runs each on the sub-task, scores (`judge`/`shortest`/`longest`) and returns the argmax. **`tree_search`** generalizes it to multi-step **Tree-of-Thought beam search**: at each depth it expands the frontier (`branch` children per node), scores, keeps the top `beam`, and repeats to `depth`, returning the global best-scoring thought — bounded by a hard `maxNodes` cap, cancellable, losing branches never touch the parent transcript. **`graph_search`** adds **Graph-of-Thought** operations a tree can't: it **generates** `branch` thoughts, **aggregates** them into one combined answer (a multi-parent merge), optionally **refines** the best in place, and returns the global best across all three — so the three tools span the canonical reasoning-search family (best-of-N · ToT · GoT). All off by default (`/reasoning-search on`, `EAGENT_REASONING_SEARCH=off`) | `/reasoning-search` | `agent:spawn` |
-| `dynamic-workflow` | `run_workflow` executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
+| `dynamic-workflow` | the `workflow` tool executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
 | `templates`   | named, file-based, inheritable **agent templates** (`<name>.md` frontmatter + body = system prompt; single-parent `extends`); `spawn_template` delegates to a scoped isolated child, `/template use` reconfigures the live session (become) with a tool allow-list veto; opt-in name+description catalog (`/template catalog on`), `EAGENT_TEMPLATES=off` kill switch | `/template` | `agent:spawn` |
 | `teams`       | **team orchestration**: `run_team` runs a template-backed lead agent supervising template-backed member agents (file `<name>.md` roster **or** an inline roster) over a shared run-scoped board, selecting a coordination pattern (orchestrator, parallel, sequential, generator-verifier, consensus, blackboard) from a documented playbook (optionally pinned); members are leaf agents barred from any spawn/workflow tool; bounded (lead/member turns, delegate cap, roster cap, board caps), `EAGENT_TEAMS=off` kill switch | `/team` | `agent:spawn` |
 | `memory`      | store-backed `remember`/`recall` working-memory scratchpad with white-box per-entry provenance; **two tiers** (core `note:` + archival `archive:`) with auto-eviction oldest→archive at a cap, and **`recall(query)`** ranking across both tiers — dependency-free **lexical** token-overlap (`lib/relevance`) by default, with **optional semantic (embedding)** ranking when `EAGENT_MEMORY_EMBED_ENDPOINT` is set (a zero-dep `fetch` embedder; cosine over the query + candidates, **fail-soft** to lexical; `EAGENT_MEMORY_EMBED=off` kill switch) (`/memory recall|archive|promote|forget-archive`); `EAGENT_MEMORY_ENTRIES=off` to disable — registers no `transformContext` hook | `/memory` | — |
@@ -225,7 +226,7 @@ They are listed in `BUILTIN_EXTENSIONS` load order (`src/host.ts`).
 | `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
 | `budget-cap`   | hard **USD spend ceiling that enforces** — prices the `usage` stream via `cost`'s pricecard and, at a per-run or cumulative-session cap, soft-warns then **blocks** paid tool calls (`mode=block`) or **aborts** the run (`mode=stop`); both caps default `0` = inert (`EAGENT_BUDGET_CAP=off`) | `/budget-cap` | — |
 | `self`        | the agent authors and hot-loads its **own** TypeScript extensions | `/self` | `self:read`, `self:extend` |
-| `self-improve` | **bounded, human-checkpointed self-improvement harness** (DGM-safety): `propose_improvement` stages a candidate (static-veto + bespoke write, never executed) → `evaluate_candidate` scores it as an **advisory, tamper-detected** signal in a **separate `no-network`-sandboxed subprocess** (the candidate is *never* loaded into the live agent to be judged) → `adopt_improvement` loads it **only after human source-review via `ui.ask`** (not `--yolo`-able), host-tracked + `unloadExtension`-reversible. The isolation boundary is the subprocess+sandbox; the gate is the human. Off by default (`/self-improve on`, `EAGENT_SELF_IMPROVE=off`) | `/self-improve` | `self:extend` |
+| `self-improve` | **bounded, human-checkpointed self-improvement harness** (DGM-safety): `propose_improvement` stages a candidate (static-veto + bespoke write, never executed) → `evaluate_candidate` scores it as an **advisory, tamper-detected** signal in a **separate `no-network`-sandboxed subprocess** (the candidate is *never* loaded into the live agent to be judged) → `adopt_improvement` loads it **only after human source-review via `ui.ask`** (not `--yolo`-able), host-tracked + `unloadExtension`-reversible. The isolation boundary is the subprocess+sandbox; the gate is the human. Off by default (`/self-improve on`, `EAGENT_SELF_IMPROVE=off`) | `/self-improve` | `self:extend`, `code:exec` |
 | `web`         | capability-gated, size-bounded HTTP access (`fetch_url`) | `/fetch` | `net:fetch` |
 | `checkpoint`  | git-backed workspace snapshots before mutating tools, with rollback. On by default; `EAGENT_CHECKPOINT=off` kill switch (the auto-snapshot runs async, serialized git on every mutating call) | `/checkpoint`, `/checkpoints`, `/rollback` | — |
 | `introspect`  | self-documentation: describe any tool/command, search by keyword | `/describe`, `/apropos` | — |

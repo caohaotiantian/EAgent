@@ -3,7 +3,7 @@
 **Start here for a fresh session.** This is the orientation + status doc. Authoritative detail lives in
 the files this doc points to; where they disagree, *they* win (this doc drifts, they don't).
 
-_Snapshot: trunk `init` @ `64eb15b` · 1195 tests pass / 0 fail / 1 skip · kernel 2198/2200 · `npm run
+_Snapshot: trunk `init` @ `55a5710` · 1204 tests pass / 0 fail / 1 skip · kernel 2198/2200 · `npm run
 eval` 5/5 · typecheck 0 · zero runtime deps except `jiti`._
 
 ---
@@ -151,9 +151,10 @@ un-offline-testable — the cap-enforcement logic itself is offline-tested (`tes
 
 ## 5. Suggested next steps for a fresh session
 
-1. **If asked to keep hardening:** pick up **① async checkpoint git** (real value) then **③ SRV-4b**
-   (MCP read caps — reuse `readCapped`). Both through the three-loop.
-2. **Quick doc hygiene** — DONE in the 2026-07-02 safe-cleanup pass (see item ② above). Nothing left here.
+1. **The three ranked §4 items (①/②/③) are all DONE** (2026-07-02, PR #34). ① async serialized
+   checkpoint git and ③ SRV-4b MCP read caps both landed through the three-loop; `readCapped` now lives
+   at `src/extensions/lib/read-capped.ts`. No open hardening remains in that subsection.
+2. **Quick doc hygiene** — DONE (safe-cleanup pass + the 2026-07-02 doc-alignment sweep). Nothing left here.
 3. **If asked for new capability:** it is almost certainly an **extension** (see `docs/EXTENSIONS.md`),
    not a kernel change — the kernel has ~1 line of slack, and adding to it requires golfing or an
    explicit user decision (as KERN-1 was).
@@ -178,6 +179,6 @@ un-offline-testable — the cap-enforcement logic itself is offline-tested (`tes
 | Commands | `npm test` / `npm run typecheck` / `npm run build` / `npm run dev` (REPL) / `npm run serve` (HTTP) / `npm run eval` |
 
 **One gotcha worth knowing:** the kernel line budget is measured by `split("\n").length` (= 2199 before
-KERN-1, now 2198), **not** `wc -l` (2187) — don't conflate them when reasoning about headroom. Also, on
+KERN-1, now 2198), **not** `wc -l` (2186) — don't conflate them when reasoning about headroom. Also, on
 macOS, `grep` silently skips EAgent source files containing non-ASCII glyphs (`→`/`σ`/`≥`); use `grep -a`
 or the Read tool for audits.
