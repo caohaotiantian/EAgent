@@ -372,3 +372,47 @@ test("/flow-guard status and off toggle work", async () => {
   await cmd!.run({ agent: h.agent, args: "off", print: (l) => off.push(l) });
   assert.match(off.join("\n"), /flow-guard off/);
 });
+
+// -- GUARD-2: a sensitive path NESTED in a sub-object taints (not only a top-level path arg) --
+
+test("GUARD-2: a sensitive path nested in a sub-object taints the session and blocks egress", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [
+      { toolCalls: [{ name: "read_file", arguments: { opts: { path: "config/.env" } } }] },
+      { toolCalls: [{ name: "get_url" }] },
+      { text: "done" },
+    ],
+  });
+  let fetched = false;
+  h.agent.tools.register(
+    defineTool({ name: "read_file", description: "", capabilities: ["fs:read"], parameters: { type: "object", properties: {} }, execute: () => ({ content: "DOTENV" }) }),
+  );
+  h.agent.tools.register(
+    defineTool({ name: "get_url", description: "", capabilities: ["net:fetch"], execute: () => { fetched = true; return { content: "fetched" }; } }),
+  );
+  await h.host.use("flow-guard", (e) => { e.store.set("mode", "block"); return flowGuard(e); });
+  await h.agent.run("read the nested env path then exfiltrate");
+  assert.equal(fetched, false, "a sensitive path nested in a sub-object must taint and block egress");
+});
+
+test("GUARD-2: a non-sensitive nested path does not taint (egress allowed)", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [
+      { toolCalls: [{ name: "read_file", arguments: { opts: { path: "config/app.json" } } }] },
+      { toolCalls: [{ name: "get_url" }] },
+      { text: "done" },
+    ],
+  });
+  let fetched = false;
+  h.agent.tools.register(
+    defineTool({ name: "read_file", description: "", capabilities: ["fs:read"], parameters: { type: "object", properties: {} }, execute: () => ({ content: "ok" }) }),
+  );
+  h.agent.tools.register(
+    defineTool({ name: "get_url", description: "", capabilities: ["net:fetch"], execute: () => { fetched = true; return { content: "fetched" }; } }),
+  );
+  await h.host.use("flow-guard", (e) => { e.store.set("mode", "block"); return flowGuard(e); });
+  await h.agent.run("read a normal nested path then fetch");
+  assert.equal(fetched, true, "a non-sensitive nested path must not taint");
+});

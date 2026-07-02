@@ -32,6 +32,9 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 type Mode = "ask" | "block";
 
 /** Capabilities whose use marks the session as having touched sensitive data. */
+/** Max nesting the sensitive-path arg scan descends into (mirrors provenance/secret-guard). */
+const MAX_SCAN_DEPTH = 8;
+
 const DEFAULT_SOURCE_CAPS = ["shell:exec"];
 /** Capabilities that move data off the machine (where a chain would exfiltrate). */
 const DEFAULT_EGRESS_CAPS = ["net:fetch", "mcp:call"];
@@ -127,13 +130,23 @@ export default function activate(e: ExtensionAPI): () => void {
     // The result message does not exist yet, so record the call id for the
     // `message` handler to tag when it is appended.
     if (caps.includes("fs:read")) {
-      for (const v of Object.values(call.arguments)) {
-        if (typeof v === "string" && c.sensitivePaths.some((re) => re.test(v))) {
-          const reasons = pending.get(call.id) ?? [];
-          reasons.push(`sensitive-path:${v}`);
-          pending.set(call.id, reasons);
-          break;
+      // Recurse string leaves (depth-bounded like provenance/secret-guard) so a
+      // sensitive path nested in a sub-object — e.g. a third-party fs:read tool's
+      // `{opts:{path:…}}` — is tainted, not only a top-level path arg.
+      const findSensitivePath = (v: unknown, depth: number): string | undefined => {
+        if (typeof v === "string") return c.sensitivePaths.some((re) => re.test(v)) ? v : undefined;
+        if (depth <= 0 || v === null || typeof v !== "object") return undefined;
+        for (const item of Object.values(v)) {
+          const hit = findSensitivePath(item, depth - 1);
+          if (hit !== undefined) return hit;
         }
+        return undefined;
+      };
+      const hit = findSensitivePath(call.arguments, MAX_SCAN_DEPTH);
+      if (hit !== undefined) {
+        const reasons = pending.get(call.id) ?? [];
+        reasons.push(`sensitive-path:${hit}`);
+        pending.set(call.id, reasons);
       }
     }
   });
