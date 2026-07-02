@@ -1,3 +1,8 @@
+Status: closed
+Closing-commit: 6205efd
+Closed-on: 2026-07-02
+Deferred: none
+
 # Design — checkpoint async auto-snapshot git (item ①)
 
 **Slug:** `2026-07-02-checkpoint-async-git` · **Tier:** Full (behavior change to a default-loaded
@@ -36,20 +41,20 @@ the other), and last-write-wins the store list — silent checkpoint loss / dupl
 
 ## 2. Deliverables
 
-- [ ] The shared `git()` helper in `checkpoint.ts` runs `execFile` **asynchronously** (via
+- [x] The shared `git()` helper in `checkpoint.ts` runs `execFile` **asynchronously** (via
   `node:util` `promisify(execFile)`), returning `Promise<string | null>`; all callers `await` it.
-- [ ] The auto-snapshot `beforeToolCall` hook is `async`, awaits the snapshot before returning the
+- [x] The auto-snapshot `beforeToolCall` hook is `async`, awaits the snapshot before returning the
   (unchanged) decision, so the **snapshot-before-mutation** ordering guarantee is preserved.
-- [ ] **All** snapshots — the auto-hook path **and** the manual `/checkpoint` command — are
+- [x] **All** snapshots — the auto-hook path **and** the manual `/checkpoint` command — are
   **serialized** through one per-`activate` promise-chain queue so nothing can interleave
   `nextId()`/`update-ref`/`record()` — ids and refs stay atomic (a single uniform snapshot path).
-- [ ] The `/checkpoint`, `/checkpoints`, `/rollback` command handlers become `async` (awaiting the
+- [x] The `/checkpoint`, `/checkpoints`, `/rollback` command handlers become `async` (awaiting the
   async `git()`); their printed output and semantics are byte-identical.
-- [ ] The extension docstring (`checkpoint.ts:1-25`) is updated to state the auto-snapshot git is
+- [x] The extension docstring (`checkpoint.ts:1-25`) is updated to state the auto-snapshot git is
   asynchronous and serialized (removing the "runs synchronous git" wording at lines 21-24), and the
   `README.md:230` `checkpoint` row's stale parenthetical ("the auto-snapshot runs synchronous git on
   every mutating call") is corrected to reflect the async behavior.
-- [ ] Tests: a concurrency test proving N concurrent auto-snapshots record N checkpoints with N
+- [x] Tests: a concurrency test proving N concurrent auto-snapshots record N checkpoints with N
   distinct ids and N live refs (RED-verified against a non-serialized variant during L2); an
   ordering test proving the snapshot is recorded before the triggering tool's `execute` runs; all
   existing `test/checkpoint.test.ts` tests still pass.

@@ -1,3 +1,8 @@
+Status: closed
+Closing-commit: 6205efd
+Closed-on: 2026-07-02
+Deferred: none
+
 # Implementation — checkpoint async auto-snapshot git (item ①)
 
 **Slug:** `2026-07-02-checkpoint-async-git` · Design: `docs/design/2026-07-02-checkpoint-async-git.md`.

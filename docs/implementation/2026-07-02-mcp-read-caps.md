@@ -1,3 +1,8 @@
+Status: closed
+Closing-commit: b13ace3
+Closed-on: 2026-07-02
+Deferred: none
+
 # Implementation — cap MCP transport reads (SRV-4b / item ③)
 
 **Slug:** `2026-07-02-mcp-read-caps` · Design: `docs/design/2026-07-02-mcp-read-caps.md`.

@@ -1,3 +1,8 @@
+Status: closed
+Closing-commit: b13ace3
+Closed-on: 2026-07-02
+Deferred: none
+
 # Design — cap MCP transport reads (SRV-4b / item ③)
 
 **Slug:** `2026-07-02-mcp-read-caps` · **Tier:** Full (>3 files: a shared-helper relocation + both MCP
@@ -28,17 +33,17 @@ the shared server host — despite the provider-side SSE cap already shipped.
 
 ## 2. Deliverables
 
-- [ ] `readCapped` is **relocated** from `web.ts` into `src/extensions/lib/read-capped.ts` (a shared
+- [x] `readCapped` is **relocated** from `web.ts` into `src/extensions/lib/read-capped.ts` (a shared
   helper, matching the `lib/` convention); `web.ts` imports it from `./lib/read-capped.js` with its two
   call sites (`web.ts:218,272`) unchanged in behavior.
-- [ ] A new env-overridable cap helper `maxMcpReadBytes()` (env `EAGENT_MAX_MCP_READ_BYTES`, default
+- [x] A new env-overridable cap helper `maxMcpReadBytes()` (env `EAGENT_MAX_MCP_READ_BYTES`, default
   **16 MiB**, `Number.isInteger(n) && n > 0` else default) co-located in `mcp.ts`, modeled exactly on
   `providers/http.ts:16-21`'s `maxSseEventBytes()`.
-- [ ] `HttpTransport.#readResponse` reads `res.body` via `readCapped(res.body, maxMcpReadBytes())` for
+- [x] `HttpTransport.#readResponse` reads `res.body` via `readCapped(res.body, maxMcpReadBytes())` for
   both the SSE and JSON branches; on `truncated`, it throws a clear "response exceeded N bytes" error
   (surfaced through the existing transport error path). A null `res.body` falls back to `res.text()` /
   `res.json()` (mirroring `web.ts:272`).
-- [ ] `StdioTransport` replaces the default `createInterface` with a **byte-bounded line reader**: it
+- [x] `StdioTransport` replaces the default `createInterface` with a **byte-bounded line reader**: it
   reads `child.stdout` directly, emits complete newline-delimited lines to the existing `#onLine`, and
   when the current un-terminated line buffer exceeds `maxMcpReadBytes()` it enters "discard until the
   next newline" mode (dropping the oversized line, then resuming) — so a no-newline flood cannot grow
@@ -46,9 +51,9 @@ the shared server host — despite the provider-side SSE cap already shipped.
   `(bufferState, chunk, cap)` that returns the emitted complete lines, the retained buffered-byte count,
   and whether it is in discard mode — a testable observable so a unit test can assert the retained buffer
   never exceeds the cap (a real boundedness discriminator, not just "the valid line survives").
-- [ ] `docs/HANDOFF.md:142`'s "the SRV-4b MCP caps … un-offline-testable by design" is corrected at
+- [x] `docs/HANDOFF.md:142`'s "the SRV-4b MCP caps … un-offline-testable by design" is corrected at
   closeout to scope that claim to a *live hostile-server smoke* (the cap logic is offline-tested here).
-- [ ] Tests: HTTP SSE + JSON over-cap → error (small env cap); a stdio bounded-reader unit test that
+- [x] Tests: HTTP SSE + JSON over-cap → error (small env cap); a stdio bounded-reader unit test that
   feeds a ≫cap no-newline run and asserts the retained buffer stays ≤ cap and discard mode engages, then
   a following valid line still parses; relocated `readCapped` unit tests pass from the new path; existing
   MCP + web suites green.
