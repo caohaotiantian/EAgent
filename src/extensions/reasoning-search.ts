@@ -1,12 +1,14 @@
 /**
- * reasoning-search — best-of-N over forked, governed child agents.
+ * reasoning-search — best-of-N, tree, and graph search over forked, governed
+ * child agents.
  *
  * A single off-by-default extension that composes existing public primitives
  * with NO kernel change. `best_of_n` forks N child agents from a `snapshot()` of
  * the current state, runs each on the same sub-task, scores their final answers
- * to a number, and returns the argmax candidate. It is the minimal slice of
- * "search over reasoning": N continuations of the same conversation, scored and
- * selected; tree/graph search (expand → evaluate → backtrack) is deferred.
+ * to a number, and returns the argmax candidate — the minimal slice of "search
+ * over reasoning". It also provides `tree_search` (multi-step beam search over the
+ * fork spine — Tree-of-Thought) and `graph_search` (generate → aggregate → refine,
+ * refine-to-convergence — Graph-of-Thought), all on the same governed fork spine.
  *
  * The fork machinery mirrors `subagents.ts`: a child is `new Agent({ providers,
  * capabilities, tools: childRegistry(), hooks: childScope() })`. Two divergences

@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
-import { locateEdit } from "./edit-match.js";
+import { locateEdit } from "./lib/edit-match.js";
 
 const execAsync = promisify(exec);
 
