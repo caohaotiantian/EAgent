@@ -56,7 +56,31 @@ ledger is authoritative over any such stale row.)
 Every closed item has a validated deployment alternative in its closure doc — none leaves a capability
 gap. **The register is now fully accounted for: every ID is built, resolved, or validated-closed** — a
 late audit re-verified the four apparently-open upper rows (RW1-2, RW7d-1, RW8b-1, RW9-1) and found all
-four already shipped (2026-06-30 cleanup), confirming no open item remains.
+four already shipped (2026-06-30 cleanup). A subsequent **register-blind production-readiness audit
+(2026-07-02)** then found 13 *new* gaps not previously tracked — recorded and being resolved below.
+
+## Production-readiness audit gaps (2026-07-02)
+
+A 63-agent register-blind audit (6 dimension scanners → adversarial verification) surfaced 13 genuine
+gaps (0 high, 1 medium, 12 low) outside the existing register — the HTTP host was the least
+production-ready surface, plus a handful of guard/kernel/test edges. These are being resolved across
+several three-loop waves; status updated per wave.
+
+| ID | Gap | Location | Sev | Status |
+|----|-----|----------|-----|--------|
+| SRV-1 | Streaming `res` has no `'error'` listener + **no process-level `uncaughtException`/`unhandledRejection` backstop** anywhere in `src/` → a client socket reset mid-stream can crash the whole host. | `server.ts:345`; `cli.ts` | MED | OPEN |
+| SRV-2 | The top-level 500 fallback re-sends headers after the stream committed them (`ERR_HTTP_HEADERS_SENT`) → unhandled rejection → host crash. | `server.ts:159-161,299,420` | LOW | OPEN |
+| SRV-3 | `sessions` Map is unbounded (full `AgentState` per turn, freed only by `DELETE`) → a client rotating session ids grows heap to OOM. | `server.ts:148,370` | LOW | OPEN |
+| SRV-4 | External stream inputs read with no size cap (`parseSSE` buffer, provider accumulators, MCP `res.text()`/readline) → OOM/DoS; `readCapped` primitive exists but isn't applied. | `providers/http.ts:29`; `mcp.ts:189,354` | LOW | OPEN |
+| SRV-5 | Error-path exit (`main().catch`) skips `host.dispose()` → `session_shutdown` never fires → orphaned stdio-MCP children. | `cli.ts:442`; `server.ts:453` | LOW | OPEN |
+| SRV-6 | SIGINT/SIGTERM `shutdown` is not idempotent → a second signal re-emits `session_shutdown` to live handlers during the first dispose. | `server.ts:447-448` | LOW | OPEN |
+| KERN-1 | `CapabilityManager.require()` is an async check-then-act (`has()` … await `confirm` … `set()`) → concurrent tool dispatch double-prompts the human and races the remembered write. (Kernel; 0 headroom.) | `capabilities.ts:95,116-117` | LOW | OPEN |
+| GUARD-1 | `secret-guard` (default-ON) arg scanner has **no recursion depth bound** → a deeply-nested payload → RangeError → its fail-open catch skips the scan → secret bypass. `provenance` bounds the identical scan (`MAX_SCAN_DEPTH=8`); secret-guard doesn't. | `secret-guard.ts:81-91,126` | LOW | OPEN |
+| GUARD-2 | `flow-guard` sensitive-path taint scans only top-level arg values (no recursion) → a path nested in a sub-object isn't tainted; asymmetric with provenance/secret-guard. | `flow-guard.ts:129-138` | LOW | OPEN |
+| GUARD-3 | `risk-guard` classifier sub-call uses a never-aborted `AbortController` (no timeout) inside a blocking gate → a hung provider stalls the gated call forever. | `risk-guard.ts:149` | LOW | OPEN |
+| TEST-1 | `memory` real fetch embedder (`resolveEmbedder`) has zero offline coverage though it's cheaply `fetch`-stub-testable → a regression yields permanent silent lexical fallback with no failing test. | `memory.ts:153-165`; `memory.test.ts` | LOW | OPEN |
+| DOC-1 | RW7c-2 is marked RESOLVED yet still appears in the "still deferred" prose list (factually false). | `DEFERRED-FOLLOWUPS.md` (2026-07-01 still-deferred prose list) | LOW | **RESOLVED** (Wave 1) — superseding banner added over the stale 2026-07-01 list. |
+| DOC-2 | Six per-item detail rows read "deferred" over already-fixed code (RW1-1, RW3-1/2, RW6c-4, RW8b-2, RW6d-1) — incomplete strikethrough pass. | `DEFERRED-FOLLOWUPS.md` detail rows | LOW | **RESOLVED** (Wave 1) — all six rows struck to RESOLVED. |
 
 ## Kept deferred (correctly cut — Simplicity First)
 
@@ -100,7 +124,7 @@ fresh/non-cached input; cache tokens are disjoint siblings). Both are non-blocki
 
 | # | Finding | Home design | Effort · Risk | Why deferred / fix |
 |---|---|---|---|---|
-| RW1-1 | `limits.ts:207` per-run token budget omits cache tokens on a cached run (`usage.inputTokens + usage.outputTokens`) | `docs/design/2026-06-28-phase0-foundation.md` (§3, KDD-2 ripple; impl §5) | S · L | No test exercises a cached run through `limits`. Fix: sum via `totalTokens(usage)` so cache tokens count. |
+| ~~RW1-1~~ | **RESOLVED** (Wave 9; row was stale) — the per-run token budget now counts cache tokens via cache-aware `totalTokens` (`limits.ts:210`). | — | — | — |
 | ~~RW1-2~~ | **RESOLVED** (already fixed; row was stale). `trace.ts:209-211` computes `cache = cacheRead + cacheWrite` and renders a `cache=${cache}` field (shown only when >0, so an uncached line stays byte-identical) alongside `in=`/`out=`/`total=`, so the split never reads as contradictory. | — | — | — |
 
 ## Re-design Wave 3 (governed sub-agents) — deferred residuals
@@ -111,8 +135,8 @@ design. All are **strictly more** governance than the prior fresh-bus status quo
 
 | # | Residual | Home design | Effort · Risk | Why deferred / fix |
 |---|---|---|---|---|
-| RW3-1 | `flow-guard` **data-taint** does not fire for a child (read a sensitive file *without* `shell:exec`, then egress): the gate scans `e.agent.messages` = **parent** transcript (`flow-guard.ts:164`); a child's tagged message is in the child transcript. The **capability** trigger (shell:exec→egress) IS governed. | `docs/design/2026-06-28-governed-subagents.md` (§3, KDD-6) | M · M | Needs flow-guard to track data-taint in shared closure state (like the capability `tainted` Set), or per-agent guard state. |
-| RW3-2 | `e.agent.handle.steer`/`followUp` **writes** route to the **parent** when a *child* triggers them (`circuit-breaker.ts:156` nudge, `budget-cap.ts:298`, `output-contract.ts:170`); `output-contract.ts:187` `e.agent.stop()` stops the parent. Hard guards still block the child's call; only the soft nudge/stop misroutes. | same (§3, KDD-6) | M · M | Part of the per-agent guard-state rework: guards should act on the *acting* agent (pass it in the hook context) rather than the closure's parent `e.agent`. |
+| ~~RW3-1~~ | **RESOLVED** (Wave 9; row was stale) — flow-guard data-taint now reads the acting-agent transcript via `currentActingAgent()` (`flow-guard.ts:168`), so a child that reads a sensitive file is governed. | — | — | — |
+| ~~RW3-2~~ | **RESOLVED** (Wave 9; row was stale) — circuit-breaker/budget-cap/output-contract now act on the acting agent via `currentActingAgent()`, so a child's soft nudge/stop no longer misroutes to the parent. | — | — | — |
 | RW3-3 | `AgentHandle.spawnChild` not added — the four sites still construct children directly (now with `childScope`). | same (KDD-5) | S · L | A first-class spawn helper is best designed once Wave 8's search controller has concrete needs. |
 | RW3-4 | `agentId`/`depth` event **attribution/tagging** not added (would change every `KernelEvents` payload). | same (KDD-6) | M · M | Add once a consumer needs to attribute/dedupe child vs parent lifecycle signals. |
 
@@ -161,7 +185,7 @@ From `docs/design/2026-06-29-execution-target.md` (§3, R6, L1 round-2 note).
 | ~~RW6c-2~~ | **CLOSED (won't-build) 2026-07-01** — dir-scoped macOS sandbox-exec write profile. `docs/design/2026-07-01-deferred-closures.md`; fresh adversarial review confirmed every narrowing risks an **offline-uncatchable fail-closed EPERM/ENOENT**: codeact spawns the interpreter with a scrubbed env (`HOME=os.tmpdir()` under `/private/var/folders`, `TMPDIR` unset → Node `os.tmpdir()`=`/tmp`), so dropping *either* temp subpath breaks a legit snippet; the only string-testable variant is a trap knob. `bwrap`/`firejail` are already dir-scoped; the no-home/project-writes guarantee already holds. | — | — | — |
 | RW6c-3 | A **real-host launcher smoke test** (`bwrap`/`sandbox-exec` actually present) before Wave 8 relies on the wrap end-to-end — the offline suite uses a forced backend + fake-launcher-on-PATH, never a real launcher. | same (L1 round-2 note) | S · M | The pure `wrapCommand` is unit-pinned and the integration is proven via a PATH shim; a one-time real-host smoke de-risks the bwrap `--tmpfs /tmp` + temp-dir-root interaction before self-improvement candidates depend on it. |
 | ~~RW8b-1~~ | **RESOLVED** (2026-06-30 cleanup; row was stale). `test/self-improve-integration.test.ts` exercises the real `realEvaluate` (spawn + sandbox + subprocess + `runEvalDir` + tamper path) end-to-end; it runs in the `sandbox-linux` bwrap CI job (`ci.yml:50-53`), backend-gated + `EAGENT_SI_INTEGRATION`-opt-in so default `npm test` stays fast/offline. | — | — | — |
-| RW8b-2 | A **failed `loadExtension` after the staged→live `renameSync`** (adopt) leaves the candidate file in the live extensions dir, where it auto-loads on the next host restart **without** re-passing the `ui.ask` gate. | `docs/design/2026-06-29-self-improvement.md` (D5; closing review) | S · L | The human already approved it at adopt, so it is not an unreviewed load; but a clean fix moves the file back (or records `adopted:false` + skips it) on a load failure. Low-likelihood (load fails only transiently after a passing veto+eval). |
+| ~~RW8b-2~~ | **RESOLVED** (Wave 9; row was stale) — a failed adopt-load now reverts the staged→live `renameSync` (`self-improve.ts:427-434`), so a broken candidate doesn't auto-load un-reviewed on restart. | — | — | — |
 | ~~RW8a-1~~ | **RESOLVED 2026-06-30.** Both halves shipped: ToT as `tree_search` (multi-step beam search) and GoT as `graph_search` (generate → aggregate → refine), `docs/design/2026-06-30-tree-search.md` + `docs/design/2026-06-30-graph-of-thought.md`. | — | — | — |
 | RW8a-3 | **GoT extensions** beyond `graph_search` v1. **Multi-round iterative refinement (refine→score→refine to convergence): RESOLVED 2026-07-01** (`docs/design/2026-07-01-graph-search-refine-rounds.md` — optional `refineRounds?`, default 1 = byte-identical, stops the first non-improving round). The other two sub-parts **CLOSED (won't-build)**: the configurable Graph-of-Operations DSL and cross-tool `tree_search→graph_search` composition are speculative generality with no consumer, and the composition entangles the shared recursion-guard registry pruning (`reasoning-search.ts:89`). | `docs/design/2026-06-30-graph-of-thought.md` (§3, KDD-2) | — | Refine-to-convergence shipped; DSL/composition won't-build (speculative). |
 | RW8a-2 | **Early goal-termination** in `tree_search` — v1 always runs to `depth`; a goal-threshold (or classifier) that stops once a thought scores above a bar would cut cost on easy problems. | `docs/design/2026-06-30-tree-search.md` (R5, KDD-5) | S–M · L | v1's termination is purely depth-bounded by design (KDD-5); the global best-so-far is already tracked, so an early-exit is additive. |
@@ -176,8 +200,8 @@ From `docs/design/2026-06-29-execution-target.md` (§3, R6, L1 round-2 note).
 | RW7a-1 | **Delta/incremental blob** storage for checkpoint nodes (each node stores a full `AgentState`, so a deep tree duplicates the growing transcript). | `docs/design/2026-06-29-time-travel.md` (§3) | M · M | The FIFO cap bounds disk today; delta storage (store only the message diff vs parent) is an optimization, not a correctness need. Deferred until disk pressure is real. |
 | RW7a-3 | Command polish (F-review): `/rewind`/`/fork` don't re-check the `enabled` flag (so enable→create→disable→`/fork` would still write a node — harmless in the shipped-off default since no nodes exist); and an ambiguous-step selector prints both `resolve()`'s "ambiguous step" line and the caller's "no such checkpoint" line. | `docs/design/2026-06-29-time-travel.md` (F review) | S · L | Cosmetic; off-by-default makes it inert in practice. A one-line `enabled` guard on fork + suppressing the caller's second message; not worth churning merged code for an edge. |
 | RW7a-2 | **Unify conversation rewind with workspace rollback** — `/rewind` restores agent state only; files are `checkpoint.ts`'s `/rollback`. A combined "rewind to step N AND roll the workspace back" needs an id-alignment design between the two extensions. | `docs/design/2026-06-29-time-travel.md` (KDD-5) | M · M | Coupling two extensions is fragile (git may be absent; step-ids ≠ workspace-checkpoint-ids). Documented; operator pairs them manually. A later design can align them. |
-| RW6d-1 | A **reasoning-only** assistant turn (reasoning streamed, no text, no tool call — e.g. `max_tokens` mid-thought) now persists `content:[{thinking}]`; on replay the unsigned thinking block is dropped, leaving OpenAI `content:null` (its existing text-less shape) and **Gemini `parts:[]`** (which the API may reject). | `docs/design/2026-06-29-reasoning-fidelity.md` (R4) | S · L | Low likelihood (requires snapshotting a truncated thinking-only turn then continuing). Fix: a "drop an assistant message whose replay yields empty content" guard in the builders, if it ever bites. Left unguarded in the Light fix. |
-| RW6c-4 | codeact `tier=readonly` is **non-functional on the `bwrap` backend**: `wrapCommand`'s bwrap branch mounts `--tmpfs /tmp` and only re-binds the writable root for *write* tiers, so the snippet (under `os.tmpdir()` = `/tmp` on Linux) is shadowed and the interpreter gets ENOENT. Fails **closed** (errors, no bypass); macOS `sandbox-exec` + Linux `firejail` are unaffected; codeact's recommended tiers (`workspace-write`/`no-network`) bind the dir and work. | `docs/design/2026-06-29-execution-target.md` (F review) | M · M | Fix needs a **read-only** bind of the per-call dir for non-write tiers — a `wrapCommand` contract extension (a readonly-bind param) that must not loosen the *shell* readonly tier. Deferred to a focused change; README notes the degradation. |
+| ~~RW6d-1~~ | **RESOLVED** (Wave 9; row was stale) — the Gemini builder now skips an empty-`parts` assistant turn on replay (`gemini.ts:208-212`), so a reasoning-only turn can't emit a rejectable `parts:[]`. | — | — | — |
+| ~~RW6c-4~~ | **RESOLVED** (Wave 9; row was stale) — the bwrap branch now `--ro-bind`s the per-call dir for non-write tiers (`lib/sandbox.ts:119-121`), so codeact `tier=readonly` works on bwrap. | — | — | — |
 
 ---
 
@@ -299,6 +323,12 @@ fresh-review for B + D). Suite 1136 → **1151 pass / 0 fail / 1 skip**; typeche
 - **RW7a-3** (Wave D) — `time-travel` command polish: an ambiguous bare-step selector prints **one** line
   (`resolve()` returns an `"ambiguous"` sentinel, callers suppress the duplicate `no such checkpoint`);
   `/fork` honors `cfg().enabled` (the write path). Commit 1b1722c.
+
+> **Superseded 2026-07-01 (DOC-1 fix):** this 2026-07-01 audit list is stale — the finish-followups
+> program subsequently **built** RW7c-2 (traceparent propagation) and RW8a-3's refine-to-convergence,
+> and **validated-closed** the rest (RW9-2/3, RW4-1/2, RW5-1, RW6b-1, RW3-3/4, RW6a-1/2, RW7a-1/2,
+> RW6c-1, DEFERRED-2/3/4/6). See the **Closure ledger** at the top, which is authoritative. Retained as
+> historical context only.
 
 **Still deferred (verified infeasible or intentional Simplicity-First cut — unchanged):** the audit
 confirmed these stay deferred — they break the zero-dep / offline-testable / tiny-seam constraints or
