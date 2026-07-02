@@ -166,12 +166,19 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     );
   });
 
+  // Idempotent teardown: a second close (e.g. a second signal) must not re-emit
+  // session_shutdown to handlers that already tore down.
+  let closed = false;
   return {
     server,
     agent: built.agent,
     extensions: built.host.list(),
     model: built.model,
-    close: () => built.host.dispose(),
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      await built.host.dispose();
+    },
   };
 }
 
@@ -377,7 +384,15 @@ async function streamRun(
     // consecutive user messages. Keep the session's last valid state instead.
     const msgs = agent.messages;
     const danglingUser = msgs.length > 0 && msgs[msgs.length - 1]!.role === "user";
-    if (session && !danglingUser) sessions.set(session, agent.snapshot());
+    if (session && !danglingUser) {
+      // LRU touch: Map.set on an existing key keeps its position, so delete+set
+      // moves the just-written session to newest, then evict the oldest keys past
+      // the cap. cap===0 skips the loop entirely (unbounded).
+      sessions.delete(session);
+      sessions.set(session, agent.snapshot());
+      const cap = maxSessions();
+      while (cap > 0 && sessions.size > cap) sessions.delete(sessions.keys().next().value as string);
+    }
     write({ type: "done", reason, session, usage: agent.usage });
   } catch (err) {
     write({ type: "error", message: err instanceof Error ? err.message : String(err) });
@@ -427,6 +442,21 @@ function authorized(req: IncomingMessage, token: string): boolean {
   return timingSafeEqual(provided, expected);
 }
 
+/**
+ * The sessions-map cap from `EAGENT_MAX_SESSIONS`. On by default at 1000; an
+ * explicit `0` disables it (unbounded). Empty / whitespace / non-numeric /
+ * negative / non-integer all fall back to 1000 — the empty-string guard is
+ * load-bearing: `loadEnvFile` sets a bare `EAGENT_MAX_SESSIONS=` line to `""`
+ * and `Number("") === 0`, so without it an unfilled placeholder would wrongly
+ * disable the cap.
+ */
+export function maxSessions(): number {
+  const raw = process.env.EAGENT_MAX_SESSIONS?.trim();
+  if (!raw) return 1000;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : 1000;
+}
+
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   if (res.headersSent) return; // the stream already owns this response; never re-writeHead
   res.writeHead(status, { "content-type": "application/json" });
@@ -445,19 +475,31 @@ async function main(): Promise<void> {
   // off-box. Set EAGENT_HOST=0.0.0.0 to expose it deliberately (use a token).
   const host = process.env.EAGENT_HOST ?? "127.0.0.1";
   const http = await createHttpServer({ port, host });
-  http.server.listen(port, host, () => {
-    console.error(`eagent server on http://${host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
-  });
+  try {
+    http.server.listen(port, host, () => {
+      console.error(`eagent server on http://${host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
+    });
 
-  // Graceful shutdown: stop accepting connections, tear down the host, exit.
-  const shutdown = async (signal: string) => {
-    console.error(`\n${signal} received, shutting down…`);
-    await new Promise<void>((resolve) => http.server.close(() => resolve()));
+    // Graceful shutdown: stop accepting connections, tear down the host, exit.
+    // The shuttingDown guard makes a second signal a no-op so it can't re-enter
+    // server.close() / race process.exit before the first dispose completes.
+    let shuttingDown = false;
+    const shutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.error(`\n${signal} received, shutting down…`);
+      await new Promise<void>((resolve) => http.server.close(() => resolve()));
+      await http.close();
+      process.exit(0);
+    };
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+  } catch (err) {
+    // A throw after the host is built (e.g. listen setup) must still dispose it
+    // so session_shutdown fires and stdio-MCP children don't orphan.
     await http.close();
-    process.exit(0);
-  };
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  process.on("SIGINT", () => void shutdown("SIGINT"));
+    throw err;
+  }
 }
 
 // Run as a CLI only when invoked directly, not when imported by a test.

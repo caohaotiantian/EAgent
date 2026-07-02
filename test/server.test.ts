@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createHttpServer, sendJson, type HttpServer } from "../src/server.js";
+import { createHttpServer, maxSessions, sendJson, type HttpServer } from "../src/server.js";
 import type { MockProvider } from "../src/providers/mock.js";
 import type { Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
@@ -725,4 +725,101 @@ test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a si
       http.agent.restore = original;
     }
   });
+});
+
+// -- SRV-3 / SRV-5 / SRV-6: session cap + shutdown lifecycle -------------------
+
+/** Set EAGENT_MAX_SESSIONS for the body, restoring the prior value after. */
+async function withMaxSessions(value: string | undefined, body: () => Promise<void>): Promise<void> {
+  const prev = process.env.EAGENT_MAX_SESSIONS;
+  if (value === undefined) delete process.env.EAGENT_MAX_SESSIONS;
+  else process.env.EAGENT_MAX_SESSIONS = value;
+  try {
+    await body();
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MAX_SESSIONS;
+    else process.env.EAGENT_MAX_SESSIONS = prev;
+  }
+}
+
+test("SRV-3: maxSessions() parses EAGENT_MAX_SESSIONS with a safe 1000 default", () => {
+  const prev = process.env.EAGENT_MAX_SESSIONS;
+  try {
+    delete process.env.EAGENT_MAX_SESSIONS;
+    assert.equal(maxSessions(), 1000, "unset → 1000");
+    // Empty / whitespace / non-numeric / negative / non-integer all fall back to
+    // the safe default (never silently disabling the cap or hanging the evict loop).
+    for (const bad of ["", "  ", "abc", "-1", "1.5"]) {
+      process.env.EAGENT_MAX_SESSIONS = bad;
+      assert.equal(maxSessions(), 1000, `${JSON.stringify(bad)} → 1000`);
+    }
+    process.env.EAGENT_MAX_SESSIONS = "42";
+    assert.equal(maxSessions(), 42, "a non-negative integer overrides");
+    process.env.EAGENT_MAX_SESSIONS = "0";
+    assert.equal(maxSessions(), 0, "an explicit 0 → unbounded");
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_MAX_SESSIONS;
+    else process.env.EAGENT_MAX_SESSIONS = prev;
+  }
+});
+
+test("SRV-3: the sessions map is LRU-bounded — the least-recently-used session is evicted", async () => {
+  await withMaxSessions("2", () =>
+    withServer(async (base) => {
+      const run = async (session: string): Promise<void> => {
+        const r = await fetch(`${base}/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ input: "hi", session }),
+        });
+        await r.text();
+      };
+      await run("A");
+      await run("B");
+      await run("A"); // re-touch A → A is now newest, B is the least-recently-used
+      await run("C"); // inserting C exceeds cap=2 → evicts B (the LRU)
+
+      const health = (await (await fetch(`${base}/health`)).json()) as { sessions: number };
+      assert.equal(health.sessions, 2, "the cap holds the map at 2");
+
+      // Identity probe (size alone can't tell LRU from FIFO): DELETE returns 200
+      // for a session that still exists, 404 for one that was evicted.
+      const del = async (id: string): Promise<number> =>
+        (await fetch(`${base}/sessions/${id}`, { method: "DELETE" })).status;
+      assert.equal(await del("B"), 404, "B was the least-recently-used and got evicted");
+      assert.equal(await del("A"), 200, "A was re-touched and survived");
+      assert.equal(await del("C"), 200, "C is the newest and survived");
+    }),
+  );
+});
+
+test("SRV-3: EAGENT_MAX_SESSIONS=0 disables the cap (sessions unbounded)", async () => {
+  await withMaxSessions("0", () =>
+    withServer(async (base) => {
+      for (const session of ["A", "B", "C"]) {
+        const r = await fetch(`${base}/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ input: "hi", session }),
+        });
+        await r.text();
+      }
+      const health = (await (await fetch(`${base}/health`)).json()) as { sessions: number };
+      assert.equal(health.sessions, 3, "cap=0 retains every session");
+      for (const session of ["A", "B", "C"]) {
+        assert.equal((await fetch(`${base}/sessions/${session}`, { method: "DELETE" })).status, 200);
+      }
+    }),
+  );
+});
+
+test("SRV-6: HttpServer.close is idempotent — session_shutdown emits exactly once", async () => {
+  const http = await createHttpServer({ provider: "mock", logger: silentLogger });
+  let shutdowns = 0;
+  http.agent.hooks.on("session_shutdown", () => {
+    shutdowns++;
+  });
+  await http.close();
+  await http.close(); // a second close must be a no-op, not a second dispose
+  assert.equal(shutdowns, 1, "a repeated close() does not re-dispose / re-emit session_shutdown");
 });
