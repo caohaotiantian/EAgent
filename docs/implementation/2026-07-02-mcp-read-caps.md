@@ -170,7 +170,8 @@ cap; within-cap reads succeed; `maxMcpReadBytes()` matches the SRV-4 helper shap
      expose the retained-**byte** count + discard state for T4.)
    - In `StdioTransport`: replace `this.#rl = createInterface({ input: this.#child.stdout! }); this.#rl.on(
      "line", …)` (`:189-190`) with `const reader = createBoundedLineReader(maxMcpReadBytes(), (line) =>
-     this.#onLine(line)); this.#child.stdout!.on("data", (c) => reader.push(c));`. Update `close()`
+     this.#onLine(line)); this.#child.stdout!.on("data", (c: Buffer) => reader.push(c));` (annotate
+     `c: Buffer` — Node types the `data` payload as `any`, and CLAUDE.md forbids `any` cop-outs). Update `close()`
      (`:224-234`) to stop feeding the reader (remove the `#rl.close()`; the child kill + stdout end
      suffice — detach the `data` listener if a handle is retained). Drop the now-unused `createInterface`/
      `Interface` import and the `#rl` field. Keep `#onLine`, `#write`, `#failAll`, `#pending` unchanged.
@@ -199,7 +200,8 @@ test/kernel-surface.test.ts`; no new dependency).
 
 ## 4. Data and Fixture Dependencies
 
-- P1: reuse `test/web.test.ts:11-20` `streamOf`/`bytesOf` (copied into `test/read-capped.test.ts`).
+- P1: `test/web.test.ts:11-20` `streamOf`/`bytesOf` are **moved** into `test/read-capped.test.ts` (and
+  removed from `web.test.ts`, since only the moved readCapped tests use them — see P1 task 2).
 - P2: reuse the in-process `node:http` fixture in `test/mcp-http.test.ts:41-101` (add SSE + oversized-JSON
   branches; the current fixture only replies `application/json`, never SSE).
 - P3: reuse the stdio `FIXTURE_SERVER` template in `test/mcp.test.ts` (~`:100-136`) + the temp-dir
