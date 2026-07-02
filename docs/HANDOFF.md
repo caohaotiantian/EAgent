@@ -138,8 +138,10 @@ All intentional, each with a rationale + alternative in `DEFERRED-FOLLOWUPS.md` 
 
 ### Test-coverage caveats
 Real-backend confinement + real self-improve eval run only in the `sandbox-linux` CI job (every push).
-The 1 suite skip is `self-improve-integration.test.ts`. Live-endpoint smokes (embeddings, OTLP, the
-SRV-4b MCP caps) are un-offline-testable by design.
+The 1 suite skip is `self-improve-integration.test.ts`. Live-endpoint smokes (embeddings, OTLP) are
+un-offline-testable by design. For the SRV-4b MCP read caps, only a live hostile-server smoke is
+un-offline-testable — the cap-enforcement logic itself is offline-tested (`test/mcp.test.ts`,
+`test/mcp-http.test.ts`).
 
 ---
 

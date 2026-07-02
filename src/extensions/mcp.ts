@@ -26,7 +26,6 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { createInterface, type Interface } from "node:readline";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
@@ -156,6 +155,54 @@ export function maxMcpReadBytes(): number {
 }
 
 /**
+ * A byte-bounded, newline-delimited line reader for the stdio transport. It
+ * buffers raw bytes (never a partial-UTF-8 string) and emits each complete
+ * `\n`-terminated line decoded as one whole UTF-8 string — since `0x0A` cannot
+ * occur inside a UTF-8 multibyte sequence, splitting on the byte never bisects a
+ * character, so a multibyte char straddling two chunks is not corrupted. When
+ * the un-terminated residual exceeds `cap` with no newline, the reader drops it
+ * and discards further bytes up to (and including) the next `\n`, so a hostile
+ * no-newline flood cannot grow the retained buffer past `cap`. `buffered()`
+ * exposes the residual byte count and `discarding()` the drop state, for tests.
+ */
+export function createBoundedLineReader(
+  cap: number,
+  onLine: (line: string) => void,
+): { push(chunk: Buffer): void; buffered(): number; discarding(): boolean } {
+  let residual: Buffer = Buffer.alloc(0);
+  let discarding = false;
+  return {
+    push(chunk: Buffer): void {
+      residual = residual.length === 0 ? chunk : Buffer.concat([residual, chunk]);
+      for (;;) {
+        const nl = residual.indexOf(0x0a);
+        if (discarding) {
+          if (nl === -1) {
+            residual = Buffer.alloc(0);
+            return;
+          }
+          residual = residual.subarray(nl + 1);
+          discarding = false;
+          continue;
+        }
+        if (nl === -1) {
+          if (residual.length > cap) {
+            discarding = true;
+            residual = Buffer.alloc(0);
+          }
+          return;
+        }
+        const line = residual.subarray(0, nl);
+        residual = residual.subarray(nl + 1);
+        onLine(line.toString("utf8"));
+      }
+    },
+    buffered: () => residual.length,
+    discarding: () => discarding,
+  };
+}
+
+/**
  * The narrow contract every transport satisfies. The connect/register logic
  * (handshake, tool enumeration, proxying) is written once against this and so is
  * identical whether we are talking to a subprocess or an HTTP endpoint.
@@ -179,7 +226,6 @@ interface Transport {
 class StdioTransport implements Transport {
   readonly #name: string;
   readonly #child: ChildProcess;
-  readonly #rl: Interface;
   readonly #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   #nextId = 1;
   #closed = false;
@@ -196,8 +242,8 @@ class StdioTransport implements Transport {
     // Server logs/diagnostics go to stderr; we deliberately ignore them.
     this.#child.stderr?.resume();
 
-    this.#rl = createInterface({ input: this.#child.stdout! });
-    this.#rl.on("line", (line) => this.#onLine(line));
+    const reader = createBoundedLineReader(maxMcpReadBytes(), (line) => this.#onLine(line));
+    this.#child.stdout!.on("data", (c: Buffer) => reader.push(c));
   }
 
   request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
@@ -234,7 +280,6 @@ class StdioTransport implements Transport {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#rl.close();
     try {
       this.#child.kill();
     } catch {

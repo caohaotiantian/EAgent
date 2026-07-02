@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import activate, { parseResourceList, parseServers, detectSuspiciousDescription } from "../src/extensions/mcp.js";
+import activate, { createBoundedLineReader, parseResourceList, parseServers, detectSuspiciousDescription } from "../src/extensions/mcp.js";
 import { Agent } from "../src/kernel/agent.js";
 import { CapabilityManager } from "../src/kernel/capabilities.js";
 import { CommandRegistry } from "../src/kernel/commands.js";
@@ -96,6 +96,48 @@ test("parseResourceList keeps only non-empty-string uri entries and tolerates ju
   assert.deepEqual(parseResourceList(null), []);
 });
 
+// T4 (AC4) — the exported byte-bounded line reader keeps the retained buffer
+// under the cap during a no-newline flood, engages discard mode, and resyncs on
+// the next newline. The retained-byte-count assertion is the load-bearing
+// discriminator: a "buffer everything, then discard at the newline" reader would
+// let buffered() climb 20→40→…→200 and fail it.
+test("createBoundedLineReader bounds a no-newline flood, discards, and resyncs on the next line", () => {
+  const cap = 16;
+  const lines: string[] = [];
+  const reader = createBoundedLineReader(cap, (line) => lines.push(line));
+
+  // Feed 200 bytes as ten 20-byte no-newline chunks (each chunk alone > cap).
+  for (let i = 0; i < 10; i++) {
+    reader.push(Buffer.from("x".repeat(20)));
+    assert.ok(reader.buffered() <= cap, `buffered() must stay <= ${cap}, got ${reader.buffered()} after chunk ${i}`);
+  }
+  assert.ok(reader.discarding(), "discard mode must engage once the cap is passed with no newline");
+  assert.equal(lines.length, 0, "no complete line yet, so nothing emitted");
+
+  // A lone newline ends the discarded run; the following valid line resyncs.
+  reader.push(Buffer.from("\n"));
+  reader.push(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }) + "\n"));
+  assert.equal(lines.length, 1, "exactly one line emitted after resync");
+  assert.deepEqual(JSON.parse(lines[0]!), { jsonrpc: "2.0", id: 1, result: {} });
+  assert.ok(!reader.discarding(), "discard mode cleared after resync");
+});
+
+// T4 (AC4) — a multibyte char whose UTF-8 bytes straddle two chunks decodes
+// intact, because the reader buffers bytes and decodes only whole lines (0x0A
+// never occurs inside a UTF-8 multibyte sequence).
+test("createBoundedLineReader decodes a multibyte char split across chunks without corruption", () => {
+  const lines: string[] = [];
+  const reader = createBoundedLineReader(1024, (line) => lines.push(line));
+
+  const full = Buffer.from('{"x":"σ"}\n', "utf8"); // σ = 0xCF 0x83 at bytes 6-7
+  reader.push(full.subarray(0, 7)); // ends mid-σ (after its first byte)
+  assert.equal(lines.length, 0, "no newline yet");
+  reader.push(full.subarray(7)); // 0x83 + '"}' + '\n'
+
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]!), { x: "σ" }, "the split multibyte char survives whole-line decode");
+});
+
 const FIXTURE_SERVER = `
 import { createInterface } from "node:readline";
 
@@ -120,7 +162,16 @@ rl.on("line", (line) => {
     send({ jsonrpc: "2.0", id, result: { tools: [ { name: "echo", description: "echo text", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } } ] } });
   } else if (method === "tools/call") {
     const args = (params && params.arguments) || {};
-    send({ jsonrpc: "2.0", id, result: { content: [ { type: "text", text: "echo: " + args.text } ] } });
+    if (args.text === "__flood__") {
+      // A huge no-newline blob (over any sane read cap), THEN a newline to close
+      // that oversized line, THEN the real newline-terminated response. A bounded
+      // reader must drop the oversized line yet still deliver this response.
+      process.stdout.write("F".repeat(70000));
+      process.stdout.write("\\n");
+      send({ jsonrpc: "2.0", id, result: { content: [ { type: "text", text: "echo: flooded" } ] } });
+    } else {
+      send({ jsonrpc: "2.0", id, result: { content: [ { type: "text", text: "echo: " + args.text } ] } });
+    }
   } else if (method === "resources/list") {
     listCalls++;
     const resources = listCalls <= 1
@@ -215,6 +266,36 @@ test("calling the MCP tool returns the server's textual result", async () => {
     assert.ok(!block.isError, "result should not be an error");
   } finally {
     await host.dispose();
+  }
+});
+
+// T5 (AC4) — the bounded reader wired into StdioTransport drops an oversized
+// no-newline line the server emits, without breaking the surrounding round-trip:
+// the real response after the flood still resolves. The cap sits above the
+// handshake line sizes (~130+ bytes) but far below the flood (70 KiB).
+test("an oversized stdio line is dropped and the following response still resolves", async () => {
+  const prevCap = process.env.EAGENT_MAX_MCP_READ_BYTES;
+  process.env.EAGENT_MAX_MCP_READ_BYTES = "1024";
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__fixture__echo", arguments: { text: "__flood__" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  try {
+    await host.use("mcp", activate);
+    await agent.run("please flood");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    assert.ok(toolMsg, "expected a tool-role message in the transcript");
+    const block = toolMsg!.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.match(block.content, /echo: flooded/, "the response after the flood must arrive");
+    assert.ok(!block.isError, "the round-trip survives the dropped oversized line");
+  } finally {
+    await host.dispose();
+    if (prevCap === undefined) delete process.env.EAGENT_MAX_MCP_READ_BYTES;
+    else process.env.EAGENT_MAX_MCP_READ_BYTES = prevCap;
   }
 });
 
