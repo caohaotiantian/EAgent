@@ -171,6 +171,9 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   payload can't overflow the stack past a scannable secret / nest a sensitive path out of reach), and
   `risk-guard`'s classifier sub-call is bounded by a timeout (a hung provider fails open instead of
   blocking the tool gate forever).
+- **Concurrent capability prompts are de-duplicated.** Under a parallel tool wave, two calls needing the
+  same not-yet-granted `ask`-fallback capability now share **one** confirm instead of prompting the human
+  twice (an in-flight memo in the kernel `CapabilityManager`).
 - **Durable journal `/resume` recovers** from a single corrupt/truncated line
   instead of discarding the whole journal; session/journal loads validate each
   entry's shape at the boundary.

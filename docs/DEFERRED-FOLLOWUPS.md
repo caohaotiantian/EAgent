@@ -63,8 +63,11 @@ four already shipped (2026-06-30 cleanup). A subsequent **register-blind product
 
 A 63-agent register-blind audit (6 dimension scanners → adversarial verification) surfaced 13 genuine
 gaps (0 high, 1 medium, 12 low) outside the existing register — the HTTP host was the least
-production-ready surface, plus a handful of guard/kernel/test edges. These are being resolved across
-several three-loop waves; status updated per wave.
+production-ready surface, plus a handful of guard/kernel/test edges. **All 13 are now RESOLVED** across
+six three-loop waves (each fresh-reviewer-gated; RED/mutation-verified). The only partial is SRV-4: the
+shared `parseSSE` reader is capped (protecting all 3 providers); the MCP-transport reads are a documented
+follow-up (**SRV-4b**). KERN-1 was a user-directed BUILD (kernel dedup + comment-golf to hold the < 2200
+ceiling) over the adversarial assessment's close recommendation.
 
 | ID | Gap | Location | Sev | Status |
 |----|-----|----------|-----|--------|
@@ -74,7 +77,7 @@ several three-loop waves; status updated per wave.
 | SRV-4 | External stream inputs read with no size cap (`parseSSE` buffer, provider accumulators, MCP `res.text()`/readline) → OOM/DoS; `readCapped` primitive exists but isn't applied. | `providers/http.ts:29`; `mcp.ts:189,354` | LOW | **RESOLVED (parseSSE)** (Wave 3, `docs/design/2026-07-02-sse-buffer-cap.md`) — the shared `parseSSE` incomplete-event buffer is capped at `EAGENT_MAX_SSE_EVENT_BYTES` (default 16 MiB), protecting all 3 fetch providers. **SRV-4b (deferred):** the MCP transport reads (`res.text()`, stdio readline) — a distinct mechanism, MCP separately gated. |
 | SRV-5 | Error-path exit (`main().catch`) skips `host.dispose()` → `session_shutdown` never fires → orphaned stdio-MCP children. | `cli.ts:442`; `server.ts:453` | LOW | **RESOLVED** (Wave 2) — server + CLI `main()` bodies wrapped to dispose the host on an error exit (symmetric with the signal paths). |
 | SRV-6 | SIGINT/SIGTERM `shutdown` is not idempotent → a second signal re-emits `session_shutdown` to live handlers during the first dispose. | `server.ts:447-448` | LOW | **RESOLVED** (Wave 2) — idempotent `HttpServer.close` + a `shuttingDown` guard on the server `shutdown` and the CLI signal path. |
-| KERN-1 | `CapabilityManager.require()` is an async check-then-act (`has()` … await `confirm` … `set()`) → concurrent tool dispatch double-prompts the human and races the remembered write. (Kernel; 0 headroom.) | `capabilities.ts:95,116-117` | LOW | OPEN |
+| KERN-1 | `CapabilityManager.require()` is an async check-then-act (`has()` … await `confirm` … `set()`) → concurrent tool dispatch double-prompts the human and races the remembered write. (Kernel; 0 headroom.) | `capabilities.ts:95,116-117` | LOW | **RESOLVED** (Wave 5, `docs/design/2026-07-02-capability-prompt-dedup.md`) — an in-flight `#pending` memo makes concurrent callers share ONE confirm (`#remembered` set once in the shared `.then`); comment-golfed to keep the kernel < 2200 (2199→2198). *User-directed BUILD over the assessment's close recommendation.* |
 | GUARD-1 | `secret-guard` (default-ON) arg scanner has **no recursion depth bound** → a deeply-nested payload → RangeError → its fail-open catch skips the scan → secret bypass. `provenance` bounds the identical scan (`MAX_SCAN_DEPTH=8`); secret-guard doesn't. | `secret-guard.ts:81-91,126` | LOW | **RESOLVED** (Wave 4a, `docs/design/2026-07-02-secret-guard-scan-depth.md`) — `walk` bounded at `MAX_SCAN_DEPTH=8`, mirroring provenance. |
 | GUARD-2 | `flow-guard` sensitive-path taint scans only top-level arg values (no recursion) → a path nested in a sub-object isn't tainted; asymmetric with provenance/secret-guard. | `flow-guard.ts:129-138` | LOW | **RESOLVED** (Wave 4b, `docs/design/2026-07-02-flow-guard-path-recursion.md`) — path taint recurses a depth-bounded string-leaf search (nested paths now tainted). |
 | GUARD-3 | `risk-guard` classifier sub-call uses a never-aborted `AbortController` (no timeout) inside a blocking gate → a hung provider stalls the gated call forever. | `risk-guard.ts:149` | LOW | **RESOLVED** (Wave 4c, `docs/design/2026-07-02-risk-guard-classify-timeout.md`) — classifier sub-call now `AbortSignal.timeout` (default 10000, `EAGENT_RISK_GUARD_TIMEOUT_MS`); a hang times out → fail-open. |

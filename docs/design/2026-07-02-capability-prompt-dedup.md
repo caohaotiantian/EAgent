@@ -120,4 +120,15 @@ one prompt; a deny variant; and that a *second* wave after the first settles sho
 
 ## Closure
 
-(filled at F)
+Status: closed
+Closing-commit: 8455381
+Closed-on: 2026-07-02
+Deferred: none (KERN-1 built). Reopen note is moot — the fix shipped.
+
+`require()` now dedups concurrent prompts via an `#pending` in-flight memo; `#remembered` is set once in
+the shared `.then`; per-caller `record`/throw preserved. Comment-golfed **within `capabilities.ts` alone**
+(net -1: verbose `fallback` JSDoc + `AuditEntry`/field comments tightened losslessly, `:1-20` header
+untouched) → kernel 2199→**2198** (< 2200 holds, +1 headroom recovered). User-directed BUILD (over the
+adversarial assessment's close). L1 converged (2-gen zero-severe/zero-general); L2 pass; L3 clean-first-
+round; F whole-project review pass. Gates: capabilities +3 tests, kernel-surface (export-pin + `<2200`)
+pass, `npm test` 1195 pass / 0 fail / 1 skip, typecheck 0, eval 5/5, no new dependency.

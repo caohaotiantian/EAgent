@@ -73,4 +73,7 @@ comments so the kernel stays `< 2200`.
 
 ## Closure
 
-(filled at F)
+Status: closed
+Closing-commit: 8455381
+Closed-on: 2026-07-02
+Deferred: none. See the design doc's closure. L3 closed clean-first-round; F pass; kernel 2198 (< 2200).
