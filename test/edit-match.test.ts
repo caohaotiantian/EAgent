@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { locateEdit } from "../src/extensions/edit-match.js";
+import { locateEdit } from "../src/extensions/lib/edit-match.js";
 
 test("exact precedence: verbatim find wins even when a relaxed variant exists elsewhere", () => {
   // "foo();" occurs once verbatim, and "  foo();" (indented) occurs once too;

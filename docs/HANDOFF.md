@@ -111,16 +111,15 @@ there is very little genuinely-unfinished work. Ranked:
   kill-switch.md:34-36,67-68`). **The one item with real runtime cost.** Decide: make the snapshot async
   (`execFile`/`await`), or ratify sync-git + opt-out as final. Likely a Full three-loop wave (a
   snapshot-ordering/error-handling decision).
-- **② [LOW] Untracked stale docs** — quick fixes: `reasoning-search.ts:9` docstring still says tree/graph
-  search is "deferred" but the file ships `tree_search`/`graph_search` (the only genuinely-stale,
-  untracked *source* docstring); `CLAUDE.md:70` says internal helpers live in `lib/` but
-  `edit-match.ts` sits outside it (reword, or move the file); `codeact.test.ts:121` silently skips the
-  python3 dispatch test when `python3` is absent (an untracked test-coverage caveat).
+- **② [DONE — safe-cleanup pass] Stale docs fixed:** the `reasoning-search.ts` header docstring now
+  states `tree_search`/`graph_search` ship; `edit-match.ts` was **moved into `lib/`** (making
+  `CLAUDE.md:70`'s "helpers in `lib/`" accurate — no CLAUDE.md edit needed); the register drift was fixed
+  (SRV-4 cap ref → `http.ts:16-21`, RW3-3 "4"→"5"); and the env-conditional `codeact.test.ts:121`
+  python3-skip is now recorded as a known test-coverage caveat in `DEFERRED-FOLLOWUPS.md`.
 - **③ [LOW] SRV-4b — MCP transport reads uncapped** (`mcp.ts:354` `await res.text()`; `mcp.ts:189`
   uncapped stdio readline). A hostile MCP server could OOM the host. `readCapped` exists (`web.ts:62`)
-  but isn't wired into `mcp.ts`. Tracked (`DEFERRED-FOLLOWUPS.md`, "SRV-4b"). Register drift to fix: that
-  row cites `http.ts:29` but the cap lives at `http.ts:16-21`; and the RW3-3 row says "4 sites" where
-  it's 5.
+  but isn't wired into `mcp.ts`. Tracked (`DEFERRED-FOLLOWUPS.md`, "SRV-4b"). **Still open** — a distinct
+  mechanism (readCapped relocation / byte-counting readline).
 
 ### Tracked deferrals & by-design cuts (the honest "what's not there")
 All intentional, each with a rationale + alternative in `DEFERRED-FOLLOWUPS.md` / a design-doc closure:
@@ -148,9 +147,7 @@ SRV-4b MCP caps) are un-offline-testable by design.
 
 1. **If asked to keep hardening:** pick up **① async checkpoint git** (real value) then **③ SRV-4b**
    (MCP read caps — reuse `readCapped`). Both through the three-loop.
-2. **Quick doc hygiene** (low-risk, ~one commit): fix the `reasoning-search.ts:9` docstring, the
-   `CLAUDE.md:70` helper-location line, the `DEFERRED-FOLLOWUPS.md` register drift, and record the
-   untracked `codeact`-python-skip caveat.
+2. **Quick doc hygiene** — DONE in the 2026-07-02 safe-cleanup pass (see item ② above). Nothing left here.
 3. **If asked for new capability:** it is almost certainly an **extension** (see `docs/EXTENSIONS.md`),
    not a kernel change — the kernel has ~1 line of slack, and adding to it requires golfing or an
    explicit user decision (as KERN-1 was).
