@@ -32,6 +32,7 @@ import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { JSONSchema } from "../kernel/types.js";
 import { getTraceparent, isTrustedHost, propagateAllowlist } from "./lib/otel-context.js";
+import { readCapped } from "./lib/read-capped.js";
 
 /** A stdio server entry as found in `EAGENT_MCP_SERVERS`. */
 interface StdioServerDef {
@@ -144,6 +145,15 @@ export function detectSuspiciousDescription(text: string): string[] {
  * not block activation or an agent turn indefinitely.
  */
 const HTTP_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * OOM-safety cap on a single MCP transport read (`EAGENT_MAX_MCP_READ_BYTES`,
+ * default 16 MiB — far above any legitimate MCP response/line; invalid/≤0 → default).
+ */
+export function maxMcpReadBytes(): number {
+  const n = Number(process.env.EAGENT_MAX_MCP_READ_BYTES);
+  return Number.isInteger(n) && n > 0 ? n : 16 * 1024 * 1024;
+}
 
 /**
  * The narrow contract every transport satisfies. The connect/register logic
@@ -350,12 +360,22 @@ class HttpTransport implements Transport {
     id: number,
   ): Promise<{ id?: unknown; result?: unknown; error?: { message?: string } }> {
     const contentType = res.headers.get("content-type") ?? "";
-    if (contentType.includes("text/event-stream")) {
-      const text = await res.text();
-      return this.#parseSse(text, id);
+    const isSse = contentType.includes("text/event-stream");
+    // No stream to cap (some runtimes may not expose `.body`): fall back to the
+    // uncapped per-branch reads (mirrors web.ts's null-body fallback).
+    if (!res.body) {
+      if (isSse) return this.#parseSse(await res.text(), id);
+      return (await res.json()) as { id?: unknown; result?: unknown; error?: { message?: string } };
     }
+    // Bound the read so a hostile/broken server cannot OOM the host, then throw a
+    // clear error on overflow (D4) — a truncated JSON/SSE slice is unparseable.
+    const { text, truncated } = await readCapped(res.body, maxMcpReadBytes());
+    if (truncated) {
+      throw new Error(`MCP HTTP response from "${this.#name}" exceeded ${maxMcpReadBytes()} bytes`);
+    }
+    if (isSse) return this.#parseSse(text, id);
     // Default to JSON: one JSON-RPC response object in the body.
-    return (await res.json()) as { id?: unknown; result?: unknown; error?: { message?: string } };
+    return JSON.parse(text) as { id?: unknown; result?: unknown; error?: { message?: string } };
   }
 
   /** Pull the JSON-RPC response matching `id` out of an SSE stream body. */
