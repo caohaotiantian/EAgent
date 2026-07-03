@@ -1,8 +1,8 @@
 /**
- * Dynamic workflow extension: a `run_workflow` tool that executes a model-emitted
+ * Dynamic workflow extension: a `workflow` tool that executes a model-emitted
  * dependency DAG of tool/agent steps. All offline via MockProvider.
  *
- * The AC-* labels map to docs/design/2026-06-20-dynamic-workflow.md §7.
+ * The AC-* labels are the extension's acceptance criteria.
  */
 
 import assert from "node:assert/strict";

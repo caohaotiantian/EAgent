@@ -76,7 +76,6 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   once a sensitive source (`shell:exec`) has run this session — `ask` by default,
   `block`-able, tunable via `/flow-guard` or `EAGENT_FLOW_GUARD=off`. A new
   security best practice absorbed as a hot-reloadable extension, no core change.
-  (Motivated by the 2026-06-16 design research; see `docs/RESEARCH-agent-kernel-design.md`.)
   It also enforces **data confinement** with transcript-level **information-flow
   taint**: a tool result that reads a sensitive path (`.env`, `id_rsa`, `.pem`,
   `.ssh/`, `.aws/`, `credentials`, `secret`) or returns credential-looking content

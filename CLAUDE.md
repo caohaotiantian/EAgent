@@ -158,9 +158,9 @@ add an offline test. See `docs/EXTENSIONS.md` for the full author's guide.
   skill (design → implementation → dev/review/accept → end-to-end review),
   fresh-reviewer-gated at each stage. Accumulate a batch on a `chore/<slug>`
   branch and PR to `init` (the trunk).
-- **Status.** `docs/HANDOFF.md` is the session-orientation + status doc; the
-  authoritative "what's built vs. deferred-by-design" record is the Closure ledger
-  + audit-gaps table atop `docs/DEFERRED-FOLLOWUPS.md`. `docs/ROADMAP.md` is the
-  per-wave history. When these disagree with the code, the code wins.
+- **Status & history.** Git history and `CHANGELOG.md` are the record of what
+  changed and why. The current authoritative surface is the code itself — the
+  extension table in `README.md` and `BUILTIN_EXTENSIONS` in `src/host.ts`. When a
+  doc disagrees with the code, the code wins.
 - **macOS gotcha.** `grep` silently skips source files containing non-ASCII glyphs
   (`→`/`σ`/`≥`); use `grep -a` or the Read tool for audits.
