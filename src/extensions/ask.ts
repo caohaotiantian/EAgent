@@ -82,7 +82,7 @@ export default function activate(e: ExtensionAPI): () => void {
           ? args.options.filter((o): o is string => typeof o === "string")
           : undefined;
 
-        // D6 / D5: when the host can elicit, await the human's answer; when it
+        // When the host can elicit, await the human's answer; when it
         // cannot — or when the answer is null/empty — take the absence-fallback.
         if (typeof ctx.ui.ask === "function") {
           const answer = await ctx.ui.ask(question, options);

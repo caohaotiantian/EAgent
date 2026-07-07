@@ -22,7 +22,7 @@
  * its `mission` is not angle-bracket-validated, but its `members` must resolve to
  * known templates and its `pattern` must be a playbook key.
  *
- * Bounds (Decision 4.8): the recursion guard strips every tool whose declared
+ * Bounds: the recursion guard strips every tool whose declared
  * capabilities intersect `SPAWN_CAPS` ({agent:spawn, workflow:run}) from BOTH the
  * member (`memberChildRegistry`) and the lead (`excludeCapabilities: SPAWN_CAPS`),
  * so neither can reach a nested-team / workflow tool — the worst case stays finite
@@ -104,7 +104,7 @@ Selection heuristic: start with orchestrator; if subtasks are independent and sp
 /** The spawn-class capability set; a member tool intersecting it is the recursion-guard escape. */
 export const SPAWN_CAPS = ["agent:spawn", "workflow:run"] as const;
 
-/** The roster member-count cap (Decision 4.8). */
+/** The roster member-count cap. */
 export const MAX_MEMBERS = 16;
 /** The lead agent's `maxTurns` cap. */
 export const LEAD_MAX_TURNS = 16;
@@ -587,7 +587,7 @@ export default function activate(e: ExtensionAPI): void {
     // helper wires `resolved.systemPrompt` into the child). `excludeCapabilities:
     // SPAWN_CAPS` strips every inherited spawn-class tool (`run_team`,
     // `run_workflow`, `spawn_*`, …) so a lead turn cannot spawn a nested team or
-    // workflow — the recursion guard that keeps §4.8's worst case finite ("no
+    // workflow — the recursion guard that keeps the worst case finite ("no
     // grandchildren"). `delegate`/`board` are then re-added via `extraTools`
     // AFTER the exclude filter, so the lead keeps exactly those two primitives.
     const leadTemplate: ResolvedTemplate = { ...rt.lead, systemPrompt: buildLeadPrompt(rt, task) };

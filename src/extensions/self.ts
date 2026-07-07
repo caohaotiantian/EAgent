@@ -98,6 +98,7 @@ export default function activate(e: ExtensionAPI): void {
       name: "list_extensions",
       description:
         "List the extension source files present in the project extensions directory, plus a count of currently registered tools and commands.",
+      capabilities: ["self:read"],
       execute: () => {
         const dir = extensionsDir(e);
         const files = listSourceFiles(dir);

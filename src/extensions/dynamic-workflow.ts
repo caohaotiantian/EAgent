@@ -423,7 +423,7 @@ async function runToolStep(
  * tool calls made inside a workflow — the workflow does not bypass policy.
  *
  * It intentionally reproduces the kernel's order; if the kernel's guard changes,
- * this mirror must be updated to match (AC-7 asserts the beforeToolCall path is
+ * this mirror must be updated to match (a test asserts the beforeToolCall path is
  * live, so a drift surfaces as a failing test).
  */
 async function guardedInvoke(tool: Tool, call: ToolCallBlock, ctx: ToolContext, e: ExtensionAPI): Promise<ToolResult> {
@@ -473,7 +473,7 @@ async function guardedBody(tool: Tool, call: ToolCallBlock, ctx: ToolContext, e:
 async function runAgentStep(step: WorkflowStep, outputs: Record<string, string>, e: ExtensionAPI): Promise<StepResult> {
   const prompt = substitute(step.prompt ?? "", outputs);
 
-  // Resolve the three least-privilege passthroughs once (D6 parity); omitting all
+  // Resolve the three least-privilege passthroughs once; omitting all
   // of them — or the kill switch being off — reproduces today's exact construction
   // (parent manager, parent provider/model, free-text return).
   const parent = {

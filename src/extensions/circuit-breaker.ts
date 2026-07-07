@@ -84,7 +84,7 @@ export default function activate(e: ExtensionAPI): () => void {
    * Per-run signature buckets, keyed by the ACTING agent (`WeakMap<Agent,…>`) so
    * concurrent parent + child forks don't share a bucket. In-memory; the parent's
    * entry is reset on `agent_start` (a child's is suppressed, so it lazily inits
-   * on its first call) and self-evicts on GC. (W9.1.)
+   * on its first call) and self-evicts on GC.
    */
   const buckets = new WeakMap<Agent, Map<string, Bucket>>();
 
@@ -126,7 +126,7 @@ export default function activate(e: ExtensionAPI): () => void {
       if (!enabled || decision.block) return decision;
 
       // Steer/track the ACTING agent (the running child under a shared bus), not
-      // the parent bound at activation. (W9.1.)
+      // the parent bound at activation.
       const agent = currentActingAgent() ?? e.agent;
       // Key on the RAW model arguments (`ctx.call.arguments`), exactly as
       // `afterToolCall` does, so both hooks address the same bucket. Keying on
@@ -140,7 +140,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // Failure trip first (so its framing wins when both branches apply): once
       // this signature has failed `threshold` times in a row, halt the next
       // attempt with a failure-framed reason — distinct from the identical-args
-      // reason so AC-2 and AC-4 assert different text. The streak is maintained
+      // reason. The streak is maintained
       // by `afterToolCall` and reset on a success of this signature.
       if (b.consecutiveFailures >= threshold) {
         const reason = `circuit-breaker: ${ctx.call.name} failed ${b.consecutiveFailures}x — halting the retry loop`;

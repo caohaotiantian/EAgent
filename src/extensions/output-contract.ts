@@ -26,7 +26,7 @@
  * `EAGENT_OUTPUT_CONTRACT=off` kill switch. No capability (recording a value the
  * run already produced is not a side effect; mirrors `recovery`).
  *
- * Decode-time forcing (the delivered follow-up, design §9): on the SAME
+ * Decode-time forcing (the delivered follow-up): on the SAME
  * corrective-turn path where it steers a reask, it also sets the public mutable
  * `e.agent.forceTool = "respond"` so the kernel maps it to
  * `CompletionRequest.toolChoice` and the provider COMPELS a `respond` call on
@@ -99,7 +99,7 @@ export default function activate(e: ExtensionAPI): () => void {
   if (!e.config.enabled("output-contract", { default: true })) return () => {};
 
   // Per-run state, keyed by the ACTING agent so a child that trips the shared
-  // reask never corrupts the parent's attempt count / registration. (W9.1.)
+  // reask never corrupts the parent's attempt count / registration.
   const attempts = new WeakMap<Agent, number>();
   const respondReg = new WeakMap<Agent, { dispose(): void }>();
 
@@ -166,7 +166,7 @@ export default function activate(e: ExtensionAPI): () => void {
   const onAfter = e.hook("afterToolCall", (result, { call }) => {
     if (call.name !== "respond") return result;
     // Read/write the ACTING agent: a child that trips the shared reask is steered
-    // and finalized on itself, never on the parent. (W9.1.)
+    // and finalized on itself, never on the parent.
     const agent = currentActingAgent() ?? e.agent;
     if (!agent.outputSchema) return result;
     if (!result.isError || !result.content.startsWith(INVALID_RESPOND_PREFIX)) return result;

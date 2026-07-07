@@ -60,6 +60,24 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable
       throw new Error(`parseSSE: an SSE event exceeded ${maxEvent} bytes with no terminator`);
     }
   }
+  // Stream ended: flush the decoder and emit a final event that arrived without a
+  // trailing blank line (a proxy closing early would otherwise drop the last
+  // token). Only emit when a `data:` line is present, so a clean close (empty
+  // buffer) or a stray fragment yields nothing.
+  buffer += decoder.decode();
+  const tail = buffer.trim();
+  if (tail) {
+    const dataLines: string[] = [];
+    const msg: SSEMessage = { data: "" };
+    for (const line of tail.split(/\r?\n/)) {
+      if (line.startsWith("event:")) msg.event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (dataLines.length > 0) {
+      msg.data = dataLines.join("\n");
+      yield msg;
+    }
+  }
 }
 
 export interface RetryRequest {
@@ -101,6 +119,9 @@ export async function fetchWithRetry(req: RetryRequest): Promise<Response> {
     if (!retryable || attempt >= req.maxRetries) {
       throw new Error(req.describe(res.status, await safeText(res)));
     }
+    // Drain the retryable response body before looping: an unconsumed body pins
+    // the underlying socket (undici) until GC, leaking a connection per retry.
+    await res.body?.cancel().catch(() => {});
     await backoff(attempt++, res.headers.get("retry-after"), req.signal);
   }
 }

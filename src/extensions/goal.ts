@@ -40,7 +40,7 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, StopReason } from "../kernel/types.js";
 import { text } from "../kernel/types.js";
 
-// -- lexical-coverage constants (Design §7) ---------------------------------
+// -- lexical-coverage constants ---------------------------------------------
 
 /**
  * A criterion is flagged "unaddressed" when its significant-token coverage in
@@ -196,7 +196,7 @@ export function renderPin(objective: string, criteria: readonly string[]): strin
   return parts.join("\n\n");
 }
 
-// -- model-judge parsing (Design §7) ----------------------------------------
+// -- model-judge parsing ----------------------------------------------------
 
 /** A verdict per criterion as returned by the optional model judge. */
 export type Verdict = "MET" | "UNMET";

@@ -1,6 +1,6 @@
 /**
- * otel-context — the publish/consume channel for W3C trace-context propagation
- * (RW7c-2). `otel-exporter` PUBLISHES the current tool-call span as a `traceparent`
+ * otel-context — the publish/consume channel for W3C trace-context propagation.
+ * `otel-exporter` PUBLISHES the current tool-call span as a `traceparent`
  * keyed by the kernel `toolCallId`; `web` and `mcp` CONSUME it and inject the header
  * on outbound tool HTTP, so a downstream instrumented service becomes a child span
  * of the tool call.

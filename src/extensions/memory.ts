@@ -51,7 +51,7 @@ interface Entry {
   source: string;
   ts: string;
   prevText?: string;
-  /** RW7b-3: recall count while in the archive tier; dropped on promotion to core. */
+  /** Recall count while in the archive tier; dropped on promotion to core. */
   recalls?: number;
 }
 
@@ -69,8 +69,8 @@ function entriesDisabled(config: Config): boolean {
 }
 
 /**
- * Read the entry stored at `note:<key>`, tolerating both shapes (Decision D4,
- * lazy coexistence): a bare string is wrapped as a `legacy`-sourced entry with
+ * Read the entry stored at `note:<key>`, tolerating both shapes (lazy
+ * coexistence): a bare string is wrapped as a `legacy`-sourced entry with
  * no `prevText`; an object is returned as-is. Returns `undefined` for a missing
  * key. No startup migration — the wrap happens only on read.
  */
@@ -221,7 +221,7 @@ function lexicalRank(store: Store, query: string, topK: number): Match[] {
 }
 
 /**
- * Rank both tiers for `query`, then (RW7b-3) auto-promote any archived note that
+ * Rank both tiers for `query`, then auto-promote any archived note that
  * has now been recalled `EAGENT_MEMORY_PROMOTE_AT` times back to core. The ranking
  * itself is a pure read (`rankTiers`); the promotion is the recall path's only
  * write, gated off by default (`EAGENT_MEMORY_PROMOTE_AT` unset/0 ⇒ no-op).
@@ -327,7 +327,7 @@ function findById(store: Store, id: string): { key: string; entry: Entry } | und
   return undefined;
 }
 
-/** Normalize text for `consolidate`'s exact-duplicate grouping (D5). */
+/** Normalize text for `consolidate`'s exact-duplicate grouping. */
 function normalize(t: string): string {
   return t.trim().toLowerCase();
 }
@@ -401,7 +401,7 @@ async function runScratchpad(
         print(`no note with id "${id}".`);
         return;
       }
-      // Bounded to one step (D3): restore prevText into text and CONSUME it, so
+      // Bounded to one step: restore prevText into text and CONSUME it, so
       // a second consecutive rollback has nothing before prevText and is a
       // no-op. Absent prevText is also a no-op (nothing to undo).
       if (hit.entry.prevText === undefined) {
@@ -419,7 +419,7 @@ async function runScratchpad(
       return;
     }
     case "consolidate": {
-      // Opt-in exact-text dedupe (D5): group keys by normalized text, then keep
+      // Opt-in exact-text dedupe: group keys by normalized text, then keep
       // the LOWEST-`ts` entry per group (the genuinely earliest copy; legacy
       // `ts:""` first) and drop the rest. `ts` is last-write time, so an overwrite
       // can bump it without changing key-iteration order — hence survivor-by-`ts`
@@ -610,7 +610,7 @@ export default function activate(e: ExtensionAPI): () => void {
           return { content: `Remembered "${key}".` };
         }
         // Overwrite is reversible one step: the current text (if any) becomes
-        // prevText; the older prior is discarded (Decision D3). A first write
+        // prevText; the older prior is discarded. A first write
         // reuses any existing id so list/edit/forget/rollback stay stable.
         const existing = readEntry(e.store, key);
         const entry: Entry = {
@@ -661,7 +661,7 @@ export default function activate(e: ExtensionAPI): () => void {
             ? { content: `No notes match "${query}".`, details: [] }
             : { content: top.map(renderMatch).join("\n"), details: top };
         }
-        // No-key list keeps its `{ key → text }` contract (D4): unwrap `.text`
+        // No-key list keeps its `{ key → text }` contract: unwrap `.text`
         // from entries, pass legacy bare strings through, never serialize an
         // Entry object.
         const all: Record<string, string> = {};

@@ -33,11 +33,11 @@ import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { text, type Message } from "../kernel/types.js";
 
-/** Estimated-token budget above which the older prefix is folded. (§4 D4.) */
+/** Estimated-token budget above which the older prefix is folded. */
 const DEFAULT_BUDGET = 60_000;
-/** Protect the last K user turns verbatim. (§4 D4.) */
+/** Protect the last K user turns verbatim. */
 const DEFAULT_KEEP_TURNS = 3;
-/** Byte cap on the always-surviving pinned block. (§4 D6, R4.) */
+/** Byte cap on the always-surviving pinned block. */
 export const PIN_MAX_BYTES = 2_000;
 /** Store-key prefix for pinned notes (mirrors memory's `NOTE_PREFIX`). */
 const PIN_PREFIX = "pin:";
@@ -46,7 +46,7 @@ const PIN_PREFIX = "pin:";
  * The fixed instruction for the summarization sub-call. It must (a) contain the
  * word "summar" so an offline test responder can branch on it, (b) ask for
  * exactly the three structured sections, and (c) instruct merge/preserve of any
- * prior such sections in the input (the D8 carry-forward).
+ * prior such sections in the input (the carry-forward).
  */
 const COMPACT_SYSTEM_PROMPT =
   "You are a conversation summarizer for a long-running agent. Summarize the " +
@@ -68,7 +68,7 @@ function est(s: string): number {
  * deliberate divergence from `prune` (which sums only `tool_result` content,
  * `prune.ts:64-69`): `compact` is a *conversation*-size gate, so it must also
  * count dialogue text — else a text-heavy conversation under-counts and never
- * fires. (§4 D1.)
+ * fires.
  */
 export function tokenEstimate(messages: Message[]): number {
   let total = 0;
@@ -90,7 +90,7 @@ export function tokenEstimate(messages: Message[]): number {
  * a user-turn boundary — so an in-flight `tool_call`/`tool_result` pair (which
  * follows a user turn) is never severed. Returns `0` (no fold) when there are
  * fewer than `keepTurns` user turns or no foldable boundary older than the recent
- * window (the one-giant-turn case). (§4 D1/D4, R3, AC-4.)
+ * window (the one-giant-turn case).
  *
  * `budget` is accepted for signature symmetry with the design contract; the
  * decision to split *at all* is the hook's budget gate, so this function only
@@ -124,7 +124,7 @@ function textOf(message: Message): string {
 /**
  * A deterministic, provider-free digest of the older slice, used when no
  * provider is available or it returns nothing. Non-empty by construction, so the
- * prefix is never silently dropped. (Mirrors `memory.ts:252-268`.) (§4 D5, AC-12.)
+ * prefix is never silently dropped. (Mirrors `memory.ts:252-268`.)
  */
 function renderFallback(older: Message[]): string {
   const lines = older.map((m) => {
@@ -178,7 +178,7 @@ export default function activate(e: ExtensionAPI): () => void {
    * runs outside the agent loop, so this completion cannot emit a tool call and
    * re-enter `transformContext`. Fails OPEN: no provider / a throw / an empty
    * reply degrades to a deterministic digest. (Mirrors `risk-guard.ts:95-121`,
-   * `memory.ts:78-93`.) (§4 D5, AC-11/AC-12.)
+   * `memory.ts:78-93`.)
    */
   async function summarize(older: Message[]): Promise<string> {
     try {
@@ -211,7 +211,7 @@ export default function activate(e: ExtensionAPI): () => void {
   /**
    * The always-surviving pinned block: every `pin:`-prefixed store entry,
    * rendered and byte-capped to `PIN_MAX_BYTES` so it can never itself blow the
-   * budget it protects. Returns `""` when there are no pins. (§4 D6, R4, AC-5.)
+   * budget it protects. Returns `""` when there are no pins.
    */
   function pinnedBlock(): string {
     const keys = pinKeys();
@@ -241,17 +241,17 @@ export default function activate(e: ExtensionAPI): () => void {
   // -- the compaction seam --------------------------------------------------
 
   const offHook = e.hook("transformContext", async (messages) => {
-    if (summarizing) return messages; // re-entrancy guard (AC-11)
+    if (summarizing) return messages; // re-entrancy guard
     const { enabled, budget, keepTurns } = cfg();
-    if (!enabled) return messages; // off by default / kill switch (AC-8/AC-9)
-    if (tokenEstimate(messages) <= budget) return messages; // under budget (AC-1)
+    if (!enabled) return messages; // off by default / kill switch
+    if (tokenEstimate(messages) <= budget) return messages; // under budget
 
     const idx = splitIndex(messages, budget, keepTurns);
-    if (idx <= 0) return messages; // no foldable boundary (§5)
+    if (idx <= 0) return messages; // no foldable boundary
 
     // We split on (not exclude) any prior summary marker, so if a summary ever
     // sits at the head of `older` it flows into the sub-call and the merge prompt
-    // (D2) preserves its slots (D8 carry-forward). In the live agent loop this is
+    // preserves its slots (carry-forward). In the live agent loop this is
     // a defensive belt-and-suspenders: `transformContext` runs over a fresh
     // `[...this.#messages]` copy each turn and the folded result is never written
     // back (agent.ts:247-251), so the hook re-receives the RAW older messages and
@@ -268,7 +268,7 @@ export default function activate(e: ExtensionAPI): () => void {
     }
 
     // A NEW array; the persistent transcript is untouched. The pinned block sits
-    // after the summary, immediately before the recent window (AC-5).
+    // after the summary, immediately before the recent window.
     return [summaryMessage(summaryText), ...pinnedMessages(), ...recent];
   });
 

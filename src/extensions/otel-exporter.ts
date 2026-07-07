@@ -59,7 +59,7 @@ interface OtlpLogRecord {
 export default function activate(e: ExtensionAPI): () => void {
   // Per-agent trace state so concurrent forks don't collide on a shared
   // `openSpans["1"]` or traceId. Keyed by the ACTING agent; lazily created on the
-  // first intra-run event, since children never fire agent_start. (W9.1.)
+  // first intra-run event, since children never fire agent_start.
   interface RunTrace {
     traceId: string;
     rootSpanId: string;
@@ -277,7 +277,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // Flush all three signals; each exports only when ITS endpoint resolves AND it
   // has data. Returns a promise that resolves when every started POST settles, so
-  // session_shutdown can await the last in-flight batch (RW9-1). The intra-run
+  // session_shutdown can await the last in-flight batch. The intra-run
   // agent_end caller leaves it unawaited (fire-and-forget).
   const flush = (): Promise<void> => {
     if (!notSuppressed()) return Promise.resolve();
@@ -360,7 +360,7 @@ export default function activate(e: ExtensionAPI): () => void {
         startTimeUnixNano: nanos(),
         attributes: [attr("gen_ai.tool.name", call.name)],
       });
-      // RW7c-2: publish this tool-call span as a traceparent for web/mcp to
+      // Publish this tool-call span as a traceparent for web/mcp to
       // propagate onto outbound tool HTTP (consumed only for allowlisted hosts).
       setTraceparent(call.id, traceparent(t.traceId, spanId));
     }),
@@ -369,7 +369,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // Metric accumulation runs above the trace guard: a metrics-only run never
       // creates a RunTrace, but its tool calls must still be counted.
       if (anyEnabled()) toolCalls[result.isError ? "error" : "ok"]++;
-      clearTraceparent(call.id); // RW7c-2: drop the published traceparent (paired with tool_start)
+      clearTraceparent(call.id); // drop the published traceparent (paired with tool_start)
       if (!enabled()) return;
       const t = traces.get(currentActingAgent() ?? e.agent);
       if (!t) return;

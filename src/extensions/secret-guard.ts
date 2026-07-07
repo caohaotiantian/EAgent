@@ -14,7 +14,7 @@
  * secret-guard fills that prevention seam: a `beforeToolCall` filter that scans
  * the about-to-run arguments for secret-looking *values* and, for a tool whose
  * capability could *leak* the value (the egress/exec set — default `net:fetch`,
- * `shell:exec`), HOLDS the call — asking the human in `ask` mode (default) or
+ * `shell:exec`, `mcp:call`), HOLDS the call — asking the human in `ask` mode (default) or
  * refusing in `block` mode — WITHOUT ever echoing the matched value. The single
  * most important property: only the matched *kind* label ever appears in a
  * reason, prompt, or log line; the secret value never does.
@@ -35,9 +35,9 @@ type Mode = "ask" | "block";
  * guards agree on "what a secret looks like": flow-guard taints when one of these
  * appears in a *result*, secret-guard holds when the *same shape* appears in an
  * *argument*. Copied (not imported from flow-guard's non-exported `const`) to
- * keep the two guards decoupled — no load-order or circular-import coupling — per
- * design D1; this comment marks the single-source-of-truth intent for the eventual
- * extract-to-shared-module refactor. No entropy gate (design D4): the patterns are
+ * keep the two guards decoupled — no load-order or circular-import coupling —
+ * this comment marks the single-source-of-truth intent for the eventual
+ * extract-to-shared-module refactor. No entropy gate: the patterns are
  * structurally anchored, so the false-positive rate is near zero, and the table is
  * shaped so an entropy gate is a one-entry addition later.
  */
@@ -59,8 +59,7 @@ const MAX_SCAN_DEPTH = 8;
  * Scan a single string for known credential shapes, returning the de-duplicated
  * list of KIND labels that matched. Pure. Returns `[]` for a non-string or no
  * match. By contract it NEVER returns the matched substring — only kind labels —
- * so a reason can name *what* matched without leaking *the value* (design §2, §8,
- * AC-3).
+ * so a reason can name *what* matched without leaking *the value*.
  */
 export function scanSecrets(value: string): string[] {
   if (typeof value !== "string") return [];
@@ -74,7 +73,7 @@ export function scanSecrets(value: string): string[] {
 /**
  * Walk argument *values* recursively — descending arrays and plain objects — and
  * return the de-duplicated union of secret kinds found in any nested string.
- * Numbers/booleans/null/undefined are ignored. Pure (AC-11). Typed over `unknown`
+ * Numbers/booleans/null/undefined are ignored. Pure. Typed over `unknown`
  * to stay `noUncheckedIndexedAccess`-safe with no index assumptions.
  */
 export function scanArgs(args: Record<string, unknown>): string[] {
@@ -104,7 +103,7 @@ export function scanArgs(args: Record<string, unknown>): string[] {
 
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
-    // On by default (design D5 — unlike risk-guard), killable via the env var.
+    // On by default (unlike risk-guard), killable via the env var.
     enabled: e.config.enabled("secret-guard", { default: true, store: e.store }),
     mode: (e.store.get<Mode>("mode", "ask") ?? "ask") as Mode,
     leakCaps: e.store.get<string[]>("leakCaps", DEFAULT_LEAK_CAPS) ?? DEFAULT_LEAK_CAPS,
@@ -116,15 +115,15 @@ export default function activate(e: ExtensionAPI): () => void {
   const offHook = e.hook("beforeToolCall", async (decision, ctx) => {
     try {
       const { enabled, mode, leakCaps } = cfg();
-      // Passthrough when off; never un-block an already-blocked decision (§8).
+      // Passthrough when off; never un-block an already-blocked decision.
       if (!enabled || decision.block) return decision;
-      // Out-of-scope (non-leak-capable) tools pass with no scan, no confirm (D2, AC-4).
+      // Out-of-scope (non-leak-capable) tools pass with no scan, no confirm.
       if (!capsOf(ctx.call.name).some((c) => leakCaps.includes(c))) return decision;
 
       const kinds = scanArgs(ctx.call.arguments);
-      if (kinds.length === 0) return decision; // no secret → no prompt, no block (AC-7)
+      if (kinds.length === 0) return decision; // no secret → no prompt, no block
 
-      // Reason built from KIND labels only — never the value (§8, AC-3/AC-5).
+      // Reason built from KIND labels only — never the value.
       const why = `secret-guard: a ${kinds.join(", ")} value is about to be sent via ${ctx.call.name}`;
       if (mode === "block") return { ...decision, block: true, reason: why };
 

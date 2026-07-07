@@ -26,12 +26,12 @@
 
 import { stripInvisible } from "../content-guard.js";
 
-/** Decode depth bound (D4): at most two layers, so a double-wrap is reached but a decode bomb is not. */
+/** Decode depth bound: at most two layers, so a double-wrap is reached but a decode bomb is not. */
 export const DECODE_DEPTH = 2;
 
 /**
  * Known shell command families used to gate the always-total rot13 decoder
- * (D7 conjunct-2, reversible-alphabet tier). A rot13 decode is surfaced only when
+ * (conjunct-2, reversible-alphabet tier). A rot13 decode is surfaced only when
  * its first token is one of these — `rot13("ls -la")` first token `yf` is not
  * known (dropped), `rot13("ez -es /")` first token `rm` is known (surfaced).
  */
@@ -128,11 +128,11 @@ type Candidate =
   | { kind: "alpha"; text: string };
 
 /**
- * The single D7 emit gate, applied to every produced candidate. Conjunct 1
+ * The single emit gate, applied to every produced candidate. Conjunct 1
  * (valid-UTF-8 / round-trip) does the work for byte-decoders; conjunct 2
  * (command-plausibility, strengthened to a known command family for the
  * reversible rot13 permutation) does the work for the always-total alphabet
- * decoder. Kept in ONE place (D7 rejects pushing it into each decoder).
+ * decoder. Kept in ONE place rather than pushed into each decoder.
  */
 function passesGate(c: Candidate, raw: string): boolean {
   if (c.text === raw || c.text.trim() === "") return false;
@@ -151,7 +151,7 @@ function passesGate(c: Candidate, raw: string): boolean {
  * a coverage guarantee — short base64 runs (e.g. `c2ggLWM=`, the 7-char encoding
  * of `sh -c`) are intentionally skipped so ordinary 1-2 char tokens that happen
  * to be valid base64 do not flood the candidate set; a `>=8`-char run carrying
- * the same idiom IS surfaced. Consistent with the focused-coverage design (D2):
+ * the same idiom IS surfaced. Consistent with the focused-coverage design:
  * the gate decides what is *emitted*; this bound only tunes what is *scanned*.
  */
 const BASE64_TOKEN = /[A-Za-z0-9+/]{8,}={0,2}/g;
@@ -202,7 +202,7 @@ function decodeLayer(text: string): Candidate[] {
 
 /**
  * Decode/normalize `text` into the set of decoded inspection candidates. Strips
- * invisible-injection Unicode first (D1), then applies every decoder + idiom
+ * invisible-injection Unicode first, then applies every decoder + idiom
  * matcher up to `DECODE_DEPTH` layers — re-feeding the *raw decoded bytes* of each
  * decode for one more layer (the gate decides what to *emit*, not what to recurse
  * on, so a `=`-padded intermediate still gets traversed). Returns the gated,

@@ -25,7 +25,7 @@
  * summarization fails OPEN: no provider / a throw / an empty reply degrades to a
  * deterministic provider-free digest, so a resume artifact is never lost.
  *
- * RESUME INJECTION (the READ side, B3). The writer above only PRODUCES handoff
+ * RESUME INJECTION (the READ side). The writer above only PRODUCES handoff
  * docs; this extension can also CONSUME the most recent one. On a fresh session's
  * first user turn it can inject the newest RELEVANT, FRESH handoff into context
  * once (a `transformContext` filter), so resuming costs a summary instead of
@@ -55,7 +55,7 @@ export { salientTokens } from "./lib/relevance.js";
 
 /**
  * The nine fixed schema section headers, in order, followed by the reactivation
- * paragraph header. A fixed schema *is the point* (design D3): a resumer scans
+ * paragraph header. A fixed schema *is the point*: a resumer scans
  * named sections instead of re-reading prose. Both the system prompt and the
  * fallback digest emit exactly these, in this order.
  */
@@ -73,7 +73,7 @@ const SCHEMA_SECTIONS = [
 ] as const;
 
 /**
- * The fixed instruction for the summarization sub-call (design D3). It (a) names
+ * The fixed instruction for the summarization sub-call. It (a) names
  * every schema section in order, (b) instructs 3–7 `## Next steps` items, (c)
  * asks for a paste-ready reactivation paragraph, and (d) contains the
  * distinctive branch word "handoff" so an offline test responder can detect the
@@ -94,12 +94,12 @@ export const HANDOFF_SYSTEM_PROMPT =
 
 /**
  * Injected clock, default `new Date()`. The date in the filename derives from a
- * single read of this, so offline tests can pin it (design D4) and assertions
+ * single read of this, so offline tests can pin it and assertions
  * don't race the wall clock. `__setNow()` with no arg restores the default.
  */
 let now: () => Date = () => new Date();
 
-/** Test seam: pin the clock (design D4). Call with no arg to restore the default. */
+/** Test seam: pin the clock. Call with no arg to restore the default. */
 export function __setNow(fn?: () => Date): void {
   now = fn ?? (() => new Date());
 }
@@ -112,7 +112,7 @@ function textOf(message: Message): string {
     .join("");
 }
 
-/** The first user message's text — the run's goal (design D4). */
+/** The first user message's text — the run's goal. */
 function firstUserText(messages: readonly Message[]): string {
   for (const m of messages) {
     if (m.role !== "user") continue;
@@ -124,7 +124,7 @@ function firstUserText(messages: readonly Message[]): string {
 
 /**
  * Kebab-case, lowercase, ASCII-only, length-capped (≤ 40) slug derived from the
- * run's goal so a handoff is identifiable without opening it (design D4).
+ * run's goal so a handoff is identifiable without opening it.
  * Non-`[a-z0-9]` runs collapse to a single `-`; empty/whitespace → `session`.
  */
 export function slugify(goal: string): string {
@@ -147,8 +147,8 @@ function dateStamp(d: Date): string {
 
 /**
  * A deterministic, provider-free digest of the transcript, used when no provider
- * is available, the sub-call throws, or it returns nothing (design D2 fail-open,
- * AC-8). Non-empty by construction and emits every schema header, so a resume
+ * is available, the sub-call throws, or it returns nothing (fail-open).
+ * Non-empty by construction and emits every schema header, so a resume
  * artifact is never lost. `goal` is surfaced under `## Goal`.
  */
 export function renderFallback(messages: readonly Message[], goal: string): string {
@@ -197,7 +197,7 @@ export function renderFallback(messages: readonly Message[], goal: string): stri
 /**
  * Ensure the rendered summary is schema-valid: if the model dropped any required
  * section header, append the missing ones so the artifact always satisfies the
- * fixed schema (design D3). Returns the summary unchanged when it is already
+ * fixed schema. Returns the summary unchanged when it is already
  * complete.
  */
 export function ensureSchema(summary: string, goal: string): string {
@@ -219,7 +219,7 @@ function workspaceRoot(config: Config): string {
   return ws ? resolve(ws) : process.cwd();
 }
 
-// -- resume-injection (B3): the READ side ------------------------------------
+// -- resume-injection: the READ side -----------------------------------------
 //
 // The writer above DISTILLS a session into `.eagent/handoffs/<date>-<slug>.md`.
 // Nothing read it back: resuming was manual (the user `cat`s the file). This
@@ -262,7 +262,7 @@ export function goalText(body: string): string {
 }
 
 /**
- * The relevance gate (conservative; design B3). Returns true iff the new
+ * The relevance gate (conservative). Returns true iff the new
  * session's first user message is plausibly about the candidate handoff:
  *   (a) the candidate's filename slug is a substring of the user message's slug
  *       (or vice versa) — a strong, cheap signal that the goals are the same; OR
@@ -354,7 +354,7 @@ export function scanHandoffs(dir: string): ResumeCandidate[] {
  * Select the single best handoff to resume from, or `undefined` (the safe
  * default — inject nothing). Walks candidates newest-first and returns the first
  * that passes BOTH gates: FRESHNESS (`when` within `maxAgeHours` of `nowMs`) and
- * RELEVANCE (`isRelevant`). Only ONE handoff is ever selected (design B3).
+ * RELEVANCE (`isRelevant`). Only ONE handoff is ever selected.
  */
 export function selectResume(
   candidates: ResumeCandidate[],
@@ -419,13 +419,13 @@ export function resumeMessage(candidate: ResumeCandidate, maxBytes: number): Mes
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  /** Off by default; the env kill switch hard-disables the auto-trigger (design D6). */
+  /** Off by default; the env kill switch hard-disables the auto-trigger. */
   const cfg = () => ({
     enabled: e.config.enabled("handoff", { default: false, store: e.store }),
   });
 
   /**
-   * Resume-injection config (B3): off by default and INDEPENDENT of the writer's
+   * Resume-injection config: off by default and INDEPENDENT of the writer's
    * `enabled` flag — reading a prior session's notes into a new one is its own
    * opt-in. `EAGENT_HANDOFF_RESUME=off` is the hard kill switch.
    */
@@ -445,9 +445,9 @@ export default function activate(e: ExtensionAPI): () => void {
   /**
    * Summarize the transcript via the configured provider DIRECTLY. Passing
    * `tools: []` runs outside the agent loop, so this completion cannot emit a
-   * tool call and re-enter any seam — the structural recursion guard (design
-   * D2). Fails OPEN: no provider / a throw / an empty reply degrades to the
-   * deterministic digest, so a handoff is always written (AC-8).
+   * tool call and re-enter any seam — the structural recursion guard.
+   * Fails OPEN: no provider / a throw / an empty reply degrades to the
+   * deterministic digest, so a handoff is always written.
    */
   async function summarize(messages: readonly Message[], goal: string): Promise<string> {
     try {
@@ -472,10 +472,10 @@ export default function activate(e: ExtensionAPI): () => void {
 
   /**
    * Write `content` to `.eagent/handoffs/<date>-<slug>.md` under the workspace
-   * root (design D4, copying `limits.ts:169-181`). On a same-date/slug collision,
+   * root (copying `limits.ts:169-181`). On a same-date/slug collision,
    * append an `existsSync`-guarded monotonic suffix (`-2`, `-3`, …) so two
-   * snapshots in the same session/day never clobber (AC-9). All disk ops are
-   * wrapped so a failure logs a warning and never crashes the run (R3). Returns
+   * snapshots in the same session/day never clobber. All disk ops are
+   * wrapped so a failure logs a warning and never crashes the run. Returns
    * the written path, or `undefined` on failure.
    */
   function writeHandoff(content: string, slug: string): string | undefined {
@@ -511,12 +511,12 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // -- the auto-trigger: an agent_end observer (read-only) ------------------
   const offEnd = e.on("agent_end", async () => {
-    if (summarizing) return; // re-entrancy guard (design D2)
-    if (!cfg().enabled) return; // off by default / kill switch (AC-6/AC-7)
+    if (summarizing) return; // re-entrancy guard
+    if (!cfg().enabled) return; // off by default / kill switch
     await produce();
   });
 
-  // -- resume injection (B3): the READ side, off by default -----------------
+  // -- resume injection: the READ side, off by default ----------------------
   //
   // Once-per-session, first-user-turn-only. The `transformContext` filter fires
   // on every turn of every `run()` (the loop starts at turn 1 each run,
@@ -592,7 +592,7 @@ export default function activate(e: ExtensionAPI): () => void {
           return;
         }
         case "resume": {
-          // Resume-injection toggle (B3), independent of the writer's `enabled`.
+          // Resume-injection toggle, independent of the writer's `enabled`.
           switch (sub) {
             case "on":
               e.store.set("resume", true);

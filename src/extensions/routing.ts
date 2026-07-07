@@ -196,7 +196,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // The configured model captured per ACTING agent — each agent's restore
   // baseline. Keyed per agent so a routed child restores to ITS OWN model, not
-  // the parent's, and concurrent forks don't share one var (W9.1). The parent is
+  // the parent's, and concurrent forks don't share one var. The parent is
   // seeded eagerly so a unit-level command dispatch (`/routing off`) before any
   // run can still restore; a child seeds lazily on its first turn (it never fires
   // agent_start), capturing its model before routing first mutates it.
@@ -265,7 +265,7 @@ export default function activate(e: ExtensionAPI): () => void {
     e.on("turn_start", async () => {
       const c = cfg();
       // Route the ACTING agent (a running child under the shared bus), not the
-      // parent bound at activation. (W9.1.)
+      // parent bound at activation.
       const agent = currentActingAgent() ?? e.agent;
       // The acting agent's own baseline (seeded here on a child's first turn,
       // before any branch below mutates its model).

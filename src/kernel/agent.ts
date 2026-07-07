@@ -71,7 +71,7 @@ const DEFAULT_SYSTEM_PROMPT =
  */
 const MAX_PROVIDER_RETRIES = 6;
 
-/** Ambient acting-agent context (W9.1): `run()` binds `this`, so a childScope guard reads the running agent + a `WeakMap` key under concurrent forks. */
+/** Ambient acting-agent context: `run()` binds `this`, so a childScope guard reads the running agent + a `WeakMap` key under concurrent forks. */
 const actingAgentStore = new AsyncLocalStorage<Agent>();
 export const currentActingAgent = (): Agent | undefined => actingAgentStore.getStore();
 

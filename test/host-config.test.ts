@@ -30,3 +30,16 @@ test("EAGENT_AGENT_MAX_TURNS overrides the constructed agent's bound", async () 
   assert.equal(agent.maxTurns, 5);
   await host.dispose();
 });
+
+test("createAgentHost fails fast on an explicitly requested but unconfigured provider", async () => {
+  // Invariant: --provider anthropic with no API key must ERROR, not silently
+  // downgrade to another provider or mock (which would run the wrong model/cost).
+  const keys = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"];
+  const saved = keys.map((k) => [k, process.env[k]] as const);
+  for (const k of keys) delete process.env[k];
+  try {
+    await assert.rejects(() => createAgentHost({ provider: "anthropic" }), /not configured/);
+  } finally {
+    for (const [k, v] of saved) if (v !== undefined) process.env[k] = v;
+  }
+});

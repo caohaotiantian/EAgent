@@ -139,7 +139,12 @@ export class LayeredConfig implements Config {
     const o = this.#over.get<string | number | boolean>(key);
     if (o !== undefined) return parseConfigBool(String(o)) ?? Boolean(o);
     // 3. the extension's own store flag, with the default threaded into the lookup.
-    if (opts?.store) return Boolean(opts.store.get("enabled", fallback));
+    //    Coerce via parseConfigBool (like the override layer) so a string flag
+    //    "off"/"false" reads false, not truthy.
+    if (opts?.store) {
+      const v = opts.store.get("enabled", fallback);
+      return parseConfigBool(String(v)) ?? Boolean(v);
+    }
     // 4. the code default.
     return fallback;
   }

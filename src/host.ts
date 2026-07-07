@@ -208,11 +208,18 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   const anthropic = new AnthropicProvider({ baseUrl: config.string("providers.anthropic.baseUrl") });
   const openai = new OpenAIProvider({ baseUrl: config.string("providers.openai.baseUrl") });
   const gemini = new GeminiProvider({ baseUrl: config.string("providers.gemini.baseUrl") });
-  const defaultProvider = selectProvider(opts.provider, {
-    anthropic: anthropic.configured,
-    openai: openai.configured,
-    gemini: gemini.configured,
-  });
+  const configured = { anthropic: anthropic.configured, openai: openai.configured, gemini: gemini.configured };
+  // Fail fast on an explicitly-requested live provider with no API key, rather
+  // than silently downgrading to another configured provider or mock (which would
+  // run the wrong model/cost). `selectProvider` can't throw — it is shared with
+  // tab-completion — so the check lives here, at the one place a live run is built.
+  if (opts.provider && Object.hasOwn(configured, opts.provider) && !configured[opts.provider as keyof typeof configured]) {
+    throw new Error(
+      `provider "${opts.provider}" was requested but is not configured. Set the matching API key ` +
+        `(ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY), pick a different --provider, or use mock.`,
+    );
+  }
+  const defaultProvider = selectProvider(opts.provider, configured);
   const live = defaultProvider !== "mock";
   // An explicit --model wins; otherwise the per-provider model config key (whose
   // legacy env alias is `*_MODEL`) is honored so a configured endpoint's model is
