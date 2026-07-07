@@ -72,10 +72,10 @@ function djb2(s: string): string {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_PROVENANCE === "off") return () => {};
+  if (!e.config.enabled("provenance", { default: true })) return () => {};
 
   const cfg = () => ({
-    enabled: e.store.get<boolean>("enabled", false) ?? false,
+    enabled: e.config.enabled("provenance", { default: false, store: e.store }),
     mode: (e.store.get<Mode>("mode", "default") ?? "default") as Mode,
     foreignCaps: e.store.get<string[]>("foreignCaps", DEFAULT_FOREIGN_CAPS) ?? DEFAULT_FOREIGN_CAPS,
     sinkCaps: e.store.get<string[]>("sinkCaps", DEFAULT_SINK_CAPS) ?? DEFAULT_SINK_CAPS,

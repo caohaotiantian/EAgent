@@ -88,7 +88,7 @@ function locatorOf(content: string): string {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_CITATIONS === "off") return () => {};
+  if (!e.config.enabled("citations", { default: true })) return () => {};
 
   const cfg = (): Config => ({
     enabled: e.store.get<boolean>("enabled", false) ?? false,

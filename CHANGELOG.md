@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Centralized configuration (`e.config`).** Configuration used to be read at ~200
+isolated sites — direct `process.env.EAGENT_*` reads, private hard-coded
+constants, and per-extension store flags, each with its own precedence and
+parsing. It is now one layered facility injected into every extension as
+`e.config` (peer to `e.store`/`e.log`):
+
+- **One deterministic precedence chain.** Value keys resolve `override > env >
+  file > default`; enablement resolves `env-veto("off") > override > store >
+  default`, deliberately excluding the config *file* so an untrusted project
+  `.eagent/config.json` can never enable/disable an extension.
+- **A `Config` interface + `envOnlyConfig` fallback** live in the kernel
+  (`store.ts`); the full `LayeredConfig` (file layer, legacy-name aliases,
+  source reporting, secret hiding) lives in `src/config.ts`. Adding the facility
+  raised the kernel line ceiling from 2,200 to 2,250 — a deliberate, documented
+  decision (the `Config` public export is type-only, so the runtime surface is
+  unchanged).
+- **`/config`** — a new built-in command to `list`/`get`/`set`/`unset`/`reload`
+  the whole surface, making every knob discoverable and tunable at runtime
+  (`EAGENT_CONFIG=off`).
+- **Every `EAGENT_*` env var except the two secrets** (`EAGENT_TOKEN`,
+  `EAGENT_MEMORY_EMBED_API_KEY`) now flows through `e.config`, and the four
+  duplicated hard-coded `maxTurns` constants (`subagents`/`teams`/`sweep-edit`/
+  `dynamic-workflow`) are one settable knob each (`EAGENT_SUBAGENTS_MAX_TURNS`,
+  `/config set subagents.maxTurns 12`, or a `config.json` entry) — no source edit
+  required. Every legacy env-var name still works via an alias map; a config file
+  lives at `~/.eagent/config.json` then `./.eagent/config.json` (project wins).
+- **Behavior change (intentional):** the five `/x on|off` toggles that used to
+  mutate `process.env` now write the persisted override, so `/x off` survives a
+  restart and `/x on` no longer clears a shell `EAGENT_X=off` (env-off is now a
+  firm operator kill).
+
 Six new built-in extensions, each adapting a capability from the leading
 terminal coding agents (Claude Code, OpenAI Codex CLI, OpenCode) onto EAgent's
 existing seams — no kernel change, all capability-gated and offline-tested:

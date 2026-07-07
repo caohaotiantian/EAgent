@@ -253,16 +253,10 @@ test("/headless status reports the resolution and on/off state", async () => {
   });
 });
 
-test("/headless off then on toggles the kill switch", async () => {
-  const prev = process.env.EAGENT_HEADLESS_FLAGS;
-  try {
-    const { run } = await loadCmd();
-    await run("off");
-    assert.equal(process.env.EAGENT_HEADLESS_FLAGS, "off");
-    await run("on");
-    assert.equal(process.env.EAGENT_HEADLESS_FLAGS, undefined);
-  } finally {
-    if (prev === undefined) delete process.env.EAGENT_HEADLESS_FLAGS;
-    else process.env.EAGENT_HEADLESS_FLAGS = prev;
-  }
+test("/headless off then on toggles the kill switch via the persisted config override", async () => {
+  const { run } = await loadCmd();
+  await run("off");
+  assert.match(await run(""), /headless-flags off/, "/headless off disables via the override");
+  await run("on");
+  assert.match(await run(""), /headless-flags on/, "/headless on re-enables via the override");
 });

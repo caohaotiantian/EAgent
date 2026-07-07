@@ -16,7 +16,7 @@
 
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
-import type { Store } from "../kernel/store.js";
+import type { Config, Store } from "../kernel/store.js";
 import { overlapScore } from "./lib/relevance.js";
 
 /** Defaults; each is overridable via `e.store`. Surfaced by the `/memory` view. */
@@ -64,8 +64,8 @@ const LEGACY_SOURCE = "legacy";
  * the pre-upgrade `memory` extension (mirrors `EAGENT_RECOVERY`,
  * `EAGENT_WRITE_GUARD`, `EAGENT_MICROAGENTS`).
  */
-function entriesDisabled(): boolean {
-  return process.env.EAGENT_MEMORY_ENTRIES === "off";
+function entriesDisabled(config: Config): boolean {
+  return !config.enabled("memory.entries", { default: true });
 }
 
 /**
@@ -145,10 +145,10 @@ export function parseEmbeddings(body: unknown): number[][] {
  * `EAGENT_MEMORY_EMBED_ENDPOINT` is unset. POSTs `{ model, input }` to the
  * OpenAI-compatible endpoint under a bounded timeout; zero-dep (global `fetch`).
  */
-export function resolveEmbedder(): Embedder | undefined {
-  const endpoint = process.env.EAGENT_MEMORY_EMBED_ENDPOINT;
+export function resolveEmbedder(config: Config): Embedder | undefined {
+  const endpoint = config.string("memory.embed.endpoint");
   if (!endpoint) return undefined;
-  const model = process.env.EAGENT_MEMORY_EMBED_MODEL ?? DEFAULT_EMBED_MODEL;
+  const model = config.string("memory.embed.model") ?? DEFAULT_EMBED_MODEL;
   const apiKey = process.env.EAGENT_MEMORY_EMBED_API_KEY ?? process.env.OPENAI_API_KEY;
   return async (texts) => {
     const res = await fetch(endpoint, {
@@ -170,9 +170,9 @@ export function resolveEmbedder(): Embedder | undefined {
  * lexical) under the `EAGENT_MEMORY_EMBED=off` kill switch, else the injected
  * mock or the env-resolved `fetch` embedder.
  */
-function activeEmbedder(): Embedder | undefined {
-  if (process.env.EAGENT_MEMORY_EMBED === "off") return undefined;
-  return injected ?? resolveEmbedder();
+function activeEmbedder(config: Config): Embedder | undefined {
+  if (!config.enabled("memory.embed", { default: true })) return undefined;
+  return injected ?? resolveEmbedder(config);
 }
 
 /** Cosine similarity of two vectors; 0 when either has zero norm. */
@@ -226,9 +226,9 @@ function lexicalRank(store: Store, query: string, topK: number): Match[] {
  * itself is a pure read (`rankTiers`); the promotion is the recall path's only
  * write, gated off by default (`EAGENT_MEMORY_PROMOTE_AT` unset/0 ⇒ no-op).
  */
-async function searchTiers(store: Store, query: string, topK: number): Promise<Match[]> {
-  const matches = await rankTiers(store, query, topK);
-  autoPromote(store, matches);
+async function searchTiers(store: Store, query: string, topK: number, config: Config): Promise<Match[]> {
+  const matches = await rankTiers(store, query, topK, config);
+  autoPromote(store, matches, config);
   return matches;
 }
 
@@ -237,8 +237,8 @@ async function searchTiers(store: Store, query: string, topK: number): Promise<M
  * `EAGENT_MEMORY_PROMOTE_AT` promote it to core (dropping the transient counter),
  * mirroring `/memory promote`. Off (no write) when the env is unset/≤0.
  */
-function autoPromote(store: Store, matches: Match[]): void {
-  const at = Number(process.env.EAGENT_MEMORY_PROMOTE_AT) || 0;
+function autoPromote(store: Store, matches: Match[], config: Config): void {
+  const at = config.int("memory.promoteAt", 0);
   if (at <= 0) return;
   for (const m of matches) {
     if (m.tier !== "archive") continue;
@@ -260,8 +260,8 @@ function autoPromote(store: Store, matches: Match[]): void {
  * The ranking (a pure read): cosine over embeddings when an embedder is active,
  * else — and on any embed failure — the lexical ranking.
  */
-async function rankTiers(store: Store, query: string, topK: number): Promise<Match[]> {
-  const embedder = activeEmbedder();
+async function rankTiers(store: Store, query: string, topK: number, config: Config): Promise<Match[]> {
+  const embedder = activeEmbedder(config);
   if (embedder) {
     try {
       // Enumerate every candidate from the FULL tier iteration — not the lexical
@@ -342,6 +342,7 @@ async function runScratchpad(
   sub: string,
   rest: string[],
   print: (line: string) => void,
+  config: Config,
 ): Promise<void> {
   switch (sub) {
     case "list": {
@@ -451,7 +452,7 @@ async function runScratchpad(
         return;
       }
       const topK = store.get<number>("recallTopK", DEFAULT_RECALL_TOPK) ?? DEFAULT_RECALL_TOPK;
-      const top = await searchTiers(store, query, topK);
+      const top = await searchTiers(store, query, topK, config);
       if (top.length === 0) {
         print(`No notes match "${query}".`);
         return;
@@ -522,7 +523,7 @@ export default function activate(e: ExtensionAPI): () => void {
    * No-op under the kill switch (legacy bare-string mode never evicts).
    */
   const evictIfOverCap = (): void => {
-    if (entriesDisabled()) return;
+    if (entriesDisabled(e.config)) return;
     const { coreCap, archiveCap } = config();
     while (noteKeys(e.store).length > coreCap) {
       const oldest = lowestByTs(noteKeys(e.store), (k) => readEntry(e.store, k));
@@ -573,11 +574,11 @@ export default function activate(e: ExtensionAPI): () => void {
         }
         // Kill switch: the new sub-commands report disabled (the no-arg view
         // above is unaffected, matching the legacy runtime).
-        if (entriesDisabled()) {
+        if (entriesDisabled(e.config)) {
           ctx.print(`/memory ${sub}: scratchpad entries are disabled (EAGENT_MEMORY_ENTRIES=off).`);
           return;
         }
-        return runScratchpad(e.store, sub, tokens.slice(1), ctx.print);
+        return runScratchpad(e.store, sub, tokens.slice(1), ctx.print, e.config);
       },
     }),
   );
@@ -603,7 +604,7 @@ export default function activate(e: ExtensionAPI): () => void {
       execute: async (args) => {
         const key = String(args.key);
         const value = String(args.value);
-        if (entriesDisabled()) {
+        if (entriesDisabled(e.config)) {
           // Kill switch: byte-identical to the pre-upgrade write path.
           e.store.set(NOTE_PREFIX + key, value);
           return { content: `Remembered "${key}".` };
@@ -655,7 +656,7 @@ export default function activate(e: ExtensionAPI): () => void {
         }
         const query = typeof args.query === "string" ? args.query.trim() : "";
         if (query.length > 0) {
-          const top = await searchTiers(e.store, query, config().recallTopK);
+          const top = await searchTiers(e.store, query, config().recallTopK, e.config);
           return top.length === 0
             ? { content: `No notes match "${query}".`, details: [] }
             : { content: top.map(renderMatch).join("\n"), details: top };

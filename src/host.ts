@@ -19,7 +19,9 @@ import { Agent } from "./kernel/agent.js";
 import { CapabilityManager } from "./kernel/capabilities.js";
 import { CommandRegistry } from "./kernel/commands.js";
 import { ExtensionHost } from "./kernel/extension.js";
+import type { Config } from "./kernel/store.js";
 import { FileBackend } from "./kernel/store.js";
+import { LayeredConfig, loadConfigFile } from "./config.js";
 import type { Logger, ThinkingLevel, UI } from "./kernel/types.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAIProvider } from "./providers/openai.js";
@@ -84,6 +86,7 @@ import timeTravel from "./extensions/time-travel.js";
 import otelExporter from "./extensions/otel-exporter.js";
 import reasoningSearch from "./extensions/reasoning-search.js";
 import selfImprove from "./extensions/self-improve.js";
+import configCmd from "./extensions/config-cmd.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
 /** The canonical built-in extension set, in load order. */
@@ -146,6 +149,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["otel-exporter", otelExporter],
   ["reasoning-search", reasoningSearch],
   ["self-improve", selfImprove],
+  ["config", configCmd],
 ];
 
 /** The provider names EAgent recognizes, shared by selection and completion. */
@@ -177,6 +181,8 @@ export interface AgentHost {
   model: string;
   /** Built-in extensions that failed to activate (logged and skipped, not fatal). */
   failures: { id: string; err: unknown }[];
+  /** The layered config the host resolved from; front ends source server knobs from it. */
+  config: Config;
 }
 
 /**
@@ -186,26 +192,39 @@ export interface AgentHost {
  * it can wire rendering first.
  */
 export async function createAgentHost(opts: AgentHostOptions = {}): Promise<AgentHost> {
-  const anthropic = new AnthropicProvider();
-  const openai = new OpenAIProvider();
-  const gemini = new GeminiProvider();
+  // The layered config is built first so provider/agent defaults resolve through
+  // it (override > env > file > default) instead of scattered `process.env` reads.
+  const storeBackend = new FileBackend(opts.storeRoot ?? join(homedir(), ".eagent", "state"));
+  const configPaths = [
+    join(homedir(), ".eagent", "config.json"),
+    join(process.cwd(), ".eagent", "config.json"),
+  ];
+  const config = new LayeredConfig({
+    fileValues: loadConfigFile(configPaths),
+    overrideStore: storeBackend.open("config"),
+    filePaths: configPaths,
+  });
+
+  const anthropic = new AnthropicProvider({ baseUrl: config.string("providers.anthropic.baseUrl") });
+  const openai = new OpenAIProvider({ baseUrl: config.string("providers.openai.baseUrl") });
+  const gemini = new GeminiProvider({ baseUrl: config.string("providers.gemini.baseUrl") });
   const defaultProvider = selectProvider(opts.provider, {
     anthropic: anthropic.configured,
     openai: openai.configured,
     gemini: gemini.configured,
   });
   const live = defaultProvider !== "mock";
-  // An explicit --model wins; otherwise honor a per-provider *_MODEL env var
-  // (so a configured endpoint's model, e.g. OPENAI_MODEL=GLM-5.1, is used
-  // without forcing --model on every call); finally fall back to a sane default.
+  // An explicit --model wins; otherwise the per-provider model config key (whose
+  // legacy env alias is `*_MODEL`) is honored so a configured endpoint's model is
+  // used without forcing --model on every call; finally a sane default.
   const model =
     opts.model ??
     (defaultProvider === "anthropic"
-      ? process.env.ANTHROPIC_MODEL ?? "claude-fable-5"
+      ? config.string("models.anthropic") ?? "claude-fable-5"
       : defaultProvider === "openai"
-        ? process.env.OPENAI_MODEL ?? "gpt-4o"
+        ? config.string("models.openai") ?? "gpt-4o"
         : defaultProvider === "gemini"
-          ? process.env.GEMINI_MODEL ?? "gemini-2.0-flash"
+          ? config.string("models.gemini") ?? "gemini-2.0-flash"
           : "mock");
 
   const capabilities = new CapabilityManager({
@@ -221,7 +240,10 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     capabilities,
     model,
     provider: defaultProvider,
-    thinking: opts.thinking ?? thinkingFromEnv(process.env.EAGENT_THINKING),
+    thinking: opts.thinking ?? thinkingFromEnv(config.string("thinking")),
+    maxTurns: config.int("agent.maxTurns", 24),
+    maxConcurrency: config.int("agent.maxConcurrency", 0) || Infinity,
+    systemPrompt: config.string("agent.systemPrompt"),
   });
 
   agent.providers.register(new MockProvider(), { default: defaultProvider === "mock" });
@@ -243,7 +265,8 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     agent,
     commands,
     logger: opts.logger,
-    store: new FileBackend(opts.storeRoot ?? join(homedir(), ".eagent", "state")),
+    store: storeBackend,
+    config,
   });
 
   // A failing built-in must not take down the whole agent: log, record, and skip it.
@@ -268,7 +291,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   await host.discover(dirs);
   for (const path of opts.extraExtensions ?? []) await host.loadFile(path);
 
-  return { agent, host, commands, live, model, failures };
+  return { agent, host, commands, live, model, failures, config };
 }
 
 /**

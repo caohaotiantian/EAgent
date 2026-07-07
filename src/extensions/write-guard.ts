@@ -24,10 +24,12 @@ import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 
 /** The directory file paths resolve against — matches `core-tools`. */
-function workspaceRoot(): string {
-  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+function workspaceRoot(config: Config): string {
+  const ws = config.string("workspace");
+  return ws ? resolve(ws) : process.cwd();
 }
 
 /** Resolve a path argument to an absolute path the same way `core-tools` does. */
@@ -57,9 +59,9 @@ export function isFullOverwrite(capabilities: string[] | undefined, args: Record
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_WRITE_GUARD === "off") return () => {};
+  if (!e.config.enabled("write-guard", { default: true })) return () => {};
 
-  const root = workspaceRoot();
+  const root = workspaceRoot(e.config);
   /** Absolute paths the session has read or written this session. */
   const seen = new Set<string>();
 

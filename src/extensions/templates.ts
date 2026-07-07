@@ -37,6 +37,7 @@ import type { CapabilityManager } from "../kernel/capabilities.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { KernelEvents, KernelFilters, ToolDecision } from "../kernel/events.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { HookBus } from "../kernel/hooks.js";
 import { ProviderRegistry, ToolRegistry } from "../kernel/registry.js";
 import type { Logger, Message, ThinkingLevel, Tool, UI } from "../kernel/types.js";
@@ -85,13 +86,13 @@ const ALLOWED_KEYS = new Set([
 ]);
 
 /** The templates directory: an env override, else `~/.eagent/templates`. */
-export function templatesRoot(): string {
-  return process.env.EAGENT_TEMPLATES_DIR ?? join(homedir(), ".eagent", "templates");
+export function templatesRoot(config: Config): string {
+  return config.string("templates.dir") ?? join(homedir(), ".eagent", "templates");
 }
 
-/** Kill switch: the extension is inert when `EAGENT_TEMPLATES=off`. */
-export function enabled(): boolean {
-  return process.env.EAGENT_TEMPLATES !== "off";
+/** Kill switch: the extension is inert when `templates` resolves off (env `EAGENT_TEMPLATES=off`). */
+export function enabled(config: Config): boolean {
+  return config.enabled("templates", { default: true });
 }
 
 /**
@@ -290,8 +291,9 @@ export function resolveTemplate(name: string, catalog: Template[]): ResolveResul
  * allocation) when the kill switch is off, the `on` flag is false, or the catalog
  * is empty; otherwise returns a NEW `[note, ...messages]`.
  */
-export function injectCatalog(messages: Message[], catalog: Template[], on: boolean): Message[] {
-  if (!enabled() || !on || catalog.length === 0) return messages;
+export function injectCatalog(messages: Message[], catalog: Template[], on: boolean, config?: Config): Message[] {
+  const off = config ? !enabled(config) : false;
+  if (off || !on || catalog.length === 0) return messages;
   const lines = catalog.map((t) => `- ${t.name}: ${t.description}`).join("\n");
   const note: Message = {
     role: "system",
@@ -426,7 +428,7 @@ export default function activate(e: ExtensionAPI): void {
   // Opt-in catalog injection (default off). Re-scans each turn so a freshly
   // authored template appears without a reload.
   e.hook("transformContext", (messages) =>
-    injectCatalog(messages, scanTemplates(templatesRoot(), (m) => e.log.warn(m)), catalogOn()),
+    injectCatalog(messages, scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m)), catalogOn(), e.config),
   );
 
   // The become veto: registered once, inert until a template is active. While
@@ -461,12 +463,12 @@ export default function activate(e: ExtensionAPI): void {
         required: ["template", "prompt"],
       },
       execute: async (args) => {
-        if (!enabled()) return fail("Templates are disabled (EAGENT_TEMPLATES=off).");
+        if (!enabled(e.config)) return fail("Templates are disabled (EAGENT_TEMPLATES=off).");
         const name = typeof args.template === "string" ? args.template : "";
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
         if (prompt.length === 0) return fail("spawn_template requires a non-empty string `prompt`.");
 
-        const catalog = scanTemplates(templatesRoot(), (m) => e.log.warn(m));
+        const catalog = scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
         const resolved = resolveTemplate(name, catalog);
         if (!resolved.ok) {
           const available = catalog.map((t) => t.name).join(", ") || "(none)";
@@ -499,12 +501,12 @@ export default function activate(e: ExtensionAPI): void {
       const sub = argv[0] ?? "list";
       const arg = argv[1];
 
-      const catalog = (): Template[] => scanTemplates(templatesRoot(), (m) => e.log.warn(m));
+      const catalog = (): Template[] => scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
 
       if (sub === "list") {
         const found = catalog();
         if (found.length === 0) {
-          ctx.print(`(no templates in ${templatesRoot()})`);
+          ctx.print(`(no templates in ${templatesRoot(e.config)})`);
           return;
         }
         for (const t of found) ctx.print(`  ${t.name.padEnd(20)} ${t.description}`);
@@ -538,7 +540,7 @@ export default function activate(e: ExtensionAPI): void {
       }
 
       if (sub === "use") {
-        if (!enabled()) {
+        if (!enabled(e.config)) {
           ctx.print("Templates are disabled (EAGENT_TEMPLATES=off).");
           return;
         }

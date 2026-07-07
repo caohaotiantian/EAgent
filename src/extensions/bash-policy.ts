@@ -584,7 +584,7 @@ export function evaluate(command: string, rules: Rule[], fallthrough: Action): A
 
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
-    enabled: process.env.EAGENT_BASH_POLICY !== "off",
+    enabled: e.config.enabled("bash-policy", { default: true }),
     rules: e.store.get<Rule[]>("rules", []) ?? [],
     fallthrough: (e.store.get<Action>("fallthrough", "allow") ?? "allow") as Action,
     commandArgKey: e.store.get<string>("commandArgKey", "command") ?? "command",
@@ -616,7 +616,7 @@ export default function activate(e: ExtensionAPI): () => void {
     // `rm -rf /` is segmented/normalized like any command line. The decode layer
     // never blocks — it only widens the set this same ruleset already judges.
     // `EAGENT_DECODE_NORMALIZE=off` restores literal-only matching.
-    if (process.env.EAGENT_DECODE_NORMALIZE !== "off") {
+    if (e.config.enabled("decode.normalize", { default: true })) {
       for (const decoded of normalizeForInspection(command)) {
         for (const expanded of expandCommands(decoded)) {
           if (!candidates.includes(expanded)) candidates.push(expanded);
@@ -653,11 +653,11 @@ export default function activate(e: ExtensionAPI): () => void {
       const arg = c.args.trim();
       switch (arg) {
         case "on":
-          delete process.env.EAGENT_BASH_POLICY;
+          e.config.set("bash-policy", true);
           c.print("bash-policy on");
           break;
         case "off":
-          process.env.EAGENT_BASH_POLICY = "off";
+          e.config.set("bash-policy", false);
           c.print("bash-policy off");
           break;
         default: {

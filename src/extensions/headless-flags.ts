@@ -31,6 +31,7 @@
 
 import type { ToolDecision } from "../kernel/events.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import { unwrap } from "./bash-policy.js";
 
 /**
@@ -367,8 +368,17 @@ export default function activate(e: ExtensionAPI): () => void {
     stdout: !!process.stdout.isTTY,
   });
 
+  // Overlay the config-resolved `headless`/`frontend` values onto the process
+  // environment so the pure resolver sees an operator's `/headless force …`
+  // override (config.string reads override > env > file) alongside the CI signals.
+  const headlessEnv = (): NodeJS.ProcessEnv => ({
+    ...process.env,
+    EAGENT_HEADLESS: e.config.string("headless"),
+    EAGENT_FRONTEND: e.config.string("frontend"),
+  });
+
   const resolve = (): { headless: boolean; reason: string } => {
-    if (!cached) cached = resolveHeadless(process.env, ttyState());
+    if (!cached) cached = resolveHeadless(headlessEnv(), ttyState());
     return cached;
   };
 
@@ -385,7 +395,7 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   const offHook = e.hook("beforeToolCall", (decision, ctx): ToolDecision => {
-    const enabled = process.env.EAGENT_HEADLESS_FLAGS !== "off";
+    const enabled = e.config.enabled("headless-flags", { default: true });
     // Never un-block another guard's veto, and stay inert when disabled or interactive.
     if (!enabled || decision.block) return decision;
     if (!resolve().headless) return decision;
@@ -430,19 +440,19 @@ export default function activate(e: ExtensionAPI): () => void {
 
       switch (head) {
         case "on":
-          delete process.env.EAGENT_HEADLESS_FLAGS;
+          e.config.set("headless-flags", true);
           c.print("headless-flags on");
           return;
         case "off":
-          process.env.EAGENT_HEADLESS_FLAGS = "off";
+          e.config.set("headless-flags", false);
           c.print("headless-flags off");
           return;
         case "force": {
           const mode = (rest[0] ?? "").toLowerCase();
           if (mode === "on" || mode === "off") {
-            process.env.EAGENT_HEADLESS = mode;
+            e.config.set("headless", mode);
           } else if (mode === "auto") {
-            delete process.env.EAGENT_HEADLESS;
+            e.config.unset("headless");
           } else {
             c.print("headless: usage — /headless force on|off|auto");
             return;
@@ -490,7 +500,7 @@ export default function activate(e: ExtensionAPI): () => void {
           return;
         }
         default:
-          renderStatus(c.print, resolve(), activeDict());
+          renderStatus(c.print, resolve(), activeDict(), e.config);
       }
     },
   });
@@ -536,12 +546,13 @@ function renderStatus(
   print: (line: string) => void,
   resolution: { headless: boolean; reason: string },
   dict: InjectDict,
+  config: Config,
 ): void {
-  const enabled = process.env.EAGENT_HEADLESS_FLAGS !== "off";
+  const enabled = config.enabled("headless-flags", { default: true });
   print(`headless-flags ${enabled ? "on" : "off"}`);
   print(`headless=${resolution.headless} (reason: ${resolution.reason})`);
-  const override = (process.env.EAGENT_HEADLESS ?? "auto").toLowerCase();
-  print(`detection override: EAGENT_HEADLESS=${override}`);
+  const override = (config.string("headless") ?? "auto").toLowerCase();
+  print(`detection override: headless=${override}`);
   print("injection dictionary:");
   for (const [program, entry] of Object.entries(dict)) {
     print(`  ${program}: ${describeEntry(entry)}`);

@@ -31,7 +31,7 @@ export {
   MemoryBackend,
   FileBackend,
 } from "./store.js";
-export type { Store, StoreBackend } from "./store.js";
+export type { Store, StoreBackend, Config } from "./store.js";
 
 /** Convenience helper: define a tool with inline typing. */
 export { defineTool } from "./define.js";

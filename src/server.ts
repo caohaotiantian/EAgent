@@ -33,6 +33,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { Agent } from "./kernel/agent.js";
+import type { Config } from "./kernel/store.js";
 import type { AgentState, Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 
@@ -62,6 +63,8 @@ export interface HttpServer {
   agent: Agent;
   extensions: string[];
   model: string;
+  /** The resolved bind host (`server.host` config / `EAGENT_HOST`, else loopback). */
+  host: string;
   /** Tear down the extension host (call on shutdown). */
   close(): Promise<void>;
 }
@@ -92,20 +95,6 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     error: (...a) => console.error("✗", ...a),
   };
 
-  const host = opts.host ?? process.env.EAGENT_HOST ?? "127.0.0.1";
-  const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
-
-  // Fail-closed on the dangerous combination: a non-loopback bind exposes the
-  // server off-box, and with an empty token /run is unauthenticated AND runs
-  // tools with full capabilities under yolo. Refuse to start rather than warn.
-  // Guarded here (before any listen) so the check is pre-bind and unit-testable.
-  if (!isLoopback(host) && !token) {
-    throw new Error(
-      `refusing to bind ${host} without EAGENT_TOKEN: a non-loopback bind with no token exposes an ` +
-        "unauthenticated, full-capability agent. Set EAGENT_TOKEN, or bind a loopback address (127.0.0.1).",
-    );
-  }
-
   // The mid-turn elicitation channel (see the `Elicitation` doc). `serverUI.ask`
   // delegates to the turn-installed sink so the `ask` extension's conditional
   // grant of `ui:ask` fires (its activation sees a function-valued `ask`) and
@@ -124,6 +113,24 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   };
 
   const built = await createAgentHost({ ...opts, ui: serverUI, logger, yolo: opts.yolo ?? true });
+
+  const host = opts.host ?? built.config.string("server.host") ?? "127.0.0.1";
+  const token = opts.token ?? process.env.EAGENT_TOKEN ?? "";
+
+  // Fail-closed on the dangerous combination: a non-loopback bind exposes the
+  // server off-box, and with an empty token /run is unauthenticated AND runs
+  // tools with full capabilities under yolo. Refuse to start rather than warn.
+  // Guarded here (before any listen) so the check is pre-bind and unit-testable.
+  if (!isLoopback(host) && !token) {
+    // Tear down the just-built host so the refuse path leaks no activated
+    // extensions (the host must be built first to resolve `server.host` from config).
+    await built.host.dispose();
+    throw new Error(
+      `refusing to bind ${host} without EAGENT_TOKEN: a non-loopback bind with no token exposes an ` +
+        "unauthenticated, full-capability agent. Set EAGENT_TOKEN, or bind a loopback address (127.0.0.1).",
+    );
+  }
+
   await built.agent.hooks.emit("session_start", {});
 
   // The pristine state a brand-new session (or a sessionless /run) restores from:
@@ -161,7 +168,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
       set busy(v) {
         busy = v;
       },
-    }, { token, maxBody }, elicit, askTimeoutMs).catch((err) =>
+    }, { token, maxBody }, elicit, askTimeoutMs, built.config).catch((err) =>
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }),
     );
   });
@@ -174,6 +181,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     agent: built.agent,
     extensions: built.host.list(),
     model: built.model,
+    host,
     close: async () => {
       if (closed) return;
       closed = true;
@@ -202,6 +210,7 @@ async function route(
   security: Security,
   elicit: Elicitation,
   askTimeoutMs: number,
+  config: Config,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -284,7 +293,7 @@ async function route(
     }
     lock.busy = true;
     try {
-      await streamRun(res, agent, input, sessions, initial, session, elicit, askTimeoutMs);
+      await streamRun(res, agent, input, sessions, initial, session, elicit, askTimeoutMs, config);
     } finally {
       lock.busy = false;
     }
@@ -307,6 +316,7 @@ async function streamRun(
   session: string | undefined,
   elicit: Elicitation,
   askTimeoutMs: number,
+  config: Config,
 ): Promise<void> {
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   let closed = false;
@@ -390,7 +400,7 @@ async function streamRun(
       // the cap. cap===0 skips the loop entirely (unbounded).
       sessions.delete(session);
       sessions.set(session, agent.snapshot());
-      const cap = maxSessions();
+      const cap = maxSessions(config);
       while (cap > 0 && sessions.size > cap) sessions.delete(sessions.keys().next().value as string);
     }
     write({ type: "done", reason, session, usage: agent.usage });
@@ -450,8 +460,8 @@ function authorized(req: IncomingMessage, token: string): boolean {
  * and `Number("") === 0`, so without it an unfilled placeholder would wrongly
  * disable the cap.
  */
-export function maxSessions(): number {
-  const raw = process.env.EAGENT_MAX_SESSIONS?.trim();
+export function maxSessions(config: Config): number {
+  const raw = config.string("server.maxSessions")?.trim();
   if (!raw) return 1000;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 0 ? n : 1000;
@@ -472,12 +482,12 @@ async function main(): Promise<void> {
   loadEnvFile();
   const port = Number(process.env.PORT ?? 8787);
   // Bind loopback by default so an unauthenticated server is not reachable
-  // off-box. Set EAGENT_HOST=0.0.0.0 to expose it deliberately (use a token).
-  const host = process.env.EAGENT_HOST ?? "127.0.0.1";
-  const http = await createHttpServer({ port, host });
+  // off-box. Set `server.host` (env EAGENT_HOST=0.0.0.0) to expose it deliberately
+  // (use a token). createHttpServer resolves the host from config; reuse it here.
+  const http = await createHttpServer({ port });
   try {
-    http.server.listen(port, host, () => {
-      console.error(`eagent server on http://${host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
+    http.server.listen(port, http.host, () => {
+      console.error(`eagent server on http://${http.host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
     });
 
     // Graceful shutdown: stop accepting connections, tear down the host, exit.

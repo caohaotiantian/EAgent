@@ -20,6 +20,46 @@ export interface StoreBackend {
   open(namespace: string): Store;
 }
 
+/** Layered, read-mostly config handed to every extension as `e.config`: value
+ *  keys resolve override>env>file>default; `enabled()` env-veto>override>store>
+ *  default (no file). Full host impl: `LayeredConfig` in `src/config.ts`. */
+export interface Config {
+  get<T>(key: string, fallback: T): T;
+  int(key: string, fallback: number): number;
+  bool(key: string, fallback: boolean): boolean;
+  string(key: string): string | undefined;
+  enabled(key: string, opts?: { default?: boolean; store?: Pick<Store, "get"> }): boolean;
+  set(key: string, value: string | number | boolean): void;
+  unset(key: string): void;
+  entries(): { key: string; value: unknown; source: "override" | "env" | "file" | "default" }[];
+}
+
+/** Coerce a config string to a boolean by the shared vocabulary, or `undefined`. */
+export function parseConfigBool(raw: string | undefined): boolean | undefined {
+  const v = raw?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on" || v === "yes") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+  return undefined;
+}
+
+/** A minimal env-only `Config`: the `ExtensionHost` fallback when a host supplies
+ *  none (chiefly tests). No file layer, aliases, or override store — `set/unset`
+ *  are no-ops; real hosts pass a full `LayeredConfig` (`src/config.ts`). */
+export function envOnlyConfig(): Config {
+  const env = (k: string): string | undefined =>
+    process.env["EAGENT_" + k.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[.-]/g, "_").toUpperCase()];
+  return {
+    get: <T>(k: string, f: T): T => ((env(k) as unknown as T) ?? f),
+    int: (k, f) => { const r = env(k), n = Number(r); return r !== undefined && Number.isFinite(n) ? n : f; },
+    bool: (k, f) => parseConfigBool(env(k)) ?? f,
+    string: (k) => env(k),
+    enabled: (k, o) => (env(k) === "off" ? false : o?.store ? Boolean(o.store.get("enabled", o.default ?? false)) : (o?.default ?? false)),
+    set: () => {},
+    unset: () => {},
+    entries: () => [],
+  };
+}
+
 export class MemoryStore implements Store {
   readonly #data = new Map<string, unknown>();
   get<T>(key: string, fallback?: T): T | undefined {

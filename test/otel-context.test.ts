@@ -48,11 +48,9 @@ test("isTrustedHost: a malformed URL is never trusted (fail-closed)", () => {
   assert.equal(isTrustedHost("not a url", ["example.com"]), false);
 });
 
-test("propagateAllowlist parses the comma-separated env, trims, lowercases, drops blanks", () => {
-  delete process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
-  assert.deepEqual(propagateAllowlist(), []);
-  process.env.EAGENT_OTEL_PROPAGATE_HOSTS = " API.Example.com , ,mcp.internal ";
-  assert.deepEqual(propagateAllowlist(), ["api.example.com", "mcp.internal"]);
+test("propagateAllowlist parses the comma-separated value, trims, lowercases, drops blanks", () => {
+  assert.deepEqual(propagateAllowlist(""), []);
+  assert.deepEqual(propagateAllowlist(" API.Example.com , ,mcp.internal "), ["api.example.com", "mcp.internal"]);
 });
 
 test("set/get/clear is a per-callId channel", () => {

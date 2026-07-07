@@ -135,7 +135,7 @@ const CHILD_SYSTEM_PREFIX =
   "edit a single file. Apply the shared instruction to file=";
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_SWEEP_EDIT === "off") return () => {};
+  if (!e.config.enabled("sweep-edit", { default: true })) return () => {};
 
   e.grantCapability("agent:spawn");
 
@@ -244,7 +244,7 @@ export default function activate(e: ExtensionAPI): () => void {
               model: e.agent.model,
               provider: e.agent.providerName,
               systemPrompt: system,
-              maxTurns: DEFAULT_MAX_TURNS,
+              maxTurns: e.config.int("sweep-edit.maxTurns", DEFAULT_MAX_TURNS),
               tools: childRegistry(read!, edit!),
               hooks: e.agent.hooks.childScope(),
             });

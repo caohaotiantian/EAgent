@@ -35,11 +35,6 @@ import { validate } from "../kernel/validate.js";
 /** The tool name, also the registration that children must never inherit. */
 const SPAWN_TOOL = "spawn_agent";
 
-/** Kill switch: when set to "off", the three least-privilege params are no-ops. */
-function lpEnabled(): boolean {
-  return process.env.EAGENT_SUBAGENTS_LP !== "off";
-}
-
 const DEFAULT_CHILD_SYSTEM =
   "You are a focused sub-agent. You have a fresh context and a single task. " +
   "Work it to completion and report only the final answer concisely.";
@@ -154,8 +149,9 @@ export default function activate(e: ExtensionAPI): void {
           },
           maxTurns: {
             type: "integer",
-            default: DEFAULT_MAX_TURNS,
-            description: "Safety bound on each child's loop iterations.",
+            description:
+              "Safety bound on each child's loop iterations. Omit to use the configured " +
+              "`subagents.maxTurns` (default 8).",
           },
           readOnly: {
             type: "boolean",
@@ -197,10 +193,11 @@ export default function activate(e: ExtensionAPI): void {
       execute: async (args) => {
         const mode = typeof args.mode === "string" ? args.mode : "single";
         const system = typeof args.system === "string" ? args.system : undefined;
+        const lp = e.config.enabled("subagents.lp", { default: true });
         const maxTurns =
           typeof args.maxTurns === "number" && args.maxTurns > 0
             ? Math.floor(args.maxTurns)
-            : DEFAULT_MAX_TURNS;
+            : e.config.int("subagents.maxTurns", DEFAULT_MAX_TURNS);
         const readOnly = args.readOnly === true;
 
         // Resolve the three least-privilege passthroughs once; applied to every
@@ -213,12 +210,12 @@ export default function activate(e: ExtensionAPI): void {
           model: e.agent.model,
           log: e.log,
         };
-        const { provider, model } = resolveChildProvider(args, parent);
+        const { provider, model } = resolveChildProvider(args, parent, lp);
         const opts: ChildOptions = {
-          capabilities: resolveChildCapabilities(args, parent),
+          capabilities: resolveChildCapabilities(args, parent, lp),
           provider,
           model,
-          schema: resolveOutputSchema(args),
+          schema: resolveOutputSchema(args, lp),
         };
 
         if (mode === "single") {
@@ -322,7 +319,7 @@ function nonEmptyStringList(value: unknown): string[] | undefined {
 export function resolveChildCapabilities(
   args: { capabilities?: unknown; readOnly?: unknown },
   parent: { capabilities: CapabilityManager; ui: UI; log: Pick<Logger, "warn"> },
-  enabled = lpEnabled(),
+  enabled = true,
 ): CapabilityManager {
   if (!enabled) return parent.capabilities;
   const allowlist = nonEmptyStringList(args.capabilities);
@@ -347,7 +344,7 @@ export function resolveChildCapabilities(
 export function resolveChildProvider(
   args: { provider?: unknown; model?: unknown },
   parent: { providers: { get(name?: string): unknown }; providerName: string | undefined; model: string; log: Pick<Logger, "warn"> },
-  enabled = lpEnabled(),
+  enabled = true,
 ): { provider: string | undefined; model: string } {
   if (!enabled) return { provider: parent.providerName, model: parent.model };
   let provider = parent.providerName;
@@ -375,7 +372,7 @@ const CONTRACT_VIOLATION = "contract violation:";
  */
 export function resolveOutputSchema(
   args: { outputSchema?: unknown; require?: unknown },
-  enabled = lpEnabled(),
+  enabled = true,
 ): JSONSchema | undefined {
   if (!enabled) return undefined;
   const raw = args.outputSchema;

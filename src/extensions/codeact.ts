@@ -190,13 +190,13 @@ export default function activate(e: ExtensionAPI): void {
    * falling through `wrapCommand`'s switch), and an unset value is detected.
    */
   const resolveSandbox = (): SandboxConfig => {
-    const envTier = process.env.EAGENT_CODEACT_TIER;
+    const envTier = e.config.string("codeact.tier");
     const tier: Tier =
       envTier !== undefined && (TIERS as readonly string[]).includes(envTier)
         ? (envTier as Tier)
         : (e.store.get<Tier>("tier", "off") ?? "off");
     const missingBackend = e.store.get<"block" | "pass">("missingBackend", "block") ?? "block";
-    const raw = process.env.EAGENT_SANDBOX_BACKEND;
+    const raw = e.config.string("sandbox.backend");
     const backend: Backend = raw ? (isBackend(raw) ? raw : "none") : detectBackend(process.platform, binExists);
     return {
       tier,

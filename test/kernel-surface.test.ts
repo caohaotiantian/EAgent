@@ -66,5 +66,5 @@ test("the kernel source stays small", async () => {
   for (const f of readdirSync(dir)) {
     if (f.endsWith(".ts")) lines += readFileSync(join(dir, f), "utf8").split("\n").length;
   }
-  assert.ok(lines < 2200, `kernel is ${lines} lines; keep the core minimal (ceiling 2200)`);
+  assert.ok(lines < 2250, `kernel is ${lines} lines; keep the core minimal (ceiling 2250)`);
 });

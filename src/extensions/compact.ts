@@ -165,8 +165,7 @@ function byteCap(s: string, max: number): string {
 
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
-    enabled:
-      process.env.EAGENT_COMPACT === "off" ? false : e.store.get<boolean>("enabled", false) ?? false,
+    enabled: e.config.enabled("compact", { default: false, store: e.store }),
     budget: e.store.get<number>("budget", DEFAULT_BUDGET) ?? DEFAULT_BUDGET,
     keepTurns: e.store.get<number>("keepTurns", DEFAULT_KEEP_TURNS) ?? DEFAULT_KEEP_TURNS,
   });

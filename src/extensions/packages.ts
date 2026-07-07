@@ -36,6 +36,7 @@ import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { Command, CommandContext } from "../kernel/commands.js";
 import type { KernelEvents, KernelFilters } from "../kernel/events.js";
 import type { EventHandler, FilterHandler } from "../kernel/hooks.js";
@@ -72,7 +73,7 @@ export default function activate(e: ExtensionAPI): Disposable {
   /** Live disposers per installed package id, keyed alongside the store. */
   const active = new Map<string, Disposable[]>();
 
-  const packagesDir = resolvePackagesDir();
+  const packagesDir = resolvePackagesDir(e.config);
   // We load packages through our own jiti + recording shim rather than the
   // ExtensionAPI's `loadExtension`, on purpose: a package is a CHILD of the
   // manager. Scoping its registrations to us means `/pkg-remove` and reloading
@@ -376,6 +377,7 @@ function makeShim(e: ExtensionAPI, collected: Disposable[]): ExtensionAPI {
     ) => record(e.hook(point, handler)),
     grantCapability: (pattern: string) => e.grantCapability(pattern),
     store: e.store,
+    config: e.config,
     log: e.log,
     agent: e.agent,
     commands: e.commands,
@@ -389,8 +391,8 @@ function makeShim(e: ExtensionAPI, collected: Disposable[]): ExtensionAPI {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function resolvePackagesDir(): string {
-  return process.env.EAGENT_PACKAGES_DIR ?? join(homedir(), ".eagent", "packages");
+function resolvePackagesDir(config: Config): string {
+  return config.string("packages.dir") ?? join(homedir(), ".eagent", "packages");
 }
 
 /** A stable id derived from the entry file's basename (sans extension). */

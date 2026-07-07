@@ -31,7 +31,7 @@ import type { Agent } from "./agent.js";
 import type { KernelEvents, KernelFilters } from "./events.js";
 import type { EventHandler, FilterHandler } from "./hooks.js";
 import { type Command, CommandRegistry } from "./commands.js";
-import { MemoryBackend, type Store, type StoreBackend } from "./store.js";
+import { type Config, envOnlyConfig, MemoryBackend, type Store, type StoreBackend } from "./store.js";
 import { combine, type Disposable, type Logger, type Provider, type Tool } from "./types.js";
 
 /**
@@ -56,6 +56,8 @@ export interface ExtensionAPI {
 
   /** Namespaced persistent state for this extension. */
   readonly store: Store;
+  /** Layered, read-mostly configuration (peer to `store`); see `Config`. */
+  readonly config: Config;
   readonly log: Logger;
   /** The running agent (registries, hooks, capabilities, transcript). */
   readonly agent: Agent;
@@ -94,6 +96,7 @@ export interface ExtensionHostOptions {
   commands?: CommandRegistry;
   store?: StoreBackend;
   logger?: Logger;
+  config?: Config;
 }
 
 export class ExtensionHost {
@@ -101,6 +104,7 @@ export class ExtensionHost {
   readonly commands: CommandRegistry;
   readonly #store: StoreBackend;
   readonly #logger: Logger;
+  readonly #config: Config;
   readonly #loaded = new Map<string, LoadedExtension>();
   readonly #jiti: ReturnType<typeof createJiti>;
 
@@ -109,6 +113,7 @@ export class ExtensionHost {
     this.commands = opts.commands ?? new CommandRegistry();
     this.#store = opts.store ?? new MemoryBackend();
     this.#logger = opts.logger ?? this.agent.logger;
+    this.#config = opts.config ?? envOnlyConfig();
     // moduleCache:false so re-importing a file on reload re-evaluates it.
     this.#jiti = createJiti(pathToFileURL(join(process.cwd(), "eagent.host.ts")).href, {
       moduleCache: false,
@@ -237,6 +242,7 @@ export class ExtensionHost {
       hook: (point, handler) => track(host.agent.hooks.filter(point, handler)),
       grantCapability: (pattern) => host.agent.capabilities.grant(pattern),
       store,
+      config: host.#config,
       log: prefixed(this.#logger, spec.id),
       agent: host.agent,
       commands: host.commands,

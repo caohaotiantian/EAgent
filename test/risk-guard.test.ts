@@ -378,17 +378,13 @@ class Hanging extends MockProvider {
 }
 
 test("GUARD-3: a hung classifier times out and fails open, not blocking the gate forever", { timeout: 3000 }, async () => {
-  const prev = process.env.EAGENT_RISK_GUARD_TIMEOUT_MS;
-  process.env.EAGENT_RISK_GUARD_TIMEOUT_MS = "50";
-  try {
-    const h = makeHarness({ fallback: "allow" });
-    h.agent.providers.register(new Hanging(() => ({ text: "" })), { default: true });
-    await activate(h, { enabled: true });
-    h.agent.tools.register(shellTool("run_shell"));
-    const out = await applyHook(h, "run_shell", { cmd: "x" });
-    assert.equal(out.block, false, "a hung classifier must time out and fail open, not block the gate forever");
-  } finally {
-    if (prev === undefined) delete process.env.EAGENT_RISK_GUARD_TIMEOUT_MS;
-    else process.env.EAGENT_RISK_GUARD_TIMEOUT_MS = prev;
-  }
+  const h = makeHarness({ fallback: "allow" });
+  // Set the classifier timeout via a race-free config override (not global
+  // process.env, which can be perturbed by concurrent tests on CI).
+  h.config.set("risk-guard.timeoutMs", 50);
+  h.agent.providers.register(new Hanging(() => ({ text: "" })), { default: true });
+  await activate(h, { enabled: true });
+  h.agent.tools.register(shellTool("run_shell"));
+  const out = await applyHook(h, "run_shell", { cmd: "x" });
+  assert.equal(out.block, false, "a hung classifier must time out and fail open, not block the gate forever");
 });

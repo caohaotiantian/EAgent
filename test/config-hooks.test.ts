@@ -325,6 +325,33 @@ async function runCmd(h: ReturnType<typeof makeHarness>, args: string): Promise<
   return out;
 }
 
+test("/config-hooks off actually disables after a prior on (toggle is symmetric)", async () => {
+  // Regression: `on` used to also write the runtime override, which `off` never
+  // cleared — leaving a shell-executing extension stuck enabled (override shadows
+  // the store flag). The toggle must round-trip.
+  const h = makeHarness({
+    fallback: "allow",
+    responder: (req) =>
+      req.messages.some((m) => m.role === "tool")
+        ? { text: "done" }
+        : { toolCalls: [{ name: "bash", arguments: { command: "rm x" } }] },
+  });
+  const didRun = shellTool(h.agent);
+  await h.host.use(
+    "config-hooks",
+    withConfig([{ on: "beforeToolCall", match: { tool: "bash" }, action: { type: "block", reason: "no" } }], { enabled: false }),
+  );
+
+  await runCmd(h, "on");
+  await h.agent.run("do it");
+  assert.equal(didRun(), false, "on: the bash block fires");
+
+  await runCmd(h, "off");
+  h.agent.clear();
+  await h.agent.run("do it again");
+  assert.equal(didRun(), true, "off: the block no longer fires (extension disabled)");
+});
+
 test("/config-hooks on then status prints on; list prints the bindings", async () => {
   const h = makeHarness({ fallback: "allow" });
   await h.host.use(

@@ -29,6 +29,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { JSONSchema } from "../kernel/types.js";
 import { getTraceparent, isTrustedHost, propagateAllowlist } from "./lib/otel-context.js";
 import { readCapped } from "./lib/read-capped.js";
@@ -149,8 +150,8 @@ const HTTP_REQUEST_TIMEOUT_MS = 60_000;
  * OOM-safety cap on a single MCP transport read (`EAGENT_MAX_MCP_READ_BYTES`,
  * default 16 MiB — far above any legitimate MCP response/line; invalid/≤0 → default).
  */
-export function maxMcpReadBytes(): number {
-  const n = Number(process.env.EAGENT_MAX_MCP_READ_BYTES);
+export function maxMcpReadBytes(config: Config): number {
+  const n = config.int("mcp.maxReadBytes", 16 * 1024 * 1024);
   return Number.isInteger(n) && n > 0 ? n : 16 * 1024 * 1024;
 }
 
@@ -230,7 +231,7 @@ class StdioTransport implements Transport {
   #nextId = 1;
   #closed = false;
 
-  constructor(def: StdioServerDef) {
+  constructor(def: StdioServerDef, config: Config) {
     this.#name = def.name;
     this.#child = spawn(def.command, def.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -242,7 +243,7 @@ class StdioTransport implements Transport {
     // Server logs/diagnostics go to stderr; we deliberately ignore them.
     this.#child.stderr?.resume();
 
-    const reader = createBoundedLineReader(maxMcpReadBytes(), (line) => this.#onLine(line));
+    const reader = createBoundedLineReader(maxMcpReadBytes(config), (line) => this.#onLine(line));
     this.#child.stdout!.on("data", (c: Buffer) => reader.push(c));
   }
 
@@ -328,14 +329,16 @@ class HttpTransport implements Transport {
   readonly #name: string;
   readonly #url: string;
   readonly #headers: Record<string, string>;
+  readonly #config: Config;
   #sessionId: string | undefined;
   #nextId = 1;
   #closed = false;
 
-  constructor(def: HttpServerDef) {
+  constructor(def: HttpServerDef, config: Config) {
     this.#name = def.name;
     this.#url = def.url;
     this.#headers = def.headers ?? {};
+    this.#config = config;
   }
 
   async request(method: string, params: unknown, signal?: AbortSignal, callId?: string): Promise<unknown> {
@@ -376,7 +379,7 @@ class HttpTransport implements Transport {
     // RW7c-2: propagate the tool-call traceparent to an allowlisted MCP host (only
     // while otel traces are on — the map's sole writer). Notifications pass no callId.
     const tp = callId ? getTraceparent(callId) : undefined;
-    if (tp && isTrustedHost(this.#url, propagateAllowlist())) headers["traceparent"] = tp;
+    if (tp && isTrustedHost(this.#url, propagateAllowlist(this.#config.string("otel.propagateHosts") ?? ""))) headers["traceparent"] = tp;
 
     // Bound every request with a timeout, and also honor a caller's abort, by
     // driving one AbortController from both. (Manual rather than
@@ -414,9 +417,9 @@ class HttpTransport implements Transport {
     }
     // Bound the read so a hostile/broken server cannot OOM the host, then throw a
     // clear error on overflow (D4) — a truncated JSON/SSE slice is unparseable.
-    const { text, truncated } = await readCapped(res.body, maxMcpReadBytes());
+    const { text, truncated } = await readCapped(res.body, maxMcpReadBytes(this.#config));
     if (truncated) {
-      throw new Error(`MCP HTTP response from "${this.#name}" exceeded ${maxMcpReadBytes()} bytes`);
+      throw new Error(`MCP HTTP response from "${this.#name}" exceeded ${maxMcpReadBytes(this.#config)} bytes`);
     }
     if (isSse) return this.#parseSse(text, id);
     // Default to JSON: one JSON-RPC response object in the body.
@@ -454,16 +457,18 @@ class McpConnection {
   readonly name: string;
   readonly #transport: Transport;
   readonly #warn: (msg: string) => void;
+  readonly #config: Config;
   tools: McpTool[] = [];
   /** The read-only data half: cached `resources/list` catalog (bodies read live). */
   resources: McpResource[] = [];
   /** The server's advertised `initialize` capabilities, used as a skip hint (D4). */
   #serverCapabilities: Record<string, unknown> = {};
 
-  constructor(def: ServerDef, warn: (msg: string) => void = () => {}) {
+  constructor(def: ServerDef, config: Config, warn: (msg: string) => void = () => {}) {
     this.name = def.name;
     this.#warn = warn;
-    this.#transport = isHttpDef(def) ? new HttpTransport(def) : new StdioTransport(def);
+    this.#config = config;
+    this.#transport = isHttpDef(def) ? new HttpTransport(def, config) : new StdioTransport(def, config);
   }
 
   /** Run the handshake and load the tool list. Throws if the server misbehaves. */
@@ -495,7 +500,7 @@ class McpConnection {
    * payload (empty catalog, never throws) — the same tolerance `tools/list` has.
    */
   async #loadResources(): Promise<void> {
-    if (process.env.EAGENT_MCP_RESOURCES === "off") {
+    if (!this.#config.enabled("mcp.resources", { default: true })) {
       this.resources = [];
       return;
     }
@@ -538,10 +543,10 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
 
   const connections: McpConnection[] = [];
 
-  for (const def of parseServers(e.log.warn, process.env.EAGENT_MCP_SERVERS)) {
+  for (const def of parseServers(e.log.warn, e.config.string("mcp.servers"))) {
     let conn: McpConnection | undefined;
     try {
-      conn = new McpConnection(def, e.log.warn);
+      conn = new McpConnection(def, e.config, e.log.warn);
       await conn.start();
     } catch (err) {
       // A server that won't start is skipped, never fatal to activation.

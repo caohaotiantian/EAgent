@@ -50,7 +50,7 @@ export default function activate(e: ExtensionAPI): void {
   /** Resolve the base directory: store override, then env, then cwd. */
   const baseDir = (): string => {
     const override = e.store.get<string>("baseDir");
-    const dir = override ?? process.env.EAGENT_WORKSPACE ?? process.cwd();
+    const dir = override ?? e.config.string("workspace") ?? process.cwd();
     return resolve(dir);
   };
 

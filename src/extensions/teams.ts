@@ -40,6 +40,7 @@ import { join } from "node:path";
 import type { Agent } from "../kernel/agent.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import { ToolRegistry } from "../kernel/registry.js";
 import type { Message, Tool, ToolResult } from "../kernel/types.js";
 
@@ -121,13 +122,13 @@ const BOARD_MAX_NOTE_BYTES = 4096;
 const ALLOWED_KEYS = new Set(["name", "description", "lead", "members", "pattern"]);
 
 /** The teams directory: an env override, else `~/.eagent/teams`. */
-export function teamsRoot(): string {
-  return process.env.EAGENT_TEAMS_DIR ?? join(homedir(), ".eagent", "teams");
+export function teamsRoot(config: Config): string {
+  return config.string("teams.dir") ?? join(homedir(), ".eagent", "teams");
 }
 
-/** Kill switch: the extension is inert when `EAGENT_TEAMS=off`. */
-export function enabled(): boolean {
-  return process.env.EAGENT_TEAMS !== "off";
+/** Kill switch: the extension is inert when `teams` resolves off (env `EAGENT_TEAMS=off`). */
+export function enabled(config: Config): boolean {
+  return config.enabled("teams", { default: true });
 }
 
 /**
@@ -574,7 +575,7 @@ export default function activate(e: ExtensionAPI): void {
       const member = rt.members.find((m) => m.name === memberName)!;
       const child = buildTemplateChild(member.template, parentFields(), {
         baseRegistry: memberChildRegistry(e.agent.tools.list(), member.template.tools, board.tool),
-        maxTurnsCeiling: MEMBER_MAX_TURNS,
+        maxTurnsCeiling: e.config.int("teams.member.maxTurns", MEMBER_MAX_TURNS),
       });
       const { messages } = await child.run(subtask);
       return finalText(messages);
@@ -593,7 +594,7 @@ export default function activate(e: ExtensionAPI): void {
     const lead = buildTemplateChild(leadTemplate, parentFields(), {
       excludeCapabilities: [...SPAWN_CAPS],
       extraTools: [board.tool, delegateTool],
-      maxTurnsCeiling: LEAD_MAX_TURNS,
+      maxTurnsCeiling: e.config.int("teams.lead.maxTurns", LEAD_MAX_TURNS),
     });
     const { messages } = await lead.run(task);
     return ok(finalText(messages), { team: rt.name, pattern: rt.pattern });
@@ -601,9 +602,9 @@ export default function activate(e: ExtensionAPI): void {
 
   /** Resolve `team` (a name) or `roster` (inline) into a ResolvedTeam, against the live catalogs. */
   const resolve = (teamName: string | undefined, roster: InlineRoster | undefined): ResolveTeamResult => {
-    const templateCatalog = scanTemplates(templatesRoot(), (m) => e.log.warn(m));
+    const templateCatalog = scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
     if (teamName !== undefined && teamName.length > 0) {
-      const teamCatalog = scanTeams(teamsRoot(), (m) => e.log.warn(m));
+      const teamCatalog = scanTeams(teamsRoot(e.config), (m) => e.log.warn(m));
       return resolveTeam(teamName, teamCatalog, templateCatalog);
     }
     if (roster) {
@@ -643,7 +644,7 @@ export default function activate(e: ExtensionAPI): void {
         required: ["task"],
       },
       execute: async (args): Promise<ToolResult> => {
-        if (!enabled()) return fail("Teams are disabled (EAGENT_TEAMS=off).");
+        if (!enabled(e.config)) return fail("Teams are disabled (EAGENT_TEAMS=off).");
         const task = typeof args.task === "string" ? args.task : "";
         if (task.length === 0) return fail("run_team requires a non-empty string `task`.");
         const teamName = typeof args.team === "string" ? args.team : undefined;
@@ -662,12 +663,12 @@ export default function activate(e: ExtensionAPI): void {
       const argv = ctx.args.trim().split(/\s+/).filter((s) => s.length > 0);
       const sub = argv[0] ?? "list";
 
-      const teamCatalog = (): Team[] => scanTeams(teamsRoot(), (m) => e.log.warn(m));
+      const teamCatalog = (): Team[] => scanTeams(teamsRoot(e.config), (m) => e.log.warn(m));
 
       if (sub === "list") {
         const found = teamCatalog();
         if (found.length === 0) {
-          ctx.print(`(no teams in ${teamsRoot()})`);
+          ctx.print(`(no teams in ${teamsRoot(e.config)})`);
           return;
         }
         for (const t of found) ctx.print(`  ${t.name.padEnd(20)} ${t.description}`);
@@ -680,7 +681,7 @@ export default function activate(e: ExtensionAPI): void {
           ctx.print("usage: /team show <name>");
           return;
         }
-        const templateCatalog = scanTemplates(templatesRoot(), (m) => e.log.warn(m));
+        const templateCatalog = scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
         const resolved = resolveTeam(name, teamCatalog(), templateCatalog);
         if (!resolved.ok) {
           ctx.print(resolved.error);
@@ -698,7 +699,7 @@ export default function activate(e: ExtensionAPI): void {
       }
 
       if (sub === "run") {
-        if (!enabled()) {
+        if (!enabled(e.config)) {
           ctx.print("Teams are disabled (EAGENT_TEAMS=off).");
           return;
         }

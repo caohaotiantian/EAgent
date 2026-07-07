@@ -34,9 +34,12 @@ export function clearTraceparent(callId: string): void {
   CONTEXT.delete(callId);
 }
 
-/** The operator's outbound-propagation host allowlist (`EAGENT_OTEL_PROPAGATE_HOSTS`, default empty). */
-export function propagateAllowlist(): string[] {
-  return (process.env.EAGENT_OTEL_PROPAGATE_HOSTS ?? "")
+/** Parse an operator's outbound-propagation host allowlist from a raw
+ *  comma-separated string (the `otel.propagateHosts` config value), trimming,
+ *  lower-casing, and dropping blanks. The caller supplies the resolved value so
+ *  this lib reads no env. */
+export function propagateAllowlist(raw: string): string[] {
+  return raw
     .split(",")
     .map((h) => h.trim().toLowerCase())
     .filter((h) => h.length > 0);

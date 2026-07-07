@@ -345,7 +345,7 @@ down gracefully on SIGTERM/SIGINT.
 `test/kernel-surface.test.ts` pins the kernel's complete public surface: adding a
 new export to `src/kernel/index.ts` fails the test until the author either moves
 the addition into an extension or deliberately updates the expected list. A second
-assertion holds the total line count of `src/kernel/` under a hard ceiling (2,200
+assertion holds the total line count of `src/kernel/` under a hard ceiling (2,250
 lines). Together they make core growth a conscious decision — new capability is an
 extension by construction.
 

@@ -111,7 +111,7 @@ export default function activate(e: ExtensionAPI): void {
         // finite integer here; a validly-passed negative integer clamps to 0 via
         // Math.max (mirrors the maxBytes guard above). The kill switch reverts to
         // today's behavior: ignore start_index and re-emit the legacy marker.
-        const paginate = process.env.EAGENT_WEB_PAGINATE !== "off";
+        const paginate = e.config.enabled("web.paginate", { default: true });
         const startIndex = paginate ? Math.max(0, Number(args.start_index ?? 0)) : 0;
         const baseHeaders =
           args.headers && typeof args.headers === "object"
@@ -122,7 +122,7 @@ export default function activate(e: ExtensionAPI): void {
         // otherwise `headers` is byte-identical to the caller's (undefined by default).
         const tp = getTraceparent(ctx.toolCallId);
         const headers =
-          tp && isTrustedHost(url.href, propagateAllowlist())
+          tp && isTrustedHost(url.href, propagateAllowlist(e.config.string("otel.propagateHosts") ?? ""))
             ? { ...(baseHeaders ?? {}), traceparent: tp }
             : baseHeaders;
         const body = method === "GET" || method === "HEAD" ? undefined : (args.body as string | undefined);

@@ -23,6 +23,7 @@ import { CommandRegistry } from "../src/kernel/commands.js";
 import { FileBackend, MemoryBackend } from "../src/kernel/store.js";
 import type { Store, StoreBackend } from "../src/kernel/store.js";
 import activate, { parseEmbeddings, resolveEmbedder, setEmbedder } from "../src/extensions/memory.js";
+import { envOnlyConfig } from "../src/kernel/store.js";
 import type { Embedder } from "../src/extensions/memory.js";
 import type { CompletionRequest, Message } from "../src/kernel/types.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
@@ -758,7 +759,7 @@ test("TEST-1: resolveEmbedder POSTs {model,input} with a Bearer header and parse
         EAGENT_MEMORY_EMBED_API_KEY: "sk-key",
       },
       async () => {
-        const embed = resolveEmbedder();
+        const embed = resolveEmbedder(envOnlyConfig());
         assert.ok(embed, "endpoint set → an embedder is resolved");
         const vecs = await embed!(["hello"]);
         assert.deepEqual(vecs, [[0.1, 0.2]], "returns the parsed embeddings");
@@ -780,7 +781,7 @@ test("TEST-1: resolveEmbedder throws on a non-ok response (upstream fail-soft to
   globalThis.fetch = (async () => new Response("nope", { status: 500 })) as typeof fetch;
   try {
     await withEmbedEnv({ EAGENT_MEMORY_EMBED_ENDPOINT: "https://embed.test/v1/embeddings" }, async () => {
-      const embed = resolveEmbedder();
+      const embed = resolveEmbedder(envOnlyConfig());
       await assert.rejects(() => embed!(["x"]), /500/, "a non-ok embed response throws");
     });
   } finally {
@@ -790,7 +791,7 @@ test("TEST-1: resolveEmbedder throws on a non-ok response (upstream fail-soft to
 
 test("TEST-1: resolveEmbedder is undefined when the endpoint is unset; no Bearer without a key", async () => {
   await withEmbedEnv({}, async () => {
-    assert.equal(resolveEmbedder(), undefined, "no endpoint → no embedder");
+    assert.equal(resolveEmbedder(envOnlyConfig()), undefined, "no endpoint → no embedder");
   });
   const origFetch = globalThis.fetch;
   let headers: Record<string, string> = {};
@@ -800,7 +801,7 @@ test("TEST-1: resolveEmbedder is undefined when the endpoint is unset; no Bearer
   }) as typeof fetch;
   try {
     await withEmbedEnv({ EAGENT_MEMORY_EMBED_ENDPOINT: "https://embed.test/v1/embeddings" }, async () => {
-      await resolveEmbedder()!(["x"]);
+      await resolveEmbedder(envOnlyConfig())!(["x"]);
       assert.equal(headers.authorization, undefined, "no api key (and no OPENAI_API_KEY) → no authorization header");
     });
   } finally {

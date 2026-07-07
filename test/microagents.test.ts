@@ -24,6 +24,7 @@ import microagents, {
   type Microagent,
 } from "../src/extensions/microagents.js";
 import type { CommandContext } from "../src/kernel/commands.js";
+import { envOnlyConfig } from "../src/kernel/store.js";
 import type { Message } from "../src/kernel/types.js";
 import { text } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
@@ -137,7 +138,7 @@ test("injectMicroagents: AC-8 kill switch returns input by reference", () => {
   const saved = process.env.EAGENT_MICROAGENTS;
   process.env.EAGENT_MICROAGENTS = "off";
   try {
-    const out = injectMicroagents(input, [m]);
+    const out = injectMicroagents(input, [m], envOnlyConfig());
     assert.equal(out, input);
   } finally {
     if (saved === undefined) delete process.env.EAGENT_MICROAGENTS;

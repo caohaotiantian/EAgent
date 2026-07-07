@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createHttpServer, maxSessions, sendJson, type HttpServer } from "../src/server.js";
+import { LayeredConfig } from "../src/config.js";
+import { MemoryStore } from "../src/kernel/store.js";
 import type { MockProvider } from "../src/providers/mock.js";
 import type { Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
@@ -744,19 +746,22 @@ async function withMaxSessions(value: string | undefined, body: () => Promise<vo
 
 test("SRV-3: maxSessions() parses EAGENT_MAX_SESSIONS with a safe 1000 default", () => {
   const prev = process.env.EAGENT_MAX_SESSIONS;
+  // A real LayeredConfig honors the legacy EAGENT_MAX_SESSIONS alias and reads
+  // process.env live, so mutating the env between calls is reflected.
+  const cfg = new LayeredConfig({ overrideStore: new MemoryStore() });
   try {
     delete process.env.EAGENT_MAX_SESSIONS;
-    assert.equal(maxSessions(), 1000, "unset → 1000");
+    assert.equal(maxSessions(cfg), 1000, "unset → 1000");
     // Empty / whitespace / non-numeric / negative / non-integer all fall back to
     // the safe default (never silently disabling the cap or hanging the evict loop).
     for (const bad of ["", "  ", "abc", "-1", "1.5"]) {
       process.env.EAGENT_MAX_SESSIONS = bad;
-      assert.equal(maxSessions(), 1000, `${JSON.stringify(bad)} → 1000`);
+      assert.equal(maxSessions(cfg), 1000, `${JSON.stringify(bad)} → 1000`);
     }
     process.env.EAGENT_MAX_SESSIONS = "42";
-    assert.equal(maxSessions(), 42, "a non-negative integer overrides");
+    assert.equal(maxSessions(cfg), 42, "a non-negative integer overrides");
     process.env.EAGENT_MAX_SESSIONS = "0";
-    assert.equal(maxSessions(), 0, "an explicit 0 → unbounded");
+    assert.equal(maxSessions(cfg), 0, "an explicit 0 → unbounded");
   } finally {
     if (prev === undefined) delete process.env.EAGENT_MAX_SESSIONS;
     else process.env.EAGENT_MAX_SESSIONS = prev;

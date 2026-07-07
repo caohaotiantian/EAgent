@@ -427,8 +427,7 @@ export default function activate(e: ExtensionAPI): () => void {
   /** File-config cache; invalidated by `/config-hooks reload`. */
   let cache: LoadedConfig | undefined;
 
-  const enabled = (): boolean =>
-    process.env.EAGENT_CONFIG_HOOKS !== "off" && e.store.get<boolean>("enabled") === true;
+  const enabled = (): boolean => e.config.enabled("config-hooks", { default: false, store: e.store });
 
   /** Read a config file; null = missing (silent skip), else parsed/validated. */
   const readConfigFile = (path: string): { bindings: Binding[]; errors: string[] } | null => {
@@ -644,7 +643,6 @@ export default function activate(e: ExtensionAPI): () => void {
       switch (arg) {
         case "on":
           e.store.set("enabled", true);
-          if (process.env.EAGENT_CONFIG_HOOKS === "off") delete process.env.EAGENT_CONFIG_HOOKS;
           c.print("config-hooks on");
           break;
         case "off":

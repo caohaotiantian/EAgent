@@ -28,6 +28,7 @@ import templates, {
   type Template,
 } from "../src/extensions/templates.js";
 import { CapabilityManager } from "../src/kernel/capabilities.js";
+import { envOnlyConfig } from "../src/kernel/store.js";
 import type { CommandContext } from "../src/kernel/commands.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { ToolDecision } from "../src/kernel/events.js";
@@ -291,7 +292,7 @@ test("T5 EAGENT_TEMPLATES=off: injectCatalog returns input by reference (AC-8)",
   try {
     const catalog: Template[] = [{ name: "a", description: "A.", systemPrompt: "x" }];
     const input = [text("user", "hi")];
-    assert.equal(injectCatalog(input, catalog, true), input);
+    assert.equal(injectCatalog(input, catalog, true, envOnlyConfig()), input);
   } finally {
     if (saved === undefined) delete process.env.EAGENT_TEMPLATES;
     else process.env.EAGENT_TEMPLATES = saved;

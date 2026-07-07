@@ -34,7 +34,7 @@ const EXT_SUFFIXES = [".ts", ".js", ".mjs", ".tsx"];
 function extensionsDir(e: ExtensionAPI): string {
   const override = e.store.get<string>("extensionsDir");
   if (override) return override;
-  const root = process.env.EAGENT_WORKSPACE ?? process.cwd();
+  const root = e.config.string("workspace") ?? process.cwd();
   return join(root, ".eagent", "extensions");
 }
 

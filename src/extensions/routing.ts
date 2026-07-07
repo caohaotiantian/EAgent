@@ -192,7 +192,7 @@ function textOf(message: Message): string {
 export default function activate(e: ExtensionAPI): () => void {
   // Kill switch: the env var makes activation a total no-op — no listeners, no
   // command, `Agent.model` never touched (the cost.ts:150 / recovery.ts pattern).
-  if (process.env.EAGENT_ROUTING === "off") return () => {};
+  if (!e.config.enabled("routing", { default: true })) return () => {};
 
   // The configured model captured per ACTING agent — each agent's restore
   // baseline. Keyed per agent so a routed child restores to ITS OWN model, not

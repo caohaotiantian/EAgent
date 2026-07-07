@@ -24,6 +24,7 @@
  */
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { Message, ToolCallBlock } from "../kernel/types.js";
 import { normalizeForInspection } from "./lib/decode.js";
 
@@ -32,10 +33,10 @@ type Mode = "ask" | "block";
 /** Capabilities whose tools are semantically analyzed before they run. */
 const DEFAULT_SENSITIVE_CAPS = ["shell:exec"];
 
-/** Classifier sub-call timeout (ms). `EAGENT_RISK_GUARD_TIMEOUT_MS`, default 10000
+/** Classifier sub-call timeout (ms). `risk-guard.timeoutMs`, default 10000
  *  (matches memory's network sub-call bound); invalid/≤0 falls back to the default. */
-function classifyTimeoutMs(): number {
-  const n = Number(process.env.EAGENT_RISK_GUARD_TIMEOUT_MS);
+function classifyTimeoutMs(config: Config): number {
+  const n = config.int("risk-guard.timeoutMs", 10000);
   return Number.isInteger(n) && n > 0 ? n : 10000;
 }
 
@@ -94,8 +95,7 @@ function stringLeaves(v: unknown, out: string[] = []): string[] {
 
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
-    enabled:
-      process.env.EAGENT_RISK_GUARD === "off" ? false : e.store.get<boolean>("enabled", false) ?? false,
+    enabled: e.config.enabled("risk-guard", { default: false, store: e.store }),
     mode: (e.store.get<Mode>("mode", "ask") ?? "ask") as Mode,
     sensitiveCaps: e.store.get<string[]>("sensitiveCaps", DEFAULT_SENSITIVE_CAPS) ?? DEFAULT_SENSITIVE_CAPS,
   });
@@ -125,7 +125,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // blob. `EAGENT_DECODE_NORMALIZE=off` leaves the prompt byte-identical.
       const rawArgs = JSON.stringify(call.arguments);
       let prefix = "";
-      if (process.env.EAGENT_DECODE_NORMALIZE !== "off") {
+      if (e.config.enabled("decode.normalize", { default: true })) {
         const seen = new Set<string>();
         const annotate = (subject: string): void => {
           for (const decoded of normalizeForInspection(subject)) {
@@ -156,7 +156,7 @@ export default function activate(e: ExtensionAPI): () => void {
         // Bound the classifier sub-call: a hung provider must not block this
         // (blocking) gate forever. On timeout the stream throws → the catch below
         // fails open (like classifier-unavailable), now bounded instead of infinite.
-        signal: AbortSignal.timeout(classifyTimeoutMs()),
+        signal: AbortSignal.timeout(classifyTimeoutMs(e.config)),
       })) {
         if (ev.type === "done") reply = textOf(ev.message);
       }
