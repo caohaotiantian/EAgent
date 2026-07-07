@@ -38,6 +38,9 @@ export interface Harness {
   host: ExtensionHost;
   commands: CommandRegistry;
   provider: MockProvider;
+  /** The injected config (same instance the extensions see as `e.config`), so a
+   *  test can set a value key race-free instead of mutating global `process.env`. */
+  config: LayeredConfig;
 }
 
 export function makeHarness(
@@ -62,7 +65,7 @@ export function makeHarness(
   // honors env-var reads AND the legacy ENV_ALIASES exactly like production.
   const config = new LayeredConfig({ overrideStore: new MemoryStore() });
   const host = new ExtensionHost({ agent, commands, logger, store: new MemoryBackend(), config });
-  return { agent, host, commands, provider };
+  return { agent, host, commands, provider, config };
 }
 
 export function lastText(agent: Agent): string {
