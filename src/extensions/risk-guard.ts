@@ -147,20 +147,31 @@ export default function activate(e: ExtensionAPI): () => void {
           ],
         },
       ];
-      let reply = "";
-      for await (const ev of provider.stream({
-        systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-        messages,
-        tools: [],
-        model: e.agent.model,
-        // Bound the classifier sub-call: a hung provider must not block this
-        // (blocking) gate forever. On timeout the stream throws → the catch below
-        // fails open (like classifier-unavailable), now bounded instead of infinite.
-        signal: AbortSignal.timeout(classifyTimeoutMs(e.config)),
-      })) {
-        if (ev.type === "done") reply = textOf(ev.message);
+      // Bound the classifier sub-call: a hung provider must not block this
+      // (blocking) gate forever. A ref'd `setTimeout` (NOT `AbortSignal.timeout`,
+      // whose timer is unref'd) keeps the loop alive so the deadline actually
+      // fires even when this sub-call is the only pending work; on abort the
+      // stream throws → the outer catch fails open (like classifier-unavailable).
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(new Error("risk-guard: classifier timed out")),
+        classifyTimeoutMs(e.config),
+      );
+      try {
+        let reply = "";
+        for await (const ev of provider.stream({
+          systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+          messages,
+          tools: [],
+          model: e.agent.model,
+          signal: controller.signal,
+        })) {
+          if (ev.type === "done") reply = textOf(ev.message);
+        }
+        return parseVerdict(reply);
+      } finally {
+        clearTimeout(timer);
       }
-      return parseVerdict(reply);
     } catch {
       return undefined;
     }

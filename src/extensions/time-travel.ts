@@ -1,7 +1,7 @@
 /**
  * time-travel — a persisted, branching checkpoint TREE for agent state.
  *
- * Wave 4 gave the kernel `Agent.snapshot()`/`restore()` (the full `AgentState`:
+ * The kernel provides `Agent.snapshot()`/`restore()` (the full `AgentState`:
  * transcript, usage, model, provider, system prompt, thinking, and the monotonic
  * `step`), but nothing consumed it as history — the HTTP host only does a flat
  * per-session save/restore. The genuine gap is *time-travel*: rewind to turn N

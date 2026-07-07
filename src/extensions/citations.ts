@@ -98,7 +98,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // Per-run state, keyed by the ACTING agent so concurrent forks don't commingle
   // ids. Reset on the parent's agent_start; a child seeds lazily on its first
-  // tagged result (agent_start is suppressed for children). (W9.1.)
+  // tagged result (agent_start is suppressed for children).
   interface CiteState {
     sources: Map<number, Source>;
     nextId: number;
@@ -163,7 +163,7 @@ export default function activate(e: ExtensionAPI): () => void {
       const c = cfg();
       if (!c.enabled) return;
       const answer = finalAnswer();
-      if (answer === "") return; // nothing to validate (§5 assumption)
+      if (answer === "") return; // nothing to validate
 
       const emitted = new Set(stateFor(currentActingAgent() ?? e.agent).sources.keys());
 

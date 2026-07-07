@@ -311,7 +311,7 @@ function nonEmptyStringList(value: unknown): string[] | undefined {
 
 /**
  * Resolve the capability manager for a child from its spawn args, shared by the
- * spawn tool and the workflow `agent` step (D1/D6). Precedence: an explicit
+ * spawn tool and the workflow `agent` step. Precedence: an explicit
  * `capabilities` allowlist wins (a warning is logged if `readOnly` is also set);
  * else `readOnly:true` uses the read-only preset; else the child inherits the
  * parent's manager exactly as today. When the kill switch is off, always inherit.
@@ -335,7 +335,7 @@ export function resolveChildCapabilities(
 }
 
 /**
- * Resolve the child's provider/model from its spawn args (D2/D6). A named,
+ * Resolve the child's provider/model from its spawn args. A named,
  * *registered* provider is used as-is; an unregistered/typo'd name falls back to
  * the parent's provider with a logged warning (never a hard failure). `model` is
  * overridden only when a string is supplied. When the kill switch is off, the
@@ -368,7 +368,7 @@ const CONTRACT_VIOLATION = "contract violation:";
  * Resolve the `outputSchema` (+ folded `require`) for a child, or `undefined`
  * when no typed return is requested or the kill switch is off. `require` keys are
  * unioned into the schema's `required` so a parent can demand keys without
- * hand-writing a full schema (D3).
+ * hand-writing a full schema.
  */
 export function resolveOutputSchema(
   args: { outputSchema?: unknown; require?: unknown },
@@ -399,7 +399,7 @@ function contractInstruction(schema: JSONSchema): string {
 
 /**
  * Render a re-prompt seed from validation errors (recovery-style single nudge):
- * the same child is re-run with this concrete, error-keyed correction (D3).
+ * the same child is re-run with this concrete, error-keyed correction.
  */
 function repromptSeed(prompt: string, errors: string[]): string {
   return (
@@ -419,7 +419,7 @@ function parseChildJson(text: string): { ok: true; value: unknown } | { ok: fals
 }
 
 /**
- * Run a child under a typed-return contract (D3), shared by the spawn tool and
+ * Run a child under a typed-return contract, shared by the spawn tool and
  * the workflow `agent` step. The child is run, its final text parsed as JSON and
  * validated against `schema`; on a miss the child is re-run *once* seeded with
  * the concrete errors, then validated again. Still invalid → a `contract

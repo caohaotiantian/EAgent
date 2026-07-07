@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["58 extensions<br/>src/extensions/"]
+        EXTS["59 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -78,7 +78,8 @@ kernel (re-exported from `src/kernel/index.ts`).
 Supporting modules round out the kernel without being primitives: `types.ts`
 (shared types plus `Usage` accounting), `events.ts` (the typed event/filter
 maps), `define.ts` (`defineTool` and result helpers), `validate.ts` (JSON-Schema
-argument validation), and `store.ts` (the namespaced persistent `Store`).
+argument validation), and `store.ts` (the namespaced persistent `Store`, plus the
+layered `Config` interface and its `envOnlyConfig` fallback that back `e.config`).
 
 ## The agent loop
 
@@ -224,8 +225,8 @@ export default function activate(e: ExtensionAPI) {
 
 The `ExtensionAPI` is the single, versioned public surface — `registerTool`,
 `registerProvider`, `registerCommand`, `on`, `hook`, `grantCapability`, a
-namespaced `store`, `log`, the `agent`, the `commands` registry, plus `reload`,
-`loadExtension`, and `unloadExtension`. It follows VS Code's discipline: minimal,
+namespaced `store`, the layered `config`, `log`, the `agent`, the `commands`
+registry, plus `reload`, `loadExtension`, and `unloadExtension`. It follows VS Code's discipline: minimal,
 additive, never broken.
 
 **Tracked disposables make reload a clean swap.** Every registration the host
@@ -386,5 +387,5 @@ the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`
 `integrity`, `write-guard`, `secret-guard`, `sweep-edit`, `citations`, `env-report`,
 `evals`, `handoff`, `drift-probe`, `skills-hardening`, `ask`, `routing`,
 `fallback-routing`, `reliability`, `time-travel`, `otel-exporter`,
-`reasoning-search`, `self-improve`. The README has a one-line description and
-capability for each; `docs/EXTENSIONS.md` is the author's guide.
+`reasoning-search`, `self-improve`, `config`. The README has a one-line description
+and capability for each; `docs/EXTENSIONS.md` is the author's guide.

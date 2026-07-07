@@ -48,7 +48,7 @@ export interface ToolSpan {
 
 /**
  * The behavior of the most recent run, folded from the lifecycle bus. `tools`
- * and `spans` are the same sequence viewed two ways (D2): one span per tool
+ * and `spans` are the same sequence viewed two ways: one span per tool
  * call, so `spans.length === tools.length` always.
  */
 export interface Trajectory {
@@ -456,7 +456,7 @@ export default function activate(e: ExtensionAPI): () => void {
         "Grade a candidate answer against a rubric. Returns a score (0-10), a pass/fail verdict, and a reason.",
       // `sequential` is load-bearing: the judge sub-call and the outer loop draw
       // turns from the same provider queue, so forcing the in-order dispatch path
-      // makes that queue consumption deterministic (design D3/§5).
+      // makes that queue consumption deterministic.
       executionMode: "sequential",
       parameters: {
         type: "object",

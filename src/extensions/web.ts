@@ -117,7 +117,7 @@ export default function activate(e: ExtensionAPI): void {
           args.headers && typeof args.headers === "object"
             ? (args.headers as Record<string, string>)
             : undefined;
-        // RW7c-2: propagate this tool call's OTel span as a `traceparent` — only for
+        // Propagate this tool call's OTel span as a `traceparent` — only for
         // an allowlisted host and only while otel traces are on (the map's writer);
         // otherwise `headers` is byte-identical to the caller's (undefined by default).
         const tp = getTraceparent(ctx.toolCallId);

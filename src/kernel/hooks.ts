@@ -31,7 +31,7 @@ interface Registration {
  * re-firing them resets per-run guard state (e.g. `circuit-breaker`/`limits`
  * reset on `agent_start`). Every other event is intra-run and IS shared, so the
  * parent's event-fed guard state (`flow-guard` taint, `write-guard` seen-set,
- * cost/budget counters) accumulates from a child's activity. (KDD-1/KDD-2.)
+ * cost/budget counters) accumulates from a child's activity.
  */
 const SUPPRESSED_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
   "agent_start",
@@ -44,7 +44,7 @@ const SUPPRESSED_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
 /**
  * The only filter points a child scope shares with its parent: the gate guards.
  * Context-shaping filters (`transformContext`/`transformRequest`) are absent by
- * design so the child keeps a fresh, isolated context window. (KDD-1/KDD-2.)
+ * design so the child keeps a fresh, isolated context window.
  */
 const SHARED_FILTER_POINTS: ReadonlySet<string> = new Set([
   "beforeToolCall",
@@ -66,7 +66,7 @@ export class HookBus<
    * @param seed  optional pre-population for a derived bus (see `childScope`).
    *   The provided `Set`/`Registration[]` references are shared, not deep-copied,
    *   so the derived bus fires the parent's existing handlers. Children never
-   *   register their own (§5), so the shared structures stay read-only in use.
+   *   register their own, so the shared structures stay read-only in use.
    */
   constructor(seed?: {
     events?: Map<keyof Events, Set<Registration>>;
@@ -162,7 +162,7 @@ export class HookBus<
    * parent's per-run guard state). Suppression is by absence: a point left out of
    * the seed is a no-op under this bus's own semantics — `emit` returns on a
    * missing event set and `apply` passes the value through on a missing filter
-   * list. (KDD-1/KDD-2.)
+   * list.
    */
   childScope(): HookBus<Events, Filters> {
     const events = new Map<keyof Events, Set<Registration>>();

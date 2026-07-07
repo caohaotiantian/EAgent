@@ -101,9 +101,9 @@ export function priceRow(model: string, card: PriceCard = DEFAULT_PRICE_CARD): R
 
 /**
  * Cache-read tokens bill at ~0.1x the fresh-input rate, cache-write (cache
- * creation) at ~1.25x. These are the documented Anthropic-standard approximations
- * (KDD-3): `cost` is an estimator, so a single multiplier off the existing input
- * rate captures the dominant effect without a separate per-model rate column.
+ * creation) at ~1.25x. These are the documented Anthropic-standard
+ * approximations: `cost` is an estimator, so a single multiplier off the existing
+ * input rate captures the dominant effect without a separate per-model rate column.
  */
 const CACHE_READ_MULTIPLIER = 0.1;
 const CACHE_WRITE_MULTIPLIER = 1.25;

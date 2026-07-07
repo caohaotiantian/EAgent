@@ -18,8 +18,8 @@
  * pinned to that tool-result message via `meta.flowGuardTaint`. Data taint is
  * information flow: it gates only while the tainting message is still in the
  * live transcript, so `/clear` and `/handoff` un-gate. Once either trigger is
- * active, a later tool requesting an "egress" capability (default `net:fetch`)
- * is held: confirmed with the human in `ask` mode, or refused outright in
+ * active, a later tool requesting an "egress" capability (default `net:fetch`,
+ * `mcp:call`) is held: confirmed with the human in `ask` mode, or refused outright in
  * `block` mode. This is the thesis in action — a new security best practice
  * absorbed as a hot-reloadable extension, not a core fork.
  *
@@ -174,7 +174,7 @@ export default function activate(e: ExtensionAPI): () => void {
     if (!enabled || decision.block) return decision;
     // Read the ACTING agent's transcript: a child that read a secret and egresses
     // is caught on its OWN transcript, not the parent's. The capability `tainted`
-    // Set stays shared (cross-agent exfiltration catch — KDD-3). (W9.1.)
+    // Set stays shared (cross-agent exfiltration catch).
     const agent = currentActingAgent() ?? e.agent;
     const dataTainted = agent.messages.some((m) => (taintArray(m)?.length ?? 0) > 0);
     if (tainted.size === 0 && !dataTainted) return decision;

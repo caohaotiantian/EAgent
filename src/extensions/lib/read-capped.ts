@@ -39,7 +39,7 @@ export async function readCapped(
       if (!value) continue;
 
       // Phase 1 — stream-and-discard until `startIndex` bytes have passed. We
-      // only count bytes; skipped bytes are never decoded (byte offset, D4).
+      // only count bytes; skipped bytes are never decoded (byte offset).
       let chunk = value;
       if (skipped < startIndex) {
         const need = startIndex - skipped;

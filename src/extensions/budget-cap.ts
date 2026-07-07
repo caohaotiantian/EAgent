@@ -159,14 +159,15 @@ function fmtUsd(usd: number): string {
 export default function activate(e: ExtensionAPI): () => void {
   // Hard kill switch: wire nothing, register no command, return a no-op disposer
   // (the `circuit-breaker` pattern). Re-checked live in `cfg()` below, so a later
-  // `/budget-cap off` flipping the env makes the installed hooks pass through.
+  // `/budget-cap off` (which sets the persisted config override) makes the
+  // installed hooks pass through.
   if (!e.config.enabled("budget-cap", { default: true })) return () => {};
 
   // --- run-scoped state, keyed by the ACTING agent (`WeakMap<Agent,…>`) so
   // concurrent parent + child forks don't commingle spend. The parent's entry is
   // reset on `agent_start`; a child's is lazily created (with `activeModel` stamped
   // from its own `model`) on its first `usage`, since `agent_start` is suppressed
-  // for children. (W9.1.) -----------------------------------------------------
+  // for children. -------------------------------------------------------------
   interface RunState {
     /** Per-run USD spend; reset on `agent_start`. */
     runUsd: number;
@@ -274,7 +275,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // Per-run accumulates from per-event deltas; the session figure mirrors the
       // authoritative cumulative (avoids float drift across a long session — the
       // exact approach `cost` takes). Only the ROOT agent updates the shared
-      // `sessionUsd`, so a child's smaller cumulative can't clobber it. (W9.1.)
+      // `sessionUsd`, so a child's smaller cumulative can't clobber it.
       s.runUsd += costOf(p.usage, row);
       if (currentActingAgent() === undefined || currentActingAgent() === e.agent) {
         sessionUsd = costOf(p.cumulative, row);

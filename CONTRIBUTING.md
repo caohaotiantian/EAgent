@@ -82,7 +82,7 @@ plain object above is equivalent.)
 
 Register everything through the `ExtensionAPI` (`registerTool`,
 `registerProvider`, `registerCommand`, `on`, `hook`, `grantCapability`,
-`store`). The host tracks every registration so a `/reload` tears the old
+`store`, `config`). The host tracks every registration so a `/reload` tears the old
 version down cleanly. The worked examples in `examples/extensions/` and the full
 author's guide in [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) are the place to
 start.

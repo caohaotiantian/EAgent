@@ -376,7 +376,7 @@ class HttpTransport implements Transport {
       ...this.#headers,
     };
     if (this.#sessionId) headers["mcp-session-id"] = this.#sessionId;
-    // RW7c-2: propagate the tool-call traceparent to an allowlisted MCP host (only
+    // Propagate the tool-call traceparent to an allowlisted MCP host (only
     // while otel traces are on — the map's sole writer). Notifications pass no callId.
     const tp = callId ? getTraceparent(callId) : undefined;
     if (tp && isTrustedHost(this.#url, propagateAllowlist(this.#config.string("otel.propagateHosts") ?? ""))) headers["traceparent"] = tp;
@@ -416,7 +416,7 @@ class HttpTransport implements Transport {
       return (await res.json()) as { id?: unknown; result?: unknown; error?: { message?: string } };
     }
     // Bound the read so a hostile/broken server cannot OOM the host, then throw a
-    // clear error on overflow (D4) — a truncated JSON/SSE slice is unparseable.
+    // clear error on overflow — a truncated JSON/SSE slice is unparseable.
     const { text, truncated } = await readCapped(res.body, maxMcpReadBytes(this.#config));
     if (truncated) {
       throw new Error(`MCP HTTP response from "${this.#name}" exceeded ${maxMcpReadBytes(this.#config)} bytes`);
@@ -461,7 +461,7 @@ class McpConnection {
   tools: McpTool[] = [];
   /** The read-only data half: cached `resources/list` catalog (bodies read live). */
   resources: McpResource[] = [];
-  /** The server's advertised `initialize` capabilities, used as a skip hint (D4). */
+  /** The server's advertised `initialize` capabilities, used as a skip hint. */
   #serverCapabilities: Record<string, unknown> = {};
 
   constructor(def: ServerDef, config: Config, warn: (msg: string) => void = () => {}) {
@@ -479,7 +479,7 @@ class McpConnection {
       clientInfo: { name: "eagent", version: "0.1" },
     })) as { capabilities?: Record<string, unknown> } | undefined;
     // Capture the server's advertised capabilities; used below as a cheap skip
-    // hint for the resources half (the controlling behavior is fail-soft, D4).
+    // hint for the resources half (the controlling behavior is fail-soft).
     this.#serverCapabilities = init?.capabilities && typeof init.capabilities === "object" ? init.capabilities : {};
     await this.#transport.notify("notifications/initialized");
     const listed = (await this.#transport.request("tools/list", {})) as { tools?: McpTool[] } | undefined;
@@ -504,7 +504,7 @@ class McpConnection {
       this.resources = [];
       return;
     }
-    // D4 skip hint: a server that clearly does not advertise `resources` is not
+    // Skip hint: a server that clearly does not advertise `resources` is not
     // probed (saves a round-trip). Foreign servers aren't trusted to advertise
     // honestly, so this is an optimization, not the correctness boundary.
     if (!("resources" in this.#serverCapabilities)) {
@@ -520,7 +520,7 @@ class McpConnection {
     }
   }
 
-  /** Re-run `resources/list` and refresh the cached catalog in place (D5). */
+  /** Re-run `resources/list` and refresh the cached catalog in place. */
   async refreshResources(): Promise<void> {
     await this.#loadResources();
   }
@@ -538,7 +538,7 @@ class McpConnection {
 export default async function activate(e: ExtensionAPI): Promise<() => void> {
   e.grantCapability("mcp:call");
   // Reading a server's resources is a distinct, read-only privilege from calling
-  // its (possibly mutating) tools, so it gets its own capability (D3).
+  // its (possibly mutating) tools, so it gets its own capability.
   e.grantCapability("mcp:read");
 
   const connections: McpConnection[] = [];
@@ -592,7 +592,7 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
                 "tools/call",
                 { name: toolName, arguments: args },
                 ctx.signal,
-                ctx.toolCallId, // RW7c-2: lets HttpTransport inject the traceparent
+                ctx.toolCallId, // lets HttpTransport inject the traceparent
               )) as McpCallResult | undefined;
               const content = (result?.content ?? [])
                 .filter((c) => typeof c.text === "string")
@@ -608,8 +608,8 @@ export default async function activate(e: ExtensionAPI): Promise<() => void> {
     }
 
     // The read-only data half: register one `read_resource` tool per server that
-    // actually has a catalog (a resource-less server gets none — AC4/AC7). The
-    // catalog is cached; bodies are read live (D5). Gated by `mcp:read` (D3).
+    // actually has a catalog (a resource-less server gets none). The
+    // catalog is cached; bodies are read live. Gated by `mcp:read`.
     if (conn.resources.length > 0) {
       const connection = conn;
       const fullName = `mcp__${def.name}__read_resource`;
@@ -707,11 +707,11 @@ export function parseServers(warn: (msg: string) => void, raw: string | undefine
   try {
     parsed = JSON.parse(raw);
   } catch {
-    warn("EAGENT_MCP_SERVERS is not valid JSON; ignoring.");
+    warn("mcp.servers (EAGENT_MCP_SERVERS) is not valid JSON; ignoring.");
     return [];
   }
   if (!Array.isArray(parsed)) {
-    warn("EAGENT_MCP_SERVERS must be a JSON array; ignoring.");
+    warn("mcp.servers (EAGENT_MCP_SERVERS) must be a JSON array; ignoring.");
     return [];
   }
   const out: ServerDef[] = [];

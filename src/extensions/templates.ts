@@ -570,7 +570,7 @@ export default function activate(e: ExtensionAPI): void {
         if (t.thinking !== undefined) agent.thinking = t.thinking;
         if (t.maxTurns !== undefined) agent.maxTurns = t.maxTurns;
         // Arm the veto only when the template declares a non-empty `tools`
-        // allow-list (design §4.5 / §8 risk note). A persona-only template (no
+        // allow-list. A persona-only template (no
         // `tools` frontmatter) leaves the veto disarmed — `[].includes(x)` would
         // otherwise block every tool, asymmetric with the delegate path where an
         // absent allow-list keeps all parent tools.
