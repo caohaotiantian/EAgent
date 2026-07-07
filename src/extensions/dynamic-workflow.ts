@@ -484,9 +484,10 @@ async function runAgentStep(step: WorkflowStep, outputs: Record<string, string>,
     model: e.agent.model,
     log: e.log,
   };
-  const { provider, model } = resolveChildProvider(step, parent);
-  const capabilities = resolveChildCapabilities(step, parent);
-  const schema = resolveOutputSchema(step);
+  const lp = e.config.enabled("subagents.lp", { default: true });
+  const { provider, model } = resolveChildProvider(step, parent, lp);
+  const capabilities = resolveChildCapabilities(step, parent, lp);
+  const schema = resolveOutputSchema(step, lp);
 
   const build = (system: string): Agent =>
     new Agent({
@@ -497,7 +498,7 @@ async function runAgentStep(step: WorkflowStep, outputs: Record<string, string>,
       model,
       provider,
       systemPrompt: system,
-      maxTurns: DEFAULT_AGENT_MAX_TURNS,
+      maxTurns: e.config.int("dynamic-workflow.maxTurns", DEFAULT_AGENT_MAX_TURNS),
       tools: workflowChildRegistry(e.agent.tools.list()),
       hooks: e.agent.hooks.childScope(),
     });

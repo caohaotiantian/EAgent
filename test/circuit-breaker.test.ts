@@ -415,8 +415,10 @@ test("T-9 kill switch: EAGENT_CIRCUIT_BREAKER=off is a clean no-op", async () =>
     const s = stub();
     agent.tools.register(s.tool);
     const disposer = activateCircuitBreaker({
-      // Minimal: activation only needs to early-return; pass the real API so the
-      // disposer is genuinely the no-op. We route through host.use for parity.
+      // Minimal: activation only needs to early-return (the kill switch resolves
+      // through e.config now), so a config whose enabled() returns false suffices.
+      // We route through host.use below for real, env-driven parity.
+      config: { enabled: () => false },
     } as never);
     // The early-return disposer must not throw.
     assert.doesNotThrow(() => disposer());

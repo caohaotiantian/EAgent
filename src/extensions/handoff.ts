@@ -47,6 +47,7 @@ import { join, resolve } from "node:path";
 
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { Message } from "../kernel/types.js";
 import { salientTokens } from "./lib/relevance.js";
 
@@ -212,9 +213,10 @@ export function ensureSchema(summary: string, goal: string): string {
   return `${summary.trimEnd()}\n${filler}`;
 }
 
-/** The workspace root: `$EAGENT_WORKSPACE` resolved, else `process.cwd()`. */
-function workspaceRoot(): string {
-  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+/** The workspace root: the `workspace` config key resolved, else `process.cwd()`. */
+function workspaceRoot(config: Config): string {
+  const ws = config.string("workspace");
+  return ws ? resolve(ws) : process.cwd();
 }
 
 // -- resume-injection (B3): the READ side ------------------------------------
@@ -419,10 +421,7 @@ export function resumeMessage(candidate: ResumeCandidate, maxBytes: number): Mes
 export default function activate(e: ExtensionAPI): () => void {
   /** Off by default; the env kill switch hard-disables the auto-trigger (design D6). */
   const cfg = () => ({
-    // `store.get(key, false)` already returns the `false` fallback when unset, so
-    // the read is a clean `boolean`; `=== true` only pins the static type.
-    enabled:
-      process.env.EAGENT_HANDOFF === "off" ? false : e.store.get<boolean>("enabled", false) === true,
+    enabled: e.config.enabled("handoff", { default: false, store: e.store }),
   });
 
   /**
@@ -431,10 +430,9 @@ export default function activate(e: ExtensionAPI): () => void {
    * opt-in. `EAGENT_HANDOFF_RESUME=off` is the hard kill switch.
    */
   const resumeCfg = () => ({
-    resume:
-      process.env.EAGENT_HANDOFF_RESUME === "off"
-        ? false
-        : e.store.get<boolean>("resume", false) === true,
+    // The runtime toggle lives under the store's own `resume` key (not `enabled`),
+    // so thread it in as the default beneath the env-veto and override layers.
+    resume: e.config.enabled("handoff.resume", { default: e.store.get<boolean>("resume", false) === true }),
     maxAgeHours: e.store.get<number>("resumeMaxAgeHours", DEFAULT_RESUME_MAX_AGE_HOURS) ??
       DEFAULT_RESUME_MAX_AGE_HOURS,
     maxBytes: e.store.get<number>("resumeMaxBytes", DEFAULT_RESUME_MAX_BYTES) ??
@@ -482,7 +480,7 @@ export default function activate(e: ExtensionAPI): () => void {
    */
   function writeHandoff(content: string, slug: string): string | undefined {
     try {
-      const dir = join(workspaceRoot(), ".eagent", "handoffs");
+      const dir = join(workspaceRoot(e.config), ".eagent", "handoffs");
       mkdirSync(dir, { recursive: true });
       const date = dateStamp(now());
       let file = join(dir, `${date}-${slug}.md`);
@@ -563,7 +561,7 @@ export default function activate(e: ExtensionAPI): () => void {
     const userText = firstUserText(messages);
     if (userText.trim().length === 0) return messages; // nothing to match on
 
-    const dir = join(workspaceRoot(), ".eagent", "handoffs");
+    const dir = join(workspaceRoot(e.config), ".eagent", "handoffs");
     const candidate = selectResume(scanHandoffs(dir), userText, now().getTime(), maxAgeHours);
     if (!candidate) return messages; // nothing fresh + relevant — inject nothing
 
@@ -590,9 +588,7 @@ export default function activate(e: ExtensionAPI): () => void {
           return;
         case "status": {
           const { enabled } = cfg();
-          ctx.print(
-            `handoff ${enabled ? "on" : "off"}${process.env.EAGENT_HANDOFF === "off" ? " (EAGENT_HANDOFF=off)" : ""}`,
-          );
+          ctx.print(`handoff ${enabled ? "on" : "off"}`);
           return;
         }
         case "resume": {
@@ -609,8 +605,7 @@ export default function activate(e: ExtensionAPI): () => void {
             default: {
               const { resume, maxAgeHours, maxBytes } = resumeCfg();
               ctx.print(
-                `handoff resume ${resume ? "on" : "off"}${process.env.EAGENT_HANDOFF_RESUME === "off" ? " (EAGENT_HANDOFF_RESUME=off)" : ""} ` +
-                  `maxAgeHours=${maxAgeHours} maxBytes=${maxBytes}`,
+                `handoff resume ${resume ? "on" : "off"} maxAgeHours=${maxAgeHours} maxBytes=${maxBytes}`,
               );
               return;
             }

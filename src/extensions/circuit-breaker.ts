@@ -78,7 +78,7 @@ interface Bucket {
 
 export default function activate(e: ExtensionAPI): () => void {
   // Hard kill switch: wire nothing, return a no-op disposer.
-  if (process.env.EAGENT_CIRCUIT_BREAKER === "off") return () => {};
+  if (!e.config.enabled("circuit-breaker", { default: true })) return () => {};
 
   /**
    * Per-run signature buckets, keyed by the ACTING agent (`WeakMap<Agent,…>`) so
@@ -97,7 +97,7 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   const cfg = (): { enabled: boolean; mode: Mode; threshold: number } => ({
-    enabled: e.store.get<boolean>(KEYS.enabled, true) ?? true,
+    enabled: e.config.enabled("circuit-breaker", { default: true, store: e.store }),
     mode: (e.store.get<Mode>(KEYS.mode, DEFAULT_MODE) ?? DEFAULT_MODE) as Mode,
     threshold: readThreshold(),
   });

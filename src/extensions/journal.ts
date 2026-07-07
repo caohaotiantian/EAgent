@@ -25,10 +25,10 @@ export default function activate(e: ExtensionAPI): () => void {
   e.grantCapability("fs:write");
 
   const journalPath = (): string =>
-    process.env.EAGENT_JOURNAL ?? e.store.get<string>("path") ?? join(homedir(), ".eagent", "journal.jsonl");
+    e.config.string("journal") ?? e.store.get<string>("path") ?? join(homedir(), ".eagent", "journal.jsonl");
 
-  // Enabled if the env var is set, or the persisted flag is on.
-  const isEnabled = (): boolean => Boolean(process.env.EAGENT_JOURNAL) || e.store.get<boolean>("enabled", false) === true;
+  // Enabled if the journal path is configured, or the persisted flag is on.
+  const isEnabled = (): boolean => Boolean(e.config.string("journal")) || e.store.get<boolean>("enabled", false) === true;
 
   const append = (message: Message): void => {
     if (!isEnabled()) return;

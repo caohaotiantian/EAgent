@@ -14,6 +14,8 @@
 import { existsSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 
+import type { Config } from "../../kernel/store.js";
+
 export type Backend = "sandbox-exec" | "bwrap" | "firejail" | "none";
 export type Tier = "off" | "readonly" | "workspace-write" | "no-network";
 
@@ -25,12 +27,14 @@ export const LAUNCHERS = ["sandbox-exec", "bwrap", "firejail"] as const;
 
 /**
  * The directory shell writes are confined to under the write tiers: computed
- * identically to `core-tools.ts`'s `workspaceRoot()` (`$EAGENT_WORKSPACE`
+ * identically to `core-tools.ts`'s `workspaceRoot()` (the `workspace` config key
  * resolved, else `process.cwd()`) so the writable subpath matches the `bash`
- * tool's `cwd: root` and the `fs:*` confinement the file tools enforce.
+ * tool's `cwd: root` and the `fs:*` confinement the file tools enforce. The
+ * resolved config is passed in by the extension caller so this lib reads no env.
  */
-export function workspaceRoot(): string {
-  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+export function workspaceRoot(config: Config): string {
+  const ws = config.string("workspace");
+  return ws ? resolve(ws) : process.cwd();
 }
 
 /**

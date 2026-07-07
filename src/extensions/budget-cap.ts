@@ -160,7 +160,7 @@ export default function activate(e: ExtensionAPI): () => void {
   // Hard kill switch: wire nothing, register no command, return a no-op disposer
   // (the `circuit-breaker` pattern). Re-checked live in `cfg()` below, so a later
   // `/budget-cap off` flipping the env makes the installed hooks pass through.
-  if (process.env.EAGENT_BUDGET_CAP === "off") return () => {};
+  if (!e.config.enabled("budget-cap", { default: true })) return () => {};
 
   // --- run-scoped state, keyed by the ACTING agent (`WeakMap<Agent,…>`) so
   // concurrent parent + child forks don't commingle spend. The parent's entry is
@@ -221,7 +221,7 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   const cfg = (): BudgetConfig => ({
-    enabled: process.env.EAGENT_BUDGET_CAP !== "off",
+    enabled: e.config.enabled("budget-cap", { default: true }),
     mode: readMode(),
     runMaxUsd: readNonNegativeUsd(KEYS.runMaxUsd, 0),
     sessionMaxUsd: readNonNegativeUsd(KEYS.sessionMaxUsd, 0),
@@ -427,12 +427,12 @@ export default function activate(e: ExtensionAPI): () => void {
         return;
       }
       if (head === "on") {
-        process.env.EAGENT_BUDGET_CAP = "on";
+        e.config.set("budget-cap", true);
         ctx.print("budget-cap on");
         return;
       }
       if (head === "off") {
-        process.env.EAGENT_BUDGET_CAP = "off";
+        e.config.set("budget-cap", false);
         ctx.print("budget-cap off");
         return;
       }

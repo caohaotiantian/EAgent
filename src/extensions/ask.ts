@@ -50,7 +50,7 @@ export const NO_HUMAN =
 
 export default function activate(e: ExtensionAPI): () => void {
   // Kill switch first — before any registration (mirror recovery.ts).
-  if (process.env.EAGENT_ASK === "off") return () => {};
+  if (!e.config.enabled("ask", { default: true })) return () => {};
 
   // Conditional grant: pre-allow ui:ask ONLY when the host UI can actually
   // elicit, so an interactive run is not double-prompted while a non-interactive

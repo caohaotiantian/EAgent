@@ -21,6 +21,7 @@ import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { ToolResult } from "../kernel/types.js";
 import { totalTokens } from "../kernel/types.js";
 import type { ToolDecision } from "../kernel/events.js";
@@ -55,9 +56,10 @@ const KEYS = {
   toolOutputRetentionDays: "toolOutputRetentionDays",
 } as const;
 
-/** The workspace the `read` tool confines to: `$EAGENT_WORKSPACE` or cwd. */
-function workspaceRoot(): string {
-  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+/** The workspace the `read` tool confines to: the `workspace` config key or cwd. */
+function workspaceRoot(config: Config): string {
+  const ws = config.string("workspace");
+  return ws ? resolve(ws) : process.cwd();
 }
 
 /** True when `p` resolves inside `root` (same rule the `read` tool enforces). */
@@ -126,10 +128,9 @@ export default function activate(e: ExtensionAPI): () => void {
     maxToolOutputBytes: readPositiveInt(KEYS.maxToolOutputBytes, DEFAULT_MAX_TOOL_OUTPUT_BYTES),
     maxToolCallsPerRun: readPositiveInt(KEYS.maxToolCallsPerRun, DEFAULT_MAX_TOOL_CALLS_PER_RUN),
     maxTokensPerRun: readNonNegativeInt(KEYS.maxTokensPerRun, DEFAULT_MAX_TOKENS_PER_RUN),
-    spillToolOutput:
-      process.env.EAGENT_TOOL_SPILL === "off"
-        ? false
-        : readBool(KEYS.spillToolOutput, DEFAULT_SPILL_TOOL_OUTPUT),
+    spillToolOutput: e.config.enabled("tool-spill", {
+      default: readBool(KEYS.spillToolOutput, DEFAULT_SPILL_TOOL_OUTPUT),
+    }),
     toolOutputDir: readString(KEYS.toolOutputDir),
     toolOutputRetentionDays: readPositiveInt(
       KEYS.toolOutputRetentionDays,
@@ -168,7 +169,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // Spill the FULL output to disk, then point the model at it. Any disk
       // failure degrades to the clipped marker rather than crashing the run.
       try {
-        const root = workspaceRoot();
+        const root = workspaceRoot(e.config);
         const dir = cfg.toolOutputDir ?? join(root, ".eagent", "tool-output");
         mkdirSync(dir, { recursive: true });
         const file = join(dir, `tool-${Date.now()}-${nextSpillId++}`);
@@ -290,7 +291,7 @@ export default function activate(e: ExtensionAPI): () => void {
       ctx.print(`maxToolCallsPerRun=${cfg.maxToolCallsPerRun}`);
       ctx.print(`maxTokensPerRun=${cfg.maxTokensPerRun}${cfg.maxTokensPerRun === 0 ? " (disabled)" : ""}`);
       ctx.print(`spillToolOutput=${cfg.spillToolOutput}`);
-      ctx.print(`toolOutputDir=${cfg.toolOutputDir ?? `(default: ${workspaceRoot()}/.eagent/tool-output)`}`);
+      ctx.print(`toolOutputDir=${cfg.toolOutputDir ?? `(default: ${workspaceRoot(e.config)}/.eagent/tool-output)`}`);
       ctx.print(`toolOutputRetentionDays=${cfg.toolOutputRetentionDays}`);
       ctx.print(`toolCallsThisRun=${toolCallsThisRun}`);
       ctx.print(`tokensThisRun=${tokensThisRun}`);
@@ -334,7 +335,7 @@ function truncateToBytes(s: string, limit: number): string {
  */
 function sweepSpillDir(e: ExtensionAPI, cfg: LimitsConfig): void {
   if (!cfg.spillToolOutput) return;
-  const dir = cfg.toolOutputDir ?? join(workspaceRoot(), ".eagent", "tool-output");
+  const dir = cfg.toolOutputDir ?? join(workspaceRoot(e.config), ".eagent", "tool-output");
   const cutoff = Date.now() - cfg.toolOutputRetentionDays * 86_400_000;
   let entries: string[];
   try {

@@ -168,7 +168,7 @@ function refinePrompt(task: string, answer: string): string {
 
 export default function activate(e: ExtensionAPI): () => void {
   // Hard kill switch: register nothing so the extension is wholly absent.
-  if (process.env.EAGENT_REASONING_SEARCH === "off") return () => {};
+  if (!e.config.enabled("reasoning-search", { default: true })) return () => {};
 
   e.grantCapability("agent:spawn");
 

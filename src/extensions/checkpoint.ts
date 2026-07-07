@@ -60,11 +60,11 @@ export default function activate(e: ExtensionAPI): void {
   // Kill switch: the auto-snapshot hook runs git on every mutating tool call, so
   // an operator must be able to opt out. When off, register nothing (no hook, no
   // commands) — mirrors time-travel's EAGENT_TIME_TRAVEL.
-  if (process.env.EAGENT_CHECKPOINT === "off") return;
+  if (!e.config.enabled("checkpoint", { default: true })) return;
 
   /** Resolve the workspace root, allowing a store override for tests. */
   const workspace = (): string =>
-    e.store.get<string>("workspaceDir") ?? process.env.EAGENT_WORKSPACE ?? process.cwd();
+    e.store.get<string>("workspaceDir") ?? e.config.string("workspace") ?? process.cwd();
 
   /** Run a git subcommand in the workspace; return trimmed stdout or null on failure. */
   const git = async (args: string[]): Promise<string | null> => {

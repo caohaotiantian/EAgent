@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import prune, { pruneMessages } from "../src/extensions/prune.js";
+import { envOnlyConfig } from "../src/kernel/store.js";
 import type { Message, ToolResultBlock } from "../src/kernel/types.js";
 import { text } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
@@ -208,7 +209,7 @@ test("AC-9: kill switch", () => {
   const saved = process.env.EAGENT_PRUNE;
   process.env.EAGENT_PRUNE = "off";
   try {
-    const out = pruneMessages(input);
+    const out = pruneMessages(input, envOnlyConfig());
     for (const id of ["A", "B", "C", "D", "E"]) {
       const expected = id === "A" ? 4 * 30000 : 4 * 8000;
       assert.equal(resultFor(out, id).content.length, expected);

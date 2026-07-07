@@ -80,7 +80,7 @@ export default function activate(
   opts: { sleep?: (ms: number) => Promise<void> } = {},
 ): () => void {
   // Hard kill switch: wire nothing, return a no-op disposer.
-  if (process.env.EAGENT_RELIABILITY === "off") return () => {};
+  if (!e.config.enabled("reliability", { default: true })) return () => {};
 
   const sleep = opts.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
 

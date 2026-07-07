@@ -14,13 +14,15 @@ import { promisify } from "node:util";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import { locateEdit } from "./lib/edit-match.js";
 
 const execAsync = promisify(exec);
 
-/** The directory the file tools are confined to: `$EAGENT_WORKSPACE` or cwd. */
-function workspaceRoot(): string {
-  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+/** The directory the file tools are confined to: the `workspace` config key or cwd. */
+function workspaceRoot(config: Config): string {
+  const ws = config.string("workspace");
+  return ws ? resolve(ws) : process.cwd();
 }
 
 /**
@@ -46,7 +48,7 @@ export default function activate(e: ExtensionAPI): void {
   e.grantCapability("fs:write");
   // shell:exec is intentionally NOT auto-granted: bash should prompt/deny by
   // default unless the host policy opts in.
-  const root = workspaceRoot();
+  const root = workspaceRoot(e.config);
 
   e.registerTool(
     defineTool({

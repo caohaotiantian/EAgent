@@ -157,7 +157,7 @@ export default function activate(e: ExtensionAPI): () => void {
   // Kill switch: the env var makes activation a total no-op — no provider, no
   // listeners, no command, `Agent.providerName` never touched (routing /
   // circuit-breaker / recovery pattern).
-  if (process.env.EAGENT_FALLBACK_ROUTING === "off") return () => {};
+  if (!e.config.enabled("fallback-routing", { default: true })) return () => {};
 
   // The configured provider captured at run start — the restore baseline. Seeded
   // eagerly so a unit-level `/fallback-routing off` before any run still restores

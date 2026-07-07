@@ -105,10 +105,7 @@ export function scanArgs(args: Record<string, unknown>): string[] {
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
     // On by default (design D5 — unlike risk-guard), killable via the env var.
-    enabled:
-      process.env.EAGENT_SECRET_GUARD === "off"
-        ? false
-        : e.store.get<boolean>("enabled", true) ?? true,
+    enabled: e.config.enabled("secret-guard", { default: true, store: e.store }),
     mode: (e.store.get<Mode>("mode", "ask") ?? "ask") as Mode,
     leakCaps: e.store.get<string[]>("leakCaps", DEFAULT_LEAK_CAPS) ?? DEFAULT_LEAK_CAPS,
   });

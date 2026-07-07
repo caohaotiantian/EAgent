@@ -142,7 +142,7 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   const notSuppressed = (): boolean =>
-    process.env.EAGENT_OTEL !== "off" && (e.store.get<boolean>("enabled", true) ?? true);
+    e.config.enabled("otel", { default: true, store: e.store });
 
   // The traces gate (the trace handlers + the trace flush branch).
   const enabled = (): boolean => !!endpoint() && notSuppressed();

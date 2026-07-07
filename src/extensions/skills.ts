@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { Message } from "../kernel/types.js";
 
 interface SkillMeta {
@@ -29,15 +30,15 @@ interface SkillMeta {
   dir: string;
 }
 
-export function skillsRoot(): string {
-  return process.env.EAGENT_SKILLS_DIR ?? join(homedir(), ".eagent", "skills");
+export function skillsRoot(config: Config): string {
+  return config.string("skills.dir") ?? join(homedir(), ".eagent", "skills");
 }
 
 export default function activate(e: ExtensionAPI): void {
   e.grantCapability("skill:read");
   // skill:write is deliberately left to ask/grant by the host policy.
 
-  const catalog = (): SkillMeta[] => scanSkills(skillsRoot());
+  const catalog = (): SkillMeta[] => scanSkills(skillsRoot(e.config));
 
   // Tier 1: inject the catalog (name + description only) before each LLM call.
   e.hook("transformContext", (messages) => {
@@ -106,7 +107,7 @@ export default function activate(e: ExtensionAPI): void {
         // Removing this one call restores the old accept-anything path.
         const errors = validateFrontmatter({ name, description });
         if (errors.length > 0) return fail(`Invalid skill frontmatter: ${errors.join("; ")}.`);
-        const dir = join(skillsRoot(), name);
+        const dir = join(skillsRoot(e.config), name);
         const body = renderSkill(name, description, String(args.instructions));
         try {
           mkdirSync(dir, { recursive: true });
@@ -128,7 +129,7 @@ export default function activate(e: ExtensionAPI): void {
       ctx.print(
         skills.length
           ? skills.map((s) => `  ${s.name.padEnd(20)} ${s.description}`).join("\n")
-          : `(no skills in ${skillsRoot()})`,
+          : `(no skills in ${skillsRoot(e.config)})`,
       );
     },
   });

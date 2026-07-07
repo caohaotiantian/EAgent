@@ -100,10 +100,10 @@ interface Counters {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_CONTENT_GUARD === "off") return () => {};
+  if (!e.config.enabled("content-guard", { default: true })) return () => {};
 
   const cfg = (): Config => ({
-    enabled: e.store.get<boolean>("enabled", true) ?? true,
+    enabled: e.config.enabled("content-guard", { default: true, store: e.store }),
     foreignCaps: e.store.get<string[]>("foreignCaps", DEFAULT_FOREIGN_CAPS) ?? DEFAULT_FOREIGN_CAPS,
   });
 

@@ -72,7 +72,7 @@ export default function activate(e: ExtensionAPI): () => void {
     missingBackend: "pass" | "block";
     commandArgKey: string;
   } => ({
-    enabled: process.env.EAGENT_SANDBOX_TIERS !== "off",
+    enabled: e.config.enabled("sandbox-tiers", { default: true }),
     tier: (e.store.get<Tier>("tier", "off") ?? "off") as Tier,
     missingBackend: (e.store.get<"pass" | "block">("missingBackend", "pass") ?? "pass"),
     commandArgKey: e.store.get<string>("commandArgKey", "command") ?? "command",
@@ -80,7 +80,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
   /** A forced backend pins the probe (store key wins, then env), for tests/ops. */
   const forcedBackend = (): Backend | undefined => {
-    const raw = e.store.get<string>("forceBackend") ?? process.env.EAGENT_SANDBOX_BACKEND;
+    const raw = e.store.get<string>("forceBackend") ?? e.config.string("sandbox.backend");
     if (!raw) return undefined;
     // An unrecognized override (operator typo) coerces to "none" so it routes
     // through the documented missingBackend pass/block policy, rather than
@@ -139,7 +139,7 @@ export default function activate(e: ExtensionAPI): () => void {
       ...decision,
       arguments: {
         ...decision.arguments,
-        [commandArgKey]: wrapCommand(backend, tier, command, { root: workspaceRoot() }),
+        [commandArgKey]: wrapCommand(backend, tier, command, { root: workspaceRoot(e.config) }),
       },
     };
   });
@@ -166,7 +166,7 @@ export default function activate(e: ExtensionAPI): () => void {
           const { enabled, tier, missingBackend } = cfg();
           c.print(
             `sandbox-tiers ${enabled ? "on" : "off"}; tier=${tier}; backend=${probeBackend()};` +
-              ` missing=${missingBackend}; root=${workspaceRoot()}`,
+              ` missing=${missingBackend}; root=${workspaceRoot(e.config)}`,
           );
           break;
         }
@@ -194,11 +194,11 @@ export default function activate(e: ExtensionAPI): () => void {
           break;
         }
         case "on":
-          delete process.env.EAGENT_SANDBOX_TIERS;
+          e.config.set("sandbox-tiers", true);
           c.print("sandbox-tiers on");
           break;
         case "off":
-          process.env.EAGENT_SANDBOX_TIERS = "off";
+          e.config.set("sandbox-tiers", false);
           c.print("sandbox-tiers off");
           break;
         default:

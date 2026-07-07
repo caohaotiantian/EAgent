@@ -250,17 +250,17 @@ export function setEvaluator(fn: Evaluator): void {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_SELF_IMPROVE === "off") return () => {};
+  if (!e.config.enabled("self-improve", { default: true })) return () => {};
 
   const isEnabled = (): boolean => e.store.get<boolean>("enabled", false) ?? false;
   const maxStaged = (): number => e.store.get<number>("maxStaged", DEFAULT_MAX_STAGED) ?? DEFAULT_MAX_STAGED;
 
   const candidatesDir = (): string =>
     e.store.get<string>("candidatesDir") ??
-    join(process.env.EAGENT_WORKSPACE ?? process.cwd(), ".eagent", "candidates");
+    join(e.config.string("workspace") ?? process.cwd(), ".eagent", "candidates");
   const liveExtensionsDir = (): string =>
     e.store.get<string>("extensionsDir") ??
-    join(process.env.EAGENT_WORKSPACE ?? process.cwd(), ".eagent", "extensions");
+    join(e.config.string("workspace") ?? process.cwd(), ".eagent", "extensions");
 
   const load = (): Candidate[] => e.store.get<Candidate[]>("candidates", [])!;
   const save = (list: Candidate[]): void => {

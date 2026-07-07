@@ -160,8 +160,7 @@ function stddev(xs: readonly number[]): number {
 export default function activate(e: ExtensionAPI): () => void {
   // Kill switch: the env var or a stored `enabled:false` flag makes activation a
   // no-op — no command, no handlers — returning a valid no-op dispose closure.
-  const enabledFlag = e.store.get<unknown>(KEYS.enabled);
-  if (process.env.EAGENT_COST === "off" || enabledFlag === false) {
+  if (!e.config.enabled("cost", { default: true, store: e.store })) {
     return () => {};
   }
 

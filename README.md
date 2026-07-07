@@ -7,8 +7,8 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~2,200 lines, held just
-under a hard 2,200-line ceiling by a test). There are no built-in tools, no hard-coded prompt
+The kernel is **seven primitives and nothing more** (~2,244 lines, held just
+under a hard 2,250-line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
 want to change is a hot-reloadable extension you can edit while the agent runs.
@@ -292,6 +292,26 @@ touches the network, the filesystem outside a scratch dir, or credentials belong
 behind a real OS/VM boundary. The capability layer is the seam where that boundary
 plugs in; EAgent enforces authority but does not pretend to sandbox in-process
 code. See [`SECURITY.md`](SECURITY.md).
+
+## Configuration
+
+Every knob is one layered surface, injected into each extension as `e.config`
+(peer to `e.store`). A value resolves **override > env > file > default**; an
+extension's enablement resolves **env-`"off"`-veto > override > store > default**
+(the config file never affects enablement, so an untrusted repo config cannot
+enable or disable an extension).
+
+- **Env** — `EAGENT_<KEY>` where the key upper-cases with camelCase/dots/dashes
+  mapped to `_` (`subagents.maxTurns` ⟷ `EAGENT_SUBAGENTS_MAX_TURNS`). Every
+  historical `EAGENT_*` name still works.
+- **File** — flat JSON at `~/.eagent/config.json` then `./.eagent/config.json`
+  (project wins): `{ "subagents.maxTurns": 12, "agent.maxTurns": 30 }`.
+- **Runtime** — `/config list | get <k> | set <k> <v> | unset <k> | reload`.
+
+So setting the per-agent turn bound during development is a one-liner —
+`EAGENT_SUBAGENTS_MAX_TURNS=12`, `/config set subagents.maxTurns 12`, or a
+`config.json` entry — no source edit. See `docs/EXTENSIONS.md` for the `Config`
+API. (Secrets like API keys are not config and are never printed by `/config`.)
 
 ## Four front ends, one kernel
 

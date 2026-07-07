@@ -22,6 +22,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { Message } from "../kernel/types.js";
 
 /** Upper bound on the total bytes injected, matching `context-files`. */
@@ -113,8 +114,8 @@ export function latestUserText(messages: Message[]): string | undefined {
  * ordered by name and prefix-filled under `MAX_TOTAL_BYTES` (whole files only,
  * stop at the first that would overflow).
  */
-export function injectMicroagents(messages: Message[], microagents: Microagent[]): Message[] {
-  if (process.env.EAGENT_MICROAGENTS === "off") return messages;
+export function injectMicroagents(messages: Message[], microagents: Microagent[], config?: Config): Message[] {
+  if (config && !config.enabled("microagents", { default: true })) return messages;
 
   const userText = latestUserText(messages);
   if (userText === undefined) return messages;
@@ -177,10 +178,10 @@ export function scanMicroagents(dir: string): Microagent[] {
  * `<workspace>/.eagent/microagents`, where `<workspace>` is `EAGENT_WORKSPACE`
  * or `process.cwd()`. Deliberately omits any store-backed override.
  */
-export function microagentsDir(): string {
+export function microagentsDir(config: Config): string {
   return (
-    process.env.EAGENT_MICROAGENTS_DIR ??
-    join(process.env.EAGENT_WORKSPACE ?? process.cwd(), ".eagent", "microagents")
+    config.string("microagents.dir") ??
+    join(config.string("workspace") ?? process.cwd(), ".eagent", "microagents")
   );
 }
 
@@ -190,19 +191,19 @@ export default function activate(e: ExtensionAPI): void {
   let cache: Microagent[] | undefined;
 
   const discover = (): Microagent[] => {
-    if (!cache) cache = scanMicroagents(microagentsDir());
+    if (!cache) cache = scanMicroagents(microagentsDir(e.config));
     return cache;
   };
 
-  e.hook("transformContext", (messages) => injectMicroagents(messages, discover()));
+  e.hook("transformContext", (messages) => injectMicroagents(messages, discover(), e.config));
 
   e.registerCommand({
     name: "microagents",
     description: "Re-scan and list keyword-triggered microagents and their triggers.",
     run: (ctx) => {
-      cache = scanMicroagents(microagentsDir());
+      cache = scanMicroagents(microagentsDir(e.config));
       if (cache.length === 0) {
-        ctx.print(`(no microagents in ${microagentsDir()})`);
+        ctx.print(`(no microagents in ${microagentsDir(e.config)})`);
         return;
       }
       for (const m of cache) ctx.print(`  ${m.name.padEnd(20)} [${m.triggers.join(", ")}]`);

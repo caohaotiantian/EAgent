@@ -100,7 +100,7 @@ export function annotate(result: ToolResult): ToolResult {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_RECOVERY === "off") return () => {};
+  if (!e.config.enabled("recovery", { default: true })) return () => {};
 
   const off = e.hook("afterToolCall", (result) => annotate(result));
 

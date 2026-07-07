@@ -77,10 +77,7 @@ function compile(patterns: string[]): RegExp[] {
 
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
-    enabled:
-      process.env.EAGENT_FLOW_GUARD === "off"
-        ? false
-        : e.store.get<boolean>("enabled", true) ?? true,
+    enabled: e.config.enabled("flow-guard", { default: true, store: e.store }),
     mode: (e.store.get<Mode>("mode", "ask") ?? "ask") as Mode,
     sourceCaps: e.store.get<string[]>("sourceCaps", DEFAULT_SOURCE_CAPS) ?? DEFAULT_SOURCE_CAPS,
     egressCaps: e.store.get<string[]>("egressCaps", DEFAULT_EGRESS_CAPS) ?? DEFAULT_EGRESS_CAPS,

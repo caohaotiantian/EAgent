@@ -136,7 +136,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
   /** One pass over the skills root: scan + read each SKILL.md body exactly once. */
   const readSkills = (): ScannedSkill[] =>
-    scanSkills(skillsRoot()).map((skill) => ({
+    scanSkills(skillsRoot(e.config)).map((skill) => ({
       name: skill.name,
       description: skill.description,
       dir: skill.dir,
@@ -220,7 +220,7 @@ export default function activate(e: ExtensionAPI): () => void {
       ctx.print(
         scanned.length
           ? scanned.map((s) => `  ${s.name.padEnd(20)} ${s.description}`).join("\n")
-          : `(no skills in ${skillsRoot()})`,
+          : `(no skills in ${skillsRoot(e.config)})`,
       );
       const findings = validationFindings(scanned);
       if (findings.length > 0) {
@@ -253,7 +253,7 @@ export default function activate(e: ExtensionAPI): () => void {
     if (call.name !== "skill_read") return;
     const name = call.arguments.name;
     if (typeof name !== "string") return;
-    const match = scanSkills(skillsRoot()).find((s) => s.name === name);
+    const match = scanSkills(skillsRoot(e.config)).find((s) => s.name === name);
     if (!match) return;
     const body = readTextOrUndefined(join(match.dir, "SKILL.md"));
     if (body === undefined) return;
@@ -291,7 +291,7 @@ export default function activate(e: ExtensionAPI): () => void {
   // catalog note. Never edits `skills.ts`'s hook.
 
   const offTransform = e.hook("transformContext", (messages) => {
-    if (process.env.EAGENT_SKILL_TRIGGERS === "off") return messages; // kill switch: pass-through
+    if (!e.config.enabled("skill-triggers", { default: true })) return messages; // kill switch: pass-through
 
     const idx = messages.findIndex(
       (m) =>
@@ -306,7 +306,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
     // Resolve which skills declare triggers, and whether they fire.
     const triggersByName = new Map<string, string[]>();
-    for (const skill of scanSkills(skillsRoot())) {
+    for (const skill of scanSkills(skillsRoot(e.config))) {
       const body = readTextOrUndefined(join(skill.dir, "SKILL.md"));
       if (body === undefined) continue;
       const trig = parseFrontmatter(body)["triggers"];

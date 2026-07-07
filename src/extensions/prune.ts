@@ -17,6 +17,7 @@
  */
 
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 import type { Message, ToolResultBlock } from "../kernel/types.js";
 
 /** Cumulative-token budget below which recent tool outputs are kept verbatim. */
@@ -44,11 +45,12 @@ function truncate(s: string): string {
 /**
  * Truncate old, oversized `tool_result` content beyond a protected recent
  * window, returning a new message array. A pure, synchronous function: it reads
- * its own kill switch (`EAGENT_PRUNE=off`), never mutates the input, and reuses
- * untouched messages and blocks by reference.
+ * its own kill switch (`prune`) through the supplied `config`, never mutates the
+ * input, and reuses untouched messages and blocks by reference. With no `config`
+ * (direct callers/tests) it is unconditionally enabled.
  */
-export function pruneMessages(messages: Message[]): Message[] {
-  if (process.env.EAGENT_PRUNE === "off") return messages;
+export function pruneMessages(messages: Message[], config?: Config): Message[] {
+  if (config && !config.enabled("prune", { default: true })) return messages;
 
   let turns = 0;
   let total = 0;
@@ -82,5 +84,5 @@ export function pruneMessages(messages: Message[]): Message[] {
 }
 
 export default function activate(e: ExtensionAPI): void {
-  e.hook("transformContext", (messages) => pruneMessages(messages));
+  e.hook("transformContext", (messages) => pruneMessages(messages, e.config));
 }

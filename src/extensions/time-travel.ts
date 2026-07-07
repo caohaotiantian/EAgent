@@ -56,7 +56,7 @@ function isRestorable(state: unknown): state is AgentState {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_TIME_TRAVEL === "off") return () => {};
+  if (!e.config.enabled("time-travel", { default: true })) return () => {};
 
   const cfg = () => ({
     enabled: e.store.get<boolean>("enabled", false) === true,
@@ -66,8 +66,8 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // Read the dir fresh each call so a test's EAGENT_TIME_TRAVEL_DIR override applies.
   const blobDir = (): string =>
-    process.env.EAGENT_TIME_TRAVEL_DIR ??
-    join(process.env.EAGENT_WORKSPACE ?? process.cwd(), ".eagent", "timetravel");
+    e.config.string("time-travel.dir") ??
+    join(e.config.string("workspace") ?? process.cwd(), ".eagent", "timetravel");
   const blobPath = (id: string): string => join(blobDir(), `${id}.json`);
 
   const readNodes = (): Record<string, Node> => e.store.get<Record<string, Node>>("nodes", {}) ?? {};

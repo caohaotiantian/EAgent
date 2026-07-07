@@ -400,6 +400,37 @@ The `store` interface is `get<T>(key, fallback?)`, `set(key, value)`,
 `delete(key)`, `keys()`. Backing is in-memory in tests and JSON-file-backed in
 the CLI (`~/.eagent/state/<id>.json`).
 
+### Configuration — `e.config`
+
+Alongside `store`, every extension gets `e.config`: the one layered
+configuration surface. **Read config through it instead of `process.env`.** Where
+`store` is deliberately per-extension isolated, `config` is a *shared* dotted
+key space (e.g. `agent.maxTurns`, `subagents.maxTurns`, `workspace`) so knobs are
+discoverable in one place and settable via env, a `config.json` file, or
+`/config set`.
+
+```ts
+const maxTurns = e.config.int("subagents.maxTurns", 8);   // value key
+const on = e.config.enabled("compact", { default: false, store: e.store });
+```
+
+- **Value keys** (`get`/`int`/`bool`/`string`) resolve **override > env > file >
+  default**. The env var name derives from the key: `subagents.maxTurns` ⟷
+  `EAGENT_SUBAGENTS_MAX_TURNS` (upper-cased, camelCase/dots/dashes → `_`).
+- **`enabled(key, { default, store })`** is the unified kill-switch/opt-in gate:
+  it resolves **env-`"off"`-veto > override > `store.get("enabled", default)` >
+  default**. The config **file is intentionally excluded** from enablement, so an
+  untrusted project `config.json` can never flip an extension on or off. Pass
+  `store: e.store` only when the extension also has a store `enabled` flag toggled
+  by its own `/x on|off` command.
+- **`set`/`unset`** write the persisted runtime override (what `/config set`
+  and `/x on|off` use); **`entries()`** powers `/config list` and hides
+  secret-substring keys. Never read a secret (API key/token) through config.
+
+Env-name irregularities (legacy names that don't match the derivation) are
+handled by the `ENV_ALIASES` map in `src/config.ts`; add a row there when you
+introduce a key whose historical env var doesn't follow the convention.
+
 The `log` is a `Logger` (`debug`/`info`/`warn`/`error`) whose every line is
 prefixed with `[<id>]`, so output from different extensions stays attributable.
 

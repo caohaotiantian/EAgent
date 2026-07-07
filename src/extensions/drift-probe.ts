@@ -220,10 +220,7 @@ export default function activate(e: ExtensionAPI): () => void {
   };
 
   const cfg = () => ({
-    enabled:
-      process.env.EAGENT_DRIFT_PROBE === "off"
-        ? false
-        : (e.store.get<boolean>(KEYS.enabled, false) ?? false),
+    enabled: e.config.enabled("drift-probe", { default: false, store: e.store }),
     n: num(KEYS.n, DEFAULT_N),
     thresholdPct: num(KEYS.threshold, DEFAULT_THRESHOLD_PCT),
     noteOnRegression: e.store.get<boolean>(KEYS.noteOnRegression, true) ?? true,

@@ -96,7 +96,7 @@ function parseErrorLines(content: string): string[] {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_OUTPUT_CONTRACT === "off") return () => {};
+  if (!e.config.enabled("output-contract", { default: true })) return () => {};
 
   // Per-run state, keyed by the ACTING agent so a child that trips the shared
   // reask never corrupts the parent's attempt count / registration. (W9.1.)

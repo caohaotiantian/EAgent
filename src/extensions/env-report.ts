@@ -133,7 +133,7 @@ export function annotateEnv(result: ToolResult, kind?: EnvClass | null): ToolRes
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_ENV_REPORT === "off") return () => {};
+  if (!e.config.enabled("env-report", { default: true })) return () => {};
 
   const off = e.hook("afterToolCall", (result) => {
     try {

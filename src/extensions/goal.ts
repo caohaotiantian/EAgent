@@ -297,7 +297,7 @@ export function parseCriteriaLine(line: string): string[] {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  if (process.env.EAGENT_GOAL === "off") return () => {};
+  if (!e.config.enabled("goal", { default: true })) return () => {};
 
   // Per-activation, session-scoped state (mirrors `todo`). No `store` persistence
   // for the goal itself — the objective is a property of THIS run/session, not
@@ -307,7 +307,7 @@ export default function activate(e: ExtensionAPI): () => void {
   let lastCheck: CriterionResult[] | undefined;
 
   const judgeEnabled = (): boolean =>
-    process.env.EAGENT_GOAL !== "off" && (e.store.get<boolean>(JUDGE_KEY, false) ?? false);
+    e.config.enabled("goal", { default: true }) && (e.store.get<boolean>(JUDGE_KEY, false) ?? false);
 
   /**
    * The optional model-judge sub-call (the `drift-probe.ask` shape): a tool-less
@@ -470,7 +470,7 @@ export default function activate(e: ExtensionAPI): () => void {
           return;
         }
         case "judge": {
-          if (process.env.EAGENT_GOAL === "off") {
+          if (!e.config.enabled("goal", { default: true })) {
             c.print("goal: hard-disabled by EAGENT_GOAL=off");
             return;
           }

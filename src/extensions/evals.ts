@@ -305,7 +305,7 @@ function textOf(message: Message): string {
 
 export default function activate(e: ExtensionAPI): () => void {
   /** Kill switch read per-call so it can be toggled mid-session in a test. */
-  const disabled = (): boolean => process.env.EAGENT_EVALS === "off";
+  const disabled = (): boolean => !e.config.enabled("evals", { default: true });
 
   /** The trajectory of the most recent (or in-progress) run only. */
   let traj: Trajectory = emptyTrajectory();

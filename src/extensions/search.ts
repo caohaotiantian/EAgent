@@ -14,6 +14,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { Config } from "../kernel/store.js";
 
 /** Maximum results returned by either tool before truncation. */
 const RESULT_CAP = 100;
@@ -21,9 +22,10 @@ const RESULT_CAP = 100;
 /** Directory names whose subtrees are never descended into. */
 const IGNORE_DIRS = new Set([".git", "node_modules"]);
 
-/** The directory searches are confined to: `$EAGENT_WORKSPACE` or cwd. */
-function workspaceRoot(): string {
-  return process.env.EAGENT_WORKSPACE ? resolve(process.env.EAGENT_WORKSPACE) : process.cwd();
+/** The directory searches are confined to: the `workspace` config key or cwd. */
+function workspaceRoot(config: Config): string {
+  const ws = config.string("workspace");
+  return ws ? resolve(ws) : process.cwd();
 }
 
 function sep(): string {
@@ -125,7 +127,7 @@ function withMarker(lines: string[], capped: boolean, kind: string): string {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  const root = workspaceRoot();
+  const root = workspaceRoot(e.config);
 
   const disposeGlob = e.registerTool(
     defineTool({
