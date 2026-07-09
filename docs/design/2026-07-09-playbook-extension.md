@@ -4,7 +4,7 @@
 Status: closed
 Closing-commit: 5475cdb
 Closed-on: 2026-07-09
-Deferred: finding — cost.test.ts:33 comment "harness exposes no store backend" newly imprecise after helpers.ts gained `backend` (still open; addressed by deferred Cycle 3); finding — buildInjection first-bullet byte-cap edge — RESOLVED by 2026-07-09-playbook-buildinjection-cap (a final `byteLength(out) > maxBytes → undefined` guard restores the invariant; no default-cap behavior change)
+Deferred: none — both findings resolved. cost.test.ts:33 stale "harness exposes no store backend" comment RESOLVED (corrected to an accurate short comment; None-tier reviewed). buildInjection first-bullet byte-cap edge RESOLVED by 2026-07-09-playbook-buildinjection-cap (a final `byteLength(out) > maxBytes → undefined` guard restores the invariant; no default-cap behavior change).
 ```
 
 Task slug: `2026-07-09-playbook-extension`
