@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Playbook extension (`playbook`) — an evolving, delta-merged, auto-injected
+insight playbook.** A new opt-in extension that maintains a durable, ordered list
+of bulleted insights and injects them into context every turn, so accumulated
+know-how is always in front of the model (the "context as an evolving playbook"
+pattern from agentic context-engineering work). Updates are **deterministic
+delta-merges** — `add` a new bullet or `merge` an insight into an existing bullet
+by id (segment-exact dedupe, no LLM call) — never a monolithic rewrite, which
+structurally avoids "context collapse".
+
+- Stored one bullet per `bullet:<id>` key with a monotonic `ord`; capped at 64
+  bullets (FIFO-drop oldest).
+- Injected as one leading ephemeral `system` note on `transformContext`, placed
+  after `compact` so it is never folded into a summary; byte-capped at 8 KB
+  (whole message, with a truncation marker) to bound the always-on per-turn cost.
+- Ships **off** (`/playbook on`; `EAGENT_PLAYBOOK=off` hard kill switch); no
+  capability required. Command: `/playbook on|off|list|add|merge|forget|clear`.
+
 **Centralized configuration (`e.config`).** Configuration used to be read at ~200
 isolated sites — direct `process.env.EAGENT_*` reads, private hard-coded
 constants, and per-extension store flags, each with its own precedence and

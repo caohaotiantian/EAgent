@@ -1,5 +1,12 @@
 # Implementation: `playbook` extension
 
+```
+Status: closed
+Closing-commit: 5475cdb
+Closed-on: 2026-07-09
+Deferred: none (findings recorded on the design doc's closure block)
+```
+
 Task slug: `2026-07-09-playbook-extension` (matches `docs/design/2026-07-09-playbook-extension.md`).
 
 ## 1. Task Index

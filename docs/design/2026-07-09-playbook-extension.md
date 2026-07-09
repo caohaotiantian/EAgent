@@ -1,5 +1,12 @@
 # Design: `playbook` extension — an ACE-style delta-merged, auto-injected insight playbook
 
+```
+Status: closed
+Closing-commit: 5475cdb
+Closed-on: 2026-07-09
+Deferred: finding — cost.test.ts:33 comment "harness exposes no store backend" newly imprecise after helpers.ts gained `backend` (left unfixed: editing the verbatim-paired trace.test.ts/cost.test.ts comments is an out-of-scope drive-by; no external tracker — recorded in closeout); finding — buildInjection first-bullet byte-cap edge reachable only under a pathological sub-~74-byte playbook.maxBytes override (left unfixed to preserve the whole-bullet fill decision; no external tracker — recorded in closeout)
+```
+
 Task slug: `2026-07-09-playbook-extension`
 Wave 1 of "absorb harness-engineering lessons into EAgent".
 
