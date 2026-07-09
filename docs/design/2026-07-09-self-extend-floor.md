@@ -4,7 +4,8 @@
 Status: closed
 Closing-commit: aa8700d
 Closed-on: 2026-07-09
-Deferred: finding — AC-6 (case-insensitive substring) is asserted at the pure-helper level (modelAllowed("mock",["MOCK"])) rather than end-to-end through config.set; intentional per the impl doc and behaviorally covered (parseAllowlist lowercases patterns, modelAllowed lowercases the model), left as-is to avoid re-opening four-corner-accepted tests; no external tracker — recorded in closeout
+Deferred: RESOLVED by 2026-07-09-self-extend-floor-hardening (f7c3072) — the AC-6 end-to-end case test (D3), the substring over-allow via an opt-in exact-match mode (D4, §8's over-allowing risk), and the sub-agent acting-model resolution (D5, Decision 4's deferred option (c) / §8's sub-agent under-blocking risk) are all now implemented and tested.
+Superseded-by (deferred items only): 2026-07-09-self-extend-floor-hardening
 ```
 
 Task slug: `2026-07-09-self-extend-floor`

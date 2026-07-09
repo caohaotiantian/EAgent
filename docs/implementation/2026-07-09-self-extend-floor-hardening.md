@@ -1,5 +1,12 @@
 # Implementation: `self-extend-floor` hardening
 
+```
+Status: closed
+Closing-commit: f7c3072
+Closed-on: 2026-07-09
+Deferred: none
+```
+
 Task slug: `2026-07-09-self-extend-floor-hardening` (matches the design doc).
 
 ## 1. Task Index

@@ -1,5 +1,13 @@
 # Design: `self-extend-floor` hardening — acting-model resolution, opt-in exact match, end-to-end case test
 
+```
+Status: closed
+Closing-commit: f7c3072
+Closed-on: 2026-07-09
+Supersedes: the D3/D4/D5 deferred items of 2026-07-09-self-extend-floor
+Deferred: none
+```
+
 Task slug: `2026-07-09-self-extend-floor-hardening`
 Cycle 1 of "finish all deferred tasks". Supersedes-scope: the three deferred items
 in `docs/design/2026-07-09-self-extend-floor.md`'s closure block + §8 residuals.
