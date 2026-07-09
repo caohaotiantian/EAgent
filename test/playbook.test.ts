@@ -22,7 +22,6 @@ import playbook, {
 } from "../src/extensions/playbook.js";
 import type { CommandContext } from "../src/kernel/commands.js";
 import { envOnlyConfig } from "../src/kernel/store.js";
-import type { Message } from "../src/kernel/types.js";
 import { text } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
 
