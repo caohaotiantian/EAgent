@@ -34,6 +34,7 @@ import skills from "./extensions/skills.js";
 import mcp from "./extensions/mcp.js";
 import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
+import subagentJobs from "./extensions/subagent-jobs.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import templates from "./extensions/templates.js";
 import teams from "./extensions/teams.js";
@@ -99,6 +100,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["mcp", mcp],
   ["codeact", codeact],
   ["subagents", subagents],
+  ["subagent-jobs", subagentJobs],
   ["dynamic-workflow", dynamicWorkflow],
   ["templates", templates],
   ["teams", teams],

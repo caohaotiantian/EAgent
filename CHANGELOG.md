@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Async sub-agent jobs (`subagent-jobs`).** A new extension adding a background
+job lifecycle on top of the existing child-agent machinery: `launch_job` starts
+a child on a prompt **without awaiting** and returns a `jobId` immediately;
+`job_status` inspects one job or lists all without blocking; `collect_job` awaits
+and returns the child's final answer (status-aware — a cancelled/failed job is
+reported as such, never overwritten to collected); `cancel_job` stops a running
+child; and `/jobs` lists every job. Jobs live in an in-process `Map` (a live
+Promise + child `Agent` are not serializable and a running job has no meaning
+across a restart) — **never persisted**. A dual recursion guard (a runtime
+root-only check plus a `SPAWN_CAPS`-stripped child registry) prevents nested
+jobs and job-child spawning; running jobs are concurrency-capped
+(`subagentJobs.maxConcurrent`, default 4) and finished records retention-capped
+(`subagentJobs.retain`, default 32, FIFO); dispose cancels every still-running
+job so no background child is orphaned on unload/reload. `EAGENT_SUBAGENT_JOBS=off`
+kill switch; tools declare `agent:spawn`. The only change to `subagents.ts` is an
+additive `export` on `finalText` (behavior-neutral); no kernel edits.
+
 **Model-capability floor for self-extension (`self-extend-floor`).** A new
 `beforeToolCall` guard extension that blocks any `self:extend`-gated tool call
 (across `self` and `self-improve`, and any future `self:extend` tool) when the

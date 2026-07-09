@@ -484,7 +484,7 @@ function asPrompts(value: unknown): string[] | undefined {
 }
 
 /** The last assistant message's text, concatenating all of its text blocks. */
-function finalText(messages: readonly Message[]): string {
+export function finalText(messages: readonly Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
     if (m.role !== "assistant") continue;
