@@ -102,7 +102,8 @@ export function mergeSegments(text: string, delta: string, sep: string): string 
  * bodies + marker) over `maxBytes`. Reserves the truncation-marker bytes inside
  * the budget, so the returned text's utf8 byte length is `<= maxBytes`. When any
  * bullet is dropped, a single `... (N more not shown)` marker line is appended.
- * Returns `undefined` when there is nothing to inject (`bullets` empty).
+ * Returns `undefined` when there is nothing to inject (`bullets` empty, or
+ * `maxBytes` is too small to fit even the header + marker).
  */
 export function buildInjection(bullets: Bullet[], maxBytes: number): string | undefined {
   if (bullets.length === 0) return undefined;
@@ -126,6 +127,10 @@ export function buildInjection(bullets: Bullet[], maxBytes: number): string | un
   const dropped = ordered.length - lines.length;
   let out = [HEADER, ...lines].join("\n");
   if (dropped > 0) out += "\n" + marker(dropped);
+  // When not even the first bullet fits, `out` is just HEADER + marker with no
+  // reserved budget, so it can exceed a very small `maxBytes`. Inject nothing
+  // rather than break the `<= maxBytes` invariant (a content-free note is noise).
+  if (Buffer.byteLength(out, "utf8") > maxBytes) return undefined;
   return out;
 }
 

@@ -62,6 +62,20 @@ test("buildInjection: caps note text at MAX_INJECT_BYTES and marks truncation", 
   assert.match(noteText, /more not shown/);
 });
 
+test("buildInjection: honors the byte cap even when not one bullet fits (D2 edge)", () => {
+  const bullets: Bullet[] = [bullet("b0", "X".repeat(500), 0)];
+  // A maxBytes far below the header line: the note (header + marker) cannot fit,
+  // so inject nothing rather than return an over-budget string.
+  assert.equal(buildInjection(bullets, 10), undefined);
+  // A maxBytes that fits the header + marker but not the 500-byte bullet:
+  // returns a marker-only note that still respects the cap.
+  const note = buildInjection(bullets, 200);
+  assert.ok(note !== undefined);
+  assert.ok(Buffer.byteLength(note, "utf8") <= 200, "marker-only note stays within the cap");
+  assert.match(note, /more not shown/);
+  assert.ok(!note.includes("X"), "no bullet body when the bullet did not fit");
+});
+
 // -- Task 3: off-path identity (AC 1) ---------------------------------------
 
 test("injectPlaybook: identity by reference when killed / disabled / empty", () => {
