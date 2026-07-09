@@ -38,7 +38,12 @@ case-insensitive **substrings** — matching is by `contains`, so write the most
 specific ids that still match, e.g. `opus-4`/`gpt-5`, since a weaker variant
 whose id contains an allowlisted substring is admitted). Capability-scoped via
 the tool registry (no hardcoded tool list); no command, no capability; hard kill
-switch `EAGENT_SELF_EXTEND_FLOOR=off`; emits one `warn` line on a block.
+switch `EAGENT_SELF_EXTEND_FLOOR=off`; emits one `warn` line on a block. The
+acting model is resolved as `currentActingAgent() ?? e.agent` so a self-extending
+sub-agent is judged on ITS model, not the root's (the capability lookup stays on
+the root registry); matching is substring by default, with an opt-in
+`selfExtendFloor.match=exact` for strict full-id equality (any other value ⇒
+substring).
 
 **Playbook extension (`playbook`) — an evolving, delta-merged, auto-injected
 insight playbook.** A new opt-in extension that maintains a durable, ordered list
