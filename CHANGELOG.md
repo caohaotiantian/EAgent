@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Model-capability floor for self-extension (`self-extend-floor`).** A new
+`beforeToolCall` guard extension that blocks any `self:extend`-gated tool call
+(across `self` and `self-improve`, and any future `self:extend` tool) when the
+acting model (`e.agent.model`) matches none of a configured allowlist of model
+substrings — embodying the STOP lesson (arXiv 2310.02304) that scaffold-level
+self-improvement should assume a capable base and refuse rather than loop on a
+weak one. Inert by default (empty allowlist ⇒ zero gating, byte-identical to
+today); activated by configuring `selfExtendFloor.models` (comma-separated,
+case-insensitive **substrings** — matching is by `contains`, so write the most
+specific ids that still match, e.g. `opus-4`/`gpt-5`, since a weaker variant
+whose id contains an allowlisted substring is admitted). Capability-scoped via
+the tool registry (no hardcoded tool list); no command, no capability; hard kill
+switch `EAGENT_SELF_EXTEND_FLOOR=off`; emits one `warn` line on a block.
+
 **Playbook extension (`playbook`) — an evolving, delta-merged, auto-injected
 insight playbook.** A new opt-in extension that maintains a durable, ordered list
 of bulleted insights and injects them into context every turn, so accumulated

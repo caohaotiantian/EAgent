@@ -87,6 +87,7 @@ import timeTravel from "./extensions/time-travel.js";
 import otelExporter from "./extensions/otel-exporter.js";
 import reasoningSearch from "./extensions/reasoning-search.js";
 import selfImprove from "./extensions/self-improve.js";
+import selfExtendFloor from "./extensions/self-extend-floor.js";
 import configCmd from "./extensions/config-cmd.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
@@ -151,6 +152,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["otel-exporter", otelExporter],
   ["reasoning-search", reasoningSearch],
   ["self-improve", selfImprove],
+  ["self-extend-floor", selfExtendFloor],
   ["config", configCmd],
 ];
 
