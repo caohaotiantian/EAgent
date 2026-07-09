@@ -1,5 +1,12 @@
 # Design: `self-extend-floor` — a model-capability floor for self-extension
 
+```
+Status: closed
+Closing-commit: aa8700d
+Closed-on: 2026-07-09
+Deferred: finding — AC-6 (case-insensitive substring) is asserted at the pure-helper level (modelAllowed("mock",["MOCK"])) rather than end-to-end through config.set; intentional per the impl doc and behaviorally covered (parseAllowlist lowercases patterns, modelAllowed lowercases the model), left as-is to avoid re-opening four-corner-accepted tests; no external tracker — recorded in closeout
+```
+
 Task slug: `2026-07-09-self-extend-floor`
 Wave 2 of "absorb harness-engineering lessons into EAgent".
 

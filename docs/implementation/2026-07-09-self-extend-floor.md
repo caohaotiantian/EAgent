@@ -1,5 +1,12 @@
 # Implementation: `self-extend-floor` extension
 
+```
+Status: closed
+Closing-commit: aa8700d
+Closed-on: 2026-07-09
+Deferred: none (finding recorded on the design doc's closure block)
+```
+
 Task slug: `2026-07-09-self-extend-floor` (matches `docs/design/2026-07-09-self-extend-floor.md`).
 
 ## 1. Task Index
