@@ -1,5 +1,12 @@
 # Implementation: `subagent-jobs` extension
 
+```
+Status: closed
+Closing-commit: d0bcd95
+Closed-on: 2026-07-09
+Deferred: none
+```
+
 Task slug: `2026-07-09-subagent-jobs` (matches `docs/design/2026-07-09-subagent-jobs.md`).
 
 ## 1. Task Index

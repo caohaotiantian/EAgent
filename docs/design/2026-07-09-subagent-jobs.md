@@ -1,5 +1,12 @@
 # Design: `subagent-jobs` — an async sub-agent job lifecycle (launch / inspect / cancel / collect)
 
+```
+Status: closed
+Closing-commit: d0bcd95
+Closed-on: 2026-07-09
+Deferred: none (the end-to-end review's one general finding — collect_job re-throwing a rejecting child instead of reporting it — was FIXED in the closing commit: the settler is now a single .then(onFulfilled, onRejected) so it records status before collect's await resumes, and collect_job wraps the await in try/catch; a post-commit-throw regression test locks it)
+```
+
 Task slug: `2026-07-09-subagent-jobs`
 Wave 3 of "absorb harness-engineering lessons into EAgent".
 

@@ -380,7 +380,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  61 built-in extensions, all riding the ExtensionAPI
+src/extensions/  62 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
