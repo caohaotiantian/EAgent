@@ -51,6 +51,7 @@ import packages from "./extensions/packages.js";
 import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
 import microagents from "./extensions/microagents.js";
+import playbook from "./extensions/playbook.js";
 import limits from "./extensions/limits.js";
 import cost from "./extensions/cost.js";
 import self from "./extensions/self.js";
@@ -114,6 +115,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["trace", trace],
   ["context-files", contextFiles],
   ["microagents", microagents],
+  ["playbook", playbook],
   ["limits", limits],
   ["cost", cost],
   ["budget-cap", budgetCap],
