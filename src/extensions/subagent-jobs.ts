@@ -197,23 +197,29 @@ export default function activate(e: ExtensionAPI): () => void {
         const job: Job = { id, status: "running", prompt, startedAt: Date.now(), child, promise };
         jobs.set(id, job);
 
-        // Status-aware settler, attached immediately (same tick). The
-        // `status !== "running"` guard is load-bearing: an aborted run RESOLVES
+        // Status-aware settler, attached immediately (same tick), as a SINGLE
+        // `.then(onFulfilled, onRejected)` — NOT `.then().catch()`. Both handlers
+        // must react directly on `promise` so the settler (registered here, before
+        // any later `collect_job` `await promise`) runs first on BOTH settle paths;
+        // a chained `.catch` would run one microtask later than collect's await on
+        // the reject path, so collect could read a not-yet-"failed" status.
+        // The `status !== "running"` guard is load-bearing: an aborted run RESOLVES
         // (reason "stop"), so without it a cancelled/collected/disposed job would
         // be clobbered back to "done". Only running → done|failed transitions here.
-        promise
-          .then((r) => {
+        promise.then(
+          (r) => {
             if (job.status !== "running") return;
             job.result = finalText((r as RunResult).messages);
             job.status = "done";
             evictFinished();
-          })
-          .catch((err: unknown) => {
+          },
+          (err: unknown) => {
             if (job.status !== "running") return;
             job.status = "failed";
             job.error = String(err);
             evictFinished();
-          });
+          },
+        );
 
         evictFinished();
         return ok(`launched ${id}`, { jobId: id });
@@ -270,8 +276,15 @@ export default function activate(e: ExtensionAPI): () => void {
         const job = jobs.get(id);
         if (!job) return fail(`collect_job: unknown job "${id}".`);
         // The launch-time settler runs before this continuation (promise-reaction
-        // order), so `status`/`result` are already populated when we resume.
-        await job.promise;
+        // order), so `status`/`result` are already populated when we resume. A
+        // genuinely-rejecting child rejects the original promise; the settler's
+        // `.catch` already recorded status="failed"/error, so swallow the rejection
+        // here and report via the status branch below — collect_job never throws.
+        try {
+          await job.promise;
+        } catch {
+          // handled by the settler; fall through to the status branch
+        }
         if (job.status === "done") {
           job.status = "collected";
           return ok(job.result ?? "");

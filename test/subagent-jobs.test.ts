@@ -83,6 +83,40 @@ test("AC1: launch_job returns a jobId; collect_job returns the child's answer; s
   assert.equal((status.details as { status: string }).status, "collected");
 });
 
+// A provider whose child run REJECTS with a genuine non-abort error. It must
+// throw AFTER emitting an event (post-commit): a pre-first-event throw is
+// absorbed by the agent's onProviderError retry seam and the run resolves, but a
+// post-commit throw propagates and `child.run()` rejects — exercising the settler
+// `.catch` and collect_job's failed branch.
+class FailingProvider implements Provider {
+  readonly name = "mock";
+  async *stream(_req: CompletionRequest): AsyncGenerator<StreamEvent> {
+    yield { type: "text_delta", text: "partial" };
+    throw new Error("boom");
+  }
+}
+
+test("collect_job reports a genuinely-failed child as a failure result (never throws)", async () => {
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(new FailingProvider(), { default: true });
+  await host.use("subagent-jobs", subagentJobs);
+
+  const launchJob = agent.tools.get("launch_job")!;
+  const collectJob = agent.tools.get("collect_job")!;
+  const jobStatus = agent.tools.get("job_status")!;
+
+  const jobId = jobIdOf(await launchJob.execute({ prompt: "will fail" }, fakeCtx()));
+
+  // collect_job must RETURN a fail result via the status branch, not re-throw
+  // the child's rejection out of execute().
+  const collected = await collectJob.execute({ jobId }, fakeCtx());
+  assert.equal(collected.isError, true);
+  assert.match(collected.content, /failed/);
+
+  const status = await jobStatus.execute({ jobId }, fakeCtx());
+  assert.equal((status.details as { status: string }).status, "failed");
+});
+
 // ---------------------------------------------------------------------------
 // AC 2 — inspect without blocking
 // ---------------------------------------------------------------------------
