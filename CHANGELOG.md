@@ -223,6 +223,13 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Changed / Fixed
 
+- **`--json` mode now emits clean JSONL on stdout.** In `--json` (programmatic)
+  mode the batch input echo (`› …`), slash-command output, and dispatch/run error
+  lines were written to stdout un-gated on the mode, so `echo … | eagent --json`
+  interleaved non-JSON lines that broke a consumer's per-line `JSON.parse`. Those
+  human/diagnostic writes now route to stderr in `--json` mode (human-mode output
+  is unchanged). Adds the first `test/cli.test.ts` (a subprocess integration test
+  asserting stdout is pure JSONL).
 - **Every extension provider sub-call now has a deadline.** Eight extensions
   (`compact`, `routing`, `drift-probe`, `goal`, `handoff`, `session`, `evals`,
   `reasoning-search`) made an LLM sub-call (`provider.stream` outside the main
