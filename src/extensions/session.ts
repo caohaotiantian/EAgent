@@ -29,6 +29,7 @@ import { CapabilityError } from "../kernel/capabilities.js";
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { isMessage, type Message } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 /** Current on-disk schema version. Bump when the envelope shape changes. */
 const SESSION_VERSION = 1;
@@ -195,22 +196,22 @@ export default function activate(e: ExtensionAPI): void {
     const provider = e.agent.providers.get();
     if (!provider) return "";
 
-    let out = "";
     try {
-      for await (const ev of provider.stream({
-        systemPrompt: HANDOFF_SYSTEM_PROMPT,
-        messages: history,
-        tools: [],
-        model: e.agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") out = textOf(ev.message);
-      }
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: HANDOFF_SYSTEM_PROMPT,
+          messages: history,
+          tools: [],
+          model: e.agent.model,
+        },
+        { timeoutMs: e.config.int("session.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      return textOf(msg).trim();
     } catch (err) {
       e.log.warn("handoff summarization failed:", errMsg(err));
       return "";
     }
-    return out.trim();
   }
 }
 

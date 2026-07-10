@@ -37,6 +37,7 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
 import type { AgentState, Message, ToolContext } from "../kernel/types.js";
 import { childRegistryFrom } from "./lib/child-registry.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 import { parseJudgeReply } from "./evals.js";
 
 // Re-exported as a local delegator (not a bare `export … from`) because this
@@ -194,17 +195,20 @@ export default function activate(e: ExtensionAPI): () => void {
       const messages: Message[] = [
         { role: "user", content: [{ type: "text", text: `Task:\n${task}\n\nCandidate:\n${candidate}` }] },
       ];
-      let reply = "";
-      for await (const ev of provider.stream({
-        systemPrompt: JUDGE_SYSTEM_PROMPT,
-        messages,
-        tools: [],
-        model: e.agent.model,
-        signal,
-      })) {
-        if (ev.type === "done") reply = textOf(ev.message);
-      }
-      return parseJudgeReply(reply)?.score ?? 0;
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: JUDGE_SYSTEM_PROMPT,
+          messages,
+          tools: [],
+          model: e.agent.model,
+        },
+        {
+          timeoutMs: e.config.int("reasoning-search.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS),
+          signal,
+        },
+      );
+      return parseJudgeReply(textOf(msg))?.score ?? 0;
     } catch {
       return 0;
     }

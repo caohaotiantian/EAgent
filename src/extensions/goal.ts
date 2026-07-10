@@ -39,6 +39,7 @@ import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, StopReason } from "../kernel/types.js";
 import { text } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 // -- lexical-coverage constants ---------------------------------------------
 
@@ -327,17 +328,17 @@ export default function activate(e: ExtensionAPI): () => void {
       const messages: Message[] = [
         { role: "user", content: [{ type: "text", text: judgePrompt(obj, crit, finalAnswer) }] },
       ];
-      let reply = "";
-      for await (const ev of provider.stream({
-        systemPrompt: JUDGE_SYSTEM_PROMPT,
-        messages,
-        tools: [],
-        model: e.agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") reply = textOf(ev.message);
-      }
-      const verdicts = parseJudgeReply(reply, crit.length);
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: JUDGE_SYSTEM_PROMPT,
+          messages,
+          tools: [],
+          model: e.agent.model,
+        },
+        { timeoutMs: e.config.int("goal.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      const verdicts = parseJudgeReply(textOf(msg), crit.length);
       if (verdicts === undefined) return undefined;
       return crit.map((c, i) => {
         const met = verdicts[i] === "MET";

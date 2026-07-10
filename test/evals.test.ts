@@ -21,7 +21,7 @@ import type { Agent } from "../src/kernel/agent.js";
 import type { CommandContext } from "../src/kernel/commands.js";
 import type { ExtensionAPI } from "../src/kernel/extension.js";
 import { defineTool, ok, fail } from "../src/kernel/define.js";
-import { makeHarness, type Harness } from "./helpers.js";
+import { Hanging, makeHarness, type Harness } from "./helpers.js";
 import evals, {
   checkExpect,
   parseJudgeReply,
@@ -513,6 +513,23 @@ function toolCtx(h: Harness): import("../src/kernel/types.js").ToolContext {
     log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   };
 }
+
+test(
+  "bounded sub-call: judge fails closed on a hung provider deadline instead of hanging",
+  { timeout: 1000 },
+  async () => {
+    const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });
+    await activate(h);
+    // Swap the default provider for one that never yields (same "mock" name).
+    h.agent.providers.register(new Hanging(), { default: true });
+    h.config.set("evals.subCallTimeoutMs", 50);
+    const judge = h.agent.tools.get("judge");
+    assert.ok(judge, "judge is registered");
+
+    const res = await judge.execute({ rubric: "r", candidate: "c" }, toolCtx(h));
+    assert.equal(res.isError, true, "the judge fails closed when the grader sub-call times out");
+  },
+);
 
 test("T15: judge fails closed (isError) when no provider is registered (AC7)", async () => {
   const h = makeHarness({ fallback: "allow", responder: [{ text: "hi" }] });

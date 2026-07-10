@@ -32,6 +32,7 @@
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { text, type Message } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 /** Estimated-token budget above which the older prefix is folded. */
 const DEFAULT_BUDGET = 60_000;
@@ -184,17 +185,17 @@ export default function activate(e: ExtensionAPI): () => void {
     try {
       const provider = e.agent.providers.get();
       if (!provider) return renderFallback(older);
-      let finalText = "";
-      for await (const ev of provider.stream({
-        systemPrompt: COMPACT_SYSTEM_PROMPT,
-        messages: older,
-        tools: [],
-        model: e.agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") finalText = textOf(ev.message);
-      }
-      return finalText.trim() || renderFallback(older);
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: COMPACT_SYSTEM_PROMPT,
+          messages: older,
+          tools: [],
+          model: e.agent.model,
+        },
+        { timeoutMs: e.config.int("compact.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      return textOf(msg).trim() || renderFallback(older);
     } catch {
       return renderFallback(older);
     }

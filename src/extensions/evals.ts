@@ -34,6 +34,7 @@ import { defineTool, ok, fail } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { MockTurn } from "../providers/mock.js";
 import { totalTokens, type Message, type StopReason, type Usage } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -479,19 +480,22 @@ export default function activate(e: ExtensionAPI): () => void {
               content: [{ type: "text", text: `Rubric:\n${rubric}\n\nCandidate:\n${candidate}` }],
             },
           ];
-          let reply = "";
-          for await (const ev of provider.stream({
-            systemPrompt: JUDGE_SYSTEM_PROMPT,
-            // Tool-less sub-call: passing `tools: []` runs the completion outside
-            // the agent loop, so it cannot emit a tool call and re-enter dispatch.
-            messages,
-            tools: [],
-            model: e.agent.model,
-            signal: ctx.signal,
-          })) {
-            if (ev.type === "done") reply = textOf(ev.message);
-          }
-          const parsed = parseJudgeReply(reply);
+          const msg = await runSubCall(
+            provider,
+            {
+              systemPrompt: JUDGE_SYSTEM_PROMPT,
+              // Tool-less sub-call: passing `tools: []` runs the completion outside
+              // the agent loop, so it cannot emit a tool call and re-enter dispatch.
+              messages,
+              tools: [],
+              model: e.agent.model,
+            },
+            {
+              timeoutMs: e.config.int("evals.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS),
+              signal: ctx.signal,
+            },
+          );
+          const parsed = parseJudgeReply(textOf(msg));
           if (!parsed) {
             // The tool wrapper (not the parser) maps the sentinel to an error
             // result — fail closed rather than silently pass.
