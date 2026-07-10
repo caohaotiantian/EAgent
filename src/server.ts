@@ -488,6 +488,7 @@ async function main(): Promise<void> {
   try {
     http.server.listen(port, http.host, () => {
       console.error(`eagent server on http://${http.host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
+      console.error(`  extension state is process-scoped; run one process per tenant/trust boundary for isolation (see SECURITY.md)`);
     });
 
     // Graceful shutdown: stop accepting connections, tear down the host, exit.

@@ -140,6 +140,20 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   reference counting: `#grant` is a multiset, so a shared pattern like `agent:spawn`
   survives until its *last* granter disposes) and the host tracks it like every
   other registration. +2 kernel lines (2246/2250 — no ceiling change).
+- **Documented the HTTP server's cross-session isolation posture.** The server
+  multiplexes many `session` ids over one set of in-process extensions: per-session
+  transcript and usage are isolated, but extension state is not — security guards
+  (`write-guard`'s seen-file set, `flow-guard`'s capability taint) and accumulators
+  (cost's per-model breakdown and anomaly baseline, drift's turn counter) carry over
+  between sessions, so the `session` id is a multiplexing key, **not** a trust
+  boundary. `SECURITY.md` now states this and prescribes **one process per tenant**
+  for multi-tenant use; the server prints the posture at startup and `README` points
+  to it. In-process per-session isolation was scoped and deliberately **not** built:
+  a design review found it a ~15-extension, all-or-nothing change (partial isolation
+  would look isolated while leaking security decisions across tenants), and process
+  isolation is the production-standard boundary the server already supports. The
+  twice-reviewed design is retained as a follow-up
+  (`docs/design/2026-07-10-session-isolation.md`).
 - **Built-in `read`/`edit`/`grep` are now memory-bounded.** They previously
   `readFileSync`'d whole files, so one hostile multi-GB file could OOM the process
   — and because the HTTP server runs one turn at a time in one process, that took

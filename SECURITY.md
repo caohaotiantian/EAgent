@@ -64,6 +64,19 @@ kernel is designed around that assumption rather than trusting the model.
   `flow-guard` extension holds later egress (default `net:fetch` and `mcp:call`) once a session
   is tainted by a source capability (default `shell:exec`) or sensitive data in
   the transcript — confirming in `ask` mode or refusing in `block` mode.
+- **Cross-session isolation in one process.** The HTTP server multiplexes many
+  `session` ids over **one** set of in-process extensions. Per-session *transcript*
+  and *usage* are isolated, but **extension** state is not — several guards and
+  accumulators carry over between sessions. `write-guard`'s seen-file set,
+  `flow-guard`'s capability taint, and goal/todo reset only at session
+  start/shutdown — both fired **once**, at startup and teardown — so they never
+  clear between sessions; cost's per-model breakdown and anomaly baseline, and
+  drift-probe's turn counter, are module-lifetime accumulators with no per-session
+  reset. (Figures mirrored from the per-session *usage* — cost/budget cumulative
+  USD — do track the acting session; the leak is the guards and the accumulators,
+  not the running totals.) The
+  `session` id is a multiplexing key, **not** a trust boundary. Isolate tenants at
+  the process boundary (below), not by the `session` id.
 
 ## Recommended deployment
 
@@ -76,6 +89,12 @@ so always set `EAGENT_TOKEN` and keep it on loopback (the default bind) or behin
 a boundary. Use `--yolo` (fallback *allow*) on the CLI only when the environment
 is already isolated, and conversely run the server with `yolo: false` if you want
 per-capability prompting back.
+
+For **multi-tenant** use, run **one process per tenant** (or per trust boundary).
+Extension state is shared across `session` ids within a process (see "Cross-session
+isolation" above), so the process — not the session id — is the isolation boundary.
+A single shared process is appropriate only when every session belongs to the same
+trust domain (one user, one tenant, or an already-sandboxed workload).
 
 ## Reporting
 
