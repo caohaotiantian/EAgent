@@ -223,6 +223,13 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Changed / Fixed
 
+- **Packaging & ops hardening.** `package.json` now declares top-level `main`/
+  `types` (fallback for non-`exports`-aware tooling) and a `prepublishOnly` build
+  hook so a publish never ships stale/absent `dist/`. The Docker HTTP quickstart is
+  corrected (a container server must `EAGENT_HOST=0.0.0.0` to be reachable via `-p`,
+  which fail-closed requires `EAGENT_TOKEN`). `SECURITY.md` now points to GitHub's
+  private vulnerability-advisory channel instead of public issues. CI runs the build
+  job on a Node 22 **and** 24 matrix (they differ in timer/AbortSignal semantics).
 - **`trace` closes tool spans by call id, not name.** Two concurrent same-named
   tool calls (e.g. two `bash`) were mis-attributed because the span was matched by
   tool name; it now matches the call `id` stamped at `tool_start`, so overlapping

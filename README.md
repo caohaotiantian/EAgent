@@ -352,7 +352,12 @@ To run sandboxed (the posture `SECURITY.md` recommends) there is a `Dockerfile`
 (non-root, workspace-confined):
 
 ```bash
-docker build -t eagent . && docker run -p 8787:8787 -v "$PWD:/workspace" eagent
+docker build -t eagent .
+# The server binds 127.0.0.1 by default; inside a container it must bind 0.0.0.0
+# to be reachable via -p, and a non-loopback bind requires EAGENT_TOKEN
+# (fail-closed) — sent as `Authorization: Bearer <token>` on /run.
+docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
+  -v "$PWD:/workspace" eagent
 ```
 
 ## Embedding the kernel

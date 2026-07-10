@@ -79,6 +79,9 @@ per-capability prompting back.
 
 ## Reporting
 
-Open an issue at https://github.com/caohaotiantian/eagent/issues. Please do not
-include exploit details that could harm other users in a public issue; request a
-private channel first.
+**Report a vulnerability privately** — do not open a public issue for anything
+exploitable. Use GitHub's private advisory form ("Report a vulnerability" under the
+repository's **Security** tab: https://github.com/caohaotiantian/eagent/security/advisories/new),
+which keeps the report confidential until a fix ships. Please include a description,
+affected versions/commit, and reproduction steps. We aim to acknowledge within a few
+days. Non-sensitive hardening suggestions can still go to the public issue tracker.
