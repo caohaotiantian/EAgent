@@ -77,10 +77,34 @@ export class AnthropicProvider implements Provider {
     if (this.#cache && tools.length > 0) {
       (tools[tools.length - 1] as Record<string, unknown>).cache_control = { type: "ephemeral" };
     }
-    const system =
-      this.#cache && req.systemPrompt
-        ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
-        : req.systemPrompt;
+    // Fold any in-transcript `role:"system"` messages into the top-level system
+    // channel — Anthropic has no positional system role inside `messages`, so
+    // dropping them would leave the whole context-injection layer dark. Notes
+    // are appended after the systemPrompt block, uncached, so the existing
+    // systemPrompt cache breakpoint is preserved and the no-note path stays
+    // byte-identical to before (design KDD1/KDD2).
+    const systemNotes = req.messages
+      .filter((m) => m.role === "system")
+      .map(systemText)
+      .filter((t) => t.length > 0);
+    let system: unknown;
+    if (systemNotes.length > 0) {
+      const blocks: unknown[] = [];
+      if (req.systemPrompt) {
+        blocks.push(
+          this.#cache
+            ? { type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }
+            : { type: "text", text: req.systemPrompt },
+        );
+      }
+      for (const note of systemNotes) blocks.push({ type: "text", text: note });
+      system = blocks;
+    } else {
+      system =
+        this.#cache && req.systemPrompt
+          ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
+          : req.systemPrompt;
+    }
 
     // A third breakpoint on the last content block of the last message caches
     // the growing conversation prefix, so each turn reads the prior transcript
@@ -237,6 +261,14 @@ export class AnthropicProvider implements Provider {
 
 function toAnthropicTool(spec: ToolSpec): unknown {
   return { name: spec.name, description: spec.description, input_schema: spec.parameters };
+}
+
+/** Concatenate a message's `type:"text"` blocks (mirrors `openai.ts` `textOf`). */
+function systemText(m: Message): string {
+  return m.content
+    .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join("");
 }
 
 /**

@@ -69,7 +69,18 @@ export class GeminiProvider implements Provider {
       contents: toGeminiContents(req.messages),
       generationConfig,
     };
-    if (req.systemPrompt) body.systemInstruction = { parts: [{ text: req.systemPrompt }] };
+    // Fold in-transcript `role:"system"` messages into systemInstruction —
+    // Gemini has no positional system role in `contents`. Synthesize
+    // systemInstruction from notes even when `systemPrompt` is absent, and emit
+    // no empty part (design KDD1/KDD2).
+    const systemParts: { text: string }[] = [];
+    if (req.systemPrompt) systemParts.push({ text: req.systemPrompt });
+    for (const m of req.messages) {
+      if (m.role !== "system") continue;
+      const t = systemText(m);
+      if (t) systemParts.push({ text: t });
+    }
+    if (systemParts.length > 0) body.systemInstruction = { parts: systemParts };
     if (req.tools.length) {
       body.tools = [{ functionDeclarations: req.tools.map(toGeminiTool) }];
       // Decode-time forcing: Gemini constrains tool use via `tool_config`'s
@@ -156,6 +167,14 @@ export class GeminiProvider implements Provider {
 
 function toGeminiTool(spec: ToolSpec): unknown {
   return { name: spec.name, description: spec.description, parameters: spec.parameters };
+}
+
+/** Concatenate a message's `type:"text"` blocks (mirrors `openai.ts` `textOf`). */
+function systemText(m: Message): string {
+  return m.content
+    .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join("");
 }
 
 /**
