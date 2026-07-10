@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { MemoryStore } from "../src/kernel/store.js";
-import { LayeredConfig, configEnvName, loadConfigFile } from "../src/config.js";
+import { LayeredConfig, configEnvName, isSecretKey, loadConfigFile } from "../src/config.js";
 
 /** Build a config with an optional file layer and a fresh in-memory override. */
 function makeConfig(fileValues: Record<string, string | number | boolean> = {}) {
@@ -144,6 +144,17 @@ test("entries() reports the winning source and hides secret-substring keys", () 
   assert.equal(byKey.get("b.over")?.source, "override");
   assert.equal(byKey.get("c.env")?.source, "env");
   assert.equal(byKey.get("my.token")?.value, "«hidden»");
+});
+
+test("isSecretKey masks credentials but not token *counts*", () => {
+  // Real credentials stay masked.
+  assert.equal(isSecretKey("my.token"), true);
+  assert.equal(isSecretKey("memory.embed.apiKey"), true);
+  assert.equal(isSecretKey("some.secret"), true);
+  // Token *counts* are limits, not secrets — must render in `/config`.
+  assert.equal(isSecretKey("providers.anthropic.maxTokens"), false);
+  assert.equal(isSecretKey("providers.openai.maxTokens"), false);
+  assert.equal(isSecretKey("limits.maxTokensPerRun"), false);
 });
 
 test("envOnlyConfig fallback: an un-configured host honors env and defaults", async () => {

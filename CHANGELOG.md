@@ -194,6 +194,22 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Changed / Fixed
 
+- **Provider honesty & resilience.** Three source-level provider fixes so the
+  default (Anthropic) stack behaves correctly: (1) an in-transcript `role:"system"`
+  message is now **folded into the top-level system channel** on Anthropic and
+  Gemini instead of being silently dropped — so the context-injecting extensions
+  (`context-files`, `skills`, `goal`, `drift-probe`, `playbook`, …) are no longer
+  dark on the default provider (OpenAI already preserved them). The systemPrompt
+  cache breakpoint is preserved and the no-note path is byte-identical. (2) A
+  **mid-stream API error frame now surfaces as a thrown error** on all three
+  providers (Anthropic `error` event, OpenAI/Gemini top-level `error`) instead of
+  ending the stream with a fabricated `done` and truncated content — so an outage
+  is retried (`onProviderError`/`reliability`) or fails honestly, never presented
+  as a successful short answer. (3) **Output `max_tokens` is now configurable**
+  per provider (`providers.<name>.maxTokens`, env `ANTHROPIC_MAX_TOKENS` /
+  `OPENAI_MAX_TOKENS` / `GEMINI_MAX_TOKENS`), defaulting to 4096, via an exported
+  `buildProviders(config)` host helper. `isSecretKey` no longer masks token-count
+  keys in `/config`. No kernel change.
 - **`stop()` is now honored by the agent loop** directly, not just forwarded to
   the provider, so an abort reliably halts the run.
 - **Cancelling a run mid-stream is now a clean stop, not an error.** When a

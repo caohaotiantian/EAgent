@@ -94,7 +94,9 @@ alias for `ANTHROPIC_API_KEY` (the gateway convention).
 Any OpenAI-compatible endpoint works through the OpenAI provider — e.g. a local
 Ollama: `OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama node dist/cli.js -p openai -m llama3`.
 For newer official OpenAI models that require `max_completion_tokens`, set
-`OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`.
+`OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`. The output-length cap defaults to
+4096 tokens; raise it per provider with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS`
+/ `GEMINI_MAX_TOKENS` for long generations or high thinking budgets.
 
 ## How a turn works
 

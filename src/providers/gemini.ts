@@ -72,7 +72,7 @@ export class GeminiProvider implements Provider {
     // Fold in-transcript `role:"system"` messages into systemInstruction —
     // Gemini has no positional system role in `contents`. Synthesize
     // systemInstruction from notes even when `systemPrompt` is absent, and emit
-    // no empty part (design KDD1/KDD2).
+    // no empty part.
     const systemParts: { text: string }[] = [];
     if (req.systemPrompt) systemParts.push({ text: req.systemPrompt });
     for (const m of req.messages) {

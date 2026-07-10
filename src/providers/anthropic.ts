@@ -82,7 +82,7 @@ export class AnthropicProvider implements Provider {
     // dropping them would leave the whole context-injection layer dark. Notes
     // are appended after the systemPrompt block, uncached, so the existing
     // systemPrompt cache breakpoint is preserved and the no-note path stays
-    // byte-identical to before (design KDD1/KDD2).
+    // byte-identical to before.
     const systemNotes = req.messages
       .filter((m) => m.role === "system")
       .map(systemText)

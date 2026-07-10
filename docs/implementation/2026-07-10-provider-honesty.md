@@ -1,7 +1,11 @@
 # Implementation — Provider honesty & resilience (Batch A)
 
 Slug: `2026-07-10-provider-honesty` (matches `docs/design/2026-07-10-provider-honesty.md`)
-Status: draft
+Status: closed
+Closing-commit: Batch A closeout on `chore/production-hardening`
+Closed-on: 2026-07-10
+Deferred: none (all 3 phases closed on their first L3 review; D1–D7 shipped).
+Result: 3 phases, all closed round 1. Suite 1275 → 1288 pass (+13 tests: 5 fold, 6 stream-error, 1 max-tokens, 1 isSecretKey), 0 fail, 1 skip; typecheck 0; eval 5/5; build 0.
 
 ## 1. Task Index
 

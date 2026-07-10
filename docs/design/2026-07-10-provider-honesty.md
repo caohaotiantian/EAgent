@@ -1,7 +1,10 @@
 # Design — Provider honesty & resilience (Batch A)
 
 Slug: `2026-07-10-provider-honesty`
-Status: draft
+Status: closed
+Closing-commit: Batch A closeout on `chore/production-hardening` (code commits `653175c`/`8383484`/`fa7aa1c` + closeout)
+Closed-on: 2026-07-10
+Deferred: finding — Gemini mid-stream error wire-shape live-backend smoke (R5; Anthropic doc-verified, Gemini detection offline-tested; no repo issue tracker — tracked in the PR); finding — `systemText` helper duplicated per-file in anthropic/gemini (trivial, matches the per-file provider-helper convention).
 
 ## 1. Background and Purpose
 

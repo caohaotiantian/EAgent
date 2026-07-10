@@ -58,6 +58,9 @@ export function configEnvName(key: string): string {
 
 /** A key whose value must never be printed by `/config` (list or get). */
 export function isSecretKey(key: string): boolean {
+  // A token *count* (maxTokens, maxTokensPerRun, …) is a limit, not a credential,
+  // so it must not be masked despite containing "token".
+  if (/maxtokens/i.test(key.replace(/[._-]/g, ""))) return false;
   return /token|key|secret/i.test(key);
 }
 
