@@ -223,6 +223,10 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Changed / Fixed
 
+- **`trace` closes tool spans by call id, not name.** Two concurrent same-named
+  tool calls (e.g. two `bash`) were mis-attributed because the span was matched by
+  tool name; it now matches the call `id` stamped at `tool_start`, so overlapping
+  same-name calls get their own durations/ok status.
 - **`--json` mode now emits clean JSONL on stdout.** In `--json` (programmatic)
   mode the batch input echo (`› …`), slash-command output, and dispatch/run error
   lines were written to stdout un-gated on the mode, so `echo … | eagent --json`

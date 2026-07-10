@@ -148,12 +148,13 @@ export default function activate(e: ExtensionAPI): () => void {
 
     e.on(
       "tool_end",
-      safe((p: { call: { name: string }; result: { isError?: boolean } }) => {
+      safe((p: { call: { id: string; name: string }; result: { isError?: boolean } }) => {
         const ok = !p.result.isError;
         if (!ok) metrics.toolErrors += 1;
-        // Match the open tool span for this call by name; fall back to any open
+        // Match the open tool span for this call by its id (set at tool_start), so
+        // concurrent same-name calls are not mis-attributed; fall back to any open
         // tool span so a mismatched/duplicate end still closes something sane.
-        let span = spans.find((s) => s.kind === "tool" && s.name === p.call.name && s.endedAt === undefined);
+        let span = spans.find((s) => s.kind === "tool" && s.meta?.id === p.call.id && s.endedAt === undefined);
         span ??= openSpan("tool");
         if (span) {
           span.ok = ok;

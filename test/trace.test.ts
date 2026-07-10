@@ -153,6 +153,31 @@ test("trace-save writes valid JSONL of spans", async () => {
   }
 });
 
+test("concurrent same-name tool spans are matched by id, not mis-attributed", async () => {
+  const h = makeHarness({ fallback: "allow" });
+  await h.host.use("trace", activate);
+
+  // Two overlapping calls to the SAME-named tool, ended in reverse order: `b`
+  // errors, `a` succeeds. Name-based matching would close them swapped; id-based
+  // matching attributes each end to its own start.
+  const call = (id: string) => ({ type: "tool_call" as const, id, name: "bash", arguments: {} });
+  await h.agent.hooks.emit("tool_start", { call: call("a") });
+  await h.agent.hooks.emit("tool_start", { call: call("b") });
+  await h.agent.hooks.emit("tool_end", { call: call("b"), result: { content: "", isError: true }, step: 0 });
+  await h.agent.hooks.emit("tool_end", { call: call("a"), result: { content: "", isError: false }, step: 0 });
+
+  const dir = mkdtempSync(join(tmpdir(), "eagent-trace-idmatch-"));
+  const path = join(dir, "run.jsonl");
+  await runCommand(h, "trace-save", path);
+  const spans = readFileSync(path, "utf8")
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as { kind?: string; ok?: boolean; meta?: { id?: string } });
+  const byId = (id: string): { ok?: boolean } | undefined => spans.find((s) => s.kind === "tool" && s.meta?.id === id);
+  assert.equal(byId("a")?.ok, true, "span a (ended ok) is closed as ok");
+  assert.equal(byId("b")?.ok, false, "span b (ended error) is closed as error");
+});
+
 test("a tool-less run does not throw and trace still prints sensibly", async () => {
   const h = makeHarness({ fallback: "allow", responder: [{ text: "just text, no tools" }] });
   registerTools(h.agent);
