@@ -44,6 +44,9 @@ export const ENV_ALIASES: Record<string, string[]> = {
   "providers.anthropic.baseUrl": ["ANTHROPIC_BASE_URL"],
   "providers.openai.baseUrl": ["OPENAI_BASE_URL"],
   "providers.gemini.baseUrl": ["GEMINI_BASE_URL"],
+  "providers.anthropic.maxTokens": ["ANTHROPIC_MAX_TOKENS"],
+  "providers.openai.maxTokens": ["OPENAI_MAX_TOKENS"],
+  "providers.gemini.maxTokens": ["GEMINI_MAX_TOKENS"],
 };
 
 /** The env var name a key reads by convention: `EAGENT_` + the key upper-cased

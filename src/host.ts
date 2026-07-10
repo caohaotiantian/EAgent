@@ -211,9 +211,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     filePaths: configPaths,
   });
 
-  const anthropic = new AnthropicProvider({ baseUrl: config.string("providers.anthropic.baseUrl") });
-  const openai = new OpenAIProvider({ baseUrl: config.string("providers.openai.baseUrl") });
-  const gemini = new GeminiProvider({ baseUrl: config.string("providers.gemini.baseUrl") });
+  const { anthropic, openai, gemini } = buildProviders(config);
   const configured = { anthropic: anthropic.configured, openai: openai.configured, gemini: gemini.configured };
   // Fail fast on an explicitly-requested live provider with no API key, rather
   // than silently downgrading to another configured provider or mock (which would
@@ -305,6 +303,37 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   for (const path of opts.extraExtensions ?? []) await host.loadFile(path);
 
   return { agent, host, commands, live, model, failures, config };
+}
+
+/**
+ * Construct the three real providers from configuration. Extracted from
+ * `createAgentHost` so the exact construction the host uses is offline-testable
+ * (a production `new AnthropicProvider(...)` line is not: offline there is no API
+ * key, so `createAgentHost` selects the mock provider and never builds these).
+ * `providers.<name>.maxTokens` sets the output cap (default 4096); `opts.fetch`
+ * is forwarded so a test can inject a capturing `fetch`.
+ */
+export function buildProviders(
+  config: Config,
+  opts: { fetch?: typeof fetch } = {},
+): { anthropic: AnthropicProvider; openai: OpenAIProvider; gemini: GeminiProvider } {
+  return {
+    anthropic: new AnthropicProvider({
+      baseUrl: config.string("providers.anthropic.baseUrl"),
+      maxTokens: config.int("providers.anthropic.maxTokens", 4096),
+      fetch: opts.fetch,
+    }),
+    openai: new OpenAIProvider({
+      baseUrl: config.string("providers.openai.baseUrl"),
+      maxTokens: config.int("providers.openai.maxTokens", 4096),
+      fetch: opts.fetch,
+    }),
+    gemini: new GeminiProvider({
+      baseUrl: config.string("providers.gemini.baseUrl"),
+      maxTokens: config.int("providers.gemini.maxTokens", 4096),
+      fetch: opts.fetch,
+    }),
+  };
 }
 
 /**
