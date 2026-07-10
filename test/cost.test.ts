@@ -29,9 +29,8 @@ import type { Logger } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
 
 /**
- * Run a command and capture its printed lines (the live read surface for this
- * suite — the harness exposes no store backend or activate-returned accessor).
- * Copied verbatim from `test/trace.test.ts:36-46`.
+ * Run a command and capture its printed lines (the read surface for this suite).
+ * Mirrors `test/trace.test.ts`'s `runCommand`.
  */
 async function runCommand(
   h: ReturnType<typeof makeHarness>,

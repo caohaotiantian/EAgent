@@ -34,6 +34,7 @@ import skills from "./extensions/skills.js";
 import mcp from "./extensions/mcp.js";
 import codeact from "./extensions/codeact.js";
 import subagents from "./extensions/subagents.js";
+import subagentJobs from "./extensions/subagent-jobs.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import templates from "./extensions/templates.js";
 import teams from "./extensions/teams.js";
@@ -51,6 +52,7 @@ import packages from "./extensions/packages.js";
 import trace from "./extensions/trace.js";
 import contextFiles from "./extensions/context-files.js";
 import microagents from "./extensions/microagents.js";
+import playbook from "./extensions/playbook.js";
 import limits from "./extensions/limits.js";
 import cost from "./extensions/cost.js";
 import self from "./extensions/self.js";
@@ -86,6 +88,7 @@ import timeTravel from "./extensions/time-travel.js";
 import otelExporter from "./extensions/otel-exporter.js";
 import reasoningSearch from "./extensions/reasoning-search.js";
 import selfImprove from "./extensions/self-improve.js";
+import selfExtendFloor from "./extensions/self-extend-floor.js";
 import configCmd from "./extensions/config-cmd.js";
 import type { ActivateFn } from "./kernel/extension.js";
 
@@ -97,6 +100,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["mcp", mcp],
   ["codeact", codeact],
   ["subagents", subagents],
+  ["subagent-jobs", subagentJobs],
   ["dynamic-workflow", dynamicWorkflow],
   ["templates", templates],
   ["teams", teams],
@@ -114,6 +118,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["trace", trace],
   ["context-files", contextFiles],
   ["microagents", microagents],
+  ["playbook", playbook],
   ["limits", limits],
   ["cost", cost],
   ["budget-cap", budgetCap],
@@ -149,6 +154,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["otel-exporter", otelExporter],
   ["reasoning-search", reasoningSearch],
   ["self-improve", selfImprove],
+  ["self-extend-floor", selfExtendFloor],
   ["config", configCmd],
 ];
 

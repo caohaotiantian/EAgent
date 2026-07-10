@@ -4,6 +4,7 @@ import { CommandRegistry } from "../src/kernel/commands.js";
 import { LayeredConfig } from "../src/config.js";
 import { ExtensionHost } from "../src/kernel/extension.js";
 import { MemoryBackend, MemoryStore } from "../src/kernel/store.js";
+import type { StoreBackend } from "../src/kernel/store.js";
 import type { CompletionRequest, Logger, Provider, StreamEvent, UI } from "../src/kernel/types.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
 
@@ -41,6 +42,9 @@ export interface Harness {
   /** The injected config (same instance the extensions see as `e.config`), so a
    *  test can set a value key race-free instead of mutating global `process.env`. */
   config: LayeredConfig;
+  /** The store backend behind the host; `backend.open(id)` returns the SAME Store
+   *  instance an extension receives as `e.store` under that id. */
+  backend: StoreBackend;
 }
 
 export function makeHarness(
@@ -64,8 +68,9 @@ export function makeHarness(
   // A real LayeredConfig (empty file layer, in-memory override) so the harness
   // honors env-var reads AND the legacy ENV_ALIASES exactly like production.
   const config = new LayeredConfig({ overrideStore: new MemoryStore() });
-  const host = new ExtensionHost({ agent, commands, logger, store: new MemoryBackend(), config });
-  return { agent, host, commands, provider, config };
+  const backend = new MemoryBackend();
+  const host = new ExtensionHost({ agent, commands, logger, store: backend, config });
+  return { agent, host, commands, provider, config, backend };
 }
 
 export function lastText(agent: Agent): string {

@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Async sub-agent jobs (`subagent-jobs`).** A new extension adding a background
+job lifecycle on top of the existing child-agent machinery: `launch_job` starts
+a child on a prompt **without awaiting** and returns a `jobId` immediately;
+`job_status` inspects one job or lists all without blocking; `collect_job` awaits
+and returns the child's final answer (status-aware — a cancelled/failed job is
+reported as such, never overwritten to collected); `cancel_job` stops a running
+child; and `/jobs` lists every job. Jobs live in an in-process `Map` (a live
+Promise + child `Agent` are not serializable and a running job has no meaning
+across a restart) — **never persisted**. A dual recursion guard (a runtime
+root-only check plus a `SPAWN_CAPS`-stripped child registry) prevents nested
+jobs and job-child spawning; running jobs are concurrency-capped
+(`subagentJobs.maxConcurrent`, default 4) and finished records retention-capped
+(`subagentJobs.retain`, default 32, FIFO); dispose cancels every still-running
+job so no background child is orphaned on unload/reload. `EAGENT_SUBAGENT_JOBS=off`
+kill switch; tools declare `agent:spawn`. The only change to `subagents.ts` is an
+additive `export` on `finalText` (behavior-neutral); no kernel edits.
+
+**Model-capability floor for self-extension (`self-extend-floor`).** A new
+`beforeToolCall` guard extension that blocks any `self:extend`-gated tool call
+(across `self` and `self-improve`, and any future `self:extend` tool) when the
+acting model (`e.agent.model`) matches none of a configured allowlist of model
+substrings — embodying the STOP lesson (arXiv 2310.02304) that scaffold-level
+self-improvement should assume a capable base and refuse rather than loop on a
+weak one. Inert by default (empty allowlist ⇒ zero gating, byte-identical to
+today); activated by configuring `selfExtendFloor.models` (comma-separated,
+case-insensitive **substrings** — matching is by `contains`, so write the most
+specific ids that still match, e.g. `opus-4`/`gpt-5`, since a weaker variant
+whose id contains an allowlisted substring is admitted). Capability-scoped via
+the tool registry (no hardcoded tool list); no command, no capability; hard kill
+switch `EAGENT_SELF_EXTEND_FLOOR=off`; emits one `warn` line on a block. The
+acting model is resolved as `currentActingAgent() ?? e.agent` so a self-extending
+sub-agent is judged on ITS model, not the root's (the capability lookup stays on
+the root registry); matching is substring by default, with an opt-in
+`selfExtendFloor.match=exact` for strict full-id equality (any other value ⇒
+substring).
+
+**Playbook extension (`playbook`) — an evolving, delta-merged, auto-injected
+insight playbook.** A new opt-in extension that maintains a durable, ordered list
+of bulleted insights and injects them into context every turn, so accumulated
+know-how is always in front of the model (the "context as an evolving playbook"
+pattern from agentic context-engineering work). Updates are **deterministic
+delta-merges** — `add` a new bullet or `merge` an insight into an existing bullet
+by id (segment-exact dedupe, no LLM call) — never a monolithic rewrite, which
+structurally avoids "context collapse".
+
+- Stored one bullet per `bullet:<id>` key with a monotonic `ord`; capped at 64
+  bullets (FIFO-drop oldest).
+- Injected as one leading ephemeral `system` note on `transformContext`, placed
+  after `compact` so it is never folded into a summary; byte-capped at 8 KB
+  (whole message, with a truncation marker) to bound the always-on per-turn cost.
+- Ships **off** (`/playbook on`; `EAGENT_PLAYBOOK=off` hard kill switch); no
+  capability required. Command: `/playbook on|off|list|add|merge|forget|clear`.
+
 **Centralized configuration (`e.config`).** Configuration used to be read at ~200
 isolated sites — direct `process.env.EAGENT_*` reads, private hard-coded
 constants, and per-extension store flags, each with its own precedence and
