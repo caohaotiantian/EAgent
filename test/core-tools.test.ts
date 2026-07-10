@@ -65,6 +65,31 @@ test("rejects path traversal outside the workspace root", async () => {
   assert.match(r.content, /ok/);
 });
 
+test("read caps a file larger than fs.maxReadBytes and marks it truncated", async () => {
+  const h = makeHarness();
+  h.config.set("fs.maxReadBytes", 20);
+  await h.host.use("core-tools", coreTools);
+  await h.agent.tools.get("write")!.execute({ path: "big.txt", content: "x".repeat(200) }, ctx());
+  const r = await h.agent.tools.get("read")!.execute({ path: "big.txt" }, ctx());
+  assert.equal(r.isError, undefined);
+  assert.match(r.content, /truncated: file exceeds fs\.maxReadBytes/);
+  // Only the leading ~20-byte window was read, not the whole 200-byte file:
+  // the numbered data line (before the truncation notice) holds ≤ 20 x's.
+  assert.ok((r.content.split("\n")[0]!.match(/x/g) || []).length <= 20, "data is bounded to the cap");
+});
+
+test("edit refuses a file larger than fs.maxReadBytes (no silent truncation)", async () => {
+  const h = makeHarness();
+  h.config.set("fs.maxReadBytes", 20);
+  await h.host.use("core-tools", coreTools);
+  await h.agent.tools.get("write")!.execute({ path: "big2.txt", content: "y".repeat(200) }, ctx());
+  const e = await h.agent.tools.get("edit")!.execute({ path: "big2.txt", old: "y", new: "z", replaceAll: true }, ctx());
+  assert.equal(e.isError, true);
+  assert.match(e.content, /exceeds fs\.maxReadBytes/);
+  // The file is untouched — the edit did NOT write back a truncated version.
+  assert.equal(readFileSync(join(WORKSPACE, "big2.txt"), "utf8").length, 200);
+});
+
 test("edit replaces unique text and guards ambiguous edits", async () => {
   const tools = await loadTools();
   await run(tools.get("write"), { path: "edit.txt", content: "one two one" });

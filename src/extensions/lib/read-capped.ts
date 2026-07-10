@@ -2,7 +2,10 @@
 // ≤ `maxBytes` window starting at byte `startIndex`, never buffering the whole
 // body, so a huge or hostile response cannot exhaust memory. It lives in `lib/`
 // so any extension that reads a foreign stream at arm's length can share it
-// (currently `web`'s `fetch_url` / `/fetch`).
+// (currently `web`'s `fetch_url` / `/fetch`). It also exports a file-path
+// analogue, `readFileCapped`, for the built-in read/edit/grep tools.
+
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 /**
  * Read `body` as UTF-8 text but stop once `maxBytes` bytes have been consumed.
@@ -21,6 +24,31 @@
  * Exported as a named export so the byte-window logic is unit-testable directly
  * over an in-memory `ReadableStream` (mirrors `recovery.ts`'s exported helpers).
  */
+/**
+ * Read a file into memory but never buffer more than `maxBytes`: a `statSync`
+ * size check plus a single bounded `readSync`, so a huge or hostile file cannot
+ * exhaust process memory (the file/path analogue of `readCapped`'s stream cap).
+ * `truncated` is true when the file was larger than `maxBytes` — only the
+ * leading `maxBytes`-byte window was read.
+ */
+export function readFileCapped(path: string, maxBytes: number): { buf: Buffer; truncated: boolean } {
+  const size = statSync(path).size;
+  const cap = Math.min(size, Math.max(0, Math.floor(maxBytes)));
+  const buf = Buffer.alloc(cap);
+  const fd = openSync(path, "r");
+  try {
+    let read = 0;
+    while (read < cap) {
+      const n = readSync(fd, buf, read, cap - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return { buf: read === cap ? buf : buf.subarray(0, read), truncated: size > maxBytes };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export async function readCapped(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,

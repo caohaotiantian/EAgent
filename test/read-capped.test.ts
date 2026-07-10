@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { readCapped } from "../src/extensions/lib/read-capped.js";
+import { readCapped, readFileCapped } from "../src/extensions/lib/read-capped.js";
+
+test("readFileCapped bounds a large file and flags truncation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eagent-readfilecapped-"));
+  const path = join(dir, "big");
+  writeFileSync(path, Buffer.alloc(1000, 0x41)); // 1000 'A' bytes
+  const capped = readFileCapped(path, 100);
+  assert.equal(capped.buf.length, 100, "reads only the cap window");
+  assert.equal(capped.truncated, true, "flags that the file exceeded the cap");
+  const whole = readFileCapped(path, 5000);
+  assert.equal(whole.buf.length, 1000, "reads the whole file when under the cap");
+  assert.equal(whole.truncated, false);
+});
 
 // In-memory stream helpers for the readCapped unit tests — no network.
 function streamOf(...chunks: Uint8Array[]): ReadableStream<Uint8Array> {

@@ -9,10 +9,11 @@
  * 100 results with an early-exit short-circuit.
  */
 
-import { type Dirent, readdirSync, readFileSync } from "node:fs";
+import { type Dirent, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
+import { readFileCapped } from "./lib/read-capped.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 
@@ -203,6 +204,7 @@ export default function activate(e: ExtensionAPI): () => void {
           return fail(`invalid regex: ${(err as Error).message}`);
         }
         const includeRe = args.include === undefined ? undefined : globToRegExp(String(args.include));
+        const cap = e.config.int("fs.maxReadBytes", 16 * 1024 * 1024);
         const results: string[] = [];
         let capped = false;
         walk(
@@ -213,7 +215,8 @@ export default function activate(e: ExtensionAPI): () => void {
             const abs = join(root, rel);
             let raw: Buffer;
             try {
-              raw = readFileSync(abs);
+              // Bounded read: a huge/hostile file cannot OOM the grep walk.
+              raw = readFileCapped(abs, cap).buf;
             } catch {
               return;
             }

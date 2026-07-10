@@ -8,11 +8,12 @@
  */
 
 import { exec } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { defineTool, fail, ok } from "../kernel/define.js";
+import { readFileCapped } from "./lib/read-capped.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 import { locateEdit } from "./lib/edit-match.js";
@@ -71,9 +72,13 @@ export default function activate(e: ExtensionAPI): void {
         } catch (err) {
           return fail((err as Error).message);
         }
+        const cap = e.config.int("fs.maxReadBytes", 16 * 1024 * 1024);
         let lines: string[];
+        let truncated = false;
         try {
-          lines = readFileSync(path, "utf8").split("\n");
+          const r = readFileCapped(path, cap);
+          truncated = r.truncated;
+          lines = r.buf.toString("utf8").split("\n");
         } catch (err) {
           return fail(`Cannot read ${path}: ${(err as Error).message}`);
         }
@@ -85,7 +90,8 @@ export default function activate(e: ExtensionAPI): void {
         const end = Number.isFinite(limit) && limit > 0 ? start + Math.floor(limit) : lines.length;
         const slice = lines.slice(start, end);
         const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(5)}  ${l}`).join("\n");
-        return ok(numbered, { path, lineCount: lines.length });
+        const body = truncated ? `${numbered}\n… [truncated: file exceeds fs.maxReadBytes (${cap}); only the leading ${cap} bytes were read]` : numbered;
+        return ok(body, { path, lineCount: lines.length, truncated });
       },
     }),
   );
@@ -142,8 +148,14 @@ export default function activate(e: ExtensionAPI): void {
         } catch (err) {
           return fail((err as Error).message);
         }
+        const editCap = e.config.int("fs.maxReadBytes", 16 * 1024 * 1024);
         let content: string;
         try {
+          // Refuse to edit a file larger than the cap: an edit rewrites the whole
+          // file, so a bounded read + write-back would silently truncate it.
+          if (statSync(path).size > editCap) {
+            return fail(`Cannot edit ${path}: file exceeds fs.maxReadBytes (${editCap}); split it or raise the cap.`);
+          }
           content = readFileSync(path, "utf8");
         } catch (err) {
           return fail(`Cannot read ${path}: ${(err as Error).message}`);

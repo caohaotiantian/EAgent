@@ -132,6 +132,14 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **Built-in `read`/`edit`/`grep` are now memory-bounded.** They previously
+  `readFileSync`'d whole files, so one hostile multi-GB file could OOM the process
+  — and because the HTTP server runs one turn at a time in one process, that took
+  down every session. A new `lib/read-capped.ts` `readFileCapped` (a `statSync`
+  guard + a single bounded read) caps each read at `fs.maxReadBytes` (default 16
+  MiB): `read` returns a truncation-marked window, `grep` scans a bounded window,
+  and `edit` **refuses** an over-cap file rather than bounded-reading and writing
+  back a silently-truncated version.
 - **MCP stdio subprocesses no longer inherit the full host environment.** The
   stdio transport spawned servers with `{ ...process.env, ...def.env }`, handing
   every host env var — API keys, `EAGENT_TOKEN` — to third-party MCP server code.
