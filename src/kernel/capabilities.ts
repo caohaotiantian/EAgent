@@ -19,7 +19,7 @@
  * Patterns support a trailing `*` wildcard segment (`fs:*`, `*`).
  */
 
-import type { UI } from "./types.js";
+import type { Disposable, UI } from "./types.js";
 
 export type Decision = "allow" | "deny" | "ask";
 
@@ -68,8 +68,10 @@ export class CapabilityManager {
   }
 
   /** Add a granted pattern at runtime (e.g. an extension declaring its needs). */
-  grant(pattern: string): void {
-    if (!this.#grant.includes(pattern)) this.#grant.push(pattern);
+  grant(pattern: string): Disposable {
+    this.#grant.push(pattern);
+    let disposed = false;
+    return { dispose: () => { if (disposed) return; disposed = true; const i = this.#grant.indexOf(pattern); if (i >= 0) this.#grant.splice(i, 1); } };
   }
 
   /**

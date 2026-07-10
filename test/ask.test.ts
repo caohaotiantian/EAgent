@@ -146,20 +146,20 @@ test("EAGENT_ASK=off registers no ask_user_question tool", async () => {
   }
 });
 
-// -- AC 6: clean teardown — tool removed, dispose never throws, grant persists -
+// -- AC 6: clean teardown — tool removed, dispose never throws, grant revoked --
 
-test("unload removes the tool and never throws; the ui:ask grant persists", async () => {
+test("unload removes the tool and never throws; the ui:ask grant is revoked", async () => {
   const ui: UI = {
     confirm: async () => true,
     notify: () => {},
     ask: async () => "Postgres",
   };
   // `fallback: "deny"` is load-bearing: under it `isGranted` reduces to
-  // `matchesAny(capability, #grant)` (capabilities.ts:124-127), so the two
+  // `matchesAny(capability, #grant)` (capabilities.ts:124-128), so the two
   // grant assertions below are non-vacuous — they pass only if the conditional
   // grant pattern is genuinely present/persisted. Under the harness default
   // `fallback: "allow"`, `isGranted` returns true via the allow-fallback
-  // (capabilities.ts:127) regardless of the grant, making both assertions pass
+  // (capabilities.ts:128) regardless of the grant, making both assertions pass
   // even if `grantCapability("ui:ask")` were deleted (vacuous) — the same defect
   // round 2 (e097d1b) fixed for AC 4.
   const h = makeHarness({ ui, fallback: "deny" });
@@ -171,7 +171,7 @@ test("unload removes the tool and never throws; the ui:ask grant persists", asyn
   await h.host.unload("ask"); // must not throw
 
   assert.equal(h.agent.tools.get("ask_user_question"), undefined, "the tracked tool disposable removed the tool");
-  // Known limitation, asserted as the current contract: grantCapability is not
-  // tracked for disposal, so the grant survives unload.
-  assert.equal(h.agent.capabilities.isGranted("ui:ask"), true, "the ui:ask grant is not reversed by unload");
+  // grantCapability is now tracked for disposal, so unload revokes the grant
+  // alongside the tool.
+  assert.equal(h.agent.capabilities.isGranted("ui:ask"), false, "the ui:ask grant is reversed by unload");
 });
