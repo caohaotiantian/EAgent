@@ -132,6 +132,18 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **Sub-agent recursion guard is now capability-based, not name-based.** Four
+  spawners (`subagents`, `templates`, `reasoning-search`, `dynamic-workflow`) built
+  a child's tool registry by stripping spawn tools **by name**, so a child kept
+  every *other* spawn tool (`run_workflow`, `run_team`, `spawn_template`, …) and
+  could spawn grandchildren — the "runaway tree is impossible" guarantee was false.
+  All four now delegate to one shared helper (`lib/child-registry.ts`) that strips
+  every tool whose capabilities intersect `SPAWN_CAPS = {agent:spawn, workflow:run}`
+  (the single source of truth, hoisted out of `teams.ts`), matching the already-
+  correct `teams`/`subagent-jobs` pattern. A child now holds no spawn tool at all,
+  so depth is bounded to one nesting level by construction. Additionally,
+  `spawn_agent`'s `parallel`/`chain` fan-out is capped at `subagents.maxFanout`
+  (default 16) to prevent a single call spawning unbounded children. No kernel change.
 - **`self.read_extension` path traversal fixed.** It built file candidates from
   the raw, unsanitized name when it ended in a known suffix, so a name like
   `../../../../etc/hosts.js` escaped the extensions directory (arbitrary file

@@ -1,7 +1,11 @@
 # Implementation — Bounded sub-agents (Batch B)
 
 Slug: `2026-07-10-bounded-subagents` (matches `docs/design/2026-07-10-bounded-subagents.md`)
-Status: draft
+Status: closed
+Closing-commit: Batch B closeout on `chore/production-hardening`
+Closed-on: 2026-07-10
+Deferred: none (both phases closed on their first L3 review).
+Result: 2 phases, both closed round 1. Suite 1288 → 1296 pass (+8: child-registry helper tests, six reworked discriminators, four fan-out cases), 0 fail, 1 skip; typecheck 0; eval 5/5; build 0. Four leaky name-based child-registry strips replaced by one capability-based lib helper; spawn_agent fan-out capped.
 
 ## 1. Task Index
 

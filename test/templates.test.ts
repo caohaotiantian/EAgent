@@ -324,7 +324,7 @@ test("T5 EAGENT_TEMPLATES=off: spawn_template errors disabled; /template use ref
 
     let spawned = false;
     const h = makeHarness({ fallback: "allow" });
-    h.provider.script((req) => {
+    h.provider.script(() => {
       if (!spawned) {
         spawned = true;
         return { toolCalls: [{ name: "spawn_template", arguments: { template: "spec", prompt: "go" } }] };

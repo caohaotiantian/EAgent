@@ -1,7 +1,10 @@
 # Design — Bounded sub-agents: capability-based recursion guard (Batch B)
 
 Slug: `2026-07-10-bounded-subagents`
-Status: draft
+Status: closed
+Closing-commit: Batch B closeout on `chore/production-hardening` (code commits `ccecf65`/`267ba31` + closeout)
+Closed-on: 2026-07-10
+Deferred: finding — the KDD3 invariant pin hard-codes the nine known spawner names rather than enumerating the live registry (an accepted residual; a future capless spawner would slip both the strip and the pin; no repo issue tracker — tracked in the PR).
 
 ## 1. Background and Purpose
 
