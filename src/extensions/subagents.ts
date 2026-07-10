@@ -49,6 +49,10 @@ const DEFAULT_CHILD_SYSTEM =
 
 const DEFAULT_MAX_TURNS = 8;
 
+/** Default fan-out (breadth) cap on a single parallel/chain spawn_agent call,
+ *  mirroring teams.ts MAX_MEMBERS. Overridable via config `subagents.maxFanout`. */
+const DEFAULT_MAX_FANOUT = 16;
+
 export default function activate(e: ExtensionAPI): void {
   e.grantCapability("agent:spawn");
 
@@ -238,6 +242,16 @@ export default function activate(e: ExtensionAPI): void {
         const prompts = asPrompts(args.prompts);
         if (!prompts) {
           return fail(`mode=${mode} requires a non-empty string array \`prompts\`.`);
+        }
+
+        // Breadth guard: one call must not fan out to an unbounded number of
+        // children. Reject before spawning any child; raise via subagents.maxFanout.
+        const maxFanout = e.config.int("subagents.maxFanout", DEFAULT_MAX_FANOUT);
+        if (prompts.length > maxFanout) {
+          return fail(
+            `mode=${mode} requested ${prompts.length} children, exceeding the subagents.maxFanout cap of ${maxFanout}. ` +
+              "Reduce `prompts` or raise subagents.maxFanout.",
+          );
         }
 
         if (mode === "parallel") {

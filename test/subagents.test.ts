@@ -183,6 +183,94 @@ test("validation: wrong/missing prompt shape fails cleanly", async () => {
   assert.match(result.content, /requires a non-empty string `prompt`/);
 });
 
+// ---------------------------------------------------------------------------
+// Fan-out (breadth) cap — one spawn_agent call cannot fan out to an unbounded
+// number of children (AC3). parallel/chain reject when prompts.length exceeds
+// subagents.maxFanout (default 16); single is unaffected.
+// ---------------------------------------------------------------------------
+
+/**
+ * A provider where the parent issues one spawn_agent call in `mode` with `n`
+ * prompts, and each spawned CHILD answers "child-done". `childCalls()` counts how
+ * many child requests actually reached the provider, so a rejected fan-out is
+ * observable as zero children run.
+ */
+function spawnFanout(mode: "parallel" | "chain", n: number): { provider: MockProvider; childCalls: () => number } {
+  let parentSpawned = false;
+  let childCalls = 0;
+  const prompts = Array.from({ length: n }, (_, i) => `task-${i + 1}`);
+  const provider = new MockProvider((req) => {
+    if (req.systemPrompt.includes("CHILD")) {
+      childCalls++;
+      return { text: "child-done" };
+    }
+    if (!parentSpawned) {
+      parentSpawned = true;
+      return { toolCalls: [{ name: "spawn_agent", arguments: { mode, prompts, system: "CHILD" } }] };
+    }
+    return { text: "parent-done" };
+  });
+  return { provider, childCalls: () => childCalls };
+}
+
+test("fan-out cap: a parallel spawn beyond maxFanout (default 16) errors and runs no children", async () => {
+  const { provider, childCalls } = spawnFanout("parallel", 17);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, true, "17 > default cap 16 is rejected");
+  assert.match(result.content, /maxFanout/, "the error names the cap");
+  assert.match(result.content, /16/, "the error names the cap value");
+  assert.equal(childCalls(), 0, "no child ran — the cap rejected before any spawn");
+});
+
+test("fan-out cap: a parallel spawn at the cap (16) is accepted and runs", async () => {
+  const { provider, childCalls } = spawnFanout("parallel", 16);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, undefined, "exactly at the cap is accepted");
+  assert.equal(childCalls(), 16, "all 16 children ran");
+});
+
+test("fan-out cap: chain mode is capped the same way", async () => {
+  const { provider, childCalls } = spawnFanout("chain", 17);
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(provider, { default: true });
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, true, "chain past the cap is rejected too");
+  assert.match(result.content, /maxFanout/, "the error names the cap");
+  assert.equal(childCalls(), 0, "no child ran — the cap rejected before any spawn");
+});
+
+test("fan-out cap: subagents.maxFanout config override tightens the bound", async () => {
+  const { provider, childCalls } = spawnFanout("parallel", 3);
+  const { agent, host, config } = makeHarness({ fallback: "allow" });
+  config.set("subagents.maxFanout", 2);
+  agent.providers.register(provider, { default: true });
+  await host.use("subagents", subagents);
+
+  await agent.run("kick off");
+
+  const result = toolResults(agent.messages)[0]!;
+  assert.equal(result.isError, true, "3 > overridden cap 2 is rejected");
+  assert.match(result.content, /maxFanout/, "the error names the cap");
+  assert.match(result.content, /2/, "the error names the overridden cap value");
+  assert.equal(childCalls(), 0, "no child ran under the tightened cap");
+});
+
 test("recursion guard: child tool registry strips every spawn-class tool by capability", () => {
   const spawn = defineTool({
     name: "spawn_agent",
