@@ -132,6 +132,14 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **Capability grants are now revoked on unload/reload.** `grantCapability` was the
+  one extension registration not tracked as a `Disposable`, and `CapabilityManager`
+  had no revoke — so a granted authority persisted after its extension was unloaded
+  or hot-reloaded, and a later/re-registered tool could run without the
+  ask-prompt a fresh session requires. `grant` now returns a `Disposable` (with
+  reference counting: `#grant` is a multiset, so a shared pattern like `agent:spawn`
+  survives until its *last* granter disposes) and the host tracks it like every
+  other registration. +2 kernel lines (2246/2250 — no ceiling change).
 - **Built-in `read`/`edit`/`grep` are now memory-bounded.** They previously
   `readFileSync`'d whole files, so one hostile multi-GB file could OOM the process
   — and because the HTTP server runs one turn at a time in one process, that took

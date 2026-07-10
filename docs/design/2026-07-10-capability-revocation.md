@@ -1,7 +1,11 @@
 # Design — Capability grant revocation across unload/reload (Cycle E)
 
 Slug: `2026-07-10-capability-revocation`
-Status: draft
+Status: closed
+Closing-commit: Cycle E closeout on `chore/production-hardening`
+Closed-on: 2026-07-10
+Deferred: finding — per-*package* grant revocation (`/pkg-remove` does not revoke the removed package's grant) is a documented §3 non-goal (closing it needs the `grantCapability`-returns-Disposable change KDD2 rejects).
+Result: kernel 2244 → 2246/2250 (no bump); suite 1313 → 1319 pass; grants are now revocable + reference-counted (multiset `#grant`, idempotent by-value splice), tracked on unload/reload.
 
 ## 1. Background and Purpose
 

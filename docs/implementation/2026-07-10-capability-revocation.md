@@ -1,7 +1,11 @@
 # Implementation — Capability grant revocation (Cycle E)
 
 Slug: `2026-07-10-capability-revocation` (matches the design doc)
-Status: draft
+Status: closed
+Closing-commit: Cycle E closeout on `chore/production-hardening`
+Closed-on: 2026-07-10
+Deferred: none (single phase, closed round 1).
+Result: kernel 2246/2250; suite 1319 pass / 0 fail / 1 skip; typecheck 0; eval 5/5; build 0. The dev also flipped `test/ask.test.ts`'s "grant survives unload" test (which pinned the bug) to assert revocation.
 
 ## 1. Task Index
 
