@@ -144,7 +144,41 @@ export function detectSuspiciousDescription(text: string): string[] {
  * accepts a POST but never answers (or holds an SSE stream open forever) must
  * not block activation or an agent turn indefinitely.
  */
-const HTTP_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * Per-request timeout for BOTH transports (`mcp.requestTimeoutMs`, default 60s).
+ * A server that accepts a request but never answers — including a stdio server
+ * that stalls the `initialize` handshake — must not block activation or a turn
+ * indefinitely (invalid/≤0 → default).
+ */
+export function mcpRequestTimeoutMs(config: Config): number {
+  const n = config.int("mcp.requestTimeoutMs", 60_000);
+  return Number.isInteger(n) && n > 0 ? n : 60_000;
+}
+
+/**
+ * Environment for a stdio MCP subprocess, built default-deny: a minimal base set
+ * (so the server can find its interpreter and run), plus an operator opt-in
+ * passthrough (`mcp.envPassthrough`, comma-separated var names), plus the server's
+ * own `def.env` (which wins). The full host environment — including API keys and
+ * `EAGENT_TOKEN` — is NOT handed to foreign server code.
+ */
+const BASE_ENV_KEYS = [
+  "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP",
+  "SHELL", "USER", "LOGNAME", "SystemRoot", "COMSPEC", "PATHEXT", "WINDIR", "APPDATA", "LOCALAPPDATA",
+];
+
+export function stdioEnv(def: StdioServerDef, config: Config): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of BASE_ENV_KEYS) {
+    const v = process.env[k];
+    if (v !== undefined) out[k] = v;
+  }
+  for (const k of (config.string("mcp.envPassthrough") ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const v = process.env[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return { ...out, ...(def.env ?? {}) };
+}
 
 /**
  * OOM-safety cap on a single MCP transport read (`EAGENT_MAX_MCP_READ_BYTES`,
@@ -224,18 +258,20 @@ interface Transport {
  * stdio transport: owns the subprocess, the line reader, and the JSON-RPC
  * id→promise correlation table.
  */
-class StdioTransport implements Transport {
+export class StdioTransport implements Transport {
   readonly #name: string;
   readonly #child: ChildProcess;
+  readonly #config: Config;
   readonly #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   #nextId = 1;
   #closed = false;
 
   constructor(def: StdioServerDef, config: Config) {
     this.#name = def.name;
+    this.#config = config;
     this.#child = spawn(def.command, def.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...def.env },
+      env: stdioEnv(def, config),
     });
     // A spawn failure (bad command) surfaces asynchronously; reject everything.
     this.#child.on("error", (err) => this.#failAll(err));
@@ -252,22 +288,38 @@ class StdioTransport implements Transport {
     if (signal?.aborted) return Promise.reject(new Error(`MCP request to "${this.#name}" aborted`));
     const id = this.#nextId++;
     const payload = { jsonrpc: "2.0", id, method, params };
+    const timeoutMs = mcpRequestTimeoutMs(this.#config);
     return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
       const onAbort = (): void => {
-        if (this.#pending.delete(id)) reject(new Error(`MCP request to "${this.#name}" aborted`));
+        if (this.#pending.delete(id)) {
+          clearTimeout(timer);
+          reject(new Error(`MCP request to "${this.#name}" aborted`));
+        }
       };
-      // Wrap so settling the request also detaches the abort listener — no leak
-      // whether the response arrives, the server exits, or the caller aborts.
+      // Wrap so settling the request also clears the timeout and detaches the
+      // abort listener — no leak whether the response arrives, the server exits,
+      // the request times out, or the caller aborts.
       this.#pending.set(id, {
         resolve: (v) => {
+          clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           resolve(v);
         },
         reject: (err) => {
+          clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           reject(err);
         },
       });
+      // A ref'd timer (unlike AbortSignal.timeout) so a hung server can't stall
+      // the handshake/turn forever, and the deadline reliably fires.
+      timer = setTimeout(() => {
+        if (this.#pending.delete(id)) {
+          signal?.removeEventListener("abort", onAbort);
+          reject(new Error(`MCP request to "${this.#name}" (${method}) timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
       this.#write(payload);
     });
@@ -385,9 +437,10 @@ class HttpTransport implements Transport {
     // driving one AbortController from both. (Manual rather than
     // AbortSignal.timeout/any so it types cleanly under lib ES2023.)
     const controller = new AbortController();
+    const timeoutMs = mcpRequestTimeoutMs(this.#config);
     const timer = setTimeout(
-      () => controller.abort(new Error(`MCP HTTP request to "${this.#name}" timed out after ${HTTP_REQUEST_TIMEOUT_MS}ms`)),
-      HTTP_REQUEST_TIMEOUT_MS,
+      () => controller.abort(new Error(`MCP HTTP request to "${this.#name}" timed out after ${timeoutMs}ms`)),
+      timeoutMs,
     );
     const onCallerAbort = (): void => controller.abort();
     if (signal) {

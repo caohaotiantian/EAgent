@@ -132,6 +132,15 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **MCP stdio subprocesses no longer inherit the full host environment.** The
+  stdio transport spawned servers with `{ ...process.env, ...def.env }`, handing
+  every host env var — API keys, `EAGENT_TOKEN` — to third-party MCP server code.
+  The subprocess env is now built default-deny: a minimal base set (PATH, HOME,
+  locale, OS essentials) so the server can run, plus the server's own `env` config,
+  plus an operator opt-in `mcp.envPassthrough` (comma-separated var names). The
+  stdio `request()`/`initialize` handshake also gained the timeout it lacked (a
+  ref'd timer, unified with the HTTP transport under `mcp.requestTimeoutMs`,
+  default 60s) so a silent server can no longer hang activation or a turn.
 - **content-guard fence is now non-forgeable (prompt-injection hardening).** The
   ingress provenance envelope was defeatable two ways: foreign content that began
   with the public standing note skipped fencing (prefix-spoof), and content
