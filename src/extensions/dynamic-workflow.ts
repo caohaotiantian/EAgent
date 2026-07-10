@@ -28,6 +28,7 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
 import type { JSONSchema, Message, Tool, ToolCallBlock, ToolContext, ToolResult } from "../kernel/types.js";
 import { validate } from "../kernel/validate.js";
+import { childRegistryFrom } from "./lib/child-registry.js";
 import {
   resolveChildCapabilities,
   resolveChildProvider,
@@ -306,17 +307,13 @@ function findCycle(steps: WorkflowStep[], deps: Map<string, Set<string>>): strin
 }
 
 /**
- * Build a child agent's tool registry: the parent's active tools minus
- * `run_workflow`, so a workflow's `agent` step cannot launch another workflow.
- * The one-omission recursion guard, mirroring `subagents`' `childRegistryFrom`.
+ * Build a child agent's tool registry: the parent's active tools minus every
+ * spawn-class tool (the shared capability strip), so a workflow's `agent` step
+ * cannot launch another workflow or otherwise spawn. Delegates to the shared
+ * `childRegistryFrom`.
  */
 export function workflowChildRegistry(parentTools: Tool[]): ToolRegistry {
-  const registry = new ToolRegistry();
-  for (const tool of parentTools) {
-    if (tool.spec.name === WORKFLOW_TOOL) continue;
-    registry.register(tool);
-  }
-  return registry;
+  return childRegistryFrom(parentTools);
 }
 
 // ---------------------------------------------------------------------------

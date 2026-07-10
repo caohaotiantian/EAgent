@@ -17,9 +17,11 @@
  *   - Each child `restore()`s the parent snapshot, so every branch inherits the
  *     conversation (subagents start children fresh). Best-of-N means "N ways
  *     forward from here," which needs the shared prior context.
- *   - The recursion guard removes `best_of_n` (and `spawn_agent`) from each
- *     child's registry, so a child cannot re-fork. The N cap only bounds one
- *     level; this guard is what prevents depth blow-up.
+ *   - The recursion guard removes every spawn-class tool (any declaring
+ *     `agent:spawn`/`workflow:run`, which covers `best_of_n`, the search tools,
+ *     and `spawn_agent`) from each child's registry, so a child cannot re-fork or
+ *     otherwise spawn. The N cap only bounds one level; this guard is what
+ *     prevents depth blow-up.
  *
  * Governance rides `childScope()`: the parent's `beforeToolCall`/`afterToolCall`
  * gate filters govern every fork, and a child's `usage` events reach the parent
@@ -33,13 +35,17 @@ import { Agent, type RunResult } from "../kernel/agent.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
-import type { AgentState, Message, Tool, ToolContext } from "../kernel/types.js";
+import type { AgentState, Message, ToolContext } from "../kernel/types.js";
+import { childRegistryFrom } from "./lib/child-registry.js";
 import { parseJudgeReply } from "./evals.js";
+
+// Re-exported as a local delegator (not a bare `export … from`) because this
+// module also calls `childRegistryFrom` internally, which needs a local binding;
+// the search tests import the recursion guard from here.
+export { childRegistryFrom };
 
 /** The tool name — also the registration a child must never inherit (recursion guard). */
 const BEST_OF_N = "best_of_n";
-/** subagents' spawn tool, likewise pruned so a fork cannot spawn either. */
-const SPAWN_TOOL = "spawn_agent";
 /** The tree-search tool name — also pruned from every child registry (recursion guard). */
 const TREE_SEARCH = "tree_search";
 /** The graph-search tool name — also pruned from every child registry (recursion guard). */
@@ -75,24 +81,6 @@ const JUDGE_SYSTEM_PROMPT =
 
 /** A candidate scorer: higher is better; the tool takes the argmax. */
 type Scorer = (candidate: string) => number | Promise<number>;
-
-/**
- * Copy a parent's active tools into a fresh registry, omitting `best_of_n`,
- * `spawn_agent`, `tree_search`, and `graph_search`. This is the recursion guard (a
- * fork cannot re-fork or re-search), factored out so tests can assert it directly —
- * exactly `subagents`' `childRegistryFrom`, extended to drop the search tools. A
- * fresh per-child registry also keeps a fork's own registrations from leaking to
- * the parent or its siblings.
- */
-export function childRegistryFrom(parentTools: Tool[]): ToolRegistry {
-  const registry = new ToolRegistry();
-  for (const tool of parentTools) {
-    const name = tool.spec.name;
-    if (name === BEST_OF_N || name === SPAWN_TOOL || name === TREE_SEARCH || name === GRAPH_SEARCH) continue;
-    registry.register(tool);
-  }
-  return registry;
-}
 
 /** The last assistant message's text, concatenating its text blocks (subagents' finalText). */
 function finalText(messages: readonly Message[]): string {
@@ -175,7 +163,7 @@ export default function activate(e: ExtensionAPI): () => void {
   /** Read per-call so `/reasoning-search on|off` toggles it mid-session. */
   const isEnabled = (): boolean => e.store.get<boolean>("enabled", false) ?? false;
 
-  /** A fresh per-fork registry: every parent tool minus best_of_n/spawn_agent. */
+  /** A fresh per-fork registry: every parent tool minus every spawn-class tool (capability strip). */
   const childRegistry = (): ToolRegistry => childRegistryFrom(e.agent.tools.list());
 
   /** Construct a fork: shares providers/capabilities, governed by childScope,

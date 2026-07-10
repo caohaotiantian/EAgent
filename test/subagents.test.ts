@@ -183,10 +183,19 @@ test("validation: wrong/missing prompt shape fails cleanly", async () => {
   assert.match(result.content, /requires a non-empty string `prompt`/);
 });
 
-test("recursion guard: child tool registry omits spawn_agent", () => {
+test("recursion guard: child tool registry strips every spawn-class tool by capability", () => {
   const spawn = defineTool({
     name: "spawn_agent",
     description: "x",
+    capabilities: ["agent:spawn"],
+    execute: () => ({ content: "" }),
+  });
+  // A SECOND, differently-named spawn tool: the capability strip must remove it
+  // too (a name-based strip keyed on "spawn_agent" would let it survive).
+  const runWorkflow = defineTool({
+    name: "run_workflow",
+    description: "x",
+    capabilities: ["workflow:run"],
     execute: () => ({ content: "" }),
   });
   const helper = defineTool({
@@ -195,26 +204,29 @@ test("recursion guard: child tool registry omits spawn_agent", () => {
     execute: () => ({ content: "" }),
   });
 
-  const childTools = childRegistryFrom([spawn, helper]);
+  const childTools = childRegistryFrom([spawn, runWorkflow, helper]);
 
   assert.equal(childTools.has("spawn_agent"), false);
+  assert.equal(
+    childTools.has("run_workflow"),
+    false,
+    "a second-named spawn tool is stripped by capability, not name",
+  );
   assert.equal(childTools.has("helper"), true);
 });
 
-test("recursion guard (behavioral): spawned child cannot itself spawn", async () => {
+test("recursion guard (behavioral): spawned child cannot call a second spawn tool", async () => {
   let parentSpawned = false;
-  let childTriedSpawn = false;
+  let childTriedWorkflow = false;
+  let childRanWorkflow = false;
   const provider = new MockProvider((req) => {
     if (req.systemPrompt.includes("CHILD")) {
-      // The child attempts to spawn again; the tool is absent from its
-      // registry, so this resolves to an "Unknown tool" error, not recursion.
-      if (!childTriedSpawn) {
-        childTriedSpawn = true;
-        return {
-          toolCalls: [
-            { name: "spawn_agent", arguments: { mode: "single", prompt: "deeper", system: "CHILD" } },
-          ],
-        };
+      // The child attempts to run a DIFFERENT spawn-class tool than the one it was
+      // spawned by; the capability strip omits it from the child registry, so this
+      // resolves to an "Unknown tool" error, not a grandchild.
+      if (!childTriedWorkflow) {
+        childTriedWorkflow = true;
+        return { toolCalls: [{ name: "run_workflow", arguments: { steps: [] } }] };
       }
       return { text: "child-done" };
     }
@@ -233,8 +245,29 @@ test("recursion guard (behavioral): spawned child cannot itself spawn", async ()
   agent.providers.register(provider, { default: true });
   await host.use("subagents", subagents);
 
+  // A second, differently-named spawn tool present on the PARENT. The child must
+  // not inherit it (capability strip), so its call resolves to "Unknown tool" and
+  // its body never runs.
+  agent.tools.register(
+    defineTool({
+      name: "run_workflow",
+      description: "x",
+      capabilities: ["workflow:run"],
+      parameters: { type: "object", properties: {} },
+      execute: () => {
+        childRanWorkflow = true;
+        return { content: "ran workflow" };
+      },
+    }),
+  );
+
   await agent.run("kick off");
 
+  assert.equal(
+    childRanWorkflow,
+    false,
+    "the child could not call the second spawn tool — it was stripped by capability",
+  );
   // Child's own spawn attempt produced an Unknown tool error, then it finished;
   // the parent's tool result is the child's final text "child-done".
   const result = toolResults(agent.messages)[0]!;

@@ -367,11 +367,15 @@ test("AC-3: an agent step's child output is captured and substitutable", async (
   assert.equal(rec.calls.rec![0]!.in, "child said answer:summarize");
 });
 
-test("AC-10: workflowChildRegistry omits run_workflow but keeps other tools", () => {
-  const wf = defineTool({ name: "run_workflow", description: "wf", execute: async () => ok("") });
+test("AC-10: workflowChildRegistry strips every spawn-class tool but keeps other tools", () => {
+  const wf = defineTool({ name: "run_workflow", description: "wf", capabilities: ["workflow:run"], execute: async () => ok("") });
+  // A second-named spawn tool: the capability strip must remove it too (a name-based
+  // strip keyed on "run_workflow" would let it survive).
+  const spawn = defineTool({ name: "spawn_agent", description: "s", capabilities: ["agent:spawn"], execute: async () => ok("") });
   const other = defineTool({ name: "reader", description: "r", execute: async () => ok("") });
-  const reg = workflowChildRegistry([wf, other]);
+  const reg = workflowChildRegistry([wf, spawn, other]);
   assert.equal(reg.has("run_workflow"), false);
+  assert.equal(reg.has("spawn_agent"), false, "a second-named spawn tool is stripped by capability");
   assert.equal(reg.has("reader"), true);
 });
 

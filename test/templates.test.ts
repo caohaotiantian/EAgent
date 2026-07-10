@@ -272,14 +272,28 @@ test("T4 templateChildRegistry: allowlist keeps exactly the named tools (AC-9)",
   assert.equal(reg.list().length, 2);
 });
 
-test("T4 templateChildRegistry: no allowlist => all parent tools except BOTH spawn tools (AC-9)", () => {
-  const parent = [tool("read"), tool("write"), tool("edit"), tool("spawn_agent"), tool("spawn_template")];
+test("T4 templateChildRegistry: no allowlist => all parent tools except spawn-class tools (AC-9)", () => {
+  const parent = [
+    tool("read"),
+    tool("write"),
+    tool("edit"),
+    capTool("spawn_agent", ["agent:spawn"]),
+    capTool("spawn_template", ["agent:spawn"]),
+    // A spawn tool OUTSIDE the old {spawn_agent, spawn_template} name set: the
+    // capability strip must remove it too (a name-based strip would let it survive).
+    capTool("run_team", ["agent:spawn"]),
+  ];
   const reg = templateChildRegistry(parent);
   assert.equal(reg.has("read"), true);
   assert.equal(reg.has("write"), true);
   assert.equal(reg.has("edit"), true);
   assert.equal(reg.has("spawn_agent"), false);
   assert.equal(reg.has("spawn_template"), false);
+  assert.equal(
+    reg.has("run_team"),
+    false,
+    "a spawn-class tool outside the old name set is stripped by capability",
+  );
 });
 
 // ---------------------------------------------------------------------------
