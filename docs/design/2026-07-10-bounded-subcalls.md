@@ -1,7 +1,10 @@
 # Design — Bounded/abortable provider sub-calls (Batch D)
 
 Slug: `2026-07-10-bounded-subcalls`
-Status: draft
+Status: closed
+Closing-commit: Batch D closeout on `chore/production-hardening` (code commits from L3 phases 1–2 + closeout)
+Closed-on: 2026-07-10
+Deferred: finding — the AC2 `clearTimeout` spy asserts `≥1` (node:test itself calls `clearTimeout`, so it does not fail on a leaked timer); the helper provably clears in `finally` (verified in source + the F review), so the residual is a soft *test guard*, not a behavior gap. No repo issue tracker — tracked in the PR.
 
 ## 1. Background and Purpose
 

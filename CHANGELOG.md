@@ -223,6 +223,17 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Changed / Fixed
 
+- **Every extension provider sub-call now has a deadline.** Eight extensions
+  (`compact`, `routing`, `drift-probe`, `goal`, `handoff`, `session`, `evals`,
+  `reasoning-search`) made an LLM sub-call (`provider.stream` outside the main
+  loop) with a fresh, never-aborted `AbortSignal` (six) or no timeout at all
+  (two), so a hung provider could wedge a whole turn indefinitely with no
+  cancellation path. All eight now run through a shared `lib/sub-call.ts` helper
+  that bounds the call with a ref'd-timer deadline (`<ext>.subCallTimeoutMs`,
+  default 30s) plus — at the two tool-execute sites — the caller's abort signal;
+  on timeout it throws, and each site's existing fail-open/fail-closed `catch`
+  converts it to the established fallback. Mirrors the `risk-guard` timeout
+  pattern; no kernel change.
 - **Provider honesty & resilience.** Three source-level provider fixes so the
   default (Anthropic) stack behaves correctly: (1) an in-transcript `role:"system"`
   message is now **folded into the top-level system channel** on Anthropic and

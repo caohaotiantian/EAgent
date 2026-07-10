@@ -1,7 +1,11 @@
 # Implementation — Bounded/abortable provider sub-calls (Batch D)
 
 Slug: `2026-07-10-bounded-subcalls` (matches the design doc)
-Status: draft
+Status: closed
+Closing-commit: Batch D closeout on `chore/production-hardening`
+Closed-on: 2026-07-10
+Deferred: none (both phases closed on their first L3 review).
+Result: 2 phases, both closed round 1. Suite 1302 → 1307 pass (+5: helper unit tests, compact + evals hang/fallback tests), 0 fail, 1 skip; typecheck 0; eval 5/5; build 0. All eight never-bounded provider sub-calls now run under a ref'd deadline (+ caller signal at the two tool sites) via `lib/sub-call.ts`.
 
 ## 1. Task Index
 
