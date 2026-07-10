@@ -132,6 +132,14 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **content-guard fence is now non-forgeable (prompt-injection hardening).** The
+  ingress provenance envelope was defeatable two ways: foreign content that began
+  with the public standing note skipped fencing (prefix-spoof), and content
+  containing the literal `</untrusted-content>` closed the fence early so its tail
+  read as trusted (break-out). The envelope tag now carries a per-activation random
+  nonce (`<untrusted-content-{nonce}>`), so foreign content can forge neither the
+  opening tag (idempotency now keys on it) nor the closing tag; the body's own
+  fence sentinels are additionally escaped. No behavior change for legitimate results.
 - **Sub-agent recursion guard is now capability-based, not name-based.** Four
   spawners (`subagents`, `templates`, `reasoning-search`, `dynamic-workflow`) built
   a child's tool registry by stripping spawn tools **by name**, so a child kept
