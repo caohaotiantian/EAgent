@@ -213,6 +213,12 @@ export class AnthropicProvider implements Provider {
           if (parsed.usage?.output_tokens !== undefined) usage.outputTokens = parsed.usage.output_tokens;
           break;
         }
+        case "error":
+          // A mid-stream API error (e.g. `overloaded_error`, a rate-limit after
+          // start). Throw rather than let the loop end and fabricate a `done`
+          // with partial content: the committed boundary (agent.ts) then retries
+          // a pre-commit error via onProviderError, or rethrows a post-commit one.
+          throw new Error(`Anthropic stream error: ${parsed.error?.type}: ${parsed.error?.message}`);
         default:
           break;
       }
@@ -363,4 +369,5 @@ type AnthropicStreamEvent =
         | { type: "input_json_delta"; partial_json: string };
     }
   | { type: "message_delta"; delta: { stop_reason?: string }; usage?: AnthropicUsage }
+  | { type: "error"; error?: { type?: string; message?: string } }
   | { type: "message_stop" | "content_block_stop" | "ping" };

@@ -115,6 +115,12 @@ export class GeminiProvider implements Provider {
       } catch {
         continue;
       }
+      // A mid-stream API error frame carries a top-level `error` object. Throw
+      // rather than let the loop end and fabricate a `done` with partial
+      // content: the committed boundary (agent.ts) retries a pre-commit error
+      // via onProviderError, or rethrows a post-commit one.
+      if (parsed.error)
+        throw new Error(`Gemini stream error: ${parsed.error.status ?? parsed.error.code}: ${parsed.error.message}`);
       if (parsed.usageMetadata) {
         const u = parsed.usageMetadata;
         // `cachedContentTokenCount` lies within `promptTokenCount`; subtract it out.
@@ -264,6 +270,8 @@ function thinkingBudget(level: "off" | "low" | "medium" | "high"): number {
 // -- minimal stream-chunk typings -------------------------------------------
 
 interface GeminiChunk {
+  /** A mid-stream API error frame (top-level `error` object). */
+  error?: { code?: number; message?: string; status?: string };
   candidates?: {
     content?: {
       role?: string;

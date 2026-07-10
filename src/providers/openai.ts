@@ -114,6 +114,13 @@ export class OpenAIProvider implements Provider {
         continue;
       }
 
+      // A mid-stream API error frame carries a top-level `error` object. Throw
+      // rather than let the loop end and fabricate a `done` with partial
+      // content: the committed boundary (agent.ts) retries a pre-commit error
+      // via onProviderError, or rethrows a post-commit one.
+      if (parsed.error)
+        throw new Error(`OpenAI stream error: ${parsed.error.type ?? parsed.error.code}: ${parsed.error.message}`);
+
       if (parsed.usage) {
         const u = parsed.usage;
         // `cached_tokens` is a sub-field of `prompt_tokens`; subtract it out so
@@ -261,6 +268,8 @@ function mapFinishReason(reason: string): StopReason {
 // -- minimal stream-chunk typings -------------------------------------------
 
 interface OpenAIChunk {
+  /** A mid-stream API error frame (top-level `error` object). */
+  error?: { message?: string; type?: string; code?: string | null };
   choices?: {
     delta?: {
       content?: string;
