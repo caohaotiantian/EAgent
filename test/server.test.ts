@@ -157,6 +157,35 @@ test("AC3: a /run turn carries tool ids, reasoning_delta, and a canonical agent_
   });
 });
 
+test("G1: a maxTurns-terminated /run turn emits the error line (CLI/HTTP parity)", async () => {
+  // The kernel emits the `error` hook on maxTurns exhaustion but does NOT throw
+  // (reason stays "stop"); the server used to drop it while the CLI emitted it.
+  process.env.EAGENT_AGENT_MAX_TURNS = "1";
+  try {
+    await withServerHandle(async (base, http) => {
+      // The model never stops calling a tool → the single turn exhausts maxTurns.
+      mockOf(http).script(() => ({ toolCalls: [{ name: "read", arguments: { path: "package.json" } }] }));
+      const lines: Record<string, unknown>[] = [];
+      const res = await fetch(`${base}/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "loop", session: "mt" }),
+      });
+      await readNdjson(res, (o) => lines.push(o));
+
+      const err = lines.find((l) => l.type === "error");
+      assert.ok(err, "the maxTurns exhaustion now surfaces an error line (previously dropped)");
+      assert.match(String(err.message), /maxTurns/, "the error names the maxTurns limit");
+      assert.equal(String(err.where), "agent.run", "the error carries the kernel `where`");
+      assert.equal(lines.filter((l) => l.type === "error").length, 1, "emitted exactly once (no double-emit)");
+      assert.equal(lines.at(-1)?.type, "agent_end", "still ends with the canonical terminal");
+      assert.ok(lines.some((l) => l.type === "done"), "the legacy done line is still present");
+    });
+  } finally {
+    delete process.env.EAGENT_AGENT_MAX_TURNS;
+  }
+});
+
 test("a session id makes /run accumulate conversation history", async () => {
   await withServer(async (base) => {
     const run = async (input: string) => {

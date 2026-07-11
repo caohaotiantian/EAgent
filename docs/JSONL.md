@@ -134,22 +134,27 @@ front ends diverge; see [`error`](#error) below.
 
 ### `error`
 
-An error terminal, emitted when a turn fails. The two front ends diverge on what
-follows it. Over the HTTP `/run` stream `error` is emitted **instead of**
-`agent_end`: `streamRun` writes `agent_end` explicitly, and that write is skipped
-when the turn throws. On the CLI, by contrast, a failing turn emits the `error`
-line **and then** a trailing `agent_end` (with `reason: "error"`) — the kernel
-emits `agent_end` from a `finally` that runs on every path, and the CLI `--json`
-renderer subscribes to that hook. So on a failing turn the CLI's last line is
-`agent_end` while the server's is `error`.
+An error terminal, emitted when a turn fails. **Both** front ends emit it: the
+HTTP `/run` stream subscribes the kernel `error` hook, as the CLI does, so an
+`error` line appears on either stream whenever the kernel reports a failure —
+including **maxTurns exhaustion** (which emits the hook *without* throwing).
+
+What *follows* the `error` line differs only on a **hard throw** (a provider/tool
+failure that propagates). The kernel emits `agent_end` from a `finally` on every
+path, so the CLI (subscribed to that hook) emits a trailing `agent_end`
+(`reason: "error"`) and its last line is `agent_end`. The server synthesizes its
+terminal from `agent.run()`'s return value, which never arrives on a throw, so its
+last line is the `error`. On a **non-throwing** failure (maxTurns), both streams
+emit the `error` line **and** still terminate with `agent_end` (`reason: "stop"`).
 
 ```json
 { "type": "error", "where": "agent.run", "message": "..." }
 ```
 
-- `where` labels the failure site. On the CLI it is the precise site forwarded
-  from the error hook; over HTTP it is the coarse constant `"agent.run"` for the
-  whole turn.
+- `where` labels the failure site, forwarded from the kernel error hook on **both**
+  front ends (e.g. `"agent.run"`). The one exception is an HTTP setup-window throw
+  (before the run begins, e.g. session restore), which the server labels with the
+  constant `"agent.run"`.
 - `message` is the error text.
 
 ### `action_required` (server-only)

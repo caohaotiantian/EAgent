@@ -372,6 +372,12 @@ async function streamRun(
   // streams a {type:"error"} line and hits the finally, not a silent 200 with no
   // terminal line. `subs` is declared out here so the finally can dispose it.
   let subs: { dispose(): void }[] = [];
+  // The kernel emits the `error` hook on both the maxTurns exhaustion path (which
+  // does NOT throw — reason stays "stop") and a real run failure (which then
+  // throws). Subscribing here — as the CLI does — emits the JSONL `error` line for
+  // the maxTurns case the server used to drop; `errorEmitted` then dedupes so a
+  // throw already surfaced via the hook is not written twice by the catch.
+  let errorEmitted = false;
   try {
     // Restore this session's state (transcript, usage, model, prompt, thinking) so
     // the turn resumes from exactly where the session left off. A new session — or a
@@ -379,6 +385,12 @@ async function streamRun(
     agent.restore((session ? sessions.get(session) : undefined) ?? initial);
 
     subs = wireJsonl(write, agent);
+    subs.push(
+      agent.hooks.on("error", ({ error, where }) => {
+        errorEmitted = true;
+        write(eventToJsonl("error", { where, message: error instanceof Error ? error.message : String(error) }));
+      }),
+    );
     const { reason } = await agent.run(input);
     // Snapshot the post-turn state back into the session. `agent.usage` here is the
     // session's cumulative (restored session usage + this turn), not process-lifetime.
@@ -402,7 +414,12 @@ async function streamRun(
     write({ type: "done", reason, session, usage: agent.usage });
     write(eventToJsonl("agent_end", { reason, usage: agent.usage, session }));
   } catch (err) {
-    write(eventToJsonl("error", { where: "agent.run", message: err instanceof Error ? err.message : String(err) }));
+    // A setup-window throw (e.g. `agent.restore`) never reaches the kernel `error`
+    // hook, so emit it here. A throw from `agent.run` already surfaced via the hook
+    // above (errorEmitted), so skip the duplicate.
+    if (!errorEmitted) {
+      write(eventToJsonl("error", { where: "agent.run", message: err instanceof Error ? err.message : String(err) }));
+    }
   } finally {
     drainElicitations(); // clear the sink + any leftover resolver before the next turn
     res.off("close", onClose);
