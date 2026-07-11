@@ -157,7 +157,7 @@ export default function activate(e: ExtensionAPI): () => void {
   const tokenUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   const toolCalls = { ok: 0, error: 0 };
   // Additive guard-block counter: a guard block is ALSO counted in `toolCalls.error`
-  // (KDD2 — the existing metric stays byte-stable), and broken out here.
+  // (the existing tool-calls metric stays byte-stable), and broken out here.
   let guardBlocks = 0;
   const sessionStart = nanos();
 
@@ -241,7 +241,7 @@ export default function activate(e: ExtensionAPI): () => void {
           isMonotonic: true,
         },
       });
-    // Additive break-out of guard blocks (KDD2). A dimensionless count, so it
+    // Additive break-out of guard blocks. A dimensionless count, so it
     // carries a nominal `kind` attribute — the reason rides the span, not here.
     if (guardBlocks > 0)
       metrics.push({
@@ -399,7 +399,7 @@ export default function activate(e: ExtensionAPI): () => void {
       span.endTimeUnixNano = nanos();
       if (result.isError) span.status = { code: 2 };
       // A guard block: mark the low-frequency span with the reason (often names
-      // the guard) — never the metric, to avoid cardinality blow-up (KDD2).
+      // the guard) — never the metric, to avoid cardinality blow-up.
       if (isGuardBlock(result)) {
         span.attributes.push(attr("eagent.guard.blocked", "true"));
         span.attributes.push(attr("eagent.guard.reason", blockReason(result)));

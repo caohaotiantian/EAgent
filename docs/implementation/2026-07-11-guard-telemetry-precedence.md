@@ -1,7 +1,7 @@
 # Implementation — Guard telemetry + precedence contract (Cycle 6)
 
 Slug: `2026-07-11-guard-telemetry-precedence` (matches the design)
-Status: **L2 closed** — round 1 PASS (zero-severe/general), independently verified; clarifications folded in. Ready for L3.
+Status: **closed** (2026-07-11) — L3 single phase via l3-phase.js round 1, PhaseEnd-verified; F review passed zero-severe (one NIT fixed in closeout). See design closure block.
 
 ## 1. Task Index
 

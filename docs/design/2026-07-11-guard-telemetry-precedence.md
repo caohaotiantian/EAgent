@@ -1,9 +1,14 @@
 # Design — Guard telemetry + precedence contract (Cycle 6)
 
 Slug: `2026-07-11-guard-telemetry-precedence`
-Status: **L1 closed** — round 1 (1 severe: false single-site claim + wrong roster) → round 2 (zero-severe;
-the reviewer independently re-derived the 17-extension roster + exhaustively confirmed the two block-string
-producers). Minor items folded in. Ready for L2.
+Status: **closed** (2026-07-11)
+Closing-commits: Cycle-6 docs commit, `337f671` (impl), + this closeout (F-review NIT: strip 3 `(KDD2)`
+design-decision markers from `otel-exporter.ts` comments — house rule "comments explain the code, not
+the workflow").
+Result: suite 1349→1364 pass / 0 fail / 1 skip; typecheck 0; typecheck:test 0; build 0; eval 5/5;
+**kernel unchanged** (zero-kernel). L1 2 rounds (severe→zero-severe, roster independently re-derived) /
+L2 1 round PASS / L3 1 phase / F — all zero-severe. Delivered: `lib/guard-block.ts` + otel `eagent.guard.blocks`
+additive counter + trace `toolBlocked` + SECURITY.md precedence contract + a live drift-guard test.
 
 ## 1. Background and Purpose
 
