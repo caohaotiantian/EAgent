@@ -214,9 +214,12 @@ export default function activate(e: ExtensionAPI): () => void {
             if (includeRe && !includeRe.test(rel)) return;
             const abs = join(root, rel);
             let raw: Buffer;
+            let fileTruncated = false;
             try {
               // Bounded read: a huge/hostile file cannot OOM the grep walk.
-              raw = readFileCapped(abs, cap).buf;
+              const r = readFileCapped(abs, cap);
+              raw = r.buf;
+              fileTruncated = r.truncated;
             } catch {
               return;
             }
@@ -234,6 +237,12 @@ export default function activate(e: ExtensionAPI): () => void {
                 }
                 results.push(`${rel}:${n + 1}:${line}`);
               }
+            }
+            // Disclose (never silently hide) a per-file byte cap: content past
+            // fs.maxReadBytes was not scanned, so later matches may be missing.
+            // Mirrors the `read` tool's truncation marker.
+            if (fileTruncated && results.length < RESULT_CAP) {
+              results.push(`${rel}: [truncated: file exceeds fs.maxReadBytes; content past the cap was not scanned]`);
             }
           },
           () => capped,
