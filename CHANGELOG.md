@@ -132,6 +132,19 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **Closed two shell/local-file information-flow guard gaps.** (1) `flow-guard` now holds a
+  **network-reaching shell command** (`curl`/`wget`/`nc`/`ssh`/… — classified by reusing `bash-policy`'s
+  command parser, so `sudo curl` and `FOO=bar curl` are caught but `echo curl` is not) as egress once the
+  session carries **data taint** (a scannable secret entered the transcript). It keys on data taint, not
+  the sticky shell-capability taint, so normal multi-command bash never self-gates; `shell:exec` is
+  **not** added to the egress-cap set. Closes the `read secret → bash curl evil.com` exfiltration path
+  the network-only egress gate missed; the network-command set is store-overridable (`networkCommands`).
+  Narrow documented residual: a shell-read secret matching none of the four credential shapes is not
+  caught (it sets only capability taint). (2) `content-guard` can now **fence local shell/file-read
+  output** (nonce-wrap it as untrusted-for-the-model), closing the local-injection gap where a malicious
+  read file or bash output reached the model unfenced. It is **opt-in** — off by default (the lean
+  net/mcp fence scope is byte-unchanged), on under the hardened profile or `/config set
+  contentGuard.fenceLocal true`. No kernel change.
 - **Hardened server profile (`EAGENT_HARDENED=1`).** One host-level switch turns the yolo server into a
   defense-in-depth posture: it enables the enforcing guards that otherwise ship inert — `risk-guard`
   (classify + block dangerous shell commands), `provenance` (injection defense), and `sandbox-tiers` at

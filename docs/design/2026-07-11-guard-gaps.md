@@ -1,8 +1,13 @@
 # Design — Close shell/local-file guard gaps (Cycle 2)
 
 Slug: `2026-07-11-guard-gaps`
-Status: **L1 closed** — round 1 zero-severe (3 general fixed) → round 2 fully clean (zero-severe,
-zero-general). Ready for L2.
+Status: **closed** (2026-07-11)
+Closing-commits: `cee2486` (Phase 1 flow-guard), `451b4de` (Phase 2 content-guard), + this closeout.
+Result: suite 1328→1339 pass / 0 fail / 1 skip; typecheck 0; build 0; eval 5/5; kernel unchanged (no
+`src/kernel/` edit). L1 2 rounds / L2 2 rounds / L3 2 phases / F — all zero-severe.
+Deferred (accepted): the shell-read-secret-not-matching-a-shape residual (§3, KDD1 option 4 follow-up);
+F-review NIT (flow-guard `why` string says "network egress" for a shell hold — cosmetic, design-accepted).
+The F-review banner NIT (hardened startup line omitted content-guard fencing) was fixed in the closeout.
 
 ## 1. Background and Purpose
 

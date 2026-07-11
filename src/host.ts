@@ -403,7 +403,9 @@ export function loadEnvFile(file: string = join(process.cwd(), ".env")): string[
 function announceHardened(config: Config, logger?: Logger): void {
   const log = logger ?? console;
   const tier = config.string("sandbox.tier");
-  log.info?.(`hardened profile active: risk-guard + provenance enabled; sandbox tier=${tier}`);
+  log.info?.(
+    `hardened profile active: risk-guard + provenance + content-guard local fencing enabled; sandbox tier=${tier}`,
+  );
   const forced = config.string("sandbox.backend");
   const backend: Backend = forced && isBackend(forced) ? forced : detectBackend(process.platform, binExists);
   if (backend === "none") {

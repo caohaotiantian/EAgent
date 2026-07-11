@@ -1,7 +1,9 @@
 # Implementation — Close shell/local-file guard gaps (Cycle 2)
 
 Slug: `2026-07-11-guard-gaps` (matches the design)
-Status: **L2 closed** — round 1 zero-severe (1 general fixed) → round 2 fully clean. Ready for L3.
+Status: **closed** (2026-07-11) — L3 Phase 1 (`cee2486` flow-guard) + Phase 2 (`451b4de` content-guard),
+each dev→review→accept via l3-phase.js round 1, PhaseEnd-verified; F review passed zero-severe. See the
+design closure block for the result summary + accepted residual/NITs.
 
 ## 1. Task Index
 
