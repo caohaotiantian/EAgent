@@ -43,6 +43,7 @@ jobs:
           fi
       # Full gate before publishing (mirrors CI). prepublishOnly also builds.
       - run: npm run typecheck
+      - run: npm run typecheck:test
       - run: npm test
       - run: npm run eval
       - run: npm run build
