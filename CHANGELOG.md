@@ -323,6 +323,13 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   which fail-closed requires `EAGENT_TOKEN`). `SECURITY.md` now points to GitHub's
   private vulnerability-advisory channel instead of public issues. CI runs the build
   job on a Node 22 **and** 24 matrix (they differ in timer/AbortSignal semantics).
+  A new **tag-triggered release workflow** (`.github/workflows/release.yml`) runs the
+  full gate (typecheck/test/eval/build) and then `npm publish --provenance` — binding
+  each published tarball to its workflow run + commit via OIDC (`id-token: write`) so
+  consumers can verify the build's origin. Fires only on a `vX.Y.Z` tag that matches
+  the `package.json` version (a mismatch fails the run); needs an `NPM_TOKEN` repo
+  secret. Provenance is a CI-only `--provenance` flag, not `publishConfig`, so a local
+  `npm publish` is not forced into the OIDC-only path.
 - **`trace` closes tool spans by call id, not name.** Two concurrent same-named
   tool calls (e.g. two `bash`) were mis-attributed because the span was matched by
   tool name; it now matches the call `id` stamped at `tool_start`, so overlapping

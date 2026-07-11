@@ -1,0 +1,51 @@
+name: Release
+
+# Publish to npm with a provenance attestation when a version tag is pushed.
+# Provenance (https://docs.npmjs.com/generating-provenance-statements) binds the
+# published tarball to this workflow run and commit via OIDC, so consumers can
+# verify where and how the package was built. Requires `id-token: write`.
+#
+# One-time setup by the maintainer: add an `NPM_TOKEN` repository secret (an npm
+# automation/granular token with publish rights); own the `eagent` name on npm;
+# and keep this repo public (npm validates a provenance attestation against a
+# public source repo). Release by pushing a stable tag that matches the package
+# version, e.g. `git tag v0.2.1 && git push origin v0.2.1`. Only `vX.Y.Z` tags fire
+# (prerelease tags like `v0.2.1-rc.1` are excluded by the anchored pattern).
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # npm >= 9.5 (ships 10.x) is required for --provenance
+          cache: npm
+          registry-url: "https://registry.npmjs.org" # sets up NODE_AUTH_TOKEN auth
+      - run: npm ci
+      # Guard: the pushed tag must match the package.json version, so a tag can
+      # never publish a mismatched version.
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag v$TAG != package.json version $PKG" >&2
+            exit 1
+          fi
+      # Full gate before publishing (mirrors CI). prepublishOnly also builds.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run eval
+      - run: npm run build
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
