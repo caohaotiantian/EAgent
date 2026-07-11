@@ -128,12 +128,20 @@ The canonical terminal of a turn.
 
   The CLI never emits `session` (it is single-session).
 
-`agent_end` is the last line of a successful turn — a consumer reading
-"last line = terminal" gets `agent_end` on both front ends.
+On a successful turn `agent_end` is the last line — a consumer reading
+"last line = terminal" gets `agent_end` on both front ends. On a failing turn the
+front ends diverge; see [`error`](#error) below.
 
 ### `error`
 
-An error terminal (emitted instead of `agent_end` when a turn fails).
+An error terminal, emitted when a turn fails. The two front ends diverge on what
+follows it. Over the HTTP `/run` stream `error` is emitted **instead of**
+`agent_end`: `streamRun` writes `agent_end` explicitly, and that write is skipped
+when the turn throws. On the CLI, by contrast, a failing turn emits the `error`
+line **and then** a trailing `agent_end` (with `reason: "error"`) — the kernel
+emits `agent_end` from a `finally` that runs on every path, and the CLI `--json`
+renderer subscribes to that hook. So on a failing turn the CLI's last line is
+`agent_end` while the server's is `error`.
 
 ```json
 { "type": "error", "where": "agent.run", "message": "..." }
