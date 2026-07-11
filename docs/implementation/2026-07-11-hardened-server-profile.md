@@ -1,7 +1,9 @@
 # Implementation — Hardened server profile (Cycle 1)
 
 Slug: `2026-07-11-hardened-server-profile` (matches the design doc)
-Status: **L2 closed** — 2 rounds, both zero-severe; generals resolved. Ready for L3.
+Status: **closed** (2026-07-11) — L3 Phase 1 (`8f6643e`) + Phase 2 (`a7d9ddc`), each dev→review→accept
+via l3-phase.js round 1, PhaseEnd-verified by the main agent; F review passed zero-severe. See the
+design doc closure block for the result summary + accepted NITs.
 
 ## 1. Task Index
 

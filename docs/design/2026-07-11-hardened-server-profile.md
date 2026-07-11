@@ -1,7 +1,15 @@
 # Design — Hardened server profile (Cycle 1)
 
 Slug: `2026-07-11-hardened-server-profile`
-Status: **L1 closed** — 3 rounds, all zero-severe; generals converged (5→3→3, all resolved). Ready for L2.
+Status: **closed** (2026-07-11)
+Closing-commits: `8f6643e` (Phase 1), `a7d9ddc` (Phase 2), + this closeout.
+Result: suite 1319→1328 pass / 0 fail / 1 skip; typecheck 0; build 0; eval 5/5; kernel unchanged (no
+`src/kernel/` edit). L1 3 rounds / L2 2 rounds / L3 2 phases / F — all zero-severe.
+Deferred (F-review NITs, accepted non-blocking): (1) `announceHardened`'s startup backend probe can
+diverge from `sandbox-tiers`' resolution on a typo'd `EAGENT_SANDBOX_BACKEND` (warning-only, not
+enforcement — `sandbox-tiers` warns authoritatively at runtime); (2) the `entries()` `"preset"→"override"`
+display branch has no runtime test; (3) a redundant `Classifier.stream` override in the test; (4) the
+default path marks `"hardened"` as a seen config key (no behavioral effect).
 
 ## 1. Background and Purpose
 

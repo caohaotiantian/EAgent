@@ -132,6 +132,18 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **Hardened server profile (`EAGENT_HARDENED=1`).** One host-level switch turns the yolo server into a
+  defense-in-depth posture: it enables the enforcing guards that otherwise ship inert — `risk-guard`
+  (classify + block dangerous shell commands), `provenance` (injection defense), and `sandbox-tiers` at
+  the `workspace-write` tier (confine shell writes to the workspace). It is **orthogonal to `yolo:false`**
+  (it does *not* change the capability fallback — capability lockdown is the separate `yolo:false` knob;
+  flipping it would deny `shell:exec` and moot the very guards). Applied as a **fail-secure runtime
+  `LayeredConfig` preset** — below the env layer, above the override-store — so a stale persisted
+  `/config set` cannot weaken it while the env var stays the single escape hatch
+  (`EAGENT_RISK_GUARD=off`, `EAGENT_PROVENANCE=off`, `EAGENT_SANDBOX_TIER=<tier>`); **nothing is written
+  to disk**, so unsetting the flag reverts cleanly. Host-level (the CLI honors it too — opt-in). No
+  kernel change; the non-hardened path is behaviorally unchanged. `hardened: true` also works on
+  `createAgentHost`/`createHttpServer`.
 - **Capability grants are now revoked on unload/reload.** `grantCapability` was the
   one extension registration not tracked as a `Disposable`, and `CapabilityManager`
   had no revoke — so a granted authority persisted after its extension was unloaded
