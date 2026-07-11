@@ -149,6 +149,39 @@ test("live: a result from an fs:read-only tool is NOT fenced (AC4)", async () =>
   assert.equal(content, "local file text", "default-excluded fs:read result is untouched");
 });
 
+test("live: a result from a shell:exec-only tool is NOT fenced by default (AC5)", async () => {
+  // AC5 — without contentGuard.fenceLocal, local shell output stays outside the
+  // foreign-caps set, so it is passed through unfenced exactly like fs:read.
+  const h = makeHarness();
+  await runWithStub(h, "run_shell", ["shell:exec"], { content: "local shell output" });
+  const content = firstResultContent(h.agent);
+  assert.equal(content, "local shell output", "default-excluded shell:exec result is untouched");
+});
+
+test("live: with contentGuard.fenceLocal, an fs:read result IS fenced (AC6)", async () => {
+  // AC6 — the hardened opt-in flag pulls fs:read into the foreign-caps set, so a
+  // local file read is nonce-fenced like foreign content.
+  const h = makeHarness();
+  h.config.set("contentGuard.fenceLocal", true);
+  await runWithStub(h, "loadfile", ["fs:read"], { content: "local file text" });
+  const content = firstResultContent(h.agent) ?? "";
+  assert.ok(content.includes(FENCE_MARKER), "the fs:read result is wrapped in the provenance envelope");
+  assert.match(content, /<untrusted-content-[0-9a-f]+ source="loadfile">/, "fenced with a nonce'd tag and the producing tool's name as source");
+  assert.ok(content.includes("local file text"), "the original body survives inside the envelope");
+});
+
+test("live: with contentGuard.fenceLocal, a shell:exec result IS fenced (AC6)", async () => {
+  // AC6 — the flag also pulls shell:exec into the foreign-caps set, so bash output
+  // is nonce-fenced.
+  const h = makeHarness();
+  h.config.set("contentGuard.fenceLocal", true);
+  await runWithStub(h, "run_shell", ["shell:exec"], { content: "local shell output" });
+  const content = firstResultContent(h.agent) ?? "";
+  assert.ok(content.includes(FENCE_MARKER), "the shell:exec result is wrapped in the provenance envelope");
+  assert.match(content, /<untrusted-content-[0-9a-f]+ source="run_shell">/, "fenced with a nonce'd tag and the producing tool's name as source");
+  assert.ok(content.includes("local shell output"), "the original body survives inside the envelope");
+});
+
 test("live: invisible chars in a foreign result are stripped from the fenced content (AC5)", async () => {
   // AC5 — the live path (not just the stripInvisible unit) must remove always-invisible
   // injection codepoints from the model-visible fenced content. Embed one representative

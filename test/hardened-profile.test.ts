@@ -58,6 +58,26 @@ test("AC1: hardened resolves risk-guard + provenance on and tier=workspace-write
   }
 });
 
+// -- AC6: hardened enables content-guard local fencing -----------------------
+
+test("AC6: hardened resolves contentGuard.fenceLocal on", async () => {
+  const built = await buildHost({ hardened: true });
+  try {
+    assert.equal(built.config.bool("contentGuard.fenceLocal", false), true);
+  } finally {
+    await built.host.dispose();
+  }
+});
+
+test("AC6: a non-hardened host leaves contentGuard.fenceLocal off", async () => {
+  const built = await buildHost();
+  try {
+    assert.equal(built.config.bool("contentGuard.fenceLocal", false), false);
+  } finally {
+    await built.host.dispose();
+  }
+});
+
 // -- AC3: non-hardened is unchanged (regression guard) -----------------------
 
 test("AC3: a non-hardened host leaves the guards inert", async () => {

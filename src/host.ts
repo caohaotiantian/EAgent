@@ -224,7 +224,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   // the env layer still overrides each preset key, and nothing is persisted.
   const hardened = opts.hardened ?? config.bool("hardened", false);
   if (hardened) {
-    config.setPreset({ "risk-guard": true, provenance: true, "sandbox.tier": "workspace-write" });
+    config.setPreset({ "risk-guard": true, provenance: true, "sandbox.tier": "workspace-write", "contentGuard.fenceLocal": true });
     announceHardened(config, opts.logger);
   }
 

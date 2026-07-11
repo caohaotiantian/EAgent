@@ -114,10 +114,21 @@ interface Counters {
 export default function activate(e: ExtensionAPI): () => void {
   if (!e.config.enabled("content-guard", { default: true })) return () => {};
 
-  const cfg = (): Config => ({
-    enabled: e.config.enabled("content-guard", { default: true, store: e.store }),
-    foreignCaps: e.store.get<string[]>("foreignCaps", DEFAULT_FOREIGN_CAPS) ?? DEFAULT_FOREIGN_CAPS,
-  });
+  const cfg = (): Config => {
+    // An explicit store override wins outright; otherwise the default set is
+    // widened to fence local (shell/fs:read) output only under the hardened
+    // opt-in flag `contentGuard.fenceLocal`, leaving the lean net/mcp default
+    // byte-unchanged when it is off.
+    const override = e.store.get<string[]>("foreignCaps");
+    return {
+      enabled: e.config.enabled("content-guard", { default: true, store: e.store }),
+      foreignCaps:
+        override ??
+        DEFAULT_FOREIGN_CAPS.concat(
+          e.config.bool("contentGuard.fenceLocal", false) ? ["shell:exec", "fs:read"] : [],
+        ),
+    };
+  };
 
   const counters: Counters = { foreignFenced: 0, invisibleStripped: 0, markersFlagged: 0 };
 
