@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Per-event cost model + provider watchdog (turn-loop hardening).** Two
+turn-loop correctness/availability fixes.
+
+The `usage` lifecycle event now carries the **model the request actually used**
+(`{ usage, cumulative, model }`) — an additive field on the event payload, filled
+from the agent loop's turn-local model. `cost` prices each `usage` event at that
+model (`p.model ?? activeModel`) and keys its `perModel` map by it, so a mid-run
+**routing switch** (`routing` re-tiering on `turn_start`) and an
+`onProviderError` **retry downshift** are both attributed to the model that was
+actually billed, not the one stamped on `agent_start`. The field is additive, so
+every other `usage` consumer (`trace`, `budget-cap`, `limits`, `otel-exporter`,
+`evals`) is unaffected. Kernel delta: a single event-type field plus the emit
+argument (no ceiling bump).
+
+A new **`watchdog`** extension bounds a hung main provider stream at zero kernel
+cost. It captures the default provider at activation and re-registers, under the
+same name, a thin wrapper whose `stream` imposes an **idle deadline**: it drives
+the inner stream via its async iterator and races each `iterator.next()` against a
+timeout that rejects after `watchdog.idleMs` and is **re-armed on every event**.
+The race — not abort alone — guarantees unblocking even a stream that ignores its
+signal; a composed `AbortController` (any-combined with `req.signal`) also aborts
+to free the underlying fetch, and a per-iteration `clearTimeout` keeps the idle
+timer from leaking into an `unhandledRejection` when the inner stream throws a
+real error first. A pre-commit idle (zero events) surfaces to the loop's
+`onProviderError`/retry seam; a mid-stream idle (committed) is rethrown as a fatal
+turn error, since retrying a partial stream would double-emit. It registers via
+the **raw** provider registry (not the tracked `registerProvider`, whose dispose
+would delete rather than restore the provider) and its dispose restores the
+captured original by overwrite; a module-local `WeakSet` brand makes activation
+idempotent, and a reload disposes-then-reactivates so no double-wrap arises. Ships
+**on** (a safety net), inert unless a stream actually stalls; it wraps the
+**default-provider path only** (not arbitrary named or composite providers). The
+default `watchdog.idleMs` is 120000 — comfortably above normal inter-event gaps;
+an operator running very large thinking budgets (where time-to-first-token can
+exceed the deadline before the first token) should raise it. `EAGENT_WATCHDOG=off`
+disables it; declares no capability (providers are not capability-gated). No
+kernel change for the watchdog.
+
 **Async sub-agent jobs (`subagent-jobs`).** A new extension adding a background
 job lifecycle on top of the existing child-agent machinery: `launch_job` starts
 a child on a prompt **without awaiting** and returns a `jobId` immediately;

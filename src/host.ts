@@ -78,6 +78,7 @@ import driftProbe from "./extensions/drift-probe.js";
 import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
+import watchdog from "./extensions/watchdog.js";
 import fallbackRouting from "./extensions/fallback-routing.js";
 import reliability from "./extensions/reliability.js";
 import headlessFlags from "./extensions/headless-flags.js";
@@ -149,6 +150,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["skills-hardening", skillsHardening],
   ["ask", ask],
   ["routing", routing],
+  ["watchdog", watchdog],
   ["fallback-routing", fallbackRouting],
   ["reliability", reliability],
   ["time-travel", timeTravel],

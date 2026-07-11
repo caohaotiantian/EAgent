@@ -15,6 +15,7 @@ import { createHttpServer, maxSessions, sendJson, type HttpServer } from "../src
 import { LayeredConfig } from "../src/config.js";
 import { MemoryStore } from "../src/kernel/store.js";
 import type { MockProvider } from "../src/providers/mock.js";
+import { unwrapProvider } from "../src/extensions/lib/provider-wrap.js";
 import type { Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
 
@@ -56,9 +57,11 @@ async function withServerHandle(
   }
 }
 
-/** Reach the server's scriptable mock provider so a test can drive tool calls. */
+/** Reach the server's scriptable mock provider so a test can drive tool calls.
+ *  The default-on `watchdog` extension wraps the default provider under the same
+ *  name, so unwrap it to reach the concrete `MockProvider`. */
 function mockOf(http: HttpServer): MockProvider {
-  return http.agent.providers.get("mock") as MockProvider;
+  return unwrapProvider(http.agent.providers.get("mock")!) as MockProvider;
 }
 
 /**

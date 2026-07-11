@@ -35,6 +35,7 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import type { MockTurn } from "../providers/mock.js";
 import { totalTokens, type Message, type StopReason, type Usage } from "../kernel/types.js";
 import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
+import { unwrapProvider } from "./lib/provider-wrap.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -236,7 +237,10 @@ export async function runEvalDir(
   const files = readdirSync(dir)
     .filter((f) => f.endsWith(".eval.json"))
     .sort();
-  const provider = agent.providers.get();
+  // Unwrap any same-name provider wrapper (the default-on `watchdog`) so the
+  // scriptable concrete provider — not the wrapper — is re-scripted per scenario.
+  const raw = agent.providers.get();
+  const provider = raw ? unwrapProvider(raw) : undefined;
   let passed = 0;
   const failures: string[] = [];
 
