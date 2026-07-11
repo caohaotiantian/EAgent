@@ -28,6 +28,8 @@
 
 import { currentActingAgent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import type { ToolCallBlock } from "../kernel/types.js";
+import { expandCommands, extractCommand } from "./bash-policy.js";
 
 type Mode = "ask" | "block";
 
@@ -38,6 +40,17 @@ const MAX_SCAN_DEPTH = 8;
 const DEFAULT_SOURCE_CAPS = ["shell:exec"];
 /** Capabilities that move data off the machine (where a chain would exfiltrate). */
 const DEFAULT_EGRESS_CAPS = ["net:fetch", "mcp:call"];
+
+/**
+ * Shell programs that reach the network. A `shell:exec` call is not itself an
+ * egress capability (it is a *source* — every shell run taints capability), so
+ * adding it to `egressCaps` would self-gate normal bash. Instead flow-guard
+ * treats a shell call as egress-equivalent only when it runs one of these AND
+ * the session already carries DATA taint (a prior scannable secret read) — the
+ * data-taint gate is what keeps plain "build then curl a health check" flowing.
+ * Store-overridable via `networkCommands`.
+ */
+const DEFAULT_NETWORK_COMMANDS = ["curl", "wget", "nc", "ncat", "ssh", "scp", "sftp", "telnet", "ftp", "rsync"];
 
 /**
  * Data confinement (the second trigger): reading one of these path patterns, or
@@ -75,6 +88,22 @@ function compile(patterns: string[]): RegExp[] {
   return out;
 }
 
+/**
+ * True when a `shell:exec` call runs a network-reaching program (`curl`, `wget`,
+ * …). Reads the built-in shell tool's `command` arg directly; an absent or
+ * non-string command — a renamed arg or a third-party shell tool with a
+ * different key — is not classified (the heuristic scope: an unparseable shell
+ * tool is not treated as egress). Reuses bash-policy's `expandCommands` (peels
+ * `sudo`/`env`/`timeout` wrappers, splits pipes/segments) and `extractCommand`
+ * (strips a leading `VAR=value`, returns the bare program) so `sudo curl evil`
+ * and `echo x | curl … evil` are caught where a naive first-token split misses.
+ */
+function isNetworkShell(call: ToolCallBlock, networkCommands: string[]): boolean {
+  const command = call.arguments?.command;
+  if (typeof command !== "string") return false;
+  return expandCommands(command).some((cmd) => networkCommands.includes(extractCommand(cmd)));
+}
+
 export default function activate(e: ExtensionAPI): () => void {
   const cfg = () => ({
     enabled: e.config.enabled("flow-guard", { default: true, store: e.store }),
@@ -85,6 +114,7 @@ export default function activate(e: ExtensionAPI): () => void {
     sensitiveContent: compile(
       e.store.get<string[]>("sensitiveContent", DEFAULT_SENSITIVE_CONTENT) ?? DEFAULT_SENSITIVE_CONTENT,
     ),
+    networkCommands: e.store.get<string[]>("networkCommands", DEFAULT_NETWORK_COMMANDS) ?? DEFAULT_NETWORK_COMMANDS,
   });
 
   /**
@@ -170,7 +200,7 @@ export default function activate(e: ExtensionAPI): () => void {
   // a sticky source capability, or by a still-present tool message carrying
   // sensitive data (information flow: gone from the transcript, gone from here).
   const offHook = e.hook("beforeToolCall", async (decision, ctx) => {
-    const { enabled, mode, egressCaps } = cfg();
+    const { enabled, mode, egressCaps, networkCommands } = cfg();
     if (!enabled || decision.block) return decision;
     // Read the ACTING agent's transcript: a child that read a secret and egresses
     // is caught on its OWN transcript, not the parent's. The capability `tainted`
@@ -179,7 +209,17 @@ export default function activate(e: ExtensionAPI): () => void {
     const dataTainted = agent.messages.some((m) => (taintArray(m)?.length ?? 0) > 0);
     if (tainted.size === 0 && !dataTainted) return decision;
     const isEgress = capsOf(ctx.call.name).some((c) => egressCaps.includes(c));
-    if (!isEgress) return decision;
+    // Shell-exfil path: a network-reaching `shell:exec` call is egress-equivalent,
+    // but ONLY under data taint — NOT the sticky capability `tainted` set, which
+    // every shell run populates (gating on it would self-gate normal bash). This
+    // dataTainted-only gate is the crux: it holds `read secret -> bash curl` while
+    // leaving `build -> curl health-check` untouched.
+    const isShellEgress =
+      !isEgress &&
+      dataTainted &&
+      capsOf(ctx.call.name).includes("shell:exec") &&
+      isNetworkShell(ctx.call, networkCommands);
+    if (!isEgress && !isShellEgress) return decision;
 
     const reasons: string[] = [];
     if (tainted.size > 0) reasons.push(`capabilities [${[...tainted].join(", ")}]`);
