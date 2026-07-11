@@ -329,12 +329,15 @@ sequenceDiagram
     C->>S: POST /run (input, session?)
     S->>S: auth (EAGENT_TOKEN) · body cap (413) · busy lock (409)
     S->>A: clear · load session transcript · run(input)
-    A-->>S: text_delta / tool_* / usage events
+    A-->>S: text_delta / reasoning_delta / tool_* (with id) / usage events
     S-->>C: JSONL stream
-    A-->>S: done (reason)
+    A-->>S: run complete (reason)
     S->>S: save session transcript
-    S-->>C: done event (reason, usage)
+    S-->>C: agent_end (reason, usage, session) — canonical terminal; legacy done still emitted (deprecated)
 ```
+
+The `/run` stream and the CLI `--json` stream share one canonical event schema,
+documented in [`docs/JSONL.md`](docs/JSONL.md).
 
 `GET /health` returns `{ ok, model, extensions, sessions, auth }` (where `auth`
 is `"required"` or `"open"`); `DELETE /sessions/:id` forgets a conversation.

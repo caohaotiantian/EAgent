@@ -1,7 +1,19 @@
 # Design — Unify the CLI `--json` and HTTP `/run` JSONL schemas (Cycle 7)
 
 Slug: `2026-07-11-jsonl-unify`
-Status: **L1 closed** — rounds 3 and 4 both passed (zero severe, zero general) by two independent fresh reviewers; two-generation termination satisfied. Every source-specific claim was verified against the code. Ready for L2.
+Status: **closed** (2026-07-11). L1 rounds 3–4 passed (two-generation, zero-severe); L2 + L3 (3 phases:
+shared serializer → both front ends adopt → docs) completed and merged to `chore/production-hardening`;
+F end-to-end review passed zero-severe (one doc-drift NIT fixed in closeout: `ARCHITECTURE.md`'s `/run`
+sequence diagram + cross-link). CLI `--json` output verified **byte-identical** to pre-cycle. Suite
+1364 → 1381 pass / 1 skip; kernel unchanged (2248/2250 — no `src/kernel/` edit).
+
+**Deferred (accepted divergence, documented in `docs/JSONL.md`):** on a *failing* turn the CLI's last
+line is `agent_end` (reason `error`) while the HTTP `/run` last line is `error` (no trailing `agent_end`)
+— the CLI inherits `agent_end` from the kernel's `finally` hook, the server synthesizes its terminal from
+`agent.run()`'s return which never happens on a throw. This cycle unified the per-line *serializer* shape,
+not terminal-sequence *semantics*; a future cycle could make the server emit a trailing `agent_end` on the
+error path for full symmetry. A type-switch consumer that treats both `agent_end` and `error` as terminal
+is unaffected.
 
 ## 1. Background and Purpose
 

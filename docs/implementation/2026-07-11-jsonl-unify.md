@@ -1,10 +1,21 @@
 # Implementation — Unify the CLI `--json` and HTTP `/run` JSONL schemas (Cycle 7)
 
 Slug: `2026-07-11-jsonl-unify` (matches the design)
-Status: **L2 closed** — rounds 3 and 4 both passed (zero severe, zero general) by two independent fresh
-reviewers; two-generation termination satisfied. Every source anchor, the 5-vs-2 terminal-assertion split,
-the additive `subs`→`wireJsonl` swap, and the baselines (suite 1364/1, kernel 2248/2250) were verified
-against the code. Ready for L3.
+Status: **closed** (2026-07-11). L2 rounds 3–4 passed (two-generation, zero-severe). L3 ran as 3 phases
+via `l3-phase.js`, each PhaseEnd-verified by the main agent and fast-forward-merged to
+`chore/production-hardening`:
+- **Phase 1** (`770fbea`) — `src/jsonl.ts` (`eventToJsonl` + `wireJsonl`) + `test/jsonl.test.ts` (14 tests:
+  9-shape mapper units + the in-process wiring golden). Round 1, clean.
+- **Phase 2** (`8cf432a`) — both front ends adopt the mapper; server gains `id`/`reasoning_delta`/dual-emit
+  terminal/`error.where`; `test/server.test.ts` terminal assertions updated (5 flipped to `agent_end`,
+  `:144-145`/`:219` left green), AC3 added, `test/jsonl-adoption.test.ts` (AC4). Round 1, clean. CLI
+  `--json` proven byte-identical by a direct output diff.
+- **Phase 3** (`e8636e4`, `6f2101f`) — `docs/JSONL.md` canonical contract + README/CHANGELOG/`cli-json.md`
+  cross-links. Round 3 (the review loop corrected the error-terminal CLI-vs-HTTP framing).
+
+Final: suite 1381 pass / 1 skip; typecheck + typecheck:test + build 0; eval 5/5; kernel 2248/2250
+unchanged. F review zero-severe (one `ARCHITECTURE.md` doc-drift NIT fixed in closeout). Deferred item
+recorded in the design doc closure.
 
 ## 1. Task Index
 
