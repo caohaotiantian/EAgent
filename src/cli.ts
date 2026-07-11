@@ -22,6 +22,7 @@ import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { complete } from "./complete.js";
 import { createAgentHost, loadEnvFile, PROVIDER_NAMES, thinkingFromEnv } from "./host.js";
+import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
 interface Args {
   model?: string;
@@ -334,16 +335,11 @@ function wireJsonRendering(agent: Agent): void {
   const emit = (obj: unknown): void => {
     process.stdout.write(JSON.stringify(obj) + "\n");
   };
-  agent.hooks.on("text_delta", ({ text }) => emit({ type: "text_delta", text }));
-  agent.hooks.on("reasoning_delta", ({ text }) => emit({ type: "reasoning_delta", text }));
-  agent.hooks.on("message", ({ message }) => emit({ type: "message", role: message.role, content: message.content }));
-  agent.hooks.on("tool_start", ({ call }) => emit({ type: "tool_start", id: call.id, name: call.name, arguments: call.arguments }));
-  agent.hooks.on("tool_end", ({ call, result }) =>
-    emit({ type: "tool_end", id: call.id, name: call.name, isError: result.isError ?? false, content: result.content }),
+  wireJsonl(emit, agent);
+  agent.hooks.on("agent_end", ({ reason }) => emit(eventToJsonl("agent_end", { reason, usage: agent.usage })));
+  agent.hooks.on("error", ({ error, where }) =>
+    emit(eventToJsonl("error", { where, message: error instanceof Error ? error.message : String(error) })),
   );
-  agent.hooks.on("usage", ({ usage, cumulative }) => emit({ type: "usage", usage, cumulative }));
-  agent.hooks.on("agent_end", ({ reason }) => emit({ type: "agent_end", reason, usage: agent.usage }));
-  agent.hooks.on("error", ({ error, where }) => emit({ type: "error", where, message: error instanceof Error ? error.message : String(error) }));
 }
 
 async function runTurn(agent: Agent, input: string, json: boolean): Promise<void> {

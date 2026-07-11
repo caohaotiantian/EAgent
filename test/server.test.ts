@@ -120,7 +120,40 @@ test("POST /run streams lifecycle events as JSONL", async () => {
     const types = events.map((e) => e.type);
     assert.ok(types.includes("message"), "should stream a message event");
     assert.ok(types.includes("usage"), "should stream a usage event");
-    assert.equal(events.at(-1)?.type, "done");
+    assert.equal(events.at(-1)?.type, "agent_end");
+    assert.ok(types.includes("done"), "the legacy done line is still present (deprecation window)");
+  });
+});
+
+test("AC3: a /run turn carries tool ids, reasoning_delta, and a canonical agent_end terminal", async () => {
+  await withServerHandle(async (base, http) => {
+    // Turn 0 reasons then reads a real file (so tool_start/tool_end fire); turn 1 wraps up.
+    mockOf(http).script((_req, i) =>
+      i === 0
+        ? { reasoning: "let me check the manifest", toolCalls: [{ name: "read", arguments: { path: "package.json" } }] }
+        : { text: "all set" },
+    );
+    const lines: Record<string, unknown>[] = [];
+    const res = await fetch(`${base}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "read the manifest", session: "ac3" }),
+    });
+    await readNdjson(res, (o) => lines.push(o));
+
+    const toolStart = lines.find((l) => l.type === "tool_start");
+    const toolEnd = lines.find((l) => l.type === "tool_end");
+    assert.ok(toolStart, "a tool_start line was emitted");
+    assert.ok(toolEnd, "a tool_end line was emitted");
+    assert.equal(typeof toolStart.id, "string", "tool_start now carries an id");
+    assert.equal(typeof toolEnd.id, "string", "tool_end now carries an id");
+
+    assert.ok(lines.some((l) => l.type === "reasoning_delta"), "the server now emits reasoning_delta");
+
+    const terminal = lines.at(-1) as { type?: string; session?: string };
+    assert.equal(terminal.type, "agent_end", "the last line is the canonical agent_end terminal");
+    assert.equal(terminal.session, "ac3", "the canonical terminal carries the session");
+    assert.ok(lines.some((l) => l.type === "done"), "the legacy done line is still present (deprecation window)");
   });
 });
 
@@ -171,9 +204,10 @@ test("KR-1: an aborted first turn is not persisted with a dangling [user] transc
     });
     const lines: Record<string, unknown>[] = [];
     await readNdjson(res, (o) => lines.push(o));
-    const done = lines.at(-1) as { type?: string; reason?: string };
-    assert.equal(done.type, "done", "the stream ends with a done event");
-    assert.equal(done.reason, "stop", "the aborted first turn resolves reason:stop");
+    const terminal = lines.at(-1) as { type?: string; reason?: string };
+    assert.equal(terminal.type, "agent_end", "the stream ends with the canonical agent_end event");
+    assert.equal(terminal.reason, "stop", "the aborted first turn resolves reason:stop");
+    assert.ok(lines.some((l) => l.type === "done"), "the legacy done line is still present (deprecation window)");
 
     // KR-1: the dangling [user] snapshot is NOT persisted → no tracked session.
     const health = await (await fetch(`${base}/health`)).json();
@@ -417,7 +451,8 @@ test("a mid-turn ask emits action_required and POST /answer resumes the turn", a
     const toolEnd = lines.find((l) => l.type === "tool_end" && l.name === "ask_user_question");
     assert.ok(toolEnd, "the ask tool finished");
     assert.match(String(toolEnd.content), /Postgres/, "the ask tool returned the supplied answer");
-    assert.equal(lines.at(-1)?.type, "done", "the turn completed");
+    assert.equal(lines.at(-1)?.type, "agent_end", "the turn completed");
+    assert.ok(lines.some((l) => l.type === "done"), "the legacy done line is still present (deprecation window)");
     const finalText = lines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
     assert.match(finalText, /chosen: .*Postgres/, "the model saw the answer and echoed it");
   });
@@ -449,7 +484,8 @@ test("an unanswered ask falls back on the askTimeoutMs and the turn still comple
       const toolEnd = lines.find((l) => l.type === "tool_end" && l.name === "ask_user_question");
       assert.ok(toolEnd, "the ask tool finished without an answer");
       assert.match(String(toolEnd.content), /proceed.*assumption/i, "it took the proceed-with-assumption fallback");
-      assert.equal(lines.at(-1)?.type, "done", "the turn completed (no hang)");
+      assert.equal(lines.at(-1)?.type, "agent_end", "the turn completed (no hang)");
+      assert.ok(lines.some((l) => l.type === "done"), "the legacy done line is still present (deprecation window)");
     },
     { askTimeoutMs: 25 },
   );
@@ -518,7 +554,8 @@ test("a normal turn (no ask) emits no action_required line (back-compat)", async
     });
     await readNdjson(res, (obj) => lines.push(obj));
     assert.equal(lines.find((l) => l.type === "action_required"), undefined, "no elicitation on a normal turn");
-    assert.equal(lines.at(-1)?.type, "done");
+    assert.equal(lines.at(-1)?.type, "agent_end");
+    assert.ok(lines.some((l) => l.type === "done"), "the legacy done line is still present (deprecation window)");
   });
 });
 
@@ -726,6 +763,7 @@ test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a si
       const err = lines.find((l) => l.type === "error");
       assert.ok(err, "the setup throw was written as a terminal {type:'error'} line");
       assert.match(String(err.message), /boom/, "the error line carries the thrown message");
+      assert.ok(err.where, "the error line now carries a `where` field (canonical error shape)");
     } finally {
       http.agent.restore = original;
     }

@@ -36,6 +36,7 @@ import type { Agent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
 import type { AgentState, Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
+import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
@@ -343,7 +344,7 @@ async function streamRun(
       elicit.pending.set(id, settle);
       timer = setTimeout(() => settle(null), askTimeoutMs);
       if (typeof timer.unref === "function") timer.unref(); // don't keep the event loop alive
-      write({ type: "action_required", id, question, options: options ?? null });
+      write(eventToJsonl("action_required", { id, question, options }));
     });
 
   // Settle every outstanding ask for this turn with null (fallback) and drop the
@@ -377,15 +378,7 @@ async function streamRun(
     // sessionless /run — restores the pristine `initial` snapshot.
     agent.restore((session ? sessions.get(session) : undefined) ?? initial);
 
-    subs = [
-      agent.hooks.on("text_delta", ({ text }) => write({ type: "text_delta", text })),
-      agent.hooks.on("message", ({ message }) => write({ type: "message", role: message.role, content: message.content })),
-      agent.hooks.on("tool_start", ({ call }) => write({ type: "tool_start", name: call.name, arguments: call.arguments })),
-      agent.hooks.on("tool_end", ({ call, result }) =>
-        write({ type: "tool_end", name: call.name, isError: result.isError ?? false, content: result.content }),
-      ),
-      agent.hooks.on("usage", ({ usage, cumulative }) => write({ type: "usage", usage, cumulative })),
-    ];
+    subs = wireJsonl(write, agent);
     const { reason } = await agent.run(input);
     // Snapshot the post-turn state back into the session. `agent.usage` here is the
     // session's cumulative (restored session usage + this turn), not process-lifetime.
@@ -403,9 +396,13 @@ async function streamRun(
       const cap = maxSessions(config);
       while (cap > 0 && sessions.size > cap) sessions.delete(sessions.keys().next().value as string);
     }
+    // Dual-emit during the deprecation window: the frozen legacy `done` first, then
+    // the canonical `agent_end` last, so a consumer reading "last line = terminal"
+    // gets `agent_end` while one scanning for `done` still finds it.
     write({ type: "done", reason, session, usage: agent.usage });
+    write(eventToJsonl("agent_end", { reason, usage: agent.usage, session }));
   } catch (err) {
-    write({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    write(eventToJsonl("error", { where: "agent.run", message: err instanceof Error ? err.message : String(err) }));
   } finally {
     drainElicitations(); // clear the sink + any leftover resolver before the next turn
     res.off("close", onClose);

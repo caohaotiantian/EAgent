@@ -41,6 +41,10 @@ test("--json batch mode emits only valid JSONL on stdout", { timeout: 30000 }, a
     lines.some((l) => typeof (JSON.parse(l) as { type?: unknown }).type === "string"),
     "emitted JSONL events carry a `type` field",
   );
+  // In --json mode /help output goes to stderr, so the last stdout line is the
+  // hi turn's canonical terminal.
+  const last = JSON.parse(lines[lines.length - 1]!) as { type?: unknown };
+  assert.equal(last.type, "agent_end", "the last stdout line is the canonical agent_end terminal");
 });
 
 test("human (non-json) batch mode still echoes input on stdout", async () => {
