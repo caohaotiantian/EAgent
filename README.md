@@ -7,7 +7,7 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~2,244 lines, held just
+The kernel is **seven primitives and nothing more** (~2,248 lines, held just
 under a hard 2,250-line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
@@ -39,7 +39,7 @@ flowchart TB
         X1["core-tools"]
         X2["skills · mcp · memory"]
         X3["self · web · checkpoint"]
-        X4["+ 52 more"]
+        X4["+ 56 more"]
     end
 
     subgraph PROVIDERS["Providers — src/providers/"]
@@ -402,7 +402,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  62 built-in extensions, all riding the ExtensionAPI
+src/extensions/  63 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
