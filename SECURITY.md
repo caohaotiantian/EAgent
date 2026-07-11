@@ -144,6 +144,36 @@ isolation" above), so the process — not the session id — is the isolation bo
 A single shared process is appropriate only when every session belongs to the same
 trust domain (one user, one tenant, or an already-sandboxed workload).
 
+### Guard precedence
+
+Several extensions intervene on a tool call through the kernel's `beforeToolCall`
+filter hook (`src/kernel/agent.ts`). They run **in `BUILTIN_EXTENSIONS` load
+order** (`src/host.ts`) — the bus iterates filters in registration order — and the
+**first decision returning `block: true` short-circuits the rest**
+(`src/kernel/agent.ts`, `shouldStop = (d) => d.block`). A non-blocking **rewrite**
+(a guard that only edits `arguments`) does *not* short-circuit: it **chains
+onward**, so a later guard sees the rewritten call. There is **no priority
+mechanism** on the hook bus — precedence is purely load order, and the only way to
+change which guard wins is to **reorder `BUILTIN_EXTENSIONS`**.
+
+The full `beforeToolCall` set is **17 extensions** — every registrant, not only
+the "guards" (`content-guard` is *not* here: it is an `afterToolCall` filter) — in
+precedence order:
+
+`templates` → `provenance` → `circuit-breaker` → `planmode` → `limits` →
+`budget-cap` → `checkpoint` → `flow-guard` → `risk-guard` → `headless-flags` →
+`bash-policy` → `sandbox-tiers` → `config-hooks` → `write-guard` → `secret-guard`
+→ `skills-hardening` → `self-extend-floor`.
+
+Attribution is best-effort: on a block the dispatcher returns
+`Tool call blocked: <reason>` and the telemetry (`otel-exporter`'s
+`eagent.guard.blocks` + the span `eagent.guard.reason`, `trace`'s `toolBlocked`)
+counts *that* a block happened; the *which-guard* attribution is only as good as
+the reason text the guard supplied. A drift test (`test/guard-precedence.test.ts`)
+re-derives this order live from `BUILTIN_EXTENSIONS` and fails if the roster above
+falls out of sync, so a future reorder or a new `beforeToolCall` registrant forces
+a doc update.
+
 ## Reporting
 
 **Report a vulnerability privately** — do not open a public issue for anything

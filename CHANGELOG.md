@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Guard telemetry + a documented `beforeToolCall` precedence contract (zero
+kernel change).** Guard blocks are now observable as *blocks*, not generic
+errors, and the load-order precedence of the guards is documented and
+drift-guarded.
+
+A shared `src/extensions/lib/guard-block.ts` helper (`isGuardBlock` /
+`blockReason`) recognizes the kernel dispatcher's `"Tool call blocked: "` result
+on `tool_end` in one place. `otel-exporter` breaks guard blocks out into a new
+**additive `eagent.guard.blocks`** counter and tags the tool **span** with
+`eagent.guard.blocked=true` + `eagent.guard.reason` — while leaving the existing
+`eagent.tool.calls` `error` bucketing **unchanged** (a block still counts as an
+error there, so no dashboard/test keyed on `error` is disturbed). `trace` counts
+a block as a separate **`toolBlocked`** (surfaced in `/usage`) and marks it
+`[blk]` in the `/trace` tree, distinct from `errors`.
+
+SECURITY.md gains a **"Guard precedence"** subsection documenting the full
+17-extension `beforeToolCall` order (= `BUILTIN_EXTENSIONS` load order),
+first-block-wins, rewrite-chains-onward, and that there is no priority mechanism
+(reorder to change it); `docs/EXTENSIONS.md` cross-links it. A drift test
+(`test/guard-precedence.test.ts`) re-derives the live order and fails if the doc
+drifts. No kernel change; the telemetry rides `otel-exporter` / `trace` (their
+`EAGENT_<NAME>=off` kill switches apply).
+
 **Per-event cost model + provider watchdog (turn-loop hardening).** Two
 turn-loop correctness/availability fixes.
 

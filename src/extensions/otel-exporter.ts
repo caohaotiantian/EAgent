@@ -24,6 +24,7 @@ import { randomBytes } from "node:crypto";
 
 import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import { blockReason, isGuardBlock } from "./lib/guard-block.js";
 import { clearTraceparent, setTraceparent, traceparent } from "./lib/otel-context.js";
 
 /** An OTLP attribute (`KeyValue` with an `AnyValue`): string or int64 (decimal string). */
@@ -155,6 +156,9 @@ export default function activate(e: ExtensionAPI): () => void {
   // startTimeUnixNano; counters keep growing (the Sum re-sends the running total).
   const tokenUsage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   const toolCalls = { ok: 0, error: 0 };
+  // Additive guard-block counter: a guard block is ALSO counted in `toolCalls.error`
+  // (KDD2 — the existing metric stays byte-stable), and broken out here.
+  let guardBlocks = 0;
   const sessionStart = nanos();
 
   // The OTel GenAI semconv advisory bucket boundaries (seconds) for
@@ -233,6 +237,18 @@ export default function activate(e: ExtensionAPI): () => void {
             sumPoint(attr("error", "false"), toolCalls.ok, now),
             sumPoint(attr("error", "true"), toolCalls.error, now),
           ],
+          aggregationTemporality: 2,
+          isMonotonic: true,
+        },
+      });
+    // Additive break-out of guard blocks (KDD2). A dimensionless count, so it
+    // carries a nominal `kind` attribute — the reason rides the span, not here.
+    if (guardBlocks > 0)
+      metrics.push({
+        name: "eagent.guard.blocks",
+        unit: "{block}",
+        sum: {
+          dataPoints: [sumPoint(attr("kind", "guard-block"), guardBlocks, now)],
           aggregationTemporality: 2,
           isMonotonic: true,
         },
@@ -367,8 +383,13 @@ export default function activate(e: ExtensionAPI): () => void {
 
     e.on("tool_end", ({ call, result }) => {
       // Metric accumulation runs above the trace guard: a metrics-only run never
-      // creates a RunTrace, but its tool calls must still be counted.
-      if (anyEnabled()) toolCalls[result.isError ? "error" : "ok"]++;
+      // creates a RunTrace, but its tool calls must still be counted. A guard
+      // block stays additively in `toolCalls.error` (the existing metric is
+      // unchanged) and is ALSO broken out into `guardBlocks`.
+      if (anyEnabled()) {
+        toolCalls[result.isError ? "error" : "ok"]++;
+        if (isGuardBlock(result)) guardBlocks++;
+      }
       clearTraceparent(call.id); // drop the published traceparent (paired with tool_start)
       if (!enabled()) return;
       const t = traces.get(currentActingAgent() ?? e.agent);
@@ -377,6 +398,12 @@ export default function activate(e: ExtensionAPI): () => void {
       if (!span) return;
       span.endTimeUnixNano = nanos();
       if (result.isError) span.status = { code: 2 };
+      // A guard block: mark the low-frequency span with the reason (often names
+      // the guard) — never the metric, to avoid cardinality blow-up (KDD2).
+      if (isGuardBlock(result)) {
+        span.attributes.push(attr("eagent.guard.blocked", "true"));
+        span.attributes.push(attr("eagent.guard.reason", blockReason(result)));
+      }
       t.openSpans.delete(call.id);
       finished.push(span);
     }),

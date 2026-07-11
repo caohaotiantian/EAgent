@@ -1008,3 +1008,83 @@ test("RW7c-2: a traceparent is published during a tool call and cleared after (m
     restoreEnv(saved);
   }
 });
+
+// ---------------------------------------------------------------------------
+// AC-2 (guard blocks) — a beforeToolCall block is broken out additively:
+// eagent.guard.blocks counts it, eagent.tool.calls STILL counts it as an error,
+// and the tool span carries eagent.guard.blocked + reason.
+// ---------------------------------------------------------------------------
+test("AC-2 guard block: eagent.guard.blocks counts it; tool.calls error still reflects it; span carries guard attrs", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://collector.test:4318/v1/traces";
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: {} }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    // A guard that vetoes the ping call; the dispatcher turns this into the
+    // canonical `Tool call blocked: <reason>` error result on tool_end.
+    agent.hooks.filter("beforeToolCall", (decision, { call }) =>
+      call.name === "ping" ? { ...decision, block: true, reason: "flow-guard: not allowed" } : decision,
+    );
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    const metricsCall = callsTo(calls, "/v1/metrics")[0]!;
+    // The new additive guard-block counter.
+    const guardMetric = metricNamed(metricsCall, "eagent.guard.blocks");
+    assert.ok(guardMetric, "eagent.guard.blocks metric present");
+    assert.equal(guardMetric!.unit, "{block}");
+    assert.equal(guardMetric!.sum!.aggregationTemporality, 2, "cumulative temporality");
+    assert.equal(guardMetric!.sum!.isMonotonic, true);
+    assert.equal(guardMetric!.sum!.dataPoints[0]!.asInt, "1", "one guard block counted");
+
+    // The existing tool.calls metric is UNCHANGED — the block still counts as an
+    // error there (additive break-out, not a reclassification).
+    const toolMetric = metricNamed(metricsCall, "eagent.tool.calls");
+    assert.ok(toolMetric, "tool-calls metric still present");
+    assert.equal(dpBy(toolMetric!, "error", "true")!.asInt, "1", "block still counted as an error (additive)");
+
+    // The tool span carries the guard attributes with the block reason.
+    const spans = spansOf(callsTo(calls, "/v1/traces")[0]!);
+    const toolSpan = spans.find((s) => attr(s, "gen_ai.tool.name")?.stringValue === "ping")!;
+    assert.ok(toolSpan, "the blocked tool still has a span");
+    assert.equal(attr(toolSpan, "eagent.guard.blocked")?.stringValue, "true");
+    assert.equal(attr(toolSpan, "eagent.guard.reason")?.stringValue, "flow-guard: not allowed");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});
+
+// A real tool error must NOT increment eagent.guard.blocks (the metric is absent
+// when no block occurred, since it is gated on guardBlocks > 0).
+test("AC-2 guard block: a real tool error does not emit eagent.guard.blocks", async () => {
+  const saved = saveEnv();
+  clearEnv();
+  process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://collector.test:4318/v1/metrics";
+  const { calls, restore } = captureFetch();
+  try {
+    const { agent, host } = makeHarness({
+      responder: [{ toolCalls: [{ name: "ping", arguments: { fail: true } }] }, { text: "done" }],
+    });
+    agent.tools.register(pingTool());
+    await host.use("otel-exporter", otelExporter);
+    await agent.run("go");
+
+    const metricsCall = callsTo(calls, "/v1/metrics")[0]!;
+    assert.equal(metricNamed(metricsCall, "eagent.guard.blocks"), undefined, "no guard.blocks on a real error");
+    const toolMetric = metricNamed(metricsCall, "eagent.tool.calls");
+    assert.equal(dpBy(toolMetric!, "error", "true")!.asInt, "1", "the real error is still counted as an error");
+
+    await host.dispose();
+  } finally {
+    restore();
+    restoreEnv(saved);
+  }
+});

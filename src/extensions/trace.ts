@@ -22,6 +22,7 @@ import { join } from "node:path";
 
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { totalTokens, type StopReason, type Usage } from "../kernel/types.js";
+import { isGuardBlock } from "./lib/guard-block.js";
 
 /** One timed region of a run. Spans nest agent -> turn -> tool by ordering. */
 export interface Span {
@@ -32,6 +33,8 @@ export interface Span {
   durationMs?: number;
   /** For tool spans: whether the result was not an error. */
   ok?: boolean;
+  /** For tool spans: whether the result was a `beforeToolCall` guard block. */
+  blocked?: boolean;
   meta?: Record<string, unknown>;
 }
 
@@ -41,6 +44,8 @@ export interface Metrics {
   turns: number;
   toolCalls: number;
   toolErrors: number;
+  /** Guard blocks (`beforeToolCall` vetoes) — counted separately from errors. */
+  toolBlocked: number;
   /** Per-tool invocation counts. */
   perTool: Record<string, number>;
   /** Total wall-clock across all completed agent spans, in milliseconds. */
@@ -61,6 +66,7 @@ export default function activate(e: ExtensionAPI): () => void {
     turns: 0,
     toolCalls: 0,
     toolErrors: 0,
+    toolBlocked: 0,
     perTool: {},
     wallMs: 0,
     usage: { inputTokens: 0, outputTokens: 0 },
@@ -148,9 +154,13 @@ export default function activate(e: ExtensionAPI): () => void {
 
     e.on(
       "tool_end",
-      safe((p: { call: { id: string; name: string }; result: { isError?: boolean } }) => {
+      safe((p: { call: { id: string; name: string }; result: { isError?: boolean; content: string } }) => {
+        // A `beforeToolCall` guard block is distinguished from a real tool error
+        // (design: trace shows a block as `blocked`, NOT `errors`).
+        const blocked = isGuardBlock(p.result);
         const ok = !p.result.isError;
-        if (!ok) metrics.toolErrors += 1;
+        if (blocked) metrics.toolBlocked += 1;
+        else if (!ok) metrics.toolErrors += 1;
         // Match the open tool span for this call by its id (set at tool_start), so
         // concurrent same-name calls are not mis-attributed; fall back to any open
         // tool span so a mismatched/duplicate end still closes something sane.
@@ -158,6 +168,7 @@ export default function activate(e: ExtensionAPI): () => void {
         span ??= openSpan("tool");
         if (span) {
           span.ok = ok;
+          span.blocked = blocked;
           close(span);
         }
       }),
@@ -194,7 +205,7 @@ export default function activate(e: ExtensionAPI): () => void {
       } else if (s.kind === "turn") {
         lines.push(`  ${s.name}${dur(s)}`);
       } else {
-        const mark = s.ok === undefined ? "?" : s.ok ? "ok" : "err";
+        const mark = s.ok === undefined ? "?" : s.blocked ? "blk" : s.ok ? "ok" : "err";
         lines.push(`    tool ${s.name} [${mark}]${dur(s)}`);
       }
     }
@@ -213,7 +224,7 @@ export default function activate(e: ExtensionAPI): () => void {
     );
     lines.push(
       `runs=${metrics.runs} turns=${metrics.turns} toolCalls=${metrics.toolCalls} ` +
-        `toolErrors=${metrics.toolErrors} wallMs=${metrics.wallMs.toFixed(1)}`,
+        `toolErrors=${metrics.toolErrors} toolBlocked=${metrics.toolBlocked} wallMs=${metrics.wallMs.toFixed(1)}`,
     );
     const perTool = Object.entries(metrics.perTool);
     if (perTool.length > 0) {

@@ -353,6 +353,11 @@ e.hook("beforeToolCall", (decision, { call }) => {
 });
 ```
 
+Multiple extensions register `beforeToolCall`; they run in `BUILTIN_EXTENSIONS`
+load order and the **first `block: true` wins** (a non-blocking rewrite chains
+onward). See [SECURITY.md → Guard precedence](../SECURITY.md#guard-precedence) for
+the full ordered roster and how to change precedence.
+
 ### `afterToolCall`
 
 Transform a tool's `ToolResult` before it is appended to the transcript —

@@ -199,3 +199,61 @@ test("trace before any run reports no recording without throwing", async () => {
   const out = (await runCommand(h, "trace")).join("\n");
   assert.match(out, /no run recorded/);
 });
+
+// ---------------------------------------------------------------------------
+// AC-3 — a guard block is counted as `blocked`, NOT as a tool error. This is
+// deliberately different from otel (which keeps a block additively in `error`);
+// trace shows it distinctly.
+// ---------------------------------------------------------------------------
+test("a guard block counts as toolBlocked and leaves toolErrors at 0", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "echo" }] }, { text: "done" }],
+  });
+  registerTools(h.agent);
+  // Veto the call; the dispatcher returns the canonical block result.
+  h.agent.hooks.filter("beforeToolCall", (decision, { call }) =>
+    call.name === "echo" ? { ...decision, block: true, reason: "flow-guard: nope" } : decision,
+  );
+  await h.host.use("trace", activate);
+
+  await h.agent.run("go");
+
+  const out = (await runCommand(h, "usage")).join("\n");
+  assert.match(out, /toolBlocked=1/);
+  // The block must NOT double-count into errors.
+  assert.match(out, /toolErrors=0/);
+});
+
+test("a real tool error counts as toolErrors and leaves toolBlocked at 0", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "boom" }] }, { text: "done" }],
+  });
+  registerTools(h.agent);
+  await h.host.use("trace", activate);
+
+  await h.agent.run("go");
+
+  const out = (await runCommand(h, "usage")).join("\n");
+  assert.match(out, /toolErrors=1/);
+  assert.match(out, /toolBlocked=0/);
+});
+
+test("the trace tree marks a blocked tool span as [blk], not [err]", async () => {
+  const h = makeHarness({
+    fallback: "allow",
+    responder: [{ toolCalls: [{ name: "echo" }] }, { text: "done" }],
+  });
+  registerTools(h.agent);
+  h.agent.hooks.filter("beforeToolCall", (decision, { call }) =>
+    call.name === "echo" ? { ...decision, block: true, reason: "flow-guard: nope" } : decision,
+  );
+  await h.host.use("trace", activate);
+
+  await h.agent.run("go");
+
+  const out = (await runCommand(h, "trace")).join("\n");
+  assert.match(out, /tool echo \[blk\]/);
+  assert.doesNotMatch(out, /tool echo \[err\]/);
+});
