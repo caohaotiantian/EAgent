@@ -346,6 +346,9 @@ curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
 curl -s localhost:8787/run -d '{"input":"now in one line","session":"abc"}'
 ```
 
+`/run` streams line-delimited JSON — the **same** canonical event schema the CLI
+`--json` mode emits, documented in [`docs/JSONL.md`](docs/JSONL.md).
+
 The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
 `Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
 Per-session state is LRU-bounded at `EAGENT_MAX_SESSIONS` (default 1000; `0` disables the cap).
@@ -411,6 +414,8 @@ test/            the full offline suite — every primitive and extension
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — the full design, with diagrams.
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
+- [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
+  the CLI `--json` stream and the HTTP `/run` stream.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.

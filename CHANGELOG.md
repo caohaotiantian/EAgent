@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Unified JSONL event schema across the CLI `--json` and HTTP `/run` streams
+(zero kernel change).** Both front ends now serialize through one shared
+`src/jsonl.ts` mapper, so a single parser reads either stream. The HTTP `/run`
+stream gains the fields the CLI already emitted: `tool_start`/`tool_end` now
+carry the tool-call `id`, and `reasoning_delta` is now streamed over HTTP. Each
+`/run` turn now ends with a canonical **`agent_end`** terminal (matching the
+kernel lifecycle event name and the CLI); the legacy `done` line is still emitted
+first during a deprecation window and is **deprecated** — consumers should migrate
+to `agent_end` (`done` is removed in a future release). The CLI `--json` output is
+unchanged (byte-identical). The canonical shapes are documented in
+[`docs/JSONL.md`](docs/JSONL.md).
+
 **Guard telemetry + a documented `beforeToolCall` precedence contract (zero
 kernel change).** Guard blocks are now observable as *blocks*, not generic
 errors, and the load-order precedence of the guards is documented and
