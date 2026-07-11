@@ -79,6 +79,10 @@ export class LayeredConfig implements Config {
   readonly #filePaths: string[];
   /** Every key ever read or written, so `entries()` can enumerate the surface. */
   readonly #seen = new Set<string>();
+  /** Optional in-memory preset, attached after construction. It sits directly
+   *  below the env layer and above the override-store/file — fail-secure — and
+   *  is never persisted. */
+  #preset: Record<string, unknown> | undefined;
 
   constructor(opts: LayeredConfigOptions) {
     this.#file = opts.fileValues ?? {};
@@ -89,6 +93,13 @@ export class LayeredConfig implements Config {
   /** Re-read the file layer from the configured paths (for `/config reload`). */
   reload(): void {
     if (this.#filePaths.length > 0) this.#file = loadConfigFile(this.#filePaths);
+  }
+
+  /** Attach a runtime preset map. Its keys override the override-store and file
+   *  layers but never the env layer, and are never written to disk — the preset
+   *  reverts when the process ends. */
+  setPreset(map: Record<string, unknown>): void {
+    this.#preset = map;
   }
 
   /** The raw env string for a key: the derived name, then any legacy alias. */
@@ -103,8 +114,15 @@ export class LayeredConfig implements Config {
   }
 
   /** The winning raw value for a VALUE key: override > env > file (else undefined). */
-  #raw(key: string): { value: string | number | boolean; source: "override" | "env" | "file" } | undefined {
+  #raw(key: string): { value: string | number | boolean; source: "override" | "env" | "file" | "preset" } | undefined {
     this.#seen.add(key);
+    // A preset key resolves env > preset here, bypassing override/file, so the
+    // preset stays fail-secure for value keys (env remains the escape hatch).
+    if (this.#preset && key in this.#preset) {
+      const e = this.#env(key);
+      if (e !== undefined) return { value: e, source: "env" };
+      return { value: this.#preset[key] as string | number | boolean, source: "preset" };
+    }
     const o = this.#over.get<string | number | boolean>(key);
     if (o !== undefined) return { value: o, source: "override" };
     const e = this.#env(key);
@@ -141,6 +159,9 @@ export class LayeredConfig implements Config {
     const fallback = opts?.default ?? false;
     // 1. env "off" is a hard veto (the config FILE is intentionally not consulted).
     if (this.#env(key) === "off") return false;
+    // A runtime preset sits directly below the env veto and above the override
+    // store, so no stale persisted value can weaken a preset gate (fail-secure).
+    if (this.#preset && key in this.#preset) return Boolean(this.#preset[key]);
     // 2. runtime override (trusted — written only by /config set and /x commands).
     const o = this.#over.get<string | number | boolean>(key);
     if (o !== undefined) return parseConfigBool(String(o)) ?? Boolean(o);
@@ -168,7 +189,8 @@ export class LayeredConfig implements Config {
     const keys = new Set<string>([...this.#seen, ...this.#over.keys(), ...Object.keys(this.#file)]);
     return [...keys].sort().map((key) => {
       const r = this.#raw(key);
-      const source = r?.source ?? "default";
+      // A preset value is a runtime layer; surface it as an override in listings.
+      const source = r?.source === "preset" ? "override" : (r?.source ?? "default");
       const value = isSecretKey(key) ? "«hidden»" : r?.value;
       return { key, value, source };
     });
