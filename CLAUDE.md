@@ -127,9 +127,11 @@ defaults to **ask**, the HTTP server to **allow**/yolo). See `SECURITY.md`.
   required by `module: NodeNext` and `verbatimModuleSyntax`.
 - **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
   `noImplicitOverride`, `noFallthroughCasesInSwitch` are all on. No `any`
-  cop-outs; model the types. Note: `tsconfig.json` excludes `test/` and
+  cop-outs; model the types. Note: the build `tsconfig.json` excludes `test/` and
   `examples/`, and `npm test` runs via `tsx` (transpile-only) — so neither
-  `typecheck` nor `test` type-checks test files; verify those types separately.
+  `typecheck` (src-only) nor `test` type-checks test files. **`npm run typecheck:test`**
+  (a separate `noEmit` `tsconfig.test.json` inheriting every strict flag) type-checks
+  `test/` + `src/` and is a CI gate; `examples/` remains unchecked.
 - **Zero runtime dependencies except `jiti`.** Do not add npm dependencies.
   Providers use the global `fetch`; nothing pulls in an SDK.
 - **Tests use `node:test` run via `tsx`**, and must run offline. Every extension

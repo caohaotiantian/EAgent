@@ -117,9 +117,15 @@ test("a later same-id activation tears down the earlier one (later wins, no leak
 test("session lifecycle events fire around a reload", async () => {
   const { host, agent } = makeHarness();
   const events: string[] = [];
-  agent.hooks.on("session_shutdown", () => events.push("down"));
-  agent.hooks.on("session_start", () => events.push("up"));
-  agent.hooks.on("reload", () => events.push("reload"));
+  agent.hooks.on("session_shutdown", () => {
+    events.push("down");
+  });
+  agent.hooks.on("session_start", () => {
+    events.push("up");
+  });
+  agent.hooks.on("reload", () => {
+    events.push("reload");
+  });
   await host.use("x", () => {});
   await host.reload();
   assert.deepEqual(events, ["down", "reload", "up"]);

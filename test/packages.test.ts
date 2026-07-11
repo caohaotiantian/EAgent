@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import activate from "../src/extensions/packages.ts";
+import activate from "../src/extensions/packages.js";
 import { makeHarness } from "./helpers.js";
 
 const DEFINE_PATH = JSON.stringify(join(process.cwd(), "src/kernel/define.ts"));

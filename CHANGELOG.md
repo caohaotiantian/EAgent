@@ -330,6 +330,13 @@ existing seams — no kernel change, all capability-gated and offline-tested:
   the `package.json` version (a mismatch fails the run); needs an `NPM_TOKEN` repo
   secret. Provenance is a CI-only `--provenance` flag, not `publishConfig`, so a local
   `npm publish` is not forced into the OIDC-only path.
+  The **`test/` tree is now type-checked** — a large body of code (112 `.ts` files) that had no static
+  guarantee (the build `tsconfig.json` excludes `test/`; `npm test` runs via transpile-only `tsx`). A new
+  `tsconfig.test.json` (a `noEmit` config inheriting every strict flag) + `npm run typecheck:test` hold
+  tests to the same bar as `src`, wired as a CI gate. Fixed the 8 latent type errors it surfaced across 5
+  files (handler expression-bodies returning a value where `void` is required, an unguarded
+  `noUncheckedIndexedAccess`, a too-narrow test-helper param, and one `.ts` import specifier → `.js`) —
+  all behavior-neutral. The build/publish path is untouched (`test/` stays excluded from the emit config).
 - **`trace` closes tool spans by call id, not name.** Two concurrent same-named
   tool calls (e.g. two `bash`) were mis-attributed because the span was matched by
   tool name; it now matches the call `id` stamped at `tool_start`, so overlapping

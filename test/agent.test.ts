@@ -611,7 +611,9 @@ test("forwards the thinking level and surfaces reasoning deltas as a hook event"
   const { agent, provider } = makeHarness({ responder: [{ reasoning: "thinking hard", text: "done" }] });
   agent.thinking = "high";
   const reasoning: string[] = [];
-  agent.hooks.on("reasoning_delta", ({ text }) => reasoning.push(text));
+  agent.hooks.on("reasoning_delta", ({ text }) => {
+    reasoning.push(text);
+  });
 
   await agent.run("go");
 

@@ -252,7 +252,7 @@ test("RW7c-2: an MCP tool call injects the traceparent for an allowlisted host, 
   const prevAllow = process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
   const TP = traceparent("c".repeat(32), "d".repeat(16));
   // Simulate otel by publishing a traceparent at tool_start (its real writer).
-  const publish = (h: { agent: { hooks: { on(ev: string, fn: (p: { call: { id: string } }) => void): void } } }): void => {
+  const publish = (h: ReturnType<typeof makeHarness>): void => {
     h.agent.hooks.on("tool_start", ({ call }) => setTraceparent(call.id, TP));
     h.agent.hooks.on("tool_end", ({ call }) => clearTraceparent(call.id));
   };
