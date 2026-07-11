@@ -50,12 +50,18 @@ async function runCommand(
  * deterministic counts instead of a hard-coded bill.
  */
 function captureUsage(h: ReturnType<typeof makeHarness>): {
-  events: { usage: Usage; cumulative: Usage }[];
-  last(): { usage: Usage; cumulative: Usage };
+  events: { usage: Usage; cumulative: Usage; model?: string }[];
+  last(): { usage: Usage; cumulative: Usage; model?: string };
 } {
-  const events: { usage: Usage; cumulative: Usage }[] = [];
+  const events: { usage: Usage; cumulative: Usage; model?: string }[] = [];
   h.agent.hooks.on("usage", (p) => {
-    events.push({ usage: { ...p.usage }, cumulative: { ...p.cumulative } });
+    events.push({
+      usage: { ...p.usage },
+      cumulative: { ...p.cumulative },
+      // `model` is the D1 kernel field: the model the committed stream requested.
+      // Read defensively so the RED phase (before D1) sees `undefined`, not a crash.
+      model: (p as { model?: string }).model,
+    });
   });
   return {
     events,
@@ -418,6 +424,108 @@ test("/cost pricecard override retunes USD by 10x without a code change", async 
   // Pin the exact 10x relationship by re-deriving the baseline at the fallback row.
   const baseDerived = costOf(base.cumulative, priceRow("mock"));
   assert.ok(Math.abs(baseUsd - baseDerived) < 1e-4, "baseline live USD matches fallback-derived");
+});
+
+// ---------------------------------------------------------------------------
+// Per-event cost model (turn-loop-hardening 3a): the `usage` event carries the
+// model the request actually used, and `cost` prices each event at that model —
+// covering a mid-run routing switch (AC2) and a retry downshift (AC3).
+// ---------------------------------------------------------------------------
+
+test("the usage event payload carries the model the request used (AC1)", async () => {
+  const h = makeHarness({ responder: [{ text: "hello there" }] });
+  const cap = captureUsage(h);
+  await h.agent.run("hi");
+  // The agent's model is "mock"; the emitted usage event must report it.
+  assert.equal(cap.last().model, "mock", "usage event reports the request's model");
+});
+
+test("cost attributes usage to a model switched mid-run on turn_start, not agent_start's model (AC2)", async () => {
+  const h = makeHarness({ responder: [{ text: "X".repeat(400) }] });
+  await h.host.use("cost", activate);
+  const cap = captureUsage(h);
+  // A tiny routing-like hook: re-tier the model on turn_start (mirrors `routing`,
+  // which writes `e.agent.model` on turn_start). `gpt-4o` is a card-priced model,
+  // whereas `mock` (the agent_start model) prices at the fallback $0.
+  h.agent.hooks.on("turn_start", () => {
+    h.agent.model = "gpt-4o";
+  });
+  await h.agent.run("hi");
+
+  // The usage event reports the switched model, not the agent_start model.
+  assert.equal(cap.last().model, "gpt-4o");
+
+  const out = await runCommand(h, "cost", "");
+  const text = out.join("\n");
+  // cost keyed + priced per-event at the NEW model — a gpt-4o per-model line,
+  // and no "mock" line (which is what the agent_start model would have produced).
+  assert.match(text, /per-model gpt-4o:/);
+  assert.doesNotMatch(text, /per-model mock:/);
+  const gptUsd = parseUsd(out, /per-model gpt-4o:/);
+  // Priced at gpt-4o's card row, and strictly positive (mock's fallback is $0).
+  assert.ok(
+    Math.abs(gptUsd - costOf(cap.last().usage, priceRow("gpt-4o"))) < 1e-4,
+    `per-model gpt-4o USD ${gptUsd} should equal the gpt-4o-derived figure`,
+  );
+  assert.ok(gptUsd > 0, "gpt-4o is a priced model — non-zero, unlike mock's fallback $0");
+});
+
+test("cost prices a downshifted retry at the downshifted model, which e.agent.model does not reflect (AC3)", async () => {
+  const h = makeHarness();
+  // A stateful bespoke provider: throw PRE-COMMIT (zero events) on attempt 1,
+  // succeed with usage on the retry. A MockProvider cannot script a pre-commit
+  // throw, so this is bespoke (mirrors agent.test.ts's downshift provider).
+  let attempts = 0;
+  h.agent.providers.register(
+    {
+      name: "mock",
+      async *stream() {
+        attempts++;
+        if (attempts === 1) throw new Error("transient pre-commit overload");
+        yield {
+          type: "done",
+          message: { role: "assistant", content: [{ type: "text", text: "ok after downshift" }] },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+        } as const;
+      },
+    },
+    { default: true },
+  );
+  // The exact onProviderError decision shape (events.ts:119 / agent.ts:427).
+  h.agent.hooks.filter("onProviderError", () => ({
+    retry: true,
+    downshiftModel: "gpt-4o",
+    fail: false,
+  }));
+
+  await h.host.use("cost", activate);
+  const cap = captureUsage(h);
+  const { reason } = await h.agent.run("go");
+  assert.equal(reason, "end_turn");
+  assert.equal(attempts, 2, "the stream was retried once after the pre-commit throw");
+
+  // The kernel field reports the model the committed (retried) stream requested.
+  assert.equal(cap.last().model, "gpt-4o", "usage event carries the downshifted model");
+  // `e.agent.model` is STALE for a downshift — the loop mutates only the
+  // turn-local `model`, never `this.model` (agent.ts:429). This is precisely why
+  // the extension-only path can't see a downshift and the kernel field is needed.
+  assert.equal(
+    h.agent.model,
+    "mock",
+    "e.agent.model does not reflect the downshift (why the kernel field is needed)",
+  );
+
+  // cost priced the usage at gpt-4o (non-zero), not mock's fallback $0.
+  const out = await runCommand(h, "cost", "");
+  const text = out.join("\n");
+  assert.match(text, /per-model gpt-4o:/);
+  const gptUsd = parseUsd(out, /per-model gpt-4o:/);
+  assert.ok(gptUsd > 0, "downshifted usage priced at gpt-4o's non-zero rate, not mock fallback $0");
+  assert.ok(
+    Math.abs(gptUsd - costOf(cap.last().usage, priceRow("gpt-4o"))) < 1e-4,
+    `per-model gpt-4o USD ${gptUsd} should equal the gpt-4o-derived figure`,
+  );
 });
 
 // ---------------------------------------------------------------------------

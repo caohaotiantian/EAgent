@@ -44,8 +44,9 @@ export type KernelEvents = {
   /** A parallel tool wave settled; carries the ordered {call,result} pairs and the call-time `step`. */
   tool_batch_end: { batch: { call: ToolCallBlock; result: ToolResult }[]; step: number };
 
-  /** Token usage for the just-finished model call, plus the running total. */
-  usage: { usage: Usage; cumulative: Usage };
+  /** Token usage for the just-finished model call, plus the running total and the
+   *  model the committed stream requested (captures a routing switch or downshift). */
+  usage: { usage: Usage; cumulative: Usage; model: string };
 
   error: { error: unknown; where: string };
 };

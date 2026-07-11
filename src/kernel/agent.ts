@@ -433,7 +433,7 @@ export class Agent {
       }
       // Usage only accrues on a fully-consumed stream, so a pre-commit failure adds none.
       this.#usage = addUsage(this.#usage, usage);
-      await this.hooks.emit("usage", { usage, cumulative: { ...this.#usage } });
+      await this.hooks.emit("usage", { usage, cumulative: { ...this.#usage }, model });
       return { message, stopReason };
     }
   }

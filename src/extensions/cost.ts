@@ -219,16 +219,21 @@ export default function activate(e: ExtensionAPI): () => void {
 
     e.on(
       "usage",
-      safe((p: { usage: Usage; cumulative: Usage }) => {
+      safe((p: { usage: Usage; cumulative: Usage; model?: string }) => {
         const card = activeCard();
-        const row = priceRow(activeModel, card);
+        // Price at the model the event reports (the exact model the committed
+        // stream requested — a routing switch or a retry downshift), keyed the
+        // same. `activeModel` (the agent_start model) stays the fallback for older
+        // events or a provider that reports none.
+        const model = p.model ?? activeModel;
+        const row = priceRow(model, card);
         // Per-run + per-model use the per-event delta; the session figure mirrors
         // the agent's running cumulative (matching how `trace` mirrors it).
         const deltaUsd = costOf(p.usage, row);
         runUsd += deltaUsd;
         sessionUsd = costOf(p.cumulative, row);
         sessionTokens = { ...p.cumulative };
-        const entry = perModel.get(activeModel) ?? {
+        const entry = perModel.get(model) ?? {
           usd: 0,
           tokens: { inputTokens: 0, outputTokens: 0 },
           fallback: row.fallback,
@@ -238,7 +243,7 @@ export default function activate(e: ExtensionAPI): () => void {
         // preserving the omit-invariant for providers that report none.
         entry.tokens = addUsage(entry.tokens, p.usage);
         entry.fallback = row.fallback;
-        perModel.set(activeModel, entry);
+        perModel.set(model, entry);
       }),
     ),
 
