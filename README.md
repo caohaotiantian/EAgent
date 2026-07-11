@@ -350,6 +350,14 @@ The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
 Per-session state is LRU-bounded at `EAGENT_MAX_SESSIONS` (default 1000; `0` disables the cap).
 The `session` id multiplexes conversations, not trust: extension state is shared across
 sessions in one process, so isolate tenants by running **one process per tenant** (see `SECURITY.md`).
+Set `EAGENT_HARDENED=1` for a one-switch **defense-in-depth** profile: it enables
+`risk-guard` (LLM-classifies every `shell:exec` call), `provenance` (injection-defends
+tool output), and `sandbox.tier=workspace-write` (confines subprocess writes to the
+workspace). It is **orthogonal to `yolo:false`** — it does not change the capability
+fallback — and is a host-level flag the CLI honors too. Fail-open with no sandbox
+backend (warned at startup); the env var is the single override under hardened
+(`EAGENT_RISK_GUARD=off` / `EAGENT_PROVENANCE=off` / `EAGENT_SANDBOX_TIER=<tier>`).
+See `SECURITY.md`.
 To run sandboxed (the posture `SECURITY.md` recommends) there is a `Dockerfile`
 (non-root, workspace-confined):
 

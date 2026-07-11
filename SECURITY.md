@@ -90,6 +90,40 @@ a boundary. Use `--yolo` (fallback *allow*) on the CLI only when the environment
 is already isolated, and conversely run the server with `yolo: false` if you want
 per-capability prompting back.
 
+### Hardened profile (`EAGENT_HARDENED=1`)
+
+`EAGENT_HARDENED=1` (or `hardened: true` on `createAgentHost`/`createHttpServer`)
+turns on a one-switch **defense-in-depth** posture for the otherwise-yolo server:
+
+- **`risk-guard`** — every `shell:exec` tool call is LLM-classified first and a
+  high-risk verdict is refused (on the headless server, where the confirm prompt
+  denies).
+- **`provenance`** — tool output is injection-defended.
+- **`sandbox.tier = workspace-write`** — subprocess writes are confined to the
+  workspace root (+ temp); network still works.
+
+It is **orthogonal to `yolo:false`**. Hardened does *not* touch the capability
+fallback: it keeps `shell:exec` runnable so the shell guards it enables actually
+have something to confine (flipping to `ask` would *deny* `shell:exec` on the
+headless server and make those guards moot). Combine it with `yolo:false` only if
+you also want least-privilege capability prompting, accepting that the shell
+guards then mostly idle. It is a **host-level** flag, so the **CLI honors it too**
+(opt-in — the CLI already runs the *ask* fallback, so hardened only *adds* guards).
+
+**No-backend fail-open (R1):** on a host with no sandbox launcher (Linux without
+`bwrap`/`firejail`, or Windows) the tier no-ops — shell still runs *unsandboxed*
+while risk-classification and injection-defense stay active. The host logs a
+warning at startup when this is the case.
+
+**Override policy — the env var is the single escape hatch.** Under hardened the
+preset is a runtime, in-memory layer (nothing is written to disk) that sits below
+the env layer but **above** the persisted override-store, so a stale
+`/config set …` cannot silently weaken it. To override a preset key, use its env
+var: `EAGENT_RISK_GUARD=off` / `EAGENT_PROVENANCE=off` drop a guard, and
+`EAGENT_SANDBOX_TIER=<tier>` picks a different tier (e.g. `readonly` for stricter,
+`no-network` to also cut subprocess network). Unset `EAGENT_HARDENED` to revert
+the whole profile.
+
 For **multi-tenant** use, run **one process per tenant** (or per trust boundary).
 Extension state is shared across `session` ids within a process (see "Cross-session
 isolation" above), so the process — not the session id — is the isolation boundary.

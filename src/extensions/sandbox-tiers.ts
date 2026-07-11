@@ -73,7 +73,11 @@ export default function activate(e: ExtensionAPI): () => void {
     commandArgKey: string;
   } => ({
     enabled: e.config.enabled("sandbox-tiers", { default: true }),
-    tier: (e.store.get<Tier>("tier", "off") ?? "off") as Tier,
+    // Read the tier from config first (so the hardened preset / EAGENT_SANDBOX_TIER
+    // can set it without a store write), falling back to the extension's store key.
+    // Mirrors the `sandbox.backend` config read below; fail-secure — only exact
+    // "off" is the pass-through no-op, so any other value confines.
+    tier: (e.config.string("sandbox.tier") ?? e.store.get<Tier>("tier", "off") ?? "off") as Tier,
     missingBackend: (e.store.get<"pass" | "block">("missingBackend", "pass") ?? "pass"),
     commandArgKey: e.store.get<string>("commandArgKey", "command") ?? "command",
   });

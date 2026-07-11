@@ -22,6 +22,7 @@ import { ExtensionHost } from "./kernel/extension.js";
 import type { Config } from "./kernel/store.js";
 import { FileBackend } from "./kernel/store.js";
 import { LayeredConfig, loadConfigFile } from "./config.js";
+import { detectBackend, binExists, isBackend, type Backend } from "./extensions/lib/sandbox.js";
 import type { Logger, ThinkingLevel, UI } from "./kernel/types.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAIProvider } from "./providers/openai.js";
@@ -175,6 +176,11 @@ export interface AgentHostOptions {
   discoverDirs?: string[];
   /** Extra extension files to load by path. */
   extraExtensions?: string[];
+  /** Opt into the hardened defense-in-depth profile (enable the enforcing
+   *  guards + confine the shell). Falls back to the `hardened` config key
+   *  (`EAGENT_HARDENED`). Orthogonal to `yolo` — it does not touch the
+   *  capability fallback. See SECURITY.md. */
+  hardened?: boolean;
 }
 
 export interface AgentHost {
@@ -210,6 +216,17 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     overrideStore: storeBackend.open("config"),
     filePaths: configPaths,
   });
+
+  // The hardened profile is a runtime, in-memory preset that enables the
+  // enforcing guards (risk-guard, provenance) and confines the shell to the
+  // workspace. It is resolved from the already-built config — so `EAGENT_HARDENED`
+  // and the file key `hardened` both work with env winning — and is fail-secure:
+  // the env layer still overrides each preset key, and nothing is persisted.
+  const hardened = opts.hardened ?? config.bool("hardened", false);
+  if (hardened) {
+    config.setPreset({ "risk-guard": true, provenance: true, "sandbox.tier": "workspace-write" });
+    announceHardened(config, opts.logger);
+  }
 
   const { anthropic, openai, gemini } = buildProviders(config);
   const configured = { anthropic: anthropic.configured, openai: openai.configured, gemini: gemini.configured };
@@ -374,6 +391,26 @@ export function loadEnvFile(file: string = join(process.cwd(), ".env")): string[
     setKeys.push(key);
   }
   return setKeys;
+}
+
+/**
+ * Log the one-line hardened banner: the guards it enabled and the RESOLVED
+ * sandbox tier (read from config, so an `EAGENT_SANDBOX_TIER` override reads
+ * truthfully instead of a hardcoded string). When no sandbox backend is
+ * detected on this host, warn that the tier fail-opens — shell runs unsandboxed
+ * (the R1 caveat; `sandbox-tiers` defaults `missingBackend="pass"`).
+ */
+function announceHardened(config: Config, logger?: Logger): void {
+  const log = logger ?? console;
+  const tier = config.string("sandbox.tier");
+  log.info?.(`hardened profile active: risk-guard + provenance enabled; sandbox tier=${tier}`);
+  const forced = config.string("sandbox.backend");
+  const backend: Backend = forced && isBackend(forced) ? forced : detectBackend(process.platform, binExists);
+  if (backend === "none") {
+    log.warn?.(
+      `hardened: no sandbox backend detected on this host — shell commands run unsandboxed (tier=${tier} is fail-open)`,
+    );
+  }
 }
 
 /** Parse a thinking level from a string (env/flag), ignoring anything unknown. */
