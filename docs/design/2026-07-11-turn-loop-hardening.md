@@ -1,11 +1,17 @@
 # Design — Turn-loop hardening: per-event cost model + provider watchdog (Cycle 3)
 
 Slug: `2026-07-11-turn-loop-hardening`
-Status: **L1 closed** — round 1 (1 severe + generals) → round 2 (zero-severe, general fixed) → round 3
-(fully clean). Facts verified; 3a ~+0 kernel lines (< 2250, no bump), 3b zero-kernel. Ready for L2.
-L2/L3 implementer notes from round 3: (1) no-op if `providers.get()` is undefined; (2) idempotence
-brand must be reload-stable (`Symbol.for`/string key, not a module-local `Symbol`); (3) on race timeout
-abort the composed controller (not `it.return()`) + `.catch(()=>{})` the abandoned `next()`.
+Status: **closed** (2026-07-11)
+Closing-commits: `1e00af1` (3a kernel usage.model + cost), `d6b692d` (model→optional refinement),
+`ca74089` (3b watchdog extension), + this closeout (F-review `shaped.model` precision fix).
+Result: suite 1339→1349 pass / 0 fail / 1 skip; typecheck 0; build 0; eval 5/5; **kernel 2248/2250** (3a
++2 net, no bump); 3b zero-kernel. L1 3 rounds / L2 2 rounds / L3 2 phases / F — all zero-severe.
+Refinements during impl (documented): `usage.model` shipped **optional** (design said required — avoids
+coupling test emit sites / Cycle-5 typecheck debt); the emit uses `shaped.model` (post-`transformRequest`)
+so it exactly matches the "model the committed stream requested" contract (F-review general). Necessary
+implementation growth beyond D1–D6: `lib/provider-wrap.ts` `unwrapProvider` (evals re-scripting +
+`test/server.test.ts` `mockOf` must see through the default-on watchdog wrapper). Deferred: 3a cannot
+report fallback-routing's provider-internal model (needs a `done`-event protocol change — follow-up, §3).
 
 ## 1. Background and Purpose
 

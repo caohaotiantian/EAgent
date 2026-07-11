@@ -1,7 +1,9 @@
 # Implementation — Turn-loop hardening (Cycle 3)
 
 Slug: `2026-07-11-turn-loop-hardening` (matches the design)
-Status: **L2 closed** — round 1 zero-severe (4 general fixed) → round 2 fully clean. Ready for L3.
+Status: **closed** (2026-07-11) — L3 Phase 1 (`1e00af1`+`d6b692d` 3a) + Phase 2 (`ca74089` 3b watchdog),
+each dev→review→accept via l3-phase.js round 1, PhaseEnd-verified; F review passed zero-severe. See the
+design closure block for the result summary + refinements (model→optional, shaped.model, unwrapProvider).
 
 ## 1. Task Index
 
