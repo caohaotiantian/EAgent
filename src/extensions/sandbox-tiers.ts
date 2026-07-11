@@ -52,7 +52,6 @@ import {
   detectBackend,
   binExists,
   isBackend,
-  isWrapped,
   workspaceRoot,
   TIERS,
   LAUNCHERS,
@@ -120,8 +119,14 @@ export default function activate(e: ExtensionAPI): () => void {
     if (typeof command !== "string") return decision;
 
     if (tier === "off") return decision; // the no-op default path
-    if (isWrapped(command)) return decision; // never nest two sandboxes
 
+    // Always wrap when a tier is active — never skip because the command *looks*
+    // already-wrapped. The command is untrusted model output, so a launcher prefix
+    // (`sandbox-exec`/`bwrap`/`firejail`) is attacker-forgeable: skipping on it would
+    // let an injected `sandbox-exec -p '(allow default)' /bin/sh -c '…'` run under the
+    // attacker's own permissive profile and escape confinement. Nesting our launcher
+    // around a launcher command fails closed — the OS rejects a nested sandbox, or the
+    // inner can only further-restrict what the outer already denied — never opens a hole.
     const backend = probeBackend();
     if (backend === "none") {
       if (missingBackend === "block") {
