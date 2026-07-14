@@ -11,7 +11,8 @@ import type {
   ToolResult,
 } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
-import subagentJobs, { jobChildRegistry } from "../src/extensions/subagent-jobs.js";
+import subagentJobs, { jobChildRegistry, JOBS_ACCESSOR_KEY } from "../src/extensions/subagent-jobs.js";
+import type { Agent } from "../src/kernel/agent.js";
 import { makeHarness } from "./helpers.js";
 
 /** A minimal ToolContext for driving a tool's `execute` directly. */
@@ -342,6 +343,31 @@ test("AC7: EAGENT_SUBAGENT_JOBS=off disables launch_job and /jobs", async () => 
     if (prev === undefined) delete process.env.EAGENT_SUBAGENT_JOBS;
     else process.env.EAGENT_SUBAGENT_JOBS = prev;
   }
+});
+
+// ---------------------------------------------------------------------------
+// hasLiveJob — the server-visible live-job signal (cross-boundary store accessor)
+// ---------------------------------------------------------------------------
+
+test("hasLiveJob accessor reports a live job for its root agent, and false once it settles", async () => {
+  const gated = new GatedProvider();
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(gated, { default: true });
+  await host.use("subagent-jobs", subagentJobs);
+
+  const hasLiveJob = host.storeFor("subagent-jobs").get<(a: Agent) => boolean>(JOBS_ACCESSOR_KEY);
+  assert.equal(typeof hasLiveJob, "function", "subagent-jobs publishes a hasLiveJob accessor into its store");
+
+  const launchJob = agent.tools.get("launch_job")!;
+  const cancelJob = agent.tools.get("cancel_job")!;
+
+  // Direct call (outside a run) keys the job on host.agent = the harness agent.
+  assert.equal(hasLiveJob!(agent), false, "no live job before any launch");
+  const jobId = jobIdOf(await launchJob.execute({ prompt: "long" }, fakeCtx()));
+  assert.equal(hasLiveJob!(agent), true, "a running job is reported live for its root agent");
+
+  await cancelJob.execute({ jobId }, fakeCtx());
+  assert.equal(hasLiveJob!(agent), false, "no live job once it is cancelled");
 });
 
 // ---------------------------------------------------------------------------

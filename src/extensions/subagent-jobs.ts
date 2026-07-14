@@ -29,6 +29,15 @@ import type { Tool } from "../kernel/types.js";
 import { finalText, resolveChildCapabilities, resolveChildProvider } from "./subagents.js";
 import { SPAWN_CAPS } from "./teams.js";
 
+/**
+ * The store key under which this extension publishes a `hasLiveJob(agent):
+ * boolean` accessor (true when the given session-root agent owns a still-running
+ * job). A host front end (the HTTP server) resolves it from this extension's
+ * namespaced store to decide whether a session is safe to evict — the same
+ * cross-boundary read channel as `cost`'s `costOf`, so no new host/kernel API.
+ */
+export const JOBS_ACCESSOR_KEY = "hasLiveJob";
+
 /** The default system prompt a background job's child runs under. */
 const DEFAULT_JOB_SYSTEM =
   "You are a focused background sub-agent. You have a fresh context and a single task. " +
@@ -96,6 +105,15 @@ export default function activate(e: ExtensionAPI): () => void {
   // enumerable). Pruned as each job settles/cancels, so it never pins a finished
   // child; never consulted by a tool, so it leaks no cross-session visibility.
   const running = new Set<Job>();
+
+  // Publish a server-visible live-job signal keyed on the session root, so the
+  // HTTP host can refuse to evict/forget a session that still owns a running
+  // background job (its detached child would be stranded). A read-only channel:
+  // it exposes only a boolean, never the registry, so no cross-session visibility.
+  e.store.set(JOBS_ACCESSOR_KEY, (agent: Agent): boolean => {
+    const s = byRoot.get(agent);
+    return s !== undefined && [...s.jobs.values()].some((j) => j.status === "running");
+  });
 
   const enabled = (): boolean => e.config.enabled("subagent-jobs", { default: true });
   const maxConcurrent = (): number => e.config.int("subagentJobs.maxConcurrent", 4);

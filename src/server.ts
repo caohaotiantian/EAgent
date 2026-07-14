@@ -16,16 +16,17 @@
  *   DELETE /sessions/:id     → forget a conversation
  *
  * A `session` id makes `/run` calls accumulate into one conversation; without
- * it, each call is a fresh, stateless turn. The agent runs one turn at a time
- * (a second concurrent `/run` gets 409) — a deliberate simplicity for a minimal
- * server; front a pool of these for real concurrency.
+ * it, each call is a fresh, stateless turn. Turns from DIFFERENT sessions run
+ * concurrently, each on its own `Agent` with per-session extension state; two
+ * `/run`s for the SAME session serialize — the second gets 409 while the first
+ * is in flight — since they would otherwise alias one Agent.
  *
  * ELICITATION (the `ask` extension over HTTP). When the model calls
  * `ask_user_question` mid-turn it reaches a server-side `UI.ask`, which pauses
  * the turn and emits an `{ type: "action_required", id, question, options }`
  * line on the open `/run` stream. The client answers out-of-band with
  * `POST /answer { id, answer }` (same auth as `/run`, NOT blocked by the
- * single-flight lock), and the turn resumes with that answer fed back to the
+ * per-session lock), and the turn resumes with that answer fed back to the
  * model. An unanswered ask falls back (proceed-with-assumption) on a bounded
  * timeout (`askTimeoutMs`) or on client disconnect, so a turn never hangs.
  */
@@ -33,11 +34,12 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import { Agent } from "./kernel/agent.js";
+import { Agent, currentRootAgent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 import { COST_ACCESSOR_KEY } from "./extensions/cost.js";
+import { JOBS_ACCESSOR_KEY } from "./extensions/subagent-jobs.js";
 import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
 export interface ServeOptions extends AgentHostOptions {
@@ -72,19 +74,26 @@ export interface HttpServer {
   close(): Promise<void>;
 }
 
+/** A turn's ask sink: emit `action_required` and resolve when the client answers
+ *  (or on timeout/disconnect). One per in-flight turn, keyed by its session root. */
+type AskSink = (question: string, options?: string[]) => Promise<string | null>;
+
 /**
- * The per-turn elicitation channel shared by `streamRun` (producer) and the
- * `/answer` route (consumer). At most one turn runs at a time (the single-flight
- * lock), so a single mutable holder is enough: `streamRun` installs an `ask`
- * implementation at turn start and clears it in `finally`; `serverUI.ask`
- * delegates to whatever is installed, or returns null (→ the ask tool's
- * proceed-with-assumption fallback) when no turn is streaming.
+ * The elicitation channel shared by `streamRun` (producer) and the `/answer`
+ * route (consumer). Turns from different sessions run concurrently, so the ask
+ * sink is routed PER session ROOT: `streamRun` installs its sink under its root
+ * Agent and clears it in `finally`; `serverUI.ask` resolves the sink for the
+ * currently-executing turn via `currentRootAgent()` (a fork's ask reaches its
+ * session's stream, and two sessions never overwrite each other's sink), or
+ * returns null (→ the ask tool's proceed-with-assumption) when none is installed.
  *
- * A pending ask is keyed by a monotonic id (no clock/randomness); its resolver
- * lives in `pending` until `/answer`, a timeout, or a disconnect settles it.
+ * A pending ask is keyed by a process-global monotonic id (no clock/randomness);
+ * its resolver lives in `pending` until `/answer`, a timeout, or a disconnect
+ * settles it. Each turn tracks its own ask ids so its `finally` drains only its
+ * own — one session's turn end can't cancel another's pending ask.
  */
 interface Elicitation {
-  ask: ((question: string, options?: string[]) => Promise<string | null>) | null;
+  sinks: Map<Agent, AskSink>;
   pending: Map<number, (answer: string | null) => void>;
   nextId: number;
 }
@@ -102,7 +111,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   // delegates to the turn-installed sink so the `ask` extension's conditional
   // grant of `ui:ask` fires (its activation sees a function-valued `ask`) and
   // the model actually reaches a human over HTTP instead of the fallback.
-  const elicit: Elicitation = { ask: null, pending: new Map(), nextId: 1 };
+  const elicit: Elicitation = { sinks: new Map(), pending: new Map(), nextId: 1 };
   const serverUI: UI = {
     // Preserve the headless fail-safe: a guard prompt the server can't surface
     // interactively (write-guard, secret-guard, flow-guard, risk-guard,
@@ -112,7 +121,11 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     // become fail-open just because we now supply a UI.
     confirm: async () => false,
     notify: () => {},
-    ask: (question, options) => (elicit.ask ? elicit.ask(question, options) : Promise.resolve(null)),
+    ask: (question, options) => {
+      const root = currentRootAgent();
+      const sink = root ? elicit.sinks.get(root) : undefined;
+      return sink ? sink(question, options) : Promise.resolve(null);
+    },
   };
 
   const built = await createAgentHost({ ...opts, ui: serverUI, logger, yolo: opts.yolo ?? true });
@@ -153,7 +166,14 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   // One Agent per conversation (its own transcript/usage/model), all sharing the
   // host's registries/hooks/capabilities so every extension governs every session.
   const sessions = new Map<string, Agent>();
-  let busy = false;
+  // The per-session lock: session ids with a turn currently in flight. A second
+  // /run for a session already here gets 409; different sessions (and sessionless
+  // runs) proceed concurrently. Removed in the request's `finally`.
+  const running = new Set<string>();
+  // Session-root Agents built for a sessionless /run (no id, never pooled): a
+  // launch_job from one is refused, since there is no id to ever query its
+  // detached background child against.
+  const sessionlessRoots = new WeakSet<Agent>();
 
   // The cross-boundary cost read: the `cost` extension publishes a
   // `costOf(agent): number` accessor into its namespaced store at activation
@@ -164,20 +184,32 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     return typeof fn === "function" ? fn(agent) : 0;
   };
 
+  // The cross-boundary live-job read: `subagent-jobs` publishes `hasLiveJob(agent)`
+  // into its store; the server consults it so eviction / DELETE never drop a
+  // session that still owns a running detached job. Falls back to false when absent.
+  const hasLiveJob = (agent: Agent): boolean => {
+    const fn = built.host.storeFor("subagent-jobs").get<(a: Agent) => boolean>(JOBS_ACCESSOR_KEY);
+    return typeof fn === "function" ? fn(agent) : false;
+  };
+
+  // Refuse a launch_job from a sessionless run: its background child would outlive
+  // the throwaway Agent with no session id to ever query/collect it. Session-backed
+  // roots pass; a fork is already gated by the extension's own rootOnly guard.
+  built.agent.hooks.filter("beforeToolCall", (decision, ctx) => {
+    if (decision.block || ctx.call.name !== "launch_job") return decision;
+    const root = currentRootAgent();
+    return root && sessionlessRoots.has(root)
+      ? { ...decision, block: true, reason: "launch_job needs a session id; a sessionless /run cannot later query the background job." }
+      : decision;
+  });
+
   const server = createServer((req, res) => {
     // Absorb an OutgoingMessage 'error' (a socket reset — ECONNRESET/EPIPE) on
     // any response, streaming or single-write. Without a listener it throws as an
     // uncaught exception and takes the whole process down; route(...).catch only
     // catches promise rejections, not EventEmitter errors.
     res.on("error", () => {});
-    route(req, res, built.agent, built.host.list(), sessions, {
-      get busy() {
-        return busy;
-      },
-      set busy(v) {
-        busy = v;
-      },
-    }, { token, maxBody }, elicit, askTimeoutMs, built.config, costUsdFor).catch((err) =>
+    route(req, res, built.agent, built.host.list(), sessions, running, sessionlessRoots, { token, maxBody }, elicit, askTimeoutMs, built.config, costUsdFor, hasLiveJob).catch((err) =>
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }),
     );
   });
@@ -199,10 +231,6 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   };
 }
 
-interface Lock {
-  busy: boolean;
-}
-
 interface Security {
   token: string;
   maxBody: number;
@@ -214,12 +242,14 @@ async function route(
   template: Agent,
   extensions: string[],
   sessions: Map<string, Agent>,
-  lock: Lock,
+  running: Set<string>,
+  sessionlessRoots: WeakSet<Agent>,
   security: Security,
   elicit: Elicitation,
   askTimeoutMs: number,
   config: Config,
   costUsdFor: (agent: Agent) => number,
+  hasLiveJob: (agent: Agent) => boolean,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -251,6 +281,13 @@ async function route(
 
   if (req.method === "DELETE" && url.pathname.startsWith("/sessions/")) {
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
+    // Never forget a session mid-turn or while it still owns a running background
+    // job: dropping its Agent would abort the live turn or strand the detached child.
+    const agent = sessions.get(id);
+    if (running.has(id) || (agent && hasLiveJob(agent))) {
+      sendJson(res, 409, { error: "session is busy (a turn or background job is in flight); cannot delete", session: id });
+      return;
+    }
     const existed = sessions.delete(id);
     sendJson(res, existed ? 200 : 404, { deleted: existed, session: id });
     return;
@@ -310,15 +347,18 @@ async function route(
       sendJson(res, 400, { error: "missing 'input'" });
       return;
     }
-    if (lock.busy) {
-      sendJson(res, 409, { error: "agent is busy; retry shortly" });
+    // Per-session lock: a same-session /run already in flight → 409; a different
+    // session (or a sessionless run) proceeds concurrently. A sessionless run
+    // takes no lock — it cannot alias another request (fresh throwaway Agent).
+    if (session !== undefined && running.has(session)) {
+      sendJson(res, 409, { error: "a turn is already in flight for this session; retry shortly" });
       return;
     }
-    lock.busy = true;
+    if (session !== undefined) running.add(session);
     try {
-      await streamRun(res, template, input, sessions, session, elicit, askTimeoutMs, config);
+      await streamRun(res, template, input, sessions, session, elicit, askTimeoutMs, config, sessionlessRoots, running, hasLiveJob);
     } finally {
-      lock.busy = false;
+      if (session !== undefined) running.delete(session);
     }
     return;
   }
@@ -362,6 +402,9 @@ async function streamRun(
   elicit: Elicitation,
   askTimeoutMs: number,
   config: Config,
+  sessionlessRoots: WeakSet<Agent>,
+  running: Set<string>,
+  hasLiveJob: (agent: Agent) => boolean,
 ): Promise<void> {
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   let closed = false;
@@ -370,18 +413,32 @@ async function streamRun(
     res.write(JSON.stringify(obj) + "\n");
   };
 
-  // Install this turn's elicitation sink. A model `ask_user_question` reaches
-  // serverUI.ask → here: we emit an `action_required` line, register a resolver
-  // under a fresh id, and return a Promise that the client settles via
-  // `POST /answer` — or that a bounded timeout / disconnect settles with null
-  // (→ the ask tool's proceed-with-assumption fallback), so the turn never hangs.
-  elicit.ask = (question, options) =>
+  // The session's own Agent (own transcript/usage): reuse the pooled one, else
+  // build a fresh one from the host template. A sessionless /run runs on a
+  // throwaway that is never pooled and cannot launch a background job. `existed`
+  // gates whether a brand-new session whose only turn aborts is worth persisting
+  // (it is not — see the rollback below).
+  const existed = session !== undefined && sessions.has(session);
+  const agent = (session !== undefined ? sessions.get(session) : undefined) ?? makeSessionAgent(template);
+  if (session === undefined) sessionlessRoots.add(agent);
+
+  // This turn's own pending ask ids (the per-turn drain-set): the `finally`
+  // settles ONLY these, so one session's turn end cannot cancel another's ask.
+  const askIds = new Set<number>();
+  // Install this turn's ask sink, keyed on the session ROOT Agent. A model
+  // `ask_user_question` reaches serverUI.ask, which routes by `currentRootAgent()`
+  // to THIS sink: emit an `action_required` line, register a resolver under a
+  // fresh id, and return a Promise the client settles via `POST /answer` — or a
+  // bounded timeout / disconnect settles with null (→ proceed-with-assumption).
+  elicit.sinks.set(agent, (question, options) =>
     new Promise<string | null>((resolve) => {
       const id = elicit.nextId++;
+      askIds.add(id);
       let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = (answer: string | null): void => {
         if (!elicit.pending.has(id)) return; // already settled (answer/timeout/close)
         elicit.pending.delete(id);
+        askIds.delete(id);
         if (timer) clearTimeout(timer);
         resolve(answer);
       };
@@ -389,26 +446,20 @@ async function streamRun(
       timer = setTimeout(() => settle(null), askTimeoutMs);
       if (typeof timer.unref === "function") timer.unref(); // don't keep the event loop alive
       write(eventToJsonl("action_required", { id, question, options }));
-    });
+    }),
+  );
 
-  // Settle every outstanding ask for this turn with null (fallback) and drop the
-  // sink. Called from disconnect and from the finally so no resolver leaks past
-  // the turn and a later `/answer` for a stale id is a clean 404.
+  // Settle this turn's outstanding asks with null (fallback) and drop its sink.
+  // Called from disconnect and from the finally so no resolver leaks past the turn
+  // and a later `/answer` for a stale id is a clean 404.
   const drainElicitations = (): void => {
-    for (const settle of [...elicit.pending.values()]) settle(null);
-    elicit.pending.clear();
-    elicit.ask = null;
+    for (const id of [...askIds]) elicit.pending.get(id)?.(null);
+    askIds.clear();
+    elicit.sinks.delete(agent);
   };
 
-  // The session's own Agent (own transcript/usage): reuse the pooled one, else
-  // build a fresh one from the host template. A sessionless /run runs on a
-  // throwaway that is never pooled. `existed` gates whether a brand-new session
-  // whose only turn aborts is worth persisting (it is not — see the rollback below).
-  const existed = session !== undefined && sessions.has(session);
-  const agent = (session !== undefined ? sessions.get(session) : undefined) ?? makeSessionAgent(template);
-
   // If the client disconnects mid-turn, abort THIS session's agent so it stops
-  // streaming to a dead socket (and frees the single-flight lock) instead of running
+  // streaming to a dead socket (and frees the per-session lock) instead of running
   // the whole turn to completion and wasting tokens/side effects. Also release any
   // ask the turn is blocked on, so the agent loop can unwind instead of hanging.
   const onClose = (): void => {
@@ -418,6 +469,16 @@ async function streamRun(
   };
   res.on("close", onClose);
   res.on("error", onClose); // a mid-stream socket error runs the same teardown
+
+  // Route a streaming frame to THIS session's response only when the currently-
+  // executing turn's root IS this session's Agent. On the shared hook bus every
+  // session's wireJsonl/error observers fire for every session's events (and its
+  // forks', which inherit the root via `currentRootAgent()`); this guard keeps
+  // each frame on its own stream with zero cross-talk. The terminal writes below
+  // run outside any run's ALS context, so they use `write` directly.
+  const emit = (obj: unknown): void => {
+    if (currentRootAgent() === agent) write(obj);
+  };
 
   // Subscribe inside the try so a setup-window throw streams a {type:"error"} line
   // and hits the finally, not a silent 200 with no terminal line. `subs` is declared
@@ -437,9 +498,10 @@ async function streamRun(
     // persistent Agent. Agent has no pop, so capture here and restore below.
     const pre = agent.snapshot();
 
-    subs = wireJsonl(write, agent);
+    subs = wireJsonl(emit, agent);
     subs.push(
       agent.hooks.on("error", ({ error, where }) => {
+        if (currentRootAgent() !== agent) return; // another session's error, not ours
         errorEmitted = true;
         write(eventToJsonl("error", { where, message: error instanceof Error ? error.message : String(error) }));
       }),
@@ -457,11 +519,10 @@ async function streamRun(
     // it is dropped (an existing session stays, rolled back to its prior state).
     if (session !== undefined && (!danglingUser || existed)) {
       // LRU touch: delete+set moves the just-run session to newest, then evict the
-      // oldest keys past the cap. cap===0 skips the loop entirely (unbounded).
+      // oldest evictable sessions past the cap (skipping in-flight / live-job ones).
       sessions.delete(session);
       sessions.set(session, agent);
-      const cap = maxSessions(config);
-      while (cap > 0 && sessions.size > cap) sessions.delete(sessions.keys().next().value as string);
+      evictSessions(sessions, maxSessions(config), running, hasLiveJob);
     }
     // Dual-emit during the deprecation window: the frozen legacy `done` first, then
     // the canonical `agent_end` last, so a consumer reading "last line = terminal"
@@ -476,11 +537,38 @@ async function streamRun(
       write(eventToJsonl("error", { where: "agent.run", message: err instanceof Error ? err.message : String(err) }));
     }
   } finally {
-    drainElicitations(); // clear the sink + any leftover resolver before the next turn
+    drainElicitations(); // settle this turn's asks + drop its sink
     res.off("close", onClose);
     res.off("error", onClose);
     for (const s of subs) s.dispose();
     if (!closed) res.end();
+  }
+}
+
+/**
+ * Evict least-recently-used sessions past `cap` (Map iteration is insertion
+ * order, so the oldest key is the LRU). SKIP any session whose turn is in flight
+ * (in `running`) or that still owns a running background job (`hasLiveJob`) —
+ * dropping its Agent would abort a live turn or strand a detached child. If no
+ * session is evictable the map stays briefly over cap; the next turn retries.
+ * `cap <= 0` disables the bound (unbounded).
+ */
+function evictSessions(
+  sessions: Map<string, Agent>,
+  cap: number,
+  running: Set<string>,
+  hasLiveJob: (agent: Agent) => boolean,
+): void {
+  if (cap <= 0) return;
+  while (sessions.size > cap) {
+    let victim: string | undefined;
+    for (const [id, agent] of sessions) {
+      if (running.has(id) || hasLiveJob(agent)) continue;
+      victim = id;
+      break;
+    }
+    if (victim === undefined) break; // nothing evictable right now
+    sessions.delete(victim);
   }
 }
 
