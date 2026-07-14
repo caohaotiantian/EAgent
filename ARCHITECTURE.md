@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["59 extensions<br/>src/extensions/"]
+        EXTS["63 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -329,12 +329,15 @@ sequenceDiagram
     C->>S: POST /run (input, session?)
     S->>S: auth (EAGENT_TOKEN) · body cap (413) · busy lock (409)
     S->>A: clear · load session transcript · run(input)
-    A-->>S: text_delta / tool_* / usage events
+    A-->>S: text_delta / reasoning_delta / tool_* (with id) / usage events
     S-->>C: JSONL stream
-    A-->>S: done (reason)
+    A-->>S: run complete (reason)
     S->>S: save session transcript
-    S-->>C: done event (reason, usage)
+    S-->>C: agent_end (reason, usage, session) — canonical terminal; legacy done still emitted (deprecated)
 ```
+
+The `/run` stream and the CLI `--json` stream share one canonical event schema,
+documented in [`docs/JSONL.md`](docs/JSONL.md).
 
 `GET /health` returns `{ ok, model, extensions, sessions, auth }` (where `auth`
 is `"required"` or `"open"`); `DELETE /sessions/:id` forgets a conversation.
@@ -378,14 +381,15 @@ flowchart TB
 Each is a single file under `src/extensions/`, rides the `ExtensionAPI`, ships
 with offline tests, and gates privileged work behind a capability. They load in
 the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`,
-`skills`, `mcp`, `codeact`, `subagents`, `dynamic-workflow`, `templates`, `teams`,
-`memory`, `prune`, `compact`, `recovery`, `output-contract`, `content-guard`,
-`provenance`, `circuit-breaker`, `planmode`, `session`, `packages`, `trace`,
-`context-files`, `microagents`, `limits`, `cost`, `budget-cap`, `self`, `web`,
-`checkpoint`, `introspect`, `journal`, `todo`, `goal`, `prompts`, `flow-guard`,
-`risk-guard`, `headless-flags`, `bash-policy`, `sandbox-tiers`, `config-hooks`,
-`integrity`, `write-guard`, `secret-guard`, `sweep-edit`, `citations`, `env-report`,
-`evals`, `handoff`, `drift-probe`, `skills-hardening`, `ask`, `routing`,
-`fallback-routing`, `reliability`, `time-travel`, `otel-exporter`,
-`reasoning-search`, `self-improve`, `config`. The README has a one-line description
-and capability for each; `docs/EXTENSIONS.md` is the author's guide.
+`skills`, `mcp`, `codeact`, `subagents`, `subagent-jobs`, `dynamic-workflow`,
+`templates`, `teams`, `memory`, `prune`, `compact`, `recovery`, `output-contract`,
+`content-guard`, `provenance`, `circuit-breaker`, `planmode`, `session`, `packages`,
+`trace`, `context-files`, `microagents`, `playbook`, `limits`, `cost`, `budget-cap`,
+`self`, `web`, `checkpoint`, `introspect`, `journal`, `todo`, `goal`, `prompts`,
+`flow-guard`, `risk-guard`, `headless-flags`, `bash-policy`, `sandbox-tiers`,
+`config-hooks`, `integrity`, `write-guard`, `secret-guard`, `sweep-edit`,
+`citations`, `env-report`, `evals`, `handoff`, `drift-probe`, `skills-hardening`,
+`ask`, `routing`, `watchdog`, `fallback-routing`, `reliability`, `time-travel`,
+`otel-exporter`, `reasoning-search`, `self-improve`, `self-extend-floor`, `config`.
+The README has a one-line description and capability for each; `docs/EXTENSIONS.md`
+is the author's guide.

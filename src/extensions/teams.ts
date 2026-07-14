@@ -44,6 +44,7 @@ import type { Config } from "../kernel/store.js";
 import { ToolRegistry } from "../kernel/registry.js";
 import type { Message, Tool, ToolResult } from "../kernel/types.js";
 
+import { SPAWN_CAPS } from "./lib/child-registry.js";
 import {
   buildTemplateChild,
   resolveTemplate,
@@ -101,8 +102,12 @@ export const PATTERN_PLAYBOOK = `Coordination patterns (select and apply the one
 
 Selection heuristic: start with orchestrator; if subtasks are independent and speed matters, parallel; if they must build in order, sequential; if quality is critical, generator-verifier or consensus; if agents must build on each other's findings continuously, blackboard.`;
 
-/** The spawn-class capability set; a member tool intersecting it is the recursion-guard escape. */
-export const SPAWN_CAPS = ["agent:spawn", "workflow:run"] as const;
+/**
+ * The spawn-class capability set; a member tool intersecting it is the
+ * recursion-guard escape. The single definition lives in `lib/child-registry.ts`;
+ * re-exported here for back-compat with `subagent-jobs.ts`'s `./teams.js` import.
+ */
+export { SPAWN_CAPS };
 
 /** The roster member-count cap. */
 export const MAX_MEMBERS = 16;

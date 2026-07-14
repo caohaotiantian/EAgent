@@ -20,8 +20,10 @@
  * Crucially, a child SHARES the parent's providers and capabilities (so it
  * costs nothing extra to wire up and is governed by the same permission layer)
  * but gets its OWN tool registry, which we populate by copying the parent's
- * tools EXCEPT `spawn_agent` itself. That single omission is the recursion
- * guard: a child cannot spawn grandchildren, so a runaway tree is impossible.
+ * tools EXCEPT any that declare a spawn-class capability
+ * (`agent:spawn`/`workflow:run`). That capability strip is the recursion guard: a
+ * child inherits no spawner, so it cannot spawn grandchildren and a runaway tree
+ * is impossible.
  */
 
 import { Agent } from "../kernel/agent.js";
@@ -29,8 +31,14 @@ import { CapabilityManager } from "../kernel/capabilities.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { ToolRegistry } from "../kernel/registry.js";
-import type { JSONSchema, Logger, Message, Tool, ToolResult, UI } from "../kernel/types.js";
+import type { JSONSchema, Logger, Message, ToolResult, UI } from "../kernel/types.js";
 import { validate } from "../kernel/validate.js";
+
+import { childRegistryFrom } from "./lib/child-registry.js";
+
+// Re-exported for callers that import the recursion guard from this module (e.g.
+// tests); the capability-based implementation lives in the shared lib helper.
+export { childRegistryFrom };
 
 /** The tool name, also the registration that children must never inherit. */
 const SPAWN_TOOL = "spawn_agent";
@@ -41,13 +49,17 @@ const DEFAULT_CHILD_SYSTEM =
 
 const DEFAULT_MAX_TURNS = 8;
 
+/** Default fan-out (breadth) cap on a single parallel/chain spawn_agent call,
+ *  mirroring teams.ts MAX_MEMBERS. Overridable via config `subagents.maxFanout`. */
+const DEFAULT_MAX_FANOUT = 16;
+
 export default function activate(e: ExtensionAPI): void {
   e.grantCapability("agent:spawn");
 
   /**
    * Build a child's tool registry: a fresh registry seeded with every tool the
-   * parent currently has, minus `spawn_agent`. Exposed at module scope so the
-   * recursion guard can be exercised directly in tests.
+   * parent currently has, minus every spawn-class tool (the shared capability
+   * strip). Delegates to the lib `childRegistryFrom`.
    */
   const buildChildRegistry = (): ToolRegistry => childRegistryFrom(e.agent.tools.list());
 
@@ -230,6 +242,16 @@ export default function activate(e: ExtensionAPI): void {
         const prompts = asPrompts(args.prompts);
         if (!prompts) {
           return fail(`mode=${mode} requires a non-empty string array \`prompts\`.`);
+        }
+
+        // Breadth guard: one call must not fan out to an unbounded number of
+        // children. Reject before spawning any child; raise via subagents.maxFanout.
+        const maxFanout = e.config.int("subagents.maxFanout", DEFAULT_MAX_FANOUT);
+        if (prompts.length > maxFanout) {
+          return fail(
+            `mode=${mode} requested ${prompts.length} children, exceeding the subagents.maxFanout cap of ${maxFanout}. ` +
+              "Reduce `prompts` or raise subagents.maxFanout.",
+          );
         }
 
         if (mode === "parallel") {
@@ -461,19 +483,6 @@ export async function runTypedChild(
   }
 
   return fail(`${CONTRACT_VIOLATION} child output did not match the schema after one retry:\n- ${second.result.errors.join("\n- ")}`);
-}
-
-/**
- * Copy a parent's active tools into a fresh registry, omitting `spawn_agent`.
- * This is the recursion guard, factored out so tests can assert it directly.
- */
-export function childRegistryFrom(parentTools: Tool[]): ToolRegistry {
-  const registry = new ToolRegistry();
-  for (const tool of parentTools) {
-    if (tool.spec.name === SPAWN_TOOL) continue;
-    registry.register(tool);
-  }
-  return registry;
 }
 
 /** Coerce an argument into a non-empty array of strings, or undefined. */

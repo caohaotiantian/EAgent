@@ -99,7 +99,8 @@ const ROLES: readonly Role[] = ["system", "user", "assistant", "tool"];
 export function isMessage(value: unknown): value is Message {
   if (typeof value !== "object" || value === null) return false;
   const m = value as { role?: unknown; content?: unknown };
-  return typeof m.role === "string" && (ROLES as readonly string[]).includes(m.role) && Array.isArray(m.content);
+  return typeof m.role === "string" && (ROLES as readonly string[]).includes(m.role) && Array.isArray(m.content) &&
+    m.content.every((b) => typeof b === "object" && b !== null && typeof (b as { type?: unknown }).type === "string");
 }
 
 // ---------------------------------------------------------------------------

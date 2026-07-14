@@ -7,7 +7,7 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~2,244 lines, held just
+The kernel is **seven primitives and nothing more** (~2,248 lines, held just
 under a hard 2,250-line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
@@ -39,7 +39,7 @@ flowchart TB
         X1["core-tools"]
         X2["skills · mcp · memory"]
         X3["self · web · checkpoint"]
-        X4["+ 52 more"]
+        X4["+ 56 more"]
     end
 
     subgraph PROVIDERS["Providers — src/providers/"]
@@ -94,7 +94,9 @@ alias for `ANTHROPIC_API_KEY` (the gateway convention).
 Any OpenAI-compatible endpoint works through the OpenAI provider — e.g. a local
 Ollama: `OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama node dist/cli.js -p openai -m llama3`.
 For newer official OpenAI models that require `max_completion_tokens`, set
-`OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`.
+`OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`. The output-length cap defaults to
+4096 tokens; raise it per provider with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS`
+/ `GEMINI_MAX_TOKENS` for long generations or high thinking budgets.
 
 ## How a turn works
 
@@ -205,7 +207,7 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `codeact`     | code-as-action: `run_code` runs JS/Python in a subprocess boundary, with an optional off-by-default **OS-sandbox isolation tier** (`workspace-write`/`no-network` recommended; `readonly` is degraded on the `bwrap` backend — RW6c-4) via the shared `lib/sandbox` launchers; **fails closed** once a tier is selected if no backend | `/code`, `/codeact` | `code:exec` |
 | `subagents`   | `spawn_agent` runs isolated child agents (single / parallel / chain) | `/agents` | `agent:spawn` |
 | `subagent-jobs` | async background job lifecycle over the child machinery — `launch_job` fires a child without blocking and returns a jobId; `job_status` inspects, `collect_job` awaits/merges the answer, `cancel_job` stops one; concurrency- and retention-capped, recursion-guarded, dispose cancels running jobs. Jobs are **in-process, not persisted** (they end with the process). `EAGENT_SUBAGENT_JOBS=off` kill switch | `/jobs` | `agent:spawn` |
-| `reasoning-search` | **search over forked agents** — `best_of_n` snapshots the current state, forks N **governed** children (`childScope` gate filters + a pruned registry that removes `best_of_n`/`tree_search`/`spawn_agent` so a fork can't re-fork), runs each on the sub-task, scores (`judge`/`shortest`/`longest`) and returns the argmax. **`tree_search`** generalizes it to multi-step **Tree-of-Thought beam search**: at each depth it expands the frontier (`branch` children per node), scores, keeps the top `beam`, and repeats to `depth`, returning the global best-scoring thought — bounded by a hard `maxNodes` cap, cancellable, losing branches never touch the parent transcript. **`graph_search`** adds **Graph-of-Thought** operations a tree can't: it **generates** `branch` thoughts, **aggregates** them into one combined answer (a multi-parent merge), optionally **refines** the best in place, and returns the global best across all three — so the three tools span the canonical reasoning-search family (best-of-N · ToT · GoT). All off by default (`/reasoning-search on`, `EAGENT_REASONING_SEARCH=off`) | `/reasoning-search` | `agent:spawn` |
+| `reasoning-search` | **search over forked agents** — `best_of_n` snapshots the current state, forks N **governed** children (`childScope` gate filters + a pruned registry that removes every spawn-class tool — any declaring `agent:spawn`/`workflow:run` — so a fork can't re-fork), runs each on the sub-task, scores (`judge`/`shortest`/`longest`) and returns the argmax. **`tree_search`** generalizes it to multi-step **Tree-of-Thought beam search**: at each depth it expands the frontier (`branch` children per node), scores, keeps the top `beam`, and repeats to `depth`, returning the global best-scoring thought — bounded by a hard `maxNodes` cap, cancellable, losing branches never touch the parent transcript. **`graph_search`** adds **Graph-of-Thought** operations a tree can't: it **generates** `branch` thoughts, **aggregates** them into one combined answer (a multi-parent merge), optionally **refines** the best in place, and returns the global best across all three — so the three tools span the canonical reasoning-search family (best-of-N · ToT · GoT). All off by default (`/reasoning-search on`, `EAGENT_REASONING_SEARCH=off`) | `/reasoning-search` | `agent:spawn` |
 | `dynamic-workflow` | the `workflow` tool executes a model-emitted dependency DAG of `tool`/`agent` steps with `${id}` substitution; independent steps run in parallel | `/workflow` | `workflow:run` |
 | `templates`   | named, file-based, inheritable **agent templates** (`<name>.md` frontmatter + body = system prompt; single-parent `extends`); `spawn_template` delegates to a scoped isolated child, `/template use` reconfigures the live session (become) with a tool allow-list veto; opt-in name+description catalog (`/template catalog on`), `EAGENT_TEMPLATES=off` kill switch | `/template` | `agent:spawn` |
 | `teams`       | **team orchestration**: `run_team` runs a template-backed lead agent supervising template-backed member agents (file `<name>.md` roster **or** an inline roster) over a shared run-scoped board, selecting a coordination pattern (orchestrator, parallel, sequential, generator-verifier, consensus, blackboard) from a documented playbook (optionally pinned); members are leaf agents barred from any spawn/workflow tool; bounded (lead/member turns, delegate cap, roster cap, board caps), `EAGENT_TEAMS=off` kill switch | `/team` | `agent:spawn` |
@@ -214,7 +216,7 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `compact`     | token-gated structured conversation compaction via `transformContext` — folds the older prefix at a user-turn boundary into `## Decisions`/`## Files`/`## Open threads`, keeps the last K user turns, re-injects a byte-capped pinned block; off by default (`/compact on`, `EAGENT_COMPACT=off` to kill) | `/compact` | — |
 | `recovery`    | turns a *failed* tool result into a corrective nudge via `afterToolCall`, keyed to EAgent's own error strings, so the model self-corrects (`EAGENT_RECOVERY=off` to disable) | — | — |
 | `output-contract`| schema-validated final output — set `Agent.outputSchema` and the model's answer is validated/coerced (reusing the kernel input-validator) via a per-run `respond` tool, surfaced typed on `Agent.output`; invalid answers drive a bounded validate-and-reask with the exact per-field errors, and on the corrective turn the provider is made to force `respond` at decode time (`toolChoice`, graceful degrade) so output becomes near-guaranteed (inert with no schema; `EAGENT_OUTPUT_CONTRACT=off`) | `/respond` | — |
-| `content-guard`| ingress trust labeling on `afterToolCall` — strips invisible injection-vector Unicode and wraps *successful* foreign-tool output (default `net:fetch`/`mcp:call`/`mcp:read`) in an `<untrusted-content>` provenance fence (on by default; `EAGENT_CONTENT_GUARD=off`) | `/content-guard` | — |
+| `content-guard`| ingress trust labeling on `afterToolCall` — strips invisible injection-vector Unicode and wraps *successful* foreign-tool output (default `net:fetch`/`mcp:call`/`mcp:read`) in a non-forgeable (per-activation nonce'd) `<untrusted-content-…>` provenance fence — the body's own fence sentinels are escaped, so foreign content can neither spoof nor break out of the envelope; also fences local `shell:exec`/`fs:read` output when `contentGuard.fenceLocal` is set (the hardened preset sets it; else `/config set contentGuard.fenceLocal true`) (on by default; `EAGENT_CONTENT_GUARD=off`) | `/content-guard` | — |
 | `circuit-breaker` | tool-call repetition / consecutive-failure fail-fast — buckets calls by signature (`name + canonical(args)`); the 2nd identical call earns a non-blocking steer, the N-th (default 3) or N consecutive failures ask/block (on by default, mode `ask`; `EAGENT_CIRCUIT_BREAKER=off`) | `/circuit-breaker` | — |
 | `planmode`    | human-in-the-loop approval gate before mutating tools run | `/plan` | — |
 | `session`     | save / load / handoff for transcripts | `/save`, `/load`, `/sessions`, `/handoff` | `fs:read`, `fs:write` |
@@ -238,7 +240,7 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `todo`        | session-scoped in-memory todo list — `todowrite` replaces and echoes the list | `/todos` | — |
 | `goal`         | pins the run's **objective + acceptance criteria** in front of the model every turn (anti-drift `transformContext`) and runs an advisory, offline completion check on `agent_end`; adds a `setgoal` tool + opt-in model-judge; inert until a goal is set (`EAGENT_GOAL=off`) | `/goal` | — |
 | `prompts`     | saved prompt templates / macros with `$1 $2 $*` args (Emacs abbrevs) | `/prompt`, `/prompt-save`, `/prompt-remove`, `/prompts` | — |
-| `flow-guard`  | compositional egress gate: taints a session on a source capability (default `shell:exec`) or sensitive data, then holds egress (`net:fetch`) — ask or block | `/flow-guard` | — |
+| `flow-guard`  | compositional egress gate: taints a session on a source capability (default `shell:exec`) or sensitive data, then holds egress (default `net:fetch`/`mcp:call`) — ask or block; also holds a **network-reaching `shell:exec`** command (default `curl`/`wget`/`nc`/`ssh`/…, store-overridable via `networkCommands`) once the session carries *data* taint (a sensitive-path read or a credential-shaped secret), so `read secret → bash curl` is gated while plain `build → curl` is not — residual: a shell-read secret matching none of the four credential shapes sets only capability taint, so it is not caught | `/flow-guard` | — |
 | `provenance`  | CaMeL-lite structural injection defense — tags foreign-source results (`net:fetch`/`mcp:call`/`mcp:read`) into a bounded segment store on `afterToolCall`, then on `beforeToolCall` gates a privileged **sink** (`shell:exec`/`net:fetch`/`mcp:call`/`fs:write`) whose string arg verbatim-derives (≥`minLen` segment) from untrusted content — prompts (default) or blocks (strict), redacted; a *different axis* from `flow-guard` (source-taint→any sink vs sensitive-pattern→egress) and `content-guard` (gate vs label). Off by default (`/provenance on`, `EAGENT_PROVENANCE=off`) | `/provenance` | — |
 | `risk-guard`  | LLM-based semantic risk analyzer on `beforeToolCall` — classifies sensitive calls (default `shell:exec`) via a tool-less provider sub-call and asks or blocks on a RISKY verdict (off by default; `EAGENT_RISK_GUARD=off`) | `/risk-guard` | — |
 | `headless-flags` | CI safety net — when no TTY / a `CI` signal is detected, rewrites shell commands to their non-interactive form (`apt-get install -y`, `npm init -y`) and prepends env guards (`GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`) so a prompt or `$EDITOR` can't hang an unattended run; loads before `bash-policy`, inert in an interactive TTY (`EAGENT_HEADLESS_FLAGS=off`) | `/headless` | — |
@@ -259,6 +261,7 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
 | `fallback-routing` | **model/provider fallback chains** — registers a composite `fallback` provider that streams an ordered `{provider, model}` chain, failing over to the next entry only *before* the first event is emitted (the no-double-emit invariant), with a per-run circuit breaker; off by default (`/fallback-routing on`, `EAGENT_FALLBACK_ROUTING=off`) | `/fallback-routing` | — |
 | `reliability` | **same-provider retry + model downshift** on the `onProviderError` seam — bounded exponential backoff-with-jitter retry of a transient pre-first-event stream failure (conservative allowlist; never re-retries `http.ts`-owned 429/5xx), optionally downshifting the model; a *different axis* from `fallback-routing` (cross-provider) — it never switches provider. Off by default (`/reliability on`, `EAGENT_RELIABILITY=off`) | `/reliability` | — |
+| `watchdog`    | **idle deadline on the main provider stream** — wraps the default provider in place and races each `iterator.next()` against an `idleMs` timeout that is *re-armed on every event*, so a stream that goes silent past the deadline is aborted (the turn never hangs) while a long-but-progressing generation is never touched. The `next()`-race, not abort alone, is what unblocks even a signal-ignoring stall; a composed `AbortController` also aborts to free the underlying fetch. A pre-commit idle surfaces to the `onProviderError` retry seam; a mid-stream idle is a fatal turn error (no double-emit). Ships **on** (a safety net), inert unless a stream stalls; wraps the default-provider path only (not arbitrary named/composite providers). `watchdog.idleMs` default 120000; raise it for very large thinking budgets (TTFT can exceed the deadline before the first token). `EAGENT_WATCHDOG=off` | — | — |
 | `config`      | **the centralized configuration surface** — inspect and override every knob through the injected `e.config` (value keys resolve override > env > file > default; enablement is env-`off`-veto > override > store > default, the config file excluded). `/config list\|get\|set\|unset\|reload` makes the whole surface discoverable and tunable at runtime, backed by `~/.eagent/config.json`; secrets are never printed (`EAGENT_CONFIG=off`) | `/config` | — |
 
 The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
@@ -343,14 +346,33 @@ curl -s localhost:8787/run -d '{"input":"summarize package.json"}'
 curl -s localhost:8787/run -d '{"input":"now in one line","session":"abc"}'
 ```
 
+`/run` streams line-delimited JSON — the **same** canonical event schema the CLI
+`--json` mode emits, documented in [`docs/JSONL.md`](docs/JSONL.md).
+
 The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
 `Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
 Per-session state is LRU-bounded at `EAGENT_MAX_SESSIONS` (default 1000; `0` disables the cap).
+The `session` id multiplexes conversations, not trust: extension state is shared across
+sessions in one process, so isolate tenants by running **one process per tenant** (see `SECURITY.md`).
+Set `EAGENT_HARDENED=1` for a one-switch **defense-in-depth** profile: it enables
+`risk-guard` (LLM-classifies every `shell:exec` call), `provenance` (injection-defends
+tool output), `sandbox.tier=workspace-write` (confines subprocess writes to the
+workspace), and `contentGuard.fenceLocal` (content-guard also nonce-fences local
+`shell:exec`/`fs:read` output). It is **orthogonal to `yolo:false`** — it does not change the capability
+fallback — and is a host-level flag the CLI honors too. Fail-open with no sandbox
+backend (warned at startup); the env var is the single override under hardened
+(`EAGENT_RISK_GUARD=off` / `EAGENT_PROVENANCE=off` / `EAGENT_SANDBOX_TIER=<tier>`).
+See `SECURITY.md`.
 To run sandboxed (the posture `SECURITY.md` recommends) there is a `Dockerfile`
 (non-root, workspace-confined):
 
 ```bash
-docker build -t eagent . && docker run -p 8787:8787 -v "$PWD:/workspace" eagent
+docker build -t eagent .
+# The server binds 127.0.0.1 by default; inside a container it must bind 0.0.0.0
+# to be reachable via -p, and a non-loopback bind requires EAGENT_TOKEN
+# (fail-closed) — sent as `Authorization: Bearer <token>` on /run.
+docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
+  -v "$PWD:/workspace" eagent
 ```
 
 ## Embedding the kernel
@@ -380,7 +402,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  62 built-in extensions, all riding the ExtensionAPI
+src/extensions/  63 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
@@ -392,6 +414,8 @@ test/            the full offline suite — every primitive and extension
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — the full design, with diagrams.
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
+- [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
+  the CLI `--json` stream and the HTTP `/run` stream.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.

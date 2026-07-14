@@ -28,6 +28,7 @@
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
 import { text } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 // -- scoring constants (tuned; Design 4.2 / 4.4) ----------------------------
 
@@ -240,16 +241,17 @@ export default function activate(e: ExtensionAPI): () => void {
       const messages: Message[] = [
         { role: "user", content: [{ type: "text", text: probe.prompt }] },
       ];
-      let reply = "";
-      for await (const ev of provider.stream({
-        systemPrompt: PROBE_SYSTEM_PROMPT,
-        messages,
-        tools: [],
-        model: e.agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") reply = textOf(ev.message);
-      }
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: PROBE_SYSTEM_PROMPT,
+          messages,
+          tools: [],
+          model: e.agent.model,
+        },
+        { timeoutMs: e.config.int("drift-probe.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      const reply = textOf(msg);
       return reply.trim().length > 0 ? reply : undefined;
     } catch {
       return undefined;

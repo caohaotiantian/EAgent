@@ -30,6 +30,8 @@
     "eagent": "./dist/cli.js",
     "eagent-serve": "./dist/server.js"
   },
+  "main": "./dist/kernel/index.js",
+  "types": "./dist/kernel/index.d.ts",
   "exports": {
     ".": "./dist/kernel/index.js",
     "./host": "./dist/host.js",
@@ -48,7 +50,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "eval": "node --import tsx src/eval-runner.ts evals",

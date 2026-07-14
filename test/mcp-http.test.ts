@@ -96,6 +96,13 @@ before(async () => {
         res.end(`data: ${data}\n\n`);
       } else if (args.msg === "__oversize_json__") {
         json({ content: [{ type: "text", text: "x".repeat(8 * 1024) }] });
+      } else if (args.msg === "__stall_body__") {
+        // Flush headers, then hold the body open forever — exercises the request
+        // deadline spanning the BODY read, not just time-to-headers (GEN-3). A
+        // client abort (the timeout) closes the request, so we destroy then.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.write("{"); // a partial body that never completes
+        req.on("close", () => res.destroy());
       } else {
         json({ content: [{ type: "text", text: "pong: " + args.msg }] });
       }
@@ -180,6 +187,32 @@ test("AC2: an oversized SSE HTTP reply is capped and surfaced as an 'exceeded' e
   }
 });
 
+test("GEN-3: an HTTP MCP server that stalls the body times out (deadline spans the read)", async () => {
+  const prev = process.env.EAGENT_MCP_REQUEST_TIMEOUT_MS;
+  process.env.EAGENT_MCP_REQUEST_TIMEOUT_MS = "150"; // ample for the instant handshake, tight for the stall
+  const { agent, host } = makeHarness({
+    responder: [
+      { toolCalls: [{ name: "mcp__httpfix__ping", arguments: { msg: "__stall_body__" } }] },
+      { text: "done" },
+    ],
+    fallback: "allow",
+  });
+  try {
+    await host.use("mcp", activate);
+    assert.ok(agent.tools.has("mcp__httpfix__ping"), "the handshake completed within the timeout");
+    await agent.run("please ping");
+    const toolMsg = agent.messages.find((m) => m.role === "tool");
+    const block = toolMsg?.content.find((b) => b.type === "tool_result");
+    assert.ok(block && block.type === "tool_result");
+    assert.ok(block.isError, "a stalled response body must surface as an error, not hang the turn");
+    assert.match(block.content, /timed out/, "the deadline fired during the body read");
+  } finally {
+    await host.dispose();
+    if (prev === undefined) delete process.env.EAGENT_MCP_REQUEST_TIMEOUT_MS;
+    else process.env.EAGENT_MCP_REQUEST_TIMEOUT_MS = prev;
+  }
+});
+
 test("AC2: a within-cap SSE HTTP reply parses and resolves normally", async () => {
   const prev = process.env.EAGENT_MAX_MCP_READ_BYTES;
   process.env.EAGENT_MAX_MCP_READ_BYTES = "2048";
@@ -252,7 +285,7 @@ test("RW7c-2: an MCP tool call injects the traceparent for an allowlisted host, 
   const prevAllow = process.env.EAGENT_OTEL_PROPAGATE_HOSTS;
   const TP = traceparent("c".repeat(32), "d".repeat(16));
   // Simulate otel by publishing a traceparent at tool_start (its real writer).
-  const publish = (h: { agent: { hooks: { on(ev: string, fn: (p: { call: { id: string } }) => void): void } } }): void => {
+  const publish = (h: ReturnType<typeof makeHarness>): void => {
     h.agent.hooks.on("tool_start", ({ call }) => setTraceparent(call.id, TP));
     h.agent.hooks.on("tool_end", ({ call }) => clearTraceparent(call.id));
   };

@@ -28,6 +28,7 @@
 import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 /** The two-tier classification the heuristic / sub-call returns. */
 export type Tier = "cheap" | "flagship";
@@ -240,17 +241,17 @@ export default function activate(e: ExtensionAPI): () => void {
       const agent = currentActingAgent() ?? e.agent;
       const provider = agent.providers.get();
       if (!provider) return undefined;
-      let reply = "";
-      for await (const ev of provider.stream({
-        systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-        messages: [...messages],
-        tools: [],
-        model: agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") reply = textOf(ev.message);
-      }
-      return parseTier(reply);
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+          messages: [...messages],
+          tools: [],
+          model: agent.model,
+        },
+        { timeoutMs: e.config.int("routing.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      return parseTier(textOf(msg));
     } catch {
       return undefined;
     }

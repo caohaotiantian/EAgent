@@ -31,52 +31,60 @@ export async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable
   const decoder = new TextDecoder();
   const maxEvent = maxSseEventBytes();
   let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let m: RegExpExecArray | null;
-    while ((m = /\r?\n\r?\n/.exec(buffer)) !== null) {
-      const raw = buffer.slice(0, m.index);
-      buffer = buffer.slice(m.index + m[0].length);
-      const msg: SSEMessage = { data: "" };
+  // try/finally so that if the consumer throws (e.g. on a provider error frame) or
+  // breaks early, the generator's `.return()` cancels the underlying stream and the
+  // socket is released rather than left dangling. Cancel is a no-op on a done stream,
+  // so it is safe on the normal-completion path too.
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let m: RegExpExecArray | null;
+      while ((m = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        const raw = buffer.slice(0, m.index);
+        buffer = buffer.slice(m.index + m[0].length);
+        const msg: SSEMessage = { data: "" };
+        const dataLines: string[] = [];
+        for (const line of raw.split(/\r?\n/)) {
+          if (line.startsWith("event:")) msg.event = line.slice(6).trim();
+          // Per the SSE spec, strip only a single leading space after the colon
+          // (not all whitespace), so payloads with significant edge whitespace
+          // survive. Trailing \r is already gone from the CRLF-aware line split.
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+        msg.data = dataLines.join("\n");
+        yield msg;
+      }
+      // OOM guard: whatever remains is one not-yet-terminated event. A stream that
+      // never sends `\n\n` would grow `buffer` without bound, so cap a single
+      // incomplete event and abort the stream (surfaces as a provider error).
+      // `buffer.length` is UTF-16 code units (≈ bytes; over-approximates memory —
+      // the JS string, at ≤2 bytes/unit, is what can OOM), which is what we bound.
+      if (buffer.length > maxEvent) {
+        throw new Error(`parseSSE: an SSE event exceeded ${maxEvent} bytes with no terminator`);
+      }
+    }
+    // Stream ended: flush the decoder and emit a final event that arrived without a
+    // trailing blank line (a proxy closing early would otherwise drop the last
+    // token). Only emit when a `data:` line is present, so a clean close (empty
+    // buffer) or a stray fragment yields nothing.
+    buffer += decoder.decode();
+    const tail = buffer.trim();
+    if (tail) {
       const dataLines: string[] = [];
-      for (const line of raw.split(/\r?\n/)) {
+      const msg: SSEMessage = { data: "" };
+      for (const line of tail.split(/\r?\n/)) {
         if (line.startsWith("event:")) msg.event = line.slice(6).trim();
-        // Per the SSE spec, strip only a single leading space after the colon
-        // (not all whitespace), so payloads with significant edge whitespace
-        // survive. Trailing \r is already gone from the CRLF-aware line split.
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
       }
-      msg.data = dataLines.join("\n");
-      yield msg;
+      if (dataLines.length > 0) {
+        msg.data = dataLines.join("\n");
+        yield msg;
+      }
     }
-    // OOM guard: whatever remains is one not-yet-terminated event. A stream that
-    // never sends `\n\n` would grow `buffer` without bound, so cap a single
-    // incomplete event and abort the stream (surfaces as a provider error).
-    // `buffer.length` is UTF-16 code units (≈ bytes; over-approximates memory —
-    // the JS string, at ≤2 bytes/unit, is what can OOM), which is what we bound.
-    if (buffer.length > maxEvent) {
-      throw new Error(`parseSSE: an SSE event exceeded ${maxEvent} bytes with no terminator`);
-    }
-  }
-  // Stream ended: flush the decoder and emit a final event that arrived without a
-  // trailing blank line (a proxy closing early would otherwise drop the last
-  // token). Only emit when a `data:` line is present, so a clean close (empty
-  // buffer) or a stray fragment yields nothing.
-  buffer += decoder.decode();
-  const tail = buffer.trim();
-  if (tail) {
-    const dataLines: string[] = [];
-    const msg: SSEMessage = { data: "" };
-    for (const line of tail.split(/\r?\n/)) {
-      if (line.startsWith("event:")) msg.event = line.slice(6).trim();
-      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-    }
-    if (dataLines.length > 0) {
-      msg.data = dataLines.join("\n");
-      yield msg;
-    }
+  } finally {
+    await reader.cancel().catch(() => {});
   }
 }
 

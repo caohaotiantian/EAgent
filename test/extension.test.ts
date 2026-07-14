@@ -32,6 +32,31 @@ test("unloading an extension disposes every registration", async () => {
   assert.equal(host.has("demo"), false);
 });
 
+test("a granted capability is torn down on unload like every other registration", async () => {
+  // fallback:"deny" so isGranted reports false for an ungranted cap — the default
+  // allow harness would report true even after a correct revoke.
+  const { agent, host } = makeHarness({ fallback: "deny" });
+  await host.use("granter", (e: ExtensionAPI) => {
+    e.grantCapability("ext:cap");
+  });
+  assert.equal(agent.capabilities.isGranted("ext:cap"), true);
+  await host.unload("granter");
+  assert.equal(agent.capabilities.isGranted("ext:cap"), false, "the grant must be revoked on unload");
+});
+
+test("a granted capability is re-granted (not leaked) across a reload", async () => {
+  const { agent, host } = makeHarness({ fallback: "deny" });
+  await host.use("granter", (e: ExtensionAPI) => {
+    e.grantCapability("ext:cap");
+  });
+  await host.reload("granter");
+  // The reload re-invokes the inline factory, so the grant is present again —
+  // and, crucially, not doubly-held: a single unload fully revokes it.
+  assert.equal(agent.capabilities.isGranted("ext:cap"), true);
+  await host.unload("granter");
+  assert.equal(agent.capabilities.isGranted("ext:cap"), false, "reload must not leak a second grant");
+});
+
 test("a failed activation leaves no half-wired registrations", async () => {
   const { agent, host, commands } = makeHarness();
   await assert.rejects(() =>
@@ -92,9 +117,15 @@ test("a later same-id activation tears down the earlier one (later wins, no leak
 test("session lifecycle events fire around a reload", async () => {
   const { host, agent } = makeHarness();
   const events: string[] = [];
-  agent.hooks.on("session_shutdown", () => events.push("down"));
-  agent.hooks.on("session_start", () => events.push("up"));
-  agent.hooks.on("reload", () => events.push("reload"));
+  agent.hooks.on("session_shutdown", () => {
+    events.push("down");
+  });
+  agent.hooks.on("session_start", () => {
+    events.push("up");
+  });
+  agent.hooks.on("reload", () => {
+    events.push("reload");
+  });
   await host.use("x", () => {});
   await host.reload();
   assert.deepEqual(events, ["down", "reload", "up"]);

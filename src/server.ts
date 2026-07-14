@@ -36,6 +36,7 @@ import type { Agent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
 import type { AgentState, Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
+import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
@@ -343,7 +344,7 @@ async function streamRun(
       elicit.pending.set(id, settle);
       timer = setTimeout(() => settle(null), askTimeoutMs);
       if (typeof timer.unref === "function") timer.unref(); // don't keep the event loop alive
-      write({ type: "action_required", id, question, options: options ?? null });
+      write(eventToJsonl("action_required", { id, question, options }));
     });
 
   // Settle every outstanding ask for this turn with null (fallback) and drop the
@@ -371,21 +372,25 @@ async function streamRun(
   // streams a {type:"error"} line and hits the finally, not a silent 200 with no
   // terminal line. `subs` is declared out here so the finally can dispose it.
   let subs: { dispose(): void }[] = [];
+  // The kernel emits the `error` hook on both the maxTurns exhaustion path (which
+  // does NOT throw — reason stays "stop") and a real run failure (which then
+  // throws). Subscribing here — as the CLI does — emits the JSONL `error` line for
+  // the maxTurns case the server used to drop; `errorEmitted` then dedupes so a
+  // throw already surfaced via the hook is not written twice by the catch.
+  let errorEmitted = false;
   try {
     // Restore this session's state (transcript, usage, model, prompt, thinking) so
     // the turn resumes from exactly where the session left off. A new session — or a
     // sessionless /run — restores the pristine `initial` snapshot.
     agent.restore((session ? sessions.get(session) : undefined) ?? initial);
 
-    subs = [
-      agent.hooks.on("text_delta", ({ text }) => write({ type: "text_delta", text })),
-      agent.hooks.on("message", ({ message }) => write({ type: "message", role: message.role, content: message.content })),
-      agent.hooks.on("tool_start", ({ call }) => write({ type: "tool_start", name: call.name, arguments: call.arguments })),
-      agent.hooks.on("tool_end", ({ call, result }) =>
-        write({ type: "tool_end", name: call.name, isError: result.isError ?? false, content: result.content }),
-      ),
-      agent.hooks.on("usage", ({ usage, cumulative }) => write({ type: "usage", usage, cumulative })),
-    ];
+    subs = wireJsonl(write, agent);
+    subs.push(
+      agent.hooks.on("error", ({ error, where }) => {
+        errorEmitted = true;
+        write(eventToJsonl("error", { where, message: error instanceof Error ? error.message : String(error) }));
+      }),
+    );
     const { reason } = await agent.run(input);
     // Snapshot the post-turn state back into the session. `agent.usage` here is the
     // session's cumulative (restored session usage + this turn), not process-lifetime.
@@ -403,9 +408,18 @@ async function streamRun(
       const cap = maxSessions(config);
       while (cap > 0 && sessions.size > cap) sessions.delete(sessions.keys().next().value as string);
     }
+    // Dual-emit during the deprecation window: the frozen legacy `done` first, then
+    // the canonical `agent_end` last, so a consumer reading "last line = terminal"
+    // gets `agent_end` while one scanning for `done` still finds it.
     write({ type: "done", reason, session, usage: agent.usage });
+    write(eventToJsonl("agent_end", { reason, usage: agent.usage, session }));
   } catch (err) {
-    write({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    // A setup-window throw (e.g. `agent.restore`) never reaches the kernel `error`
+    // hook, so emit it here. A throw from `agent.run` already surfaced via the hook
+    // above (errorEmitted), so skip the duplicate.
+    if (!errorEmitted) {
+      write(eventToJsonl("error", { where: "agent.run", message: err instanceof Error ? err.message : String(err) }));
+    }
   } finally {
     drainElicitations(); // clear the sink + any leftover resolver before the next turn
     res.off("close", onClose);
@@ -488,6 +502,7 @@ async function main(): Promise<void> {
   try {
     http.server.listen(port, http.host, () => {
       console.error(`eagent server on http://${http.host}:${port} (model=${http.model}, ${http.extensions.length} extensions)`);
+      console.error(`  extension state is process-scoped; run one process per tenant/trust boundary for isolation (see SECURITY.md)`);
     });
 
     // Graceful shutdown: stop accepting connections, tear down the host, exit.

@@ -119,3 +119,43 @@ test("a fresh unremembered cap prompts once (memo not cross-contaminated)", asyn
   assert.equal(d.calls(), 2);
   assert.equal(mgr.audit().length, 4);
 });
+
+// A runtime grant is revocable and reference-counted: a shared pattern survives
+// until its last granter disposes, a baseline grant is never revoked, and a
+// double-dispose never over-revokes a sibling. Managers use the default `ask`
+// fallback so `isGranted` reports `false` for an ungranted cap (an `allow`
+// fallback would mask revocation).
+
+test("a runtime grant is revocable via its Disposable", () => {
+  const mgr = new CapabilityManager();
+  const d = mgr.grant("test:cap");
+  assert.equal(mgr.isGranted("test:cap"), true);
+  d.dispose();
+  assert.equal(mgr.isGranted("test:cap"), false);
+});
+
+test("shared runtime grants are reference-counted (survive until the last granter disposes)", () => {
+  const mgr = new CapabilityManager();
+  const a = mgr.grant("shared:cap");
+  const b = mgr.grant("shared:cap");
+  a.dispose();
+  assert.equal(mgr.isGranted("shared:cap"), true, "one granter left keeps it granted");
+  b.dispose();
+  assert.equal(mgr.isGranted("shared:cap"), false, "the last granter disposing revokes it");
+});
+
+test("a baseline (constructor) grant survives a same-pattern runtime grant's dispose", () => {
+  const mgr = new CapabilityManager({ grant: ["base:cap"] });
+  const d = mgr.grant("base:cap");
+  d.dispose();
+  assert.equal(mgr.isGranted("base:cap"), true, "the baseline instance is never revoked");
+});
+
+test("a double-dispose is idempotent and never over-revokes a sibling", () => {
+  const mgr = new CapabilityManager();
+  const d = mgr.grant("i:cap");
+  d.dispose();
+  const d2 = mgr.grant("i:cap");
+  d.dispose(); // second dispose of d must not splice d2's instance
+  assert.equal(mgr.isGranted("i:cap"), true);
+});

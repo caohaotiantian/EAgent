@@ -23,6 +23,24 @@ export class RenamedProvider implements Provider {
   }
 }
 
+/**
+ * A provider whose `stream` never yields and only settles when its request
+ * signal aborts — then it rejects. It lets a test drive the deadline/abort path
+ * of a bounded sub-call (a real provider that opened a connection and sent no
+ * data behaves the same way).
+ */
+export class Hanging extends MockProvider {
+  override async *stream(req: CompletionRequest): AsyncGenerator<never> {
+    await new Promise<void>((_, reject) => {
+      if (req.signal.aborted) {
+        reject(new Error("provider hung"));
+        return;
+      }
+      req.signal.addEventListener("abort", () => reject(new Error("provider hung")), { once: true });
+    });
+  }
+}
+
 export const silentLogger: Logger = {
   debug: () => {},
   info: () => {},

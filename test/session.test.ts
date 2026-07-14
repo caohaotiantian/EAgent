@@ -153,3 +153,32 @@ test("load rejects a session whose messages contain a malformed entry", async ()
   const lines = await run("load", path);
   assert.match(lines.join("\n"), /malformed entry/);
 });
+
+test("load rejects a message whose content block is malformed (null / no type)", async () => {
+  const { dir, run } = await setup();
+  // A null content block (or a non-object / typeless block) passes a shallow
+  // Array.isArray check but crashes a later turn that reads block.type. It must
+  // fail loudly at the read boundary instead.
+  for (const bad of [[null], ["oops"], [{ text: "no type" }]]) {
+    const path = join(dir, `badblock-${JSON.stringify(bad).length}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify({ version: 1, savedAt: "x", model: "mock", messages: [{ role: "user", content: bad }] }),
+      "utf8",
+    );
+    const lines = await run("load", path);
+    assert.match(lines.join("\n"), /malformed entry/, `content ${JSON.stringify(bad)} is rejected`);
+  }
+});
+
+test("load rejects a forward-incompatible session version", async () => {
+  const { dir, run } = await setup();
+  const path = join(dir, "future.json");
+  writeFileSync(
+    path,
+    JSON.stringify({ version: 999, savedAt: "x", model: "mock", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
+    "utf8",
+  );
+  const lines = await run("load", path);
+  assert.match(lines.join("\n"), /unsupported session version 999/);
+});

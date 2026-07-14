@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { MemoryStore } from "../src/kernel/store.js";
-import { LayeredConfig, configEnvName, loadConfigFile } from "../src/config.js";
+import { LayeredConfig, configEnvName, isSecretKey, loadConfigFile } from "../src/config.js";
 
 /** Build a config with an optional file layer and a fresh in-memory override. */
 function makeConfig(fileValues: Record<string, string | number | boolean> = {}) {
@@ -110,6 +110,56 @@ test("enabled(): store flag with default threaded (default-on stays on when unse
   assert.equal(cfg.enabled("optin", { default: false, store: on }), true);
 });
 
+test("preset: enabled() lifts default and beats override-store; env-veto beats preset", () => {
+  // preset lifts a default-off gate
+  const lift = makeConfig();
+  lift.setPreset({ "risk-guard": true });
+  assert.equal(lift.enabled("risk-guard", { store: new MemoryStore() }), true);
+  // preset outranks a persisted override-store value (fail-secure, AC8)
+  const over = new MemoryStore();
+  const beats = new LayeredConfig({ fileValues: {}, overrideStore: over });
+  over.set("risk-guard", false);
+  beats.setPreset({ "risk-guard": true });
+  assert.equal(beats.enabled("risk-guard", { store: new MemoryStore() }), true);
+  // env-veto still wins over the preset (AC4)
+  const veto = makeConfig();
+  setEnv("EAGENT_RISK_GUARD", "off");
+  veto.setPreset({ "risk-guard": true });
+  assert.equal(veto.enabled("risk-guard", { store: new MemoryStore() }), false);
+});
+
+test("preset: value path resolves preset over override-store; env beats preset", () => {
+  // preset supplies a value
+  const val = makeConfig();
+  val.setPreset({ "sandbox.tier": "workspace-write" });
+  assert.equal(val.string("sandbox.tier"), "workspace-write");
+  // preset outranks a persisted override-store value (AC8)
+  const over = new MemoryStore();
+  const beats = new LayeredConfig({ fileValues: {}, overrideStore: over });
+  over.set("sandbox.tier", "off");
+  beats.setPreset({ "sandbox.tier": "workspace-write" });
+  assert.equal(beats.string("sandbox.tier"), "workspace-write");
+  // env is the single escape hatch above the preset
+  const env = makeConfig();
+  setEnv("EAGENT_SANDBOX_TIER", "readonly");
+  env.setPreset({ "sandbox.tier": "workspace-write" });
+  assert.equal(env.string("sandbox.tier"), "readonly");
+});
+
+test("preset: inert without setPreset (AC3 base — byte-identical to today)", () => {
+  const cfg = makeConfig();
+  assert.equal(cfg.enabled("risk-guard", { store: new MemoryStore() }), false);
+  assert.equal(cfg.string("sandbox.tier"), undefined);
+});
+
+test("preset: setPreset never writes the override store (AC5 — no persistence)", () => {
+  const over = new MemoryStore();
+  const cfg = new LayeredConfig({ fileValues: {}, overrideStore: over });
+  cfg.setPreset({ "risk-guard": true });
+  assert.equal(over.get("risk-guard"), undefined);
+  assert.equal(cfg.enabled("risk-guard", { store: new MemoryStore() }), true);
+});
+
 test("env-name derivation maps dots and dashes to underscores", () => {
   assert.equal(configEnvName("subagents.maxTurns"), "EAGENT_SUBAGENTS_MAX_TURNS");
   assert.equal(configEnvName("bash-policy"), "EAGENT_BASH_POLICY");
@@ -144,6 +194,17 @@ test("entries() reports the winning source and hides secret-substring keys", () 
   assert.equal(byKey.get("b.over")?.source, "override");
   assert.equal(byKey.get("c.env")?.source, "env");
   assert.equal(byKey.get("my.token")?.value, "«hidden»");
+});
+
+test("isSecretKey masks credentials but not token *counts*", () => {
+  // Real credentials stay masked.
+  assert.equal(isSecretKey("my.token"), true);
+  assert.equal(isSecretKey("memory.embed.apiKey"), true);
+  assert.equal(isSecretKey("some.secret"), true);
+  // Token *counts* are limits, not secrets — must render in `/config`.
+  assert.equal(isSecretKey("providers.anthropic.maxTokens"), false);
+  assert.equal(isSecretKey("providers.openai.maxTokens"), false);
+  assert.equal(isSecretKey("limits.maxTokensPerRun"), false);
 });
 
 test("envOnlyConfig fallback: an un-configured host honors env and defaults", async () => {

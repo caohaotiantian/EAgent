@@ -65,7 +65,7 @@ test("content-guard sanitizes and labels a foreign payload with invisible inject
   const content = firstResultContent(h.agent) ?? "";
   // Labeled: wrapped in the provenance envelope, sourced to the producing tool.
   assert.ok(content.includes(FENCE_MARKER), "the foreign result is wrapped in the provenance envelope");
-  assert.match(content, /<untrusted-content source="grab">/, "fenced with the producing tool's name as source");
+  assert.match(content, /<untrusted-content-[0-9a-f]+ source="grab">/, "fenced with a nonce'd tag and the producing tool's name as source");
   // Sanitized: the visible body survives contiguous, with no invisible codepoint.
   assert.ok(content.includes("safetext"), "the visible body survives, contiguous after stripping");
   assert.ok(!INVISIBLE.test(content), "no invisible injection codepoint remains in what the model sees");

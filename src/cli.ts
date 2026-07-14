@@ -22,6 +22,7 @@ import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { complete } from "./complete.js";
 import { createAgentHost, loadEnvFile, PROVIDER_NAMES, thinkingFromEnv } from "./host.js";
+import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
 interface Args {
   model?: string;
@@ -214,12 +215,12 @@ async function main(): Promise<void> {
     if (!args.json) banner(agent, host, live);
 
     if (args.eval !== undefined) {
-      await runTurn(agent, args.eval);
+      await runTurn(agent, args.eval, args.json);
     } else if (rl) {
-      await repl(rl, agent, commands, host);
+      await repl(rl, agent, commands, host, args.json);
     } else {
       // Piped, non-interactive stdin: treat each line as a command or a turn.
-      await batch(agent, commands, host);
+      await batch(agent, commands, host, args.json);
     }
   } catch (err) {
     // An error before the normal-path dispose must still tear the host down so
@@ -235,16 +236,19 @@ async function main(): Promise<void> {
 }
 
 /** Read all of stdin and process it line by line, then exit. */
-async function batch(agent: Agent, commands: CommandRegistry, host: ExtensionHost): Promise<void> {
+async function batch(agent: Agent, commands: CommandRegistry, host: ExtensionHost, json: boolean): Promise<void> {
+  // In --json mode stdout carries only the JSONL lifecycle events; the human echo
+  // goes to stderr so a consumer's per-line JSON.parse never hits a non-JSON line.
+  const echo = (s: string): void => (json ? console.error(s) : console.log(s));
   const lines = (await readAll(stdin)).split("\n");
   for (const raw of lines) {
     const line = raw.trim();
     if (line === "" || line === "/quit" || line === "/exit") continue;
     if (line.startsWith("/")) {
-      await dispatchCommand(line, commands, agent, host);
+      await dispatchCommand(line, commands, agent, host, json);
     } else {
-      console.log(C.bold(`\n› ${line}`));
-      await runTurn(agent, line);
+      echo(C.bold(`\n› ${line}`));
+      await runTurn(agent, line, json);
     }
   }
 }
@@ -264,17 +268,21 @@ async function dispatchCommand(
   commands: CommandRegistry,
   agent: Agent,
   _host: ExtensionHost,
+  json: boolean,
 ): Promise<void> {
+  // Command output and errors are not JSONL lifecycle events; in --json mode they
+  // go to stderr so stdout stays a clean machine-readable stream.
+  const out = (s: string): void => (json ? console.error(s) : console.log(s));
   const [name, ...rest] = line.slice(1).split(" ");
   const command = commands.get(name!);
   if (!command) {
-    console.log(C.red(`Unknown command: /${name}. Try /help.`));
+    out(C.red(`Unknown command: /${name}. Try /help.`));
     return;
   }
   try {
-    await command.run({ agent, args: rest.join(" "), print: (l) => console.log(l) });
+    await command.run({ agent, args: rest.join(" "), print: out });
   } catch (err) {
-    console.log(C.red(`✗ /${name}: ${err instanceof Error ? err.message : String(err)}`));
+    out(C.red(`✗ /${name}: ${err instanceof Error ? err.message : String(err)}`));
   }
 }
 
@@ -327,27 +335,26 @@ function wireJsonRendering(agent: Agent): void {
   const emit = (obj: unknown): void => {
     process.stdout.write(JSON.stringify(obj) + "\n");
   };
-  agent.hooks.on("text_delta", ({ text }) => emit({ type: "text_delta", text }));
-  agent.hooks.on("reasoning_delta", ({ text }) => emit({ type: "reasoning_delta", text }));
-  agent.hooks.on("message", ({ message }) => emit({ type: "message", role: message.role, content: message.content }));
-  agent.hooks.on("tool_start", ({ call }) => emit({ type: "tool_start", id: call.id, name: call.name, arguments: call.arguments }));
-  agent.hooks.on("tool_end", ({ call, result }) =>
-    emit({ type: "tool_end", id: call.id, name: call.name, isError: result.isError ?? false, content: result.content }),
+  wireJsonl(emit, agent);
+  agent.hooks.on("agent_end", ({ reason }) => emit(eventToJsonl("agent_end", { reason, usage: agent.usage })));
+  agent.hooks.on("error", ({ error, where }) =>
+    emit(eventToJsonl("error", { where, message: error instanceof Error ? error.message : String(error) })),
   );
-  agent.hooks.on("usage", ({ usage, cumulative }) => emit({ type: "usage", usage, cumulative }));
-  agent.hooks.on("agent_end", ({ reason }) => emit({ type: "agent_end", reason, usage: agent.usage }));
-  agent.hooks.on("error", ({ error, where }) => emit({ type: "error", where, message: error instanceof Error ? error.message : String(error) }));
 }
 
-async function runTurn(agent: Agent, input: string): Promise<void> {
+async function runTurn(agent: Agent, input: string, json: boolean): Promise<void> {
   try {
     await agent.run(input);
   } catch (err) {
-    console.log(C.red(`✗ ${err instanceof Error ? err.message : String(err)}`));
+    // In --json mode a run throw goes to stderr (the JSON renderer already emits an
+    // `error` lifecycle event on stdout); human mode keeps the red line on stdout.
+    const msg = C.red(`✗ ${err instanceof Error ? err.message : String(err)}`);
+    if (json) console.error(msg);
+    else console.log(msg);
   }
 }
 
-async function repl(rl: Interface, agent: Agent, commands: CommandRegistry, host: ExtensionHost): Promise<void> {
+async function repl(rl: Interface, agent: Agent, commands: CommandRegistry, host: ExtensionHost, json: boolean): Promise<void> {
   for (;;) {
     let line: string;
     try {
@@ -359,11 +366,11 @@ async function repl(rl: Interface, agent: Agent, commands: CommandRegistry, host
     if (line === "/quit" || line === "/exit") break;
 
     if (line.startsWith("/")) {
-      await dispatchCommand(line, commands, agent, host);
+      await dispatchCommand(line, commands, agent, host, json);
       continue;
     }
 
-    await runTurn(agent, line);
+    await runTurn(agent, line, json);
   }
 }
 

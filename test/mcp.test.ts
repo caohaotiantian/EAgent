@@ -15,12 +15,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import activate, { createBoundedLineReader, parseResourceList, parseServers, detectSuspiciousDescription } from "../src/extensions/mcp.js";
+import activate, {
+  createBoundedLineReader,
+  parseResourceList,
+  parseServers,
+  detectSuspiciousDescription,
+  stdioEnv,
+  mcpRequestTimeoutMs,
+  StdioTransport,
+} from "../src/extensions/mcp.js";
+import { LayeredConfig } from "../src/config.js";
 import { Agent } from "../src/kernel/agent.js";
 import { CapabilityManager } from "../src/kernel/capabilities.js";
 import { CommandRegistry } from "../src/kernel/commands.js";
 import { ExtensionHost } from "../src/kernel/extension.js";
-import { MemoryBackend } from "../src/kernel/store.js";
+import { MemoryBackend, MemoryStore } from "../src/kernel/store.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
 import { autoUI, makeHarness, silentLogger } from "./helpers.js";
 
@@ -470,5 +479,74 @@ test("EAGENT_MCP_RESOURCES=off registers no read tool and leaves the tools half 
     await host.dispose();
     if (prev === undefined) delete process.env.EAGENT_MCP_RESOURCES;
     else process.env.EAGENT_MCP_RESOURCES = prev;
+  }
+});
+
+// -- stdio hardening: env allowlist + request timeout (Batch C2) -------------
+
+function testConfig(overrides: Record<string, string | number | boolean> = {}): LayeredConfig {
+  const cfg = new LayeredConfig({ fileValues: {}, overrideStore: new MemoryStore() });
+  for (const [k, v] of Object.entries(overrides)) cfg.set(k, v);
+  return cfg;
+}
+
+test("stdioEnv builds a default-deny subprocess environment (no host-secret leak)", () => {
+  process.env.MCP_SECRET_LEAK = "s3cr3t";
+  try {
+    const env = stdioEnv({ name: "s", command: "node" }, testConfig());
+    assert.equal(env.MCP_SECRET_LEAK, undefined, "an arbitrary host var is NOT inherited by the subprocess");
+    if (process.env.PATH !== undefined) assert.equal(env.PATH, process.env.PATH, "PATH is forwarded from the base set");
+    const env2 = stdioEnv({ name: "s", command: "node", env: { PATH: "/custom", FOO: "bar" } }, testConfig());
+    assert.equal(env2.PATH, "/custom", "def.env overrides a base key");
+    assert.equal(env2.FOO, "bar", "def.env adds a server-specific var");
+  } finally {
+    delete process.env.MCP_SECRET_LEAK;
+  }
+});
+
+test("stdioEnv passthrough forwards named non-secret vars but denies secret-shaped ones", () => {
+  process.env.MCP_PROXY_URL = "http://localhost:8080";
+  process.env.TOKENIZERS_PARALLELISM = "false"; // contains "TOKEN" but not as a word — not a secret
+  process.env.MCP_SECRET_LEAK = "s3cr3t";
+  process.env.ANTHROPIC_API_KEY = "sk-must-not-leak";
+  process.env.GITHUB_TOKEN = "ghp_must-not-leak";
+  try {
+    const env = stdioEnv(
+      { name: "s", command: "node" },
+      testConfig({
+        "mcp.envPassthrough": "MCP_PROXY_URL, TOKENIZERS_PARALLELISM, MCP_SECRET_LEAK, ANTHROPIC_API_KEY, GITHUB_TOKEN",
+      }),
+    );
+    assert.equal(env.MCP_PROXY_URL, "http://localhost:8080", "a named non-secret host var is forwarded");
+    assert.equal(env.TOKENIZERS_PARALLELISM, "false", "a non-secret var that merely contains 'TOKEN' is forwarded");
+    // A secret-shaped name is denied even when the (possibly untrusted-config) list names it.
+    assert.equal(env.MCP_SECRET_LEAK, undefined, "a SECRET-shaped name is not forwarded");
+    assert.equal(env.ANTHROPIC_API_KEY, undefined, "the host's provider API key is never forwarded to a foreign server");
+    assert.equal(env.GITHUB_TOKEN, undefined, "a *_TOKEN secret is not forwarded");
+  } finally {
+    delete process.env.MCP_PROXY_URL;
+    delete process.env.TOKENIZERS_PARALLELISM;
+    delete process.env.MCP_SECRET_LEAK;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GITHUB_TOKEN;
+  }
+});
+
+test("mcpRequestTimeoutMs honors config and rejects invalid values", () => {
+  assert.equal(mcpRequestTimeoutMs(testConfig()), 60_000, "default 60s");
+  assert.equal(mcpRequestTimeoutMs(testConfig({ "mcp.requestTimeoutMs": 100 })), 100, "config override");
+  assert.equal(mcpRequestTimeoutMs(testConfig({ "mcp.requestTimeoutMs": 0 })), 60_000, "invalid ≤0 → default");
+});
+
+test("stdio request times out when the server never replies", async () => {
+  // A subprocess that keeps stdin open but never writes a JSON-RPC response.
+  const t = new StdioTransport(
+    { name: "hung", command: process.execPath, args: ["-e", "process.stdin.resume()"] },
+    testConfig({ "mcp.requestTimeoutMs": 100 }),
+  );
+  try {
+    await assert.rejects(t.request("initialize", {}), /timed out/, "a silent server times out instead of hanging");
+  } finally {
+    t.close();
   }
 });

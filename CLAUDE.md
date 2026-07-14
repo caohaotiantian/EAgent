@@ -31,7 +31,7 @@ result helpers), `validate.ts` (JSON-Schema argument validation), `store.ts`
 (the namespaced `Store`), and `index.ts` (the public barrel). The whole core is
 held minimal on purpose: `test/kernel-surface.test.ts` pins the public exports
 and keeps `src/kernel/` under a hard line ceiling (2,250 lines; the metric is
-`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,244 — a few
+`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,248 — a couple
 lines of slack). The ceiling moved from 2,200 to 2,250 when the `Config`
 interface + `envOnlyConfig` fallback were added to `store.ts` for the injected
 `e.config` facility — a deliberate explicit decision. Adding to the kernel means
@@ -76,7 +76,7 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` (retry/backoff + SSE parsing),
   and `cassette` (record/replay). All read config from `process.env`.
-- `src/extensions/` — the 62 built-in extensions, plus shared helpers in `lib/`
+- `src/extensions/` — the 63 built-in extensions, plus shared helpers in `lib/`
   (`decode`, `edit-match`, `otel-context`, `read-capped`, `relevance`, `sandbox`).
   A helper that two extensions share goes in `lib/`, not imported peer-to-peer.
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
@@ -93,7 +93,7 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 
 ## Built-in extensions
 
-Everything outside `src/kernel/` is an extension. 62 ship in `BUILTIN_EXTENSIONS`
+Everything outside `src/kernel/` is an extension. 63 ship in `BUILTIN_EXTENSIONS`
 (`src/host.ts`), each a single file with offline tests that gates privileged work
 behind a capability. Conventions worth knowing:
 
@@ -127,9 +127,11 @@ defaults to **ask**, the HTTP server to **allow**/yolo). See `SECURITY.md`.
   required by `module: NodeNext` and `verbatimModuleSyntax`.
 - **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
   `noImplicitOverride`, `noFallthroughCasesInSwitch` are all on. No `any`
-  cop-outs; model the types. Note: `tsconfig.json` excludes `test/` and
+  cop-outs; model the types. Note: the build `tsconfig.json` excludes `test/` and
   `examples/`, and `npm test` runs via `tsx` (transpile-only) — so neither
-  `typecheck` nor `test` type-checks test files; verify those types separately.
+  `typecheck` (src-only) nor `test` type-checks test files. **`npm run typecheck:test`**
+  (a separate `noEmit` `tsconfig.test.json` inheriting every strict flag) type-checks
+  `test/` + `src/` and is a CI gate; `examples/` remains unchecked.
 - **Zero runtime dependencies except `jiti`.** Do not add npm dependencies.
   Providers use the global `fetch`; nothing pulls in an SDK.
 - **Tests use `node:test` run via `tsx`**, and must run offline. Every extension

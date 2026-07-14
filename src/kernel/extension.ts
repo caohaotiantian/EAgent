@@ -240,7 +240,7 @@ export class ExtensionHost {
       registerCommand: (command) => track(host.commands.register(command)),
       on: (event, handler) => track(host.agent.hooks.on(event, handler)),
       hook: (point, handler) => track(host.agent.hooks.filter(point, handler)),
-      grantCapability: (pattern) => host.agent.capabilities.grant(pattern),
+      grantCapability: (pattern) => track(host.agent.capabilities.grant(pattern)),
       store,
       config: host.#config,
       log: prefixed(this.#logger, spec.id),

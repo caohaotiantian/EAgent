@@ -199,15 +199,19 @@ test("AC-5: n above the cap (5) is clamped to at most 5 forks", async () => {
   assert.equal(childRequests, 5, "n=10 is clamped to the default cap of 5 forks");
 });
 
-test("AC-5: a child's registry omits best_of_n (and spawn_agent) — no re-fork", () => {
-  const bestOfN = defineTool({ name: "best_of_n", description: "x", execute: () => ({ content: "" }) });
-  const spawn = defineTool({ name: "spawn_agent", description: "x", execute: () => ({ content: "" }) });
+test("AC-5: a child's registry omits every spawn-class tool — no re-fork", () => {
+  const bestOfN = defineTool({ name: "best_of_n", description: "x", capabilities: ["agent:spawn"], execute: () => ({ content: "" }) });
+  const spawn = defineTool({ name: "spawn_agent", description: "x", capabilities: ["agent:spawn"], execute: () => ({ content: "" }) });
+  // A second-named spawn tool outside the old {best_of_n, spawn_agent, tree_search,
+  // graph_search} name set: the capability strip must remove it too.
+  const runWorkflow = defineTool({ name: "run_workflow", description: "x", capabilities: ["workflow:run"], execute: () => ({ content: "" }) });
   const helper = defineTool({ name: "helper", description: "x", execute: () => ({ content: "" }) });
 
-  const childTools = childRegistryFrom([bestOfN, spawn, helper]);
+  const childTools = childRegistryFrom([bestOfN, spawn, runWorkflow, helper]);
 
   assert.equal(childTools.has("best_of_n"), false, "the recursion guard removes best_of_n");
   assert.equal(childTools.has("spawn_agent"), false, "spawn_agent is also removed");
+  assert.equal(childTools.has("run_workflow"), false, "a second-named spawn tool is stripped by capability");
   assert.equal(childTools.has("helper"), true, "every other parent tool is copied through");
 });
 

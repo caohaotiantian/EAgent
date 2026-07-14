@@ -587,7 +587,7 @@ const mockEmbedder: Embedder = (texts) =>
       const v = [0, 0, 0, 0];
       for (const tok of t.toLowerCase().split(/[^a-z0-9]+/)) {
         const dim = CONCEPT[tok];
-        if (dim !== undefined) v[dim] += 1;
+        if (dim !== undefined) v[dim] = (v[dim] ?? 0) + 1;
       }
       return v;
     }),

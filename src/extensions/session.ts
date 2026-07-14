@@ -29,6 +29,7 @@ import { CapabilityError } from "../kernel/capabilities.js";
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { isMessage, type Message } from "../kernel/types.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 /** Current on-disk schema version. Bump when the envelope shape changes. */
 const SESSION_VERSION = 1;
@@ -195,22 +196,22 @@ export default function activate(e: ExtensionAPI): void {
     const provider = e.agent.providers.get();
     if (!provider) return "";
 
-    let out = "";
     try {
-      for await (const ev of provider.stream({
-        systemPrompt: HANDOFF_SYSTEM_PROMPT,
-        messages: history,
-        tools: [],
-        model: e.agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") out = textOf(ev.message);
-      }
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: HANDOFF_SYSTEM_PROMPT,
+          messages: history,
+          tools: [],
+          model: e.agent.model,
+        },
+        { timeoutMs: e.config.int("session.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      return textOf(msg).trim();
     } catch (err) {
       e.log.warn("handoff summarization failed:", errMsg(err));
       return "";
     }
-    return out.trim();
   }
 }
 
@@ -241,6 +242,12 @@ function readSession(path: string): SessionFile | { error: string } {
   // file fails loudly here rather than crashing a later turn that assumes
   // `message.content` is an array.
   if (!obj.messages.every(isMessage)) return { error: "messages array contains a malformed entry" };
+  // Reject a forward-incompatible envelope rather than loading it blindly. A file
+  // with no version is a pre-versioning save and loads as current (back-compat);
+  // a present-but-different version is from another/newer tool.
+  if (typeof obj.version === "number" && obj.version !== SESSION_VERSION) {
+    return { error: `unsupported session version ${obj.version} (expected ${SESSION_VERSION})` };
+  }
 
   return {
     version: typeof obj.version === "number" ? obj.version : SESSION_VERSION,

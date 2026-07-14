@@ -9,6 +9,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Unified JSONL event schema across the CLI `--json` and HTTP `/run` streams
+(zero kernel change).** Both front ends now serialize through one shared
+`src/jsonl.ts` mapper, so a single parser reads either stream. The HTTP `/run`
+stream gains the fields the CLI already emitted: `tool_start`/`tool_end` now
+carry the tool-call `id`, and `reasoning_delta` is now streamed over HTTP. Each
+`/run` turn now ends with a canonical **`agent_end`** terminal (matching the
+kernel lifecycle event name and the CLI); the legacy `done` line is still emitted
+first during a deprecation window and is **deprecated** — consumers should migrate
+to `agent_end` (`done` is removed in a future release). The CLI `--json` output is
+unchanged (byte-identical). The canonical shapes are documented in
+[`docs/JSONL.md`](docs/JSONL.md).
+
+**Guard telemetry + a documented `beforeToolCall` precedence contract (zero
+kernel change).** Guard blocks are now observable as *blocks*, not generic
+errors, and the load-order precedence of the guards is documented and
+drift-guarded.
+
+A shared `src/extensions/lib/guard-block.ts` helper (`isGuardBlock` /
+`blockReason`) recognizes the kernel dispatcher's `"Tool call blocked: "` result
+on `tool_end` in one place. `otel-exporter` breaks guard blocks out into a new
+**additive `eagent.guard.blocks`** counter and tags the tool **span** with
+`eagent.guard.blocked=true` + `eagent.guard.reason` — while leaving the existing
+`eagent.tool.calls` `error` bucketing **unchanged** (a block still counts as an
+error there, so no dashboard/test keyed on `error` is disturbed). `trace` counts
+a block as a separate **`toolBlocked`** (surfaced in `/usage`) and marks it
+`[blk]` in the `/trace` tree, distinct from `errors`.
+
+SECURITY.md gains a **"Guard precedence"** subsection documenting the full
+17-extension `beforeToolCall` order (= `BUILTIN_EXTENSIONS` load order),
+first-block-wins, rewrite-chains-onward, and that there is no priority mechanism
+(reorder to change it); `docs/EXTENSIONS.md` cross-links it. A drift test
+(`test/guard-precedence.test.ts`) re-derives the live order and fails if the doc
+drifts. No kernel change; the telemetry rides `otel-exporter` / `trace` (their
+`EAGENT_<NAME>=off` kill switches apply).
+
+**Per-event cost model + provider watchdog (turn-loop hardening).** Two
+turn-loop correctness/availability fixes.
+
+The `usage` lifecycle event now carries the **model the request actually used**
+(`{ usage, cumulative, model }`) — an additive field on the event payload, filled
+from the agent loop's turn-local model. `cost` prices each `usage` event at that
+model (`p.model ?? activeModel`) and keys its `perModel` map by it, so a mid-run
+**routing switch** (`routing` re-tiering on `turn_start`) and an
+`onProviderError` **retry downshift** are both attributed to the model that was
+actually billed, not the one stamped on `agent_start`. The field is additive, so
+every other `usage` consumer (`trace`, `budget-cap`, `limits`, `otel-exporter`,
+`evals`) is unaffected. Kernel delta: a single event-type field plus the emit
+argument (no ceiling bump).
+
+A new **`watchdog`** extension bounds a hung main provider stream at zero kernel
+cost. It captures the default provider at activation and re-registers, under the
+same name, a thin wrapper whose `stream` imposes an **idle deadline**: it drives
+the inner stream via its async iterator and races each `iterator.next()` against a
+timeout that rejects after `watchdog.idleMs` and is **re-armed on every event**.
+The race — not abort alone — guarantees unblocking even a stream that ignores its
+signal; a composed `AbortController` (any-combined with `req.signal`) also aborts
+to free the underlying fetch, and a per-iteration `clearTimeout` keeps the idle
+timer from leaking into an `unhandledRejection` when the inner stream throws a
+real error first. A pre-commit idle (zero events) surfaces to the loop's
+`onProviderError`/retry seam; a mid-stream idle (committed) is rethrown as a fatal
+turn error, since retrying a partial stream would double-emit. It registers via
+the **raw** provider registry (not the tracked `registerProvider`, whose dispose
+would delete rather than restore the provider) and its dispose restores the
+captured original by overwrite; a module-local `WeakSet` brand makes activation
+idempotent, and a reload disposes-then-reactivates so no double-wrap arises. Ships
+**on** (a safety net), inert unless a stream actually stalls; it wraps the
+**default-provider path only** (not arbitrary named or composite providers). The
+default `watchdog.idleMs` is 120000 — comfortably above normal inter-event gaps;
+an operator running very large thinking budgets (where time-to-first-token can
+exceed the deadline before the first token) should raise it. `EAGENT_WATCHDOG=off`
+disables it; declares no capability (providers are not capability-gated). No
+kernel change for the watchdog.
+
 **Async sub-agent jobs (`subagent-jobs`).** A new extension adding a background
 job lifecycle on top of the existing child-agent machinery: `launch_job` starts
 a child on a prompt **without awaiting** and returns a `jobId` immediately;
@@ -132,6 +205,90 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Security
 
+- **Closed two shell/local-file information-flow guard gaps.** (1) `flow-guard` now holds a
+  **network-reaching shell command** (`curl`/`wget`/`nc`/`ssh`/… — classified by reusing `bash-policy`'s
+  command parser, so `sudo curl` and `FOO=bar curl` are caught but `echo curl` is not) as egress once the
+  session carries **data taint** (a scannable secret entered the transcript). It keys on data taint, not
+  the sticky shell-capability taint, so normal multi-command bash never self-gates; `shell:exec` is
+  **not** added to the egress-cap set. Closes the `read secret → bash curl evil.com` exfiltration path
+  the network-only egress gate missed; the network-command set is store-overridable (`networkCommands`).
+  Narrow documented residual: a shell-read secret matching none of the four credential shapes is not
+  caught (it sets only capability taint). (2) `content-guard` can now **fence local shell/file-read
+  output** (nonce-wrap it as untrusted-for-the-model), closing the local-injection gap where a malicious
+  read file or bash output reached the model unfenced. It is **opt-in** — off by default (the lean
+  net/mcp fence scope is byte-unchanged), on under the hardened profile or `/config set
+  contentGuard.fenceLocal true`. No kernel change.
+- **Hardened server profile (`EAGENT_HARDENED=1`).** One host-level switch turns the yolo server into a
+  defense-in-depth posture: it enables the enforcing guards that otherwise ship inert — `risk-guard`
+  (classify + block dangerous shell commands), `provenance` (injection defense), and `sandbox-tiers` at
+  the `workspace-write` tier (confine shell writes to the workspace). It is **orthogonal to `yolo:false`**
+  (it does *not* change the capability fallback — capability lockdown is the separate `yolo:false` knob;
+  flipping it would deny `shell:exec` and moot the very guards). Applied as a **fail-secure runtime
+  `LayeredConfig` preset** — below the env layer, above the override-store — so a stale persisted
+  `/config set` cannot weaken it while the env var stays the single escape hatch
+  (`EAGENT_RISK_GUARD=off`, `EAGENT_PROVENANCE=off`, `EAGENT_SANDBOX_TIER=<tier>`); **nothing is written
+  to disk**, so unsetting the flag reverts cleanly. Host-level (the CLI honors it too — opt-in). No
+  kernel change; the non-hardened path is behaviorally unchanged. `hardened: true` also works on
+  `createAgentHost`/`createHttpServer`.
+- **Capability grants are now revoked on unload/reload.** `grantCapability` was the
+  one extension registration not tracked as a `Disposable`, and `CapabilityManager`
+  had no revoke — so a granted authority persisted after its extension was unloaded
+  or hot-reloaded, and a later/re-registered tool could run without the
+  ask-prompt a fresh session requires. `grant` now returns a `Disposable` (with
+  reference counting: `#grant` is a multiset, so a shared pattern like `agent:spawn`
+  survives until its *last* granter disposes) and the host tracks it like every
+  other registration. +2 kernel lines (2246/2250 — no ceiling change).
+- **Documented the HTTP server's cross-session isolation posture.** The server
+  multiplexes many `session` ids over one set of in-process extensions: per-session
+  transcript and usage are isolated, but extension state is not — security guards
+  (`write-guard`'s seen-file set, `flow-guard`'s capability taint) and accumulators
+  (cost's per-model breakdown and anomaly baseline, drift's turn counter) carry over
+  between sessions, so the `session` id is a multiplexing key, **not** a trust
+  boundary. `SECURITY.md` now states this and prescribes **one process per tenant**
+  for multi-tenant use; the server prints the posture at startup and `README` points
+  to it. In-process per-session isolation was scoped and deliberately **not** built:
+  a design review found it a ~15-extension, all-or-nothing change (partial isolation
+  would look isolated while leaking security decisions across tenants), and process
+  isolation is the production-standard boundary the server already supports. The
+  twice-reviewed design is retained as a follow-up
+  (`docs/design/2026-07-10-session-isolation.md`).
+- **Built-in `read`/`edit`/`grep` are now memory-bounded.** They previously
+  `readFileSync`'d whole files, so one hostile multi-GB file could OOM the process
+  — and because the HTTP server runs one turn at a time in one process, that took
+  down every session. A new `lib/read-capped.ts` `readFileCapped` (a `statSync`
+  guard + a single bounded read) caps each read at `fs.maxReadBytes` (default 16
+  MiB): `read` returns a truncation-marked window, `grep` scans a bounded window,
+  and `edit` **refuses** an over-cap file rather than bounded-reading and writing
+  back a silently-truncated version.
+- **MCP stdio subprocesses no longer inherit the full host environment.** The
+  stdio transport spawned servers with `{ ...process.env, ...def.env }`, handing
+  every host env var — API keys, `EAGENT_TOKEN` — to third-party MCP server code.
+  The subprocess env is now built default-deny: a minimal base set (PATH, HOME,
+  locale, OS essentials) so the server can run, plus the server's own `env` config,
+  plus an operator opt-in `mcp.envPassthrough` (comma-separated var names). The
+  stdio `request()`/`initialize` handshake also gained the timeout it lacked (a
+  ref'd timer, unified with the HTTP transport under `mcp.requestTimeoutMs`,
+  default 60s) so a silent server can no longer hang activation or a turn.
+- **content-guard fence is now non-forgeable (prompt-injection hardening).** The
+  ingress provenance envelope was defeatable two ways: foreign content that began
+  with the public standing note skipped fencing (prefix-spoof), and content
+  containing the literal `</untrusted-content>` closed the fence early so its tail
+  read as trusted (break-out). The envelope tag now carries a per-activation random
+  nonce (`<untrusted-content-{nonce}>`), so foreign content can forge neither the
+  opening tag (idempotency now keys on it) nor the closing tag; the body's own
+  fence sentinels are additionally escaped. No behavior change for legitimate results.
+- **Sub-agent recursion guard is now capability-based, not name-based.** Four
+  spawners (`subagents`, `templates`, `reasoning-search`, `dynamic-workflow`) built
+  a child's tool registry by stripping spawn tools **by name**, so a child kept
+  every *other* spawn tool (`run_workflow`, `run_team`, `spawn_template`, …) and
+  could spawn grandchildren — the "runaway tree is impossible" guarantee was false.
+  All four now delegate to one shared helper (`lib/child-registry.ts`) that strips
+  every tool whose capabilities intersect `SPAWN_CAPS = {agent:spawn, workflow:run}`
+  (the single source of truth, hoisted out of `teams.ts`), matching the already-
+  correct `teams`/`subagent-jobs` pattern. A child now holds no spawn tool at all,
+  so depth is bounded to one nesting level by construction. Additionally,
+  `spawn_agent`'s `parallel`/`chain` fan-out is capped at `subagents.maxFanout`
+  (default 16) to prevent a single call spawning unbounded children. No kernel change.
 - **`self.read_extension` path traversal fixed.** It built file candidates from
   the raw, unsanitized name when it ended in a known suffix, so a name like
   `../../../../etc/hosts.js` escaped the extensions directory (arbitrary file
@@ -194,6 +351,65 @@ existing seams — no kernel change, all capability-gated and offline-tested:
 
 ### Changed / Fixed
 
+- **Packaging & ops hardening.** `package.json` now declares top-level `main`/
+  `types` (fallback for non-`exports`-aware tooling) and a `prepublishOnly` build
+  hook so a publish never ships stale/absent `dist/`. The Docker HTTP quickstart is
+  corrected (a container server must `EAGENT_HOST=0.0.0.0` to be reachable via `-p`,
+  which fail-closed requires `EAGENT_TOKEN`). `SECURITY.md` now points to GitHub's
+  private vulnerability-advisory channel instead of public issues. CI runs the build
+  job on a Node 22 **and** 24 matrix (they differ in timer/AbortSignal semantics).
+  A new **tag-triggered release workflow** (`.github/workflows/release.yml`) runs the
+  full gate (typecheck/test/eval/build) and then `npm publish --provenance` — binding
+  each published tarball to its workflow run + commit via OIDC (`id-token: write`) so
+  consumers can verify the build's origin. Fires only on a `vX.Y.Z` tag that matches
+  the `package.json` version (a mismatch fails the run); needs an `NPM_TOKEN` repo
+  secret. Provenance is a CI-only `--provenance` flag, not `publishConfig`, so a local
+  `npm publish` is not forced into the OIDC-only path.
+  The **`test/` tree is now type-checked** — a large body of code (112 `.ts` files) that had no static
+  guarantee (the build `tsconfig.json` excludes `test/`; `npm test` runs via transpile-only `tsx`). A new
+  `tsconfig.test.json` (a `noEmit` config inheriting every strict flag) + `npm run typecheck:test` hold
+  tests to the same bar as `src`, wired as a CI gate. Fixed the 8 latent type errors it surfaced across 5
+  files (handler expression-bodies returning a value where `void` is required, an unguarded
+  `noUncheckedIndexedAccess`, a too-narrow test-helper param, and one `.ts` import specifier → `.js`) —
+  all behavior-neutral. The build/publish path is untouched (`test/` stays excluded from the emit config).
+- **`trace` closes tool spans by call id, not name.** Two concurrent same-named
+  tool calls (e.g. two `bash`) were mis-attributed because the span was matched by
+  tool name; it now matches the call `id` stamped at `tool_start`, so overlapping
+  same-name calls get their own durations/ok status.
+- **`--json` mode now emits clean JSONL on stdout.** In `--json` (programmatic)
+  mode the batch input echo (`› …`), slash-command output, and dispatch/run error
+  lines were written to stdout un-gated on the mode, so `echo … | eagent --json`
+  interleaved non-JSON lines that broke a consumer's per-line `JSON.parse`. Those
+  human/diagnostic writes now route to stderr in `--json` mode (human-mode output
+  is unchanged). Adds the first `test/cli.test.ts` (a subprocess integration test
+  asserting stdout is pure JSONL).
+- **Every extension provider sub-call now has a deadline.** Eight extensions
+  (`compact`, `routing`, `drift-probe`, `goal`, `handoff`, `session`, `evals`,
+  `reasoning-search`) made an LLM sub-call (`provider.stream` outside the main
+  loop) with a fresh, never-aborted `AbortSignal` (six) or no timeout at all
+  (two), so a hung provider could wedge a whole turn indefinitely with no
+  cancellation path. All eight now run through a shared `lib/sub-call.ts` helper
+  that bounds the call with a ref'd-timer deadline (`<ext>.subCallTimeoutMs`,
+  default 30s) plus — at the two tool-execute sites — the caller's abort signal;
+  on timeout it throws, and each site's existing fail-open/fail-closed `catch`
+  converts it to the established fallback. Mirrors the `risk-guard` timeout
+  pattern; no kernel change.
+- **Provider honesty & resilience.** Three source-level provider fixes so the
+  default (Anthropic) stack behaves correctly: (1) an in-transcript `role:"system"`
+  message is now **folded into the top-level system channel** on Anthropic and
+  Gemini instead of being silently dropped — so the context-injecting extensions
+  (`context-files`, `skills`, `goal`, `drift-probe`, `playbook`, …) are no longer
+  dark on the default provider (OpenAI already preserved them). The systemPrompt
+  cache breakpoint is preserved and the no-note path is byte-identical. (2) A
+  **mid-stream API error frame now surfaces as a thrown error** on all three
+  providers (Anthropic `error` event, OpenAI/Gemini top-level `error`) instead of
+  ending the stream with a fabricated `done` and truncated content — so an outage
+  is retried (`onProviderError`/`reliability`) or fails honestly, never presented
+  as a successful short answer. (3) **Output `max_tokens` is now configurable**
+  per provider (`providers.<name>.maxTokens`, env `ANTHROPIC_MAX_TOKENS` /
+  `OPENAI_MAX_TOKENS` / `GEMINI_MAX_TOKENS`), defaulting to 4096, via an exported
+  `buildProviders(config)` host helper. `isSecretKey` no longer masks token-count
+  keys in `/config`. No kernel change.
 - **`stop()` is now honored by the agent loop** directly, not just forwarded to
   the provider, so an abort reliably halts the run.
 - **Cancelling a run mid-stream is now a clean stop, not an error.** When a

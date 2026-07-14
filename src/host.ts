@@ -22,6 +22,7 @@ import { ExtensionHost } from "./kernel/extension.js";
 import type { Config } from "./kernel/store.js";
 import { FileBackend } from "./kernel/store.js";
 import { LayeredConfig, loadConfigFile } from "./config.js";
+import { detectBackend, binExists, isBackend, type Backend } from "./extensions/lib/sandbox.js";
 import type { Logger, ThinkingLevel, UI } from "./kernel/types.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAIProvider } from "./providers/openai.js";
@@ -77,6 +78,7 @@ import driftProbe from "./extensions/drift-probe.js";
 import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
+import watchdog from "./extensions/watchdog.js";
 import fallbackRouting from "./extensions/fallback-routing.js";
 import reliability from "./extensions/reliability.js";
 import headlessFlags from "./extensions/headless-flags.js";
@@ -148,6 +150,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["skills-hardening", skillsHardening],
   ["ask", ask],
   ["routing", routing],
+  ["watchdog", watchdog],
   ["fallback-routing", fallbackRouting],
   ["reliability", reliability],
   ["time-travel", timeTravel],
@@ -175,6 +178,11 @@ export interface AgentHostOptions {
   discoverDirs?: string[];
   /** Extra extension files to load by path. */
   extraExtensions?: string[];
+  /** Opt into the hardened defense-in-depth profile (enable the enforcing
+   *  guards + confine the shell). Falls back to the `hardened` config key
+   *  (`EAGENT_HARDENED`). Orthogonal to `yolo` — it does not touch the
+   *  capability fallback. See SECURITY.md. */
+  hardened?: boolean;
 }
 
 export interface AgentHost {
@@ -211,9 +219,18 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
     filePaths: configPaths,
   });
 
-  const anthropic = new AnthropicProvider({ baseUrl: config.string("providers.anthropic.baseUrl") });
-  const openai = new OpenAIProvider({ baseUrl: config.string("providers.openai.baseUrl") });
-  const gemini = new GeminiProvider({ baseUrl: config.string("providers.gemini.baseUrl") });
+  // The hardened profile is a runtime, in-memory preset that enables the
+  // enforcing guards (risk-guard, provenance) and confines the shell to the
+  // workspace. It is resolved from the already-built config — so `EAGENT_HARDENED`
+  // and the file key `hardened` both work with env winning — and is fail-secure:
+  // the env layer still overrides each preset key, and nothing is persisted.
+  const hardened = opts.hardened ?? config.bool("hardened", false);
+  if (hardened) {
+    config.setPreset({ "risk-guard": true, provenance: true, "sandbox.tier": "workspace-write", "contentGuard.fenceLocal": true });
+    announceHardened(config, opts.logger);
+  }
+
+  const { anthropic, openai, gemini } = buildProviders(config);
   const configured = { anthropic: anthropic.configured, openai: openai.configured, gemini: gemini.configured };
   // Fail fast on an explicitly-requested live provider with no API key, rather
   // than silently downgrading to another configured provider or mock (which would
@@ -308,6 +325,37 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
 }
 
 /**
+ * Construct the three real providers from configuration. Extracted from
+ * `createAgentHost` so the exact construction the host uses is offline-testable
+ * (a production `new AnthropicProvider(...)` line is not: offline there is no API
+ * key, so `createAgentHost` selects the mock provider and never builds these).
+ * `providers.<name>.maxTokens` sets the output cap (default 4096); `opts.fetch`
+ * is forwarded so a test can inject a capturing `fetch`.
+ */
+export function buildProviders(
+  config: Config,
+  opts: { fetch?: typeof fetch } = {},
+): { anthropic: AnthropicProvider; openai: OpenAIProvider; gemini: GeminiProvider } {
+  return {
+    anthropic: new AnthropicProvider({
+      baseUrl: config.string("providers.anthropic.baseUrl"),
+      maxTokens: config.int("providers.anthropic.maxTokens", 4096),
+      fetch: opts.fetch,
+    }),
+    openai: new OpenAIProvider({
+      baseUrl: config.string("providers.openai.baseUrl"),
+      maxTokens: config.int("providers.openai.maxTokens", 4096),
+      fetch: opts.fetch,
+    }),
+    gemini: new GeminiProvider({
+      baseUrl: config.string("providers.gemini.baseUrl"),
+      maxTokens: config.int("providers.gemini.maxTokens", 4096),
+      fetch: opts.fetch,
+    }),
+  };
+}
+
+/**
  * Load environment variables from a `.env` file into `process.env` *without*
  * overriding values already present (the real environment always wins). A tiny
  * zero-dependency parser: `KEY=VALUE` lines, `#` comments, an optional `export`
@@ -345,6 +393,28 @@ export function loadEnvFile(file: string = join(process.cwd(), ".env")): string[
     setKeys.push(key);
   }
   return setKeys;
+}
+
+/**
+ * Log the one-line hardened banner: the guards it enabled and the RESOLVED
+ * sandbox tier (read from config, so an `EAGENT_SANDBOX_TIER` override reads
+ * truthfully instead of a hardcoded string). When no sandbox backend is
+ * detected on this host, warn that the tier fail-opens — shell runs unsandboxed
+ * (the R1 caveat; `sandbox-tiers` defaults `missingBackend="pass"`).
+ */
+function announceHardened(config: Config, logger?: Logger): void {
+  const log = logger ?? console;
+  const tier = config.string("sandbox.tier");
+  log.info?.(
+    `hardened profile active: risk-guard + provenance + content-guard local fencing enabled; sandbox tier=${tier}`,
+  );
+  const forced = config.string("sandbox.backend");
+  const backend: Backend = forced && isBackend(forced) ? forced : detectBackend(process.platform, binExists);
+  if (backend === "none") {
+    log.warn?.(
+      `hardened: no sandbox backend detected on this host — shell commands run unsandboxed (tier=${tier} is fail-open)`,
+    );
+  }
 }
 
 /** Parse a thinking level from a string (env/flag), ignoring anything unknown. */

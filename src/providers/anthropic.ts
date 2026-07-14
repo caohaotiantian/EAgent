@@ -77,10 +77,34 @@ export class AnthropicProvider implements Provider {
     if (this.#cache && tools.length > 0) {
       (tools[tools.length - 1] as Record<string, unknown>).cache_control = { type: "ephemeral" };
     }
-    const system =
-      this.#cache && req.systemPrompt
-        ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
-        : req.systemPrompt;
+    // Fold any in-transcript `role:"system"` messages into the top-level system
+    // channel — Anthropic has no positional system role inside `messages`, so
+    // dropping them would leave the whole context-injection layer dark. Notes
+    // are appended after the systemPrompt block, uncached, so the existing
+    // systemPrompt cache breakpoint is preserved and the no-note path stays
+    // byte-identical to before.
+    const systemNotes = req.messages
+      .filter((m) => m.role === "system")
+      .map(systemText)
+      .filter((t) => t.length > 0);
+    let system: unknown;
+    if (systemNotes.length > 0) {
+      const blocks: unknown[] = [];
+      if (req.systemPrompt) {
+        blocks.push(
+          this.#cache
+            ? { type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }
+            : { type: "text", text: req.systemPrompt },
+        );
+      }
+      for (const note of systemNotes) blocks.push({ type: "text", text: note });
+      system = blocks;
+    } else {
+      system =
+        this.#cache && req.systemPrompt
+          ? [{ type: "text", text: req.systemPrompt, cache_control: { type: "ephemeral" } }]
+          : req.systemPrompt;
+    }
 
     // A third breakpoint on the last content block of the last message caches
     // the growing conversation prefix, so each turn reads the prior transcript
@@ -189,6 +213,12 @@ export class AnthropicProvider implements Provider {
           if (parsed.usage?.output_tokens !== undefined) usage.outputTokens = parsed.usage.output_tokens;
           break;
         }
+        case "error":
+          // A mid-stream API error (e.g. `overloaded_error`, a rate-limit after
+          // start). Throw rather than let the loop end and fabricate a `done`
+          // with partial content: the committed boundary (agent.ts) then retries
+          // a pre-commit error via onProviderError, or rethrows a post-commit one.
+          throw new Error(`Anthropic stream error: ${parsed.error?.type}: ${parsed.error?.message}`);
         default:
           break;
       }
@@ -237,6 +267,14 @@ export class AnthropicProvider implements Provider {
 
 function toAnthropicTool(spec: ToolSpec): unknown {
   return { name: spec.name, description: spec.description, input_schema: spec.parameters };
+}
+
+/** Concatenate a message's `type:"text"` blocks (mirrors `openai.ts` `textOf`). */
+function systemText(m: Message): string {
+  return m.content
+    .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join("");
 }
 
 /**
@@ -331,4 +369,5 @@ type AnthropicStreamEvent =
         | { type: "input_json_delta"; partial_json: string };
     }
   | { type: "message_delta"; delta: { stop_reason?: string }; usage?: AnthropicUsage }
+  | { type: "error"; error?: { type?: string; message?: string } }
   | { type: "message_stop" | "content_block_stop" | "ping" };

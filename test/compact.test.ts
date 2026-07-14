@@ -20,7 +20,7 @@ import memory from "../src/extensions/memory.js";
 import type { ExtensionAPI } from "../src/kernel/extension.js";
 import type { CompletionRequest, Message, ToolContext } from "../src/kernel/types.js";
 import { text } from "../src/kernel/types.js";
-import { makeHarness, type Harness } from "./helpers.js";
+import { Hanging, makeHarness, type Harness } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -288,6 +288,29 @@ test("AC-2: over budget folds into exactly one system summary; recent turns surv
   for (const tag of ["recent-A", "recent-B", "recent-C"]) {
     assert.ok(joined.includes(tag), `recent turn ${tag} survives verbatim`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// AC-3 (bounded-subcalls) — a hung provider must not wedge the compaction hook:
+// the sub-call deadline fires, the summarize fails open to the deterministic
+// digest, and the turn completes. `{ timeout: 1000 }` so a pre-fix hang (the
+// fresh, never-aborted signal) fails cleanly instead of stalling the runner.
+// ---------------------------------------------------------------------------
+
+test("bounded sub-call: a hung provider times out and compaction falls back rather than hanging", { timeout: 1000 }, async () => {
+  const h = makeHarness({ responder: makeResponder() });
+  await activate(h, { enabled: true });
+  // Swap the default provider for one that never yields (same "mock" name, so it
+  // overwrites the default). The compaction summarize sub-call now hangs unless
+  // it is bounded by a deadline.
+  h.agent.providers.register(new Hanging(), { default: true });
+  h.config.set("compact.subCallTimeoutMs", 50);
+
+  const out = await applyHook(h, overBudget());
+
+  const s = summaries(out);
+  assert.equal(s.length, 1, "compaction still folds — the summarize falls open to the digest on the deadline");
+  assert.equal(s[0]!.meta?.source, "compact", "the fallback summary is authored by compact");
 });
 
 // ---------------------------------------------------------------------------

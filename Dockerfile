@@ -51,5 +51,8 @@ USER node
 WORKDIR /workspace
 
 # HTTP server front end: GET /health, POST /run. PORT defaults to 8787.
+# The server binds 127.0.0.1 by default; to reach it from outside the container
+# via `-p`, run with `-e EAGENT_HOST=0.0.0.0`, which (fail-closed) also requires
+# `-e EAGENT_TOKEN=<token>`. See the README HTTP section and SECURITY.md.
 EXPOSE 8787
 CMD ["node", "/app/dist/server.js"]

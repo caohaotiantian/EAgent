@@ -50,6 +50,7 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 import type { Message } from "../kernel/types.js";
 import { salientTokens } from "./lib/relevance.js";
+import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
 export { salientTokens } from "./lib/relevance.js";
 
@@ -453,17 +454,17 @@ export default function activate(e: ExtensionAPI): () => void {
     try {
       const provider = e.agent.providers.get();
       if (!provider) return renderFallback(messages, goal);
-      let finalText = "";
-      for await (const ev of provider.stream({
-        systemPrompt: HANDOFF_SYSTEM_PROMPT,
-        messages: [...messages],
-        tools: [],
-        model: e.agent.model,
-        signal: new AbortController().signal,
-      })) {
-        if (ev.type === "done") finalText = textOf(ev.message);
-      }
-      const trimmed = finalText.trim();
+      const msg = await runSubCall(
+        provider,
+        {
+          systemPrompt: HANDOFF_SYSTEM_PROMPT,
+          messages: [...messages],
+          tools: [],
+          model: e.agent.model,
+        },
+        { timeoutMs: e.config.int("handoff.subCallTimeoutMs", DEFAULT_SUB_CALL_TIMEOUT_MS) },
+      );
+      const trimmed = textOf(msg).trim();
       return trimmed.length > 0 ? ensureSchema(trimmed, goal) : renderFallback(messages, goal);
     } catch {
       return renderFallback(messages, goal);
