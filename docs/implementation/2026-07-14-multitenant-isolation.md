@@ -1,11 +1,17 @@
 # Implementation — Full concurrent in-process multi-tenant isolation
 
 Slug: `2026-07-14-multitenant-isolation` (matches the design)
-Status: **L2 closed** (2026-07-14). Rounds 1–3 (zero severe throughout); round 3 passed
-zero-severe/zero-general with every source citation and the `test/*` accept files verified. Ready for L3.
-Fixes landed: danglingUser rollback = snapshot/restore; cross-boundary channels via `host.storeFor(id)`
-accessors (`costOf`/`hasLiveJob`); `fallback-routing.baselineProvider` root-keyed (races otherwise);
-Phase C accept + AC4-under-concurrency added.
+Status: **closed** (2026-07-15)
+Closing-commit: `af073fa`
+Closed-on: 2026-07-15
+Deferred: finding — detached-job stream bleed (see the design doc §10 L1); none blocking.
+
+All 4 phases landed green (A `63f0b80`, B `8993561`, C `27e439a`, D `fa1cf91`) + the whole-cycle audit
+fix (`af073fa`). Final suite 1427 pass / 0 fail; typecheck + typecheck:test + build 0; eval 5/5; kernel
+2260/2265. Design decisions realized as planned: danglingUser rollback = snapshot/restore; cross-boundary
+channels via published Store accessors (`costOf`/`hasLiveJob`); `fallback-routing.baselineProvider`
+root-keyed; per-session lock (`Set<string>`) + root-scoped streaming/elicitation guards; concurrent E2E
+smoke (`test/server-concurrency.e2e.test.ts`).
 
 ## 1. Task Index
 

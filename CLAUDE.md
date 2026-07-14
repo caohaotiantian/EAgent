@@ -88,7 +88,10 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 - `src/complete.ts` — the REPL Tab-completion engine: a pure, offline-testable
   `complete(line, ctx)`.
 - `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `POST /answer`
-  for a mid-turn elicitation reply, `DELETE /sessions/:id`).
+  for a mid-turn elicitation reply, `GET /sessions/:id` for a session's usage +
+  cost summary, `DELETE /sessions/:id`). Sessions are isolated per session id and
+  run **concurrently** (a same-session second `/run` gets 409; different sessions
+  overlap); all per-session extension state is keyed on the run-tree root Agent.
 - `test/` — the full offline suite, roughly one file per primitive/extension.
 - `examples/extensions/` — worked example extensions.
 - `docs/EXTENSIONS.md` — the extension author's guide.

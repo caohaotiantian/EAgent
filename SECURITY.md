@@ -74,18 +74,28 @@ kernel is designed around that assumption rather than trusting the model.
   a heuristic (bypassable by e.g. `python -c`), raising the bar for common exfil tools rather than
   mediating completely.
 - **Cross-session isolation in one process.** The HTTP server multiplexes many
-  `session` ids over **one** set of in-process extensions. Per-session *transcript*
-  and *usage* are isolated, but **extension** state is not — several guards and
-  accumulators carry over between sessions. `write-guard`'s seen-file set,
-  `flow-guard`'s capability taint, and goal/todo reset only at session
-  start/shutdown — both fired **once**, at startup and teardown — so they never
-  clear between sessions; cost's per-model breakdown and anomaly baseline, and
-  drift-probe's turn counter, are module-lifetime accumulators with no per-session
-  reset. (Figures mirrored from the per-session *usage* — cost/budget cumulative
-  USD — do track the acting session; the leak is the guards and the accumulators,
-  not the running totals.) The
-  `session` id is a multiplexing key, **not** a trust boundary. Isolate tenants at
-  the process boundary (below), not by the `session` id.
+  `session` ids over one set of in-process extensions, each session on its **own
+  Agent**, running **concurrently**. Per-session *transcript*, *usage*, and
+  **extension state** are isolated: every guard and accumulator that holds
+  per-session state — `write-guard`'s seen-file set, `flow-guard`'s capability
+  taint, `provenance`'s untrusted set, `bash-policy`'s shell approvals,
+  `skills-hardening`'s allowlists, `subagent-jobs`' job table, and the
+  `budget-cap` / `cost` / `goal` / `todo` / `drift-probe` / `handoff` / `limits` /
+  `fallback-routing` state — is keyed on the session's run-tree **root Agent**
+  (shared across that session's sub-agent fork tree, distinct between sessions,
+  and reclaimed when the session is evicted). Each `/run` stream carries only its
+  own session's events; a concurrent same-session `/run` is refused with 409.
+  A few counters are deliberately process-global and carry no per-tenant
+  authority: OpenTelemetry metric counters, the package-install and
+  skill-integrity registries, and the disk-backed checkpoint/journal.
+- **The `session` id is a multiplexing key, still NOT a per-tenant trust
+  boundary.** The server authenticates with **one** process-wide bearer token
+  (`EAGENT_TOKEN`): any token holder can address — and read the usage + cost of,
+  via `GET /sessions/:id` — any session id. Per-session state isolation stops one
+  session's guard/accumulator state from bleeding into another; it does **not**
+  turn the `session` id into an authorization boundary. For per-tenant
+  authorization, isolate tenants at the process boundary (below) — one process
+  (one token) per tenant.
 
 ## Recommended deployment
 
@@ -139,10 +149,11 @@ var: `EAGENT_RISK_GUARD=off` / `EAGENT_PROVENANCE=off` drop a guard, and
 the whole profile.
 
 For **multi-tenant** use, run **one process per tenant** (or per trust boundary).
-Extension state is shared across `session` ids within a process (see "Cross-session
-isolation" above), so the process — not the session id — is the isolation boundary.
-A single shared process is appropriate only when every session belongs to the same
-trust domain (one user, one tenant, or an already-sandboxed workload).
+Per-session state is isolated (see "Cross-session isolation" above), but the server
+authenticates with one shared token, so the process — not the session id — is the
+*authorization* boundary. A single shared process is appropriate only when every
+session belongs to the same trust domain (one user, one tenant, or an
+already-sandboxed workload).
 
 ### Guard precedence
 

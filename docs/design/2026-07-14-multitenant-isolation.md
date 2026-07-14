@@ -1,12 +1,22 @@
 # Design — Full concurrent in-process multi-tenant isolation (HTTP server)
 
 Slug: `2026-07-14-multitenant-isolation`
-Status: **L1 closed** (2026-07-14). Three fresh-reviewer panel rounds caught + fixed 6 severe design
-flaws (all pre-code); the round-4 corroboration passed zero-severe/zero-general with every source
-citation verified. Both linchpins (ALS streaming routing, `currentRootAgent()` inheritance) empirically
-validated. Ready for L2. Decomposed into 4 L3 phases (state isolation first/serial, concurrency last).
+Status: **closed** (2026-07-15)
+Closing-commit: `af073fa`
+Closed-on: 2026-07-15
 Supersedes: `docs/design/2026-07-10-session-isolation.md` (closed won't-build; its getter/root-detection
 mechanism is carried forward and its commingling enumeration is re-validated + expanded here).
+Deferred: finding — a detached `launch_job`'s frames route by session **root**, so a still-running
+background job's events can surface in a **later same-session** `/run` stream (within-session, never
+cross-tenant; strictly narrower than the pre-cycle single-Agent behavior). Proper fix = per-request
+stream routing; recorded as a known limitation in §10.
+
+Built across 4 fresh-reviewer-gated L3 phases (A mechanism, B the 7 security guards, C correctness
+state + observability, D concurrency). L1 caught + fixed 6 severe design flaws pre-code (both linchpins —
+ALS streaming routing, `currentRootAgent()` inheritance — empirically validated). A whole-cycle
+adversarial audit (6 dimensions × 3-lens refute-by-default verify) confirmed **zero severe** findings
+and drove two general completeness fixes (compact re-entrancy guard + citations `lastRun` → per-root,
+`af073fa`).
 
 ## 1. Background and Purpose
 
@@ -204,38 +214,38 @@ Then the remaining shared mutable server state, audited for concurrency:
 
 ## 4. Deliverables
 
-- [ ] **D1 (kernel: getter + `currentRootAgent()`)** — the `e.agent` getter (`extension.ts:247`) + a new
+- [x] **D1 (kernel: getter + `currentRootAgent()`)** — the `e.agent` getter (`extension.ts:247`) + a new
       `rootAgentStore` ALS with `currentRootAgent()` (set to the root at top-level `run`, inherited by
       forks; `agent.ts`), the `currentActingAgent` + `currentRootAgent` **value** imports in
       `extension.ts:30`, a new **`readonly rootAgent: Agent`** ExtensionAPI interface member +
       `get rootAgent()` on the API object, and the **`index.ts` barrel export** of `currentRootAgent`
       (`index.ts:15`). Kernel **2249 → ~2262** (single-line getters/comment-lean to stay tight); **bump the
       ceiling to 2265** (KDD5) and reconcile CLAUDE.md. Pin `currentRootAgent` in `kernel-surface.test.ts`.
-- [ ] **D2 (server per-session Agent pool)** — `Map<session, Agent>`; each session its own Agent sharing
+- [x] **D2 (server per-session Agent pool)** — `Map<session, Agent>`; each session its own Agent sharing
       host registries + fresh config; `agent.run(input)` replaces restore/snapshot; **danglingUser
       rollback retained** (pop a trailing user message left by an aborted run — S2/§3a); LRU eviction skips
       the running set.
-- [ ] **D3 (root-detection)** — `budget-cap.ts:280` + `subagent-jobs.ts:96` replace `=== e.agent` with
+- [x] **D3 (root-detection)** — `budget-cap.ts:280` + `subagent-jobs.ts:96` replace `=== e.agent` with
       `currentActingAgent() === currentRootAgent()`. **Security-critical; test both directions (fork
       refused, root allowed) UNDER CONCURRENCY (AC4).**
-- [ ] **D4 (session-scoped state → `WeakMap<RootAgent>` keyed on `currentRootAgent()`; the 7 security
+- [x] **D4 (session-scoped state → `WeakMap<RootAgent>` keyed on `currentRootAgent()`; the 7 security
       guards)** — `write-guard` (`seen`), `flow-guard` (`tainted`/`pending`), `provenance` (`untrusted`),
       `bash-policy` (`approved`), `skills-hardening` (`activeAllowlists`), `subagent-jobs` (`jobs`),
       `budget-cap` (`sessionUsd`) → keyed on the **session root** (shares across the fork tree, isolates
       per session — preserving the flow-guard/provenance cross-agent exfil catch). Remove vestigial resets.
       **Each with a security isolation test (session A vs B) AND a parent↔fork cross-agent-still-shared
       test.**
-- [ ] **D5 (state → per-Agent; correctness)** — all `currentRootAgent()`-keyed: session-scoped `cost`
+- [x] **D5 (state → per-Agent; correctness)** — all `currentRootAgent()`-keyed: session-scoped `cost`
       session totals, `goal`, `todo`, `drift-probe`, `handoff` latch (GC'd on eviction); per-run-tree
       `limits` (`toolCallsThisRun`/`tokensThisRun`) + `fallback-routing` (per-run circuit) — **keep their
       `agent_start` reset** (zeroes the root entry per turn; preserves the tree-aggregate bound while fixing
       the concurrency race, G3). `otel-exporter` spans already per-Agent. Non-security.
-- [ ] **D6 (concurrent streaming + elicitation routing)** — the server passes `wireJsonl` a `write` that
+- [x] **D6 (concurrent streaming + elicitation routing)** — the server passes `wireJsonl` a `write` that
       **guards on `currentRootAgent() === sessionRoot`** (fires for the session's root run AND its forks,
       not another session; guard lives in the *server's* `write`/`error` observers, NOT in `wireJsonl` —
       CLI stays unguarded, `jsonl.ts` unchanged). The ask sink routes **per `currentRootAgent()`** with a
       per-turn drain-set (3f) — one accessor for both streaming and elicitation.
-- [ ] **D7 (per-session serialization + concurrency)** — replace the global `busy` lock with a
+- [x] **D7 (per-session serialization + concurrency)** — replace the global `busy` lock with a
       **per-session lock** (a Set of running session ids; concurrent same-session `/run` → 409; different
       sessions concurrent). A **sessionless `/run`** (no id, no pool key) runs on a **fresh throwaway
       Agent** — no aliasing, no lock needed (G4). Concurrency-safe `sessions` Map; LRU eviction **skips both
@@ -244,9 +254,9 @@ Then the remaining shared mutable server state, audited for concurrency:
       exposes a **server-visible live-job signal** (a shared running-jobs `Set<session>` / store flag — the
       server can't see the extension's private `jobs` map otherwise); `DELETE /sessions/:id` checks the
       same signal; a **sessionless `launch_job` is refused** (no id to ever query the job).
-- [ ] **D8 (observability)** — `GET /sessions/:id` returns the session's usage + cost summary (per-tenant
+- [x] **D8 (observability)** — `GET /sessions/:id` returns the session's usage + cost summary (per-tenant
       readout + the isolation-test observation seam).
-- [ ] **D9 (tests)** — (a) two-session **state** isolation for each D4/D5 conversion; (b) **parent↔fork
+- [x] **D9 (tests)** — (a) two-session **state** isolation for each D4/D5 conversion; (b) **parent↔fork
       cross-agent sharing preserved** for flow-guard/provenance (the S2 regression guard); (c) two-session
       **concurrent** streaming isolation (interleaved in-flight `/run`s — AC3 protocol); (d) root-detection
       under concurrency (AC4); (e) **concurrent same-session `/run` → 409** (AC7); (f) per-session
@@ -403,3 +413,28 @@ Then the remaining shared mutable server state, audited for concurrency:
 - **Overall rollback:** kernel (getter + `currentRootAgent`) + server + ~15 extensions + tests; each phase
   reverts independently; Phase D reverts to the serial (global-lock) server, which is still correctly
   state-isolated. Branch `chore/session-isolation`, PR to `init`.
+
+## 10. Known limitations (whole-cycle audit dispositions)
+
+The whole-cycle adversarial audit (6 dimensions × 3-lens verify, zero severe) surfaced these; each is a
+conscious disposition, recorded so it does not silently vanish.
+
+- **L1 (deferred finding) — a detached `launch_job`'s frames surface in a later same-session `/run`
+  stream.** A background job started in run #1 outlives that turn; its events inherit the session **root**,
+  so the root-scoped streaming guard (which is per-*session*, not per-*request*) writes them into whatever
+  same-session `/run` is in flight when they fire. This is **within one session** (one tenant) — never
+  cross-tenant — and is strictly narrower than the pre-cycle single-Agent server, where such frames could
+  reach *any* session. Proper fix (per-request stream routing for detached jobs) is deferred as a follow-up;
+  it needs its own design (the job would carry a request-scoped sink, not just a root identity).
+- **L2 (ratified) — `GET /sessions/:id` inherits the single process-wide bearer token.** State is now
+  isolated per session, but the `session` id remains a *multiplexing* key, **not** a per-tenant
+  authorization boundary: any holder of `EAGENT_TOKEN` can read any session's usage+cost by id. This is
+  unchanged from the documented threat model — one token is one trust domain; isolate tenants at the
+  process/token boundary. Documented in `SECURITY.md`.
+- **L3 (ratified) — CLI `/reload` no longer resets `write-guard`/`bash-policy` state.** `reload` also emits
+  `session_start` (`extension.ts:179`), so the pre-cycle `session_start` reset closures cleared the seen-set
+  and shell approvals on every `/reload`. D4 removed those closures (the state is now root-keyed and GC'd on
+  eviction). Net effect on the CLI's single long-lived Agent: read-before-write state and shell approvals
+  now **persist across a hot code-reload** — ratified as correct, since `/reload` swaps extension code
+  within a *continuing* session and does not invalidate prior reads or user consent. The server is
+  unaffected (per-session Agents; `reload` fires on the host agent only).
