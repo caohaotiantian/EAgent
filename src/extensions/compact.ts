@@ -31,6 +31,7 @@
 
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
+import { type Agent } from "../kernel/agent.js";
 import { text, type Message } from "../kernel/types.js";
 import { DEFAULT_SUB_CALL_TIMEOUT_MS, runSubCall } from "./lib/sub-call.js";
 
@@ -171,8 +172,12 @@ export default function activate(e: ExtensionAPI): () => void {
     keepTurns: e.store.get<number>("keepTurns", DEFAULT_KEEP_TURNS) ?? DEFAULT_KEEP_TURNS,
   });
 
-  /** Recursion guard: true while a summarization sub-call is in flight. */
-  let summarizing = false;
+  /**
+   * Recursion guard: the run-tree root is present while its summarization
+   * sub-call is in flight. Keyed on `e.rootAgent` so concurrent sessions on
+   * their own Agents never suppress each other's compaction (handoff.ts:450).
+   */
+  const summarizing = new WeakSet<Agent>();
 
   /**
    * Summarize `older` via the configured provider DIRECTLY. Passing `tools: []`
@@ -242,7 +247,7 @@ export default function activate(e: ExtensionAPI): () => void {
   // -- the compaction seam --------------------------------------------------
 
   const offHook = e.hook("transformContext", async (messages) => {
-    if (summarizing) return messages; // re-entrancy guard
+    if (summarizing.has(e.rootAgent)) return messages; // re-entrancy guard
     const { enabled, budget, keepTurns } = cfg();
     if (!enabled) return messages; // off by default / kill switch
     if (tokenEstimate(messages) <= budget) return messages; // under budget
@@ -260,12 +265,12 @@ export default function activate(e: ExtensionAPI): () => void {
     const older = messages.slice(0, idx);
     const recent = messages.slice(idx);
 
-    summarizing = true;
+    summarizing.add(e.rootAgent);
     let summaryText: string;
     try {
       summaryText = await summarize(older);
     } finally {
-      summarizing = false;
+      summarizing.delete(e.rootAgent);
     }
 
     // A NEW array; the persistent transcript is untouched. The pinned block sits
