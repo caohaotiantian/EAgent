@@ -1,12 +1,10 @@
 # Design — Full concurrent in-process multi-tenant isolation (HTTP server)
 
 Slug: `2026-07-14-multitenant-isolation`
-Status: draft (round 3 — panel round-2 fixes: elicitation ask-sink routed per `currentRootAgent()` (the
-severe); `limits`/`fallback-routing` root-keyed to preserve tree-aggregation; §3b preserves the
-supply-chain-sweep/baseline `session_start` handlers; AC1b split capability- vs data-taint; sessionless
-`/run` on a fresh Agent + background-job eviction guard; D1 lists the `rootAgent` interface member +
-`index.ts` export, ceiling 2265; counts reconciled. Two mechanisms empirically validated; round-2 panel
-confirmed all 3 round-1 severe fixes correct.)
+Status: **L1 closed** (2026-07-14). Three fresh-reviewer panel rounds caught + fixed 6 severe design
+flaws (all pre-code); the round-4 corroboration passed zero-severe/zero-general with every source
+citation verified. Both linchpins (ALS streaming routing, `currentRootAgent()` inheritance) empirically
+validated. Ready for L2. Decomposed into 4 L3 phases (state isolation first/serial, concurrency last).
 Supersedes: `docs/design/2026-07-10-session-isolation.md` (closed won't-build; its getter/root-detection
 mechanism is carried forward and its commingling enumeration is re-validated + expanded here).
 
