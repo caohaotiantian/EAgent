@@ -91,6 +91,25 @@ export function makeHarness(
   return { agent, host, commands, provider, config, backend };
 }
 
+/**
+ * A second session Agent that SHARES the harness's registries/hooks/capabilities/
+ * ui/logger (mirroring the server's per-session Agent pool) but carries its OWN
+ * transcript/usage. Two-session isolation tests run one session on `h.agent` and
+ * one on this distinct Agent to prove per-session-root state does not commingle.
+ */
+export function siblingAgent(h: Harness): Agent {
+  return new Agent({
+    hooks: h.agent.hooks,
+    tools: h.agent.tools,
+    providers: h.agent.providers,
+    capabilities: h.agent.capabilities,
+    ui: h.agent.ui,
+    logger: h.agent.logger,
+    model: h.agent.model,
+    provider: h.agent.providerName,
+  });
+}
+
 export function lastText(agent: Agent): string {
   for (let i = agent.messages.length - 1; i >= 0; i--) {
     const m = agent.messages[i]!;

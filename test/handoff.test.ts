@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { makeHarness } from "./helpers.js";
+import { makeHarness, siblingAgent } from "./helpers.js";
 import type { CompletionRequest, Message } from "../src/kernel/types.js";
 import handoff, {
   slugify,
@@ -780,6 +780,34 @@ test("RB-bytecap: an oversized handoff body is truncated with a marker in the in
     if (block && block.type === "text") {
       assert.match(block.text, /\[resume-context truncated\]/, "the oversized body is truncated");
     }
+  } finally {
+    __setNow();
+    s.cleanup();
+  }
+});
+
+// -- AC2: the once-per-session resume latch is per-session-root ---------------
+
+test("AC2: a second session still gets its OWN resume injection (latch keyed per session root)", async () => {
+  const s = scratch();
+  __setNow(() => new Date("2026-06-22T10:00:00Z"));
+  try {
+    writeCandidate(s, "2026-06-22-fix-login-bug.md", "## Goal\nFix the login bug in auth\n## Next steps\n1. test");
+    const seen: Message[][] = [];
+    const h = makeHarness({ responder: capturingResponder(seen) });
+    await h.host.use("handoff", handoff);
+    await runHandoff(h, "resume on");
+
+    // Session A consumes its one-shot injection latch.
+    await h.agent.run("continue fixing the login bug");
+    assert.ok(sawResume(seen), "session A injected its resume-context");
+
+    // Session B is a distinct pooled Agent (the server model): its once-only latch
+    // is its own, so it STILL injects. A shared `injected` latch would suppress B
+    // because session A already consumed it.
+    seen.length = 0;
+    await siblingAgent(h).run("continue fixing the login bug");
+    assert.ok(sawResume(seen), "session B injected its own resume-context (latch isolated from A)");
   } finally {
     __setNow();
     s.cleanup();

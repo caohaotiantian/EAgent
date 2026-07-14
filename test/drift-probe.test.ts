@@ -25,7 +25,7 @@ import driftProbe, {
 import type { ExtensionAPI } from "../src/kernel/extension.js";
 import type { CompletionRequest, Logger, Message, UI } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
-import { makeHarness, silentLogger, type Harness } from "./helpers.js";
+import { makeHarness, siblingAgent, silentLogger, type Harness } from "./helpers.js";
 
 // -- fixtures ---------------------------------------------------------------
 
@@ -458,6 +458,32 @@ test("4.6: a regression that arms while noteOnRegression=false, then flipped tru
     provider.mainTurnHadNote.filter((had) => had).length,
     0,
     "no main turn ever saw a drift-note — the flag never armed under disabled notes",
+  );
+});
+
+// ===========================================================================
+// AC2 — per-session-root isolation of the turn counter
+// ===========================================================================
+
+test("AC2: a second session's turns do not advance the first session's probe cadence", async () => {
+  // The turn counter accumulates across runs and is NOT reset per turn — so on a
+  // shared closure, session B's turns would push the shared count over N and fire
+  // a probe that belongs to neither session. Keyed per session root, each session
+  // counts its own turns. With N=2, one turn in A + one turn in a distinct pooled
+  // Agent B must fire NO probe (each is at count 1); a commingled counter reaches
+  // 2 on B's turn and fires one.
+  const h = makeHarness();
+  const provider = new ProbeProvider([]);
+  h.agent.providers.register(provider, { default: true });
+  await activate(h, { enabled: true, n: 2 });
+
+  await h.agent.run("session A turn"); // session A: root count 1, no probe
+  await siblingAgent(h).run("session B turn"); // session B (distinct root): count 1, no probe
+
+  assert.equal(
+    provider.probeCalls,
+    0,
+    "no probe fires — each session's turn counter is independent (commingled would fire on B)",
   );
 });
 

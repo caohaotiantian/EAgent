@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 
-import { defineTool } from "../src/kernel/define.js";
+import { Agent } from "../src/kernel/agent.js";
+import { defineTool, ok } from "../src/kernel/define.js";
 import type { Command } from "../src/kernel/commands.js";
 import type { Message, ToolResultBlock } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
@@ -165,6 +166,85 @@ test("enforces a per-run tool-call budget and stops invoking the tool body", asy
     blocked.every((r) => r.isError),
     "blocked calls are reported as errors",
   );
+});
+
+test("a fork's tool calls AGGREGATE onto the session's per-turn budget (root-keyed, not per-fork)", async () => {
+  // The per-run tool-call budget is keyed on the SESSION ROOT and reset only on
+  // the top-level agent_start (a fork's agent_start is suppressed by childScope),
+  // so a fork's calls count against the same tree-wide budget. Keying per acting
+  // agent would give each fork a fresh 0 and let a spawn fan-out evade the cap.
+  let pingRuns = 0;
+  const { agent, host, commands } = makeHarness({
+    responder: (req) => {
+      const last = req.messages[req.messages.length - 1];
+      const lastResult =
+        last?.role === "tool" ? last.content.find((b) => b.type === "tool_result") : undefined;
+      const isChild = req.messages.some(
+        (m) => m.role === "user" && m.content.some((b) => b.type === "text" && b.text.includes("child")),
+      );
+      if (isChild) {
+        // The fork pings until it is blocked by the (shared, root-keyed) budget.
+        if (lastResult && lastResult.type === "tool_result" && /budget/.test(lastResult.content)) {
+          return { text: "child-done" };
+        }
+        return { toolCalls: [{ name: "ping" }] };
+      }
+      // The parent: ping, ping, spawn a fork, then finish.
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (toolMsgs < 2) return { toolCalls: [{ name: "ping" }] };
+      if (toolMsgs === 2) return { toolCalls: [{ name: "spawn" }] };
+      return { text: "parent-done" };
+    },
+    fallback: "allow",
+  });
+  agent.maxTurns = 12;
+
+  agent.tools.register(
+    defineTool({
+      name: "ping",
+      description: "counts one execution",
+      execute: () => {
+        pingRuns += 1;
+        return ok("pong");
+      },
+    }),
+  );
+  agent.tools.register(
+    defineTool({
+      name: "spawn",
+      description: "run a child agent within this session (a fork)",
+      execute: async () => {
+        // A fork: its own transcript, but it SHARES the session's hooks (via
+        // childScope, so its agent_start is suppressed) — so child.run inherits the
+        // session root and its tool calls land on the same per-turn budget.
+        const child = new Agent({
+          hooks: agent.hooks.childScope(),
+          tools: agent.tools,
+          providers: agent.providers,
+          capabilities: agent.capabilities,
+          ui: agent.ui,
+          logger: agent.logger,
+          model: "mock",
+          provider: "mock",
+          maxTurns: 8,
+        });
+        await child.run("child: ping until budget-blocked");
+        return ok("spawned");
+      },
+    }),
+  );
+
+  await host.use("limits", activateLimits);
+  // Budget of 4: parent runs ping, ping, spawn (calls 1,2,3); the fork then gets
+  // exactly one ping (call 4) before the 5th is blocked — 3 successful pings total.
+  await runCommand(commands.get("limits")!, agent, "maxToolCallsPerRun=4");
+
+  await agent.run("parent go");
+
+  // Root-keyed aggregation: parent(2) + fork(1) = 3 successful pings, the fork's
+  // 2nd ping blocked by the tree-wide cap. A fresh per-fork counter would let the
+  // fork ping up to its own cap of 4, yielding 6.
+  assert.equal(pingRuns, 3, "the fork's calls aggregate onto the session's per-turn budget");
 });
 
 test("budget counter resets between runs", async () => {

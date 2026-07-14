@@ -14,6 +14,7 @@
  * malformed write fails with a correcting message and does not mutate the list.
  */
 
+import { type Agent } from "../kernel/agent.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 
@@ -76,7 +77,16 @@ function validate(raw: unknown): ValidateResult {
 }
 
 export default function activate(e: ExtensionAPI): () => void {
-  let items: TodoItem[] = [];
+  // Session-scoped list, keyed on the run-tree ROOT (`e.rootAgent`) so it is shared
+  // across a session's fork tree but isolated BETWEEN sessions (each on its own
+  // Agent). The `session_start` reset (below) still clears the session's entry on
+  // a reload.
+  const byRoot = new WeakMap<Agent, { items: TodoItem[] }>();
+  const stateFor = (agent: Agent): { items: TodoItem[] } => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { items: [] }));
+    return s;
+  };
 
   const offTool = e.registerTool(
     defineTool({
@@ -107,8 +117,9 @@ export default function activate(e: ExtensionAPI): () => void {
       execute: (args) => {
         const v = validate(args);
         if (!v.ok) return fail(v.message);
-        items = v.items;
-        return ok(render(items));
+        const st = stateFor(e.rootAgent);
+        st.items = v.items;
+        return ok(render(st.items));
       },
     }),
   );
@@ -116,11 +127,11 @@ export default function activate(e: ExtensionAPI): () => void {
   const offCmd = e.registerCommand({
     name: "todos",
     description: "Show the current session todo list.",
-    run: (c) => c.print(render(items)),
+    run: (c) => c.print(render(stateFor(e.rootAgent).items)),
   });
 
   const reset = () => {
-    items = [];
+    stateFor(e.rootAgent).items = [];
   };
   const offStart = e.on("session_start", reset);
   const offDown = e.on("session_shutdown", reset);

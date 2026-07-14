@@ -34,6 +34,7 @@
  * makes activation a total no-op. Configure with `/fallback-routing`.
  */
 
+import { type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { CompletionRequest, Provider, StreamEvent } from "../kernel/types.js";
 
@@ -159,32 +160,38 @@ export default function activate(e: ExtensionAPI): () => void {
   // circuit-breaker / recovery pattern).
   if (!e.config.enabled("fallback-routing", { default: true })) return () => {};
 
-  // The configured provider captured at run start — the restore baseline. Seeded
-  // eagerly so a unit-level `/fallback-routing off` before any run still restores
-  // to a sane value. `string | undefined`; `undefined` correctly restores "use
-  // the registry default".
-  let baselineProvider: string | undefined = e.agent.providerName;
-
-  /**
-   * Per-run circuit: provider name -> consecutive in-run failure count. Reset on
-   * `agent_start`; a provider whose count reaches `tripAfter` is skipped for the
-   * rest of that run. In-memory only — persisted state is just the config keys.
-   */
-  const circuit = new Map<string, number>();
+  // Per-run-tree state, keyed on the run-tree ROOT (`e.rootAgent`) so it is
+  // isolated BETWEEN sessions (each on its own Agent) and race-free under
+  // concurrency — the `baselineProvider` was a shared closure singleton that
+  // would otherwise race one session's capture over another's.
+  //
+  //   - `baselineProvider`: the configured provider captured at run start (the
+  //     restore baseline). `undefined` correctly restores "use the registry
+  //     default". Seeded eagerly (below) so a `/fallback-routing off` before any
+  //     run still restores to a sane value.
+  //   - `circuit`: per-run provider name -> consecutive in-run failure count.
+  //     Reset on `agent_start`; a provider whose count reaches `tripAfter` is
+  //     skipped for the rest of that run. In-memory only.
+  interface RouteState {
+    baselineProvider: string | undefined;
+    circuit: Map<string, number>;
+  }
+  const byRoot = new WeakMap<Agent, RouteState>();
+  const stateFor = (agent: Agent): RouteState => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { baselineProvider: agent.providerName, circuit: new Map() }));
+    return s;
+  };
+  // Eager seed so a `/fallback-routing off` before this session's first run
+  // restores the configured provider (captured before anything flips it to the
+  // wrapper).
+  stateFor(e.rootAgent);
 
   const cfg = (): { enabled: boolean; chain: FallbackEntry[]; tripAfter: number } => ({
     enabled: e.store.get<boolean>("enabled", false) ?? false,
     chain: e.store.get<FallbackEntry[]>("chain", []) ?? [],
     tripAfter: asPositiveInt(e.store.get<unknown>("tripAfter"), DEFAULT_TRIP_AFTER),
   });
-
-  const isTripped = (name: string): boolean => (circuit.get(name) ?? 0) >= cfg().tripAfter;
-  const onFailure = (name: string): void => {
-    circuit.set(name, (circuit.get(name) ?? 0) + 1);
-  };
-  const onSuccess = (name: string): void => {
-    circuit.set(name, 0);
-  };
 
   /**
    * The composite provider. Builds and normalizes the chain lazily AT STREAM TIME
@@ -195,12 +202,14 @@ export default function activate(e: ExtensionAPI): () => void {
   const wrapper: Provider = {
     name: FALLBACK_PROVIDER_NAME,
     async *stream(req: CompletionRequest): AsyncIterable<StreamEvent> {
-      const headName = baselineProvider ?? e.agent.providers.get()?.name;
+      const st = stateFor(e.rootAgent);
+      const { chain: fallbacks, tripAfter } = cfg();
+      const headName = st.baselineProvider ?? e.agent.providers.get()?.name;
       const head: ChainEntry | undefined =
         headName !== undefined ? { name: headName, model: req.model } : undefined;
-      const chain = normalizeChain(buildChain(head, cfg().chain), {
+      const chain = normalizeChain(buildChain(head, fallbacks), {
         isRegistered: (n) => e.agent.providers.get(n) !== undefined,
-        isTripped,
+        isTripped: (n) => (st.circuit.get(n) ?? 0) >= tripAfter,
       });
 
       let lastErr: unknown;
@@ -214,13 +223,13 @@ export default function activate(e: ExtensionAPI): () => void {
             committed = true;
             yield ev;
           }
-          onSuccess(entry.name); // a clean run resets this provider's failure streak
+          st.circuit.set(entry.name, 0); // a clean run resets this provider's failure streak
           return; // exactly one `done` was forwarded; stop the chain
         } catch (err) {
           // A user abort is not a provider fault: never fail over, and don't
-          // count it against the per-run circuit (checked before onFailure).
+          // count it against the per-run circuit (checked before the trip bump).
           if (req.signal.aborted) throw err;
-          onFailure(entry.name);
+          st.circuit.set(entry.name, (st.circuit.get(entry.name) ?? 0) + 1);
           if (committed) throw err; // already emitted events — failing over would double-emit
           lastErr = err; // failed before the first event — advance to the next entry
         }
@@ -240,15 +249,16 @@ export default function activate(e: ExtensionAPI): () => void {
     // `run()` awaits all `agent_start` handlers before turn 1, so this lands
     // before the first `streamTurn`.
     e.on("agent_start", () => {
-      baselineProvider = e.agent.providerName;
-      circuit.clear();
+      const st = stateFor(e.rootAgent);
+      st.baselineProvider = e.agent.providerName;
+      st.circuit.clear();
       if (cfg().enabled) e.agent.providerName = FALLBACK_PROVIDER_NAME;
     }),
 
     // Restore the configured provider when the run ends (fires in the loop's
     // `finally`, so it also restores after an errored/aborted run — no residue).
     e.on("agent_end", () => {
-      e.agent.providerName = baselineProvider;
+      e.agent.providerName = stateFor(e.rootAgent).baselineProvider;
     }),
   ];
 
@@ -260,6 +270,7 @@ export default function activate(e: ExtensionAPI): () => void {
     run: (ctx) => {
       const args = ctx.args.trim();
       const [head, ...rest] = args.split(/\s+/).filter((s) => s.length > 0);
+      const st = stateFor(e.rootAgent);
       switch (head) {
         case "on":
           e.store.set("enabled", true);
@@ -268,7 +279,7 @@ export default function activate(e: ExtensionAPI): () => void {
         case "off":
           e.store.set("enabled", false);
           // Soft switch: immediately restore the configured baseline.
-          e.agent.providerName = baselineProvider;
+          e.agent.providerName = st.baselineProvider;
           ctx.print("fallback-routing off");
           break;
         case "chain": {
@@ -284,18 +295,18 @@ export default function activate(e: ExtensionAPI): () => void {
           break;
         }
         case "reset":
-          circuit.clear();
+          st.circuit.clear();
           ctx.print("fallback-routing: per-run circuit cleared");
           break;
         case "status":
         case undefined:
         default: {
           const c = cfg();
-          const headName = baselineProvider ?? e.agent.providers.get()?.name;
+          const headName = st.baselineProvider ?? e.agent.providers.get()?.name;
           const headEntry: ChainEntry | undefined =
             headName !== undefined ? { name: headName, model: e.agent.model } : undefined;
           const resolved = buildChain(headEntry, c.chain).map((x) => `${x.name}:${x.model}`);
-          const trippedCount = [...circuit.values()].filter((n) => n >= c.tripAfter).length;
+          const trippedCount = [...st.circuit.values()].filter((n) => n >= c.tripAfter).length;
           ctx.print(`enabled=${c.enabled}`);
           ctx.print(`chain=${resolved.join(" -> ") || "(head only)"}`);
           ctx.print(`tripAfter=${c.tripAfter}`);

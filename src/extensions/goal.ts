@@ -35,6 +35,7 @@
  * paid call per run-end) and is enabled with `/goal judge on`.
  */
 
+import { type Agent } from "../kernel/agent.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, StopReason } from "../kernel/types.js";
@@ -300,12 +301,23 @@ export function parseCriteriaLine(line: string): string[] {
 export default function activate(e: ExtensionAPI): () => void {
   if (!e.config.enabled("goal", { default: true })) return () => {};
 
-  // Per-activation, session-scoped state (mirrors `todo`). No `store` persistence
-  // for the goal itself — the objective is a property of THIS run/session, not
-  // durable config. Only the judge toggle is persisted (in `store`).
-  let objective: string | undefined;
-  let criteria: string[] = [];
-  let lastCheck: CriterionResult[] | undefined;
+  // Session-scoped state, keyed on the run-tree ROOT (`e.rootAgent`) so it is
+  // shared across a session's fork tree but isolated BETWEEN sessions (each on its
+  // own Agent). No `store` persistence for the goal itself — the objective is a
+  // property of THIS session, not durable config. Only the judge toggle is
+  // persisted (in `store`). The `session_start` reset (below) still clears the
+  // session's entry on a reload.
+  interface GoalState {
+    objective: string | undefined;
+    criteria: string[];
+    lastCheck: CriterionResult[] | undefined;
+  }
+  const byRoot = new WeakMap<Agent, GoalState>();
+  const stateFor = (agent: Agent): GoalState => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { objective: undefined, criteria: [], lastCheck: undefined }));
+    return s;
+  };
 
   const judgeEnabled = (): boolean =>
     e.config.enabled("goal", { default: true }) && (e.store.get<boolean>(JUDGE_KEY, false) ?? false);
@@ -361,8 +373,9 @@ export default function activate(e: ExtensionAPI): () => void {
   // -- 1. transformContext: the anti-drift pin ------------------------------
   const offTransform = e.hook("transformContext", (messages: Message[]): Message[] => {
     // Inert until a goal is set: return BY REFERENCE, byte-identical to absence.
-    if (objective === undefined) return messages;
-    const note = text("system", renderPin(objective, criteria));
+    const st = stateFor(e.rootAgent);
+    if (st.objective === undefined) return messages;
+    const note = text("system", renderPin(st.objective, st.criteria));
     note.meta = { source: "goal", ephemeral: true };
     // A NEW array; never mutate the live transcript (house rule).
     return [note, ...messages];
@@ -372,20 +385,21 @@ export default function activate(e: ExtensionAPI): () => void {
   const offEnd = e.on("agent_end", async (_payload: { reason: StopReason }) => {
     // Fail OPEN: a check that throws must never break the run.
     try {
-      if (objective === undefined) return; // inert with no goal
-      if (criteria.length === 0) {
-        lastCheck = [];
+      const st = stateFor(e.rootAgent);
+      if (st.objective === undefined) return; // inert with no goal
+      if (st.criteria.length === 0) {
+        st.lastCheck = [];
         return; // nothing to check against
       }
       const finalAnswer = harvestFinal(e.agent.messages);
       let results: CriterionResult[] | undefined;
       if (judgeEnabled()) {
-        results = await judge(objective, criteria, finalAnswer);
+        results = await judge(st.objective, st.criteria, finalAnswer);
       }
       // Fall back to the deterministic lexical check when the judge is off or
       // yielded nothing.
-      results ??= checkCriteria(finalAnswer, criteria);
-      lastCheck = results;
+      results ??= checkCriteria(finalAnswer, st.criteria);
+      st.lastCheck = results;
 
       const unaddressed = results.filter((r) => !r.addressed);
       if (unaddressed.length > 0) {
@@ -418,10 +432,11 @@ export default function activate(e: ExtensionAPI): () => void {
       execute: (args) => {
         const v = validateGoal(args);
         if (!v.ok) return fail(v.message);
-        objective = v.objective;
-        criteria = v.criteria;
-        lastCheck = undefined;
-        return ok(render(objective, criteria));
+        const st = stateFor(e.rootAgent);
+        st.objective = v.objective;
+        st.criteria = v.criteria;
+        st.lastCheck = undefined;
+        return ok(render(st.objective, st.criteria));
       },
     }),
   );
@@ -437,6 +452,7 @@ export default function activate(e: ExtensionAPI): () => void {
       const sp = trimmed.indexOf(" ");
       const sub = (sp === -1 ? trimmed : trimmed.slice(0, sp)).toLowerCase();
       const rest = sp === -1 ? "" : trimmed.slice(sp + 1).trim();
+      const st = stateFor(e.rootAgent);
 
       switch (sub) {
         case "set": {
@@ -444,30 +460,30 @@ export default function activate(e: ExtensionAPI): () => void {
             c.print("objective text is empty");
             return;
           }
-          objective = rest;
-          lastCheck = undefined;
-          c.print(render(objective, criteria));
+          st.objective = rest;
+          st.lastCheck = undefined;
+          c.print(render(st.objective, st.criteria));
           return;
         }
         case "criteria": {
-          if (objective === undefined) {
+          if (st.objective === undefined) {
             c.print("set an objective first: /goal set <text>");
             return;
           }
-          criteria = parseCriteriaLine(rest);
-          lastCheck = undefined;
-          c.print(render(objective, criteria));
+          st.criteria = parseCriteriaLine(rest);
+          st.lastCheck = undefined;
+          c.print(render(st.objective, st.criteria));
           return;
         }
         case "check": {
-          if (objective === undefined) {
+          if (st.objective === undefined) {
             c.print("(no goal set)");
             return;
           }
           const finalAnswer = harvestFinal(e.agent.messages);
-          lastCheck = checkCriteria(finalAnswer, criteria);
-          c.print(render(objective, criteria));
-          if (lastCheck.length > 0) c.print(renderCheck(lastCheck));
+          st.lastCheck = checkCriteria(finalAnswer, st.criteria);
+          c.print(render(st.objective, st.criteria));
+          if (st.lastCheck.length > 0) c.print(renderCheck(st.lastCheck));
           return;
         }
         case "judge": {
@@ -487,23 +503,23 @@ export default function activate(e: ExtensionAPI): () => void {
           return;
         }
         case "clear": {
-          objective = undefined;
-          criteria = [];
-          lastCheck = undefined;
+          st.objective = undefined;
+          st.criteria = [];
+          st.lastCheck = undefined;
           c.print("goal cleared");
           return;
         }
         case "":
         case "status": {
-          if (objective === undefined) {
+          if (st.objective === undefined) {
             c.print("(no goal set)");
             return;
           }
-          c.print(render(objective, criteria));
+          c.print(render(st.objective, st.criteria));
           c.print(`judge: ${judgeEnabled() ? "on" : "off"}`);
-          if (lastCheck !== undefined && lastCheck.length > 0) {
+          if (st.lastCheck !== undefined && st.lastCheck.length > 0) {
             c.print("last check:");
-            c.print(renderCheck(lastCheck));
+            c.print(renderCheck(st.lastCheck));
           }
           return;
         }
@@ -516,10 +532,14 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   // -- 5. session lifecycle reset (session-scoped, like `todo`) -------------
+  // Clears the current session's entry (host agent on the CLI, where session_start
+  // marks a reload; on the per-session-Agent server this fires once on the host
+  // template and cannot touch a live session's isolated entry).
   const reset = (): void => {
-    objective = undefined;
-    criteria = [];
-    lastCheck = undefined;
+    const st = stateFor(e.rootAgent);
+    st.objective = undefined;
+    st.criteria = [];
+    st.lastCheck = undefined;
   };
   const offStart = e.on("session_start", reset);
   const offDown = e.on("session_shutdown", reset);

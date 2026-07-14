@@ -12,6 +12,7 @@
  *                             body: { input: string, session?: string }
  *   POST   /answer          → answer a pending elicitation mid-turn
  *                             body: { id: number, answer: string }
+ *   GET    /sessions/:id     → a session's usage + cost summary
  *   DELETE /sessions/:id     → forget a conversation
  *
  * A `session` id makes `/run` calls accumulate into one conversation; without
@@ -36,6 +37,7 @@ import { Agent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
 import type { Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
+import { COST_ACCESSOR_KEY } from "./extensions/cost.js";
 import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
 export interface ServeOptions extends AgentHostOptions {
@@ -153,6 +155,15 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   const sessions = new Map<string, Agent>();
   let busy = false;
 
+  // The cross-boundary cost read: the `cost` extension publishes a
+  // `costOf(agent): number` accessor into its namespaced store at activation
+  // (usage lives natively on the Agent; cost does not). Resolved live so a reload
+  // republishes cleanly; falls back to 0 when cost is disabled/absent.
+  const costUsdFor = (agent: Agent): number => {
+    const fn = built.host.storeFor("cost").get<(a: Agent) => number>(COST_ACCESSOR_KEY);
+    return typeof fn === "function" ? fn(agent) : 0;
+  };
+
   const server = createServer((req, res) => {
     // Absorb an OutgoingMessage 'error' (a socket reset — ECONNRESET/EPIPE) on
     // any response, streaming or single-write. Without a listener it throws as an
@@ -166,7 +177,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
       set busy(v) {
         busy = v;
       },
-    }, { token, maxBody }, elicit, askTimeoutMs, built.config).catch((err) =>
+    }, { token, maxBody }, elicit, askTimeoutMs, built.config, costUsdFor).catch((err) =>
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }),
     );
   });
@@ -208,6 +219,7 @@ async function route(
   elicit: Elicitation,
   askTimeoutMs: number,
   config: Config,
+  costUsdFor: (agent: Agent) => number,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -220,6 +232,20 @@ async function route(
 
   if (security.token && !authorized(req, security.token)) {
     sendJson(res, 401, { error: "unauthorized; provide Authorization: Bearer <token>" });
+    return;
+  }
+
+  // Per-tenant observability: a session's own usage + cost summary. Usage lives
+  // natively on the session Agent; cost is read through the extension-published
+  // accessor (`costUsdFor`). An unknown session id is a clean 404.
+  if (req.method === "GET" && url.pathname.startsWith("/sessions/")) {
+    const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
+    const agent = sessions.get(id);
+    if (!agent) {
+      sendJson(res, 404, { error: "unknown session", session: id });
+      return;
+    }
+    sendJson(res, 200, { session: id, usage: agent.usage, costUsd: costUsdFor(agent) });
     return;
   }
 
@@ -299,7 +325,7 @@ async function route(
 
   sendJson(res, 404, {
     error: "not found",
-    routes: ["GET /health", "POST /run", "POST /answer", "DELETE /sessions/:id"],
+    routes: ["GET /health", "POST /run", "POST /answer", "GET /sessions/:id", "DELETE /sessions/:id"],
   });
 }
 

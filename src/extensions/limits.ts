@@ -20,6 +20,7 @@
 import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
+import { type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 import type { ToolResult } from "../kernel/types.js";
@@ -75,13 +76,24 @@ function sep(): string {
 
 export default function activate(e: ExtensionAPI): () => void {
   /**
-   * Per-run tool-call counter. In-memory and reset on `agent_start`, because it
-   * is meaningful only within a single run — it must not survive across runs or
-   * a reload (the budget is "this run", not "ever").
+   * Per-run-tree counters, keyed on the run-tree ROOT (`e.rootAgent`). The budget
+   * is "this turn's whole tree": a fork's `agent_start` is suppressed by
+   * `childScope`, so its calls aggregate onto the ROOT's counter (root-keying
+   * preserves the tree-wide cap while isolating BETWEEN sessions and staying
+   * race-free under concurrency). The root's entry is zeroed on each top-level
+   * `agent_start`, so it does not survive across runs.
    */
-  let toolCallsThisRun = 0;
-  /** Tokens consumed in this run, summed from the `usage` event. */
-  let tokensThisRun = 0;
+  interface RunCounters {
+    toolCallsThisRun: number;
+    /** Tokens consumed in this run, summed from the `usage` event. */
+    tokensThisRun: number;
+  }
+  const byRoot = new WeakMap<Agent, RunCounters>();
+  const stateFor = (agent: Agent): RunCounters => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { toolCallsThisRun: 0, tokensThisRun: 0 }));
+    return s;
+  };
 
   /**
    * Read a positive-integer config value from the store, falling back to its
@@ -198,32 +210,35 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // --- 2. Per-run tool-call budget ----------------------------------------
   //
-  // Reset the counter at the start of every run, then count and gate each call.
+  // Reset the ROOT's counters at the start of every top-level run (a fork's
+  // agent_start is suppressed, so its calls keep aggregating), then count and gate.
   const offReset = e.on("agent_start", () => {
-    toolCallsThisRun = 0;
-    tokensThisRun = 0;
+    const s = stateFor(e.rootAgent);
+    s.toolCallsThisRun = 0;
+    s.tokensThisRun = 0;
   });
 
   // Track tokens consumed this run so the budget can stop a runaway agent.
   // `totalTokens` is cache-aware (input + cache read/write + output) and already
   // excludes reasoning tokens, so cached runs can't slip past the budget.
   const offUsage = e.on("usage", ({ usage }) => {
-    tokensThisRun += totalTokens(usage);
+    stateFor(e.rootAgent).tokensThisRun += totalTokens(usage);
   });
 
   const offBudget = e.hook("beforeToolCall", (decision: ToolDecision): ToolDecision => {
     try {
       if (decision.block) return decision; // already vetoed by another guard
       const cfg = config();
-      if (cfg.maxTokensPerRun > 0 && tokensThisRun > cfg.maxTokensPerRun) {
+      const s = stateFor(e.rootAgent);
+      if (cfg.maxTokensPerRun > 0 && s.tokensThisRun > cfg.maxTokensPerRun) {
         return {
           ...decision,
           block: true,
           reason: `token budget (${cfg.maxTokensPerRun}) exceeded for this run`,
         };
       }
-      toolCallsThisRun += 1;
-      if (toolCallsThisRun > cfg.maxToolCallsPerRun) {
+      s.toolCallsThisRun += 1;
+      if (s.toolCallsThisRun > cfg.maxToolCallsPerRun) {
         return {
           ...decision,
           block: true,
@@ -293,8 +308,9 @@ export default function activate(e: ExtensionAPI): () => void {
       ctx.print(`spillToolOutput=${cfg.spillToolOutput}`);
       ctx.print(`toolOutputDir=${cfg.toolOutputDir ?? `(default: ${workspaceRoot(e.config)}/.eagent/tool-output)`}`);
       ctx.print(`toolOutputRetentionDays=${cfg.toolOutputRetentionDays}`);
-      ctx.print(`toolCallsThisRun=${toolCallsThisRun}`);
-      ctx.print(`tokensThisRun=${tokensThisRun}`);
+      const counters = stateFor(e.rootAgent);
+      ctx.print(`toolCallsThisRun=${counters.toolCallsThisRun}`);
+      ctx.print(`tokensThisRun=${counters.tokensThisRun}`);
     },
   });
 

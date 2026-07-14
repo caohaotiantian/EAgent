@@ -1179,3 +1179,103 @@ test("AC1 subagent-jobs: session B cannot job_status a job launched by session A
     assert.match(String(bStatus!.content), /unknown job/, "B's job_status reports A's id as unknown");
   });
 });
+
+// -- Phase C: correctness-state isolation (AC2) + observability (D8) -----------
+// The correctness extensions (cost/goal/todo/drift-probe/handoff) key their
+// session-scoped state on the SESSION ROOT (currentRootAgent). A session's state
+// must not leak into another session's distinct pooled Agent. cost + goal are
+// server-observable here; todo/drift-probe/handoff are covered in their own
+// test files (their read seams are not exposed over HTTP).
+
+test("D8: GET /sessions/:id returns the session's usage + cost summary; 404 for an unknown id", async () => {
+  await withServerHandle(async (base, http) => {
+    mockOf(http).script({ text: "ok" });
+
+    // Run a session so it is pooled.
+    await readNdjson(await post(base, "obs", "hello"), () => {});
+
+    const res = await fetch(`${base}/sessions/obs`);
+    assert.equal(res.status, 200, "a known session returns 200");
+    const body = (await res.json()) as { session: string; usage: Usage; costUsd: number };
+    assert.equal(body.session, "obs");
+    assert.ok(body.usage && typeof body.usage.inputTokens === "number", "usage summary present");
+    assert.ok(body.usage.inputTokens > 0, "the session accrued input tokens");
+    assert.equal(typeof body.costUsd, "number", "a costUsd figure is present");
+
+    // An unknown session id is a clean 404.
+    const miss = await fetch(`${base}/sessions/does-not-exist`);
+    assert.equal(miss.status, 404, "an unknown session id 404s");
+    await miss.text();
+  });
+});
+
+test("AC2 cost: GET /sessions/:id reports each session's OWN cost, not a commingled total", async () => {
+  // Route each turn through a priced model (gpt-4o) so cost is non-zero and
+  // per-session-distinct. Routing would reset the model each turn and mask the
+  // switch, so kill it for the duration (orthogonal to the isolation under test).
+  const prevRouting = process.env.EAGENT_ROUTING;
+  process.env.EAGENT_ROUTING = "off";
+  try {
+    await withServerHandle(async (base, http) => {
+      const sub = http.agent.hooks.on("turn_start", () => {
+        currentActingAgent()!.model = "gpt-4o"; // a card-priced model (mock prices at $0)
+      });
+      mockOf(http).script({ text: "ok" });
+
+      // Session A runs twice (accumulates); session B runs once.
+      await readNdjson(await post(base, "costA", "alpha"), () => {});
+      await readNdjson(await post(base, "costA", "beta"), () => {});
+      await readNdjson(await post(base, "costB", "alpha"), () => {});
+
+      const a = (await (await fetch(`${base}/sessions/costA`)).json()) as { usage: Usage; costUsd: number };
+      const b = (await (await fetch(`${base}/sessions/costB`)).json()) as { usage: Usage; costUsd: number };
+
+      assert.ok(a.costUsd > 0, "session A accrued a non-zero cost at the priced model");
+      assert.ok(b.costUsd > 0, "session B accrued a non-zero cost");
+      // ISOLATION: A ran twice, B once — A's cost strictly exceeds B's. A commingled
+      // session total (shared closure, last-writer-wins) would report B's value for A.
+      assert.ok(a.costUsd > b.costUsd, `A (2 runs) costUsd ${a.costUsd} must exceed B (1 run) ${b.costUsd}`);
+      // And B's own cost equals A's per-run cost — B is a fresh session, not A+B.
+      assert.ok(a.usage.inputTokens > b.usage.inputTokens, "A's usage exceeds B's (isolated)");
+
+      sub.dispose();
+    });
+  } finally {
+    if (prevRouting === undefined) delete process.env.EAGENT_ROUTING;
+    else process.env.EAGENT_ROUTING = prevRouting;
+  }
+});
+
+test("AC2 goal: session A's objective pin does not leak into session B's request context", async () => {
+  await withServerHandle(async (base, http) => {
+    const PIN = "ALPHA-OBJECTIVE-XYZ";
+    mockOf(http).script((req) => {
+      const user = latestUserText(req);
+      const seesPin = req.messages.some(
+        (m) => m.role === "system" && m.content.some((b) => b.type === "text" && b.text.includes(PIN)),
+      );
+      if (user.includes("session A")) {
+        // Turn 0: set the objective; a later turn then carries the pin (armed).
+        const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+        if (toolMsgs === 0) return { toolCalls: [{ name: "setgoal", arguments: { objective: PIN } }] };
+        return { text: seesPin ? "A-sees-pin" : "A-no-pin" };
+      }
+      // Session B: report whether A's pin leaked into B's context.
+      return { text: seesPin ? "B-LEAKED-PIN" : "B-clean" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "goalA", "session A sets a goal"), (o) => aLines.push(o));
+    const bLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "goalB", "session B has no goal"), (o) => bLines.push(o));
+
+    const aText = aLines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
+    const bText = bLines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
+
+    // Non-vacuous: A's own later turn sees its pin (the anti-drift mechanism is armed).
+    assert.match(aText, /A-sees-pin/, "session A's own turn carries the objective pin");
+    // ISOLATION: B never sees A's pin. A shared-closure objective would inject it into B.
+    assert.match(bText, /B-clean/, "session B's context is free of A's objective pin");
+    assert.doesNotMatch(bText, /LEAKED/, "A's objective did not leak into B");
+  });
+});
