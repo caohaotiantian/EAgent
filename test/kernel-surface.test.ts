@@ -16,12 +16,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as kernel from "../src/kernel/index.js";
+import type { ExtensionAPI } from "../src/kernel/extension.js";
 
 /** The complete, intended public surface of the kernel. Keep it small. */
 const EXPECTED_EXPORTS = [
   // The runtime classes — the seven primitives and their support types.
   "Agent",
   "currentActingAgent",
+  "currentRootAgent",
   "HookBus",
   "ToolRegistry",
   "ProviderRegistry",
@@ -66,5 +68,40 @@ test("the kernel source stays small", async () => {
   for (const f of readdirSync(dir)) {
     if (f.endsWith(".ts")) lines += readFileSync(join(dir, f), "utf8").split("\n").length;
   }
-  assert.ok(lines < 2250, `kernel is ${lines} lines; keep the core minimal (ceiling 2250)`);
+  assert.ok(lines < 2265, `kernel is ${lines} lines; keep the core minimal (ceiling 2265)`);
+});
+
+/** The stable member set of the object handed to every extension at activation. */
+const EXPECTED_API_MEMBERS = [
+  "id",
+  "registerTool",
+  "registerProvider",
+  "registerCommand",
+  "on",
+  "hook",
+  "grantCapability",
+  "store",
+  "config",
+  "log",
+  "agent",
+  "rootAgent",
+  "commands",
+  "reload",
+  "loadExtension",
+  "unloadExtension",
+].sort();
+
+test("the ExtensionAPI exposes exactly its intended members (no surface creep)", async () => {
+  const agent = new kernel.Agent();
+  const host = new kernel.ExtensionHost({ agent });
+  let captured: ExtensionAPI | undefined;
+  await host.use("surface-pin", (e) => {
+    captured = e;
+  });
+  assert.ok(captured, "the activation captured the ExtensionAPI");
+  assert.deepEqual(
+    Object.keys(captured).sort(),
+    EXPECTED_API_MEMBERS,
+    "The ExtensionAPI surface changed. Add a member deliberately or move the capability into an extension.",
+  );
 });

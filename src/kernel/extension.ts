@@ -27,7 +27,7 @@ import { readdirSync, statSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { Agent } from "./agent.js";
+import { currentActingAgent, currentRootAgent, type Agent } from "./agent.js";
 import type { KernelEvents, KernelFilters } from "./events.js";
 import type { EventHandler, FilterHandler } from "./hooks.js";
 import { type Command, CommandRegistry } from "./commands.js";
@@ -59,8 +59,10 @@ export interface ExtensionAPI {
   /** Layered, read-mostly configuration (peer to `store`); see `Config`. */
   readonly config: Config;
   readonly log: Logger;
-  /** The running agent (registries, hooks, capabilities, transcript). */
+  /** The acting agent (the running agent during a run; a fork during its own turn). */
   readonly agent: Agent;
+  /** The session-tree root agent — a fork resolves to its parent's root. */
+  readonly rootAgent: Agent;
   /** The command registry, for introspection. */
   readonly commands: CommandRegistry;
 
@@ -244,7 +246,8 @@ export class ExtensionHost {
       store,
       config: host.#config,
       log: prefixed(this.#logger, spec.id),
-      agent: host.agent,
+      get agent() { return currentActingAgent() ?? host.agent; },
+      get rootAgent() { return currentRootAgent() ?? host.agent; },
       commands: host.commands,
       reload: () => host.reload(spec.id),
       loadExtension: (path) => host.loadFile(path),

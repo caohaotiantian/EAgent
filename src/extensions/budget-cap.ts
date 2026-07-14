@@ -45,7 +45,7 @@
  * it guards is worse than no guardrail.
  */
 
-import { currentActingAgent, type Agent } from "../kernel/agent.js";
+import { currentActingAgent, currentRootAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message, Usage } from "../kernel/types.js";
 import { text } from "../kernel/types.js";
@@ -274,10 +274,11 @@ export default function activate(e: ExtensionAPI): () => void {
       const row = priceRow(s.activeModel, activeCard());
       // Per-run accumulates from per-event deltas; the session figure mirrors the
       // authoritative cumulative (avoids float drift across a long session — the
-      // exact approach `cost` takes). Only the ROOT agent updates the shared
-      // `sessionUsd`, so a child's smaller cumulative can't clobber it.
+      // exact approach `cost` takes). Only the run-tree ROOT updates the shared
+      // `sessionUsd`, so a fork's smaller cumulative can't clobber it (keyed on the
+      // root, not `e.agent`, so it holds under a per-session Agent and is race-free).
       s.runUsd += costOf(p.usage, row);
-      if (currentActingAgent() === undefined || currentActingAgent() === e.agent) {
+      if (currentActingAgent() === currentRootAgent()) {
         sessionUsd = costOf(p.cumulative, row);
       }
 

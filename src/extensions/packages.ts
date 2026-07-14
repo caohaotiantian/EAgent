@@ -379,7 +379,10 @@ function makeShim(e: ExtensionAPI, collected: Disposable[]): ExtensionAPI {
     store: e.store,
     config: e.config,
     log: e.log,
-    agent: e.agent,
+    // Getters (not a frozen read) so a package's `e.agent`/`e.rootAgent` resolve
+    // live to the acting/root agent during a run, like the real ExtensionAPI.
+    get agent() { return e.agent; },
+    get rootAgent() { return e.rootAgent; },
     commands: e.commands,
     reload: () => e.reload(),
     loadExtension: (path: string) => e.loadExtension(path),

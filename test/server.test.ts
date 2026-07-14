@@ -12,12 +12,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createHttpServer, maxSessions, sendJson, type HttpServer } from "../src/server.js";
+import { currentActingAgent } from "../src/kernel/agent.js";
 import { LayeredConfig } from "../src/config.js";
 import { MemoryStore } from "../src/kernel/store.js";
 import type { MockProvider } from "../src/providers/mock.js";
 import { unwrapProvider } from "../src/extensions/lib/provider-wrap.js";
-import type { Usage } from "../src/kernel/types.js";
+import { defineTool, ok } from "../src/kernel/define.js";
+import type { ToolResult, Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
+
+/** POST /run and return the open response (NDJSON), for the multi-turn tests. */
+function post(base: string, session: string, input: string): Promise<Response> {
+  return fetch(`${base}/run`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input, session }),
+  });
+}
 
 async function withServer(
   fn: (base: string) => Promise<void>,
@@ -219,11 +230,11 @@ test("a session id makes /run accumulate conversation history", async () => {
 
 test("KR-1: an aborted first turn is not persisted with a dangling [user] transcript", async () => {
   await withServerHandle(async (base, http) => {
-    // Abort mid-first-turn: a text_delta listener stops the agent, so the turn
-    // ends reason:"stop" with the assistant message NOT appended (the post-
-    // streamTurn abort check) → transcript = [user]. Same code path a client
-    // disconnect hits (onClose → agent.stop()), but deterministic.
-    http.agent.hooks.on("text_delta", () => http.agent.stop());
+    // Abort mid-first-turn: a text_delta listener stops the ACTING (per-session)
+    // agent, so the turn ends reason:"stop" with the assistant message NOT appended
+    // (the post-streamTurn abort check) → transcript = [user]. Same code path a
+    // client disconnect hits (onClose → agent.stop()), but deterministic.
+    http.agent.hooks.on("text_delta", () => currentActingAgent()?.stop());
     mockOf(http).script({ text: "partial" });
 
     const res = await fetch(`${base}/run`, {
@@ -255,12 +266,13 @@ test("per-session usage and model are isolated across sessions (AC-8)", async ()
       const initialModel = http.model;
       const modelsSeen: string[] = [];
       let changed = false;
-      // One-shot: mutate the shared agent's model DURING the first turn (session A).
-      // If model bled across sessions, B's turn would inherit it.
+      // One-shot: mutate the ACTING (per-session) agent's model DURING the first
+      // turn (session A). If model bled across sessions, B's turn would inherit it;
+      // under per-session Agents it cannot (B runs on a distinct Agent).
       const sub = http.agent.hooks.on("turn_start", () => {
         if (!changed) {
           changed = true;
-          http.agent.model = "model-from-A";
+          currentActingAgent()!.model = "model-from-A";
         }
       });
       // Record the model each provider turn actually saw, in call order.
@@ -776,10 +788,12 @@ test("SRV-2a: sendJson no-ops when headers are already sent (no throw, no second
 
 test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a silent 200", async () => {
   await withServerHandle(async (base, http) => {
-    const original = http.agent.restore.bind(http.agent);
-    http.agent.restore = () => {
+    // Force a throw in the setup window (after writeHead, before the terminal): the
+    // per-session Agent shares this hooks bus, so `wireJsonl`'s first `hooks.on` throws.
+    const original = http.agent.hooks.on.bind(http.agent.hooks);
+    http.agent.hooks.on = (() => {
       throw new Error("boom");
-    };
+    }) as typeof http.agent.hooks.on;
     try {
       const lines: Record<string, unknown>[] = [];
       const res = await fetch(`${base}/run`, {
@@ -794,7 +808,7 @@ test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a si
       assert.match(String(err.message), /boom/, "the error line carries the thrown message");
       assert.ok(err.where, "the error line now carries a `where` field (canonical error shape)");
     } finally {
-      http.agent.restore = original;
+      http.agent.hooks.on = original;
     }
   });
 });
@@ -897,4 +911,93 @@ test("SRV-6: HttpServer.close is idempotent — session_shutdown emits exactly o
   await http.close();
   await http.close(); // a second close must be a no-op, not a second dispose
   assert.equal(shutdowns, 1, "a repeated close() does not re-dispose / re-emit session_shutdown");
+});
+
+// -- Phase A: root-detection + danglingUser rollback on the per-session Agent --
+
+test("AC4: a session root can launch_job; a fork within the session is refused (currentActingAgent === currentRootAgent)", async () => {
+  await withServerHandle(async (base, http) => {
+    const launchJob = http.agent.tools.get("launch_job")!;
+
+    // A cap-free probe (survives the spawn_agent child-registry strip) that invokes
+    // launch_job.execute from within the FORK's acting-agent context.
+    let forkResult: ToolResult | undefined;
+    http.agent.tools.register(
+      defineTool({
+        name: "probe_fork",
+        description: "invokes launch_job from the acting (fork) context",
+        parameters: { type: "object", properties: {} },
+        execute: async (_a, ctx) => {
+          forkResult = await launchJob.execute({ prompt: "nested" }, ctx);
+          return ok("probed");
+        },
+      }),
+    );
+
+    mockOf(http).script((req) => {
+      const sys = req.systemPrompt;
+      // The spawned fork: call probe_fork once (→ nested launch_job, refused), then finish.
+      if (sys.includes("PROBE-CHILD")) {
+        return req.messages.some((m) => m.role === "tool") ? { text: "fork-done" } : { toolCalls: [{ name: "probe_fork", arguments: {} }] };
+      }
+      // A launch_job background child (DEFAULT_JOB_SYSTEM): finish immediately.
+      if (sys.includes("background sub-agent")) return { text: "job-done" };
+      // The session ROOT: launch_job at the root (allowed), spawn a fork, then finish.
+      const toolTurns = req.messages.filter((m) => m.role === "tool").length;
+      if (toolTurns === 0) return { toolCalls: [{ name: "launch_job", arguments: { prompt: "root-task" } }] };
+      if (toolTurns === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "PROBE-CHILD" } }] };
+      return { text: "root-done" };
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "ac4", "start"), (o) => lines.push(o));
+
+    // ROOT direction: the session root's own launch_job (dispatched by the loop) was
+    // ALLOWED — a tool_end with isError falsy, not a refusal.
+    const rootLaunch = lines.find((l) => l.type === "tool_end" && l.name === "launch_job");
+    assert.ok(rootLaunch, "the session root's launch_job produced a tool_end");
+    assert.notEqual(rootLaunch.isError, true, "the session root is allowed to launch_job");
+
+    // FORK direction: the fork's launch_job was REFUSED by rootOnly (fork !== root).
+    // (The identical predicate gates budget-cap's sessionUsd update — the fork's spend
+    // cannot clobber the session budget; unit-covered in budget-cap.test.ts.)
+    assert.ok(forkResult, "the fork invoked launch_job");
+    assert.equal(forkResult!.isError, true, "a fork within the session is refused launch_job");
+    assert.match(forkResult!.content, /sub-agent/, "the refusal names the sub-agent recursion guard");
+  });
+});
+
+test("danglingUser rollback: an aborted turn on a persistent session Agent leaves no bare user for the next turn", async () => {
+  await withServerHandle(async (base, http) => {
+    const captured: string[][] = []; // provider-seen message roles, per turn
+    let abortThisTurn = false;
+    // Abort the ACTING (per-session) agent mid-stream when armed.
+    const sub = http.agent.hooks.on("text_delta", () => {
+      if (abortThisTurn) currentActingAgent()?.stop();
+    });
+    mockOf(http).script((req) => {
+      captured.push(req.messages.map((m) => m.role));
+      return { text: "ok" };
+    });
+
+    // Turn 1: normal → the session Agent is persisted with valid alternating state.
+    await readNdjson(await post(base, "s", "one"), () => {});
+    // Turn 2: abort mid-stream → a trailing bare [user] on the PERSISTENT Agent that
+    // the rollback (pre-turn snapshot / restore on dangling) must discard.
+    abortThisTurn = true;
+    await readNdjson(await post(base, "s", "two"), () => {});
+    // Turn 3: normal → must NOT append a second consecutive user message.
+    abortThisTurn = false;
+    const lines3: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "s", "three"), (o) => lines3.push(o));
+
+    const turn3Roles = captured.at(-1)!;
+    assert.ok(
+      !turn3Roles.some((r, i) => r === "user" && turn3Roles[i + 1] === "user"),
+      `turn 3 request carries no two consecutive user messages; got roles: ${turn3Roles.join(",")}`,
+    );
+    assert.equal((lines3.at(-1) as { type?: string }).type, "agent_end", "turn 3 completed normally");
+    assert.ok(turn3Roles.includes("user"), "turn 3 still carries its own user message");
+    sub.dispose();
+  });
 });

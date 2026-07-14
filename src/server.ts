@@ -32,9 +32,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import type { Agent } from "./kernel/agent.js";
+import { Agent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
-import type { AgentState, Logger, UI } from "./kernel/types.js";
+import type { Logger, UI } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 import { eventToJsonl, wireJsonl } from "./jsonl.js";
 
@@ -134,10 +134,6 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
 
   await built.agent.hooks.emit("session_start", {});
 
-  // The pristine state a brand-new session (or a sessionless /run) restores from:
-  // empty transcript, zero usage, the configured model/prompt/thinking.
-  const initial = built.agent.snapshot();
-
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
 
@@ -152,8 +148,9 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     );
   }
 
-  // Per-conversation state snapshots, restored into the shared agent each turn.
-  const sessions = new Map<string, AgentState>();
+  // One Agent per conversation (its own transcript/usage/model), all sharing the
+  // host's registries/hooks/capabilities so every extension governs every session.
+  const sessions = new Map<string, Agent>();
   let busy = false;
 
   const server = createServer((req, res) => {
@@ -162,7 +159,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     // uncaught exception and takes the whole process down; route(...).catch only
     // catches promise rejections, not EventEmitter errors.
     res.on("error", () => {});
-    route(req, res, built.agent, built.host.list(), sessions, initial, {
+    route(req, res, built.agent, built.host.list(), sessions, {
       get busy() {
         return busy;
       },
@@ -203,10 +200,9 @@ interface Security {
 async function route(
   req: IncomingMessage,
   res: ServerResponse,
-  agent: Agent,
+  template: Agent,
   extensions: string[],
-  sessions: Map<string, AgentState>,
-  initial: AgentState,
+  sessions: Map<string, Agent>,
   lock: Lock,
   security: Security,
   elicit: Elicitation,
@@ -218,7 +214,7 @@ async function route(
   // /health is always open (for liveness probes); everything else needs auth
   // when a token is configured.
   if (req.method === "GET" && url.pathname === "/health") {
-    sendJson(res, 200, { ok: true, model: agent.model, extensions, sessions: sessions.size, auth: security.token ? "required" : "open" });
+    sendJson(res, 200, { ok: true, model: template.model, extensions, sessions: sessions.size, auth: security.token ? "required" : "open" });
     return;
   }
 
@@ -294,7 +290,7 @@ async function route(
     }
     lock.busy = true;
     try {
-      await streamRun(res, agent, input, sessions, initial, session, elicit, askTimeoutMs, config);
+      await streamRun(res, template, input, sessions, session, elicit, askTimeoutMs, config);
     } finally {
       lock.busy = false;
     }
@@ -307,13 +303,35 @@ async function route(
   });
 }
 
+/**
+ * Build a fresh per-session Agent: it SHARES the host's registries/hooks/
+ * capabilities/ui/logger (so every extension governs every session) but carries
+ * its OWN transcript/usage and a fresh copy of the run config
+ * (model/systemPrompt/thinking/maxTurns/provider/maxConcurrency).
+ */
+function makeSessionAgent(template: Agent): Agent {
+  return new Agent({
+    hooks: template.hooks,
+    tools: template.tools,
+    providers: template.providers,
+    capabilities: template.capabilities,
+    ui: template.ui,
+    logger: template.logger,
+    model: template.model,
+    provider: template.providerName,
+    systemPrompt: template.systemPrompt,
+    thinking: template.thinking,
+    maxTurns: template.maxTurns,
+    maxConcurrency: template.maxConcurrency,
+  });
+}
+
 /** Run one turn, streaming lifecycle events to the client as JSONL. */
 async function streamRun(
   res: ServerResponse,
-  agent: Agent,
+  template: Agent,
   input: string,
-  sessions: Map<string, AgentState>,
-  initial: AgentState,
+  sessions: Map<string, Agent>,
   session: string | undefined,
   elicit: Elicitation,
   askTimeoutMs: number,
@@ -356,9 +374,16 @@ async function streamRun(
     elicit.ask = null;
   };
 
-  // If the client disconnects mid-turn, abort the agent so it stops streaming
-  // to a dead socket (and frees the single-flight lock) instead of running the
-  // whole turn to completion and wasting tokens/side effects. Also release any
+  // The session's own Agent (own transcript/usage): reuse the pooled one, else
+  // build a fresh one from the host template. A sessionless /run runs on a
+  // throwaway that is never pooled. `existed` gates whether a brand-new session
+  // whose only turn aborts is worth persisting (it is not — see the rollback below).
+  const existed = session !== undefined && sessions.has(session);
+  const agent = (session !== undefined ? sessions.get(session) : undefined) ?? makeSessionAgent(template);
+
+  // If the client disconnects mid-turn, abort THIS session's agent so it stops
+  // streaming to a dead socket (and frees the single-flight lock) instead of running
+  // the whole turn to completion and wasting tokens/side effects. Also release any
   // ask the turn is blocked on, so the agent loop can unwind instead of hanging.
   const onClose = (): void => {
     closed = true;
@@ -368,9 +393,9 @@ async function streamRun(
   res.on("close", onClose);
   res.on("error", onClose); // a mid-stream socket error runs the same teardown
 
-  // Restore + subscribe inside the try so a setup-window throw (e.g. restore)
-  // streams a {type:"error"} line and hits the finally, not a silent 200 with no
-  // terminal line. `subs` is declared out here so the finally can dispose it.
+  // Subscribe inside the try so a setup-window throw streams a {type:"error"} line
+  // and hits the finally, not a silent 200 with no terminal line. `subs` is declared
+  // out here so the finally can dispose it.
   let subs: { dispose(): void }[] = [];
   // The kernel emits the `error` hook on both the maxTurns exhaustion path (which
   // does NOT throw — reason stays "stop") and a real run failure (which then
@@ -379,10 +404,12 @@ async function streamRun(
   // throw already surfaced via the hook is not written twice by the catch.
   let errorEmitted = false;
   try {
-    // Restore this session's state (transcript, usage, model, prompt, thinking) so
-    // the turn resumes from exactly where the session left off. A new session — or a
-    // sessionless /run — restores the pristine `initial` snapshot.
-    agent.restore((session ? sessions.get(session) : undefined) ?? initial);
+    // A transient pre-turn snapshot for the danglingUser rollback ONLY (NOT the
+    // removed per-session state pool): `agent.run` pushes the user message
+    // unconditionally, and an abort during the first stream breaks with reason "stop"
+    // before any assistant push — baking a trailing bare `user` message into the
+    // persistent Agent. Agent has no pop, so capture here and restore below.
+    const pre = agent.snapshot();
 
     subs = wireJsonl(write, agent);
     subs.push(
@@ -392,19 +419,21 @@ async function streamRun(
       }),
     );
     const { reason } = await agent.run(input);
-    // Snapshot the post-turn state back into the session. `agent.usage` here is the
-    // session's cumulative (restored session usage + this turn), not process-lifetime.
-    // Skip a transcript left on a bare `user` turn (a turn aborted before any
-    // assistant output): restoring it and appending the next input would form two
-    // consecutive user messages. Keep the session's last valid state instead.
+    // Discard a trailing bare `user` turn left by an aborted run: restoring the
+    // pre-turn snapshot rolls it back so the next /run does not append a second
+    // consecutive user message on the persistent Agent. `agent.usage` is this
+    // session's own cumulative (its turns), not process-lifetime.
     const msgs = agent.messages;
     const danglingUser = msgs.length > 0 && msgs[msgs.length - 1]!.role === "user";
-    if (session && !danglingUser) {
-      // LRU touch: Map.set on an existing key keeps its position, so delete+set
-      // moves the just-written session to newest, then evict the oldest keys past
-      // the cap. cap===0 skips the loop entirely (unbounded).
+    if (danglingUser) agent.restore(pre);
+    // Persist the session Agent (LRU touch to newest), unless this is a brand-new
+    // session whose only turn aborted to empty — that phantom carries no state, so
+    // it is dropped (an existing session stays, rolled back to its prior state).
+    if (session !== undefined && (!danglingUser || existed)) {
+      // LRU touch: delete+set moves the just-run session to newest, then evict the
+      // oldest keys past the cap. cap===0 skips the loop entirely (unbounded).
       sessions.delete(session);
-      sessions.set(session, agent.snapshot());
+      sessions.set(session, agent);
       const cap = maxSessions(config);
       while (cap > 0 && sessions.size > cap) sessions.delete(sessions.keys().next().value as string);
     }
@@ -414,7 +443,7 @@ async function streamRun(
     write({ type: "done", reason, session, usage: agent.usage });
     write(eventToJsonl("agent_end", { reason, usage: agent.usage, session }));
   } catch (err) {
-    // A setup-window throw (e.g. `agent.restore`) never reaches the kernel `error`
+    // A setup-window throw (e.g. `agent.snapshot`) never reaches the kernel `error`
     // hook, so emit it here. A throw from `agent.run` already surfaced via the hook
     // above (errorEmitted), so skip the duplicate.
     if (!errorEmitted) {

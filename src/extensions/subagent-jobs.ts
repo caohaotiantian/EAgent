@@ -20,7 +20,7 @@
  * capped; dispose cancels every still-running job so no child is orphaned.
  */
 
-import { Agent, currentActingAgent } from "../kernel/agent.js";
+import { Agent, currentActingAgent, currentRootAgent } from "../kernel/agent.js";
 import type { RunResult } from "../kernel/agent.js";
 import { defineTool, fail, ok } from "../kernel/define.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
@@ -86,15 +86,13 @@ export default function activate(e: ExtensionAPI): () => void {
   const DISABLED_MSG = "subagent-jobs: disabled (EAGENT_SUBAGENT_JOBS=off).";
 
   /**
-   * True at the root only: the acting agent is `e.agent` (or unset — a direct
-   * call outside any run). Any sub-agent context (`spawn_agent` child, team
-   * member, or job-child) makes this false, so a job tool refuses there — no
-   * nested jobs and no cross-extension inheritance path.
+   * True at the run-tree root only: the acting agent IS the root (or both unset —
+   * a direct call outside any run). Any sub-agent context (`spawn_agent` child,
+   * team member, or job-child) has a distinct acting agent, so a job tool refuses
+   * there — no nested jobs and no cross-extension inheritance path. Keyed on the
+   * root (not `e.agent`) so it is correct under a per-session Agent and race-free.
    */
-  const rootOnly = (): boolean => {
-    const acting = currentActingAgent();
-    return acting === undefined || acting === e.agent;
-  };
+  const rootOnly = (): boolean => currentActingAgent() === currentRootAgent();
 
   /** FIFO-drop the oldest finished (non-running) records past the retention cap. */
   const evictFinished = (): void => {

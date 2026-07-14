@@ -75,6 +75,10 @@ const MAX_PROVIDER_RETRIES = 6;
 const actingAgentStore = new AsyncLocalStorage<Agent>();
 export const currentActingAgent = (): Agent | undefined => actingAgentStore.getStore();
 
+/** Ambient run-tree root: set once at the top-level `run()` and inherited (never overwritten) by forks, so session-scoped state keys per session and root-detection is concurrency-safe. */
+const rootAgentStore = new AsyncLocalStorage<Agent>();
+export const currentRootAgent = (): Agent | undefined => rootAgentStore.getStore();
+
 export class Agent {
   readonly hooks: HookBus<KernelEvents, KernelFilters>;
   readonly tools: ToolRegistry;
@@ -218,7 +222,11 @@ export class Agent {
   }
 
   async run(input: string | Message): Promise<RunResult> {
-    return actingAgentStore.run(this, async (): Promise<RunResult> => {
+    // A top-level run is its own root; a fork inherits its parent's root (the ALS
+    // context set here is never overwritten by a nested run).
+    const root = rootAgentStore.getStore() ?? this;
+    return rootAgentStore.run(root, () =>
+    actingAgentStore.run(this, async (): Promise<RunResult> => {
       if (this.#running) throw new Error("agent is already running");
       const userMessage: Message =
         typeof input === "string" ? { role: "user", content: [{ type: "text", text: input }] } : input;
@@ -344,7 +352,7 @@ export class Agent {
       }
 
       return { reason, messages: this.#messages };
-    });
+    }));
   }
 
   // -- internals ----------------------------------------------------------

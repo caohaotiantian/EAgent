@@ -191,7 +191,13 @@ test("AC4: launch_job is refused from inside a sub-agent run but succeeds from t
       }
       return { text: "child-final" };
     }
-    return { text: "unused" };
+    // The ROOT run: launch one background job (which establishes the run-tree root),
+    // then finish. Root-detection is `currentActingAgent() === currentRootAgent()`, so
+    // the root launch MUST happen inside a real run for the job-child to inherit a
+    // distinct root (the session root) rather than reading as its own root.
+    return req.messages.some((m) => m.role === "tool")
+      ? { text: "root-final" }
+      : { toolCalls: [{ name: "launch_job", arguments: { prompt: "go", system: "PROBE-CHILD" } }] };
   });
 
   const { agent, host } = makeHarness({ fallback: "allow" });
@@ -216,16 +222,21 @@ test("AC4: launch_job is refused from inside a sub-agent run but succeeds from t
     }),
   );
 
-  // Root launch succeeds (acting agent is undefined at the root).
-  const launched = await launchJob.execute({ prompt: "go", system: "PROBE-CHILD" }, fakeCtx());
-  assert.equal(launched.isError, undefined, "root launch succeeds");
-  const rootId = jobIdOf(launched);
+  // Capture the root job's id off the tool_end stream so the child can be drained.
+  let rootId: string | undefined;
+  agent.hooks.on("tool_end", ({ call, result }) => {
+    if (call.name === "launch_job" && !result.isError) rootId = (result.details as { jobId?: string }).jobId;
+  });
+
+  // The root launches from within a real run (acting agent === run-tree root → allowed).
+  await agent.run("start");
+  assert.ok(rootId, "the root launch (inside a run) succeeded and produced a jobId");
 
   // Drain the background child (it calls the probe → nested launch_job).
-  await collectJob.execute({ jobId: rootId }, fakeCtx());
+  await collectJob.execute({ jobId: rootId! }, fakeCtx());
 
   assert.ok(nested, "the child invoked the probe");
-  assert.equal(nested!.isError, true, "the nested launch_job was refused");
+  assert.equal(nested!.isError, true, "the nested launch_job was refused (fork !== root)");
   assert.match(nested!.content, /sub-agent/, "refusal names the sub-agent recursion guard");
 
   // No nested job was created: exactly the one root job exists.
