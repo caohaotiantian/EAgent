@@ -21,6 +21,7 @@ import { test } from "node:test";
 
 import activate, { assess, bindingCap, softBinding, type BudgetConfig } from "../src/extensions/budget-cap.js";
 import { costOf, priceRow, DEFAULT_PRICE_CARD, type PriceCard } from "../src/extensions/cost.js";
+import { Agent } from "../src/kernel/agent.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { Logger, Message, ToolResultBlock, Usage } from "../src/kernel/types.js";
 import type { MockResponder } from "../src/providers/mock.js";
@@ -469,4 +470,52 @@ test("host.unload removes the command and hooks; nothing trips afterward", async
 
   await h.agent.run("go");
   assert.equal(s.calls(), 3, "all calls ran after unload (hooks gone)");
+});
+
+// ---------------------------------------------------------------------------
+// Phase B — the cumulative sessionUsd figure is keyed on the SESSION ROOT
+// ---------------------------------------------------------------------------
+
+/** A second per-session Agent sharing the host's single activation (mirrors the
+ *  server's per-session Agent pool: distinct run-tree roots, one shared bus). */
+function sessionAgent(template: Agent): Agent {
+  return new Agent({
+    hooks: template.hooks,
+    tools: template.tools,
+    providers: template.providers,
+    capabilities: template.capabilities,
+    ui: template.ui,
+    logger: template.logger,
+    model: template.model,
+    provider: template.providerName,
+  });
+}
+
+test("AC1: session A's cumulative sessionUsd does not carry into session B's figure", async () => {
+  // Two sessions with DIFFERENT spend (different input lengths). After both run,
+  // `/budget-cap status` (invoked outside any run → keyed on host.agent, i.e. A's
+  // root) must report A's sessionUsd, not B's. A commingled closure would show B's
+  // (the last writer overwrote the shared figure). Not exercised through the HTTP
+  // server: mock pricing is $0 and there is no HTTP route to set a price card/cap,
+  // and the overwrite-each-usage design self-heals a shared figure serially — the
+  // status readout is the observable seam.
+  const h = makeHarness({ fallback: "allow" });
+  const cap = captureUsage(h);
+  await h.host.use("budget-cap", activate);
+  await runCommand(h, "budget-cap", "pricecard mock 1000 1000");
+
+  const b = sessionAgent(h.agent);
+  await h.agent.run("A".repeat(50)); // session A: long input → larger cumulative
+  const aEventCount = cap.events.length;
+  await b.run("B"); // session B: short input → smaller cumulative
+
+  const row = priceRow("mock", mockCard(1000, 1000));
+  const aSessionUsd = costOf(cap.events[aEventCount - 1]!.cumulative, row);
+  const bSessionUsd = costOf(cap.events.at(-1)!.cumulative, row);
+  assert.ok(aSessionUsd !== bSessionUsd, "the two sessions spent different amounts (distinguishable)");
+
+  const status = await runCommand(h, "budget-cap", "status");
+  const shown = parseUsdField(status, "sessionUsd");
+  assert.ok(Math.abs(shown - aSessionUsd) < 1e-6, `status shows A's sessionUsd ${aSessionUsd}, got ${shown}`);
+  assert.ok(Math.abs(shown - bSessionUsd) > 1e-9, "status does NOT reflect B's spend (sessionUsd is per-session-root)");
 });

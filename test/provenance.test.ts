@@ -19,9 +19,11 @@ import { test } from "node:test";
 
 import provenance from "../src/extensions/provenance.js";
 import contentGuard from "../src/extensions/content-guard.js";
+import subagents from "../src/extensions/subagents.js";
+import { Agent } from "../src/kernel/agent.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { ExtensionAPI } from "../src/kernel/extension.js";
-import type { ToolResult, UI } from "../src/kernel/types.js";
+import type { CompletionRequest, ToolResult, UI } from "../src/kernel/types.js";
 import { makeHarness, type Harness } from "./helpers.js";
 
 interface StoreCfg {
@@ -313,4 +315,112 @@ test("W9.5c: a clean nested arg with no untrusted segment is not escalated", asy
   const out = await gate(h, "mcp_tool", { params: { items: ["nothing", "tainted", "here at all"] } });
   assert.equal(out.block, false, "a clean nested arg passes through");
   assert.equal(confirms, 0, "no escalation for a clean nested arg");
+});
+
+// -- Phase B: the untrusted-segment store is keyed on the SESSION ROOT ----------
+// `untrusted` must be shared across a session's fork tree (the cross-agent catch)
+// but isolated BETWEEN sessions. These two tests mirror the server's model: one
+// activation, distinct per-session-root Agents.
+
+/** The most recent user-role text in a request (branch on this, not the mock's
+ *  global turn index). */
+function latestUserText(req: CompletionRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const m = req.messages[i]!;
+    if (m.role !== "user") continue;
+    const t = m.content.find((b) => b.type === "text");
+    if (t && t.type === "text") return t.text;
+  }
+  return "";
+}
+
+/** A second per-session Agent sharing the host's single activation — the server's
+ *  per-session pool has distinct run-tree roots over one shared registry/bus. */
+function sessionAgent(template: Agent): Agent {
+  return new Agent({
+    hooks: template.hooks,
+    tools: template.tools,
+    providers: template.providers,
+    capabilities: template.capabilities,
+    ui: template.ui,
+    logger: template.logger,
+    model: template.model,
+    provider: template.providerName,
+  });
+}
+
+/** Every tool-result content string in an agent's transcript. */
+function toolResultsOf(agent: Agent): string[] {
+  const out: string[] = [];
+  for (const m of agent.messages) {
+    if (m.role !== "tool") continue;
+    for (const b of m.content) if (b.type === "tool_result") out.push(b.content);
+  }
+  return out;
+}
+
+test("AC1: session A's untrusted taint does not gate an identical sink arg in session B", async () => {
+  const responder = (req: CompletionRequest) => {
+    const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+    if (latestUserText(req).includes("A")) {
+      if (toolMsgs === 0) return { toolCalls: [{ name: "fetch_foreign" }] };
+      if (toolMsgs === 1) return { toolCalls: [{ name: "sink", arguments: { data: S } }] };
+      return { text: "A-done" };
+    }
+    if (toolMsgs === 0) return { toolCalls: [{ name: "sink", arguments: { data: S } }] };
+    return { text: "B-done" };
+  };
+  const h = makeHarness({ responder, fallback: "allow" });
+  h.agent.tools.register(foreignTool("fetch_foreign", "prefix " + S + " suffix"));
+  let sinkRuns = 0;
+  h.agent.tools.register(
+    defineTool({ name: "sink", description: "a privileged sink", capabilities: ["shell:exec"], execute: () => ((sinkRuns++), { content: "ran" }) }),
+  );
+  await activate(h, { enabled: true, mode: "strict" });
+
+  const b = sessionAgent(h.agent);
+  await h.agent.run("session A: fetch then sink");
+  await b.run("session B: sink the same value");
+
+  // A's sink arg derives from A's foreign result → provenance strict blocks it.
+  assert.ok(toolResultsOf(h.agent).some((c) => /provenance/.test(c)), "A's sink was blocked by provenance");
+  // B's sink carries the identical arg, but B's untrusted store is empty → allowed.
+  assert.equal(
+    toolResultsOf(b).some((c) => /provenance/.test(c)),
+    false,
+    "B's identical sink arg is NOT blocked (the untrusted store is per-session-root)",
+  );
+  assert.equal(sinkRuns, 1, "only B's sink executed (A's was blocked)");
+});
+
+test("AC1b: a parent's foreign taint STILL gates a fork's sink (cross-agent catch preserved)", async () => {
+  const responder = (req: CompletionRequest) => {
+    if (req.systemPrompt.includes("FORK-CHILD")) {
+      return req.messages.some((m) => m.role === "tool") ? { text: "fork-done" } : { toolCalls: [{ name: "sink", arguments: { data: S } }] };
+    }
+    const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+    if (toolMsgs === 0) return { toolCalls: [{ name: "fetch_foreign" }] };
+    if (toolMsgs === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "FORK-CHILD" } }] };
+    return { text: "root-done" };
+  };
+  const h = makeHarness({ responder, fallback: "allow" });
+  h.agent.tools.register(foreignTool("fetch_foreign", "prefix " + S + " suffix"));
+  let sinkRuns = 0;
+  h.agent.tools.register(
+    defineTool({ name: "sink", description: "a privileged sink", capabilities: ["shell:exec"], execute: () => ((sinkRuns++), { content: "ran" }) }),
+  );
+  const sinkResults: ToolResult[] = [];
+  h.agent.hooks.on("tool_end", ({ call, result }) => {
+    if (call.name === "sink") sinkResults.push(result);
+  });
+  await h.host.use("subagents", subagents);
+  await activate(h, { enabled: true, mode: "strict" });
+
+  await h.agent.run("start");
+
+  // The fork's sink lands in the fork's transcript; capture it off the shared bus.
+  assert.equal(sinkResults.length, 1, "the fork attempted its sink once");
+  assert.equal(sinkResults[0]!.isError, true, "the fork's sink was held by the parent's foreign taint (shared root store)");
+  assert.match(String(sinkResults[0]!.content), /provenance/, "provenance held the fork's sink");
+  assert.equal(sinkRuns, 0, "the fork's sink never executed");
 });

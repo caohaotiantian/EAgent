@@ -26,7 +26,7 @@
  * Disable or tune it at runtime with `/flow-guard`, or set `EAGENT_FLOW_GUARD=off`.
  */
 
-import { currentActingAgent } from "../kernel/agent.js";
+import { currentActingAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { ToolCallBlock } from "../kernel/types.js";
 import { expandCommands, extractCommand } from "./bash-policy.js";
@@ -118,22 +118,32 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   /**
-   * Capability taint stays a session-sticky set: a tool that ran `shell:exec`
-   * could carry a secret in any unscannable form, so we cannot tie that taint to
-   * a single message. Data taint is different — it rides the *message* that
-   * carried the data (see the `message` handler) and clears when that message
-   * leaves the transcript. The split is the whole point of this layer.
+   * Per-session-root state, keyed on `e.rootAgent` (the run-tree root). Both the
+   * capability-taint set and the pending-path map are shared across a session's
+   * fork tree — so a parent's taint gates a fork's egress (the confused-deputy
+   * exfil catch) — yet isolated BETWEEN sessions (each on its own Agent). No reset
+   * closure is needed: eviction drops the root Agent and GCs the entry.
+   *
+   *   - `tainted`: a session-sticky set. A tool that ran `shell:exec` could carry
+   *     a secret in any unscannable form, so we cannot tie that taint to a single
+   *     message. (Data taint is different — it rides the *message* that carried
+   *     the data, see the `message` handler, and clears when that message leaves
+   *     the transcript. The split is the whole point of this layer.)
+   *   - `pending`: sensitive-path detections awaiting their tool-result message. A
+   *     `tool_end` knows the path arg, but the message to tag is built later, in
+   *     the `message` event — so we stash `callId → reasons` here and the
+   *     `message` handler drains it. A never-claimed entry is inert.
    */
-  const tainted = new Set<string>();
-
-  /**
-   * Sensitive path detections waiting for their tool-result message to be
-   * appended. A `tool_end` knows the call arguments (the path), but the message
-   * to tag is built later, in the `message` event — so we stash `callId →
-   * reasons` and the `message` handler drains it. Cleared on session reset; a
-   * never-claimed entry is inert and reclaimed there.
-   */
-  const pending = new Map<string, string[]>();
+  interface FlowState {
+    tainted: Set<string>;
+    pending: Map<string, string[]>;
+  }
+  const byRoot = new WeakMap<Agent, FlowState>();
+  const stateFor = (agent: Agent): FlowState => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { tainted: new Set(), pending: new Map() }));
+    return s;
+  };
 
   /** Read a message's data-taint marker as an array, or undefined if absent. */
   const taintArray = (m: { meta?: Record<string, unknown> }): unknown[] | undefined => {
@@ -150,8 +160,9 @@ export default function activate(e: ExtensionAPI): () => void {
   const offEnd = e.on("tool_end", ({ call, result }) => {
     if (result.isError) return;
     const c = cfg();
+    const st = stateFor(e.rootAgent);
     const caps = capsOf(call.name);
-    for (const cap of caps) if (c.sourceCaps.includes(cap)) tainted.add(cap);
+    for (const cap of caps) if (c.sourceCaps.includes(cap)) st.tainted.add(cap);
 
     // Data confinement (path trigger): a sensitive path argument to a read tool.
     // The result message does not exist yet, so record the call id for the
@@ -171,9 +182,9 @@ export default function activate(e: ExtensionAPI): () => void {
       };
       const hit = findSensitivePath(call.arguments, MAX_SCAN_DEPTH);
       if (hit !== undefined) {
-        const reasons = pending.get(call.id) ?? [];
+        const reasons = st.pending.get(call.id) ?? [];
         reasons.push(`sensitive-path:${hit}`);
-        pending.set(call.id, reasons);
+        st.pending.set(call.id, reasons);
       }
     }
   });
@@ -185,14 +196,15 @@ export default function activate(e: ExtensionAPI): () => void {
   const offMessage = e.on("message", ({ message }) => {
     if (message.role !== "tool") return;
     const c = cfg();
+    const st = stateFor(e.rootAgent);
     for (const block of message.content) {
       if (block.type !== "tool_result") continue;
-      const reasons = [...(pending.get(block.toolCallId) ?? [])];
+      const reasons = [...(st.pending.get(block.toolCallId) ?? [])];
       if (c.sensitiveContent.some((re) => re.test(block.content))) reasons.push("sensitive-content");
       if (reasons.length > 0) {
         message.meta = { ...message.meta, flowGuardTaint: reasons };
       }
-      pending.delete(block.toolCallId);
+      st.pending.delete(block.toolCallId);
     }
   });
 
@@ -203,11 +215,13 @@ export default function activate(e: ExtensionAPI): () => void {
     const { enabled, mode, egressCaps, networkCommands } = cfg();
     if (!enabled || decision.block) return decision;
     // Read the ACTING agent's transcript: a child that read a secret and egresses
-    // is caught on its OWN transcript, not the parent's. The capability `tainted`
-    // Set stays shared (cross-agent exfiltration catch).
+    // is caught on its OWN transcript, not the parent's. The capability taint set
+    // is keyed on the SESSION ROOT, so it stays shared across the fork tree (the
+    // cross-agent exfiltration catch) while isolating between sessions.
+    const st = stateFor(e.rootAgent);
     const agent = currentActingAgent() ?? e.agent;
     const dataTainted = agent.messages.some((m) => (taintArray(m)?.length ?? 0) > 0);
-    if (tainted.size === 0 && !dataTainted) return decision;
+    if (st.tainted.size === 0 && !dataTainted) return decision;
     const isEgress = capsOf(ctx.call.name).some((c) => egressCaps.includes(c));
     // Shell-exfil path: a network-reaching `shell:exec` call is egress-equivalent,
     // but ONLY under data taint — NOT the sticky capability `tainted` set, which
@@ -222,7 +236,7 @@ export default function activate(e: ExtensionAPI): () => void {
     if (!isEgress && !isShellEgress) return decision;
 
     const reasons: string[] = [];
-    if (tainted.size > 0) reasons.push(`capabilities [${[...tainted].join(", ")}]`);
+    if (st.tainted.size > 0) reasons.push(`capabilities [${[...st.tainted].join(", ")}]`);
     if (dataTainted) reasons.push("sensitive data in the live transcript");
     const why =
       `network egress (${ctx.call.name}) while the session is tainted by ${reasons.join(" and ")} ` +
@@ -233,15 +247,6 @@ export default function activate(e: ExtensionAPI): () => void {
     const allow = await e.agent.ui.confirm(`flow-guard: allow ${why}?`);
     return allow ? decision : { ...decision, block: true, reason: `flow-guard: denied ${why}` };
   });
-
-  // The chain is scoped to a session; a fresh runtime starts clean. (Data taint
-  // lives on messages, so it clears with the transcript, not here.)
-  const reset = () => {
-    tainted.clear();
-    pending.clear();
-  };
-  const offStart = e.on("session_start", reset);
-  const offDown = e.on("session_shutdown", reset);
 
   const offCmd = e.registerCommand({
     name: "flow-guard",
@@ -262,22 +267,25 @@ export default function activate(e: ExtensionAPI): () => void {
           e.store.set("mode", arg);
           c.print(`flow-guard mode = ${arg}`);
           break;
-        case "reset":
-          tainted.clear();
-          pending.clear();
+        case "reset": {
+          const st = stateFor(e.rootAgent);
+          st.tainted.clear();
+          st.pending.clear();
           // Data taint rides the messages, so a true clear-all strips it there too.
           for (const m of (currentActingAgent() ?? e.agent).messages) {
             if (m.meta && "flowGuardTaint" in m.meta) delete (m.meta as Record<string, unknown>).flowGuardTaint;
           }
           c.print("flow-guard: session taint cleared");
           break;
+        }
         default: {
           const { enabled, mode, sourceCaps, egressCaps } = cfg();
+          const st = stateFor(e.rootAgent);
           const dataCount = (currentActingAgent() ?? e.agent).messages.filter((m) => (taintArray(m)?.length ?? 0) > 0).length;
           c.print(
             `flow-guard ${enabled ? "on" : "off"} (mode=${mode}); ` +
               `source=${sourceCaps.join(",")} -> egress=${egressCaps.join(",")}; ` +
-              `capability-taint: ${tainted.size} (${tainted.size ? [...tainted].join(", ") : "none"}); ` +
+              `capability-taint: ${st.tainted.size} (${st.tainted.size ? [...st.tainted].join(", ") : "none"}); ` +
               `tainted-data: ${dataCount}`,
           );
         }
@@ -286,7 +294,7 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   return () => {
-    for (const d of [offEnd, offMessage, offHook, offStart, offDown, offCmd]) {
+    for (const d of [offEnd, offMessage, offHook, offCmd]) {
       try {
         d.dispose();
       } catch {

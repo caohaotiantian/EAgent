@@ -71,13 +71,31 @@ export function jobChildRegistry(parentTools: Tool[]): ToolRegistry {
 export default function activate(e: ExtensionAPI): () => void {
   e.grantCapability("agent:spawn");
 
-  /** The in-process job registry — process-lifetime, never persisted. */
-  const jobs = new Map<string, Job>();
+  // The job registry, keyed on the SESSION ROOT (`e.rootAgent`) so a session's
+  // jobs are visible only within its own fork tree — session B cannot enumerate,
+  // collect, or cancel session A's jobs. Process-lifetime, never persisted; the id
+  // counter/base are per-root too (ids need only be unique within a registry).
+  interface RootJobs {
+    jobs: Map<string, Job>;
+    idCounter: number;
+    idBase: string;
+  }
+  const byRoot = new WeakMap<Agent, RootJobs>();
+  const stateFor = (agent: Agent): RootJobs => {
+    let s = byRoot.get(agent);
+    if (!s) {
+      // Per-activation monotonic id (zero-dep; no `crypto`), mirroring memory.ts.
+      byRoot.set(agent, (s = { jobs: new Map(), idCounter: 0, idBase: Math.floor(Math.random() * 0xffffff).toString(36) }));
+    }
+    return s;
+  };
+  const newId = (s: RootJobs): string => `job-${s.idBase}-${(s.idCounter++).toString(36)}`;
 
-  // Per-activation monotonic id (zero-dep; no `crypto`), mirroring memory.ts.
-  let idCounter = 0;
-  const idBase = Math.floor(Math.random() * 0xffffff).toString(36);
-  const newId = (): string => `job-${idBase}-${(idCounter++).toString(36)}`;
+  // A cross-session view of the currently-RUNNING jobs, held ONLY so dispose can
+  // cancel every live child on unload/reload (the per-root WeakMap is not
+  // enumerable). Pruned as each job settles/cancels, so it never pins a finished
+  // child; never consulted by a tool, so it leaks no cross-session visibility.
+  const running = new Set<Job>();
 
   const enabled = (): boolean => e.config.enabled("subagent-jobs", { default: true });
   const maxConcurrent = (): number => e.config.int("subagentJobs.maxConcurrent", 4);
@@ -94,8 +112,9 @@ export default function activate(e: ExtensionAPI): () => void {
    */
   const rootOnly = (): boolean => currentActingAgent() === currentRootAgent();
 
-  /** FIFO-drop the oldest finished (non-running) records past the retention cap. */
-  const evictFinished = (): void => {
+  /** FIFO-drop the oldest finished (non-running) records past the retention cap,
+   *  within one session's registry. */
+  const evictFinished = (jobs: Map<string, Job>): void => {
     const cap = retain();
     const finished = [...jobs.values()].filter((j) => j.status !== "running");
     let excess = finished.length - cap;
@@ -184,16 +203,18 @@ export default function activate(e: ExtensionAPI): () => void {
         if (typeof prompt !== "string" || prompt.length === 0) {
           return fail("launch_job requires a non-empty string `prompt`.");
         }
-        const running = [...jobs.values()].filter((j) => j.status === "running").length;
-        if (running >= maxConcurrent()) {
-          return fail(`launch_job at capacity (${running} running); collect or cancel a job first.`);
+        const st = stateFor(e.rootAgent);
+        const runningCount = [...st.jobs.values()].filter((j) => j.status === "running").length;
+        if (runningCount >= maxConcurrent()) {
+          return fail(`launch_job at capacity (${runningCount} running); collect or cancel a job first.`);
         }
 
-        const id = newId();
+        const id = newId(st);
         const child = makeJobChild(args);
         const promise = child.run(prompt);
         const job: Job = { id, status: "running", prompt, startedAt: Date.now(), child, promise };
-        jobs.set(id, job);
+        st.jobs.set(id, job);
+        running.add(job);
 
         // Status-aware settler, attached immediately (same tick), as a SINGLE
         // `.then(onFulfilled, onRejected)` — NOT `.then().catch()`. Both handlers
@@ -209,17 +230,19 @@ export default function activate(e: ExtensionAPI): () => void {
             if (job.status !== "running") return;
             job.result = finalText((r as RunResult).messages);
             job.status = "done";
-            evictFinished();
+            running.delete(job);
+            evictFinished(st.jobs);
           },
           (err: unknown) => {
             if (job.status !== "running") return;
             job.status = "failed";
             job.error = String(err);
-            evictFinished();
+            running.delete(job);
+            evictFinished(st.jobs);
           },
         );
 
-        evictFinished();
+        evictFinished(st.jobs);
         return ok(`launched ${id}`, { jobId: id });
       },
     }),
@@ -238,6 +261,7 @@ export default function activate(e: ExtensionAPI): () => void {
       },
       execute: (args) => {
         if (!enabled()) return fail(DISABLED_MSG);
+        const jobs = stateFor(e.rootAgent).jobs;
         const id = typeof args.jobId === "string" && args.jobId.length > 0 ? args.jobId : undefined;
         if (id === undefined) {
           const list = [...jobs.values()].map((j) => ({ id: j.id, status: j.status }));
@@ -271,7 +295,7 @@ export default function activate(e: ExtensionAPI): () => void {
       execute: async (args) => {
         if (!enabled()) return fail(DISABLED_MSG);
         const id = typeof args.jobId === "string" ? args.jobId : "";
-        const job = jobs.get(id);
+        const job = stateFor(e.rootAgent).jobs.get(id);
         if (!job) return fail(`collect_job: unknown job "${id}".`);
         // The launch-time settler runs before this continuation (promise-reaction
         // order), so `status`/`result` are already populated when we resume. A
@@ -310,18 +334,20 @@ export default function activate(e: ExtensionAPI): () => void {
       execute: (args) => {
         if (!enabled()) return fail(DISABLED_MSG);
         const id = typeof args.jobId === "string" ? args.jobId : "";
-        const job = jobs.get(id);
+        const st = stateFor(e.rootAgent);
+        const job = st.jobs.get(id);
         if (!job) return fail(`cancel_job: unknown job "${id}".`);
         if (job.status === "running") {
           // Set the terminal status BEFORE stopping, so the settler (which fires
           // when the aborted run resolves) sees a non-running status and skips.
           job.status = "cancelled";
+          running.delete(job);
           try {
             job.child.stop();
           } catch {
             // stop() aborts a controller and does not throw; belt-and-braces.
           }
-          evictFinished();
+          evictFinished(st.jobs);
           return ok(`cancelled ${id}`);
         }
         return ok(`${id} already ${job.status}`);
@@ -337,7 +363,7 @@ export default function activate(e: ExtensionAPI): () => void {
         ctx.print("subagent-jobs: disabled (EAGENT_SUBAGENT_JOBS=off).");
         return;
       }
-      const list = [...jobs.values()];
+      const list = [...stateFor(e.rootAgent).jobs.values()];
       if (list.length === 0) {
         ctx.print("(no jobs)");
         return;
@@ -346,12 +372,14 @@ export default function activate(e: ExtensionAPI): () => void {
     },
   });
 
-  // Dispose: cancel every still-running job so no background child is orphaned on
-  // unload/reload. Sets each terminal synchronously (so none stays "running")
-  // then aborts its child; never throws. The host tears down the tool/command
-  // registrations itself, so this does ONLY the job cancellation.
+  // Dispose: cancel every still-running job across ALL sessions so no background
+  // child is orphaned on unload/reload. The per-root registries are not enumerable,
+  // so this sweeps the cross-session `running` set (which holds exactly the live
+  // jobs). Sets each terminal synchronously then aborts its child; never throws.
+  // The host tears down the tool/command registrations itself, so this does ONLY
+  // the job cancellation.
   return () => {
-    for (const job of jobs.values()) {
+    for (const job of running) {
       if (job.status === "running") {
         job.status = "cancelled";
         try {

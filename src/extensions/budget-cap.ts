@@ -184,8 +184,13 @@ export default function activate(e: ExtensionAPI): () => void {
     if (!s) states.set(agent, (s = { runUsd: 0, tripped: false, softWarned: false, activeModel: agent.model }));
     return s;
   };
-  /** Cumulative-session USD; cross-run, shared, mirrored from the ROOT's `usage`. */
-  let sessionUsd = 0;
+  // Cumulative-session USD, keyed on the run-tree ROOT (`e.rootAgent`) so the
+  // session figure is shared across the fork tree but isolated BETWEEN sessions
+  // (each on its own Agent) and race-free under concurrency. The per-acting
+  // `states` WeakMap above holds the per-run figures; only this session total is
+  // root-scoped. Mirrored from the root's cumulative `usage`.
+  const sessionUsdByRoot = new WeakMap<Agent, number>();
+  const sessionUsdFor = (agent: Agent): number => sessionUsdByRoot.get(agent) ?? 0;
 
   // Each handler is wrapped so a thrown error never escapes the bus (the `cost`
   // `safe` wrapper). A budget-cap failure can at worst drop a number, never a turn.
@@ -279,9 +284,10 @@ export default function activate(e: ExtensionAPI): () => void {
       // root, not `e.agent`, so it holds under a per-session Agent and is race-free).
       s.runUsd += costOf(p.usage, row);
       if (currentActingAgent() === currentRootAgent()) {
-        sessionUsd = costOf(p.cumulative, row);
+        sessionUsdByRoot.set(e.rootAgent, costOf(p.cumulative, row));
       }
 
+      const sessionUsd = sessionUsdFor(e.rootAgent);
       const verdict = assess(s.runUsd, sessionUsd, c);
       if (verdict === "hard") {
         // Fire the warn/stop side-effects once, on the ok→hard transition — the
@@ -334,7 +340,7 @@ export default function activate(e: ExtensionAPI): () => void {
       if (!c.enabled || c.mode === "warn") return decision;
       const s = stateFor(currentActingAgent() ?? e.agent);
       if (!s.tripped) return decision;
-      const b = bindingCap(s.runUsd, sessionUsd, c);
+      const b = bindingCap(s.runUsd, sessionUsdFor(e.rootAgent), c);
       const reason = b
         ? `budget-cap: ${b.which} budget (${fmtUsd(b.cap)}) exhausted — spent ${fmtUsd(b.spend)}; ` +
           `halting paid tool work`
@@ -356,7 +362,7 @@ export default function activate(e: ExtensionAPI): () => void {
     print(`sessionMaxUsd=${c.sessionMaxUsd}${c.sessionMaxUsd === 0 ? " (disabled)" : ""}`);
     print(`softFraction=${c.softFraction}`);
     print(`runUsd=${fmtUsd(s.runUsd)}`);
-    print(`sessionUsd=${fmtUsd(sessionUsd)}`);
+    print(`sessionUsd=${fmtUsd(sessionUsdFor(e.rootAgent))}`);
     print(`tripped=${s.tripped}`);
   };
 

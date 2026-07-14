@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
-import type { Agent } from "../src/kernel/agent.js";
+import { Agent } from "../src/kernel/agent.js";
+import type { CompletionRequest, UI } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
 import bashPolicy, {
   extractCommand,
@@ -273,7 +274,7 @@ test("ask passes on a 'yes'", async () => {
   assert.equal(sawBlock(h.agent), false, "no bash-policy block reason");
 });
 
-test("ask remembers within a session and re-prompts after session_start", async () => {
+test("ask remembers a command family across a session's run tree (survives session_start)", async () => {
   let confirms = 0;
   const h = makeHarness({
     fallback: "allow",
@@ -299,11 +300,16 @@ test("ask remembers within a session and re-prompts after session_start", async 
   await h.agent.run("two curls");
   assert.equal(confirms, 1, "the affirmative is remembered prefix-wise for the session");
 
+  // `approved` is now keyed on the session ROOT (`e.rootAgent`) and GC'd on
+  // eviction, not cleared on `session_start` (that reset closure was removed in
+  // Phase B — session_start fires once at startup, before any approval). So a
+  // later run on the SAME agent stays remembered; cross-session isolation (a fresh
+  // Agent re-prompts) is covered by the AC1 test below.
   await h.agent.hooks.emit("session_start", {});
 
   h.provider.script([{ toolCalls: [{ name: "bash", arguments: { command: "curl http://c" } }] }, { text: "done" }]);
-  await h.agent.run("another curl after reset");
-  assert.equal(confirms, 2, "remember cleared on session_start, so confirm is asked again");
+  await h.agent.run("another curl on the same session");
+  assert.equal(confirms, 1, "the approval survives session_start (same run-tree root, no reset)");
 });
 
 test("capability fidelity: a shell:exec tool named other than bash is gated", async () => {
@@ -707,4 +713,50 @@ test("EAGENT_BASH_POLICY=off disables the guard", async () => {
     if (prev === undefined) delete process.env.EAGENT_BASH_POLICY;
     else process.env.EAGENT_BASH_POLICY = prev;
   }
+});
+
+// -- Phase B: the session-approved command set is keyed on the SESSION ROOT -----
+// `approved` (an ask-rule's per-session grant) must not carry from session A into
+// session B. Mirrors the server model: one activation, distinct per-session-root
+// Agents. (Not exercised through the HTTP server because its `ui.confirm` is
+// fail-safe-DENY, so `approved` never populates there — design §2.)
+
+/** A second per-session Agent sharing the host's single activation. */
+function sessionAgent(template: Agent): Agent {
+  return new Agent({
+    hooks: template.hooks,
+    tools: template.tools,
+    providers: template.providers,
+    capabilities: template.capabilities,
+    ui: template.ui,
+    logger: template.logger,
+    model: template.model,
+    provider: template.providerName,
+  });
+}
+
+test("AC1: session A's session-approval of a command family does not skip session B's prompt", async () => {
+  let confirms = 0;
+  const ui: UI = { confirm: async () => ((confirms++), true), notify: () => {} };
+  const responder = (req: CompletionRequest) =>
+    req.messages.filter((m) => m.role === "tool").length === 0
+      ? { toolCalls: [{ name: "sh", arguments: { command: "echo hi" } }] }
+      : { text: "done" };
+  const h = makeHarness({ responder, ui, fallback: "allow" });
+  h.agent.tools.register(
+    defineTool({ name: "sh", description: "a shell tool", capabilities: ["shell:exec"], execute: () => ({ content: "ok" }) }),
+  );
+  await h.host.use("bash-policy", (e) => {
+    e.store.set("rules", [{ pattern: "echo*", action: "ask" }]);
+    return bashPolicy(e);
+  });
+
+  const b = sessionAgent(h.agent);
+
+  await h.agent.run("A first"); // echo → ask → approve
+  await h.agent.run("A second"); // echo → approved (cached) → NO re-prompt
+  assert.equal(confirms, 1, "A's session approval is cached — the second echo is not re-prompted");
+
+  await b.run("B"); // echo → B's approved set is empty → prompted again
+  assert.equal(confirms, 2, "B is prompted despite A's approval (the approved set is per-session-root)");
 });

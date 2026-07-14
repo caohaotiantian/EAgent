@@ -18,8 +18,20 @@ import { MemoryStore } from "../src/kernel/store.js";
 import type { MockProvider } from "../src/providers/mock.js";
 import { unwrapProvider } from "../src/extensions/lib/provider-wrap.js";
 import { defineTool, ok } from "../src/kernel/define.js";
-import type { ToolResult, Usage } from "../src/kernel/types.js";
+import type { CompletionRequest, ToolResult, Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
+
+/** The most recent user-role text in a request (stable within a session's turns,
+ *  since the mock's turn counter is global — branch on this, not the index). */
+function latestUserText(req: CompletionRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const m = req.messages[i]!;
+    if (m.role !== "user") continue;
+    const t = m.content.find((b) => b.type === "text");
+    if (t && t.type === "text") return t.text;
+  }
+  return "";
+}
 
 /** POST /run and return the open response (NDJSON), for the multi-turn tests. */
 function post(base: string, session: string, input: string): Promise<Response> {
@@ -999,5 +1011,171 @@ test("danglingUser rollback: an aborted turn on a persistent session Agent leave
     assert.equal((lines3.at(-1) as { type?: string }).type, "agent_end", "turn 3 completed normally");
     assert.ok(turn3Roles.includes("user"), "turn 3 still carries its own user message");
     sub.dispose();
+  });
+});
+
+// -- Phase B: security-guard state isolation across sessions (AC1 / AC1b) -------
+// Each of the 7 security guards keys its session-scoped state on the SESSION ROOT
+// (currentRootAgent). Under the still-serial server, a guard decision from
+// session A must not leak into session B (its distinct pooled Agent). AC1b (the
+// cross-agent exfil catch) is verified within one session: a parent's taint still
+// gates a fork's egress via the shared root key (the S2 regression guard).
+
+test("AC1 write-guard: session A's read-set does not let session B blind-overwrite the same path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eagent-wg-iso-"));
+  const victim = join(dir, "victim.txt");
+  writeFileSync(victim, "ORIGINAL");
+  const prev = process.env.EAGENT_WORKSPACE;
+  process.env.EAGENT_WORKSPACE = dir; // set before the server builds (write-guard reads it)
+  try {
+    await withServerHandle(async (base, http) => {
+      // A reads the file (so its read-set includes it) then blind-overwrites it
+      // (ALLOWED — A saw it this session). B blind-overwrites the SAME path with an
+      // empty read-set → write-guard must still prompt (server confirm denies) →
+      // blocked. If `seen` commingled, B's overwrite would silently pass.
+      mockOf(http).script((req) => {
+        const user = latestUserText(req);
+        const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+        if (user.includes("A")) {
+          if (toolMsgs === 0) return { toolCalls: [{ name: "read", arguments: { path: "victim.txt" } }] };
+          if (toolMsgs === 1) return { toolCalls: [{ name: "write", arguments: { path: "victim.txt", content: "A-WROTE" } }] };
+          return { text: "A-done" };
+        }
+        if (toolMsgs === 0) return { toolCalls: [{ name: "write", arguments: { path: "victim.txt", content: "B-WROTE" } }] };
+        return { text: "B-done" };
+      });
+
+      const aLines: Record<string, unknown>[] = [];
+      await readNdjson(await post(base, "A", "session A: read then overwrite"), (o) => aLines.push(o));
+      const bLines: Record<string, unknown>[] = [];
+      await readNdjson(await post(base, "B", "session B: overwrite the same path"), (o) => bLines.push(o));
+
+      const aWrite = aLines.find((l) => l.type === "tool_end" && l.name === "write") as { isError?: boolean } | undefined;
+      assert.ok(aWrite, "A's write ran");
+      assert.notEqual(aWrite!.isError, true, "A overwrote its own read file (seen this session → allowed)");
+
+      const bWrite = bLines.find((l) => l.type === "tool_end" && l.name === "write") as { isError?: boolean } | undefined;
+      assert.ok(bWrite, "B's write ran");
+      assert.equal(bWrite!.isError, true, "B was still prompted/blocked (its read-set is isolated from A's)");
+
+      assert.equal(readFileSync(victim, "utf8"), "A-WROTE", "B's blind overwrite never reached disk");
+    });
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_WORKSPACE;
+    else process.env.EAGENT_WORKSPACE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Register benign, offline stand-ins for a shell:exec source and a net:fetch
+ *  egress so flow-guard's capability taint is exercised without a real shell or
+ *  network call. Both are visible to every session (the shared tools registry). */
+function registerFlowGuardTools(http: HttpServer): void {
+  http.agent.tools.register(
+    defineTool({ name: "taint_src", description: "a shell:exec source", capabilities: ["shell:exec"], parameters: { type: "object", properties: {} }, execute: () => ok("ran") }),
+  );
+  http.agent.tools.register(
+    defineTool({ name: "egress", description: "a net:fetch egress", capabilities: ["net:fetch"], parameters: { type: "object", properties: {} }, execute: () => ok("sent") }),
+  );
+}
+
+test("AC1 flow-guard: session A's capability taint does not gate session B's egress", async () => {
+  await withServerHandle(async (base, http) => {
+    registerFlowGuardTools(http);
+    mockOf(http).script((req) => {
+      const user = latestUserText(req);
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (user.includes("A")) {
+        if (toolMsgs === 0) return { toolCalls: [{ name: "taint_src", arguments: {} }] };
+        if (toolMsgs === 1) return { toolCalls: [{ name: "egress", arguments: {} }] };
+        return { text: "A-done" };
+      }
+      if (toolMsgs === 0) return { toolCalls: [{ name: "egress", arguments: {} }] };
+      return { text: "B-done" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "A", "session A taints then egresses"), (o) => aLines.push(o));
+    const bLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "B", "session B egresses only"), (o) => bLines.push(o));
+
+    // Within A the taint is live, so A's OWN egress is held by flow-guard — proving
+    // the mechanism is armed so B's pass below is not vacuous.
+    const aEgress = aLines.find((l) => l.type === "tool_end" && l.name === "egress") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(aEgress, "A's egress ran");
+    assert.equal(aEgress!.isError, true, "A's egress is held while A is capability-tainted");
+    assert.match(String(aEgress!.content), /flow-guard/, "flow-guard is the guard that held A's egress");
+
+    // Session B is never tainted → flow-guard must NOT hold its egress. A commingled
+    // `tainted` set would carry A's shell:exec taint into B and block this.
+    const bEgress = bLines.find((l) => l.type === "tool_end" && l.name === "egress") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(bEgress, "B's egress ran");
+    assert.ok(!/flow-guard/.test(String(bEgress!.content ?? "")), "flow-guard did not hold B's egress (taint is isolated)");
+    assert.notEqual(bEgress!.isError, true, "B's egress passed (its taint set is isolated from A's)");
+  });
+});
+
+test("AC1b flow-guard: a parent's capability taint STILL gates a fork's egress (cross-agent catch preserved)", async () => {
+  await withServerHandle(async (base, http) => {
+    registerFlowGuardTools(http);
+    mockOf(http).script((req) => {
+      if (req.systemPrompt.includes("FORK-CHILD")) {
+        // The fork: attempt an egress once (must be HELD by the parent's taint), then finish.
+        return req.messages.some((m) => m.role === "tool") ? { text: "fork-done" } : { toolCalls: [{ name: "egress", arguments: {} }] };
+      }
+      // The session root: taint (shell:exec), spawn a fork, then finish.
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (toolMsgs === 0) return { toolCalls: [{ name: "taint_src", arguments: {} }] };
+      if (toolMsgs === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "FORK-CHILD" } }] };
+      return { text: "root-done" };
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "flow-fork", "start"), (o) => lines.push(o));
+
+    // The fork's egress is HELD by the parent's capability taint — `tainted` is
+    // shared across the session's fork tree (root-keyed). Keying it on the ACTING
+    // (child) agent would drop this confused-deputy exfil catch (the S2 regression).
+    const forkEgress = lines.find((l) => l.type === "tool_end" && l.name === "egress") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(forkEgress, "the fork's egress ran");
+    assert.equal(forkEgress!.isError, true, "the fork's egress is held by the parent's capability taint");
+    assert.match(String(forkEgress!.content), /flow-guard/, "flow-guard held the fork's egress via the shared session-root taint");
+  });
+});
+
+test("AC1 subagent-jobs: session B cannot job_status a job launched by session A", async () => {
+  await withServerHandle(async (base, http) => {
+    let jobId: string | undefined;
+    http.agent.hooks.on("tool_end", ({ call, result }) => {
+      if (call.name === "launch_job" && !result.isError) jobId = (result.details as { jobId?: string }).jobId;
+    });
+
+    mockOf(http).script((req) => {
+      if (req.systemPrompt.includes("background sub-agent")) return { text: "bg" }; // A's job child finishes at once
+      const user = latestUserText(req);
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (user.includes("launch")) {
+        // Session A: launch a job, collect it (so the child settles inside A's turn), finish.
+        if (toolMsgs === 0) return { toolCalls: [{ name: "launch_job", arguments: { prompt: "bg" } }] };
+        if (toolMsgs === 1) return { toolCalls: [{ name: "collect_job", arguments: { jobId } }] };
+        return { text: "A-done" };
+      }
+      // Session B: try to inspect A's job by its id.
+      if (toolMsgs === 0) return { toolCalls: [{ name: "job_status", arguments: { jobId } }] };
+      return { text: "B-done" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "A", "launch a job"), (o) => aLines.push(o));
+    assert.ok(jobId, "session A launched a job");
+    const aLaunch = aLines.find((l) => l.type === "tool_end" && l.name === "launch_job") as { isError?: boolean } | undefined;
+    assert.notEqual(aLaunch?.isError, true, "A's launch_job succeeded (session root is allowed)");
+
+    const bLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "B", "inspect it"), (o) => bLines.push(o));
+    const bStatus = bLines.find((l) => l.type === "tool_end" && l.name === "job_status") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(bStatus, "B ran job_status");
+    assert.equal(bStatus!.isError, true, "B cannot see A's job (the registry is per-session-root)");
+    assert.match(String(bStatus!.content), /unknown job/, "B's job_status reports A's id as unknown");
   });
 });

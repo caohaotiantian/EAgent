@@ -31,6 +31,7 @@
  * is a hard kill switch.
  */
 
+import type { Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { ToolResult } from "../kernel/types.js";
 
@@ -83,8 +84,20 @@ export default function activate(e: ExtensionAPI): () => void {
     maxSegments: e.store.get<number>("maxSegments", DEFAULT_MAX_SEGMENTS) ?? DEFAULT_MAX_SEGMENTS,
   });
 
-  /** The bounded untrusted-segment store (closure state; no kernel field). */
-  const untrusted = new Set<string>();
+  /**
+   * The bounded untrusted-segment store (closure state; no kernel field), keyed on
+   * the SESSION ROOT (`e.rootAgent`). Because `before/afterToolCall` are shared
+   * filter points, the store accumulates a fork's foreign results and gates its
+   * sink calls too (provenance governs sub-agents — the cross-agent catch), yet it
+   * is isolated BETWEEN sessions (each on its own Agent). No reset closure: eviction
+   * drops the root Agent and GCs the store.
+   */
+  const untrustedByRoot = new WeakMap<Agent, Set<string>>();
+  const untrustedFor = (agent: Agent): Set<string> => {
+    let s = untrustedByRoot.get(agent);
+    if (!s) untrustedByRoot.set(agent, (s = new Set<string>()));
+    return s;
+  };
 
   /** The capabilities a registered tool declares (the flow-/secret-guard pattern). */
   const capsOf = (name: string): string[] => e.agent.tools.get(name)?.capabilities ?? [];
@@ -96,6 +109,7 @@ export default function activate(e: ExtensionAPI): () => void {
   const offAfter = e.hook("afterToolCall", (result: ToolResult, ctx) => {
     const c = cfg();
     if (!c.enabled || result.isError || !intersects(capsOf(ctx.call.name), c.foreignCaps)) return result;
+    const untrusted = untrustedFor(e.rootAgent);
     for (const seg of result.content.split(/\s+/)) {
       if (seg.length < c.minLen) continue;
       untrusted.add(seg);
@@ -115,6 +129,7 @@ export default function activate(e: ExtensionAPI): () => void {
     const c = cfg();
     if (!c.enabled || decision.block) return decision;
     if (!intersects(capsOf(ctx.call.name), c.sinkCaps)) return decision;
+    const untrusted = untrustedFor(e.rootAgent);
     for (const v of stringLeaves(decision.arguments, MAX_SCAN_DEPTH)) {
       for (const seg of untrusted) {
         if (!v.includes(seg)) continue;
@@ -152,7 +167,7 @@ export default function activate(e: ExtensionAPI): () => void {
           cmd.print(
             `provenance ${c.enabled ? "on" : "off"} (mode=${c.mode}); ` +
               `foreign=${c.foreignCaps.join(",")} -> sink=${c.sinkCaps.join(",")}; ` +
-              `minLen=${c.minLen}; tracked-segments: ${untrusted.size}`,
+              `minLen=${c.minLen}; tracked-segments: ${untrustedFor(e.rootAgent).size}`,
           );
         }
       }

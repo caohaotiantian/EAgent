@@ -32,6 +32,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import type { Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
 
@@ -236,10 +237,16 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   // -- Piece 3: allowed-tools scoping --------------------------------------
-  // Session-scoped: the set of allowlists declared by skills read this session.
-
-  /** Per-skill allowlists recorded as each scoped skill is read this session. */
-  const activeAllowlists = new Map<string, Set<string>>();
+  // Session-scoped: the set of allowlists declared by skills read this session,
+  // keyed on the SESSION ROOT (`e.rootAgent`) so a scoped skill governs the whole
+  // fork tree yet is isolated BETWEEN sessions (each on its own Agent). No reset
+  // closure is needed: eviction drops the root Agent and GCs the entry.
+  const allowlistsByRoot = new WeakMap<Agent, Map<string, Set<string>>>();
+  const allowlistsFor = (agent: Agent): Map<string, Set<string>> => {
+    let m = allowlistsByRoot.get(agent);
+    if (!m) allowlistsByRoot.set(agent, (m = new Map<string, Set<string>>()));
+    return m;
+  };
 
   /** Parse a comma-separated single-line list (like microagents' triggers). */
   const parseList = (raw: string | undefined): string[] =>
@@ -259,11 +266,12 @@ export default function activate(e: ExtensionAPI): () => void {
     if (body === undefined) return;
     const allowed = parseList(parseFrontmatter(body)["allowed-tools"]);
     if (allowed.length === 0) return; // no allowed-tools → record nothing (no-op)
-    activeAllowlists.set(name, new Set(allowed));
+    allowlistsFor(e.rootAgent).set(name, new Set(allowed));
   });
 
   const offBeforeTool = e.hook("beforeToolCall", async (decision, ctx) => {
     if (decision.block) return decision; // compose with upstream guards
+    const activeAllowlists = allowlistsFor(e.rootAgent);
     if (activeAllowlists.size === 0) return decision; // no active scoped skill → no-op
     const toolName = ctx.call.name;
     // skill_read / skill_create remain reachable so a skill can be loaded/authored.
@@ -281,10 +289,6 @@ export default function activate(e: ExtensionAPI): () => void {
     const allow = await e.agent.ui.confirm(`skills-hardening: allow ${why}?`);
     return allow ? decision : { ...decision, block: true, reason: `skills-hardening: blocked — ${why}` };
   });
-
-  const resetScoping = () => activeAllowlists.clear();
-  const offResetStart = e.on("session_start", resetScoping);
-  const offShutdown = e.on("session_shutdown", resetScoping);
 
   // -- Piece 4: trigger-gated tier-1 disclosure ----------------------------
   // An OWN, later transformContext pass that only narrows the skills-sourced
@@ -358,7 +362,7 @@ export default function activate(e: ExtensionAPI): () => void {
   // -- Teardown (never throws) ---------------------------------------------
 
   return () => {
-    for (const d of [offStart, offCmd, offToolEnd, offBeforeTool, offResetStart, offShutdown, offTransform]) {
+    for (const d of [offStart, offCmd, offToolEnd, offBeforeTool, offTransform]) {
       try {
         d.dispose();
       } catch {
