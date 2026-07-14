@@ -242,6 +242,12 @@ function readSession(path: string): SessionFile | { error: string } {
   // file fails loudly here rather than crashing a later turn that assumes
   // `message.content` is an array.
   if (!obj.messages.every(isMessage)) return { error: "messages array contains a malformed entry" };
+  // Reject a forward-incompatible envelope rather than loading it blindly. A file
+  // with no version is a pre-versioning save and loads as current (back-compat);
+  // a present-but-different version is from another/newer tool.
+  if (typeof obj.version === "number" && obj.version !== SESSION_VERSION) {
+    return { error: `unsupported session version ${obj.version} (expected ${SESSION_VERSION})` };
+  }
 
   return {
     version: typeof obj.version === "number" ? obj.version : SESSION_VERSION,
