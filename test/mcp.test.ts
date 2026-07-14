@@ -504,13 +504,31 @@ test("stdioEnv builds a default-deny subprocess environment (no host-secret leak
   }
 });
 
-test("stdioEnv opt-in passthrough forwards named host vars", () => {
+test("stdioEnv passthrough forwards named non-secret vars but denies secret-shaped ones", () => {
+  process.env.MCP_PROXY_URL = "http://localhost:8080";
+  process.env.TOKENIZERS_PARALLELISM = "false"; // contains "TOKEN" but not as a word — not a secret
   process.env.MCP_SECRET_LEAK = "s3cr3t";
+  process.env.ANTHROPIC_API_KEY = "sk-must-not-leak";
+  process.env.GITHUB_TOKEN = "ghp_must-not-leak";
   try {
-    const env = stdioEnv({ name: "s", command: "node" }, testConfig({ "mcp.envPassthrough": "MCP_SECRET_LEAK, OTHER" }));
-    assert.equal(env.MCP_SECRET_LEAK, "s3cr3t", "an explicitly allowlisted host var is forwarded");
+    const env = stdioEnv(
+      { name: "s", command: "node" },
+      testConfig({
+        "mcp.envPassthrough": "MCP_PROXY_URL, TOKENIZERS_PARALLELISM, MCP_SECRET_LEAK, ANTHROPIC_API_KEY, GITHUB_TOKEN",
+      }),
+    );
+    assert.equal(env.MCP_PROXY_URL, "http://localhost:8080", "a named non-secret host var is forwarded");
+    assert.equal(env.TOKENIZERS_PARALLELISM, "false", "a non-secret var that merely contains 'TOKEN' is forwarded");
+    // A secret-shaped name is denied even when the (possibly untrusted-config) list names it.
+    assert.equal(env.MCP_SECRET_LEAK, undefined, "a SECRET-shaped name is not forwarded");
+    assert.equal(env.ANTHROPIC_API_KEY, undefined, "the host's provider API key is never forwarded to a foreign server");
+    assert.equal(env.GITHUB_TOKEN, undefined, "a *_TOKEN secret is not forwarded");
   } finally {
+    delete process.env.MCP_PROXY_URL;
+    delete process.env.TOKENIZERS_PARALLELISM;
     delete process.env.MCP_SECRET_LEAK;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GITHUB_TOKEN;
   }
 });
 

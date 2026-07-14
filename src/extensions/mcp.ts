@@ -167,6 +167,13 @@ const BASE_ENV_KEYS = [
   "SHELL", "USER", "LOGNAME", "SystemRoot", "COMSPEC", "PATHEXT", "WINDIR", "APPDATA", "LOCALAPPDATA",
 ];
 
+/** A variable name that reads as a secret. `mcp.envPassthrough` is a value key that
+ *  resolves through the project config FILE layer, so an untrusted `./.eagent/config.json`
+ *  could otherwise name `ANTHROPIC_API_KEY`/`EAGENT_TOKEN` here and exfiltrate the host's
+ *  secrets into a foreign server subprocess. Deny secret-shaped names regardless of the
+ *  passthrough source — honoring stdioEnv's default-deny contract. */
+const SECRET_ENV_NAME = /API[_-]?KEY|ACCESS[_-]?KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|(^|_)(KEY|AUTH|TOKEN)S?($|_)/i;
+
 export function stdioEnv(def: StdioServerDef, config: Config): Record<string, string> {
   const out: Record<string, string> = {};
   for (const k of BASE_ENV_KEYS) {
@@ -174,6 +181,7 @@ export function stdioEnv(def: StdioServerDef, config: Config): Record<string, st
     if (v !== undefined) out[k] = v;
   }
   for (const k of (config.string("mcp.envPassthrough") ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    if (SECRET_ENV_NAME.test(k)) continue; // never hand a secret-shaped var to foreign server code
     const v = process.env[k];
     if (v !== undefined) out[k] = v;
   }
@@ -396,32 +404,40 @@ class HttpTransport implements Transport {
   async request(method: string, params: unknown, signal?: AbortSignal, callId?: string): Promise<unknown> {
     if (this.#closed) throw new Error(`MCP server "${this.#name}" is closed`);
     const id = this.#nextId++;
-    const res = await this.#post({ jsonrpc: "2.0", id, method, params }, signal, callId);
-    if (!res.ok) {
-      throw new Error(`MCP HTTP ${method} failed: ${res.status} ${res.statusText}`);
-    }
-    // initialize hands back a session id we must carry on later requests.
-    const session = res.headers.get("mcp-session-id");
-    if (session) this.#sessionId = session;
+    const { res, done } = await this.#post({ jsonrpc: "2.0", id, method, params }, signal, callId);
+    try {
+      if (!res.ok) {
+        throw new Error(`MCP HTTP ${method} failed: ${res.status} ${res.statusText}`);
+      }
+      // initialize hands back a session id we must carry on later requests.
+      const session = res.headers.get("mcp-session-id");
+      if (session) this.#sessionId = session;
 
-    const msg = await this.#readResponse(res, id);
-    if (msg.error) throw new Error(msg.error.message ?? "MCP error");
-    return msg.result;
+      const msg = await this.#readResponse(res, id);
+      if (msg.error) throw new Error(msg.error.message ?? "MCP error");
+      return msg.result;
+    } finally {
+      done(); // tear down the deadline only after the body read completes
+    }
   }
 
   async notify(method: string, params?: unknown): Promise<void> {
     if (this.#closed) return;
     // Notifications carry no id and expect a 202/empty acknowledgement.
-    const res = await this.#post({ jsonrpc: "2.0", method, params: params ?? {} });
-    // Drain any body so the socket can be reused; we ignore the content.
-    await res.body?.cancel().catch(() => {});
+    const { res, done } = await this.#post({ jsonrpc: "2.0", method, params: params ?? {} });
+    try {
+      // Drain any body so the socket can be reused; we ignore the content.
+      await res.body?.cancel().catch(() => {});
+    } finally {
+      done();
+    }
   }
 
   close(): void {
     this.#closed = true;
   }
 
-  #post(message: unknown, signal?: AbortSignal, callId?: string): Promise<Response> {
+  #post(message: unknown, signal?: AbortSignal, callId?: string): Promise<{ res: Response; done: () => void }> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -447,10 +463,19 @@ class HttpTransport implements Transport {
       if (signal.aborted) controller.abort();
       else signal.addEventListener("abort", onCallerAbort, { once: true });
     }
-    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message), signal: controller.signal }).finally(
-      () => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onCallerAbort);
+    // The deadline must span the whole request→response, not just time-to-headers:
+    // a server that flushes headers then stalls the body would otherwise hang the
+    // body read (which runs after fetch() resolves) with the timer already cleared.
+    // `done()` tears the timer down only once the caller has finished the body.
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onCallerAbort);
+    };
+    return fetch(this.#url, { method: "POST", headers, body: JSON.stringify(message), signal: controller.signal }).then(
+      (res) => ({ res, done }),
+      (err) => {
+        done();
+        throw err;
       },
     );
   }
