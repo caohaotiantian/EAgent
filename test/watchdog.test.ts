@@ -99,6 +99,28 @@ test("AC5: does not abort a progressing stream", { timeout: 3000 }, async () => 
   assert.equal(lastText(h.agent), "xyz");
 });
 
+// GEN-1 — a caller's own deadline (an upstream abort signal, e.g. runSubCall's
+// timeout) bounds a signal-IGNORING stall promptly, not only the idle timer. With
+// idleMs far above the test timeout, only honoring the upstream abort settles it.
+test("GEN-1: an upstream abort bounds a signal-ignoring stall before idleMs", { timeout: 3000 }, async () => {
+  const h = makeHarness();
+  h.agent.providers.register(new NeverYield(), { default: true });
+  h.config.set("watchdog.idleMs", 60000);
+  await h.host.use("watchdog", watchdog);
+  const wrapped = h.agent.providers.get()!;
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(new Error("caller deadline")), 30);
+  await assert.rejects(
+    (async () => {
+      for await (const _ev of wrapped.stream({ messages: [], signal: ctrl.signal } as unknown as CompletionRequest)) {
+        void _ev; // NeverYield never yields; the race resolves via the upstream abort
+      }
+    })(),
+    /caller deadline/,
+    "rejects with the upstream reason, not the 60s idle error",
+  );
+});
+
 // AC5c — an inner error before idleMs propagates to the loop, and the idle timer
 // is cleared so no unhandledRejection surfaces from it (per-iteration clearTimeout).
 test("AC5c: inner error propagates with no idle-timer leak", { timeout: 3000 }, async () => {

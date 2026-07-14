@@ -55,22 +55,37 @@ async function* idleGuard(
   idleMs: number,
 ): AsyncGenerator<StreamEvent> {
   const ctrl = new AbortController();
+  const upstream = req.signal;
   const it = inner.stream({ ...req, signal: AbortSignal.any([req.signal, ctrl.signal]) })[Symbol.asyncIterator]();
   for (;;) {
+    // Honor the caller's own deadline (e.g. runSubCall's timeout on `upstream`)
+    // promptly: a provider that ignores its AbortSignal must still be bounded by
+    // the caller, not left running to our idle limit. React to `upstream` both
+    // synchronously (already aborted) and via the race (aborts mid-step).
+    if (upstream?.aborted) {
+      ctrl.abort();
+      throw upstream.reason ?? new Error("aborted");
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     const idle = new Promise<never>((_, rej) => {
       timer = setTimeout(() => rej(new Error(`provider idle for ${idleMs}ms`)), idleMs);
+    });
+    const aborted = new Promise<never>((_, rej) => {
+      onAbort = () => rej(upstream?.reason ?? new Error("aborted"));
+      upstream?.addEventListener("abort", onAbort, { once: true });
     });
     const step = it.next();
     let r: IteratorResult<StreamEvent>;
     try {
-      r = await Promise.race([step, idle]);
+      r = await Promise.race([step, idle, aborted]);
     } catch (err) {
       ctrl.abort();
       step.catch(() => {});
       throw err;
     } finally {
       clearTimeout(timer);
+      if (onAbort) upstream?.removeEventListener("abort", onAbort);
     }
     if (r.done) return;
     yield r.value;
