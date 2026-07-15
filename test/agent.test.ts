@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Agent } from "../src/kernel/agent.js";
-import { defineTool } from "../src/kernel/define.js";
+import { Agent, currentRootAgent } from "../src/kernel/agent.js";
+import { defineTool, ok } from "../src/kernel/define.js";
 import { setHandlerErrorReporter } from "../src/kernel/hooks.js";
+import { ProviderRegistry, ToolRegistry } from "../src/kernel/registry.js";
 import type { CompletionRequest, Message, StopReason, ToolCallBlock, ToolResult, UI, Usage } from "../src/kernel/types.js";
+import { MockProvider, type MockResponder } from "../src/providers/mock.js";
 import { makeHarness, lastText } from "./helpers.js";
+
+/** A responder that emits a `tool` call until the transcript already carries one. */
+function callThenText(toolName: string, done: string): MockResponder {
+  return (req) => (req.messages.some((m) => m.role === "tool") ? { text: done } : { toolCalls: [{ name: toolName, arguments: {} }] });
+}
 
 test("runs a full tool-use turn: call -> result -> final answer", async () => {
   const { agent } = makeHarness({
@@ -1239,4 +1246,105 @@ test("beforeDispatch divergence: tool_batch_end carries only executed results; t
     SKIP_NOTE,
     "the dropped id carries the synthetic skip note in the transcript",
   );
+});
+
+// ---------------------------------------------------------------------------
+// currentRootAgent() — the run-tree root accessor (a second ambient ALS)
+// ---------------------------------------------------------------------------
+
+test("currentRootAgent() is undefined outside any run", () => {
+  assert.equal(currentRootAgent(), undefined, "no root agent outside a run()");
+});
+
+test("currentRootAgent() is the running agent inside its own top-level run", async () => {
+  const { agent } = makeHarness({ fallback: "allow" });
+  let seen: Agent | undefined;
+  agent.tools.register(
+    defineTool({
+      name: "who",
+      description: "x",
+      parameters: { type: "object", properties: {} },
+      execute: () => {
+        seen = currentRootAgent();
+        return ok("ok");
+      },
+    }),
+  );
+  agent.providers.register(new MockProvider(callThenText("who", "done")), { default: true });
+
+  await agent.run("go");
+  assert.equal(seen, agent, "a top-level run's root is the agent itself");
+  assert.equal(currentRootAgent(), undefined, "the root context is cleared after run() returns");
+});
+
+test("currentRootAgent() inheritance: a fork nested in the parent's run observes the PARENT's root", async () => {
+  const { agent: parent } = makeHarness({ fallback: "allow" });
+
+  let rootInChild: Agent | undefined;
+  const probe = defineTool({
+    name: "probe",
+    description: "x",
+    parameters: { type: "object", properties: {} },
+    execute: () => {
+      rootInChild = currentRootAgent();
+      return ok("ok");
+    },
+  });
+  const childTools = new ToolRegistry();
+  childTools.register(probe);
+  const childProviders = new ProviderRegistry();
+  childProviders.register(new MockProvider(callThenText("probe", "child-done")), { default: true });
+
+  const fork = defineTool({
+    name: "fork",
+    description: "runs a child nested in the parent's run",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      const child = new Agent({
+        providers: childProviders,
+        tools: childTools,
+        hooks: parent.hooks.childScope(),
+        capabilities: parent.capabilities,
+        model: "mock",
+        provider: "mock",
+      });
+      await child.run("go");
+      return ok("forked");
+    },
+  });
+  parent.tools.register(fork);
+  parent.providers.register(new MockProvider(callThenText("fork", "parent-done")), { default: true });
+
+  await parent.run("start");
+  assert.equal(rootInChild, parent, "a fork inherits the parent as its run-tree root (not itself)");
+});
+
+test("currentRootAgent() concurrency: two concurrent top-level runs have distinct roots", async () => {
+  const make = (): { agent: Agent; seen: () => Agent | undefined } => {
+    const { agent } = makeHarness({ fallback: "allow" });
+    let seen: Agent | undefined;
+    agent.tools.register(
+      defineTool({
+        name: "who",
+        description: "x",
+        parameters: { type: "object", properties: {} },
+        execute: async () => {
+          // Yield so the two runs interleave before either records its root.
+          await new Promise((r) => setTimeout(r, 10));
+          seen = currentRootAgent();
+          return ok("ok");
+        },
+      }),
+    );
+    agent.providers.register(new MockProvider(callThenText("who", "done")), { default: true });
+    return { agent, seen: () => seen };
+  };
+
+  const a = make();
+  const b = make();
+  await Promise.all([a.agent.run("a"), b.agent.run("b")]);
+
+  assert.equal(a.seen(), a.agent, "run A's root is A");
+  assert.equal(b.seen(), b.agent, "run B's root is B");
+  assert.notEqual(a.seen(), b.seen(), "the two concurrent roots are distinct (per-ALS-context)");
 });

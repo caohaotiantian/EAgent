@@ -30,13 +30,15 @@ accounting), `events.ts` (the event/filter maps), `define.ts` (`defineTool` +
 result helpers), `validate.ts` (JSON-Schema argument validation), `store.ts`
 (the namespaced `Store`), and `index.ts` (the public barrel). The whole core is
 held minimal on purpose: `test/kernel-surface.test.ts` pins the public exports
-and keeps `src/kernel/` under a hard line ceiling (2,250 lines; the metric is
-`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,248 — a couple
+and keeps `src/kernel/` under a hard line ceiling (2,265 lines; the metric is
+`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,260 — a few
 lines of slack). The ceiling moved from 2,200 to 2,250 when the `Config`
 interface + `envOnlyConfig` fallback were added to `store.ts` for the injected
-`e.config` facility — a deliberate explicit decision. Adding to the kernel means
-golfing something else out or an explicit decision; new capability is an
-extension, not a core change.
+`e.config` facility, then from 2,250 to 2,265 for the multi-tenant isolation
+seam (`currentRootAgent()` + a `rootAgentStore` ALS, the `e.agent`/`e.rootAgent`
+getters) — deliberate explicit decisions. Adding to the kernel means golfing
+something else out or an explicit decision; new capability is an extension, not a
+core change.
 
 **Everything else is an extension** — even the four "built-in" tools (`read`,
 `write`, `edit`, `bash`) live in `src/extensions/core-tools.ts`. The kernel ships
@@ -86,7 +88,10 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 - `src/complete.ts` — the REPL Tab-completion engine: a pure, offline-testable
   `complete(line, ctx)`.
 - `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `POST /answer`
-  for a mid-turn elicitation reply, `DELETE /sessions/:id`).
+  for a mid-turn elicitation reply, `GET /sessions/:id` for a session's usage +
+  cost summary, `DELETE /sessions/:id`). Sessions are isolated per session id and
+  run **concurrently** (a same-session second `/run` gets 409; different sessions
+  overlap); all per-session extension state is keyed on the run-tree root Agent.
 - `test/` — the full offline suite, roughly one file per primitive/extension.
 - `examples/extensions/` — worked example extensions.
 - `docs/EXTENSIONS.md` — the extension author's guide.

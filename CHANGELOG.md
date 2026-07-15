@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Concurrent in-process multi-tenant isolation for the HTTP server (one kernel
+seam).** The server now hosts many `session` ids **concurrently**, each on its own
+Agent, with no cross-session state bleed. A single new kernel accessor —
+`currentRootAgent()`, a second `AsyncLocalStorage` set at the top-level `run()` and
+inherited by sub-agent forks — lets every extension key its per-session state on the
+session's run-tree **root** via `WeakMap<Agent>` (shared across a session's fork
+tree, distinct between sessions, GC'd on eviction). All 7 security guards
+(`write-guard`, `flow-guard`, `provenance`, `bash-policy`, `skills-hardening`,
+`subagent-jobs`, `budget-cap`) and the correctness accumulators (`cost`, `goal`,
+`todo`, `drift-probe`, `handoff`, `limits`, `fallback-routing`, `compact`,
+`citations`) are isolated per session; the cross-agent exfil catches (a parent's
+taint still gates a fork's egress) are preserved. The `/run` streams and mid-turn
+elicitation route by root, so each response carries only its own session's events; a
+concurrent **same-session** `/run` returns **409** while different sessions overlap.
+New `GET /sessions/:id` returns a session's usage + cost summary. The `session` id
+remains a multiplexing key authenticated by one shared token, **not** a per-tenant
+authorization boundary — for that, run one process per tenant (see `SECURITY.md`).
+
 **Unified JSONL event schema across the CLI `--json` and HTTP `/run` streams
 (zero kernel change).** Both front ends now serialize through one shared
 `src/jsonl.ts` mapper, so a single parser reads either stream. The HTTP `/run`

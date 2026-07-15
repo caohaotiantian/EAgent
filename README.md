@@ -329,7 +329,7 @@ flowchart LR
         ONE["One-shot<br/>eagent -e / --json"]
         BATCH["Batch<br/>(piped stdin)"]
     end
-    SRV["src/server.ts<br/>HTTP — /health, /run, DELETE /sessions/:id"]
+    SRV["src/server.ts<br/>HTTP — /health, /run, GET+DELETE /sessions/:id"]
     HOST["createAgentHost()<br/>src/host.ts"]
     K["Kernel + built-in extensions"]
     REPL --> HOST
@@ -352,8 +352,11 @@ curl -s localhost:8787/run -d '{"input":"now in one line","session":"abc"}'
 The server is open by default (trusted local use); set `EAGENT_TOKEN` to require
 `Authorization: Bearer <token>` on `/run`, and request bodies are capped at 1 MiB.
 Per-session state is LRU-bounded at `EAGENT_MAX_SESSIONS` (default 1000; `0` disables the cap).
-The `session` id multiplexes conversations, not trust: extension state is shared across
-sessions in one process, so isolate tenants by running **one process per tenant** (see `SECURITY.md`).
+The `session` id multiplexes conversations, not trust: per-session state is isolated (keyed on the
+session's root Agent) and sessions run **concurrently** — a same-session second `/run` returns 409 while
+different sessions overlap, and `GET /sessions/:id` returns a session's usage + cost. The id is still
+authenticated by one shared token, so for per-tenant authorization isolate tenants by running **one
+process per tenant** (see `SECURITY.md`).
 Set `EAGENT_HARDENED=1` for a one-switch **defense-in-depth** profile: it enables
 `risk-guard` (LLM-classifies every `shell:exec` call), `provenance` (injection-defends
 tool output), `sandbox.tier=workspace-write` (confines subprocess writes to the

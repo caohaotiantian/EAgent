@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { defineTool } from "../src/kernel/define.js";
+import { Agent } from "../src/kernel/agent.js";
+import { defineTool, ok } from "../src/kernel/define.js";
 import type { ExtensionAPI } from "../src/kernel/extension.js";
+import { ProviderRegistry, ToolRegistry } from "../src/kernel/registry.js";
+import { MockProvider } from "../src/providers/mock.js";
 import { makeHarness } from "./helpers.js";
 
 test("an inline extension registers tools, commands, and hooks", async () => {
@@ -173,3 +176,61 @@ function fakeCtx() {
     log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   };
 }
+
+test("e.agent resolves to the acting agent during a run and to host.agent at activation; e.rootAgent is the run-tree root", async () => {
+  const { agent: parent, host } = makeHarness({ fallback: "allow" });
+
+  let atActivation: unknown;
+  let actingAtLeaf: unknown;
+  let rootAtLeaf: unknown;
+  await host.use("probe", (e: ExtensionAPI) => {
+    atActivation = e.agent;
+    e.on("tool_start", ({ call }) => {
+      // Record only when the CHILD's leaf tool starts, so the acting agent is the
+      // fork (not the parent) and the root is the parent.
+      if (call.name === "leaf") {
+        actingAtLeaf = e.agent;
+        rootAtLeaf = e.rootAgent;
+      }
+    });
+  });
+  assert.equal(atActivation, parent, "at activation e.agent resolves to host.agent");
+
+  const leaf = defineTool({ name: "leaf", description: "x", parameters: { type: "object", properties: {} }, execute: () => ok("ok") });
+  const childTools = new ToolRegistry();
+  childTools.register(leaf);
+  const childProviders = new ProviderRegistry();
+  childProviders.register(
+    new MockProvider((req) => (req.messages.some((m) => m.role === "tool") ? { text: "child-done" } : { toolCalls: [{ name: "leaf", arguments: {} }] })),
+    { default: true },
+  );
+
+  const fork = defineTool({
+    name: "fork",
+    description: "x",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      const child = new Agent({
+        providers: childProviders,
+        tools: childTools,
+        hooks: parent.hooks.childScope(),
+        capabilities: parent.capabilities,
+        model: "mock",
+        provider: "mock",
+      });
+      await child.run("go");
+      return ok("forked");
+    },
+  });
+  parent.tools.register(fork);
+  parent.providers.register(
+    new MockProvider((req) => (req.messages.some((m) => m.role === "tool") ? { text: "parent-done" } : { toolCalls: [{ name: "fork", arguments: {} }] })),
+    { default: true },
+  );
+
+  await parent.run("start");
+
+  assert.ok(actingAtLeaf, "the leaf tool_start observer fired inside the fork");
+  assert.notEqual(actingAtLeaf, parent, "during the fork e.agent resolves to the acting (child) agent, not host.agent");
+  assert.equal(rootAtLeaf, parent, "during the fork e.rootAgent resolves to the run-tree root (the parent)");
+});

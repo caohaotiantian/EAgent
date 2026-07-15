@@ -109,7 +109,10 @@ export default function activate(e: ExtensionAPI): () => void {
     if (!s) states.set(agent, (s = { sources: new Map(), nextId: 1 }));
     return s;
   };
-  let lastRun: LastRun | undefined;
+  // The last completed run's citation summary, keyed on the run-tree root so
+  // the `/citations` readout reflects only the reading session (agent_end fires
+  // for the top-level run, where `e.rootAgent` is the session root).
+  const lastRunByRoot = new WeakMap<Agent, LastRun>();
 
   /** A result is retrieval iff its producing tool declares an intersecting cap. */
   const isRetrieval = (name: string, retrievalCaps: string[]): boolean => {
@@ -182,12 +185,12 @@ export default function activate(e: ExtensionAPI): () => void {
 
       const missingAttribution = emitted.size >= 1 && cited.size === 0;
 
-      lastRun = {
+      lastRunByRoot.set(e.rootAgent, {
         emitted: [...emitted].sort((a, b) => a - b),
         cited: [...cited].sort((a, b) => a - b),
         fabricated: fabricated.sort((a, b) => a - b),
         missingAttribution,
-      };
+      });
 
       for (const n of fabricated) {
         e.log.warn(`citations: fabricated source id [src:${n}] — cited but never emitted this run`);
@@ -218,7 +221,7 @@ export default function activate(e: ExtensionAPI): () => void {
           break;
         default: {
           const { enabled, retrievalCaps, warnMissing } = cfg();
-          const r = lastRun;
+          const r = lastRunByRoot.get(e.rootAgent);
           cmd.print(`citations ${enabled ? "on" : "off"}; retrieval-caps=${retrievalCaps.join(",")}; warn-missing=${warnMissing}`);
           if (r) {
             cmd.print(`last run — emitted: ${r.emitted.length} [${r.emitted.join(",")}]`);

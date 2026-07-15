@@ -17,10 +17,20 @@
  * `mock`/unfamiliar endpoints never report a confidently-wrong dollar figure.
  */
 
+import { currentActingAgent, currentRootAgent, type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { addUsage, totalTokens, type StopReason, type Usage } from "../kernel/types.js";
 
 export type { Usage };
+
+/**
+ * The store key under which `cost` publishes a `costOf(agent): number` accessor
+ * (the session's cumulative USD, keyed on the session root). A host front end
+ * (e.g. the HTTP server's `GET /sessions/:id`) resolves it from `cost`'s
+ * namespaced store and calls it with a session's Agent — the cross-boundary read
+ * channel, so no new host API or kernel method is needed.
+ */
+export const COST_ACCESSOR_KEY = "costOf";
 
 /** A per-model USD rate, expressed per million tokens (the conventional unit). */
 export interface PriceRow {
@@ -134,7 +144,6 @@ const WINDOW_SIZE = 20;
 /** Store keys this extension persists under (its own namespace). */
 const KEYS = {
   priceCard: "priceCard",
-  window: "window",
   enabled: "enabled",
 } as const;
 
@@ -164,19 +173,52 @@ export default function activate(e: ExtensionAPI): () => void {
     return () => {};
   }
 
-  // --- session state (closure-captured; survives run boundaries) ----------
-  /** Cumulative session cost and tokens, mirrored from the `usage` cumulative. */
-  let sessionUsd = 0;
-  let sessionTokens: Usage = { inputTokens: 0, outputTokens: 0 };
-  /** Per-run cost; reset on every `agent_start`. */
-  let runUsd = 0;
-  /** Per-model breakdown for the live session (USD + tokens + fallback mark). */
-  const perModel = new Map<string, { usd: number; tokens: Usage; fallback: boolean }>();
-  /** The model stamped at the start of the current run (the lookup key). */
-  let activeModel = e.agent.model;
-  /** The most recent finished run's cost and the rolling mean at that point. */
-  let lastRunUsd = 0;
-  let lastMean = 0;
+  // --- session state, keyed on the run-tree ROOT (`e.rootAgent`) so it is shared
+  // across a session's fork tree but isolated BETWEEN sessions (each on its own
+  // Agent) and race-free under concurrency. Eviction drops the root Agent and GCs
+  // the entry — no reset closure needed. The rolling anomaly `window` lives here
+  // too (session-scoped, not a durable cross-session store key). ----------------
+  interface CostState {
+    /** Cumulative session cost and tokens, mirrored from the `usage` cumulative. */
+    sessionUsd: number;
+    sessionTokens: Usage;
+    /** Per-run cost; reset on every `agent_start`. */
+    runUsd: number;
+    /** Per-model breakdown for the live session (USD + tokens + fallback mark). */
+    perModel: Map<string, { usd: number; tokens: Usage; fallback: boolean }>;
+    /** The model stamped at the start of the current run (the lookup key). */
+    activeModel: string;
+    /** The most recent finished run's cost and the rolling mean at that point. */
+    lastRunUsd: number;
+    lastMean: number;
+    /** Fixed-size rolling window of recent run costs feeding the anomaly baseline. */
+    window: number[];
+  }
+  const byRoot = new WeakMap<Agent, CostState>();
+  const stateFor = (agent: Agent): CostState => {
+    let s = byRoot.get(agent);
+    if (!s) {
+      byRoot.set(
+        agent,
+        (s = {
+          sessionUsd: 0,
+          sessionTokens: { inputTokens: 0, outputTokens: 0 },
+          runUsd: 0,
+          perModel: new Map(),
+          activeModel: agent.model,
+          lastRunUsd: 0,
+          lastMean: 0,
+          window: [],
+        }),
+      );
+    }
+    return s;
+  };
+
+  // Publish the cross-boundary read accessor: a host front end resolves the
+  // session's cumulative USD by the session Agent (a non-upserting peek, so a read
+  // for a never-priced session returns 0 without pinning an entry).
+  e.store.set(COST_ACCESSOR_KEY, (agent: Agent): number => byRoot.get(agent)?.sessionUsd ?? 0);
 
   // Each handler is wrapped so a thrown error never escapes the bus (trace
   // pattern). A cost failure can at worst drop a number, never a turn.
@@ -212,8 +254,9 @@ export default function activate(e: ExtensionAPI): () => void {
       safe(() => {
         // Reset only the per-run accumulator and re-stamp the active model;
         // cumulative + per-model session totals persist across runs.
-        runUsd = 0;
-        activeModel = e.agent.model;
+        const st = stateFor(e.rootAgent);
+        st.runUsd = 0;
+        st.activeModel = e.agent.model;
       }),
     ),
 
@@ -221,19 +264,24 @@ export default function activate(e: ExtensionAPI): () => void {
       "usage",
       safe((p: { usage: Usage; cumulative: Usage; model?: string }) => {
         const card = activeCard();
+        const st = stateFor(e.rootAgent);
         // Price at the model the event reports (the exact model the committed
         // stream requested — a routing switch or a retry downshift), keyed the
         // same. `activeModel` (the agent_start model) stays the fallback for older
         // events or a provider that reports none.
-        const model = p.model ?? activeModel;
+        const model = p.model ?? st.activeModel;
         const row = priceRow(model, card);
         // Per-run + per-model use the per-event delta; the session figure mirrors
-        // the agent's running cumulative (matching how `trace` mirrors it).
+        // the agent's running cumulative (matching how `trace` mirrors it). Only the
+        // run-tree ROOT updates the session cumulative, so a fork's smaller
+        // cumulative can't clobber it (the budget-cap root-guard pattern).
         const deltaUsd = costOf(p.usage, row);
-        runUsd += deltaUsd;
-        sessionUsd = costOf(p.cumulative, row);
-        sessionTokens = { ...p.cumulative };
-        const entry = perModel.get(model) ?? {
+        st.runUsd += deltaUsd;
+        if (currentActingAgent() === currentRootAgent()) {
+          st.sessionUsd = costOf(p.cumulative, row);
+          st.sessionTokens = { ...p.cumulative };
+        }
+        const entry = st.perModel.get(model) ?? {
           usd: 0,
           tokens: { inputTokens: 0, outputTokens: 0 },
           fallback: row.fallback,
@@ -243,54 +291,48 @@ export default function activate(e: ExtensionAPI): () => void {
         // preserving the omit-invariant for providers that report none.
         entry.tokens = addUsage(entry.tokens, p.usage);
         entry.fallback = row.fallback;
-        perModel.set(model, entry);
+        st.perModel.set(model, entry);
       }),
     ),
 
     e.on(
       "agent_end",
       safe((_p: { reason: StopReason }) => {
+        const st = stateFor(e.rootAgent);
         // Compute the baseline over the PRIOR samples, then record this run.
-        const prior = readWindow();
+        const prior = st.window;
         const m = mean(prior);
         const sd = stddev(prior);
-        lastRunUsd = runUsd;
-        lastMean = m;
-        if (prior.length >= ANOMALY_MIN_SAMPLES && runUsd > m + ANOMALY_K * sd) {
+        st.lastRunUsd = st.runUsd;
+        st.lastMean = m;
+        if (prior.length >= ANOMALY_MIN_SAMPLES && st.runUsd > m + ANOMALY_K * sd) {
           e.log.warn(
-            `cost anomaly: run cost ${fmtUsd(runUsd)} exceeds rolling mean ${fmtUsd(m)} ` +
+            `cost anomaly: run cost ${fmtUsd(st.runUsd)} exceeds rolling mean ${fmtUsd(m)} ` +
               `by more than ${ANOMALY_K}σ (n=${prior.length})`,
           );
         }
-        // Push this run into the fixed-size rolling window and persist it.
-        const next = [...prior, runUsd].slice(-WINDOW_SIZE);
-        e.store.set(KEYS.window, next);
+        // Push this run into the fixed-size rolling window.
+        st.window = [...prior, st.runUsd].slice(-WINDOW_SIZE);
       }),
     ),
   ];
-
-  /** Defensive read of the rolling window: coerce/repair malformed entries. */
-  function readWindow(): number[] {
-    const raw = e.store.get<unknown>(KEYS.window);
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((x): x is number => typeof x === "number" && Number.isFinite(x));
-  }
 
   // --- /cost command: status view + pricecard setter ----------------------
 
   const renderStatus = (print: (line: string) => void): void => {
     const card = activeCard();
+    const st = stateFor(e.rootAgent);
     // (a) session cumulative USD + token totals
     print(
-      `cumulative: ${fmtUsd(sessionUsd)}  ` +
-        `(tokens in=${sessionTokens.inputTokens} out=${sessionTokens.outputTokens} ` +
-        `total=${totalTokens(sessionTokens)})`,
+      `cumulative: ${fmtUsd(st.sessionUsd)}  ` +
+        `(tokens in=${st.sessionTokens.inputTokens} out=${st.sessionTokens.outputTokens} ` +
+        `total=${totalTokens(st.sessionTokens)})`,
     );
     // (b) per-model breakdown naming each model (fallback-priced models marked)
-    if (perModel.size === 0) {
+    if (st.perModel.size === 0) {
       print("per-model: (no usage recorded yet)");
     } else {
-      for (const [model, agg] of perModel) {
+      for (const [model, agg] of st.perModel) {
         const mark = agg.fallback ? "  (fallback rate — unknown model)" : "";
         print(
           `per-model ${model}: ${fmtUsd(agg.usd)}  ` +
@@ -306,10 +348,9 @@ export default function activate(e: ExtensionAPI): () => void {
     const fb = priceRow(" unknown ", card);
     print(`  price (fallback, unknown models): in=$${fb.inputPerMTok} out=$${fb.outputPerMTok}`);
     // (d) anomaly-status line naming the rolling mean and last-run cost
-    const window = readWindow();
     print(
-      `anomaly: last-run ${fmtUsd(lastRunUsd)} vs rolling mean ${fmtUsd(lastMean)} ` +
-        `(window n=${window.length}, k=${ANOMALY_K}σ, min-samples=${ANOMALY_MIN_SAMPLES})`,
+      `anomaly: last-run ${fmtUsd(st.lastRunUsd)} vs rolling mean ${fmtUsd(st.lastMean)} ` +
+        `(window n=${st.window.length}, k=${ANOMALY_K}σ, min-samples=${ANOMALY_MIN_SAMPLES})`,
     );
   };
 

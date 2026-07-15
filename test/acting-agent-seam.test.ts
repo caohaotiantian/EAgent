@@ -455,10 +455,25 @@ test("AC-6 otel: two concurrent forks under one parent emit distinct, correctly-
 // AC-7 — flow-guard: cross-agent capability taint preserved + intra-child data
 // ---------------------------------------------------------------------------
 
-test("AC-7(a) flow-guard: a child's shell:exec source taints the shared Set — another agent's egress is held", async () => {
+test("AC-7(a) flow-guard: a fork's shell:exec source taints the session root — a sibling fork's egress is held", async () => {
   await withEnv(["EAGENT_FLOW_GUARD"], async () => {
     delete process.env.EAGENT_FLOW_GUARD;
-    const { agent: parent, host, commands } = makeHarness({ fallback: "allow" });
+    // The parent orchestrates two sibling forks NESTED inside its run, so both
+    // inherit the parent's run-tree root (the way `subagents` spawns children —
+    // `await child.run()` inside the parent's dispatch). flow-guard's `tainted` set
+    // is now keyed on that shared root: childA's shell:exec source taints it, and
+    // childB's egress is held by that taint — the cross-agent confused-deputy catch
+    // preserved by root-keying (two INDEPENDENT top-level runs are, correctly, now
+    // isolated — that is the per-session isolation Phase B adds).
+    const { agent: parent, host, commands } = makeHarness({
+      fallback: "allow",
+      responder: (req) => {
+        const n = toolMsgCount(req);
+        if (n === 0) return { toolCalls: [{ name: "spawn_a", arguments: {} }] };
+        if (n === 1) return { toolCalls: [{ name: "spawn_b", arguments: {} }] };
+        return { text: "parent-done" };
+      },
+    });
     await host.use("flow-guard", flowGuard);
     commands.get("flow-guard")!.run({ agent: parent as never, args: "block", print: () => {} });
 
@@ -479,16 +494,20 @@ test("AC-7(a) flow-guard: a child's shell:exec source taints the shared Set — 
     parent.tools.register(egress);
 
     const childA = makeChild(parent, "CHILD-A", (req) => (toolMsgCount(req) === 0 ? { toolCalls: [{ name: "source", arguments: {} }] } : { text: "a-done" }), [source]);
-    await childA.run("a");
+    const childB = makeChild(parent, "CHILD-B", (req) => (toolMsgCount(req) === 0 ? { toolCalls: [{ name: "egress", arguments: {} }] } : { text: "b-done" }), [egress]);
+    // Spawn tools run each child's run INSIDE the parent's dispatch, so the child
+    // inherits the parent's root (currentRootAgent()) via the ambient ALS context.
+    parent.tools.register(defineTool({ name: "spawn_a", description: "x", parameters: { type: "object", properties: {} }, execute: async () => (await childA.run("a"), ok("spawned-a")) }));
+    parent.tools.register(defineTool({ name: "spawn_b", description: "x", parameters: { type: "object", properties: {} }, execute: async () => (await childB.run("b"), ok("spawned-b")) }));
 
     const egressResults: ToolResult[] = [];
     parent.hooks.on("tool_end", ({ call, result }) => {
       if (call.name === "egress") egressResults.push(result);
     });
-    const childB = makeChild(parent, "CHILD-B", (req) => (toolMsgCount(req) === 0 ? { toolCalls: [{ name: "egress", arguments: {} }] } : { text: "b-done" }), [egress]);
-    await childB.run("b");
 
-    assert.equal(egressRuns, 0, "the second child's egress body never ran (cross-agent capability taint)");
+    await parent.run("orchestrate");
+
+    assert.equal(egressRuns, 0, "the sibling fork's egress body never ran (cross-agent capability taint via the shared root)");
     assert.equal(egressResults.length, 1, "the egress reached the shared tool_end once");
     assert.ok(egressResults[0]!.isError && /flow-guard: blocked/.test(egressResults[0]!.content), "flow-guard held it");
   });

@@ -18,6 +18,8 @@ import { test } from "node:test";
 import skills, { validateFrontmatter } from "../src/extensions/skills.js";
 import skillsHardening from "../src/extensions/skills-hardening.js";
 import { makeHarness } from "./helpers.js";
+import { Agent } from "../src/kernel/agent.js";
+import { defineTool } from "../src/kernel/define.js";
 import type { Logger, UI } from "../src/kernel/types.js";
 import type { CompletionRequest } from "../src/kernel/types.js";
 
@@ -668,6 +670,72 @@ test("dispose loop restores every hook count and never throws", async () => {
 
     const after = points.map((p) => h.agent.hooks.listenerCount(p));
     assert.deepEqual(after, before, "all hook counts return to pre-load values after unload");
+  } finally {
+    s.cleanup();
+  }
+});
+
+// -- Phase B: activeAllowlists is keyed on the SESSION ROOT ---------------------
+// A scoped skill read in session A must gate only A's tool calls, never B's.
+// Mirrors the server model: one activation, distinct per-session-root Agents.
+
+/** The most recent user-role text in a request (branch on this, not the mock's
+ *  global turn index). */
+function latestUserText(req: CompletionRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const m = req.messages[i]!;
+    if (m.role !== "user") continue;
+    const t = m.content.find((b) => b.type === "text");
+    if (t && t.type === "text") return t.text;
+  }
+  return "";
+}
+
+/** A second per-session Agent sharing the host's single activation. */
+function sessionAgent(template: Agent): Agent {
+  return new Agent({
+    hooks: template.hooks,
+    tools: template.tools,
+    providers: template.providers,
+    capabilities: template.capabilities,
+    ui: template.ui,
+    logger: template.logger,
+    model: template.model,
+    provider: template.providerName,
+  });
+}
+
+test("AC1: a scoped skill read in session A does not gate session B's tools", async () => {
+  const s = scratchSkills();
+  try {
+    // Skill "foo" scopes its allowlist to `read` only, so an out-of-allowlist tool
+    // (`probe`) is gated while foo is active.
+    s.write("foo", fm({ name: "foo", description: "scoped", "allowed-tools": "read" }));
+
+    let confirms = 0;
+    const ui: UI = { confirm: async () => ((confirms++), true), notify: () => {} };
+    const responder = (req: CompletionRequest) => {
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (latestUserText(req).includes("A")) {
+        if (toolMsgs === 0) return { toolCalls: [{ name: "skill_read", arguments: { name: "foo" } }] };
+        if (toolMsgs === 1) return { toolCalls: [{ name: "probe", arguments: {} }] };
+        return { text: "A-done" };
+      }
+      if (toolMsgs === 0) return { toolCalls: [{ name: "probe", arguments: {} }] };
+      return { text: "B-done" };
+    };
+    const h = makeHarness({ responder, ui, fallback: "allow" });
+    h.agent.tools.register(defineTool({ name: "probe", description: "an out-of-allowlist tool", execute: () => ({ content: "ran" }) }));
+    await h.host.use("skills", skills);
+    await h.host.use("skills-hardening", skillsHardening);
+
+    const b = sessionAgent(h.agent);
+
+    await h.agent.run("session A reads the scoped skill then probes");
+    assert.equal(confirms, 1, "A's out-of-allowlist probe is gated by the active skill allowlist");
+
+    await b.run("session B just probes");
+    assert.equal(confirms, 1, "B is NOT gated — A's active allowlist does not govern B (per-session-root)");
   } finally {
     s.cleanup();
   }

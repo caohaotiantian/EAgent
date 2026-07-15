@@ -11,7 +11,8 @@ import type {
   ToolResult,
 } from "../src/kernel/types.js";
 import { MockProvider } from "../src/providers/mock.js";
-import subagentJobs, { jobChildRegistry } from "../src/extensions/subagent-jobs.js";
+import subagentJobs, { jobChildRegistry, JOBS_ACCESSOR_KEY } from "../src/extensions/subagent-jobs.js";
+import type { Agent } from "../src/kernel/agent.js";
 import { makeHarness } from "./helpers.js";
 
 /** A minimal ToolContext for driving a tool's `execute` directly. */
@@ -191,7 +192,13 @@ test("AC4: launch_job is refused from inside a sub-agent run but succeeds from t
       }
       return { text: "child-final" };
     }
-    return { text: "unused" };
+    // The ROOT run: launch one background job (which establishes the run-tree root),
+    // then finish. Root-detection is `currentActingAgent() === currentRootAgent()`, so
+    // the root launch MUST happen inside a real run for the job-child to inherit a
+    // distinct root (the session root) rather than reading as its own root.
+    return req.messages.some((m) => m.role === "tool")
+      ? { text: "root-final" }
+      : { toolCalls: [{ name: "launch_job", arguments: { prompt: "go", system: "PROBE-CHILD" } }] };
   });
 
   const { agent, host } = makeHarness({ fallback: "allow" });
@@ -216,16 +223,21 @@ test("AC4: launch_job is refused from inside a sub-agent run but succeeds from t
     }),
   );
 
-  // Root launch succeeds (acting agent is undefined at the root).
-  const launched = await launchJob.execute({ prompt: "go", system: "PROBE-CHILD" }, fakeCtx());
-  assert.equal(launched.isError, undefined, "root launch succeeds");
-  const rootId = jobIdOf(launched);
+  // Capture the root job's id off the tool_end stream so the child can be drained.
+  let rootId: string | undefined;
+  agent.hooks.on("tool_end", ({ call, result }) => {
+    if (call.name === "launch_job" && !result.isError) rootId = (result.details as { jobId?: string }).jobId;
+  });
+
+  // The root launches from within a real run (acting agent === run-tree root → allowed).
+  await agent.run("start");
+  assert.ok(rootId, "the root launch (inside a run) succeeded and produced a jobId");
 
   // Drain the background child (it calls the probe → nested launch_job).
-  await collectJob.execute({ jobId: rootId }, fakeCtx());
+  await collectJob.execute({ jobId: rootId! }, fakeCtx());
 
   assert.ok(nested, "the child invoked the probe");
-  assert.equal(nested!.isError, true, "the nested launch_job was refused");
+  assert.equal(nested!.isError, true, "the nested launch_job was refused (fork !== root)");
   assert.match(nested!.content, /sub-agent/, "refusal names the sub-agent recursion guard");
 
   // No nested job was created: exactly the one root job exists.
@@ -331,6 +343,31 @@ test("AC7: EAGENT_SUBAGENT_JOBS=off disables launch_job and /jobs", async () => 
     if (prev === undefined) delete process.env.EAGENT_SUBAGENT_JOBS;
     else process.env.EAGENT_SUBAGENT_JOBS = prev;
   }
+});
+
+// ---------------------------------------------------------------------------
+// hasLiveJob — the server-visible live-job signal (cross-boundary store accessor)
+// ---------------------------------------------------------------------------
+
+test("hasLiveJob accessor reports a live job for its root agent, and false once it settles", async () => {
+  const gated = new GatedProvider();
+  const { agent, host } = makeHarness({ fallback: "allow" });
+  agent.providers.register(gated, { default: true });
+  await host.use("subagent-jobs", subagentJobs);
+
+  const hasLiveJob = host.storeFor("subagent-jobs").get<(a: Agent) => boolean>(JOBS_ACCESSOR_KEY);
+  assert.equal(typeof hasLiveJob, "function", "subagent-jobs publishes a hasLiveJob accessor into its store");
+
+  const launchJob = agent.tools.get("launch_job")!;
+  const cancelJob = agent.tools.get("cancel_job")!;
+
+  // Direct call (outside a run) keys the job on host.agent = the harness agent.
+  assert.equal(hasLiveJob!(agent), false, "no live job before any launch");
+  const jobId = jobIdOf(await launchJob.execute({ prompt: "long" }, fakeCtx()));
+  assert.equal(hasLiveJob!(agent), true, "a running job is reported live for its root agent");
+
+  await cancelJob.execute({ jobId }, fakeCtx());
+  assert.equal(hasLiveJob!(agent), false, "no live job once it is cancelled");
 });
 
 // ---------------------------------------------------------------------------

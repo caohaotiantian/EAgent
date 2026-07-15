@@ -45,6 +45,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { type Agent } from "../kernel/agent.js";
 import type { CommandContext } from "../kernel/commands.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
@@ -440,8 +441,25 @@ export default function activate(e: ExtensionAPI): () => void {
       DEFAULT_RESUME_MAX_BYTES,
   });
 
-  /** Recursion guard: true while a summarization sub-call is in flight (compact.ts:175). */
-  let summarizing = false;
+  // Session-scoped state, keyed on the run-tree ROOT (`e.rootAgent`) so it is
+  // isolated BETWEEN sessions (each on its own Agent): the summarization recursion
+  // guard and the once-per-session resume-injection latch. Keyed per session so a
+  // second session gets its OWN one-shot injection instead of inheriting the
+  // first's consumed latch.
+  interface HandoffState {
+    /** Recursion guard: true while a summarization sub-call is in flight (compact.ts:175). */
+    summarizing: boolean;
+    /** Distinguishes the session's first `run()` from later ones (see below). */
+    firstRunSeen: boolean;
+    /** The once-only resume-injection latch for this session. */
+    injected: boolean;
+  }
+  const byRoot = new WeakMap<Agent, HandoffState>();
+  const stateFor = (agent: Agent): HandoffState => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { summarizing: false, firstRunSeen: false, injected: false }));
+    return s;
+  };
 
   /**
    * Summarize the transcript via the configured provider DIRECTLY. Passing
@@ -500,19 +518,20 @@ export default function activate(e: ExtensionAPI): () => void {
   async function produce(): Promise<string | undefined> {
     const messages = e.agent.messages;
     const goal = firstUserText(messages);
-    summarizing = true;
+    const st = stateFor(e.rootAgent);
+    st.summarizing = true;
     let content: string;
     try {
       content = await summarize(messages, goal);
     } finally {
-      summarizing = false;
+      st.summarizing = false;
     }
     return writeHandoff(content, slugify(goal));
   }
 
   // -- the auto-trigger: an agent_end observer (read-only) ------------------
   const offEnd = e.on("agent_end", async () => {
-    if (summarizing) return; // re-entrancy guard
+    if (stateFor(e.rootAgent).summarizing) return; // re-entrancy guard
     if (!cfg().enabled) return; // off by default / kill switch
     await produce();
   });
@@ -525,29 +544,30 @@ export default function activate(e: ExtensionAPI): () => void {
   // We inject at most once, on the FIRST run's first turn of a fresh session.
   //
   // `firstRunSeen` distinguishes the session's first `run()` from later ones;
-  // `injected` is the once-only latch. The first `agent_start` arms the latch
-  // (`injected = false`); the transform consumes it. `session_start` (a reload /
-  // fresh runtime, extension.ts:172) re-arms for the new session. Note `host.use`
-  // does NOT emit `session_start`, so on a fresh activation we rely on the
-  // initial state (`firstRunSeen = false`) and the first `agent_start` to arm —
-  // not on a `session_start` ever firing.
-  let firstRunSeen = false;
-  let injected = false;
+  // `injected` is the once-only latch (both per session root). The first
+  // `agent_start` arms the latch (`injected = false`); the transform consumes it.
+  // `session_start` (a reload / fresh runtime, extension.ts:172) re-arms for the
+  // new session. Note `host.use` does NOT emit `session_start`, so on a fresh
+  // activation we rely on the initial state (`firstRunSeen = false`) and the first
+  // `agent_start` to arm — not on a `session_start` ever firing.
   const offSession = e.on("session_start", () => {
-    firstRunSeen = false; // a reload starts a new session: re-arm on its first run
-    injected = true; // suppress any stray transform before that first agent_start
+    const st = stateFor(e.rootAgent);
+    st.firstRunSeen = false; // a reload starts a new session: re-arm on its first run
+    st.injected = true; // suppress any stray transform before that first agent_start
   });
   const offStart = e.on("agent_start", () => {
-    if (!firstRunSeen) {
-      firstRunSeen = true;
-      injected = false; // arm the single injection for this session's first run
+    const st = stateFor(e.rootAgent);
+    if (!st.firstRunSeen) {
+      st.firstRunSeen = true;
+      st.injected = false; // arm the single injection for this session's first run
     }
   });
 
   const offTransform = e.hook("transformContext", (messages, ctx) => {
     const { resume, maxAgeHours, maxBytes } = resumeCfg();
     if (!resume) return messages; // off by default / kill switch (inert: no hook effect)
-    if (injected) return messages; // once-only per session
+    const st = stateFor(e.rootAgent);
+    if (st.injected) return messages; // once-only per session
     if (ctx.turn !== 1) return messages; // only the first user turn of a run
     // Only a genuinely fresh first turn: the transcript holds just the opening
     // user message(s), no assistant turn yet. Re-folded/continued transcripts
@@ -557,7 +577,7 @@ export default function activate(e: ExtensionAPI): () => void {
     // From here we have attempted injection for this session — never try again,
     // even if a gate declines (a wrong injection is the cost we avoid; a missed
     // one is fine).
-    injected = true;
+    st.injected = true;
 
     const userText = firstUserText(messages);
     if (userText.trim().length === 0) return messages; // nothing to match on

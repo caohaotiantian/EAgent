@@ -12,12 +12,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createHttpServer, maxSessions, sendJson, type HttpServer } from "../src/server.js";
+import { currentActingAgent } from "../src/kernel/agent.js";
 import { LayeredConfig } from "../src/config.js";
 import { MemoryStore } from "../src/kernel/store.js";
 import type { MockProvider } from "../src/providers/mock.js";
 import { unwrapProvider } from "../src/extensions/lib/provider-wrap.js";
-import type { Usage } from "../src/kernel/types.js";
+import { defineTool, ok } from "../src/kernel/define.js";
+import type { CompletionRequest, ToolResult, Usage } from "../src/kernel/types.js";
 import { silentLogger } from "./helpers.js";
+
+/** The most recent user-role text in a request (stable within a session's turns,
+ *  since the mock's turn counter is global — branch on this, not the index). */
+function latestUserText(req: CompletionRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const m = req.messages[i]!;
+    if (m.role !== "user") continue;
+    const t = m.content.find((b) => b.type === "text");
+    if (t && t.type === "text") return t.text;
+  }
+  return "";
+}
+
+/** POST /run and return the open response (NDJSON), for the multi-turn tests. */
+function post(base: string, session: string, input: string): Promise<Response> {
+  return fetch(`${base}/run`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input, session }),
+  });
+}
 
 async function withServer(
   fn: (base: string) => Promise<void>,
@@ -219,11 +242,11 @@ test("a session id makes /run accumulate conversation history", async () => {
 
 test("KR-1: an aborted first turn is not persisted with a dangling [user] transcript", async () => {
   await withServerHandle(async (base, http) => {
-    // Abort mid-first-turn: a text_delta listener stops the agent, so the turn
-    // ends reason:"stop" with the assistant message NOT appended (the post-
-    // streamTurn abort check) → transcript = [user]. Same code path a client
-    // disconnect hits (onClose → agent.stop()), but deterministic.
-    http.agent.hooks.on("text_delta", () => http.agent.stop());
+    // Abort mid-first-turn: a text_delta listener stops the ACTING (per-session)
+    // agent, so the turn ends reason:"stop" with the assistant message NOT appended
+    // (the post-streamTurn abort check) → transcript = [user]. Same code path a
+    // client disconnect hits (onClose → agent.stop()), but deterministic.
+    http.agent.hooks.on("text_delta", () => currentActingAgent()?.stop());
     mockOf(http).script({ text: "partial" });
 
     const res = await fetch(`${base}/run`, {
@@ -255,12 +278,13 @@ test("per-session usage and model are isolated across sessions (AC-8)", async ()
       const initialModel = http.model;
       const modelsSeen: string[] = [];
       let changed = false;
-      // One-shot: mutate the shared agent's model DURING the first turn (session A).
-      // If model bled across sessions, B's turn would inherit it.
+      // One-shot: mutate the ACTING (per-session) agent's model DURING the first
+      // turn (session A). If model bled across sessions, B's turn would inherit it;
+      // under per-session Agents it cannot (B runs on a distinct Agent).
       const sub = http.agent.hooks.on("turn_start", () => {
         if (!changed) {
           changed = true;
-          http.agent.model = "model-from-A";
+          currentActingAgent()!.model = "model-from-A";
         }
       });
       // Record the model each provider turn actually saw, in call order.
@@ -776,10 +800,12 @@ test("SRV-2a: sendJson no-ops when headers are already sent (no throw, no second
 
 test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a silent 200", async () => {
   await withServerHandle(async (base, http) => {
-    const original = http.agent.restore.bind(http.agent);
-    http.agent.restore = () => {
+    // Force a throw in the setup window (after writeHead, before the terminal): the
+    // per-session Agent shares this hooks bus, so `wireJsonl`'s first `hooks.on` throws.
+    const original = http.agent.hooks.on.bind(http.agent.hooks);
+    http.agent.hooks.on = (() => {
       throw new Error("boom");
-    };
+    }) as typeof http.agent.hooks.on;
     try {
       const lines: Record<string, unknown>[] = [];
       const res = await fetch(`${base}/run`, {
@@ -794,7 +820,7 @@ test("SRV-2b: a setup-window throw surfaces as an in-stream error line, not a si
       assert.match(String(err.message), /boom/, "the error line carries the thrown message");
       assert.ok(err.where, "the error line now carries a `where` field (canonical error shape)");
     } finally {
-      http.agent.restore = original;
+      http.agent.hooks.on = original;
     }
   });
 });
@@ -897,4 +923,797 @@ test("SRV-6: HttpServer.close is idempotent — session_shutdown emits exactly o
   await http.close();
   await http.close(); // a second close must be a no-op, not a second dispose
   assert.equal(shutdowns, 1, "a repeated close() does not re-dispose / re-emit session_shutdown");
+});
+
+// -- Phase A: root-detection + danglingUser rollback on the per-session Agent --
+
+test("AC4: a session root can launch_job; a fork within the session is refused (currentActingAgent === currentRootAgent)", async () => {
+  await withServerHandle(async (base, http) => {
+    const launchJob = http.agent.tools.get("launch_job")!;
+
+    // A cap-free probe (survives the spawn_agent child-registry strip) that invokes
+    // launch_job.execute from within the FORK's acting-agent context.
+    let forkResult: ToolResult | undefined;
+    http.agent.tools.register(
+      defineTool({
+        name: "probe_fork",
+        description: "invokes launch_job from the acting (fork) context",
+        parameters: { type: "object", properties: {} },
+        execute: async (_a, ctx) => {
+          forkResult = await launchJob.execute({ prompt: "nested" }, ctx);
+          return ok("probed");
+        },
+      }),
+    );
+
+    mockOf(http).script((req) => {
+      const sys = req.systemPrompt;
+      // The spawned fork: call probe_fork once (→ nested launch_job, refused), then finish.
+      if (sys.includes("PROBE-CHILD")) {
+        return req.messages.some((m) => m.role === "tool") ? { text: "fork-done" } : { toolCalls: [{ name: "probe_fork", arguments: {} }] };
+      }
+      // A launch_job background child (DEFAULT_JOB_SYSTEM): finish immediately.
+      if (sys.includes("background sub-agent")) return { text: "job-done" };
+      // The session ROOT: launch_job at the root (allowed), spawn a fork, then finish.
+      const toolTurns = req.messages.filter((m) => m.role === "tool").length;
+      if (toolTurns === 0) return { toolCalls: [{ name: "launch_job", arguments: { prompt: "root-task" } }] };
+      if (toolTurns === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "PROBE-CHILD" } }] };
+      return { text: "root-done" };
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "ac4", "start"), (o) => lines.push(o));
+
+    // ROOT direction: the session root's own launch_job (dispatched by the loop) was
+    // ALLOWED — a tool_end with isError falsy, not a refusal.
+    const rootLaunch = lines.find((l) => l.type === "tool_end" && l.name === "launch_job");
+    assert.ok(rootLaunch, "the session root's launch_job produced a tool_end");
+    assert.notEqual(rootLaunch.isError, true, "the session root is allowed to launch_job");
+
+    // FORK direction: the fork's launch_job was REFUSED by rootOnly (fork !== root).
+    // (The identical predicate gates budget-cap's sessionUsd update — the fork's spend
+    // cannot clobber the session budget; unit-covered in budget-cap.test.ts.)
+    assert.ok(forkResult, "the fork invoked launch_job");
+    assert.equal(forkResult!.isError, true, "a fork within the session is refused launch_job");
+    assert.match(forkResult!.content, /sub-agent/, "the refusal names the sub-agent recursion guard");
+  });
+});
+
+test("danglingUser rollback: an aborted turn on a persistent session Agent leaves no bare user for the next turn", async () => {
+  await withServerHandle(async (base, http) => {
+    const captured: string[][] = []; // provider-seen message roles, per turn
+    let abortThisTurn = false;
+    // Abort the ACTING (per-session) agent mid-stream when armed.
+    const sub = http.agent.hooks.on("text_delta", () => {
+      if (abortThisTurn) currentActingAgent()?.stop();
+    });
+    mockOf(http).script((req) => {
+      captured.push(req.messages.map((m) => m.role));
+      return { text: "ok" };
+    });
+
+    // Turn 1: normal → the session Agent is persisted with valid alternating state.
+    await readNdjson(await post(base, "s", "one"), () => {});
+    // Turn 2: abort mid-stream → a trailing bare [user] on the PERSISTENT Agent that
+    // the rollback (pre-turn snapshot / restore on dangling) must discard.
+    abortThisTurn = true;
+    await readNdjson(await post(base, "s", "two"), () => {});
+    // Turn 3: normal → must NOT append a second consecutive user message.
+    abortThisTurn = false;
+    const lines3: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "s", "three"), (o) => lines3.push(o));
+
+    const turn3Roles = captured.at(-1)!;
+    assert.ok(
+      !turn3Roles.some((r, i) => r === "user" && turn3Roles[i + 1] === "user"),
+      `turn 3 request carries no two consecutive user messages; got roles: ${turn3Roles.join(",")}`,
+    );
+    assert.equal((lines3.at(-1) as { type?: string }).type, "agent_end", "turn 3 completed normally");
+    assert.ok(turn3Roles.includes("user"), "turn 3 still carries its own user message");
+    sub.dispose();
+  });
+});
+
+// -- Phase B: security-guard state isolation across sessions (AC1 / AC1b) -------
+// Each of the 7 security guards keys its session-scoped state on the SESSION ROOT
+// (currentRootAgent). Under the still-serial server, a guard decision from
+// session A must not leak into session B (its distinct pooled Agent). AC1b (the
+// cross-agent exfil catch) is verified within one session: a parent's taint still
+// gates a fork's egress via the shared root key (the S2 regression guard).
+
+test("AC1 write-guard: session A's read-set does not let session B blind-overwrite the same path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eagent-wg-iso-"));
+  const victim = join(dir, "victim.txt");
+  writeFileSync(victim, "ORIGINAL");
+  const prev = process.env.EAGENT_WORKSPACE;
+  process.env.EAGENT_WORKSPACE = dir; // set before the server builds (write-guard reads it)
+  try {
+    await withServerHandle(async (base, http) => {
+      // A reads the file (so its read-set includes it) then blind-overwrites it
+      // (ALLOWED — A saw it this session). B blind-overwrites the SAME path with an
+      // empty read-set → write-guard must still prompt (server confirm denies) →
+      // blocked. If `seen` commingled, B's overwrite would silently pass.
+      mockOf(http).script((req) => {
+        const user = latestUserText(req);
+        const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+        if (user.includes("A")) {
+          if (toolMsgs === 0) return { toolCalls: [{ name: "read", arguments: { path: "victim.txt" } }] };
+          if (toolMsgs === 1) return { toolCalls: [{ name: "write", arguments: { path: "victim.txt", content: "A-WROTE" } }] };
+          return { text: "A-done" };
+        }
+        if (toolMsgs === 0) return { toolCalls: [{ name: "write", arguments: { path: "victim.txt", content: "B-WROTE" } }] };
+        return { text: "B-done" };
+      });
+
+      const aLines: Record<string, unknown>[] = [];
+      await readNdjson(await post(base, "A", "session A: read then overwrite"), (o) => aLines.push(o));
+      const bLines: Record<string, unknown>[] = [];
+      await readNdjson(await post(base, "B", "session B: overwrite the same path"), (o) => bLines.push(o));
+
+      const aWrite = aLines.find((l) => l.type === "tool_end" && l.name === "write") as { isError?: boolean } | undefined;
+      assert.ok(aWrite, "A's write ran");
+      assert.notEqual(aWrite!.isError, true, "A overwrote its own read file (seen this session → allowed)");
+
+      const bWrite = bLines.find((l) => l.type === "tool_end" && l.name === "write") as { isError?: boolean } | undefined;
+      assert.ok(bWrite, "B's write ran");
+      assert.equal(bWrite!.isError, true, "B was still prompted/blocked (its read-set is isolated from A's)");
+
+      assert.equal(readFileSync(victim, "utf8"), "A-WROTE", "B's blind overwrite never reached disk");
+    });
+  } finally {
+    if (prev === undefined) delete process.env.EAGENT_WORKSPACE;
+    else process.env.EAGENT_WORKSPACE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Register benign, offline stand-ins for a shell:exec source and a net:fetch
+ *  egress so flow-guard's capability taint is exercised without a real shell or
+ *  network call. Both are visible to every session (the shared tools registry). */
+function registerFlowGuardTools(http: HttpServer): void {
+  http.agent.tools.register(
+    defineTool({ name: "taint_src", description: "a shell:exec source", capabilities: ["shell:exec"], parameters: { type: "object", properties: {} }, execute: () => ok("ran") }),
+  );
+  http.agent.tools.register(
+    defineTool({ name: "egress", description: "a net:fetch egress", capabilities: ["net:fetch"], parameters: { type: "object", properties: {} }, execute: () => ok("sent") }),
+  );
+}
+
+test("AC1 flow-guard: session A's capability taint does not gate session B's egress", async () => {
+  await withServerHandle(async (base, http) => {
+    registerFlowGuardTools(http);
+    mockOf(http).script((req) => {
+      const user = latestUserText(req);
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (user.includes("A")) {
+        if (toolMsgs === 0) return { toolCalls: [{ name: "taint_src", arguments: {} }] };
+        if (toolMsgs === 1) return { toolCalls: [{ name: "egress", arguments: {} }] };
+        return { text: "A-done" };
+      }
+      if (toolMsgs === 0) return { toolCalls: [{ name: "egress", arguments: {} }] };
+      return { text: "B-done" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "A", "session A taints then egresses"), (o) => aLines.push(o));
+    const bLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "B", "session B egresses only"), (o) => bLines.push(o));
+
+    // Within A the taint is live, so A's OWN egress is held by flow-guard — proving
+    // the mechanism is armed so B's pass below is not vacuous.
+    const aEgress = aLines.find((l) => l.type === "tool_end" && l.name === "egress") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(aEgress, "A's egress ran");
+    assert.equal(aEgress!.isError, true, "A's egress is held while A is capability-tainted");
+    assert.match(String(aEgress!.content), /flow-guard/, "flow-guard is the guard that held A's egress");
+
+    // Session B is never tainted → flow-guard must NOT hold its egress. A commingled
+    // `tainted` set would carry A's shell:exec taint into B and block this.
+    const bEgress = bLines.find((l) => l.type === "tool_end" && l.name === "egress") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(bEgress, "B's egress ran");
+    assert.ok(!/flow-guard/.test(String(bEgress!.content ?? "")), "flow-guard did not hold B's egress (taint is isolated)");
+    assert.notEqual(bEgress!.isError, true, "B's egress passed (its taint set is isolated from A's)");
+  });
+});
+
+test("AC1b flow-guard: a parent's capability taint STILL gates a fork's egress (cross-agent catch preserved)", async () => {
+  await withServerHandle(async (base, http) => {
+    registerFlowGuardTools(http);
+    mockOf(http).script((req) => {
+      if (req.systemPrompt.includes("FORK-CHILD")) {
+        // The fork: attempt an egress once (must be HELD by the parent's taint), then finish.
+        return req.messages.some((m) => m.role === "tool") ? { text: "fork-done" } : { toolCalls: [{ name: "egress", arguments: {} }] };
+      }
+      // The session root: taint (shell:exec), spawn a fork, then finish.
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (toolMsgs === 0) return { toolCalls: [{ name: "taint_src", arguments: {} }] };
+      if (toolMsgs === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "FORK-CHILD" } }] };
+      return { text: "root-done" };
+    });
+
+    const lines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "flow-fork", "start"), (o) => lines.push(o));
+
+    // The fork's egress is HELD by the parent's capability taint — `tainted` is
+    // shared across the session's fork tree (root-keyed). Keying it on the ACTING
+    // (child) agent would drop this confused-deputy exfil catch (the S2 regression).
+    const forkEgress = lines.find((l) => l.type === "tool_end" && l.name === "egress") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(forkEgress, "the fork's egress ran");
+    assert.equal(forkEgress!.isError, true, "the fork's egress is held by the parent's capability taint");
+    assert.match(String(forkEgress!.content), /flow-guard/, "flow-guard held the fork's egress via the shared session-root taint");
+  });
+});
+
+test("AC1 subagent-jobs: session B cannot job_status a job launched by session A", async () => {
+  await withServerHandle(async (base, http) => {
+    let jobId: string | undefined;
+    http.agent.hooks.on("tool_end", ({ call, result }) => {
+      if (call.name === "launch_job" && !result.isError) jobId = (result.details as { jobId?: string }).jobId;
+    });
+
+    mockOf(http).script((req) => {
+      if (req.systemPrompt.includes("background sub-agent")) return { text: "bg" }; // A's job child finishes at once
+      const user = latestUserText(req);
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (user.includes("launch")) {
+        // Session A: launch a job, collect it (so the child settles inside A's turn), finish.
+        if (toolMsgs === 0) return { toolCalls: [{ name: "launch_job", arguments: { prompt: "bg" } }] };
+        if (toolMsgs === 1) return { toolCalls: [{ name: "collect_job", arguments: { jobId } }] };
+        return { text: "A-done" };
+      }
+      // Session B: try to inspect A's job by its id.
+      if (toolMsgs === 0) return { toolCalls: [{ name: "job_status", arguments: { jobId } }] };
+      return { text: "B-done" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "A", "launch a job"), (o) => aLines.push(o));
+    assert.ok(jobId, "session A launched a job");
+    const aLaunch = aLines.find((l) => l.type === "tool_end" && l.name === "launch_job") as { isError?: boolean } | undefined;
+    assert.notEqual(aLaunch?.isError, true, "A's launch_job succeeded (session root is allowed)");
+
+    const bLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "B", "inspect it"), (o) => bLines.push(o));
+    const bStatus = bLines.find((l) => l.type === "tool_end" && l.name === "job_status") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(bStatus, "B ran job_status");
+    assert.equal(bStatus!.isError, true, "B cannot see A's job (the registry is per-session-root)");
+    assert.match(String(bStatus!.content), /unknown job/, "B's job_status reports A's id as unknown");
+  });
+});
+
+// -- Phase C: correctness-state isolation (AC2) + observability (D8) -----------
+// The correctness extensions (cost/goal/todo/drift-probe/handoff) key their
+// session-scoped state on the SESSION ROOT (currentRootAgent). A session's state
+// must not leak into another session's distinct pooled Agent. cost + goal are
+// server-observable here; todo/drift-probe/handoff are covered in their own
+// test files (their read seams are not exposed over HTTP).
+
+test("D8: GET /sessions/:id returns the session's usage + cost summary; 404 for an unknown id", async () => {
+  await withServerHandle(async (base, http) => {
+    mockOf(http).script({ text: "ok" });
+
+    // Run a session so it is pooled.
+    await readNdjson(await post(base, "obs", "hello"), () => {});
+
+    const res = await fetch(`${base}/sessions/obs`);
+    assert.equal(res.status, 200, "a known session returns 200");
+    const body = (await res.json()) as { session: string; usage: Usage; costUsd: number };
+    assert.equal(body.session, "obs");
+    assert.ok(body.usage && typeof body.usage.inputTokens === "number", "usage summary present");
+    assert.ok(body.usage.inputTokens > 0, "the session accrued input tokens");
+    assert.equal(typeof body.costUsd, "number", "a costUsd figure is present");
+
+    // An unknown session id is a clean 404.
+    const miss = await fetch(`${base}/sessions/does-not-exist`);
+    assert.equal(miss.status, 404, "an unknown session id 404s");
+    await miss.text();
+  });
+});
+
+test("AC2 cost: GET /sessions/:id reports each session's OWN cost, not a commingled total", async () => {
+  // Route each turn through a priced model (gpt-4o) so cost is non-zero and
+  // per-session-distinct. Routing would reset the model each turn and mask the
+  // switch, so kill it for the duration (orthogonal to the isolation under test).
+  const prevRouting = process.env.EAGENT_ROUTING;
+  process.env.EAGENT_ROUTING = "off";
+  try {
+    await withServerHandle(async (base, http) => {
+      const sub = http.agent.hooks.on("turn_start", () => {
+        currentActingAgent()!.model = "gpt-4o"; // a card-priced model (mock prices at $0)
+      });
+      mockOf(http).script({ text: "ok" });
+
+      // Session A runs twice (accumulates); session B runs once.
+      await readNdjson(await post(base, "costA", "alpha"), () => {});
+      await readNdjson(await post(base, "costA", "beta"), () => {});
+      await readNdjson(await post(base, "costB", "alpha"), () => {});
+
+      const a = (await (await fetch(`${base}/sessions/costA`)).json()) as { usage: Usage; costUsd: number };
+      const b = (await (await fetch(`${base}/sessions/costB`)).json()) as { usage: Usage; costUsd: number };
+
+      assert.ok(a.costUsd > 0, "session A accrued a non-zero cost at the priced model");
+      assert.ok(b.costUsd > 0, "session B accrued a non-zero cost");
+      // ISOLATION: A ran twice, B once — A's cost strictly exceeds B's. A commingled
+      // session total (shared closure, last-writer-wins) would report B's value for A.
+      assert.ok(a.costUsd > b.costUsd, `A (2 runs) costUsd ${a.costUsd} must exceed B (1 run) ${b.costUsd}`);
+      // And B's own cost equals A's per-run cost — B is a fresh session, not A+B.
+      assert.ok(a.usage.inputTokens > b.usage.inputTokens, "A's usage exceeds B's (isolated)");
+
+      sub.dispose();
+    });
+  } finally {
+    if (prevRouting === undefined) delete process.env.EAGENT_ROUTING;
+    else process.env.EAGENT_ROUTING = prevRouting;
+  }
+});
+
+test("AC2 goal: session A's objective pin does not leak into session B's request context", async () => {
+  await withServerHandle(async (base, http) => {
+    const PIN = "ALPHA-OBJECTIVE-XYZ";
+    mockOf(http).script((req) => {
+      const user = latestUserText(req);
+      const seesPin = req.messages.some(
+        (m) => m.role === "system" && m.content.some((b) => b.type === "text" && b.text.includes(PIN)),
+      );
+      if (user.includes("session A")) {
+        // Turn 0: set the objective; a later turn then carries the pin (armed).
+        const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+        if (toolMsgs === 0) return { toolCalls: [{ name: "setgoal", arguments: { objective: PIN } }] };
+        return { text: seesPin ? "A-sees-pin" : "A-no-pin" };
+      }
+      // Session B: report whether A's pin leaked into B's context.
+      return { text: seesPin ? "B-LEAKED-PIN" : "B-clean" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "goalA", "session A sets a goal"), (o) => aLines.push(o));
+    const bLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "goalB", "session B has no goal"), (o) => bLines.push(o));
+
+    const aText = aLines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
+    const bText = bLines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
+
+    // Non-vacuous: A's own later turn sees its pin (the anti-drift mechanism is armed).
+    assert.match(aText, /A-sees-pin/, "session A's own turn carries the objective pin");
+    // ISOLATION: B never sees A's pin. A shared-closure objective would inject it into B.
+    assert.match(bText, /B-clean/, "session B's context is free of A's objective pin");
+    assert.doesNotMatch(bText, /LEAKED/, "A's objective did not leak into B");
+  });
+});
+
+// -- Phase D: cross-session concurrency (AC3 / AC5 / AC5b / AC7 / AC4-conc) -----
+// The server is now genuinely concurrent across sessions: a per-session lock
+// serializes same-session turns (409) while different sessions run in parallel,
+// and the ALS streaming/elicitation guards route every frame to the session that
+// fired it. These tests keep two turns IN FLIGHT (start both, do not await the
+// first) so a broken guard or a global lock is not masked by serialization.
+
+/** Join every `text_delta` line's text, in stream order. */
+function joinText(lines: Record<string, unknown>[]): string {
+  return lines.filter((l) => l.type === "text_delta").map((l) => String(l.text)).join("");
+}
+
+/** POST /run without a session id (a sessionless, unpooled turn). */
+function postSessionless(base: string, input: string): Promise<Response> {
+  return fetch(`${base}/run`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input }),
+  });
+}
+
+test("AC7: a concurrent same-session /run 409s (first completes); a different session overlaps freely", async () => {
+  await withServerHandle(
+    async (base, http) => {
+      // Session A's first turn parks on an elicitation → A stays in-flight; a
+      // resume turn (a tool result is present) finishes it. Anything else finishes.
+      mockOf(http).script((req) => {
+        const user = latestUserText(req);
+        const hasTool = req.messages.some((m) => m.role === "tool");
+        if (user.includes("park")) {
+          return hasTool ? { text: "A-done" } : { toolCalls: [{ name: "ask_user_question", arguments: { question: "wait?" } }] };
+        }
+        return { text: "B-done" };
+      });
+
+      const aLines: Record<string, unknown>[] = [];
+      let sameStatus: number | undefined;
+      let otherStatus: number | undefined;
+      let otherText = "";
+
+      const aRes = await post(base, "same", "park please");
+      assert.equal(aRes.status, 200, "session A's run opened");
+
+      await readNdjson(aRes, (obj) => {
+        aLines.push(obj);
+        if (obj.type !== "action_required") return;
+        // A is parked and IN-FLIGHT. Probe both overlaps, then answer to release A.
+        void (async () => {
+          const same = await post(base, "same", "should be refused");
+          sameStatus = same.status;
+          await same.text();
+
+          const other = await post(base, "other", "b quick");
+          otherStatus = other.status;
+          const otherLines: Record<string, unknown>[] = [];
+          await readNdjson(other, (o) => otherLines.push(o));
+          otherText = joinText(otherLines);
+
+          await fetch(`${base}/answer`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: obj.id, answer: "go" }),
+          }).then((r) => r.text());
+        })();
+      });
+
+      assert.equal(sameStatus, 409, "a second in-flight /run for the SAME session is refused with 409");
+      assert.equal(otherStatus, 200, "a DIFFERENT session overlaps without a 409 (real cross-tenant concurrency)");
+      assert.match(otherText, /B-done/, "the different session ran to completion while A was parked");
+      assert.equal(aLines.at(-1)?.type, "agent_end", "session A completed uncorrupted after the answer");
+      assert.match(joinText(aLines), /A-done/, "session A resumed and finished");
+    },
+    { askTimeoutMs: 10_000 },
+  );
+});
+
+test("AC3: two overlapping in-flight /runs receive ONLY their own session's events (incl. forks), zero cross-talk", async () => {
+  await withServerHandle(
+    async (base, http) => {
+      // Each session first parks on an ask; only when BOTH are parked (both turns
+      // in-flight, both stream subscriptions live on the shared bus) are they
+      // released — so their resume streaming genuinely interleaves. On resume each
+      // spawns a fork carrying a per-session marker (the fork reads a file → tool_*
+      // fire under the fork, root = session root) then emits its own text. A broken
+      // streaming guard would splice one session's (or its fork's) frames into the
+      // other's stream; a global lock would 409 the second before it could park.
+      mockOf(http).script((req) => {
+        const sys = req.systemPrompt;
+        if (sys.includes("FORK-")) {
+          const marker = sys.includes("FORK-A") ? "fork-A-text" : "fork-B-text";
+          return req.messages.some((m) => m.role === "tool")
+            ? { text: marker }
+            : { toolCalls: [{ name: "read", arguments: { path: "package.json" } }] };
+        }
+        const isA = latestUserText(req).includes("AWORLD");
+        const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+        if (toolMsgs === 0) return { toolCalls: [{ name: "ask_user_question", arguments: { question: isA ? "A-q" : "B-q" } }] };
+        if (toolMsgs === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: isA ? "FORK-A" : "FORK-B" } }] };
+        return { text: isA ? "root-A-text" : "root-B-text" };
+      });
+
+      const asks: number[] = [];
+      const releaseWhenBothParked = (id: number): void => {
+        asks.push(id);
+        if (asks.length < 2) return;
+        for (const askId of asks) {
+          void fetch(`${base}/answer`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: askId, answer: "go" }),
+          }).then((r) => r.text());
+        }
+      };
+
+      const aLines: Record<string, unknown>[] = [];
+      const bLines: Record<string, unknown>[] = [];
+      await Promise.all([
+        post(base, "sessA", "AWORLD please").then((res) =>
+          readNdjson(res, (o) => {
+            aLines.push(o);
+            if (o.type === "action_required") releaseWhenBothParked(o.id as number);
+          }),
+        ),
+        post(base, "sessB", "BWORLD please").then((res) =>
+          readNdjson(res, (o) => {
+            bLines.push(o);
+            if (o.type === "action_required") releaseWhenBothParked(o.id as number);
+          }),
+        ),
+      ]);
+
+      const aText = joinText(aLines);
+      const bText = joinText(bLines);
+
+      assert.match(aText, /root-A-text/, "A's stream carries A's root text");
+      assert.match(aText, /fork-A-text/, "A's fork's text_delta routed to A's stream");
+      assert.doesNotMatch(aText, /root-B-text/, "B's root text did not leak into A's stream");
+      assert.doesNotMatch(aText, /fork-B-text/, "B's fork's text did not leak into A's stream");
+
+      assert.match(bText, /root-B-text/, "B's stream carries B's root text");
+      assert.match(bText, /fork-B-text/, "B's fork's text_delta routed to B's stream");
+      assert.doesNotMatch(bText, /root-A-text/, "A's root text did not leak into B's stream");
+      assert.doesNotMatch(bText, /fork-A-text/, "A's fork's text did not leak into B's stream");
+
+      // Each stream saw exactly its own single ask (no cross-routed action_required).
+      assert.equal(aLines.filter((l) => l.type === "action_required").length, 1, "A saw only its own ask");
+      assert.equal(bLines.filter((l) => l.type === "action_required").length, 1, "B saw only its own ask");
+      assert.equal((aLines.at(-1) as { session?: string }).session, "sessA", "A's terminal carries A's session");
+      assert.equal((bLines.at(-1) as { session?: string }).session, "sessB", "B's terminal carries B's session");
+    },
+    { askTimeoutMs: 10_000 },
+  );
+});
+
+test("AC5: per-session elicitation — each session's ask routes to its own stream and its own /answer resolves it", async () => {
+  await withServerHandle(
+    async (base, http) => {
+      // Both sessions ask; each resume turn echoes the answer it received, so a
+      // mis-routed sink (single shared holder) surfaces as an answer reaching the
+      // wrong session's stream.
+      mockOf(http).script((req) => {
+        const isA = latestUserText(req).includes("A-ask");
+        const toolMsg = req.messages.find((m) => m.role === "tool");
+        if (!toolMsg) {
+          return { toolCalls: [{ name: "ask_user_question", arguments: { question: isA ? "A-question" : "B-question" } }] };
+        }
+        const block = toolMsg.content.find((b) => b.type === "tool_result");
+        const echoed = block && block.type === "tool_result" ? block.content : "";
+        return { text: `${isA ? "A-final" : "B-final"}:${echoed}` };
+      });
+
+      const aLines: Record<string, unknown>[] = [];
+      const bLines: Record<string, unknown>[] = [];
+      const answer = (id: number, tag: string): void => {
+        void fetch(`${base}/answer`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id, answer: tag }),
+        }).then((r) => r.text());
+      };
+
+      await Promise.all([
+        post(base, "eA", "A-ask now").then((res) =>
+          readNdjson(res, (o) => {
+            aLines.push(o);
+            if (o.type === "action_required") answer(o.id as number, "PICK-A");
+          }),
+        ),
+        post(base, "eB", "B-ask now").then((res) =>
+          readNdjson(res, (o) => {
+            bLines.push(o);
+            if (o.type === "action_required") answer(o.id as number, "PICK-B");
+          }),
+        ),
+      ]);
+
+      const aAsk = aLines.filter((l) => l.type === "action_required");
+      const bAsk = bLines.filter((l) => l.type === "action_required");
+      assert.equal(aAsk.length, 1, "A saw exactly its own ask");
+      assert.equal(bAsk.length, 1, "B saw exactly its own ask");
+      assert.equal(aAsk[0]!.question, "A-question", "A's stream carries A's question, not B's");
+      assert.equal(bAsk[0]!.question, "B-question", "B's stream carries B's question, not A's");
+
+      assert.match(joinText(aLines), /A-final:.*PICK-A/, "A's own /answer resolved A's ask (answer reached A)");
+      assert.match(joinText(bLines), /B-final:.*PICK-B/, "B's own /answer resolved B's ask (answer reached B)");
+      assert.doesNotMatch(joinText(aLines), /PICK-B/, "B's answer did not bleed into A's turn");
+      assert.doesNotMatch(joinText(bLines), /PICK-A/, "A's answer did not bleed into B's turn");
+    },
+    { askTimeoutMs: 10_000 },
+  );
+});
+
+test("AC5b: two concurrent sessionless /runs each run on a fresh Agent (no 409, no aliasing)", async () => {
+  await withServerHandle(
+    async (base, http) => {
+      mockOf(http).script((req) => {
+        const user = latestUserText(req);
+        const toolMsg = req.messages.find((m) => m.role === "tool");
+        if (!toolMsg) return { toolCalls: [{ name: "ask_user_question", arguments: { question: `q:${user}` } }] };
+        const block = toolMsg.content.find((b) => b.type === "tool_result");
+        const echoed = block && block.type === "tool_result" ? block.content : "";
+        return { text: `done:${user}:${echoed}` };
+      });
+
+      // Answer only once BOTH sessionless runs are parked — that guarantees they
+      // overlap (a global lock would 409 the second before it could park).
+      const asks: { id: number; answer: string }[] = [];
+      const releaseWhenBothParked = (id: number, answer: string): void => {
+        asks.push({ id, answer });
+        if (asks.length < 2) return;
+        for (const a of asks) {
+          void fetch(`${base}/answer`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: a.id, answer: a.answer }),
+          }).then((r) => r.text());
+        }
+      };
+
+      const l1: Record<string, unknown>[] = [];
+      const l2: Record<string, unknown>[] = [];
+      let s1 = 0;
+      let s2 = 0;
+
+      await Promise.all([
+        (async () => {
+          const res = await postSessionless(base, "ONE");
+          s1 = res.status;
+          await readNdjson(res, (o) => {
+            l1.push(o);
+            if (o.type === "action_required") releaseWhenBothParked(o.id as number, "AAA");
+          });
+        })(),
+        (async () => {
+          const res = await postSessionless(base, "TWO");
+          s2 = res.status;
+          await readNdjson(res, (o) => {
+            l2.push(o);
+            if (o.type === "action_required") releaseWhenBothParked(o.id as number, "BBB");
+          });
+        })(),
+      ]);
+
+      assert.equal(s1, 200, "the first sessionless run opened");
+      assert.equal(s2, 200, "the second concurrent sessionless run is NOT 409'd (no lock, fresh Agent)");
+      assert.match(joinText(l1), /done:ONE:.*AAA/, "run 1 carried its own input and answer");
+      assert.match(joinText(l2), /done:TWO:.*BBB/, "run 2 carried its own input and answer");
+      assert.doesNotMatch(joinText(l1), /TWO|BBB/, "run 2's frames did not alias into run 1");
+      assert.doesNotMatch(joinText(l2), /ONE|AAA/, "run 1's frames did not alias into run 2");
+      assert.equal((l1.at(-1) as { session?: string }).session, undefined, "a sessionless terminal carries no session");
+      assert.equal((l2.at(-1) as { session?: string }).session, undefined, "a sessionless terminal carries no session");
+    },
+    { askTimeoutMs: 10_000 },
+  );
+});
+
+test("AC4-under-concurrency: with two sessions' turns in flight, each root may launch_job but every fork is refused", async () => {
+  await withServerHandle(async (base, http) => {
+    const launchJob = http.agent.tools.get("launch_job")!;
+
+    // A cap-free probe (survives the spawn_agent child-registry strip) that calls
+    // launch_job from within the FORK's acting-agent context, capturing each result.
+    const forkResults: ToolResult[] = [];
+    http.agent.tools.register(
+      defineTool({
+        name: "probe_fork",
+        description: "invokes launch_job from the acting (fork) context",
+        parameters: { type: "object", properties: {} },
+        execute: async (_a, ctx) => {
+          forkResults.push(await launchJob.execute({ prompt: "nested" }, ctx));
+          return ok("probed");
+        },
+      }),
+    );
+
+    mockOf(http).script((req) => {
+      const sys = req.systemPrompt;
+      if (sys.includes("PROBE-CHILD")) {
+        return req.messages.some((m) => m.role === "tool") ? { text: "fork-done" } : { toolCalls: [{ name: "probe_fork", arguments: {} }] };
+      }
+      if (sys.includes("background sub-agent")) return { text: "job-done" };
+      const toolTurns = req.messages.filter((m) => m.role === "tool").length;
+      if (toolTurns === 0) return { toolCalls: [{ name: "launch_job", arguments: { prompt: "root-task" } }] };
+      if (toolTurns === 1) return { toolCalls: [{ name: "spawn_agent", arguments: { mode: "single", prompt: "go", system: "PROBE-CHILD" } }] };
+      return { text: "root-done" };
+    });
+
+    const aLines: Record<string, unknown>[] = [];
+    const bLines: Record<string, unknown>[] = [];
+    await Promise.all([
+      post(base, "cA", "start").then((res) => readNdjson(res, (o) => aLines.push(o))),
+      post(base, "cB", "start").then((res) => readNdjson(res, (o) => bLines.push(o))),
+    ]);
+
+    for (const [name, lines] of [["A", aLines], ["B", bLines]] as const) {
+      const rootLaunch = lines.find((l) => l.type === "tool_end" && l.name === "launch_job") as { isError?: boolean } | undefined;
+      assert.ok(rootLaunch, `session ${name}'s root launch_job produced a tool_end`);
+      assert.notEqual(rootLaunch!.isError, true, `session ${name}'s root is allowed to launch_job`);
+    }
+
+    assert.ok(forkResults.length >= 2, "each session's fork invoked launch_job");
+    for (const r of forkResults) {
+      assert.equal(r.isError, true, "a fork is refused launch_job even under concurrent interleave (root-detection is per-ALS-context)");
+      assert.match(r.content, /sub-agent/, "the refusal names the sub-agent recursion guard");
+    }
+  });
+});
+
+// -- Phase D: per-session lock ancillaries (sessionless job refusal, DELETE guard, live-job eviction skip) --
+
+test("a sessionless /run is refused launch_job (no id to query it); a session-backed run is allowed", async () => {
+  await withServerHandle(async (base, http) => {
+    mockOf(http).script((req) => {
+      if (req.systemPrompt.includes("background sub-agent")) return { text: "bg" };
+      const toolMsgs = req.messages.filter((m) => m.role === "tool").length;
+      if (toolMsgs === 0) return { toolCalls: [{ name: "launch_job", arguments: { prompt: "bg" } }] };
+      return { text: "done" };
+    });
+
+    const slLines: Record<string, unknown>[] = [];
+    await readNdjson(await postSessionless(base, "go"), (o) => slLines.push(o));
+    const slLaunch = slLines.find((l) => l.type === "tool_end" && l.name === "launch_job") as { isError?: boolean; content?: string } | undefined;
+    assert.ok(slLaunch, "the sessionless launch_job ran");
+    assert.equal(slLaunch!.isError, true, "a sessionless launch_job is refused (there is no session id to query it later)");
+    assert.match(String(slLaunch!.content), /session/i, "the refusal names the missing session id");
+
+    const sLines: Record<string, unknown>[] = [];
+    await readNdjson(await post(base, "hasid", "go"), (o) => sLines.push(o));
+    const sLaunch = sLines.find((l) => l.type === "tool_end" && l.name === "launch_job") as { isError?: boolean } | undefined;
+    assert.ok(sLaunch, "the session-backed launch_job ran");
+    assert.notEqual(sLaunch!.isError, true, "a session-backed launch_job is allowed");
+  });
+});
+
+test("DELETE /sessions/:id is refused (409) while the session has an in-flight turn", async () => {
+  await withServerHandle(
+    async (base, http) => {
+      mockOf(http).script((req) => {
+        const hasTool = req.messages.some((m) => m.role === "tool");
+        return hasTool ? { text: "done" } : { toolCalls: [{ name: "ask_user_question", arguments: { question: "wait?" } }] };
+      });
+
+      const aLines: Record<string, unknown>[] = [];
+      let delStatus: number | undefined;
+      await readNdjson(await post(base, "busy-sess", "park"), (obj) => {
+        aLines.push(obj);
+        if (obj.type !== "action_required") return;
+        void (async () => {
+          const del = await fetch(`${base}/sessions/busy-sess`, { method: "DELETE" });
+          delStatus = del.status;
+          await del.text();
+          await fetch(`${base}/answer`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: obj.id, answer: "go" }),
+          }).then((r) => r.text());
+        })();
+      });
+
+      assert.equal(delStatus, 409, "DELETE is refused while a turn is in flight for the session");
+      assert.equal(aLines.at(-1)?.type, "agent_end", "the session completed after the answer");
+    },
+    { askTimeoutMs: 10_000 },
+  );
+});
+
+test("LRU eviction skips a session whose turn is in flight (a running session is never dropped)", async () => {
+  await withMaxSessions("1", () =>
+    withServerHandle(
+      async (base, http) => {
+        mockOf(http).script((req) => {
+          const user = latestUserText(req);
+          const hasTool = req.messages.some((m) => m.role === "tool");
+          // "old" parks on its SECOND turn so it is pooled AND in-flight while a
+          // fresh session's turn triggers eviction.
+          if (user.includes("park")) {
+            return hasTool ? { text: "old-done" } : { toolCalls: [{ name: "ask_user_question", arguments: { question: "wait?" } }] };
+          }
+          return { text: "quick-done" };
+        });
+
+        // Turn 1: pool "old" (a completed, non-parking turn).
+        await readNdjson(await post(base, "old", "first"), () => {});
+
+        // Turn 2: re-run "old" and park it → "old" is pooled AND running.
+        const oldLines: Record<string, unknown>[] = [];
+        let evictProbe: { newStatus?: number } = {};
+        await readNdjson(await post(base, "old", "park now"), (obj) => {
+          oldLines.push(obj);
+          if (obj.type !== "action_required") return;
+          void (async () => {
+            // While "old" is parked, run a fresh session to completion. Its
+            // turn-end persists it → size 2 > cap 1 → eviction runs, but the only
+            // older candidate ("old") is in the running set and must be skipped.
+            const fresh = await post(base, "fresh", "quick");
+            evictProbe.newStatus = fresh.status;
+            await readNdjson(fresh, () => {});
+            await fetch(`${base}/answer`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id: obj.id, answer: "go" }),
+            }).then((r) => r.text());
+          })();
+        });
+
+        assert.equal(evictProbe.newStatus, 200, "the fresh session ran concurrently while old was parked");
+        assert.equal(oldLines.at(-1)?.type, "agent_end", "old completed after the answer");
+        // "old" survived the eviction its own run would otherwise have triggered
+        // against it: a DELETE returns 200 (still pooled), not 404 (evicted).
+        const delOld = await fetch(`${base}/sessions/old`, { method: "DELETE" });
+        assert.equal(delOld.status, 200, "the running session was NOT evicted despite cap=1");
+        await delOld.text();
+      },
+      { askTimeoutMs: 10_000 },
+    ),
+  );
 });

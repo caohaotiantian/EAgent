@@ -25,6 +25,7 @@
  * own (it reads the model read-only and notifies/logs).
  */
 
+import { type Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Message } from "../kernel/types.js";
 import { text } from "../kernel/types.js";
@@ -200,19 +201,29 @@ const PROBE_SYSTEM_PROMPT =
   "Answer the following question concisely, showing your reasoning, then verify it.";
 
 export default function activate(e: ExtensionAPI): () => void {
-  // Module-scoped (per-activation) lifecycle state. The turn counter accumulates
-  // ACROSS `agent.run` calls — a long session is many runs, and drift is a
-  // session-level property — so it is NOT reset on `agent_start` (Design 4.1).
-  // Reset only on dispose/reload, so a reload starts clean.
-  let turnCounter = 0;
-  let probeCount = 0;
-  /**
-   * The turn at which a regression armed the one-shot note, or `-1` when
-   * unarmed. The note injects on the *next* turn (Design 4.6): the probe fires
-   * and arms during turn N's `turn_start` (which `emit` awaits), so turn N's own
-   * `transformContext` must NOT inject — only a later turn's does, then disarms.
-   */
-  let armedAtTurn = -1;
+  // Session-scoped lifecycle state, keyed on the run-tree ROOT (`e.rootAgent`) so
+  // it is shared across a session's fork tree but isolated BETWEEN sessions (each
+  // on its own Agent). The turn counter accumulates ACROSS `agent.run` calls — a
+  // long session is many runs, and drift is a session-level property — so it is NOT
+  // reset on `agent_start` (Design 4.1). A reload starts clean because it builds a
+  // fresh activation (and a fresh WeakMap).
+  interface ProbeState {
+    turnCounter: number;
+    probeCount: number;
+    /**
+     * The turn at which a regression armed the one-shot note, or `-1` when
+     * unarmed. The note injects on the *next* turn (Design 4.6): the probe fires
+     * and arms during turn N's `turn_start` (which `emit` awaits), so turn N's own
+     * `transformContext` must NOT inject — only a later turn's does, then disarms.
+     */
+    armedAtTurn: number;
+  }
+  const byRoot = new WeakMap<Agent, ProbeState>();
+  const stateFor = (agent: Agent): ProbeState => {
+    let s = byRoot.get(agent);
+    if (!s) byRoot.set(agent, (s = { turnCounter: 0, probeCount: 0, armedAtTurn: -1 }));
+    return s;
+  };
 
   const num = (key: string, fallback: number): number => {
     const raw = e.store.get<unknown>(key);
@@ -259,9 +270,9 @@ export default function activate(e: ExtensionAPI): () => void {
   }
 
   /** Run one probe, score it, capture/compare against the turn-0 baseline. */
-  async function fireProbe(): Promise<void> {
-    const probe = pickProbe(probeCount);
-    probeCount += 1;
+  async function fireProbe(st: ProbeState): Promise<void> {
+    const probe = pickProbe(st.probeCount);
+    st.probeCount += 1;
 
     const reply = await ask(probe);
     if (reply === undefined) {
@@ -292,7 +303,7 @@ export default function activate(e: ExtensionAPI): () => void {
       // flip: a flag is never armed while `noteOnRegression` is false, so the
       // note handler need not re-check config to disarm. The warn/notify above
       // still fire (the regression IS detected); only the note is suppressed.
-      if (cfg().noteOnRegression) armedAtTurn = turnCounter;
+      if (cfg().noteOnRegression) st.armedAtTurn = st.turnCounter;
     }
   }
 
@@ -302,14 +313,15 @@ export default function activate(e: ExtensionAPI): () => void {
   // applies `transformContext`. Deterministic, with no fire-and-forget race.
   const offTurn = e.on("turn_start", async () => {
     // Increment on EVERY turn_start, accumulating across runs (4.1).
-    turnCounter += 1;
+    const st = stateFor(e.rootAgent);
+    st.turnCounter += 1;
     const { enabled, n } = cfg(); // read live so the kill switch is honored
     if (!enabled) return;
-    if (turnCounter % n !== 0) return;
+    if (st.turnCounter % n !== 0) return;
     // fireProbe never throws (internally try/catch'd); guard defensively anyway
     // so a lifecycle observer can never break the run (fail open).
     try {
-      await fireProbe();
+      await fireProbe(st);
     } catch (err) {
       e.log.warn("drift-probe: probe handler error (failing open):", err);
     }
@@ -317,15 +329,16 @@ export default function activate(e: ExtensionAPI): () => void {
 
   // -- 2. one-shot regression note on transformContext ----------------------
   const offNote = e.hook("transformContext", (messages: Message[]): Message[] => {
-    if (armedAtTurn < 0) return messages; // unarmed: by reference, nothing to do
+    const st = stateFor(e.rootAgent);
+    if (st.armedAtTurn < 0) return messages; // unarmed: by reference, nothing to do
     // No `noteOnRegression` re-check here: the flag is gated at ARM time (see
     // `fireProbe`), so an armed flag already implies notes were enabled. This
     // keeps the one-shot invariant config-order-independent — there is no path
     // that bails out of this handler while leaving a stale flag armed.
     // Inject only on a turn LATER than the one the note was armed at, so the
     // note lands on the *next* model call (4.6), not the probe's own turn.
-    if (turnCounter <= armedAtTurn) return messages;
-    armedAtTurn = -1; // disarm: at most one note per regression (4.6)
+    if (st.turnCounter <= st.armedAtTurn) return messages;
+    st.armedAtTurn = -1; // disarm: at most one note per regression (4.6)
     const note = text("system", DRIFT_NOTE_TEXT);
     note.meta = { source: "drift-probe", kind: "drift-note" };
     // A NEW array; never mutate the input, never enter the durable transcript.
@@ -362,10 +375,8 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   return () => {
-    // Reset module-scoped lifecycle state so a reload starts clean (4.1).
-    turnCounter = 0;
-    probeCount = 0;
-    armedAtTurn = -1;
+    // A reload builds a fresh activation (and a fresh per-root WeakMap), so the
+    // lifecycle counters start clean without an explicit reset here (4.1).
     for (const d of [offTurn, offNote, offCmd]) {
       try {
         d.dispose();

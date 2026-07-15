@@ -10,7 +10,7 @@ import { test } from "node:test";
 
 import { defineTool } from "../src/kernel/define.js";
 import type { Tool, ToolContext, ToolResult } from "../src/kernel/types.js";
-import { makeHarness, type Harness } from "./helpers.js";
+import { makeHarness, siblingAgent, type Harness } from "./helpers.js";
 import todo from "../src/extensions/todo.js";
 
 function ctx(): ToolContext {
@@ -100,6 +100,38 @@ test("AC-7: session_start clears the list", async () => {
   await write(h, [{ content: "a", status: "pending", priority: "high" }]);
   await h.agent.hooks.emit("session_start", {});
   assert.deepEqual(todos(h), ["(no todos)"]);
+});
+
+test("AC2: session B's todowrite does not clobber session A's list (per-session-root state)", async () => {
+  // Two sessions share one activation but distinct pooled Agents (the server
+  // model). Session A's list lives on the host agent; session B runs on a
+  // sibling Agent. A commingled `items` closure would let B's replace-write wipe
+  // A's list; per-session-root state keeps them isolated.
+  const h = makeHarness({
+    responder: (req) => {
+      const last = req.messages[req.messages.length - 1];
+      if (last?.role === "user") {
+        return {
+          toolCalls: [
+            { name: "todowrite", arguments: { todos: [{ content: "B-item", status: "pending", priority: "high" }] } },
+          ],
+        };
+      }
+      return { text: "B-done" };
+    },
+    fallback: "allow",
+  });
+  await h.host.use("todo", todo);
+
+  // Session A writes its list (on the host agent — the /todos read seam keys here).
+  await write(h, [{ content: "A-item", status: "pending", priority: "high" }]);
+  // Session B (a distinct pooled Agent) runs and writes its own list.
+  await siblingAgent(h).run("session B writes todos");
+
+  // A's list is intact — B's write landed on B's own session-root state.
+  const rendered = todos(h).join("\n");
+  assert.match(rendered, /A-item/, "session A's list survived (isolated from B)");
+  assert.doesNotMatch(rendered, /B-item/, "session B's write did not clobber A's list");
 });
 
 test("AC-8: todowrite needs no capability and runs under fallback:deny", async () => {

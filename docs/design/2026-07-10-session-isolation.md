@@ -3,6 +3,9 @@
 Slug: `2026-07-10-session-isolation`
 Status: **closed — won't-build (in-process isolation); posture documented instead**
 Closed-on: 2026-07-11
+Superseded-by: `docs/design/2026-07-14-multitenant-isolation.md` — the in-process isolation this doc
+scoped but deferred was ultimately built there (2026-07-15); its getter/root-detection mechanism and
+commingling enumeration are carried forward and expanded.
 Decision: The L1 loop (two rounds, no code) proved full in-process per-session isolation is a ~15-
 extension, security-critical, **all-or-nothing** subsystem (§Review Log). The user chose the
 production-standard posture (2026-07-11): **isolate tenants at the process boundary**, not in-process.

@@ -23,6 +23,7 @@
 import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
+import type { Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 
@@ -62,15 +63,23 @@ export default function activate(e: ExtensionAPI): () => void {
   if (!e.config.enabled("write-guard", { default: true })) return () => {};
 
   const root = workspaceRoot(e.config);
-  /** Absolute paths the session has read or written this session. */
-  const seen = new Set<string>();
+  // Absolute paths read or written, keyed on the SESSION ROOT (`e.rootAgent`) so
+  // the read-set is shared across a session's fork tree yet isolated BETWEEN
+  // sessions (each runs on its own Agent). No reset closure is needed: eviction
+  // drops the root Agent and GCs its entry.
+  const seenByRoot = new WeakMap<Agent, Set<string>>();
+  const seenFor = (agent: Agent): Set<string> => {
+    let s = seenByRoot.get(agent);
+    if (!s) seenByRoot.set(agent, (s = new Set<string>()));
+    return s;
+  };
 
   // Record every successful file tool call's path: reading, editing, or writing
   // a file all count as having "seen" it.
   const offEnd = e.on("tool_end", ({ call, result }) => {
     if (result.isError) return;
     const p = call.arguments.path;
-    if (typeof p === "string") seen.add(resolvePath(root, p));
+    if (typeof p === "string") seenFor(e.rootAgent).add(resolvePath(root, p));
   });
 
   const offHook = e.hook("beforeToolCall", async (decision, ctx) => {
@@ -81,19 +90,15 @@ export default function activate(e: ExtensionAPI): () => void {
     const abs = resolvePath(root, decision.arguments.path as string);
     // Only an existing, unread file is at risk of a blind clobber. A new file
     // has nothing to lose; a file already seen this session is known.
-    if (!fileExists(abs) || seen.has(abs)) return decision;
+    if (!fileExists(abs) || seenFor(e.rootAgent).has(abs)) return decision;
 
     const why = `overwrite "${decision.arguments.path as string}", which has not been read this session`;
     const allow = await e.agent.ui.confirm(`write-guard: allow ${why}?`);
     return allow ? decision : { ...decision, block: true, reason: `write-guard: blocked ${why}` };
   });
 
-  const reset = () => seen.clear();
-  const offStart = e.on("session_start", reset);
-  const offDown = e.on("session_shutdown", reset);
-
   return () => {
-    for (const d of [offEnd, offHook, offStart, offDown]) {
+    for (const d of [offEnd, offHook]) {
       try {
         d.dispose();
       } catch {

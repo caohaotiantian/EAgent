@@ -18,6 +18,7 @@
  * `/bash-policy`, or disable it entirely with `EAGENT_BASH_POLICY=off`.
  */
 
+import type { Agent } from "../kernel/agent.js";
 import type { ExtensionAPI } from "../kernel/extension.js";
 import { normalizeForInspection } from "./lib/decode.js";
 
@@ -590,8 +591,18 @@ export default function activate(e: ExtensionAPI): () => void {
     commandArgKey: e.store.get<string>("commandArgKey", "command") ?? "command",
   });
 
-  /** Extracted prefixes the human approved this session (cleared on reset). */
-  const approved = new Set<string>();
+  // Extracted prefixes the human approved this session, keyed on the SESSION ROOT
+  // (`e.rootAgent`) so an approval is shared across a session's fork tree yet
+  // isolated BETWEEN sessions (each on its own Agent). No reset closure is needed:
+  // eviction drops the root Agent and GCs the entry. (Note: unreachable on today's
+  // HTTP server — `serverUI.confirm` is fail-safe-deny, so `approved` never grows
+  // there; converted defensively for a future interactive server.)
+  const approvedByRoot = new WeakMap<Agent, Set<string>>();
+  const approvedFor = (agent: Agent): Set<string> => {
+    let s = approvedByRoot.get(agent);
+    if (!s) approvedByRoot.set(agent, (s = new Set<string>()));
+    return s;
+  };
 
   const offHook = e.hook("beforeToolCall", async (decision, ctx) => {
     const { enabled, rules, fallthrough, commandArgKey } = cfg();
@@ -635,16 +646,13 @@ export default function activate(e: ExtensionAPI): () => void {
       return { ...decision, block: true, reason: `bash-policy: blocked ${why}${suffix}` };
     }
 
+    const approved = approvedFor(e.rootAgent);
     if (approved.has(family)) return decision;
     const allow = await e.agent.ui.confirm(`bash-policy: allow ${family || command}${j ? ` (${j})` : ""}?`);
     if (!allow) return { ...decision, block: true, reason: `bash-policy: denied ${why}${suffix}` };
     approved.add(family);
     return decision;
   });
-
-  const reset = () => approved.clear();
-  const offStart = e.on("session_start", reset);
-  const offDown = e.on("session_shutdown", reset);
 
   const offCmd = e.registerCommand({
     name: "bash-policy",
@@ -673,7 +681,7 @@ export default function activate(e: ExtensionAPI): () => void {
   });
 
   return () => {
-    for (const d of [offHook, offStart, offDown, offCmd]) {
+    for (const d of [offHook, offCmd]) {
       try {
         d.dispose();
       } catch {
