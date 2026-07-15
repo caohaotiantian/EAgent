@@ -256,6 +256,7 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `evals`        | offline behavior-eval harness — `/expect` trajectory assertions, an `/eval <dir>` headless runner over `*.eval.json` (also exposed as the `npm run eval` **CI gate** over `evals/`, exit non-zero on failure), and a `judge` tool (recursion-safe sub-call); ships a `test/security/` guard-regression set | `/expect`, `/eval` | — |
 | `handoff`      | session resume doc — on `agent_end` (or `/handoff-doc`) summarizes the transcript via a recursion-safe sub-call into a fixed schema + reactivation paragraph, written to `.eagent/handoffs/`; plus an opt-in, relevance- and freshness-gated read side that injects the newest matching handoff once into a fresh session's first turn (off by default; `EAGENT_HANDOFF=off`, resume side `EAGENT_HANDOFF_RESUME=off`) | `/handoff-doc` | — |
 | `drift-probe`  | reasoning-quality canary — every N turns probes a pinned question and warns (never blocks) on regression vs the turn-0 baseline, suggesting `/compact` or `/handoff` (off by default; `EAGENT_DRIFT_PROBE=off`) | `/drift-probe` | — |
+| `autocontinue` | resumes a **truncated** answer — when a turn ends on `max_tokens` with no tool call, injects a "continue" follow-up so the loop resumes instead of stopping silently; capped at 3 continuations per top-level run, keyed on the acting agent (off by default; `/autocontinue on`, `EAGENT_AUTOCONTINUE=off`) | `/autocontinue` | — |
 | `skills-hardening` | guards the skill self-extension surface — `SKILL.md` body/script supply-chain scan + body rug-pull fingerprint (warn-only), frontmatter validation, `allowed-tools` `beforeToolCall` scoping for the active skill, and optional `triggers:`-gated tier-1 disclosure (`EAGENT_SKILL_TRIGGERS=off`) | `/skills` | — |
 | `ask`          | agent→host elicitation — an `ask_user_question` tool so the model can pause and ask the human (with options) before guessing, gated by `ui:ask` so batch runs auto-decline; calls an optional `UI.ask` (CLI readline), else falls back to "proceed with a stated assumption"; the HTTP server adds a durable channel (`action_required` stream event + `POST /answer`, timeout/disconnect fallback) | — (`ask_user_question`) | `ui:ask` |
 | `routing`      | difficulty-aware per-turn model tiering — a cheap heuristic (or optional sub-call) classifier sets the mutable `Agent.model` to a cheap/flagship tier per turn, restoring it on disable; pairs with `cost` (off by default; `EAGENT_ROUTING=off`) | `/routing` | — |
@@ -405,7 +406,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  63 built-in extensions, all riding the ExtensionAPI
+src/extensions/  64 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

@@ -75,6 +75,7 @@ import envReport from "./extensions/env-report.js";
 import evals from "./extensions/evals.js";
 import handoff from "./extensions/handoff.js";
 import driftProbe from "./extensions/drift-probe.js";
+import autocontinue from "./extensions/autocontinue.js";
 import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
@@ -147,6 +148,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["evals", evals],
   ["handoff", handoff],
   ["drift-probe", driftProbe],
+  ["autocontinue", autocontinue],
   ["skills-hardening", skillsHardening],
   ["ask", ask],
   ["routing", routing],
