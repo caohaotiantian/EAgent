@@ -2,7 +2,12 @@
 
 Slug: `2026-07-15-silent-truncation-fix`
 Design: `docs/design/2026-07-15-silent-truncation-fix.md`
-Status: draft
+Status: closed
+Closing-commit: `d229845` (phases 1–5, code+docs) + this closeout
+Closed-on: 2026-07-15
+Deferred: none (see design doc §8 R5/R6 for the documented residuals). All 5 phases
+landed round-1/round-3 clean; no L2 rollback occurred, so there is no Deprecated
+section to prune.
 
 ## 1. Task Index (Deliverable / AC → design location)
 

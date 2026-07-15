@@ -1,7 +1,13 @@
 # Design — Silent turn-termination: surface it, tune it, recover from it
 
 Slug: `2026-07-15-silent-truncation-fix`
-Status: draft
+Status: closed
+Closing-commit: `d229845` (phases 1–5, code+docs) + this closeout
+Closed-on: 2026-07-15
+Deferred: finding — provider-done `stop`-collapse (§8 R6) and no-finish-reason
+early-close (§8 R5) remain unsurfaced-by-D1 by design; both out of scope for this
+CLI-visibility fix and documented as residuals. No repo issue tracker — tracked in
+the PR.
 
 ## 1. Background and Purpose
 
@@ -40,19 +46,19 @@ path (`max_tokens`/`content_filter`/`refusal`) stays untested at the loop level
 
 ## 2. Deliverables
 
-- [ ] **D1 (Fix #1 — CLI visibility, primary repair)** — add an `agent_end`
+- [x] **D1 (Fix #1 — CLI visibility, primary repair)** — add an `agent_end`
       handler to `wireRendering` (`src/cli.ts`) that prints one visible warning line
       when `reason ∈ {max_tokens, content_filter, refusal}`, and prints nothing for
       `end_turn`/`tool_use`/`stop`/`error`. The warning names the cause and the
       recovery lever (raise `*_MAX_TOKENS`, or enable auto-continue).
-- [ ] **D2 (Fix #2 — raise the default cap)** — change the effective output-cap
+- [x] **D2 (Fix #2 — raise the default cap)** — change the effective output-cap
       default `4096 → 8192` at every output-cap site: `host.ts:342/347/352` (+ the
       doc comment `:332`), `anthropic.ts:55`, `openai.ts:55`, `gemini.ts:46`. Update
       the tests that pin `4096` (`test/provider-max-tokens.test.ts`,
       `test/openai.test.ts:187,200-201`). Do **not** touch `gemini.ts:264` (a
       `thinkingBudget`, not an output cap) or the byte-cap constants
       (`routing.ts:49`, `teams.ts:124`).
-- [ ] **D3 (kernel seam)** — add an optional `stopReason?: StopReason` to the
+- [x] **D3 (kernel seam)** — add an optional `stopReason?: StopReason` to the
       `message` KernelEvent (`src/kernel/events.ts:35`) and set it at the
       assistant-message emit only (`src/kernel/agent.ts:261`). `StopReason` is
       already imported at `events.ts:11`, so no import is added. Must ship as a
@@ -61,7 +67,7 @@ path (`max_tokens`/`content_filter`/`refusal`) stays untested at the loop level
       +1–2 lines fit, but a comment block would breach it. This is the minimal
       signal that lets an extension observe a truncated turn while a continuation can
       still be injected.
-- [ ] **D4 (Fix #3 — auto-continue extension)** — a new
+- [x] **D4 (Fix #3 — auto-continue extension)** — a new
       `src/extensions/autocontinue.ts` (appended to `BUILTIN_EXTENSIONS` in
       `src/host.ts`). It observes the `message` event; when the assistant message has
       `stopReason === "max_tokens"`, carries **no** `tool_call` block, and the
@@ -70,18 +76,18 @@ path (`max_tokens`/`content_filter`/`refusal`) stays untested at the loop level
       `#followUps` drain (`agent.ts:268-269`) resumes the run instead of stopping.
       Ships **off** (user decision); enabled via `/autocontinue on` (store flag) and
       hard-disabled by `EAGENT_AUTOCONTINUE=off`. Continuation cap = **3** per run.
-- [ ] **D5 (MockProvider test seam)** — add an optional `stopReason?: StopReason`
+- [x] **D5 (MockProvider test seam)** — add an optional `stopReason?: StopReason`
       to `MockTurn` (`src/providers/mock.ts:27-32`) and yield it from the `done`
       event (`mock.ts:103,111`) when present (default preserves today's
       `tool_use`/`end_turn` inference). Required because the mock cannot currently
       script a truncated turn.
-- [ ] **D6 (tests)** — offline tests: (a) `cli` prints the truncation warning on a
+- [x] **D6 (tests)** — offline tests: (a) `cli` prints the truncation warning on a
       `max_tokens` run and nothing on `end_turn`; (b) the `message` event carries
       `stopReason`; (c) `autocontinue` resumes a `max_tokens` run when enabled (final
       `reason === "end_turn"`), stops after the cap, is inert when disabled, and does
       not fire when the truncated turn has a tool call; (d) D2's 8192 default is
       pinned. Each behavioral test RED before its fix, GREEN after.
-- [ ] **D7 (docs)** — README extension table row for `autocontinue` (+ command +
+- [x] **D7 (docs)** — README extension table row for `autocontinue` (+ command +
       "no capability"); CHANGELOG entries for D1/D2/D4; note the raised default and
       the new warning.
 
