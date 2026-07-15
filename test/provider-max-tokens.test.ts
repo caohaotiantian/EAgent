@@ -1,7 +1,7 @@
 /**
  * Protected invariant: the host wires a configurable per-provider output cap
- * into the REAL provider construction (defaulting to 4096), so a deployment can
- * lengthen outputs. A hardcoded 4096 would silently truncate long answers and
+ * into the REAL provider construction (defaulting to 8192), so a deployment can
+ * lengthen outputs. A hardcoded cap would silently truncate long answers and
  * collide with high thinking budgets. `buildProviders` runs the exact
  * construction code the host uses, so testing it proves the host composes the
  * config key with the provider option.
@@ -47,7 +47,7 @@ async function drain(it: AsyncIterable<StreamEvent>): Promise<void> {
   for await (const ev of it) void ev;
 }
 
-test("buildProviders wires a configurable Anthropic max_tokens, defaulting to 4096", async () => {
+test("buildProviders wires a configurable Anthropic max_tokens, defaulting to 8192", async () => {
   const prevKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "test";
   try {
@@ -64,13 +64,45 @@ test("buildProviders wires a configurable Anthropic max_tokens, defaulting to 40
     await drain(built.anthropic.stream(req()));
     assert.equal(capturedBody.max_tokens, 8000);
 
-    // No override keeps the 4096 default.
+    // No override keeps the 8192 default.
     const noOverride = new LayeredConfig({ fileValues: {}, overrideStore: new MemoryStore() });
     const built2 = buildProviders(noOverride, { fetch: capturingFetch });
     await drain(built2.anthropic.stream(req()));
-    assert.equal(capturedBody.max_tokens, 4096);
+    assert.equal(capturedBody.max_tokens, 8192);
   } finally {
     if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+/** A minimal Gemini SSE frame — `alt=sse` data lines the parser can drain. */
+const GEMINI_CANNED = [
+  {
+    event: "message",
+    data: {
+      candidates: [{ content: { role: "model", parts: [{ text: "hi" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+    },
+  },
+];
+
+test("buildProviders defaults the Gemini output cap to 8192 (nested under generationConfig)", async () => {
+  const prevKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test";
+  try {
+    let capturedBody: any;
+    const capturingFetch: typeof fetch = async (_url, init) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return sseResponse(GEMINI_CANNED);
+    };
+
+    // No override: the Gemini cap lands in generationConfig.maxOutputTokens.
+    const noOverride = new LayeredConfig({ fileValues: {}, overrideStore: new MemoryStore() });
+    const built = buildProviders(noOverride, { fetch: capturingFetch });
+    await drain(built.gemini.stream(req()));
+    assert.equal(capturedBody.generationConfig.maxOutputTokens, 8192);
+  } finally {
+    if (prevKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = prevKey;
   }
 });

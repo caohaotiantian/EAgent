@@ -9,12 +9,12 @@
  * can explore everything offline.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { createInterface, type Interface } from "node:readline/promises";
 import { dirname, join } from "node:path";
 import { stdin, stdout } from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { Agent } from "./kernel/agent.js";
 import type { CommandRegistry } from "./kernel/commands.js";
@@ -286,7 +286,7 @@ async function dispatchCommand(
   }
 }
 
-function wireRendering(agent: Agent): void {
+export function wireRendering(agent: Agent): void {
   let streaming = false;
   let thinking = false;
   // Reasoning streams before the answer; render it dimmed and close the block
@@ -327,6 +327,21 @@ function wireRendering(agent: Agent): void {
   });
   agent.hooks.on("error", ({ error, where }) => {
     console.log(C.red(`✗ ${where}: ${error instanceof Error ? error.message : String(error)}`));
+  });
+  // The human REPL otherwise drops the terminal reason (only --json surfaces it),
+  // so a truncated/blocked/refused answer ends silently. Warn on exactly the
+  // abnormal-and-otherwise-silent reasons; the clean ends (end_turn/tool_use), an
+  // interrupt (stop → the '⏹ interrupted' line), and error (the handler above +
+  // runTurn's catch) already carry their own signals, so they stay quiet here.
+  agent.hooks.on("agent_end", ({ reason }) => {
+    if (reason === "max_tokens") {
+      console.log(C.yellow("\n⚠ response truncated (max_tokens): the model hit its output-token cap."));
+      console.log(C.dim("  raise the provider's *_MAX_TOKENS env var, or enable /autocontinue."));
+    } else if (reason === "content_filter") {
+      console.log(C.yellow("\n⚠ response stopped (content_filter): blocked by the provider content filter."));
+    } else if (reason === "refusal") {
+      console.log(C.yellow("\n⚠ response stopped (refusal): the model declined to answer."));
+    }
   });
 }
 
@@ -462,7 +477,24 @@ function banner(agent: Agent, host: ExtensionHost, live: boolean): void {
   console.log(C.dim("Type /help for commands, /quit to exit.\n"));
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run the CLI when this file is the process entry point (`npm run dev`, the
+// installed bin, the subprocess cli tests). An `import` of this module — e.g. a
+// test driving `wireRendering` in-process — must not launch the whole CLI.
+// npm installs the `eagent` bin as a symlink, so realpath argv[1] to match Node's
+// already-realpathed import.meta.url; otherwise a globally-installed `eagent`
+// (the symlink path stays in argv[1]) would launch nothing.
+function isEntryPoint(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(arg)).href;
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

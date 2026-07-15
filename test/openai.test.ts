@@ -184,7 +184,7 @@ test("sends max_tokens by default and max_completion_tokens when configured", as
     },
   });
   await collect(p1.stream(req()));
-  assert.equal(byDefault.max_tokens, 4096);
+  assert.equal(byDefault.max_tokens, 8192);
   assert.equal(byDefault.max_completion_tokens, undefined);
 
   let configured: any;
@@ -197,7 +197,7 @@ test("sends max_tokens by default and max_completion_tokens when configured", as
     },
   });
   await collect(p2.stream(req()));
-  assert.equal(configured.max_completion_tokens, 4096);
+  assert.equal(configured.max_completion_tokens, 8192);
   assert.equal(configured.max_tokens, undefined);
 });
 

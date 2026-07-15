@@ -75,6 +75,7 @@ import envReport from "./extensions/env-report.js";
 import evals from "./extensions/evals.js";
 import handoff from "./extensions/handoff.js";
 import driftProbe from "./extensions/drift-probe.js";
+import autocontinue from "./extensions/autocontinue.js";
 import skillsHardening from "./extensions/skills-hardening.js";
 import ask from "./extensions/ask.js";
 import routing from "./extensions/routing.js";
@@ -147,6 +148,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["evals", evals],
   ["handoff", handoff],
   ["drift-probe", driftProbe],
+  ["autocontinue", autocontinue],
   ["skills-hardening", skillsHardening],
   ["ask", ask],
   ["routing", routing],
@@ -329,7 +331,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
  * `createAgentHost` so the exact construction the host uses is offline-testable
  * (a production `new AnthropicProvider(...)` line is not: offline there is no API
  * key, so `createAgentHost` selects the mock provider and never builds these).
- * `providers.<name>.maxTokens` sets the output cap (default 4096); `opts.fetch`
+ * `providers.<name>.maxTokens` sets the output cap (default 8192); `opts.fetch`
  * is forwarded so a test can inject a capturing `fetch`.
  */
 export function buildProviders(
@@ -339,17 +341,17 @@ export function buildProviders(
   return {
     anthropic: new AnthropicProvider({
       baseUrl: config.string("providers.anthropic.baseUrl"),
-      maxTokens: config.int("providers.anthropic.maxTokens", 4096),
+      maxTokens: config.int("providers.anthropic.maxTokens", 8192),
       fetch: opts.fetch,
     }),
     openai: new OpenAIProvider({
       baseUrl: config.string("providers.openai.baseUrl"),
-      maxTokens: config.int("providers.openai.maxTokens", 4096),
+      maxTokens: config.int("providers.openai.maxTokens", 8192),
       fetch: opts.fetch,
     }),
     gemini: new GeminiProvider({
       baseUrl: config.string("providers.gemini.baseUrl"),
-      maxTokens: config.int("providers.gemini.maxTokens", 4096),
+      maxTokens: config.int("providers.gemini.maxTokens", 8192),
       fetch: opts.fetch,
     }),
   };

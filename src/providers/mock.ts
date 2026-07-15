@@ -29,6 +29,8 @@ export interface MockTurn {
   /** Optional reasoning to replay as `reasoning_delta` events + a thinking block. */
   reasoning?: string;
   toolCalls?: MockToolCall[];
+  /** Override the terminal reason; absent preserves the tool_use/end_turn inference. */
+  stopReason?: StopReason;
 }
 
 export type MockResponder =
@@ -100,7 +102,8 @@ export class MockProvider implements Provider {
       yield { type: "tool_call", id, name: call.name, arguments: args };
     }
 
-    const stopReason: StopReason = (turn.toolCalls?.length ?? 0) > 0 ? "tool_use" : "end_turn";
+    const stopReason: StopReason =
+      turn.stopReason ?? ((turn.toolCalls?.length ?? 0) > 0 ? "tool_use" : "end_turn");
     const message: Message = { role: "assistant", content };
     // A deterministic, rough token estimate (~4 chars/token) so usage tracking
     // is exercised offline. Real providers report exact counts.

@@ -52,7 +52,7 @@ export class AnthropicProvider implements Provider {
     this.#apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
     this.#baseUrl = (opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com").replace(/\/$/, "");
     this.#version = opts.version ?? "2023-06-01";
-    this.#maxTokens = opts.maxTokens ?? 4096;
+    this.#maxTokens = opts.maxTokens ?? 8192;
     this.#maxRetries = opts.maxRetries ?? 3;
     this.#fetch = opts.fetch ?? globalThis.fetch;
     this.#cache = opts.cache ?? true;

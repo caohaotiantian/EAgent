@@ -1348,3 +1348,37 @@ test("currentRootAgent() concurrency: two concurrent top-level runs have distinc
   assert.equal(b.seen(), b.agent, "run B's root is B");
   assert.notEqual(a.seen(), b.seen(), "the two concurrent roots are distinct (per-ALS-context)");
 });
+
+test("the assistant message event carries the turn's terminal stopReason", async () => {
+  const { agent } = makeHarness({ responder: { text: "cut off here", stopReason: "max_tokens" } });
+  const seen: { role: string; stopReason: StopReason | undefined }[] = [];
+  agent.hooks.on("message", ({ message, stopReason }) => {
+    seen.push({ role: message.role, stopReason });
+  });
+
+  await agent.run("hello");
+
+  const user = seen.find((m) => m.role === "user");
+  const assistant = seen.find((m) => m.role === "assistant");
+  assert.ok(user, "a user message event fired");
+  assert.equal(user.stopReason, undefined, "the user message event carries no stopReason");
+  assert.ok(assistant, "an assistant message event fired");
+  assert.equal(assistant.stopReason, "max_tokens", "the assistant message event carries the turn's terminal reason");
+});
+
+test("a normal turn's assistant message event carries end_turn", async () => {
+  const { agent } = makeHarness({ responder: { text: "all done" } });
+  let sawAssistant = false;
+  let assistantStop: StopReason | undefined;
+  agent.hooks.on("message", ({ message, stopReason }) => {
+    if (message.role === "assistant") {
+      sawAssistant = true;
+      assistantStop = stopReason;
+    }
+  });
+
+  await agent.run("hello");
+
+  assert.ok(sawAssistant, "an assistant message event fired");
+  assert.equal(assistantStop, "end_turn", "a clean turn's assistant message carries end_turn");
+});

@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["63 extensions<br/>src/extensions/"]
+        EXTS["64 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -388,7 +388,8 @@ the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`
 `self`, `web`, `checkpoint`, `introspect`, `journal`, `todo`, `goal`, `prompts`,
 `flow-guard`, `risk-guard`, `headless-flags`, `bash-policy`, `sandbox-tiers`,
 `config-hooks`, `integrity`, `write-guard`, `secret-guard`, `sweep-edit`,
-`citations`, `env-report`, `evals`, `handoff`, `drift-probe`, `skills-hardening`,
+`citations`, `env-report`, `evals`, `handoff`, `drift-probe`, `autocontinue`,
+`skills-hardening`,
 `ask`, `routing`, `watchdog`, `fallback-routing`, `reliability`, `time-travel`,
 `otel-exporter`, `reasoning-search`, `self-improve`, `self-extend-floor`, `config`.
 The README has a one-line description and capability for each; `docs/EXTENSIONS.md`
