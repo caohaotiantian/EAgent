@@ -258,7 +258,7 @@ export class Agent {
             break;
           }
           this.#messages.push(assistant.message);
-          await this.hooks.emit("message", { message: assistant.message });
+          await this.hooks.emit("message", { message: assistant.message, stopReason: assistant.stopReason });
 
           const calls = assistant.message.content.filter(
             (b): b is ToolCallBlock => b.type === "tool_call",

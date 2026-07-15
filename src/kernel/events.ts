@@ -31,8 +31,8 @@ export type KernelEvents = {
   /** `step` carries the per-run counter after this turn's increment. */
   turn_end: { turn: number; step: number };
 
-  /** A completed message was appended to the transcript. */
-  message: { message: Message };
+  /** A completed message was appended to the transcript; `stopReason` is set on the assistant emit. */
+  message: { message: Message; stopReason?: StopReason };
   /** Incremental assistant text during streaming. */
   text_delta: { text: string };
   /** Incremental reasoning ("thinking") text, for models that expose it. */
