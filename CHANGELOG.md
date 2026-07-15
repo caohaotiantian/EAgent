@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Surface, tune, and recover from silent turn truncation.** A turn cut off at the
+output-token cap is no longer invisible in the interactive CLI:
+
+- The human REPL now prints a warning on the abnormal terminal reasons it previously
+  dropped — `max_tokens` (with a recovery hint), `content_filter`, and `refusal` —
+  via a new `agent_end` handler in the renderer. (`--json` mode and the HTTP server
+  already surfaced the run's reason; this closes the interactive gap.)
+- The per-provider output-token cap default is raised **4096 → 8192** across all
+  three providers (override with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS` /
+  `GEMINI_MAX_TOKENS`), so realistic answers stop truncating.
+- A new **opt-in** `autocontinue` extension (ships off; `/autocontinue on`,
+  hard-disabled by `EAGENT_AUTOCONTINUE=off`) auto-resumes a truncated answer by
+  injecting a "continue" follow-up, capped at 3 continuations per top-level run and
+  keyed on the acting agent.
+- One additive kernel seam: the `message` lifecycle event now optionally carries the
+  turn's `stopReason`, letting an extension observe a truncated turn before the loop
+  decides to stop. The kernel holds at 2260 lines (ceiling 2265).
+
 **Concurrent in-process multi-tenant isolation for the HTTP server (one kernel
 seam).** The server now hosts many `session` ids **concurrently**, each on its own
 Agent, with no cross-session state bleed. A single new kernel accessor —

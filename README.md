@@ -95,8 +95,10 @@ Any OpenAI-compatible endpoint works through the OpenAI provider — e.g. a loca
 Ollama: `OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_API_KEY=ollama node dist/cli.js -p openai -m llama3`.
 For newer official OpenAI models that require `max_completion_tokens`, set
 `OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`. The output-length cap defaults to
-4096 tokens; raise it per provider with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS`
-/ `GEMINI_MAX_TOKENS` for long generations or high thinking budgets.
+8192 tokens; raise it per provider with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS`
+/ `GEMINI_MAX_TOKENS` for long generations or high thinking budgets. When a turn is
+cut off at that cap the interactive REPL flags it (`⚠ response truncated
+(max_tokens)`), and the opt-in `autocontinue` extension can resume it automatically.
 
 ## How a turn works
 
