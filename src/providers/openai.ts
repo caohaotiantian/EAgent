@@ -52,7 +52,7 @@ export class OpenAIProvider implements Provider {
   constructor(opts: OpenAIOptions = {}) {
     this.#apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY ?? "";
     this.#baseUrl = (opts.baseUrl ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
-    this.#maxTokens = opts.maxTokens ?? 4096;
+    this.#maxTokens = opts.maxTokens ?? 8192;
     this.#maxTokensParam =
       opts.maxTokensParam ??
       (process.env.OPENAI_MAX_TOKENS_PARAM === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens");

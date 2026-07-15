@@ -329,7 +329,7 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
  * `createAgentHost` so the exact construction the host uses is offline-testable
  * (a production `new AnthropicProvider(...)` line is not: offline there is no API
  * key, so `createAgentHost` selects the mock provider and never builds these).
- * `providers.<name>.maxTokens` sets the output cap (default 4096); `opts.fetch`
+ * `providers.<name>.maxTokens` sets the output cap (default 8192); `opts.fetch`
  * is forwarded so a test can inject a capturing `fetch`.
  */
 export function buildProviders(
@@ -339,17 +339,17 @@ export function buildProviders(
   return {
     anthropic: new AnthropicProvider({
       baseUrl: config.string("providers.anthropic.baseUrl"),
-      maxTokens: config.int("providers.anthropic.maxTokens", 4096),
+      maxTokens: config.int("providers.anthropic.maxTokens", 8192),
       fetch: opts.fetch,
     }),
     openai: new OpenAIProvider({
       baseUrl: config.string("providers.openai.baseUrl"),
-      maxTokens: config.int("providers.openai.maxTokens", 4096),
+      maxTokens: config.int("providers.openai.maxTokens", 8192),
       fetch: opts.fetch,
     }),
     gemini: new GeminiProvider({
       baseUrl: config.string("providers.gemini.baseUrl"),
-      maxTokens: config.int("providers.gemini.maxTokens", 4096),
+      maxTokens: config.int("providers.gemini.maxTokens", 8192),
       fetch: opts.fetch,
     }),
   };

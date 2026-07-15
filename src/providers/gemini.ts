@@ -43,7 +43,7 @@ export class GeminiProvider implements Provider {
   constructor(opts: GeminiOptions = {}) {
     this.#apiKey = opts.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
     this.#baseUrl = (opts.baseUrl ?? process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/$/, "");
-    this.#maxTokens = opts.maxTokens ?? 4096;
+    this.#maxTokens = opts.maxTokens ?? 8192;
     this.#maxRetries = opts.maxRetries ?? 3;
     this.#fetch = opts.fetch ?? globalThis.fetch;
   }
