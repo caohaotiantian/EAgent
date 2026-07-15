@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,9 +13,13 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = join(repoRoot, "src", "cli.ts");
 
 /** Run the CLI as a real subprocess (offline, mock provider) with piped stdin. */
-function runCli(args: string[], input: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runCli(
+  args: string[],
+  input: string,
+  script: string = cliPath,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", cliPath, ...args], {
+    const child = spawn(process.execPath, ["--import", "tsx", script, ...args], {
       cwd: repoRoot,
       // Strip provider keys so nothing tries to reach the network; the mock provider runs offline.
       env: { ...process.env, ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "", GEMINI_API_KEY: "", EAGENT_MCP_SERVERS: "" },
@@ -54,6 +60,22 @@ test("human (non-json) batch mode still echoes input on stdout", async () => {
   const { stdout } = await runCli(["-p", "mock"], "hi\n");
   // The `› hi` echo remains on stdout in human mode (behavior unchanged).
   assert.ok(stdout.includes("› hi"), "human mode echoes the input line on stdout");
+});
+
+test("fires main() when launched through a symlinked bin (packaged `eagent` install)", { timeout: 30000 }, async () => {
+  // npm installs the `eagent` bin (package.json) as a Unix symlink. Node realpaths
+  // import.meta.url to the real cli file while argv[1] stays the symlink path, so a
+  // guard comparing the two raw never matches and a globally-installed `eagent`
+  // launches nothing. The entry-point guard must resolve argv[1]'s realpath.
+  const dir = mkdtempSync(join(tmpdir(), "eagent-bin-"));
+  const link = join(dir, "eagent-link.ts");
+  symlinkSync(cliPath, link);
+  try {
+    const { stdout } = await runCli(["-p", "mock"], "hi\n", link);
+    assert.ok(stdout.includes("› hi"), "the symlink-launched CLI ran main() (echoed input on stdout)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // -- D1: the human REPL surfaces abnormal terminal reasons ------------------

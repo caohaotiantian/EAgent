@@ -9,7 +9,7 @@
  * can explore everything offline.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { createInterface, type Interface } from "node:readline/promises";
 import { dirname, join } from "node:path";
@@ -480,7 +480,19 @@ function banner(agent: Agent, host: ExtensionHost, live: boolean): void {
 // Only run the CLI when this file is the process entry point (`npm run dev`, the
 // installed bin, the subprocess cli tests). An `import` of this module — e.g. a
 // test driving `wireRendering` in-process — must not launch the whole CLI.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+// npm installs the `eagent` bin as a symlink, so realpath argv[1] to match Node's
+// already-realpathed import.meta.url; otherwise a globally-installed `eagent`
+// (the symlink path stays in argv[1]) would launch nothing.
+function isEntryPoint(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(arg)).href;
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) {
   main().catch((err) => {
     console.error(err);
     process.exit(1);
