@@ -257,6 +257,44 @@ test("/skills surfaces validation findings while valid skills still list", async
   }
 });
 
+test("layered read: a PROJECT-tier skill is listed by the hardening /skills", async () => {
+  // Invariant: skills-hardening's /skills listing (which shadows skills.ts) reads the
+  // LAYERED home+project catalog, matching skills.ts. A skill present only in
+  // <cwd>/.eagent/skills is surfaced. Before this was fixed, hardening read home-only,
+  // so a project-tier skill escaped the listing, the supply-chain scan, and
+  // allowed-tools scoping while still being injected into context and skill_read-able.
+  const prevHome = process.env.HOME;
+  const prevDir = process.env.EAGENT_SKILLS_DIR;
+  const prevCwd = process.cwd();
+  const tempH = mkdtempSync(join(tmpdir(), "eagent-lh-home-"));
+  const tempP = mkdtempSync(join(tmpdir(), "eagent-lh-proj-"));
+  try {
+    process.env.HOME = tempH; // empty home tier (~/.eagent/skills absent)
+    delete process.env.EAGENT_SKILLS_DIR; // no override -> exercise the layered default
+    process.chdir(tempP); // skills project root = cwd
+    const skillDir = join(tempP, ".eagent", "skills", "proj-skill");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), fm({ name: "proj-skill", description: "lives only in the project tier" }));
+
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("skills", skills);
+    await h.host.use("skills-hardening", skillsHardening);
+
+    const cmd = h.commands.get("skills")!;
+    const out: string[] = [];
+    await cmd.run({ agent: h.agent, args: "", print: (l) => out.push(l) });
+    assert.match(out.join("\n"), /proj-skill/, "a project-tier skill is listed by the hardening /skills");
+  } finally {
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevDir === undefined) delete process.env.EAGENT_SKILLS_DIR;
+    else process.env.EAGENT_SKILLS_DIR = prevDir;
+    rmSync(tempH, { recursive: true, force: true });
+    rmSync(tempP, { recursive: true, force: true });
+  }
+});
+
 // -- T9: skill_create enforces the validator — AC-6 -------------------------
 
 test("skill_create rejects invalid frontmatter at the authoring boundary; valid still writes", async () => {
