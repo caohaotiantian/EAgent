@@ -62,6 +62,7 @@ provider stream throws pre-first-event).
 npm test          # node:test via tsx; runs offline against MockProvider (no API key)
 npm run typecheck # tsc --noEmit   (alias: npm run lint)
 npm run build     # tsc -> dist/
+npm run build:binary # esbuild+Node-SEA -> a single standalone bin/eagent (posix; needs npx)
 npm run dev       # node --import tsx src/cli.ts     (interactive REPL)
 npm run serve     # node --import tsx src/server.ts  (HTTP host)
 npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits non-zero on failure
@@ -115,7 +116,10 @@ behind a capability. Conventions worth knowing:
   already use (`src/extensions/lib/resource-dirs.ts`). An explicit `<kind>.dir`
   (`EAGENT_<KIND>_DIR`) makes that kind single-source. The committed `library/`
   is the opt-in official library, not auto-loaded — copy `library/<kind>/*` into
-  a tier to enable it.
+  a tier to enable it, or run the `library` extension's `/library install
+  [--home|--project] [kind...]` (skip-existing, `fs:write`-gated) to automate the
+  copy. Installer and readers share `resourceDirs`, so a copy always lands where
+  the layered read scans.
 
 There is intentionally **no per-extension catalogue here** — it drifts. Read the
 authoritative sources instead: `BUILTIN_EXTENSIONS` in `src/host.ts` for the set
@@ -132,6 +136,13 @@ to run. The in-use set is `fs:read`, `fs:write`, `shell:exec`, `code:exec`,
 support a trailing `*` wildcard. The host pre-grants `fs:read`/`fs:write`/
 `skill:read`; the fallback for everything else is set by the front end (the CLI
 defaults to **ask**, the HTTP server to **allow**/yolo). See `SECURITY.md`.
+
+**Tools are auto-gated; slash commands are not.** A privileged *tool* declares
+`capabilities: [...]` and the dispatcher enforces them before `execute`. A
+*command* (its `CommandContext` has no capability field) must enforce itself —
+`await e.agent.capabilities.require("<cap>", "<source>")` in a `try/catch
+(CapabilityError)` (precedent: `session.ts` `/save`, `library.ts` `/library
+install`). A command that writes without that call bypasses the security model.
 
 ## House conventions
 
@@ -169,6 +180,13 @@ every registration so reload/unload stays a clean swap); gate side effects behin
 a capability; add an `EAGENT_<NAME>=off` kill switch when it observes or
 intervenes by default; append it to `BUILTIN_EXTENSIONS` in `src/host.ts`; and
 add an offline test. See `docs/EXTENSIONS.md` for the full author's guide.
+
+Registering is a **transaction across code + docs**: `test/docs-drift.test.ts`
+keys the extension count and load-order enumeration off `BUILTIN_EXTENSIONS`, so
+adding one fails the suite until `CLAUDE.md` (the count above), `ARCHITECTURE.md`
+(count + the ordered list), and `README.md` (a `` `name` `` table row + count) are
+all synced. "Add one array line" is really: array entry + import + those three doc
+updates, verified green.
 
 ## Working here
 
