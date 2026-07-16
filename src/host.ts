@@ -213,6 +213,10 @@ export async function createAgentHost(opts: AgentHostOptions = {}): Promise<Agen
   const storeBackend = new FileBackend(opts.storeRoot ?? join(homedir(), ".eagent", "state"));
   const configPaths = [
     join(homedir(), ".eagent", "config.json"),
+    // Committed project defaults at the repo root (e.g. the in-repo agent-library
+    // wiring in eagent.config.json). Project-over-user, so it beats the user-global
+    // config above; the local .eagent/config.json below and env/overrides still win.
+    join(process.cwd(), "eagent.config.json"),
     join(process.cwd(), ".eagent", "config.json"),
   ];
   const config = new LayeredConfig({
