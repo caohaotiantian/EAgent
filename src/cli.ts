@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { createInterface, type Interface } from "node:readline/promises";
 import { dirname, join } from "node:path";
 import { stdin, stdout } from "node:process";
+import { isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { Agent } from "./kernel/agent.js";
@@ -478,21 +479,28 @@ function banner(agent: Agent, host: ExtensionHost, live: boolean): void {
 }
 
 // Only run the CLI when this file is the process entry point (`npm run dev`, the
-// installed bin, the subprocess cli tests). An `import` of this module — e.g. a
-// test driving `wireRendering` in-process — must not launch the whole CLI.
-// npm installs the `eagent` bin as a symlink, so realpath argv[1] to match Node's
-// already-realpathed import.meta.url; otherwise a globally-installed `eagent`
-// (the symlink path stays in argv[1]) would launch nothing.
-function isEntryPoint(): boolean {
-  const arg = process.argv[1];
-  if (!arg) return false;
+// installed bin, the subprocess cli tests, or a SEA binary). An `import` of this
+// module — e.g. a test driving `wireRendering` in-process — must not launch the
+// whole CLI. Pure and injected so every branch is unit-testable without a build:
+// `isSea` short-circuits true inside a Single Executable Application (there
+// argv[1] is not a script path, so the realpath compare cannot match); otherwise
+// realpath argv[1] to match Node's already-realpathed import.meta.url, because npm
+// installs the `eagent` bin as a symlink and a globally-installed `eagent` keeps
+// the symlink path in argv[1]. An undefined or unresolvable argv[1] returns false.
+export function entryShouldRun(
+  argv1: string | undefined,
+  importMetaUrl: string,
+  isSea: boolean,
+): boolean {
+  if (isSea) return true;
+  if (!argv1) return false;
   try {
-    return import.meta.url === pathToFileURL(realpathSync(arg)).href;
+    return importMetaUrl === pathToFileURL(realpathSync(argv1)).href;
   } catch {
     return false;
   }
 }
-if (isEntryPoint()) {
+if (entryShouldRun(process.argv[1], import.meta.url, isSea())) {
   main().catch((err) => {
     console.error(err);
     process.exit(1);
