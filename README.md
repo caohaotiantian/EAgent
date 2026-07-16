@@ -227,6 +227,7 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `otel-exporter` | **OpenTelemetry (OTLP/HTTP-JSON) exporter — all three signals** — **traces** (agent/turn/tool lifecycle spans with GenAI attrs), **metrics** (cumulative Sum counters `eagent.gen_ai.token.usage` by token type + `eagent.tool.calls` by error, and the OTel GenAI **Histogram** `eagent.gen_ai.client.operation.duration` — per-call inference latency in seconds, advisory buckets), and **logs** (metadata-only operational records — `error`/`agent_end` with `traceId`/`spanId` correlation, never message content). POSTs each to its own endpoint via `fetch` (best-effort, swallow-all). Hand-rolled, zero-dep; **metadata only — never prompt/result content** (even the error log carries the error *class*, not the message). Each signal independent (`OTEL_EXPORTER_OTLP_ENDPOINT` base or `_TRACES_`/`_METRICS_`/`_LOGS_ENDPOINT`). Optional **W3C `traceparent` propagation**: with traces on, `web`/`mcp` inject the tool-call span onto outbound tool HTTP to hosts in `EAGENT_OTEL_PROPAGATE_HOSTS` (default empty ⇒ nothing injected), linking downstream service traces. Off by default (`EAGENT_OTEL=off`) | `/otel` | — |
 | `context-files` | discovers `AGENTS.md` / `CLAUDE.md` up the tree and injects them | `/context`, `/context-reload` | — |
 | `microagents` | keyword-triggered knowledge injection via `transformContext` — scans `*.md` files with `triggers:` frontmatter and injects a body when a trigger appears in the latest user message (`EAGENT_MICROAGENTS=off` to disable) | `/microagents` | — |
+| `library`     | install the in-repo **official agent library** (templates/teams/skills/microagents) into a resource tier — `/library list`, `install [--home\|--project] [kind...]`; derives each target from the layered read (project-tier default, `--home` for global), **never clobbers** (skip-existing + report), copies flat files and skill bundle dirs alike; `EAGENT_LIBRARY=off` kill switch | `/library` | `fs:write` |
 | `playbook`    | ACE-style durable insight playbook — an ordered list of bullets updated by deterministic delta-merge (`add` a bullet, `merge` an insight into one; segment-exact dedupe, no model call) and auto-injected as one leading ephemeral `system` note each turn via `transformContext`, byte-capped at 8 KB; off by default (`/playbook on`, `EAGENT_PLAYBOOK=off` to disable) | `/playbook` | — |
 | `limits`      | guardrails: output truncation, per-run tool-call & token budgets | `/limits` | — |
 | `cost`        | token→USD accounting from the event bus — per-model session cost via a date-pinned price card (`/cost pricecard` to retune) and a warn-only rolling-mean run-cost anomaly flag (`EAGENT_COST=off` to disable) | `/cost` | — |
@@ -388,6 +389,32 @@ docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
   -v "$PWD:/workspace" eagent
 ```
 
+## Build a single binary
+
+Compile the engine to one standalone executable — the immutable engine, with the
+ecosystem resources (templates/teams/skills/microagents) kept as external raw
+files you opt into with `/library install`:
+
+```bash
+npm run build:binary   # -> bin/eagent  (host platform only)
+printf 'hi\n' | bin/eagent -p mock
+```
+
+The script (`scripts/build-binary.mjs`) bundles `dist/cli.js` with `esbuild` into a
+CJS blob and injects it into a copy of the running `node` via Node's [Single
+Executable Applications](https://nodejs.org/api/single-executable-applications.html)
+facility (`esbuild` and `postject` are fetched on demand with `npx` — no committed
+dependency). It requires Node ≥ 22 and, on the first run, network access for that
+fetch. SEA does **not** cross-compile: the binary targets the host OS/arch only; a
+multi-OS release matrix is a follow-on. On macOS the script strips and re-applies an
+ad-hoc code signature around the injection (a no-op on Linux). `bun build --compile`
+and `deno compile` are cleaner ESM-native alternatives if you already have those
+toolchains — EAgent's committed path stays no-new-tool.
+
+The binary is the **engine only** — it does not embed `library/`. A distributed
+binary therefore has no `library/` beside it, so `/library install` there is a
+repo/dev convenience unless you point `library.dir` at a shipped copy of the tree.
+
 ## Embedding the kernel
 
 The kernel is usable headless, without the CLI:
@@ -415,7 +442,7 @@ deterministically in CI, see `RecordingProvider`/`ReplayProvider` in
 src/kernel/      the seven primitives + public barrel (index.ts)
 src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
-src/extensions/  64 built-in extensions, all riding the ExtensionAPI
+src/extensions/  65 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id

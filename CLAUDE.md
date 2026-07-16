@@ -78,7 +78,7 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 - `src/providers/` — `mock` (deterministic), `anthropic`, `openai`, `gemini`
   (all `fetch` + SSE, no SDK), shared `http.ts` (retry/backoff + SSE parsing),
   and `cassette` (record/replay). All read config from `process.env`.
-- `src/extensions/` — the 64 built-in extensions, plus shared helpers in `lib/`
+- `src/extensions/` — the 65 built-in extensions, plus shared helpers in `lib/`
   (`decode`, `edit-match`, `otel-context`, `read-capped`, `relevance`, `sandbox`).
   A helper that two extensions share goes in `lib/`, not imported peer-to-peer.
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
@@ -98,7 +98,7 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 
 ## Built-in extensions
 
-Everything outside `src/kernel/` is an extension. 64 ship in `BUILTIN_EXTENSIONS`
+Everything outside `src/kernel/` is an extension. 65 ship in `BUILTIN_EXTENSIONS`
 (`src/host.ts`), each a single file with offline tests that gates privileged work
 behind a capability. Conventions worth knowing:
 

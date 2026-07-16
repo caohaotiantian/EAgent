@@ -39,6 +39,7 @@ import subagentJobs from "./extensions/subagent-jobs.js";
 import dynamicWorkflow from "./extensions/dynamic-workflow.js";
 import templates from "./extensions/templates.js";
 import teams from "./extensions/teams.js";
+import library from "./extensions/library.js";
 import memory from "./extensions/memory.js";
 import prune from "./extensions/prune.js";
 import compact from "./extensions/compact.js";
@@ -121,6 +122,7 @@ export const BUILTIN_EXTENSIONS: [string, ActivateFn][] = [
   ["trace", trace],
   ["context-files", contextFiles],
   ["microagents", microagents],
+  ["library", library],
   ["playbook", playbook],
   ["limits", limits],
   ["cost", cost],

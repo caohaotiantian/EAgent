@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { wireRendering } from "../src/cli.js";
+import { entryShouldRun, wireRendering } from "../src/cli.js";
 import { makeHarness } from "./helpers.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -76,6 +76,28 @@ test("fires main() when launched through a symlinked bin (packaged `eagent` inst
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// -- entryShouldRun: the SEA-aware, unit-testable entry guard ----------------
+// The call site feeds `process.argv[1]`, `import.meta.url`, and `isSea()` into this
+// pure function so every branch (SEA true; realpath match; mismatch; throw) is
+// covered offline with no binary build.
+
+test("entryShouldRun fires when isSea, regardless of argv1", () => {
+  assert.equal(entryShouldRun(undefined, "file:///x", true), true);
+  assert.equal(entryShouldRun("/any/path", "file:///x", true), true);
+});
+
+test("entryShouldRun matches on argv1 realpath's file URL when not SEA", () => {
+  const url = pathToFileURL(realpathSync(cliPath)).href;
+  assert.equal(entryShouldRun(cliPath, url, false), true, "realpath match fires");
+  assert.equal(entryShouldRun(cliPath, "file:///nope", false), false, "url mismatch does not fire");
+});
+
+test("entryShouldRun returns false for undefined or unresolvable argv1 when not SEA", () => {
+  assert.equal(entryShouldRun(undefined, "file:///x", false), false, "undefined argv1 → false");
+  const missing = join(repoRoot, "does-not-exist-dir", "ghost.ts");
+  assert.equal(entryShouldRun(missing, "file:///x", false), false, "realpathSync throw is caught → false");
 });
 
 // -- D1: the human REPL surfaces abnormal terminal reasons ------------------
