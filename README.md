@@ -389,6 +389,32 @@ docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
   -v "$PWD:/workspace" eagent
 ```
 
+## Build a single binary
+
+Compile the engine to one standalone executable — the immutable engine, with the
+ecosystem resources (templates/teams/skills/microagents) kept as external raw
+files you opt into with `/library install`:
+
+```bash
+npm run build:binary   # -> bin/eagent  (host platform only)
+printf 'hi\n' | bin/eagent -p mock
+```
+
+The script (`scripts/build-binary.mjs`) bundles `dist/cli.js` with `esbuild` into a
+CJS blob and injects it into a copy of the running `node` via Node's [Single
+Executable Applications](https://nodejs.org/api/single-executable-applications.html)
+facility (`esbuild` and `postject` are fetched on demand with `npx` — no committed
+dependency). It requires Node ≥ 22 and, on the first run, network access for that
+fetch. SEA does **not** cross-compile: the binary targets the host OS/arch only; a
+multi-OS release matrix is a follow-on. On macOS the script strips and re-applies an
+ad-hoc code signature around the injection (a no-op on Linux). `bun build --compile`
+and `deno compile` are cleaner ESM-native alternatives if you already have those
+toolchains — EAgent's committed path stays no-new-tool.
+
+The binary is the **engine only** — it does not embed `library/`. A distributed
+binary therefore has no `library/` beside it, so `/library install` there is a
+repo/dev convenience unless you point `library.dir` at a shipped copy of the tree.
+
 ## Embedding the kernel
 
 The kernel is usable headless, without the CLI:
