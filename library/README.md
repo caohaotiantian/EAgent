@@ -115,6 +115,34 @@ extends: <parent-template>      # optional inheritance (tools/caps union, prompt
   `shell:exec`, `code:exec`, `net:fetch`, `skill:read`.
 - A **team file's `lead`/`members` must be existing template names** here.
 
+## Authoring doctrine (absorbed from the wider agent-skills ecosystem)
+
+**Description is the trigger.** The `description` frontmatter is what the model — and
+a team lead choosing whom to delegate to — reads to decide whether to use an
+artifact. State *what it does AND when to use it* in the description, never only in
+the body. Be deliberately pushy ("use whenever the user mentions X, even if not
+asked explicitly") and add explicit near-misses ("do not use when …", pointing at
+the right alternative). A thin description that says what it is but not when will be
+under-selected. (The new `planner`/`explore`/`verifier`/`first-principles` recipes
+follow this shape — copy their frontmatter.)
+
+**Skill resource layout.** A skill folder may bundle three kinds of resource, each
+with a distinct role:
+- `scripts/` — executable helpers. Run them (`--help` first); do **not** read their
+  source unless you are patching one. Put a one-line usage header at the top.
+- `references/` — detail loaded **on demand** (large tables, per-language notes).
+  The `SKILL.md` body is a *router* that points to them, not an inline dump.
+- `assets/` — files used **in the output** (templates, boilerplate), never loaded
+  into context.
+Keep `SKILL.md` a router under ~500 lines; a fact lives in the body **or** a
+reference, never both. Full heuristics: `library/prompts/skill-authoring.md`.
+
+**Instruction house style.** Imperative; explain the *why* behind each rule; treat
+ALLCAPS ALWAYS/NEVER as a yellow flag (usually an unexplained rule in disguise);
+delete instructions that don't earn their keep; generalize rather than overfit to
+one example. Reusable tone rules are committed once in
+`library/prompts/communication-style.md`.
+
 ## Maintenance
 
 This library is maintained like the rest of the repo: changes land through PRs,
