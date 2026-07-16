@@ -267,8 +267,15 @@ authoritative load order (which is load-bearing — a later extension can shadow
 | `watchdog`    | **idle deadline on the main provider stream** — wraps the default provider in place and races each `iterator.next()` against an `idleMs` timeout that is *re-armed on every event*, so a stream that goes silent past the deadline is aborted (the turn never hangs) while a long-but-progressing generation is never touched. The `next()`-race, not abort alone, is what unblocks even a signal-ignoring stall; a composed `AbortController` also aborts to free the underlying fetch. A pre-commit idle surfaces to the `onProviderError` retry seam; a mid-stream idle is a fatal turn error (no double-emit). Ships **on** (a safety net), inert unless a stream stalls; wraps the default-provider path only (not arbitrary named/composite providers). `watchdog.idleMs` default 120000; raise it for very large thinking budgets (TTFT can exceed the deadline before the first token). `EAGENT_WATCHDOG=off` | — | — |
 | `config`      | **the centralized configuration surface** — inspect and override every knob through the injected `e.config` (value keys resolve override > env > file > default; enablement is env-`off`-veto > override > store > default, the config file excluded). `/config list\|get\|set\|unset\|reload` makes the whole surface discoverable and tunable at runtime, backed by `~/.eagent/config.json`; secrets are never printed (`EAGENT_CONFIG=off`) | `/config` | — |
 
-The MCP client configures servers from `EAGENT_MCP_SERVERS`. Skills live under
-`~/.eagent/skills/` (override with `EAGENT_SKILLS_DIR`).
+The MCP client configures servers from `EAGENT_MCP_SERVERS`. The file-based
+resource kinds — `templates`, `teams`, `skills`, `microagents` — each load from
+**both** `~/.eagent/<kind>` (home/global) and `<cwd>/.eagent/<kind>` (project),
+merged by name with **the project tier winning** on a name conflict — the same
+home+project layering that plugins (extensions) and config already use. Setting an
+explicit `<kind>.dir` (e.g. `EAGENT_SKILLS_DIR`) makes that kind single-source:
+only that one directory is read. The committed [`library/`](library/) is the
+**opt-in official library** — a curated catalog that is *not* auto-loaded; enable
+it by copying `library/<kind>/*` into a tier.
 
 ## Capabilities: the one thing pi omits
 

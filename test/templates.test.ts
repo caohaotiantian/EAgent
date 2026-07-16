@@ -11,10 +11,11 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import templates, {
   buildTemplateChild,
@@ -27,8 +28,9 @@ import templates, {
   type ResolvedTemplate,
   type Template,
 } from "../src/extensions/templates.js";
+import { LayeredConfig, loadConfigFile } from "../src/config.js";
 import { CapabilityManager } from "../src/kernel/capabilities.js";
-import { envOnlyConfig } from "../src/kernel/store.js";
+import { envOnlyConfig, MemoryStore } from "../src/kernel/store.js";
 import type { CommandContext } from "../src/kernel/commands.js";
 import { defineTool } from "../src/kernel/define.js";
 import type { ToolDecision } from "../src/kernel/events.js";
@@ -913,6 +915,82 @@ test("T10 templates override: EAGENT_TEMPLATES_DIR is single-source — home/pro
     assert.match(listed, /override-tier-desc/, "the override dir is read");
     assert.doesNotMatch(listed, /home-tier-desc/, "the home tier is NOT read under an override");
     assert.doesNotMatch(listed, /project-tier-desc/, "the project tier is NOT read under an override");
+  } finally {
+    process.chdir(savedCwd);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDir === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = savedDir;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T11 — official library opt-in (D8; AC7, KDD5)
+// ---------------------------------------------------------------------------
+//
+// KDD5: the committed `library/` is the OPT-IN "official library" — NOT
+// auto-loaded. The auto-loaded tiers are the standard home+project `.eagent`
+// (D1-D6). These pin both halves: (1) the committed repo config pins no
+// `<kind>.dir` override, so nothing auto-redirects a tier at `library/`; and
+// (2) with both tiers isolated + empty the catalog is empty until a user opts
+// in by copying `library/<kind>/*` into a tier.
+
+test("T11 official library opt-in: the committed repo config pins no resource-dir override (AC7/D8)", () => {
+  const configPath = fileURLToPath(new URL("../eagent.config.json", import.meta.url));
+  const kinds = ["templates", "teams", "microagents", "skills"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+  for (const k of kinds) {
+    const name = `EAGENT_${k.toUpperCase()}_DIR`;
+    savedEnv[name] = process.env[name];
+    delete process.env[name];
+  }
+  try {
+    const config = new LayeredConfig({
+      fileValues: loadConfigFile([configPath]),
+      overrideStore: new MemoryStore(),
+    });
+    for (const k of kinds) {
+      assert.equal(
+        config.string(`${k}.dir`),
+        undefined,
+        `library/ is opt-in — the committed repo config must not pin ${k}.dir`,
+      );
+    }
+  } finally {
+    for (const [name, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[name];
+      else process.env[name] = v;
+    }
+  }
+});
+
+test("T11 official library opt-in: empty isolated tiers list nothing; a project-tier copy of library/templates appears (AC7)", async () => {
+  const savedHome = process.env.HOME;
+  const savedDir = process.env.EAGENT_TEMPLATES_DIR;
+  const savedCwd = process.cwd();
+  const libTemplates = fileURLToPath(new URL("../library/templates", import.meta.url));
+  const root = mkdtempSync(join(tmpdir(), "templates-optin-"));
+  const homeDir = join(root, "home", ".eagent", "templates");
+  const projDir = join(root, "project", ".eagent", "templates");
+  mkdirSync(homeDir, { recursive: true }); // home tier present but empty
+  mkdirSync(join(root, "project"), { recursive: true });
+  process.env.HOME = join(root, "home"); // homedir() reads $HOME on POSIX
+  delete process.env.EAGENT_TEMPLATES_DIR; // no override => layered home+project default
+  process.chdir(join(root, "project"));
+  try {
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("templates", templates);
+
+    // Both tiers empty and no override => `library/` is NOT auto-loaded.
+    const empty = (await runCommand(h.commands.get("template")!, h.agent, "list")).join("\n");
+    assert.match(empty, /no templates in/, "library/ is opt-in — nothing auto-loads into empty tiers");
+
+    // Opt-in: install the official library into the project tier by copying it in.
+    cpSync(libTemplates, projDir, { recursive: true });
+    const listed = (await runCommand(h.commands.get("template")!, h.agent, "list")).join("\n");
+    assert.match(listed, /security-auditor/, "a copied-in official-library template now appears");
+    assert.match(listed, /code-reviewer/, "the whole copied project tier is read");
   } finally {
     process.chdir(savedCwd);
     if (savedHome === undefined) delete process.env.HOME;

@@ -20,33 +20,47 @@ project.
 
 | Folder | What it holds | Consumed by | Auto-loaded? |
 | --- | --- | --- | --- |
-| `templates/` | **Agent recipes** — one expert persona per `.md` (prompt + model + tools + capabilities) | `templates` ext (`/template`, `spawn_template`) | yes, via `templates.dir` |
-| `teams/` | **Crews** — a lead + template-backed member experts + a coordination pattern | `teams` ext (`/team`, `run_team`) | yes, via `teams.dir` |
-| `microagents/` | **Keyword-triggered domain knowledge** — injected into context when a trigger word appears | `microagents` ext (`/microagents`) | yes, via `microagents.dir` |
-| `skills/` | **Skills** — `SKILL.md` folders (Anthropic skill standard), model-pulled procedures | `skills` ext (`/skills`, `skill_read`) | yes, via `skills.dir` |
+| `templates/` | **Agent recipes** — one expert persona per `.md` (prompt + model + tools + capabilities) | `templates` ext (`/template`, `spawn_template`) | no — opt-in (copy into a tier) |
+| `teams/` | **Crews** — a lead + template-backed member experts + a coordination pattern | `teams` ext (`/team`, `run_team`) | no — opt-in (copy into a tier) |
+| `microagents/` | **Keyword-triggered domain knowledge** — injected into context when a trigger word appears | `microagents` ext (`/microagents`) | no — opt-in (copy into a tier) |
+| `skills/` | **Skills** — `SKILL.md` folders (Anthropic skill standard), model-pulled procedures | `skills` ext (`/skills`, `skill_read`) | no — opt-in (copy into a tier) |
 | `prompts/` | **Reusable prompt fragments** — building blocks to paste into template bodies | *reference material* — humans, not an extension | no (copy-in) |
 
-## How it is wired (the discoverability fix)
+## How to install it (opt-in)
 
-EAgent's material dirs default to `~/.eagent/*`. This repo redirects them to the
-in-repo library through a **committed config file** at the repo root:
-[`eagent.config.json`](../eagent.config.json). The host reads it as a
-**project-level default that overrides your user-global `~/.eagent/config.json`**
-(project-over-user — the conventional "more-local wins"). It is in turn overridden
-by a local, gitignored `./.eagent/config.json`, any `EAGENT_*` env var, or a
-`/config` override — so per-machine and per-run choices still win, but a personal
-`~/.eagent/config.json` does **not** shadow the repo library. Config resolution
-overall is `override > env > file > default`. Run any EAgent entry point from the
-repo root and the library is live:
+This `library/` tree is the committed **official library** — a curated catalog you
+*choose* to use. It is **not auto-loaded**. EAgent auto-loads each resource kind
+from two layered tiers, merged by name with **the project tier winning** on a name
+conflict — exactly like plugins (extensions) and config already layer:
+
+- **home / global** — `~/.eagent/<kind>`
+- **project / local** — `<cwd>/.eagent/<kind>` (the repo you run in)
+
+A fresh clone therefore auto-loads **nothing** until you opt in. Enable the kinds
+you want by copying them into a tier:
+
+```bash
+# global — available in every project
+cp -R library/templates/*   ~/.eagent/templates/
+cp -R library/teams/*       ~/.eagent/teams/
+cp -R library/microagents/* ~/.eagent/microagents/
+cp -R library/skills/*      ~/.eagent/skills/
+
+# or project-local — scoped to this repo (project wins over home on a name clash)
+mkdir -p .eagent/templates && cp -R library/templates/* .eagent/templates/
+```
+
+Then run any EAgent entry point and the copied experts are live:
 
 ```bash
 npm run dev        # REPL — /template list, /team list
 npm run serve      # HTTP host
 ```
 
-**Alternative wiring** (no committed config, or running from elsewhere): copy
-[`.env.example`](../.env.example) to `.env` and adjust, or set the env vars
-directly:
+**Single-source override (run from the library without copying).** Setting an
+explicit `<kind>.dir` — an `EAGENT_<KIND>_DIR` env var, a `<kind>.dir` config key,
+or a `/config set` — makes that kind read **only** that one directory, bypassing
+the home+project layering. Point it straight at the library:
 
 ```bash
 export EAGENT_TEMPLATES_DIR="$PWD/library/templates"
@@ -55,23 +69,16 @@ export EAGENT_MICROAGENTS_DIR="$PWD/library/microagents"
 export EAGENT_SKILLS_DIR="$PWD/library/skills"
 ```
 
-Pointing a `*.dir` at the library **replaces** that source (each extension reads a
-single directory), so your `~/.eagent/*` files for that kind are not read while you
-run from this repo. To use your own directory instead **in this repo**, override
-the committed default with an env var (`EAGENT_TEMPLATES_DIR=...`), a local
-`./.eagent/config.json`, or a `/config` set — or remove the key from
-`eagent.config.json`. Editing `~/.eagent/config.json` will **not** override it (the
-committed project config wins, project-over-user). Note that redirecting
-`skills.dir` also changes where the `skill_create` tool *writes* a new skill (into
-`library/skills/`, i.e. the repo tree) — so authored skills show up as uncommitted
-repo changes, to be reviewed like any other library addition.
+Note that redirecting `skills.dir` also changes where the `skill_create` tool
+*writes* a new skill (into that single directory) — so an authored skill lands
+there, to be reviewed like any other library addition.
 
 ## Using it
 
 ```
-/template list                      # every recipe in library/templates
+/template list                      # every recipe in your loaded tiers (home+project)
 /template show security-auditor     # persona + tools + capability scope
-/team list                          # every crew in library/teams
+/team list                          # every crew in your loaded tiers
 /team run ship-feature Add rate limiting to the /run endpoint
 ```
 
