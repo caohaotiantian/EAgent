@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -202,5 +202,116 @@ test("AC-1 registration shape + AC-9 command", async () => {
     if (savedDir === undefined) delete process.env.EAGENT_MICROAGENTS_DIR;
     else process.env.EAGENT_MICROAGENTS_DIR = savedDir;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Layered home+project resolution (D5; AC1-3, AC4, KDD1)
+// ---------------------------------------------------------------------------
+//
+// Invariant: with no `microagents.dir` override, microagents resolve from BOTH
+// `~/.eagent/microagents` (the NEW home tier) and the workspace/project root,
+// merged by name, project-wins. An explicit `EAGENT_MICROAGENTS_DIR` override
+// reverts to single-source (KDD1; the empty-override "no microagents" test above
+// is the regression pin). These tests isolate `process.env.HOME` (home tier),
+// `EAGENT_WORKSPACE`, and cwd so the dev's real `~/.eagent/microagents` cannot
+// bleed in. Injection (via `transformContext`) exercises the activate-time cache
+// fill; the `/microagents` command exercises the re-scan.
+
+test("microagents layered: home tier (NEW) injects + both tiers list; project wins (AC1-3)", async () => {
+  const savedHome = process.env.HOME;
+  const savedDir = process.env.EAGENT_MICROAGENTS_DIR;
+  const savedWorkspace = process.env.EAGENT_WORKSPACE;
+  const savedCwd = process.cwd();
+  const root = mkdtempSync(join(tmpdir(), "microagents-layered-"));
+  const homeMa = join(root, "home", ".eagent", "microagents");
+  const projMa = join(root, "project", ".eagent", "microagents");
+  mkdirSync(homeMa, { recursive: true });
+  mkdirSync(projMa, { recursive: true });
+  process.env.HOME = join(root, "home"); // homedir() reads $HOME on POSIX
+  delete process.env.EAGENT_MICROAGENTS_DIR; // no override => layered default
+  delete process.env.EAGENT_WORKSPACE; // project root falls back to cwd
+  process.chdir(join(root, "project"));
+  try {
+    writeFileSync(join(homeMa, "home-agent.md"), `---\nname: home-agent\ntriggers: homekw\n---\nHOME-BODY`);
+    writeFileSync(join(projMa, "proj-agent.md"), `---\nname: proj-agent\ntriggers: projkw\n---\nPROJ-BODY`);
+
+    // (1) Injection through transformContext exercises the activate-time cache
+    // fill site — the home-tier body must reach the outbound request.
+    let injectedHomeBody = false;
+    const h = makeHarness({
+      responder: (req) => {
+        injectedHomeBody = req.messages.some(
+          (m) => m.role === "system" && m.content.some((b) => b.type === "text" && b.text.includes("HOME-BODY")),
+        );
+        return { text: "ok" };
+      },
+      fallback: "allow",
+    });
+    await h.host.use("microagents", microagents);
+    await h.agent.run("tell me about homekw");
+    assert.ok(injectedHomeBody, "the home-tier (NEW) microagent body is injected");
+
+    // (2) The `/microagents` re-scan lists BOTH tiers.
+    const cmd = h.commands.get("microagents")!;
+    const lines: string[] = [];
+    const ctx: CommandContext = { agent: h.agent, args: "", print: (l) => lines.push(l) };
+    await cmd.run(ctx);
+    const listed = lines.join("\n");
+    assert.match(listed, /home-agent/, "the home-tier microagent (NEW tier) is listed");
+    assert.match(listed, /proj-agent/, "the project-tier microagent is still listed");
+  } finally {
+    process.chdir(savedCwd);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDir === undefined) delete process.env.EAGENT_MICROAGENTS_DIR;
+    else process.env.EAGENT_MICROAGENTS_DIR = savedDir;
+    if (savedWorkspace === undefined) delete process.env.EAGENT_WORKSPACE;
+    else process.env.EAGENT_WORKSPACE = savedWorkspace;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("microagents override: EAGENT_MICROAGENTS_DIR is single-source — home/project tiers are NOT read (AC4/KDD1)", async () => {
+  const savedHome = process.env.HOME;
+  const savedDir = process.env.EAGENT_MICROAGENTS_DIR;
+  const savedWorkspace = process.env.EAGENT_WORKSPACE;
+  const savedCwd = process.cwd();
+  const root = mkdtempSync(join(tmpdir(), "microagents-override-"));
+  const homeMa = join(root, "home", ".eagent", "microagents");
+  const projMa = join(root, "project", ".eagent", "microagents");
+  const overrideDir = join(root, "override");
+  mkdirSync(homeMa, { recursive: true });
+  mkdirSync(projMa, { recursive: true });
+  mkdirSync(overrideDir, { recursive: true });
+  process.env.HOME = join(root, "home");
+  process.env.EAGENT_MICROAGENTS_DIR = overrideDir; // override => single-source
+  delete process.env.EAGENT_WORKSPACE;
+  process.chdir(join(root, "project"));
+  try {
+    writeFileSync(join(overrideDir, "only.md"), `---\nname: only\ntriggers: onlykw\n---\nONLY-BODY`);
+    writeFileSync(join(homeMa, "home-agent.md"), `---\nname: home-agent\ntriggers: homekw\n---\nHOME-BODY`);
+    writeFileSync(join(projMa, "proj-agent.md"), `---\nname: proj-agent\ntriggers: projkw\n---\nPROJ-BODY`);
+
+    const h = makeHarness();
+    await h.host.use("microagents", microagents);
+    const cmd = h.commands.get("microagents")!;
+    const lines: string[] = [];
+    const ctx: CommandContext = { agent: h.agent, args: "", print: (l) => lines.push(l) };
+    await cmd.run(ctx);
+    const listed = lines.join("\n");
+
+    assert.match(listed, /only/, "the override dir is read");
+    assert.doesNotMatch(listed, /home-agent/, "the home tier is NOT read under an override");
+    assert.doesNotMatch(listed, /proj-agent/, "the project tier is NOT read under an override");
+  } finally {
+    process.chdir(savedCwd);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDir === undefined) delete process.env.EAGENT_MICROAGENTS_DIR;
+    else process.env.EAGENT_MICROAGENTS_DIR = savedDir;
+    if (savedWorkspace === undefined) delete process.env.EAGENT_WORKSPACE;
+    else process.env.EAGENT_WORKSPACE = savedWorkspace;
+    rmSync(root, { recursive: true, force: true });
   }
 });
