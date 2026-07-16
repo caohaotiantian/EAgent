@@ -2,7 +2,14 @@
 
 Slug: `2026-07-16-layered-resource-dirs`
 Design: `docs/design/2026-07-16-layered-resource-dirs.md`
-Status: draft
+Status: closed
+Closing-commit: `e43596e` (phases 1-4 + F-review S1 fix)
+Closed-on: 2026-07-16
+Deferred: none of this doc's own items; see the design doc's Deferred line for the
+two non-blocking F-review general findings (G1/G2). All 4 phases landed round-1
+clean; no L2 rollback occurred, so there is no Deprecated section to prune. The F
+review's severe S1 (skills-hardening was a missed skills-catalog consumer) was fixed
+in the closing commit with a red->green test.
 
 ## 1. Task Index (Deliverable / AC → design location)
 

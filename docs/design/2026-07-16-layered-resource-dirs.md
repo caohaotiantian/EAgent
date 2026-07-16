@@ -1,7 +1,19 @@
 # Design — Layered resource resolution: home + project, project wins
 
 Slug: `2026-07-16-layered-resource-dirs`
-Status: draft
+Status: closed
+Closing-commit: `e43596e` (phases 1-4 + F-review S1 fix)
+Closed-on: 2026-07-16
+Deferred: finding — (G1) `test/templates.test.ts:940` now reads the deleted
+`eagent.config.json`, so its "no `<kind>.dir` override pinned" assertion is trivially
+true via the `existsSync` no-op (green, safe); consider asserting the file's absence
+instead. (G2) `resourceDirs` roots the microagents project tier at `workspace ?? cwd`
+while templates/teams/skills use `cwd` — a deliberate asymmetry (microagents was
+always workspace-rooted), worth a README line. Both non-blocking; no repo issue
+tracker (tracked in the PR).
+Note: the F whole-project review caught a severe missed consumer — `skills-hardening`
+read the skills catalog home-only while `skills` read layered (S1); the design's §5
+blast-radius did not enumerate that second consumer. Fixed in the closing commit.
 
 ## 1. Background and Purpose
 
@@ -34,7 +46,7 @@ resource surface stays inconsistent with the plugin/config surface.
 
 ## 2. Deliverables
 
-- [ ] **D1 — shared layered-merge helper** `src/extensions/lib/resource-dirs.ts`:
+- [x] **D1 — shared layered-merge helper** `src/extensions/lib/resource-dirs.ts`:
       (a) `resourceDirs(config, kind)` returns the ordered dir list to read for a
       kind — `[homeRoot, projectRoot]` (home first, project last), OR a single
       `[overrideDir]` when `config.string("<kind>.dir")` is set; (b) a generic
@@ -43,33 +55,33 @@ resource surface stays inconsistent with the plugin/config surface.
       **inserting home then project so project overwrites (last-wins)**, returning a
       name-sorted list. Mirrors `resolveTemplate`'s `new Map(catalog…)` last-wins
       (`templates.ts:241`) and the `discover`/`loadConfigFile` precedent.
-- [ ] **D2 — templates layered** — `templatesRoot`/`scanTemplates` stay as the
+- [x] **D2 — templates layered** — `templatesRoot`/`scanTemplates` stay as the
       single-dir primitives (tests call them directly); the templates extension's
       activate path resolves the layered catalog via D1.
-- [ ] **D3 — teams layered** — same treatment for `scanTeams`/`teamsRoot`. Teams
+- [x] **D3 — teams layered** — same treatment for `scanTeams`/`teamsRoot`. Teams
       does **NOT** inherit template layering for free: `teams.ts:610` (and the
       `/team show` path at `:689-690`) call `scanTemplates(templatesRoot(...))` on a
       **single** dir, so D3 must **explicitly rewire** those template-catalog builds
       to the layered template loader for a project-tier member template to resolve
       (AC6 depends on this).
-- [ ] **D4 — skills layered** — the read path (`scanSkills`) resolves the layered
+- [x] **D4 — skills layered** — the read path (`scanSkills`) resolves the layered
       skill catalog via D1. The `skill_create` **write path is unchanged** (writes to
       `skillsRoot` = home, or the override dir); home is one of the two read layers,
       so a home-written skill is still discovered — no write change is needed for
       this read feature. (Aligning the write target to the project tier is a separate
       follow-on, out of scope — see §3.)
-- [ ] **D5 — microagents layered** — add the **home** tier
+- [x] **D5 — microagents layered** — add the **home** tier
       (`~/.eagent/microagents`) to the current project/workspace default so it too is
       home+project (the inverse gap). Preserve the `workspace`-based project root.
-- [ ] **D6 — tests** — offline tests: (a) a resource present only in home loads;
+- [x] **D6 — tests** — offline tests: (a) a resource present only in home loads;
       (b) only in project loads; (c) same `name` in both → project wins; (d) an
       explicit `<kind>.dir` override reads only that dir (single-source preserved);
       (e) the D1 merge helper unit-tested directly. New layered tests **isolate both
       HOME and cwd** to temp dirs so a dev's real `~/.eagent/*` cannot bleed in.
-- [ ] **D7 — docs** — README/CLAUDE.md/`library/README.md`: document the layered
+- [x] **D7 — docs** — README/CLAUDE.md/`library/README.md`: document the layered
       home+project model, project-wins, that an explicit `<kind>.dir` override is
       single-source, and (per D8) that `library/` is the opt-in official library.
-- [ ] **D8 — official library becomes opt-in (KDD5)** — remove the resource-dir
+- [x] **D8 — official library becomes opt-in (KDD5)** — remove the resource-dir
       override keys (`templates.dir`/`teams.dir`/`microagents.dir`/`skills.dir`) from
       the committed `eagent.config.json` so the auto-loaded tiers are the standard
       home+project (D1); `library/` stays as the committed opt-in official library.
