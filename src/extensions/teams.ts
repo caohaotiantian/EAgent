@@ -45,11 +45,11 @@ import { ToolRegistry } from "../kernel/registry.js";
 import type { Message, Tool, ToolResult } from "../kernel/types.js";
 
 import { SPAWN_CAPS } from "./lib/child-registry.js";
+import { loadLayered, resourceDirs } from "./lib/resource-dirs.js";
 import {
   buildTemplateChild,
+  layeredTemplates,
   resolveTemplate,
-  scanTemplates,
-  templatesRoot,
   type ResolvedTemplate,
   type Template,
 } from "./templates.js";
@@ -607,9 +607,9 @@ export default function activate(e: ExtensionAPI): void {
 
   /** Resolve `team` (a name) or `roster` (inline) into a ResolvedTeam, against the live catalogs. */
   const resolve = (teamName: string | undefined, roster: InlineRoster | undefined): ResolveTeamResult => {
-    const templateCatalog = scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
+    const templateCatalog = layeredTemplates(e.config, (m) => e.log.warn(m));
     if (teamName !== undefined && teamName.length > 0) {
-      const teamCatalog = scanTeams(teamsRoot(e.config), (m) => e.log.warn(m));
+      const teamCatalog = loadLayered(resourceDirs(e.config, "teams"), (d) => scanTeams(d, (m) => e.log.warn(m)));
       return resolveTeam(teamName, teamCatalog, templateCatalog);
     }
     if (roster) {
@@ -668,7 +668,7 @@ export default function activate(e: ExtensionAPI): void {
       const argv = ctx.args.trim().split(/\s+/).filter((s) => s.length > 0);
       const sub = argv[0] ?? "list";
 
-      const teamCatalog = (): Team[] => scanTeams(teamsRoot(e.config), (m) => e.log.warn(m));
+      const teamCatalog = (): Team[] => loadLayered(resourceDirs(e.config, "teams"), (d) => scanTeams(d, (m) => e.log.warn(m)));
 
       if (sub === "list") {
         const found = teamCatalog();
@@ -686,7 +686,7 @@ export default function activate(e: ExtensionAPI): void {
           ctx.print("usage: /team show <name>");
           return;
         }
-        const templateCatalog = scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
+        const templateCatalog = layeredTemplates(e.config, (m) => e.log.warn(m));
         const resolved = resolveTeam(name, teamCatalog(), templateCatalog);
         if (!resolved.ok) {
           ctx.print(resolved.error);

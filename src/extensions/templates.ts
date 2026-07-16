@@ -43,6 +43,7 @@ import { ProviderRegistry, ToolRegistry } from "../kernel/registry.js";
 import type { Logger, Message, ThinkingLevel, Tool, UI } from "../kernel/types.js";
 
 import { childRegistryFrom } from "./lib/child-registry.js";
+import { loadLayered, resourceDirs } from "./lib/resource-dirs.js";
 import { scopedCapabilities } from "./subagents.js";
 
 /** A parsed-but-unresolved template. The body is the system prompt. */
@@ -227,6 +228,16 @@ export function scanTemplates(root: string, warn: (msg: string) => void = consol
     out.push(t);
   }
   return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/**
+ * The layered template catalog: `scanTemplates` run over the resolved dir list
+ * (home + project, or a single override dir) and merged by `name`, project-wins.
+ * The layered analogue of `scanTemplates(templatesRoot(config), warn)`; exported
+ * so `teams` resolves its member templates against both tiers too.
+ */
+export function layeredTemplates(config: Config, warn: (msg: string) => void = console.warn): Template[] {
+  return loadLayered(resourceDirs(config, "templates"), (d) => scanTemplates(d, warn));
 }
 
 /**
@@ -421,7 +432,7 @@ export default function activate(e: ExtensionAPI): void {
   // Opt-in catalog injection (default off). Re-scans each turn so a freshly
   // authored template appears without a reload.
   e.hook("transformContext", (messages) =>
-    injectCatalog(messages, scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m)), catalogOn(), e.config),
+    injectCatalog(messages, layeredTemplates(e.config, (m) => e.log.warn(m)), catalogOn(), e.config),
   );
 
   // The become veto: registered once, inert until a template is active. While
@@ -461,7 +472,7 @@ export default function activate(e: ExtensionAPI): void {
         const prompt = typeof args.prompt === "string" ? args.prompt : "";
         if (prompt.length === 0) return fail("spawn_template requires a non-empty string `prompt`.");
 
-        const catalog = scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
+        const catalog = layeredTemplates(e.config, (m) => e.log.warn(m));
         const resolved = resolveTemplate(name, catalog);
         if (!resolved.ok) {
           const available = catalog.map((t) => t.name).join(", ") || "(none)";
@@ -494,7 +505,7 @@ export default function activate(e: ExtensionAPI): void {
       const sub = argv[0] ?? "list";
       const arg = argv[1];
 
-      const catalog = (): Template[] => scanTemplates(templatesRoot(e.config), (m) => e.log.warn(m));
+      const catalog = (): Template[] => layeredTemplates(e.config, (m) => e.log.warn(m));
 
       if (sub === "list") {
         const found = catalog();

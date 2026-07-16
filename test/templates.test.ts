@@ -11,7 +11,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -836,5 +836,89 @@ test("spawn_template: a child's final text uses all text blocks, not just the fi
     rmSync(dir, { recursive: true, force: true });
     if (saved === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
     else process.env.EAGENT_TEMPLATES_DIR = saved;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T10 — layered home+project resolution (D2; AC1-3, AC4, KDD1)
+// ---------------------------------------------------------------------------
+//
+// Invariant: with no `<kind>.dir` override, templates resolve from BOTH
+// `~/.eagent/templates` (home) and `<cwd>/.eagent/templates` (project), merged
+// by name, project-wins — mirroring plugins/config. An explicit
+// `EAGENT_TEMPLATES_DIR` override reverts to single-source (KDD1). These tests
+// isolate BOTH `process.env.HOME` (home tier) and cwd (project tier) to temp
+// dirs so the dev's real `~/.eagent/templates` cannot bleed in.
+
+test("T10 templates layered: home-only + project-only both list; same name => project wins (AC1-3)", async () => {
+  const savedHome = process.env.HOME;
+  const savedDir = process.env.EAGENT_TEMPLATES_DIR;
+  const savedCwd = process.cwd();
+  const root = mkdtempSync(join(tmpdir(), "templates-layered-"));
+  const homeDir = join(root, "home", ".eagent", "templates");
+  const projDir = join(root, "project", ".eagent", "templates");
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(projDir, { recursive: true });
+  process.env.HOME = join(root, "home"); // homedir() reads $HOME on POSIX
+  delete process.env.EAGENT_TEMPLATES_DIR; // no override => layered default
+  process.chdir(join(root, "project"));
+  try {
+    writeFileSync(join(homeDir, "home-only.md"), fenced({ name: "home-only", description: "home-tier-desc" }, "H"));
+    writeFileSync(join(projDir, "proj-only.md"), fenced({ name: "proj-only", description: "project-tier-desc" }, "P"));
+    // Same `name` in both tiers — the project version must win (distinguishing description).
+    writeFileSync(join(homeDir, "shared.md"), fenced({ name: "shared", description: "shared-home-version" }, "H"));
+    writeFileSync(join(projDir, "shared.md"), fenced({ name: "shared", description: "shared-project-version" }, "P"));
+
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("templates", templates);
+    const listed = (await runCommand(h.commands.get("template")!, h.agent, "list")).join("\n");
+
+    assert.match(listed, /home-tier-desc/, "(a) a home-only template is listed");
+    assert.match(listed, /project-tier-desc/, "(b) a project-only template is listed");
+    assert.match(listed, /shared-project-version/, "(c) the project version wins on a name collision");
+    assert.doesNotMatch(listed, /shared-home-version/, "(c) the home version is shadowed by the project one");
+  } finally {
+    process.chdir(savedCwd);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDir === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = savedDir;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("T10 templates override: EAGENT_TEMPLATES_DIR is single-source — home/project tiers are NOT read (AC4/KDD1)", async () => {
+  const savedHome = process.env.HOME;
+  const savedDir = process.env.EAGENT_TEMPLATES_DIR;
+  const savedCwd = process.cwd();
+  const root = mkdtempSync(join(tmpdir(), "templates-override-"));
+  const homeDir = join(root, "home", ".eagent", "templates");
+  const projDir = join(root, "project", ".eagent", "templates");
+  const overrideDir = join(root, "override");
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(projDir, { recursive: true });
+  mkdirSync(overrideDir, { recursive: true });
+  process.env.HOME = join(root, "home");
+  process.env.EAGENT_TEMPLATES_DIR = overrideDir; // override => single-source
+  process.chdir(join(root, "project"));
+  try {
+    writeFileSync(join(overrideDir, "only.md"), fenced({ name: "only", description: "override-tier-desc" }, "O"));
+    writeFileSync(join(homeDir, "home-only.md"), fenced({ name: "home-only", description: "home-tier-desc" }, "H"));
+    writeFileSync(join(projDir, "proj-only.md"), fenced({ name: "proj-only", description: "project-tier-desc" }, "P"));
+
+    const h = makeHarness({ fallback: "allow" });
+    await h.host.use("templates", templates);
+    const listed = (await runCommand(h.commands.get("template")!, h.agent, "list")).join("\n");
+
+    assert.match(listed, /override-tier-desc/, "the override dir is read");
+    assert.doesNotMatch(listed, /home-tier-desc/, "the home tier is NOT read under an override");
+    assert.doesNotMatch(listed, /project-tier-desc/, "the project tier is NOT read under an override");
+  } finally {
+    process.chdir(savedCwd);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDir === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = savedDir;
+    rmSync(root, { recursive: true, force: true });
   }
 });
