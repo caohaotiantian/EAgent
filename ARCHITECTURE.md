@@ -48,7 +48,7 @@ flowchart TB
     end
     subgraph L1["Policy — out of the core"]
         direction LR
-        EXTS["64 extensions<br/>src/extensions/"]
+        EXTS["65 extensions<br/>src/extensions/"]
         PROVS["4 providers<br/>src/providers/"]
     end
 
@@ -384,7 +384,7 @@ the order listed in `BUILTIN_EXTENSIONS` (`src/host.ts`): `core-tools`, `search`
 `skills`, `mcp`, `codeact`, `subagents`, `subagent-jobs`, `dynamic-workflow`,
 `templates`, `teams`, `memory`, `prune`, `compact`, `recovery`, `output-contract`,
 `content-guard`, `provenance`, `circuit-breaker`, `planmode`, `session`, `packages`,
-`trace`, `context-files`, `microagents`, `playbook`, `limits`, `cost`, `budget-cap`,
+`trace`, `context-files`, `microagents`, `library`, `playbook`, `limits`, `cost`, `budget-cap`,
 `self`, `web`, `checkpoint`, `introspect`, `journal`, `todo`, `goal`, `prompts`,
 `flow-guard`, `risk-guard`, `headless-flags`, `bash-policy`, `sandbox-tiers`,
 `config-hooks`, `integrity`, `write-guard`, `secret-guard`, `sweep-edit`,
