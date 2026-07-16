@@ -1,6 +1,0 @@
-{
-  "templates.dir": "./library/templates",
-  "teams.dir": "./library/teams",
-  "microagents.dir": "./library/microagents",
-  "skills.dir": "./library/skills"
-}

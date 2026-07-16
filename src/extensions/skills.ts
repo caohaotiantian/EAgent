@@ -24,6 +24,8 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 import type { Message } from "../kernel/types.js";
 
+import { loadLayered, resourceDirs } from "./lib/resource-dirs.js";
+
 interface SkillMeta {
   name: string;
   description: string;
@@ -38,7 +40,10 @@ export default function activate(e: ExtensionAPI): void {
   e.grantCapability("skill:read");
   // skill:write is deliberately left to ask/grant by the host policy.
 
-  const catalog = (): SkillMeta[] => scanSkills(skillsRoot(e.config));
+  // Read the catalog from both `~/.eagent/skills` (home) and the project tier,
+  // project-wins (D4). The `skill_create` write path stays home/override (below)
+  // — home is a read layer, so a home-written skill is still discovered.
+  const catalog = (): SkillMeta[] => loadLayered(resourceDirs(e.config, "skills"), scanSkills);
 
   // Tier 1: inject the catalog (name + description only) before each LLM call.
   e.hook("transformContext", (messages) => {

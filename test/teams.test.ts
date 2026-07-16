@@ -13,7 +13,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -841,4 +841,66 @@ test("T2.9 registration: one tool (run_team), /team + /teams; list/show/run prin
     const ranLines = (await runCommand(h.commands.get("team")!, h.agent, "run brief produce a brief")).join("\n");
     assert.match(ranLines, /command-synthesis/, "/team run prints the team's result");
   });
+});
+
+// ---------------------------------------------------------------------------
+// T2.10 — layered templates->teams flow (D3; AC6)
+// ---------------------------------------------------------------------------
+//
+// Proves the templates catalog that teams resolves members against is itself
+// layered: a member template living ONLY in the project tier must resolve for a
+// team file living in the home tier. Isolates BOTH `process.env.HOME` (the home
+// team tier) and cwd (the project template tier) to temp dirs so the dev's real
+// `~/.eagent/*` cannot bleed in.
+
+test("T2.10 teams layered: a member template in the PROJECT tier resolves for a team file in HOME (AC6)", async () => {
+  const savedHome = process.env.HOME;
+  const savedTeamsDir = process.env.EAGENT_TEAMS_DIR;
+  const savedTemplatesDir = process.env.EAGENT_TEMPLATES_DIR;
+  const savedCwd = process.cwd();
+  const root = mkdtempSync(join(tmpdir(), "teams-layered-"));
+  const homeTeams = join(root, "home", ".eagent", "teams");
+  const projTemplates = join(root, "project", ".eagent", "templates");
+  mkdirSync(homeTeams, { recursive: true });
+  mkdirSync(projTemplates, { recursive: true });
+  process.env.HOME = join(root, "home"); // homedir() reads $HOME on POSIX
+  delete process.env.EAGENT_TEAMS_DIR; // no override => layered default
+  delete process.env.EAGENT_TEMPLATES_DIR;
+  process.chdir(join(root, "project"));
+  try {
+    // The team file lives in HOME; its only member template lives ONLY in PROJECT.
+    writeFileSync(
+      join(homeTeams, "solo.md"),
+      fenced({ name: "solo", description: "S.", members: "worker", pattern: "orchestrator" }, "Do the task."),
+    );
+    writeFileSync(join(projTemplates, "worker.md"), fenced({ name: "worker", description: "W." }, "WORKER PERSONA"));
+
+    const h = makeHarness({ fallback: "allow" });
+    let leadDone = false;
+    h.provider.script((req) => {
+      if (req.systemPrompt.includes("WORKER PERSONA")) return { text: "worker-answer" };
+      if (isLead(req)) {
+        if (!leadDone) {
+          leadDone = true;
+          return { toolCalls: [{ name: "delegate", arguments: { member: "worker", task: "go" } }] };
+        }
+        return { text: "lead-synthesis" };
+      }
+      return { text: "" };
+    });
+    await h.host.use("templates", templates);
+    await h.host.use("teams", teams);
+
+    const lines = (await runCommand(h.commands.get("team")!, h.agent, "run solo do-the-task")).join("\n");
+    assert.match(lines, /lead-synthesis/, "the home-tier team resolves its project-tier member template and runs");
+  } finally {
+    process.chdir(savedCwd);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedTeamsDir === undefined) delete process.env.EAGENT_TEAMS_DIR;
+    else process.env.EAGENT_TEAMS_DIR = savedTeamsDir;
+    if (savedTemplatesDir === undefined) delete process.env.EAGENT_TEMPLATES_DIR;
+    else process.env.EAGENT_TEMPLATES_DIR = savedTemplatesDir;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

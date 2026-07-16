@@ -108,6 +108,14 @@ behind a capability. Conventions worth knowing:
   **off** and are enabled via a `/<command> on` subcommand or a store flag.
 - Load order in `BUILTIN_EXTENSIONS` matters: a later extension can shadow an
   earlier registration and observe its effects.
+- The `.md`-file resource extensions (`templates`, `teams`, `skills`,
+  `microagents`) read layered from **both** `~/.eagent/<kind>` (home/global) and
+  `<cwd>/.eagent/<kind>` (project), merged by name with **project winning** on a
+  conflict — the same home+project layering plugins (extensions) and config
+  already use (`src/extensions/lib/resource-dirs.ts`). An explicit `<kind>.dir`
+  (`EAGENT_<KIND>_DIR`) makes that kind single-source. The committed `library/`
+  is the opt-in official library, not auto-loaded — copy `library/<kind>/*` into
+  a tier to enable it.
 
 There is intentionally **no per-extension catalogue here** — it drifts. Read the
 authoritative sources instead: `BUILTIN_EXTENSIONS` in `src/host.ts` for the set

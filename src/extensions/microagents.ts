@@ -25,6 +25,8 @@ import type { ExtensionAPI } from "../kernel/extension.js";
 import type { Config } from "../kernel/store.js";
 import type { Message } from "../kernel/types.js";
 
+import { loadLayered, resourceDirs } from "./lib/resource-dirs.js";
+
 /** Upper bound on the total bytes injected, matching `context-files`. */
 export const MAX_TOTAL_BYTES = 32 * 1024;
 
@@ -191,7 +193,7 @@ export default function activate(e: ExtensionAPI): void {
   let cache: Microagent[] | undefined;
 
   const discover = (): Microagent[] => {
-    if (!cache) cache = scanMicroagents(microagentsDir(e.config));
+    if (!cache) cache = loadLayered(resourceDirs(e.config, "microagents"), scanMicroagents);
     return cache;
   };
 
@@ -201,7 +203,7 @@ export default function activate(e: ExtensionAPI): void {
     name: "microagents",
     description: "Re-scan and list keyword-triggered microagents and their triggers.",
     run: (ctx) => {
-      cache = scanMicroagents(microagentsDir(e.config));
+      cache = loadLayered(resourceDirs(e.config, "microagents"), scanMicroagents);
       if (cache.length === 0) {
         ctx.print(`(no microagents in ${microagentsDir(e.config)})`);
         return;

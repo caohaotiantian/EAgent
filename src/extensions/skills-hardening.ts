@@ -39,6 +39,7 @@ import type { Message } from "../kernel/types.js";
 import { detectSuspiciousDescription } from "./mcp.js";
 import { latestUserText, triggered } from "./microagents.js";
 import { parseFrontmatter, scanSkills, skillsRoot, validateFrontmatter } from "./skills.js";
+import { loadLayered, resourceDirs } from "./lib/resource-dirs.js";
 
 /** Store key for the per-skill body fingerprint baseline. DISTINCT from
  *  `integrity`'s `descBaseline` so the two cannot collide. */
@@ -137,7 +138,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
   /** One pass over the skills root: scan + read each SKILL.md body exactly once. */
   const readSkills = (): ScannedSkill[] =>
-    scanSkills(skillsRoot(e.config)).map((skill) => ({
+    loadLayered(resourceDirs(e.config, "skills"), scanSkills).map((skill) => ({
       name: skill.name,
       description: skill.description,
       dir: skill.dir,
@@ -260,7 +261,7 @@ export default function activate(e: ExtensionAPI): () => void {
     if (call.name !== "skill_read") return;
     const name = call.arguments.name;
     if (typeof name !== "string") return;
-    const match = scanSkills(skillsRoot(e.config)).find((s) => s.name === name);
+    const match = loadLayered(resourceDirs(e.config, "skills"), scanSkills).find((s) => s.name === name);
     if (!match) return;
     const body = readTextOrUndefined(join(match.dir, "SKILL.md"));
     if (body === undefined) return;
@@ -310,7 +311,7 @@ export default function activate(e: ExtensionAPI): () => void {
 
     // Resolve which skills declare triggers, and whether they fire.
     const triggersByName = new Map<string, string[]>();
-    for (const skill of scanSkills(skillsRoot(e.config))) {
+    for (const skill of loadLayered(resourceDirs(e.config, "skills"), scanSkills)) {
       const body = readTextOrUndefined(join(skill.dir, "SKILL.md"));
       if (body === undefined) continue;
       const trig = parseFrontmatter(body)["triggers"];
