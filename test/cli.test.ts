@@ -6,8 +6,23 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { entryShouldRun, wireRendering } from "../src/cli.js";
-import { makeHarness } from "./helpers.js";
+import { entryShouldRun, registerHostCommands, wireRendering } from "../src/cli.js";
+import { CommandRegistry, type CommandContext } from "../src/kernel/commands.js";
+import type { Agent } from "../src/kernel/agent.js";
+import type { ExtensionHost } from "../src/kernel/extension.js";
+import { EngineRenderer } from "../src/engine-render.js";
+import { SPINNER_FRAMES, type RenderController } from "../src/tty.js";
+import type { ControlAction, DisplayMode } from "../src/view-model.js";
+import { makeFakeTerm, makeHarness } from "./helpers.js";
+
+/** Assert a non-interactive stream carries no alt-screen / cursor / spinner bytes. */
+function assertPlainStream(stdout: string): void {
+  assert.doesNotMatch(stdout, /\x1b\[\?1049/, "no alt-screen enter/exit");
+  assert.doesNotMatch(stdout, /\x1b\[\d*A/, "no cursor-up rewrites");
+  for (const frame of SPINNER_FRAMES) {
+    assert.ok(!stdout.includes(frame), `no spinner frame ${frame} in a machine stream`);
+  }
+}
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = join(repoRoot, "src", "cli.ts");
@@ -60,6 +75,38 @@ test("human (non-json) batch mode still echoes input on stdout", async () => {
   const { stdout } = await runCli(["-p", "mock"], "hi\n");
   // The `› hi` echo remains on stdout in human mode (behavior unchanged).
   assert.ok(stdout.includes("› hi"), "human mode echoes the input line on stdout");
+});
+
+// -- T1.10a: non-interactive parity (AC11) — the subprocess-runnable axes ----
+// A piped subprocess has isTTY:false on both stdio, so `interactive`/`fancy` are
+// false: the plain, cursor-free append path must carry no fancy control bytes.
+
+test("T1.10a --eval emits a plain stream: no alt-screen, cursor, or spinner bytes", async () => {
+  const { stdout } = await runCli(["-p", "mock", "-e", "hello there"], "");
+  assertPlainStream(stdout);
+});
+
+test("T1.10a piped batch emits a plain stream: no alt-screen, cursor, or spinner bytes", async () => {
+  const { stdout } = await runCli(["-p", "mock"], "hi\nwhat is up\n");
+  assertPlainStream(stdout);
+});
+
+// -- T4.3b: the startup suggest-hint never leaks into a subprocess stream (D7) -
+// The hint prints STARTUP-ONLY on an interactive, raw-capable-TTY, non-json terminal.
+// A piped subprocess (isTTY:false) and --json/--eval are all non-suggesting axes,
+// so no hint line may appear on stdout. The TTY-requiring positive case cannot be
+// faked by a pipe and is unit-tested via shouldSuggestTui (tty.test.ts).
+
+test("T4.3b --json prints no startup suggest-hint on stdout", async () => {
+  const { stdout } = await runCli(["-p", "mock", "--json"], "hi\n");
+  assert.doesNotMatch(stdout, /eagent-tui/, "no eagent-tui hint leaks into the machine stream");
+  assert.doesNotMatch(stdout, /full-screen/i, "no suggest-hint phrasing on stdout");
+});
+
+test("T4.3b --eval prints no startup suggest-hint on stdout", async () => {
+  const { stdout } = await runCli(["-p", "mock", "-e", "hello there"], "");
+  assert.doesNotMatch(stdout, /eagent-tui/, "no eagent-tui hint in a non-interactive --eval run");
+  assert.doesNotMatch(stdout, /full-screen/i, "no suggest-hint phrasing on stdout");
 });
 
 test("fires main() when launched through a symlinked bin (packaged `eagent` install)", { timeout: 30000 }, async () => {
@@ -172,4 +219,115 @@ test("wireRendering stays quiet on clean or already-signalled terminal reasons",
   });
   const errored = await stdoutOf(() => assert.rejects(agent.run("go")));
   assert.doesNotMatch(errored, /⚠ response/, "error is already surfaced elsewhere — no truncation warning");
+});
+
+// -- T2.6: the /details, /expand, /collapse command-dispatch layer -----------
+// registerHostCommands wires the display commands as pure closures over a mutable
+// `active` renderer holder. `applyControl`'s SEMANTICS are covered elsewhere
+// (render-modes/render-inline); these drive the registered command handlers
+// against a real CommandRegistry + a fake RenderController so the COMMAND
+// wrapper's own branching — integer/range validation, the mode allowlist, the
+// unavailable-fallback, the no-arg readout, and every error message — is covered
+// without an interactive REPL. A regression like accepting n=0 or off-by-one on
+// n-1 that the model-level tests can't see would fail here.
+
+/** Strip SGR color codes so assertions match the human-readable message text. */
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+/** A recording RenderController: captures every applied control and tracks mode. */
+class FakeController implements RenderController {
+  mode: DisplayMode = "auto";
+  readonly calls: ControlAction[] = [];
+  applyControl(action: ControlAction): void {
+    this.calls.push(action);
+    if (action.kind === "mode") this.mode = action.mode;
+  }
+}
+
+/** Register the host commands over `active`, returning a driver that invokes a
+ *  display command by name and returns its printed (ANSI-stripped) output. The host
+ *  and agent are unused by the display commands, so minimal fakes suffice. */
+function displayCommands(active: { current?: RenderController }): (name: string, args: string) => Promise<string> {
+  const commands = new CommandRegistry();
+  registerHostCommands(commands, {} as unknown as ExtensionHost, {} as unknown as Agent, active);
+  return async (name, args) => {
+    const cmd = commands.get(name);
+    assert.ok(cmd, `command /${name} is registered`);
+    const out: string[] = [];
+    const ctx: CommandContext = { agent: {} as unknown as Agent, args, print: (l) => out.push(l) };
+    await cmd!.run(ctx);
+    return stripAnsi(out.join("\n"));
+  };
+}
+
+test("T2.6 display commands report unavailability when no renderer is wired (active.current absent)", async () => {
+  const run = displayCommands({}); // no renderer wired yet (e.g. --json / non-fancy)
+  for (const [name, args] of [["details", ""], ["expand", "2"], ["collapse", "2"]] as const) {
+    assert.match(await run(name, args), /display control is unavailable in this mode\./, `/${name} guards on no renderer`);
+  }
+});
+
+test("T2.6 /details reads the mode with no arg, sets it on the allowlist, rejects anything else", async () => {
+  const r = new FakeController();
+  const run = displayCommands({ current: r });
+
+  // No-arg → a readout (not a control); reflects the renderer's current mode.
+  assert.equal(await run("details", ""), "display mode = auto");
+  assert.equal(r.calls.length, 0, "a bare /details is a readout, not a control");
+
+  for (const mode of ["full", "collapsed", "auto"] as const) {
+    assert.equal(await run("details", mode), `display mode = ${mode}`);
+    assert.deepEqual(r.calls.at(-1), { kind: "mode", mode }, `/details ${mode} applies a mode control`);
+    assert.equal(r.mode, mode, "the readout now reflects the new mode");
+    assert.equal(await run("details", "  " + mode + " "), `display mode = ${mode}`, "the mode arg is trimmed");
+  }
+
+  const applied = r.calls.length;
+  for (const bad of ["wide", "FULL", "expanded", "collapse", "1"]) {
+    const out = await run("details", bad);
+    assert.ok(out.includes(`unknown mode: ${bad}`), `the error echoes the rejected token: ${bad}`);
+    assert.match(out, /full \| collapsed \| auto/, "the error lists the allowed modes");
+  }
+  assert.equal(r.calls.length, applied, "no invalid mode reached applyControl");
+});
+
+test("T2.6 /expand and /collapse route a valid section number and reject bad ones", async () => {
+  const r = new FakeController();
+  const run = displayCommands({ current: r });
+
+  assert.match(await run("expand", "2"), /^expanded section 2\.$/);
+  assert.deepEqual(r.calls.at(-1), { kind: "expand", n: 2 });
+
+  assert.match(await run("collapse", "3"), /^collapsed section 3\.$/);
+  assert.deepEqual(r.calls.at(-1), { kind: "collapse", n: 3 });
+
+  // Surrounding whitespace is trimmed before Number(); n=1 (the lower bound) is valid.
+  assert.match(await run("expand", "  1  "), /^expanded section 1\.$/);
+  assert.deepEqual(r.calls.at(-1), { kind: "expand", n: 1 }, "n=1 is accepted (no off-by-one at the lower bound)");
+
+  const applied = r.calls.length;
+  // n<1, non-integers, and non-numbers are all rejected — notably 0 and negatives.
+  for (const bad of ["", "0", "-1", "abc", "1.5", "2 3", "Infinity"]) {
+    assert.match(
+      await run("expand", bad),
+      /^\/expand needs a section number, e\.g\. \/expand 2\.$/,
+      `/expand rejects ${JSON.stringify(bad)}`,
+    );
+  }
+  // The error names the invoked command, not a hardcoded /expand.
+  assert.match(await run("collapse", "x"), /^\/collapse needs a section number, e\.g\. \/collapse 2\.$/);
+  assert.equal(r.calls.length, applied, "no invalid section number reached applyControl");
+});
+
+test("T2.6 /details with no arg reads a real EngineRenderer's mode via its get mode() accessor", async () => {
+  const renderer = new EngineRenderer({ term: makeFakeTerm({ columns: 80 }) });
+  const run = displayCommands({ current: renderer });
+
+  // The initial model's mode is auto; the no-arg readout exercises get mode().
+  assert.equal(await run("details", ""), "display mode = auto");
+
+  // /details full drives the REAL renderer; the getter then reports the new mode.
+  assert.equal(await run("details", "full"), "display mode = full");
+  assert.equal(renderer.mode, "full", "the command drove the real renderer's mode");
+  assert.equal(await run("details", ""), "display mode = full", "the no-arg readout reflects the change via get mode()");
 });

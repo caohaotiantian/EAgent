@@ -12,8 +12,17 @@
  *                             body: { input: string, session?: string }
  *   POST   /answer          → answer a pending elicitation mid-turn
  *                             body: { id: number, answer: string }
+ *   GET    /sessions         → list live sessions [{ id, running, usage, costUsd }]
  *   GET    /sessions/:id     → a session's usage + cost summary
+ *   GET    /sessions/:id/events → a per-session live SSE feed (tenant-isolated)
+ *   POST   /sessions/:id/stop   → abort a running turn (agent.stop())
+ *   GET    /events           → a global SSE feed; each frame tagged with its session
  *   DELETE /sessions/:id     → forget a conversation
+ *
+ * The monitor endpoints (`/sessions` list, the two SSE feeds, `/sessions/:id/stop`)
+ * re-emit the shared hooks bus read-only; the per-session feed filters by run-tree
+ * root agent (`currentRootAgent() === agent`) so a session's feed carries only its
+ * own events (the same tenant-isolation guard `/run` uses).
  *
  * A `session` id makes `/run` calls accumulate into one conversation; without
  * it, each call is a fresh, stateless turn. Turns from DIFFERENT sessions run
@@ -36,11 +45,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import { Agent, currentRootAgent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
-import type { Logger, UI } from "./kernel/types.js";
+import type { Logger, UI, Usage } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 import { COST_ACCESSOR_KEY } from "./extensions/cost.js";
 import { JOBS_ACCESSOR_KEY } from "./extensions/subagent-jobs.js";
-import { eventToJsonl, wireJsonl } from "./jsonl.js";
+import { eventToJsonl, wireJsonl, type JsonlEvent } from "./jsonl.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
@@ -265,6 +274,62 @@ async function route(
     return;
   }
 
+  // -- Monitor endpoints (list + live SSE feeds + stop) ----------------------
+  // Additive, read-mostly routes the monitor client attaches to. Placed before
+  // the generic `/sessions/:id` matcher so `/sessions` and `/sessions/:id/events`
+  // resolve here first.
+
+  // Enumerate live sessions so the monitor can attach without knowing ids.
+  if (req.method === "GET" && url.pathname === "/sessions") {
+    const list = [...sessions].map(([id, agent]) => ({ id, running: agent.running, usage: agent.usage, costUsd: costUsdFor(agent) }));
+    sendJson(res, 200, list);
+    return;
+  }
+
+  // A global live feed: re-emit every session's bus events, each frame tagged
+  // with its originating session id (reverse-looked-up on the pool) so a
+  // multi-session client can demux the one stream.
+  if (req.method === "GET" && url.pathname === "/events") {
+    streamSse(res, template, {}, (obj) => {
+      const root = currentRootAgent();
+      let sid: string | null = null;
+      for (const [id, agent] of sessions) {
+        if (agent === root) {
+          sid = id;
+          break;
+        }
+      }
+      return { session: sid, ...obj };
+    });
+    return;
+  }
+
+  // A per-session live feed: only THIS session's run-tree events (the
+  // `currentRootAgent() === agent` tenant filter `/run` already uses).
+  if (req.method === "GET" && url.pathname.startsWith("/sessions/") && url.pathname.endsWith("/events")) {
+    const id = decodeURIComponent(url.pathname.slice("/sessions/".length, -"/events".length));
+    const agent = sessions.get(id);
+    if (!agent) {
+      sendJson(res, 404, { error: "unknown session", session: id });
+      return;
+    }
+    streamSse(res, agent, { session: id }, (obj) => (currentRootAgent() === agent ? obj : null));
+    return;
+  }
+
+  // Abort a running turn on a session (the monitor's one write control).
+  if (req.method === "POST" && url.pathname.startsWith("/sessions/") && url.pathname.endsWith("/stop")) {
+    const id = decodeURIComponent(url.pathname.slice("/sessions/".length, -"/stop".length));
+    const agent = sessions.get(id);
+    if (!agent) {
+      sendJson(res, 404, { error: "unknown session", session: id });
+      return;
+    }
+    agent.stop();
+    sendJson(res, 200, { stopped: true, session: id });
+    return;
+  }
+
   // Per-tenant observability: a session's own usage + cost summary. Usage lives
   // natively on the session Agent; cost is read through the extension-published
   // accessor (`costUsdFor`). An unknown session id is a clean 404.
@@ -365,7 +430,17 @@ async function route(
 
   sendJson(res, 404, {
     error: "not found",
-    routes: ["GET /health", "POST /run", "POST /answer", "GET /sessions/:id", "DELETE /sessions/:id"],
+    routes: [
+      "GET /health",
+      "POST /run",
+      "POST /answer",
+      "GET /sessions",
+      "GET /sessions/:id",
+      "GET /sessions/:id/events",
+      "POST /sessions/:id/stop",
+      "GET /events",
+      "DELETE /sessions/:id",
+    ],
   });
 }
 
@@ -622,6 +697,50 @@ export function maxSessions(config: Config): number {
   if (!raw) return 1000;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 0 ? n : 1000;
+}
+
+/** SSE response headers (a long-lived `text/event-stream`, never buffered). */
+function sseHead(res: ServerResponse): void {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+}
+
+/** Write one SSE frame: an optional `event:` name plus a JSON `data:` payload. */
+function sseFrame(res: ServerResponse, event: string | undefined, data: unknown): void {
+  const head = event ? `event: ${event}\n` : "";
+  res.write(`${head}data: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * Wire a read-only SSE feed over `agent`'s (shared) hooks bus: write a
+ * `connected` frame, then re-emit each hook-bus event through `eventToJsonl`,
+ * passing it through `frame` — which returns the object to send, or `null` to
+ * drop it (the per-session tenant filter). Subscriptions are disposed when the
+ * client disconnects, so a monitor attach never leaks handlers or perturbs a run.
+ */
+function streamSse(res: ServerResponse, agent: Agent, connected: unknown, frame: (obj: JsonlEvent) => object | null): void {
+  sseHead(res);
+  let closed = false;
+  const send = (obj: JsonlEvent): void => {
+    if (closed) return;
+    const out = frame(obj);
+    if (out !== null) sseFrame(res, undefined, out);
+  };
+  sseFrame(res, "connected", connected);
+  // agent_end/error carry no usage on the bus; read it live off the acting run's
+  // root (which the frame filter has already confirmed is the intended session).
+  const usageNow = (): Usage => currentRootAgent()?.usage ?? { inputTokens: 0, outputTokens: 0 };
+  const subs = wireJsonl((o) => send(o as JsonlEvent), agent);
+  subs.push(
+    agent.hooks.on("agent_end", ({ reason }) => send(eventToJsonl("agent_end", { reason, usage: usageNow() }))),
+    agent.hooks.on("error", ({ error, where }) => send(eventToJsonl("error", { where, message: error instanceof Error ? error.message : String(error) }))),
+  );
+  const cleanup = (): void => {
+    if (closed) return;
+    closed = true;
+    for (const s of subs) s.dispose();
+  };
+  res.on("close", cleanup);
+  res.on("error", cleanup);
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {

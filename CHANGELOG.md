@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**TUI rebuild — a decoupled Ink (React) terminal client + a multi-session monitor,
+over a shared neutral view model (zero kernel change, host code only).** The
+hand-rolled `src/render/` renderer (the earlier progressive-disclosure work) is
+removed and replaced by two consumers of one shared, pure, offline-testable view
+model (`src/view-model.ts` + `src/attribution.ts` + `src/tty.ts`):
+
+- **The engine keeps a minimal, zero-dep plain renderer** (`src/engine-render.ts`)
+  wired into the CLI for every non-Ink path — pipes, `--eval`, batch, dumb
+  terminals, and the standalone `bin/eagent` binary. It **preserves both**
+  long-standing pain-point fixes: concurrent `reasoning-search` forks are attributed
+  per acting agent and **de-interleaved** into ordered sections (no more
+  non-chronological flood), and full tool arguments/results are retained
+  **untruncated** and reachable via the `/details [full|collapsed|auto]`,
+  `/expand <n>`, and `/collapse <n>` commands (the old 79/99-char truncation stays
+  gone). Append-only — every line is written exactly once, so the machine paths
+  carry no cursor bytes and `--json` stays byte-identical (unchanged).
+- **A new rich `eagent-tui` Ink client** (`src/tui/`) renders the same section tree
+  live: streaming text, collapsible reasoning, structured tool cards, nested
+  sub-agents, a persistent input + status bar, a ≥ 100-column side panel, plus delta
+  coalescing + viewport windowing to keep the reasoning-search flood smooth. It is a
+  separate **ESM front end run via Node** (a new `eagent-tui` bin), **not** bundled
+  into the CJS SEA engine binary.
+
+A new **multi-session monitor** (`eagent-tui --monitor`) attaches to one or more
+running EAgent hosts (a `{ url, token }[]` list via repeatable `--instance
+url[,token]` flags), lists their live sessions with status/usage/cost, drills into a
+session's live SSE feed, and can stop a running turn or forget a session. It rides
+four additive, read-mostly server endpoints (zero-dep, Ink-free, reusing the
+existing bearer auth + session pool): `GET /sessions`, a per-session SSE feed
+`GET /sessions/:id/events` (tenant-isolated by run-tree root agent), a global
+`GET /events` (each frame tagged with its `session` id), and `POST /sessions/:id/stop`.
+
+The old opt-in **alt-screen surface is removed**: the `--tui` flag, the `/tui`
+command, and the raw-mode/alt-screen renderer (`createTuiHost`, `attachRawKeys`,
+`resumeLineInput`) are gone — the rich full-screen UI now lives entirely in the
+separate `eagent-tui` client.
+
+**Charter amendment (`CLAUDE.md`).** The zero-runtime-dependency rule is amended:
+the kernel, providers, extensions, server, and CLI-engine stay zero-dep (except
+`jiti`), but the `src/tui/` front end MAY use vetted, pinned, import-isolated
+dependencies — `ink` (6.8.0) + `react` (19.2.8), added as runtime `dependencies`
+(with `@types/react` + `ink-testing-library` as dev deps). `test/tui-isolation.test.ts`
+enforces the isolation: nothing outside `src/tui/` imports `ink`/`react`, and the SEA
+`bin/eagent` binary stays Ink-free. New scripts `build:tui` (esbuild →
+`dist/tui/bundle.mjs`) and `test:tui`. The controls, keys, architecture, and the
+out-of-CI real-TTY smoke procedure are documented in [`docs/TUI.md`](docs/TUI.md).
+
 **Surface, tune, and recover from silent turn truncation.** A turn cut off at the
 output-token cap is no longer invisible in the interactive CLI:
 

@@ -28,7 +28,8 @@
   },
   "bin": {
     "eagent": "./dist/cli.js",
-    "eagent-serve": "./dist/server.js"
+    "eagent-serve": "./dist/server.js",
+    "eagent-tui": "./dist/tui/main.js"
   },
   "main": "./dist/kernel/index.js",
   "types": "./dist/kernel/index.d.ts",
@@ -51,11 +52,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:binary": "node scripts/build-binary.mjs",
+    "build:tui": "npx --yes esbuild src/tui/main.tsx --bundle --platform=node --format=esm --target=node22 --jsx=automatic --alias:react-devtools-core=./src/tui/devtools-stub.js --banner:js='import{createRequire as __cr}from\"module\";const require=__cr(import.meta.url);' --outfile=dist/tui/bundle.mjs",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "test": "node --import tsx --test \"test/**/*.test.ts\" \"test/**/*.test.tsx\"",
+    "test:tui": "node --import tsx --test \"test/tui/**/*.test.tsx\"",
     "eval": "node --import tsx src/eval-runner.ts evals",
     "test:coverage": "node --import tsx --test --experimental-test-coverage \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/cli.ts",
@@ -63,10 +66,14 @@
     "start": "node dist/cli.js"
   },
   "dependencies": {
-    "jiti": "^2.4.2"
+    "ink": "6.8.0",
+    "jiti": "^2.4.2",
+    "react": "19.2.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/react": "19.2.17",
+    "ink-testing-library": "4.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   },

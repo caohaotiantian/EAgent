@@ -331,7 +331,7 @@ So setting the per-agent turn bound during development is a one-liner —
 `config.json` entry — no source edit. See `docs/EXTENSIONS.md` for the `Config`
 API. (Secrets like API keys are not config and are never printed by `/config`.)
 
-## Four front ends, one kernel
+## Four engine front ends, one kernel
 
 ```mermaid
 flowchart LR
@@ -340,7 +340,7 @@ flowchart LR
         ONE["One-shot<br/>eagent -e / --json"]
         BATCH["Batch<br/>(piped stdin)"]
     end
-    SRV["src/server.ts<br/>HTTP — /health, /run, GET+DELETE /sessions/:id"]
+    SRV["src/server.ts<br/>HTTP — /health, /run, /sessions,<br/>DELETE /sessions/:id, monitor SSE feeds"]
     HOST["createAgentHost()<br/>src/host.ts"]
     K["Kernel + built-in extensions"]
     REPL --> HOST
@@ -368,6 +368,14 @@ session's root Agent) and sessions run **concurrently** — a same-session secon
 different sessions overlap, and `GET /sessions/:id` returns a session's usage + cost. The id is still
 authenticated by one shared token, so for per-tenant authorization isolate tenants by running **one
 process per tenant** (see `SECURITY.md`).
+
+Additive, read-mostly **monitor endpoints** let a client (the `eagent-tui --monitor`
+dashboard) observe a host without mutating it: `GET /sessions` lists live sessions
+(`{id, running, usage, costUsd}`); `GET /sessions/:id/events` is a per-session
+Server-Sent-Events feed (tenant-isolated to that session) and `GET /events` is a
+global feed tagging each frame with its `session` id; `POST /sessions/:id/stop`
+aborts a running turn. They reuse the same bearer auth + session pool and add no
+kernel change.
 Set `EAGENT_HARDENED=1` for a one-switch **defense-in-depth** profile: it enables
 `risk-guard` (LLM-classifies every `shell:exec` call), `provenance` (injection-defends
 tool output), `sandbox.tier=workspace-write` (confines subprocess writes to the
@@ -388,6 +396,75 @@ docker build -t eagent .
 docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
   -v "$PWD:/workspace" eagent
 ```
+
+## Interactive display
+
+The default interactive CLI renders each reasoning block, answer, and tool call
+as an **ordered, collapsible section** — progressive disclosure, so a long
+reasoning stream no longer floods the window and a tool call's full
+parameters/results stay reachable on demand. Concurrent work (e.g. the
+`reasoning-search` forks) is attributed per agent and rendered in strict arrival
+order, never interleaved. A finished reasoning block collapses to a one-line
+header — `◆ Reasoning · N tok · 1.4s` — and a subagent call renders as a card
+whose header names the subagent and its task, with the child's own work nested
+inside.
+
+This renderer (`src/engine-render.ts`) is a **minimal, zero-dep, append-only**
+plain renderer over a shared view model — no alt screen, no framework, every line
+written exactly once. It is what pipes, `--eval`, batch, dumb terminals, and the
+standalone `bin/eagent` binary use, so none of those paths ever leak
+cursor-control bytes; `--json` emits the machine JSONL stream instead (see
+[`docs/JSONL.md`](docs/JSONL.md)). For a live, full-screen experience use the
+`eagent-tui` rich client (below).
+
+**Display modes**, set with `/details`:
+
+- **auto** (default) — only the newest section stays expanded; older ones
+  collapse to their headers as new sections begin.
+- **full** — every section expanded (all arguments and every result line shown).
+- **collapsed** — headers only.
+
+**Commands** (slash commands, not raw-mode keys):
+
+| Command | What it does |
+| --- | --- |
+| `/details [full\|collapsed\|auto]` | Set the display mode (no argument prints the current one). |
+| `/expand <n>` | Expand section *n* to its full, untruncated content. |
+| `/collapse <n>` | Collapse section *n* back to its header. |
+
+The `N tok` in a header is a char-derived estimate, not a provider token count.
+See [`docs/TUI.md`](docs/TUI.md) for the full controls reference.
+
+## The rich terminal client (`eagent-tui`)
+
+`eagent-tui` is a **rich full-screen Ink (React) client** — a separate front end
+that renders the same section tree live: streaming text, collapsible reasoning,
+structured tool cards, nested sub-agents, a persistent input + status bar, and a
+side panel at ≥ 100 columns, with delta coalescing + viewport windowing so the
+reasoning-search flood stays smooth. Its single-session mode drives the same
+`createAgentHost` assembly in-process, so it runs identical agent behavior — only
+the view is richer.
+
+```bash
+eagent-tui                 # rich single-session client (a local agent)
+eagent-tui --monitor       # multi-session dashboard over running hosts
+```
+
+**Node runtime required.** The Ink client is an **ESM front end run via Node**;
+`ink`/`react` are isolated to `src/tui/` and are **not** bundled into the CJS SEA
+`bin/eagent` binary (which stays headless + zero-dep). Install it from npm, or
+build the self-contained bundle with `npm run build:tui`, and run it under Node —
+the standalone binary cannot launch it. On a capable terminal the plain `eagent`
+prints a one-line hint suggesting `eagent-tui`.
+
+**Multi-session monitor.** `eagent-tui --monitor` attaches to one or more running
+EAgent HTTP hosts and lists their live sessions with status/usage/cost, drills
+into a session's live SSE feed, and can stop a running turn or forget a session.
+Point it at hosts with repeatable `--instance url[,token]` flags (a
+`{ url, token }[]` list); with none it defaults to a local `eagent-serve` on
+`127.0.0.1:8787` (honoring `EAGENT_TOKEN`). It rides the server's additive monitor
+endpoints (above). Keys: `[j/k]` move · `[enter]` open a session · `[s]` stop ·
+`[f]` forget · `[r]` refresh · `[q]` quit.
 
 ## Build a single binary
 
@@ -445,7 +522,12 @@ src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
 src/extensions/  65 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
-src/server.ts    HTTP host: /health, /run (streaming), DELETE /sessions/:id
+src/engine-render.ts  the engine's plain, append-only human renderer
+                 (over src/view-model.ts + src/attribution.ts + src/tty.ts)
+src/server.ts    HTTP host: /health, /run (streaming), /sessions,
+                 DELETE /sessions/:id, monitor SSE feeds (/events, …)
+src/tui/         the Ink (React) rich terminal client + --monitor dashboard
+                 (eagent-tui; the only place ink/react are imported)
 examples/        worked example extensions
 test/            the full offline suite — every primitive and extension
 ```
@@ -456,6 +538,10 @@ test/            the full offline suite — every primitive and extension
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
 - [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
   the CLI `--json` stream and the HTTP `/run` stream.
+- [`docs/TUI.md`](docs/TUI.md) — the interactive display + the `eagent-tui` rich
+  client: display modes, the `/details`/`/expand`/`/collapse` commands, the Ink
+  client + monitor keys and architecture, the multi-instance `{ url, token }[]`
+  config, and the out-of-CI real-TTY smoke procedure.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.

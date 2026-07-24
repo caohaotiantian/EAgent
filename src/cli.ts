@@ -24,6 +24,15 @@ import type { Logger, UI } from "./kernel/types.js";
 import { complete } from "./complete.js";
 import { createAgentHost, loadEnvFile, PROVIDER_NAMES, thinkingFromEnv } from "./host.js";
 import { eventToJsonl, wireJsonl } from "./jsonl.js";
+import { EngineRenderer } from "./engine-render.js";
+import { fromStdio, shouldSuggestTui, type RenderController, type Term } from "./tty.js";
+import { wireViewModel } from "./attribution.js";
+
+/** A mutable holder for the active renderer, so the display commands (registered
+ *  before the renderer exists) can route to the renderer `main()` wires up. */
+interface ActiveRenderer {
+  current?: RenderController;
+}
 
 interface Args {
   model?: string;
@@ -161,9 +170,14 @@ async function main(): Promise<void> {
     extraExtensions: args.extensions,
   });
 
-  try {
-    registerHostCommands(commands, host, agent);
+  // The display commands route here once the renderer is wired below; declared
+  // now so registerHostCommands can close over it before the renderer exists.
+  const active: ActiveRenderer = {};
+  // Whether to print the startup "run eagent-tui" hint (D7): decided below once
+  // the terminal seam exists, from the interactive/raw-capable-TTY/non-json context.
+  let suggestTui = false;
 
+  try {
     // Tab completion reads the live registries at completion time, so the
     // interface is built now that commands and the host exist.
     const completer = (line: string): [string[], string] =>
@@ -178,8 +192,17 @@ async function main(): Promise<void> {
 
     await agent.hooks.emit("session_start", {});
 
-    if (args.json) wireJsonRendering(agent);
-    else wireRendering(agent);
+    if (args.json) {
+      wireJsonRendering(agent);
+    } else {
+      const term = fromStdio(stdout, stdin);
+      // Startup-only (D7): suggest the rich Ink TUI when this session is
+      // interactive, human, and on a raw-capable TTY (never in --json/--eval/non-TTY).
+      suggestTui = shouldSuggestTui(term, { interactive, term_env: process.env.TERM, json: args.json });
+      active.current = wireRendering(agent, { term });
+    }
+
+    registerHostCommands(commands, host, agent, active);
 
     // Ctrl-C aborts the in-flight turn rather than killing the process; a second
     // press at an idle prompt exits.
@@ -214,6 +237,13 @@ async function main(): Promise<void> {
     }
 
     if (!args.json) banner(agent, host, live);
+
+    // The one-line startup hint (D7): print it once when this session could run
+    // the rich full-screen TUI. Suppressed, via shouldSuggestTui, in every
+    // --json/--eval/non-TTY/dumb context.
+    if (suggestTui) {
+      console.log(C.dim("Tip: this terminal supports the rich full-screen interface — run eagent-tui to launch it."));
+    }
 
     if (args.eval !== undefined) {
       await runTurn(agent, args.eval, args.json);
@@ -287,45 +317,21 @@ async function dispatchCommand(
   }
 }
 
-export function wireRendering(agent: Agent): void {
-  let streaming = false;
-  let thinking = false;
-  // Reasoning streams before the answer; render it dimmed and close the block
-  // when the first answer text (or the completed message) arrives.
-  agent.hooks.on("reasoning_delta", ({ text }) => {
-    if (!thinking) {
-      stdout.write(C.dim("🧠 "));
-      thinking = true;
-    }
-    stdout.write(C.dim(text));
-  });
-  agent.hooks.on("text_delta", ({ text }) => {
-    if (thinking) {
-      stdout.write("\n");
-      thinking = false;
-    }
-    if (!streaming) {
-      stdout.write(C.green("⏺ "));
-      streaming = true;
-    }
-    stdout.write(text);
-  });
-  agent.hooks.on("message", ({ message }) => {
-    if (message.role === "assistant" && (streaming || thinking)) {
-      stdout.write("\n");
-      streaming = false;
-      thinking = false;
-    }
-  });
-  agent.hooks.on("tool_start", ({ call }) => {
-    const args = JSON.stringify(call.arguments);
-    console.log(C.cyan(`→ ${call.name}`) + " " + C.dim(args.length > 80 ? args.slice(0, 79) + "…" : args));
-  });
-  agent.hooks.on("tool_end", ({ result }) => {
-    const head = result.content.split("\n")[0] ?? "";
-    const mark = result.isError ? C.red("✗") : C.dim("✓");
-    console.log(`  ${mark} ${C.dim(head.length > 100 ? head.slice(0, 99) + "…" : head)}`);
-  });
+/**
+ * The interactive human renderer. Reasoning blocks, tool cards, and subagent work
+ * fold through the pure view model and render as first-class, ordered, collapsible
+ * units (preserving the reasoning-search de-interleaving and full tool params on
+ * the non-Ink path). `opts` is optional so the pinned regression calls
+ * `wireRendering(agent)` still compile. Returns the renderer so the host can route
+ * `/details`/`/expand`/`/collapse` to it.
+ */
+export function wireRendering(agent: Agent, opts: { term?: Term } = {}): EngineRenderer {
+  const term = opts.term ?? fromStdio(stdout, stdin);
+  const renderer = new EngineRenderer({ term });
+  wireViewModel(agent, (model) => renderer.onModel(model));
+
+  // The error path stays first-class: a tool/loop error prints a red line
+  // (dropping this would still pass the warning tests but silently regress it).
   agent.hooks.on("error", ({ error, where }) => {
     console.log(C.red(`✗ ${where}: ${error instanceof Error ? error.message : String(error)}`));
   });
@@ -336,14 +342,19 @@ export function wireRendering(agent: Agent): void {
   // runTurn's catch) already carry their own signals, so they stay quiet here.
   agent.hooks.on("agent_end", ({ reason }) => {
     if (reason === "max_tokens") {
-      console.log(C.yellow("\n⚠ response truncated (max_tokens): the model hit its output-token cap."));
-      console.log(C.dim("  raise the provider's *_MAX_TOKENS env var, or enable /autocontinue."));
+      console.log(
+        C.yellow("\n⚠ response truncated (max_tokens): the model hit its output-token cap.") +
+          "\n" +
+          C.dim("  raise the provider's *_MAX_TOKENS env var, or enable /autocontinue."),
+      );
     } else if (reason === "content_filter") {
       console.log(C.yellow("\n⚠ response stopped (content_filter): blocked by the provider content filter."));
     } else if (reason === "refusal") {
       console.log(C.yellow("\n⚠ response stopped (refusal): the model declined to answer."));
     }
   });
+
+  return renderer;
 }
 
 /** Programmatic mode: emit one JSON object per lifecycle event to stdout. */
@@ -370,7 +381,13 @@ async function runTurn(agent: Agent, input: string, json: boolean): Promise<void
   }
 }
 
-async function repl(rl: Interface, agent: Agent, commands: CommandRegistry, host: ExtensionHost, json: boolean): Promise<void> {
+async function repl(
+  rl: Interface,
+  agent: Agent,
+  commands: CommandRegistry,
+  host: ExtensionHost,
+  json: boolean,
+): Promise<void> {
   for (;;) {
     let line: string;
     try {
@@ -390,7 +407,65 @@ async function repl(rl: Interface, agent: Agent, commands: CommandRegistry, host
   }
 }
 
-function registerHostCommands(commands: CommandRegistry, host: ExtensionHost, agent: Agent): void {
+/** Register the host's slash commands (help/reload/model/… plus the
+ *  `/details`/`/expand`/`/collapse` display controls). Exported so a unit test can
+ *  drive the display commands' branching against a fake `active` renderer without a
+ *  live REPL — the same in-process test seam as `wireRendering`/`entryShouldRun`. */
+export function registerHostCommands(
+  commands: CommandRegistry,
+  host: ExtensionHost,
+  agent: Agent,
+  active: ActiveRenderer,
+): void {
+  // /expand and /collapse share this section-number router.
+  const routeSection = (ctx: { args: string; print(l: string): void }, kind: "expand" | "collapse"): void => {
+    const r = active.current;
+    if (!r) {
+      ctx.print(C.dim("display control is unavailable in this mode."));
+      return;
+    }
+    const n = Number(ctx.args.trim());
+    if (!Number.isInteger(n) || n < 1) {
+      ctx.print(C.red(`/${kind} needs a section number, e.g. /${kind} 2.`));
+      return;
+    }
+    r.applyControl({ kind, n });
+    ctx.print(C.dim(`${kind === "expand" ? "expanded" : "collapsed"} section ${n}.`));
+  };
+
+  commands.register({
+    name: "details",
+    description: "Set the display mode (full|collapsed|auto), or show it with no argument.",
+    run: (ctx) => {
+      const r = active.current;
+      if (!r) {
+        ctx.print(C.dim("display control is unavailable in this mode."));
+        return;
+      }
+      const arg = ctx.args.trim();
+      if (!arg) {
+        ctx.print(`display mode = ${r.mode}`);
+        return;
+      }
+      if (arg !== "full" && arg !== "collapsed" && arg !== "auto") {
+        ctx.print(C.red(`unknown mode: ${arg} (use full | collapsed | auto).`));
+        return;
+      }
+      r.applyControl({ kind: "mode", mode: arg });
+      ctx.print(C.green(`display mode = ${arg}`));
+    },
+  });
+  commands.register({
+    name: "expand",
+    description: "Expand section <n> to its full, untruncated content (e.g. /expand 2).",
+    run: (ctx) => routeSection(ctx, "expand"),
+  });
+  commands.register({
+    name: "collapse",
+    description: "Collapse section <n> back to its header (e.g. /collapse 2).",
+    run: (ctx) => routeSection(ctx, "collapse"),
+  });
+
   commands.register({
     name: "help",
     description: "Show available commands.",
