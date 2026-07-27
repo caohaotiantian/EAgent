@@ -17,6 +17,14 @@ npm run serve               # or: node --import tsx src/server.ts
 
 Optional: `EAGENT_WEB_ROOT=/path/to/dist` overrides the default `web/dist` search.
 
+### Session persistence
+
+HTTP sessions (with a `session` id on `POST /run`) are written under
+`~/.eagent/http-sessions/` as JSON (`EAGENT_SESSIONS_DIR` to override). After a
+server restart, `GET /sessions` and `GET /sessions/:id` reload transcripts from
+disk so the web UI can continue. `DELETE /sessions/:id` removes both memory and
+the file.
+
 ### Dev
 
 ```bash

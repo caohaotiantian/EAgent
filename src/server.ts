@@ -13,7 +13,7 @@
  *   POST   /answer          → answer a pending elicitation mid-turn
  *                             body: { id: number, answer: string }
  *   GET    /sessions         → list live sessions [{ id, running, usage, costUsd }]
- *   GET    /sessions/:id     → usage + cost + messages (transcript for resume)
+ *   GET    /sessions/:id     → usage + cost + messages (transcript; loaded from disk if needed)
  *   GET    /sessions/:id/events → a per-session live SSE feed (tenant-isolated)
  *   POST   /sessions/:id/stop   → abort a running turn (agent.stop())
  *   GET    /events           → a global SSE feed; each frame tagged with its session
@@ -48,11 +48,18 @@ import { fileURLToPath } from "node:url";
 
 import { Agent, currentRootAgent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
-import type { Logger, UI, Usage } from "./kernel/types.js";
+import type { Logger, Message, UI, Usage } from "./kernel/types.js";
 import { createAgentHost, loadEnvFile, type AgentHostOptions } from "./host.js";
 import { COST_ACCESSOR_KEY } from "./extensions/cost.js";
 import { JOBS_ACCESSOR_KEY } from "./extensions/subagent-jobs.js";
 import { eventToJsonl, wireJsonl, type JsonlEvent } from "./jsonl.js";
+import {
+  deleteSessionFile,
+  listDiskSessionSummaries,
+  readSessionFile,
+  resolveSessionsDir,
+  writeSessionFile,
+} from "./session-disk.js";
 
 export interface ServeOptions extends AgentHostOptions {
   port?: number;
@@ -73,6 +80,11 @@ export interface ServeOptions extends AgentHostOptions {
   /** Directory of built web SPA assets (`index.html`, js/css). Defaults to
    *  `EAGENT_WEB_ROOT` or `<package>/web/dist`. Missing root is soft-fail. */
   webRoot?: string;
+  /** Directory for durable HTTP session transcripts. Defaults to
+   *  `EAGENT_SESSIONS_DIR` or `~/.eagent/http-sessions`. */
+  sessionsDir?: string;
+  /** When false, skip disk read/write (tests that only care about memory). Default true. */
+  persistSessions?: boolean;
 }
 
 const DEFAULT_MAX_BODY = 1024 * 1024;
@@ -167,6 +179,13 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
   const webRoot = resolveWebRoot(opts.webRoot);
+  // Persist by default outside the node:test runner (NODE_TEST_CONTEXT). Unit
+  // tests that want disk round-trips pass sessionsDir / persistSessions: true.
+  const underTest = process.env.NODE_TEST_CONTEXT !== undefined;
+  const persistSessions = opts.persistSessions ?? !underTest;
+  const sessionsDir = persistSessions
+    ? resolveSessionsDir(opts.sessionsDir ?? process.env.EAGENT_SESSIONS_DIR)
+    : undefined;
 
   // No token means /run and DELETE /sessions are unauthenticated, and the agent
   // is built with yolo (every capability auto-granted, including shell:exec).
@@ -240,6 +259,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
       costUsdFor,
       hasLiveJob,
       webRoot,
+      sessionsDir,
     ).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
   });
 
@@ -280,6 +300,7 @@ async function route(
   costUsdFor: (agent: Agent) => number,
   hasLiveJob: (agent: Agent) => boolean,
   webRoot: string | undefined,
+  sessionsDir: string | undefined,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const method = req.method ?? "GET";
@@ -315,9 +336,26 @@ async function route(
   // the generic `/sessions/:id` matcher so `/sessions` and `/sessions/:id/events`
   // resolve here first.
 
-  // Enumerate live sessions so the monitor can attach without knowing ids.
+  // Enumerate live + on-disk sessions so the monitor survives restarts.
   if (req.method === "GET" && url.pathname === "/sessions") {
-    const list = [...sessions].map(([id, agent]) => ({ id, running: agent.running, usage: agent.usage, costUsd: costUsdFor(agent) }));
+    const list = [...sessions].map(([id, agent]) => ({
+      id,
+      running: agent.running,
+      usage: agent.usage,
+      costUsd: costUsdFor(agent),
+    }));
+    if (sessionsDir) {
+      const seen = new Set(list.map((s) => s.id));
+      for (const disk of listDiskSessionSummaries(sessionsDir)) {
+        if (seen.has(disk.id)) continue;
+        list.push({
+          id: disk.id,
+          running: false,
+          usage: disk.usage,
+          costUsd: disk.costUsd,
+        });
+      }
+    }
     sendJson(res, 200, list);
     return;
   }
@@ -344,7 +382,7 @@ async function route(
   // `currentRootAgent() === agent` tenant filter `/run` already uses).
   if (req.method === "GET" && url.pathname.startsWith("/sessions/") && url.pathname.endsWith("/events")) {
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length, -"/events".length));
-    const agent = sessions.get(id);
+    const agent = getOrLoadSession(sessions, id, template, sessionsDir);
     if (!agent) {
       sendJson(res, 404, { error: "unknown session", session: id });
       return;
@@ -356,7 +394,7 @@ async function route(
   // Abort a running turn on a session (the monitor's one write control).
   if (req.method === "POST" && url.pathname.startsWith("/sessions/") && url.pathname.endsWith("/stop")) {
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length, -"/stop".length));
-    const agent = sessions.get(id);
+    const agent = getOrLoadSession(sessions, id, template, sessionsDir);
     if (!agent) {
       sendJson(res, 404, { error: "unknown session", session: id });
       return;
@@ -377,7 +415,7 @@ async function route(
       sendJson(res, 404, { error: "not found" });
       return;
     }
-    const agent = sessions.get(id);
+    const agent = getOrLoadSession(sessions, id, template, sessionsDir);
     if (!agent) {
       sendJson(res, 404, { error: "unknown session", session: id });
       return;
@@ -397,13 +435,14 @@ async function route(
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
     // Never forget a session mid-turn or while it still owns a running background
     // job: dropping its Agent would abort the live turn or strand the detached child.
-    const agent = sessions.get(id);
+    const agent = getOrLoadSession(sessions, id, template, sessionsDir);
     if (running.has(id) || (agent && hasLiveJob(agent))) {
       sendJson(res, 409, { error: "session is busy (a turn or background job is in flight); cannot delete", session: id });
       return;
     }
-    const existed = sessions.delete(id);
-    sendJson(res, existed ? 200 : 404, { deleted: existed, session: id });
+    const inMem = sessions.delete(id);
+    const onDisk = sessionsDir ? deleteSessionFile(sessionsDir, id) : false;
+    sendJson(res, inMem || onDisk ? 200 : 404, { deleted: inMem || onDisk, session: id });
     return;
   }
 
@@ -470,7 +509,21 @@ async function route(
     }
     if (session !== undefined) running.add(session);
     try {
-      await streamRun(res, template, input, sessions, session, elicit, askTimeoutMs, config, sessionlessRoots, running, hasLiveJob);
+      await streamRun(
+        res,
+        template,
+        input,
+        sessions,
+        session,
+        elicit,
+        askTimeoutMs,
+        config,
+        sessionlessRoots,
+        running,
+        hasLiveJob,
+        sessionsDir,
+        costUsdFor,
+      );
     } finally {
       if (session !== undefined) running.delete(session);
     }
@@ -499,6 +552,27 @@ async function route(
  * its OWN transcript/usage and a fresh copy of the run config
  * (model/systemPrompt/thinking/maxTurns/provider/maxConcurrency).
  */
+/**
+ * Return a pooled Agent for `id`, loading from disk into the map when needed.
+ */
+function getOrLoadSession(
+  sessions: Map<string, Agent>,
+  id: string,
+  template: Agent,
+  sessionsDir: string | undefined,
+): Agent | undefined {
+  const live = sessions.get(id);
+  if (live) return live;
+  if (!sessionsDir) return undefined;
+  const file = readSessionFile(sessionsDir, id);
+  if (!file) return undefined;
+  const agent = makeSessionAgent(template);
+  if (file.model) agent.model = file.model;
+  agent.load(file.messages);
+  sessions.set(id, agent);
+  return agent;
+}
+
 function makeSessionAgent(template: Agent): Agent {
   return new Agent({
     hooks: template.hooks,
@@ -529,6 +603,8 @@ async function streamRun(
   sessionlessRoots: WeakSet<Agent>,
   running: Set<string>,
   hasLiveJob: (agent: Agent) => boolean,
+  sessionsDir: string | undefined,
+  costUsdFor: (agent: Agent) => number,
 ): Promise<void> {
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   let closed = false;
@@ -542,8 +618,13 @@ async function streamRun(
   // throwaway that is never pooled and cannot launch a background job. `existed`
   // gates whether a brand-new session whose only turn aborts is worth persisting
   // (it is not — see the rollback below).
-  const existed = session !== undefined && sessions.has(session);
-  const agent = (session !== undefined ? sessions.get(session) : undefined) ?? makeSessionAgent(template);
+  const existed =
+    session !== undefined &&
+    (sessions.has(session) || (sessionsDir !== undefined && readSessionFile(sessionsDir, session) !== undefined));
+  const agent =
+    session !== undefined
+      ? (getOrLoadSession(sessions, session, template, sessionsDir) ?? makeSessionAgent(template))
+      : makeSessionAgent(template);
   if (session === undefined) sessionlessRoots.add(agent);
 
   // This turn's own pending ask ids (the per-turn drain-set): the `finally`
@@ -646,6 +727,21 @@ async function streamRun(
       // oldest evictable sessions past the cap (skipping in-flight / live-job ones).
       sessions.delete(session);
       sessions.set(session, agent);
+      if (sessionsDir) {
+        try {
+          writeSessionFile(sessionsDir, {
+            version: 1,
+            savedAt: new Date().toISOString(),
+            session,
+            model: agent.model,
+            messages: agent.messages.slice() as Message[],
+            usage: { inputTokens: agent.usage.inputTokens, outputTokens: agent.usage.outputTokens },
+            costUsd: costUsdFor(agent),
+          });
+        } catch {
+          // Disk full / permissions: keep serving from memory; next turn retries.
+        }
+      }
       evictSessions(sessions, maxSessions(config), running, hasLiveJob);
     }
     // Dual-emit during the deprecation window: the frozen legacy `done` first, then

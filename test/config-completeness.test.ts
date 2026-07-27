@@ -36,7 +36,7 @@ const ROOTS = [
  */
 const READ_ALLOWLIST: Record<string, Set<string>> = {
   "memory.ts": new Set(["EAGENT_MEMORY_EMBED_API_KEY"]),
-  "server.ts": new Set(["EAGENT_TOKEN", "EAGENT_WEB_ROOT"]),
+  "server.ts": new Set(["EAGENT_TOKEN", "EAGENT_WEB_ROOT", "EAGENT_SESSIONS_DIR"]),
   "http.ts": new Set(["EAGENT_MAX_SSE_EVENT_BYTES"]),
 };
 
