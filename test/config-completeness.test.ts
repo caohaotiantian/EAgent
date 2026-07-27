@@ -26,17 +26,17 @@ const ROOTS = [
 ];
 
 /**
- * The ONLY permitted `process.env.EAGENT_*` reads (a 3-item allowlist), keyed by
+ * The ONLY permitted `process.env.EAGENT_*` reads (a small allowlist), keyed by
  * file basename:
  *   - `memory.ts`      — the embed API key (a secret, never surfaced by /config).
- *   - `server.ts`      — the auth token (a secret).
+ *   - `server.ts`      — the auth token (a secret) + optional web SPA root path.
  *   - `http.ts`        — the SSE cap, kept as the provider-without-host fallback.
  * Anything else is a violation. (config-cmd's own `EAGENT_CONFIG` kill switch is
  * resolved inside `LayeredConfig.enabled("config")`, not by a direct env read.)
  */
 const READ_ALLOWLIST: Record<string, Set<string>> = {
   "memory.ts": new Set(["EAGENT_MEMORY_EMBED_API_KEY"]),
-  "server.ts": new Set(["EAGENT_TOKEN"]),
+  "server.ts": new Set(["EAGENT_TOKEN", "EAGENT_WEB_ROOT"]),
   "http.ts": new Set(["EAGENT_MAX_SSE_EVENT_BYTES"]),
 };
 
@@ -66,7 +66,7 @@ test("no source assigns a process.env.EAGENT_* variable (AC 8a)", () => {
   assert.deepEqual(violations, [], `unexpected process.env.EAGENT_* assignment(s):\n${violations.join("\n")}`);
 });
 
-test("no source reads process.env.EAGENT_* outside the 3-item allowlist (AC 8b)", () => {
+test("no source reads process.env.EAGENT_* outside the allowlist (AC 8b)", () => {
   const violations: string[] = [];
   for (const file of FILES) {
     const base = basename(file);
