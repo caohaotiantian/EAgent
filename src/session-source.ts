@@ -25,25 +25,12 @@ import { request as httpRequest, type ClientRequest, type IncomingMessage } from
 import { request as httpsRequest } from "node:https";
 
 import type { Agent } from "./kernel/agent.js";
-import type { Disposable, Role, StopReason, ToolCallBlock, ToolResult, Usage } from "./kernel/types.js";
+import type { Disposable } from "./kernel/types.js";
 import { wireEvents } from "./attribution.js";
-import type { TaggedEvent } from "./view-model.js";
+import { wireObjectToSourceEvent, type SourceEvent } from "./wire-events.js";
 
-/**
- * The one event shape both backends yield. The reducer-foldable render events
- * (`TaggedEvent`, keyed by acting agent) drive a transcript; the connection +
- * accounting + elicitation meta events (which the reducer does not fold) let the
- * monitor track status and answer prompts. All discriminate on `kind`; the render
- * kinds (agent_start/reasoning_delta/text_delta/tool_start/tool_end/message/
- * agent_end) never collide with the meta kinds below.
- */
-export type SourceEvent =
-  | TaggedEvent
-  | { kind: "connected"; session: string | null }
-  | { kind: "reconnected"; session: string | null }
-  | { kind: "usage"; usage: Usage; cumulative: Usage }
-  | { kind: "error"; where: string; message: string }
-  | { kind: "action_required"; id: number; question: string; options: string[] | null };
+export type { SourceEvent } from "./wire-events.js";
+export { wireObjectToSourceEvent } from "./wire-events.js";
 
 /** The interface a host or remote client consumes: an event stream + a bounded control surface. */
 export interface SessionSource {
@@ -270,52 +257,9 @@ export class RemoteSource implements SessionSource {
       return;
     }
 
-    const event = this.#frameToEvent(payload, session);
+    // Remote feed has no per-agent id: acting === session (flat transcript).
+    const event = wireObjectToSourceEvent(payload, { session, at: this.#now() });
     if (event) this.#emit(event);
-  }
-
-  /** Map a `data:` frame (an `eventToJsonl` object) to a `SourceEvent`. */
-  #frameToEvent(p: Record<string, unknown>, session: string): SourceEvent | undefined {
-    // The remote feed has no per-agent id, so acting === root (the session): the
-    // transcript stays flat, the documented remote limitation.
-    const tag = { actingId: session, rootId: session, at: this.#now() };
-    switch (p.type) {
-      case "text_delta":
-        return { kind: "text_delta", text: String(p.text ?? ""), ...tag };
-      case "reasoning_delta":
-        return { kind: "reasoning_delta", text: String(p.text ?? ""), ...tag };
-      case "message":
-        return { kind: "message", role: p.role as Role, ...tag };
-      case "tool_start": {
-        const call: ToolCallBlock = {
-          type: "tool_call",
-          id: String(p.id ?? ""),
-          name: String(p.name ?? ""),
-          arguments: (p.arguments as Record<string, unknown>) ?? {},
-        };
-        return { kind: "tool_start", call, ...tag };
-      }
-      case "tool_end": {
-        const call: ToolCallBlock = { type: "tool_call", id: String(p.id ?? ""), name: String(p.name ?? ""), arguments: {} };
-        const result: ToolResult = { content: String(p.content ?? ""), isError: Boolean(p.isError) };
-        return { kind: "tool_end", call, result, ...tag };
-      }
-      case "agent_end":
-        return { kind: "agent_end", reason: p.reason as StopReason, ...tag };
-      case "usage":
-        return { kind: "usage", usage: p.usage as Usage, cumulative: p.cumulative as Usage };
-      case "error":
-        return { kind: "error", where: String(p.where ?? ""), message: String(p.message ?? "") };
-      case "action_required":
-        return {
-          kind: "action_required",
-          id: Number(p.id),
-          question: String(p.question ?? ""),
-          options: Array.isArray(p.options) ? (p.options as string[]) : null,
-        };
-      default:
-        return undefined;
-    }
   }
 
   async run(input: string): Promise<void> {
