@@ -37,6 +37,18 @@ Display modes `auto` / `full` / `collapsed` use the shared pure view-model
 (`src/view-model.ts`). Remote transcripts are **flat** (no per-fork agent ids on
 the wire).
 
+## UI design notes
+
+Layout follows common open-source LLM UIs (Open WebUI, LobeChat, LibreChat):
+
+- **Full-height shell** with a left nav rail (Chat / Sessions) and sticky top bar
+- **Scrollable transcript** with user bubbles vs agent section cards
+- **Sticky composer** at the bottom (Enter to send, Shift+Enter newline)
+- **Tool / reasoning cards** with expand/collapse and status pills
+- **Monitor** as a session list + optional live detail panel
+
+No extra UI framework — CSS variables + React only under `web/`.
+
 ## Auth
 
 If `/health` reports `auth: "required"`, enter the bearer token matching

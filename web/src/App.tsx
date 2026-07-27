@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyControl,
   bodyLines,
+  estTokens,
   headerLine,
   initialModel,
   reduce,
@@ -32,28 +33,110 @@ function routeFromHash(): Route {
   return h.startsWith("monitor") ? "monitor" : "chat";
 }
 
-function SectionView({ s, onToggle }: { s: Section; onToggle: () => void }) {
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+function statusLabel(s: Section): { text: string; cls: string } {
+  if (s.status === "error") return { text: "error", cls: "err" };
+  if (s.status === "success") return { text: "done", cls: "ok" };
+  return { text: "live", cls: "run" };
+}
+
+function kindLabel(s: Section): string {
+  if (s.kind === "reasoning") return "Think";
+  if (s.kind === "answer") return "Answer";
+  return "Tool";
+}
+
+function SectionCard({
+  s,
+  depth = 0,
+  onToggleTop,
+}: {
+  s: Section;
+  depth?: number;
+  /** Top-level only: parent drives expand via view-model controls */
+  onToggleTop?: () => void;
+}) {
+  const [localOpen, setLocalOpen] = useState(!s.collapsed);
+  const isTop = depth === 0 && onToggleTop;
+  const open = isTop ? !s.collapsed : localOpen;
+  const st = statusLabel(s);
+
+  const toggle = () => {
+    if (isTop && onToggleTop) onToggleTop();
+    else setLocalOpen((v) => !v);
+  };
+
   return (
-    <div className={`section ${s.kind}${s.status === "error" ? " error" : ""}`}>
-      <div className="sec-head" onClick={onToggle} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && onToggle()}>
-        {headerLine(s)}
-      </div>
-      {!s.collapsed && (
-        <div className="pre">
-          {bodyLines(s).map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-          {s.children.map((c) => (
-            <SectionView key={c.id} s={c} onToggle={() => {}} />
-          ))}
+    <div className={`card card-${s.kind}${s.status === "error" ? " card-error" : ""}`}>
+      <button type="button" className="card-head" onClick={toggle} aria-expanded={open}>
+        <span className="card-kind">{kindLabel(s)}</span>
+        <span className="card-title" title={headerLine(s)}>
+          {s.kind === "tool"
+            ? `${s.name}${
+                Object.keys(s.arguments).length > 0
+                  ? ` · ${Object.keys(s.arguments).slice(0, 2).join(", ")}${Object.keys(s.arguments).length > 2 ? "…" : ""}`
+                  : ""
+              }`
+            : `${estTokens(s.text)} tok`}
+        </span>
+        <span className={`card-status ${st.cls}`}>{st.text}</span>
+        <span className="card-status" style={{ color: "var(--muted)" }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (
+        <div className="card-body">
+          <div className="pre">
+            {bodyLines(s).map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+          {s.children.length > 0 && (
+            <div className="card-children">
+              {s.children.map((c) => (
+                <SectionCard key={c.id} s={c} depth={depth + 1} />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
+function AskFreeText({ onSubmit }: { onSubmit: (t: string) => void }) {
+  const [v, setV] = useState("");
+  return (
+    <div className="chip-row" style={{ width: "100%" }}>
+      <input
+        style={{
+          flex: 1,
+          minWidth: "12rem",
+          padding: "0.45rem 0.65rem",
+          borderRadius: 8,
+          border: "1px solid var(--border)",
+          background: "var(--bg-elevated)",
+        }}
+        value={v}
+        onChange={(e) => setV(e.target.value)}
+        placeholder="Type your answer…"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && v.trim()) onSubmit(v.trim());
+        }}
+      />
+      <button type="button" className="btn btn-primary" disabled={!v.trim()} onClick={() => onSubmit(v.trim())}>
+        Submit
+      </button>
+    </div>
+  );
+}
+
 export function App() {
   const [route, setRoute] = useState<Route>(routeFromHash);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [token, setToken] = useState(loadToken);
   const [authRequired, setAuthRequired] = useState(false);
   const [tokenDraft, setTokenDraft] = useState("");
@@ -70,13 +153,18 @@ export function App() {
   const [detailModel, setDetailModel] = useState<ViewModel>(() => initialModel("auto"));
   const abortRef = useRef<AbortController | null>(null);
   const boundRef = useRef({ session: sessionId, generation });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     boundRef.current = { session: sessionId, generation };
   }, [sessionId, generation]);
 
   useEffect(() => {
-    const onHash = () => setRoute(routeFromHash());
+    const onHash = () => {
+      setRoute(routeFromHash());
+      setSidebarOpen(false);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -86,6 +174,14 @@ export function App() {
       .then((h) => setAuthRequired(h.auth === "required"))
       .catch(() => setAuthRequired(false));
   }, [token]);
+
+  // Auto-scroll transcript when content grows (ChatGPT / Open WebUI pattern)
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom || running) el.scrollTop = el.scrollHeight;
+  }, [model.sections, userBubbles, running, ask]);
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -115,13 +211,19 @@ export function App() {
     void (async () => {
       try {
         for await (const ev of subscribeSessionEvents(token, detailId, ac.signal)) {
-          if (ev.kind === "connected" || ev.kind === "reconnected" || ev.kind === "usage" || ev.kind === "error" || ev.kind === "action_required") {
+          if (
+            ev.kind === "connected" ||
+            ev.kind === "reconnected" ||
+            ev.kind === "usage" ||
+            ev.kind === "error" ||
+            ev.kind === "action_required"
+          ) {
             continue;
           }
           setDetailModel((m) => reduce(m, ev));
         }
       } catch {
-        /* aborted or closed */
+        /* aborted */
       }
     })();
     return () => ac.abort();
@@ -168,6 +270,7 @@ export function App() {
       setRunning(false);
       setAsk((s) => reduceAsk(s, { type: "stream_end" }));
       abortRef.current = null;
+      taRef.current?.focus();
     }
   }
 
@@ -214,221 +317,335 @@ export function App() {
 
   const mode = model.mode;
   const setMode = (m: DisplayMode) => setModel((prev) => applyControl(prev, { kind: "mode", mode: m }));
-
   const topSections = useMemo(() => model.sections, [model.sections]);
+  const empty = userBubbles.length === 0 && topSections.length === 0;
+
+  const go = (r: Route) => {
+    location.hash = r === "monitor" ? "#/monitor" : "#/";
+    setRoute(r);
+    setSidebarOpen(false);
+  };
+
+  const resizeTa = () => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  };
 
   return (
-    <div className="app">
-      <header>
-        <strong>EAgent</strong>
-        <a href="#/" className={route === "chat" ? "active" : ""} onClick={() => setRoute("chat")}>
-          Chat
-        </a>
-        <a href="#/monitor" className={route === "monitor" ? "active" : ""} onClick={() => setRoute("monitor")}>
-          Monitor
-        </a>
-        <span className="muted" style={{ marginLeft: "auto" }}>
-          session {sessionId.slice(0, 8)}…
-        </span>
-      </header>
+    <div className={`shell${sidebarOpen ? " sidebar-open" : ""}`}>
+      <button type="button" className="sidebar-backdrop" aria-label="Close menu" onClick={() => setSidebarOpen(false)} />
 
-      {authRequired && !token && (
-        <div className="panel">
-          <p>This server requires a bearer token (`EAGENT_TOKEN`).</p>
-          <div className="row">
-            <input
-              type="password"
-              placeholder="Bearer token"
-              value={tokenDraft}
-              onChange={(e) => setTokenDraft(e.target.value)}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                saveToken(tokenDraft.trim());
-                setToken(tokenDraft.trim());
-              }}
-            >
-              Save
-            </button>
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">E</div>
+          <div className="brand-text">
+            <strong>EAgent</strong>
+            <span>Agent workspace</span>
           </div>
         </div>
-      )}
 
-      {token && (
-        <div className="row muted" style={{ marginTop: "0.5rem" }}>
-          <span>Token stored in sessionStorage</span>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => {
-              saveToken("");
-              setToken("");
-            }}
-          >
-            Log out
+        <nav className="nav">
+          <button type="button" className={`nav-item${route === "chat" ? " active" : ""}`} onClick={() => go("chat")}>
+            <span className="ico">💬</span> Chat
           </button>
-        </div>
-      )}
+          <button type="button" className={`nav-item${route === "monitor" ? " active" : ""}`} onClick={() => go("monitor")}>
+            <span className="ico">📡</span> Sessions
+          </button>
+        </nav>
 
-      {error && <p className="err">{error}</p>}
-
-      {route === "chat" && (
-        <>
-          <div className="row" style={{ marginTop: "0.75rem" }}>
-            <label>
-              Display{" "}
-              <select value={mode} onChange={(e) => setMode(e.target.value as DisplayMode)}>
-                <option value="auto">auto</option>
-                <option value="full">full</option>
-                <option value="collapsed">collapsed</option>
-              </select>
-            </label>
-            <button type="button" className="secondary" onClick={() => void onClear()}>
-              Clear
-            </button>
-            <button type="button" className="secondary" disabled={!running} onClick={() => void onStop()}>
-              Stop
-            </button>
-            {running && <span className="muted">running…</span>}
+        <div className="sidebar-foot">
+          <div className="session-chip" title={sessionId}>
+            session {shortId(sessionId)}
           </div>
-
-          <div className="panel">
-            {userBubbles.map((b) => (
-              <div key={b.id} className="user-bubble">
-                <div className="muted">you</div>
-                <div className="pre">{b.text}</div>
-              </div>
-            ))}
-            {topSections.map((s, i) => (
-              <SectionView
-                key={s.id}
-                s={s}
-                onToggle={() =>
-                  setModel((m) =>
-                    applyControl(m, { kind: s.collapsed ? "expand" : "collapse", n: i + 1 }),
-                  )
-                }
-              />
-            ))}
-            {topSections.length === 0 && userBubbles.length === 0 && (
-              <p className="muted">Send a message to start a turn (uses POST /run JSONL).</p>
+          <div className="token-row">
+            <label>API token</label>
+            {token ? (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ width: "100%" }}
+                onClick={() => {
+                  saveToken("");
+                  setToken("");
+                }}
+              >
+                Log out
+              </button>
+            ) : (
+              <span className="muted" style={{ fontSize: "0.75rem" }}>
+                {authRequired ? "Required by server" : "Optional"}
+              </span>
             )}
           </div>
+        </div>
+      </aside>
 
-          {ask.kind === "pending" && (
-            <div className="panel ask">
-              <p>{ask.ask.question}</p>
-              {ask.ask.options && ask.ask.options.length > 0 ? (
-                <div className="row">
-                  {ask.ask.options.map((o) => (
-                    <button key={o} type="button" onClick={() => void onAnswer(o)}>
-                      {o}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <AskFreeText onSubmit={(t) => void onAnswer(t)} />
-              )}
+      <div className="main">
+        <div className="topbar">
+          <button type="button" className="menu-btn" aria-label="Menu" onClick={() => setSidebarOpen(true)}>
+            ☰
+          </button>
+          <div>
+            <div className="topbar-title">{route === "chat" ? "Chat" : "Sessions"}</div>
+            <div className="topbar-meta">
+              {route === "chat" ? "Streaming transcript · view-model sections" : "Live multi-session monitor"}
             </div>
-          )}
+          </div>
+          <div className="topbar-actions">
+            {running && (
+              <span className="pill live" aria-live="polite">
+                Running
+              </span>
+            )}
+            {route === "chat" && (
+              <>
+                <select className="select" value={mode} onChange={(e) => setMode(e.target.value as DisplayMode)} title="Display mode">
+                  <option value="auto">Auto collapse</option>
+                  <option value="full">Expand all</option>
+                  <option value="collapsed">Headers only</option>
+                </select>
+                <button type="button" className="btn btn-ghost" onClick={() => void onClear()}>
+                  New chat
+                </button>
+                <button type="button" className="btn btn-danger" disabled={!running} onClick={() => void onStop()}>
+                  Stop
+                </button>
+              </>
+            )}
+            {route === "monitor" && (
+              <button type="button" className="btn btn-ghost" onClick={() => void refreshSessions()}>
+                Refresh
+              </button>
+            )}
+          </div>
+        </div>
 
-          <div className="panel">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Message…"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void onSend();
-                }
-              }}
-              disabled={running || ask.kind === "pending"}
-            />
-            <div className="row" style={{ marginTop: "0.5rem" }}>
-              <button type="button" disabled={running || ask.kind === "pending" || !input.trim()} onClick={() => void onSend()}>
-                Send
+        {authRequired && !token && (
+          <div className="banner banner-auth">
+            <strong>Authentication required</strong>
+            <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginTop: 4 }}>
+              Enter the same value as <code>EAGENT_TOKEN</code>. Stored in sessionStorage only.
+            </div>
+            <div className="row">
+              <input
+                type="password"
+                placeholder="Bearer token"
+                value={tokenDraft}
+                onChange={(e) => setTokenDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && tokenDraft.trim()) {
+                    saveToken(tokenDraft.trim());
+                    setToken(tokenDraft.trim());
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  saveToken(tokenDraft.trim());
+                  setToken(tokenDraft.trim());
+                }}
+              >
+                Continue
               </button>
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {route === "monitor" && (
-        <div className="panel">
-          <div className="row">
-            <strong>Sessions</strong>
-            <button type="button" className="secondary" onClick={() => void refreshSessions()}>
-              Refresh
+        {error && (
+          <div className="banner banner-error" role="alert">
+            {error}
+            <button type="button" className="btn btn-ghost" style={{ marginLeft: 8, padding: "0.15rem 0.45rem" }} onClick={() => setError(null)}>
+              Dismiss
             </button>
           </div>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>id</th>
-                <th>running</th>
-                <th>usage</th>
-                <th>cost</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {sessions.map((s) => (
-                <tr key={s.id}>
-                  <td>
-                    <button type="button" className="secondary" onClick={() => setDetailId(s.id)}>
-                      {s.id}
-                    </button>
-                  </td>
-                  <td>{s.running ? "yes" : "no"}</td>
-                  <td>
-                    {s.usage.inputTokens}/{s.usage.outputTokens}
-                  </td>
-                  <td>{s.costUsd.toFixed(4)}</td>
-                  <td className="row">
-                    <button type="button" className="secondary" onClick={() => void stopSession(token, s.id).then(refreshSessions)}>
-                      Stop
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => void deleteSession(token, s.id).then(refreshSessions)}
-                    >
-                      Forget
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {detailId && (
-            <div style={{ marginTop: "1rem" }}>
-              <div className="row">
-                <strong>Live: {detailId}</strong>
-                <button type="button" className="secondary" onClick={() => setDetailId(null)}>
-                  Close
-                </button>
-              </div>
-              {detailModel.sections.map((s) => (
-                <SectionView key={s.id} s={s} onToggle={() => {}} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+        )}
 
-function AskFreeText({ onSubmit }: { onSubmit: (t: string) => void }) {
-  const [v, setV] = useState("");
-  return (
-    <div className="row">
-      <input value={v} onChange={(e) => setV(e.target.value)} placeholder="Your answer" />
-      <button type="button" disabled={!v.trim()} onClick={() => onSubmit(v.trim())}>
-        Answer
-      </button>
+        {route === "chat" && (
+          <>
+            <div className="transcript" ref={scrollRef}>
+              <div className="transcript-inner">
+                {empty && (
+                  <div className="empty">
+                    <div className="empty-icon">✦</div>
+                    <h2>What should we work on?</h2>
+                    <p>
+                      Messages stream over <code>POST /run</code>. Reasoning, answers, and tools render as collapsible cards — same
+                      view-model as the CLI.
+                    </p>
+                  </div>
+                )}
+
+                {/* Interleave is approximate: users first, then agent stack for the turn.
+                    Multi-turn: all users then cumulative sections — acceptable for v1 polish. */}
+                {userBubbles.map((b) => (
+                  <div key={b.id} className="msg msg-user">
+                    <div className="avatar avatar-user">You</div>
+                    <div className="msg-body">
+                      <div className="msg-label">You</div>
+                      <div className="bubble bubble-user">{b.text}</div>
+                    </div>
+                  </div>
+                ))}
+
+                {topSections.length > 0 && (
+                  <div className="msg">
+                    <div className="avatar avatar-agent">E</div>
+                    <div className="msg-body" style={{ maxWidth: "100%", flex: 1 }}>
+                      <div className="msg-label">EAgent</div>
+                      <div className="stack">
+                        {topSections.map((s, i) => (
+                          <SectionCard
+                            key={s.id}
+                            s={s}
+                            onToggleTop={() =>
+                              setModel((m) =>
+                                applyControl(m, {
+                                  kind: s.collapsed ? "expand" : "collapse",
+                                  n: i + 1,
+                                }),
+                              )
+                            }
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {ask.kind === "pending" && (
+                  <div className="ask-card">
+                    <h3>Question for you</h3>
+                    <p>{ask.ask.question}</p>
+                    {ask.ask.options && ask.ask.options.length > 0 ? (
+                      <div className="chip-row">
+                        {ask.ask.options.map((o) => (
+                          <button key={o} type="button" className="chip" onClick={() => void onAnswer(o)}>
+                            {o}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <AskFreeText onSubmit={(t) => void onAnswer(t)} />
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="composer-wrap">
+              <div className="composer">
+                <textarea
+                  ref={taRef}
+                  value={input}
+                  rows={1}
+                  placeholder="Message EAgent…"
+                  disabled={running || ask.kind === "pending"}
+                  onChange={(e) => {
+                    setInput(e.target.value);
+                    resizeTa();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void onSend();
+                    }
+                  }}
+                />
+                <div className="composer-bar">
+                  <span className="composer-hint">Enter to send · Shift+Enter newline</span>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={running || ask.kind === "pending" || !input.trim()}
+                    onClick={() => void onSend()}
+                  >
+                    Send
+                  </button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {route === "monitor" && (
+          <div className="monitor">
+            <div className={`monitor-grid${detailId ? " split" : ""}`}>
+              <div className="panel">
+                <div className="panel-head">
+                  <h2>Live sessions</h2>
+                  <span className="pill" style={{ marginLeft: "auto" }}>
+                    {sessions.length} total
+                  </span>
+                </div>
+                <div className="panel-body">
+                  {sessions.length === 0 ? (
+                    <div className="empty-list">No sessions yet. Start a chat to create one.</div>
+                  ) : (
+                    <ul className="session-list">
+                      {sessions.map((s) => (
+                        <li key={s.id} className="session-item">
+                          <button type="button" className="session-id" onClick={() => setDetailId(s.id)}>
+                            {s.id}
+                          </button>
+                          <div className="session-stats">
+                            {s.running ? <span className="pill live">running</span> : <span className="pill">idle</span>}
+                            {" · "}
+                            in {s.usage.inputTokens} / out {s.usage.outputTokens}
+                            {" · "}${s.costUsd.toFixed(4)}
+                          </div>
+                          <div className="session-actions">
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
+                              onClick={() => void stopSession(token, s.id).then(refreshSessions)}
+                            >
+                              Stop
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
+                              onClick={() => void deleteSession(token, s.id).then(refreshSessions)}
+                            >
+                              Forget
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {detailId && (
+                <div className="panel">
+                  <div className="panel-head">
+                    <h2>Live stream</h2>
+                    <code className="muted" style={{ fontSize: "0.75rem" }}>
+                      {shortId(detailId)}
+                    </code>
+                    <button type="button" className="btn btn-ghost" style={{ marginLeft: "auto" }} onClick={() => setDetailId(null)}>
+                      Close
+                    </button>
+                  </div>
+                  <div className="detail-stream">
+                    {detailModel.sections.length === 0 ? (
+                      <div className="empty-list">Waiting for events on this session…</div>
+                    ) : (
+                      detailModel.sections.map((s) => <SectionCard key={s.id} s={s} />)
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
