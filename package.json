@@ -60,6 +60,9 @@
     "test:coverage": "node --import tsx --test --experimental-test-coverage \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/cli.ts",
     "serve": "node --import tsx src/server.ts",
+    "build:web": "npm --prefix web run build",
+    "dev:web": "npm --prefix web run dev",
+    "test:web": "npm --prefix web run test && npm --prefix web run check-bundle",
     "start": "node dist/cli.js"
   },
   "dependencies": {

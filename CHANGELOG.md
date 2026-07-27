@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+**Web UI (browser SPA, TUI feature parity for single-host).** Vite + React app under
+`web/`, served same-origin by `eagent-serve` (`EAGENT_WEB_ROOT` / `web/dist`). Chat
+uses `POST /run` JSONL (including mid-turn elicitation); Monitor lists sessions and
+attaches to per-session SSE with stop/forget. Shared pure `src/wire-events.ts` mapper
+and `src/view-model.ts` section tree. Auth-exempt static GET so the UI can boot when
+`EAGENT_TOKEN` is set. Scripts: `build:web`, `dev:web`, `test:web`. See `docs/WEB.md`.
+
 ### Removed
 
 **Ink `eagent-tui` rich terminal client.** The separate ESM Ink/React front end

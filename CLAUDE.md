@@ -89,7 +89,8 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
   It delegates human rendering to the engine plain renderer (`src/engine-render.ts`)
   over the shared neutral cores and keeps its `wireRendering(agent, opts?)` export.
   (The old opt-in alt-screen surface and the former rich Ink terminal client are
-  removed; rich multi-session display is planned as a separate **web** front end.)
+  removed; rich multi-session display is the **web** SPA under `web/`, served by
+  `eagent-serve` — see `docs/WEB.md`.)
 - **The human render layer** (host, not kernel) is a shared neutral core with one
   shipped consumer. Neutral cores (zero-dep): `src/view-model.ts` (a pure,
   offline-testable reducer folding lifecycle events into an ordered, collapsible
@@ -185,8 +186,8 @@ install`). A command that writes without that call bypasses the security model.
   bundles — stay zero-runtime-dep: providers use the global `fetch`; nothing pulls
   in an SDK. Do not add any other npm dependency. Enforced by
   `test/zero-dep.test.ts` (runtime `dependencies` ⊆ `{ jiti }`; no ink/react
-  imports under `src/` or `test/`). A future web front end is a **separate**
-  package/surface, not a license to put UI frameworks in the engine.
+  imports under `src/` or `test/`). The **web** SPA (`web/`) may use React/Vite
+  as its own package deps — not engine runtime deps, not under root `test/`.
 - **Tests use `node:test` run via `tsx`**, and must run offline. Every extension
   is capability-gated and ships with tests.
 - **Capabilities are the security vocabulary.** Privileged tools declare

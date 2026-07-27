@@ -35,7 +35,7 @@ test("AC6: README.md does not instruct eagent-tui / build:tui / list src/tui as 
   assert.doesNotMatch(md, /build:tui|test:tui/, "no tui build scripts");
   assert.doesNotMatch(md, /src\/tui\//, "layout must not list src/tui/");
   assert.match(md, /engine-render/, "still documents plain renderer");
-  assert.match(md, /[Ww]eb|browser/, "points rich UX at web/browser");
+  assert.match(md, /[Ww]eb|browser|WEB\.md/, "points rich UX at web/browser");
 });
 
 test("AC6: ARCHITECTURE.md no shipped eagent-tui / src/tui; zero-dep except jiti", () => {
@@ -52,10 +52,17 @@ test("AC6: docs/TUI.md is plain-CLI + planned web; no eagent-tui install/usage",
   assert.doesNotMatch(md, /eagent-tui/, "no eagent-tui");
   assert.doesNotMatch(md, /build:tui|test:tui/, "no tui scripts");
   assert.match(md, /engine-render/, "describes plain CLI renderer");
-  assert.match(md, /[Ww]eb|browser/, "mentions planned web");
+  assert.match(md, /[Ww]eb|WEB\.md/, "mentions web UI");
   for (const re of INSTALL_HINTS) {
     assert.doesNotMatch(md, re, `must not match install hint ${re}`);
   }
+});
+
+test("AC9: docs/WEB.md documents build:web and eagent-serve", () => {
+  const md = read("docs/WEB.md");
+  assert.match(md, /build:web/);
+  assert.match(md, /eagent-serve|npm run serve/);
+  assert.doesNotMatch(md, /eagent-tui/);
 });
 
 test("AC6: CHANGELOG notes removal of Ink eagent-tui client", () => {

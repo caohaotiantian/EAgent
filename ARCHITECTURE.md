@@ -326,8 +326,9 @@ ordering-aware plain renderer over the shared neutral view model
 (`src/view-model.ts` + `src/attribution.ts` + `src/tty.ts`) that de-interleaves
 reasoning-search forks and keeps full tool params reachable. The engine stays at
 **zero runtime dependencies except `jiti`** (`test/zero-dep.test.ts`). Rich
-browser UI is planned as a separate front end over the monitor HTTP/SSE endpoints
-below — not a full-screen terminal framework. See `docs/TUI.md`.
+browser UI is a separate Vite+React SPA under `web/`, served same-origin by
+`eagent-serve` over the monitor HTTP/SSE endpoints below. See `docs/WEB.md` and
+`docs/TUI.md`.
 
 ```mermaid
 sequenceDiagram

@@ -71,11 +71,11 @@ test("AC3: static HTML without auth; sessions gated; SPA fallback; no SPA for AP
         const j = await r.json();
         assert.ok(Array.isArray(j));
       }
-      // (e) client route → SPA index
+      // (e) SPA entry is `/` only (hash client routes); assets still served
       {
-        const r = await fetch(base + "/ui/monitor");
+        const r = await fetch(base + "/app.js");
         assert.equal(r.status, 200);
-        assert.match(await r.text(), /marker-ui/);
+        assert.match(await r.text(), /console\.log/);
       }
       // reserved GET /run must not be SPA
       {

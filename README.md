@@ -415,9 +415,9 @@ plain renderer over a shared view model — no alt screen, no framework, every l
 written exactly once. It is what the interactive REPL, pipes, `--eval`, batch,
 dumb terminals, and the standalone `bin/eagent` binary use, so none of those
 paths ever leak cursor-control bytes; `--json` emits the machine JSONL stream
-instead (see [`docs/JSONL.md`](docs/JSONL.md)). Rich multi-session display is
-planned as a **web** front end over the HTTP/SSE monitor endpoints above — not a
-full-screen terminal framework.
+instead (see [`docs/JSONL.md`](docs/JSONL.md)). Rich multi-session display is the
+**web** SPA (`npm run build:web`, then open `eagent-serve` in a browser) over the
+HTTP/SSE monitor endpoints above — see [`docs/WEB.md`](docs/WEB.md).
 
 **Display modes**, set with `/details`:
 
@@ -509,8 +509,9 @@ test/            the full offline suite — every primitive and extension
 - [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
   the CLI `--json` stream and the HTTP `/run` stream.
 - [`docs/TUI.md`](docs/TUI.md) — the interactive plain-CLI display: display
-  modes, `/details`/`/expand`/`/collapse`, and the shared view-model substrate
-  for a planned web front end.
+  modes, `/details`/`/expand`/`/collapse`, and the shared view-model substrate.
+- [`docs/WEB.md`](docs/WEB.md) — the browser SPA (chat + monitor) served by
+  `eagent-serve`.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.

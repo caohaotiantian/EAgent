@@ -9,9 +9,9 @@ full-screen terminal framework.
    append-only plain renderer built into the engine. It is what the plain `eagent`
    REPL, `--eval`, batch, pipes, dumb terminals, and the standalone `bin/eagent`
    binary use. No framework, no alt screen.
-2. **Planned web front end** — rich multi-session display (streaming transcript +
-   monitor) will live in the browser and consume the HTTP/SSE monitor endpoints on
-   `eagent-serve`. That work is a separate cycle; it is **not** shipped here.
+2. **Web front end** — rich multi-session display (streaming transcript + monitor)
+   lives in the browser SPA under `web/`, served by `eagent-serve`. See
+   [`WEB.md`](WEB.md).
 
 Host code only — no kernel change. The `--json` and HTTP `/run` streams are
 unaffected; they emit the machine JSONL schema documented in

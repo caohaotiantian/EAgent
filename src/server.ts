@@ -859,12 +859,15 @@ export function tryServeStatic(res: ServerResponse, pathname: string, webRoot: s
   } catch {
     return false;
   }
-  // SPA fallback: non-file, non-API GET → index.html
-  const index = join(root, "index.html");
-  if (existsSync(index) && statSync(index).isFile()) {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(readFileSync(index));
-    return true;
+  // SPA entry only for `/` (hash routing keeps client paths on the fragment).
+  // Do not map arbitrary GETs to index.html — that would mask API 404s.
+  if (pathname === "/" || pathname === "") {
+    const index = join(root, "index.html");
+    if (existsSync(index) && statSync(index).isFile()) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+      res.end(readFileSync(index));
+      return true;
+    }
   }
   return false;
 }
