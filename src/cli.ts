@@ -25,7 +25,7 @@ import { complete } from "./complete.js";
 import { createAgentHost, loadEnvFile, PROVIDER_NAMES, thinkingFromEnv } from "./host.js";
 import { eventToJsonl, wireJsonl } from "./jsonl.js";
 import { EngineRenderer } from "./engine-render.js";
-import { fromStdio, shouldSuggestTui, type RenderController, type Term } from "./tty.js";
+import { fromStdio, type RenderController, type Term } from "./tty.js";
 import { wireViewModel } from "./attribution.js";
 
 /** A mutable holder for the active renderer, so the display commands (registered
@@ -173,9 +173,6 @@ async function main(): Promise<void> {
   // The display commands route here once the renderer is wired below; declared
   // now so registerHostCommands can close over it before the renderer exists.
   const active: ActiveRenderer = {};
-  // Whether to print the startup "run eagent-tui" hint (D7): decided below once
-  // the terminal seam exists, from the interactive/raw-capable-TTY/non-json context.
-  let suggestTui = false;
 
   try {
     // Tab completion reads the live registries at completion time, so the
@@ -196,9 +193,6 @@ async function main(): Promise<void> {
       wireJsonRendering(agent);
     } else {
       const term = fromStdio(stdout, stdin);
-      // Startup-only (D7): suggest the rich Ink TUI when this session is
-      // interactive, human, and on a raw-capable TTY (never in --json/--eval/non-TTY).
-      suggestTui = shouldSuggestTui(term, { interactive, term_env: process.env.TERM, json: args.json });
       active.current = wireRendering(agent, { term });
     }
 
@@ -237,13 +231,6 @@ async function main(): Promise<void> {
     }
 
     if (!args.json) banner(agent, host, live);
-
-    // The one-line startup hint (D7): print it once when this session could run
-    // the rich full-screen TUI. Suppressed, via shouldSuggestTui, in every
-    // --json/--eval/non-TTY/dumb context.
-    if (suggestTui) {
-      console.log(C.dim("Tip: this terminal supports the rich full-screen interface — run eagent-tui to launch it."));
-    }
 
     if (args.eval !== undefined) {
       await runTurn(agent, args.eval, args.json);

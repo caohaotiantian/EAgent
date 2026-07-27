@@ -52,30 +52,6 @@ export function isFancy(term: Term, opts: { interactive: boolean; term_env: stri
   return opts.interactive && term.isTTY && (term.columns ?? 0) > 0 && opts.term_env !== "dumb";
 }
 
-/**
- * The startup suggest-hint decision (D7): print the one-line "run eagent-tui"
- * hint exactly when the session is interactive, human (non-json), and running on
- * a raw-mode-capable TTY — the same terminal the suggested `eagent-tui` process
- * inherits. The raw-mode conjuncts (`isTTY` + a present `setRawMode` +
- * non-`dumb`) are inlined here: `setRawMode` is defined on the real adapter only
- * when stdin is itself a TTY (see `fromStdio`), so a defined `setRawMode` proves
- * both a raw-capable stdin and the output TTY. Pure and terminal-injected so the
- * TTY-requiring positive case is unit-testable in-process (a piped subprocess can
- * never fake a TTY), honoring the zero-dep charter — no PTY.
- */
-export function shouldSuggestTui(
-  term: Term,
-  opts: { interactive: boolean; term_env: string | undefined; json: boolean },
-): boolean {
-  return (
-    opts.interactive &&
-    !opts.json &&
-    term.isTTY &&
-    typeof term.setRawMode === "function" &&
-    opts.term_env !== "dumb"
-  );
-}
-
 /** The real adapter over a Node write stream + input stream. Getters read live. */
 export function fromStdio(
   out: NodeJS.WriteStream = process.stdout,
