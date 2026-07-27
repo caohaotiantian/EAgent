@@ -13,7 +13,7 @@
  *   POST   /answer          → answer a pending elicitation mid-turn
  *                             body: { id: number, answer: string }
  *   GET    /sessions         → list live sessions [{ id, running, usage, costUsd }]
- *   GET    /sessions/:id     → a session's usage + cost summary
+ *   GET    /sessions/:id     → usage + cost + messages (transcript for resume)
  *   GET    /sessions/:id/events → a per-session live SSE feed (tenant-isolated)
  *   POST   /sessions/:id/stop   → abort a running turn (agent.stop())
  *   GET    /events           → a global SSE feed; each frame tagged with its session
@@ -366,17 +366,30 @@ async function route(
     return;
   }
 
-  // Per-tenant observability: a session's own usage + cost summary. Usage lives
-  // natively on the session Agent; cost is read through the extension-published
-  // accessor (`costUsdFor`). An unknown session id is a clean 404.
+  // Per-tenant observability + resume: usage/cost plus the session Agent's
+  // transcript so a web client can hydrate Chat when switching sessions.
+  // Usage lives natively on the session Agent; cost is read through the
+  // extension-published accessor (`costUsdFor`). Unknown id → 404.
   if (req.method === "GET" && url.pathname.startsWith("/sessions/")) {
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
+    // Reject subpaths that should have been handled above (events/stop).
+    if (id.includes("/")) {
+      sendJson(res, 404, { error: "not found" });
+      return;
+    }
     const agent = sessions.get(id);
     if (!agent) {
       sendJson(res, 404, { error: "unknown session", session: id });
       return;
     }
-    sendJson(res, 200, { session: id, usage: agent.usage, costUsd: costUsdFor(agent) });
+    sendJson(res, 200, {
+      session: id,
+      running: agent.running,
+      usage: agent.usage,
+      costUsd: costUsdFor(agent),
+      // Shallow-copy the frozen messages array so callers cannot mutate the Agent.
+      messages: agent.messages.slice(),
+    });
     return;
   }
 
@@ -471,7 +484,7 @@ async function route(
       "POST /run",
       "POST /answer",
       "GET /sessions",
-      "GET /sessions/:id",
+      "GET /sessions/:id  (usage, costUsd, messages)",
       "GET /sessions/:id/events",
       "POST /sessions/:id/stop",
       "GET /events",

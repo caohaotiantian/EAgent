@@ -1196,11 +1196,20 @@ test("D8: GET /sessions/:id returns the session's usage + cost summary; 404 for 
 
     const res = await fetch(`${base}/sessions/obs`);
     assert.equal(res.status, 200, "a known session returns 200");
-    const body = (await res.json()) as { session: string; usage: Usage; costUsd: number };
+    const body = (await res.json()) as {
+      session: string;
+      usage: Usage;
+      costUsd: number;
+      messages?: Array<{ role: string; content: unknown[] }>;
+    };
     assert.equal(body.session, "obs");
     assert.ok(body.usage && typeof body.usage.inputTokens === "number", "usage summary present");
     assert.ok(body.usage.inputTokens > 0, "the session accrued input tokens");
     assert.equal(typeof body.costUsd, "number", "a costUsd figure is present");
+    assert.ok(Array.isArray(body.messages), "transcript messages array is present for resume");
+    assert.ok(body.messages!.length >= 2, "user + assistant messages after one turn");
+    assert.equal(body.messages![0]!.role, "user");
+    assert.ok(body.messages!.some((m) => m.role === "assistant"), "assistant reply is in history");
 
     // An unknown session id is a clean 404.
     const miss = await fetch(`${base}/sessions/does-not-exist`);

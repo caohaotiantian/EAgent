@@ -55,6 +55,21 @@ export async function listSessions(token: string): Promise<SessionRow[]> {
   return r.json() as Promise<SessionRow[]>;
 }
 
+/** Session summary + full transcript for Chat resume. */
+export type SessionDetail = {
+  session: string;
+  running?: boolean;
+  usage: { inputTokens: number; outputTokens: number };
+  costUsd: number;
+  messages: Array<{ role: string; content: Array<Record<string, unknown>> }>;
+};
+
+export async function getSession(token: string, id: string): Promise<SessionDetail> {
+  const r = await fetch(`/sessions/${encodeURIComponent(id)}`, { headers: authHeaders(token) });
+  if (!r.ok) throw new Error(`session ${r.status}`);
+  return r.json() as Promise<SessionDetail>;
+}
+
 export async function stopSession(token: string, id: string): Promise<void> {
   const r = await fetch(`/sessions/${encodeURIComponent(id)}/stop`, {
     method: "POST",

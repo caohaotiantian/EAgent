@@ -13,6 +13,7 @@ import type { SourceEvent } from "@eagent/wire-events";
 import {
   deleteSession,
   getHealth,
+  getSession,
   listSessions,
   loadToken,
   postAnswer,
@@ -23,18 +24,13 @@ import {
 } from "./api/client.js";
 import { agentStatuses, mergeSessionList } from "./chat/agents.js";
 import { reduceAsk, type AskState } from "./chat/ask-state.js";
+import { hydrateFromMessages, type ChatTurn } from "./chat/history.js";
 import { newSessionId, planClear, planSwitchSession, shouldAcceptFrame } from "./chat/session.js";
 import { JsonView } from "./ui/json-view.js";
 import { Markdown } from "./ui/markdown.js";
 
 type Route = "chat" | "monitor";
-
-/** One user message + the section index range produced after it. */
-type Turn = {
-  id: string;
-  user: string;
-  sectionFrom: number;
-};
+type Turn = ChatTurn;
 
 function routeFromHash(): Route {
   const h = location.hash.replace(/^#\/?/, "");
@@ -351,17 +347,27 @@ export function App() {
   }
 
   /**
-   * Bind Chat to an existing session (from Sessions list) so further sends
-   * POST /run with that session id and continue the server conversation.
-   * Local transcript starts clean — the server keeps the prior history.
+   * Bind Chat to an existing session and hydrate the transcript from
+   * GET /sessions/:id (messages + usage). Further sends continue that session.
    */
-  function switchToSession(targetId: string, opts: { fromMonitor?: boolean } = {}) {
+  async function switchToSession(targetId: string, opts: { fromMonitor?: boolean } = {}) {
     if (!targetId) return;
+
     if (targetId === sessionId && opts.fromMonitor) {
-      // Already bound — just open Chat.
       setDetailId(null);
       go("chat");
-      setResumeNote(`Already on session ${shortId(targetId)}. New messages continue this conversation.`);
+      // Re-fetch history in case the server advanced while we were on monitor.
+      try {
+        const detail = await getSession(token, targetId);
+        const hydrated = hydrateFromMessages(detail.messages, model.mode);
+        setTurns(hydrated.turns);
+        setModel(hydrated.model);
+        setResumeNote(
+          `Session ${shortId(targetId)} · ${detail.messages.length} message(s) loaded. Continue below.`,
+        );
+      } catch {
+        setResumeNote(`Already on session ${shortId(targetId)}.`);
+      }
       return;
     }
     if (targetId === sessionId) return;
@@ -373,16 +379,29 @@ export function App() {
     const plan = planSwitchSession(sessionId, targetId, generation);
     setSessionId(plan.currentId);
     setGeneration(plan.generation);
-    setModel(initialModel(model.mode));
-    setTurns([]);
     setAsk({ kind: "idle" });
     setError(null);
     setInput("");
     setDetailId(null);
-    setResumeNote(
-      `Continuing session ${shortId(targetId)}. Prior turns live on the server; this view starts fresh and new messages continue that conversation.`,
-    );
     go("chat");
+
+    try {
+      const detail = await getSession(token, targetId);
+      const hydrated = hydrateFromMessages(detail.messages, model.mode);
+      setTurns(hydrated.turns);
+      setModel(hydrated.model);
+      const nUser = hydrated.turns.length;
+      setResumeNote(
+        `Loaded session ${shortId(targetId)} · ${detail.messages.length} message(s), ${nUser} user turn(s). Continue the conversation below.`,
+      );
+    } catch (e) {
+      setTurns([]);
+      setModel(initialModel(model.mode));
+      setError(e instanceof Error ? e.message : String(e));
+      setResumeNote(
+        `Switched to ${shortId(targetId)} but history could not be loaded (session missing or unauthorized). New messages still use this id if the server accepts it.`,
+      );
+    }
     void refreshSessions().catch(() => {});
   }
 
@@ -767,8 +786,8 @@ export function App() {
                             <button
                               type="button"
                               className="session-id"
-                              title="Open in Chat and continue this session"
-                              onClick={() => switchToSession(s.id, { fromMonitor: true })}
+                              title="Open in Chat, load history, and continue"
+                              onClick={() => void switchToSession(s.id, { fromMonitor: true })}
                             >
                               {s.id}
                             </button>
@@ -786,7 +805,7 @@ export function App() {
                               type="button"
                               className="btn btn-primary"
                               style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
-                              onClick={() => switchToSession(s.id, { fromMonitor: true })}
+                              onClick={() => void switchToSession(s.id, { fromMonitor: true })}
                             >
                               {s.current ? "Open chat" : "Continue"}
                             </button>
