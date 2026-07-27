@@ -1,7 +1,7 @@
 /**
- * The `SessionSource` abstraction (design D2, KDD3): one interface the TUI view
- * consumes — an ordered, attribution-tagged lifecycle event stream plus a control
- * surface (run a turn, answer an elicitation, stop) — with two backends.
+ * The `SessionSource` abstraction: one interface a host view consumes — an
+ * ordered, attribution-tagged lifecycle event stream plus a control surface
+ * (run a turn, answer an elicitation, stop) — with two backends.
  *
  *   - `InProcessSource` wraps a local `Agent`. It tags the agent's hook-bus events
  *     via the shared in-process attribution adapter (`wireEvents`), so concurrent
@@ -16,18 +16,18 @@
  *     with backoff after a dropped connection. Control rides POST /run, POST
  *     /answer, POST /sessions/:id/stop.
  *
- * This module lives under `src/tui/` — it is a TUI concern the engine never
- * imports — but it depends only on the neutral shared cores (`../attribution.ts`,
- * `../view-model.ts` types) and Node `http`/`https`; no Ink/React here.
+ * Host-level module (monitor-API client reference for remote and in-process
+ * consumers). Depends only on the neutral shared cores (`./attribution.ts`,
+ * `./view-model.ts` types) and Node `http`/`https`; no Ink/React.
  */
 
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 
-import type { Agent } from "../kernel/agent.js";
-import type { Disposable, Role, StopReason, ToolCallBlock, ToolResult, Usage } from "../kernel/types.js";
-import { wireEvents } from "../attribution.js";
-import type { TaggedEvent } from "../view-model.js";
+import type { Agent } from "./kernel/agent.js";
+import type { Disposable, Role, StopReason, ToolCallBlock, ToolResult, Usage } from "./kernel/types.js";
+import { wireEvents } from "./attribution.js";
+import type { TaggedEvent } from "./view-model.js";
 
 /**
  * The one event shape both backends yield. The reducer-foldable render events

@@ -17,7 +17,7 @@ import { request as httpRequest, type ClientRequest, type IncomingMessage } from
 import { request as httpsRequest } from "node:https";
 
 import type { Disposable, Usage } from "../kernel/types.js";
-import { RemoteSource, SseParser, type RawSseFrame } from "./source.js";
+import { RemoteSource, SseParser, type RawSseFrame } from "../session-source.js";
 
 /** One configured instance the monitor attaches to. */
 export interface MonitorInstance {

@@ -15,7 +15,7 @@
  */
 
 import { applyControl, initialModel, reduce, type ControlAction, type DisplayMode, type ViewModel } from "../view-model.js";
-import type { SourceEvent } from "./source.js";
+import type { SourceEvent } from "../session-source.js";
 
 /** ~60fps. A frame's worth of deltas coalesce into a single commit. */
 export const FRAME_MS = 16;

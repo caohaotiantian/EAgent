@@ -25,7 +25,7 @@ import type { Usage } from "../kernel/types.js";
 import { initialModel, type DisplayMode, type ViewModel } from "../view-model.js";
 import { Coalescer } from "./coalesce.js";
 import { transcriptLines, windowLines, type DisplayLine } from "./lines.js";
-import type { SessionSource } from "./source.js";
+import type { SessionSource } from "../session-source.js";
 
 /** Width reserved for the >=100-col side panel (carried from the superseded design). */
 const PANEL_WIDTH = 28;

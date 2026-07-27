@@ -11,7 +11,7 @@
 
 import { createAgentHost, loadEnvFile } from "../host.js";
 import type { Logger, UI } from "../kernel/types.js";
-import { InProcessSource, type SessionSource } from "./source.js";
+import { InProcessSource, type SessionSource } from "../session-source.js";
 import type { TuiArgs } from "./args.js";
 
 /** A running single session: the source the UI consumes + a teardown. */

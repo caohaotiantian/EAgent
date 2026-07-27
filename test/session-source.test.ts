@@ -24,7 +24,7 @@ import { test } from "node:test";
 import { Agent } from "../src/kernel/agent.js";
 import type { CompletionRequest, Provider, StreamEvent } from "../src/kernel/types.js";
 import { makeHarness } from "./helpers.js";
-import { InProcessSource, RemoteSource, SseParser, type SourceEvent } from "../src/tui/source.js";
+import { InProcessSource, RemoteSource, SseParser, type SourceEvent } from "../src/session-source.js";
 
 /** Wait until `pred()` is true (polling), or throw after `timeoutMs`. */
 async function until(pred: () => boolean, timeoutMs = 3000): Promise<void> {
