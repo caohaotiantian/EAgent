@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+**Ink `eagent-tui` rich terminal client.** The separate ESM Ink/React front end
+(`src/tui/`, `eagent-tui` bin, `build:tui` / `test:tui`, `ink` + `react` runtime
+deps) is dropped. The engine plain renderer (`src/engine-render.ts` over the
+shared view-model / attribution / tty cores) remains the only shipped human
+terminal surface. HTTP/SSE monitor endpoints and host-level `SessionSource`
+(`src/session-source.ts`) are retained as substrate for a planned **web** rich
+UI. Zero-runtime-dep charter is restored to **only `jiti`**
+(`test/zero-dep.test.ts`).
+
 ### Added
 
 **TUI rebuild — a decoupled Ink (React) terminal client + a multi-session monitor,

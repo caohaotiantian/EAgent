@@ -95,7 +95,7 @@ test("T1.10a piped batch emits a plain stream: no alt-screen, cursor, or spinner
 // The hint prints STARTUP-ONLY on an interactive, raw-capable-TTY, non-json terminal.
 // A piped subprocess (isTTY:false) and --json/--eval are all non-suggesting axes,
 // so no hint line may appear on stdout. The TTY-requiring positive case cannot be
-// faked by a pipe and is unit-tested via shouldSuggestTui (tty.test.ts).
+// faked by a pipe; the former TUI suggest-hint path is gone (zero-dep AC8).
 
 test("T4.3b --json prints no startup suggest-hint on stdout", async () => {
   const { stdout } = await runCli(["-p", "mock", "--json"], "hi\n");

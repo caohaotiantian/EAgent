@@ -87,49 +87,36 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
   set and load order.
 - `src/cli.ts` — the terminal host: interactive REPL, batch, one-shot, `--json`.
   It delegates human rendering to the engine plain renderer (`src/engine-render.ts`)
-  over the shared neutral cores, keeps its `wireRendering(agent, opts?)` export, and
-  on a capable TTY prints a one-line hint suggesting the rich `eagent-tui` client.
-  (The old opt-in alt-screen surface — the `--tui` flag, the `/tui` command,
-  `createTuiHost`/`attachRawKeys`/`resumeLineInput` — is removed; the rich
-  full-screen UI now lives in the separate `eagent-tui` Ink front end.)
-- **The human render layer** (host, not kernel) is a shared neutral core with two
-  consumers. Neutral cores — zero-dep, no `ink`/`react`: `src/view-model.ts` (a
-  pure, offline-testable reducer folding lifecycle events into an ordered,
-  collapsible section tree — reasoning/answer/tool cards with nested sub-agent
-  trees, attributed by acting agent), `src/attribution.ts` (the in-process
-  attribution adapter that tags events via `currentActingAgent()`/
-  `currentRootAgent()`), and `src/tty.ts` (the injected `Term` seam, the
-  `isFancy`/`shouldSuggestTui` predicates, and the `RenderController` display-mode
-  seam). Consumer 1 — `src/engine-render.ts`: the engine's minimal, zero-dep plain
-  renderer wired by `cli.ts` for every non-Ink path (pipes, `--eval`, batch, dumb
-  terminals, and the SEA binary's interactive TTY); it de-interleaves
-  reasoning-search forks, collapses finished reasoning to a header, and keeps full
-  tool params reachable via `/details`/`/expand`/`/collapse`. Consumer 2 —
-  `src/tui/` (below).
-- `src/tui/` — the **rich Ink (React) terminal client + multi-session monitor**,
-  the ONLY place `ink`/`react` are imported (AC9, enforced by
-  `test/tui-isolation.test.ts`). A separate ESM front end run via Node (the
-  `eagent-tui` bin), NOT bundled into the CJS SEA engine binary. It consumes the
-  same neutral cores: `source.ts` (the `SessionSource` abstraction —
-  `InProcessSource` wraps a local agent, `RemoteSource` reads a host's HTTP+SSE
-  feed), `app.tsx` (the single-session transcript over `src/view-model.ts`, with
-  delta coalescing + viewport windowing), `monitor.tsx` + `instance.ts` (the
-  `--monitor` dashboard over N configured `{url, token}` instances), and
-  `main.tsx`/`args.ts` (the entry). Built via `npm run build:tui`; tested via
-  `npm run test:tui`.
+  over the shared neutral cores and keeps its `wireRendering(agent, opts?)` export.
+  (The old opt-in alt-screen surface and the former rich Ink terminal client are
+  removed; rich multi-session display is planned as a separate **web** front end.)
+- **The human render layer** (host, not kernel) is a shared neutral core with one
+  shipped consumer. Neutral cores (zero-dep): `src/view-model.ts` (a pure,
+  offline-testable reducer folding lifecycle events into an ordered, collapsible
+  section tree — reasoning/answer/tool cards with nested sub-agent trees,
+  attributed by acting agent), `src/attribution.ts` (the in-process attribution
+  adapter that tags events via `currentActingAgent()`/`currentRootAgent()`), and
+  `src/tty.ts` (the injected `Term` seam, the `isFancy` predicate, and the
+  `RenderController` display-mode seam). Consumer — `src/engine-render.ts`: the
+  engine's minimal plain renderer wired by `cli.ts` for every human path (REPL,
+  pipes, `--eval`, batch, dumb terminals, and the SEA binary's interactive TTY);
+  it de-interleaves reasoning-search forks, collapses finished reasoning to a
+  header, and keeps full tool params reachable via `/details`/`/expand`/`/collapse`.
+- `src/session-source.ts` — host-level `SessionSource` (InProcessSource +
+  RemoteSource over the server's monitor HTTP/SSE); the offline contract oracle
+  for remote clients (including a future web front end).
 - `src/complete.ts` — the REPL Tab-completion engine: a pure, offline-testable
   `complete(line, ctx)`.
 - `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `POST /answer`
   for a mid-turn elicitation reply, `GET /sessions/:id` for a session's usage +
-  cost summary, `DELETE /sessions/:id`), plus the additive, read-mostly **monitor
-  endpoints** the `eagent-tui --monitor` dashboard attaches to (zero-dep, Ink-free):
-  `GET /sessions` (list `{id, running, usage, costUsd}`), `GET /sessions/:id/events`
-  (a per-session SSE feed, tenant-isolated by the run-tree root agent), `GET /events`
-  (a global SSE feed with each frame tagged by its `session` id), and
-  `POST /sessions/:id/stop` (abort a running turn). Sessions are isolated per session
-  id and run **concurrently** (a same-session second `/run` gets 409; different
-  sessions overlap); all per-session extension state is keyed on the run-tree root
-  Agent.
+  cost summary, `DELETE /sessions/:id`), plus additive, read-mostly **monitor
+  endpoints** for remote clients (zero-dep): `GET /sessions` (list
+  `{id, running, usage, costUsd}`), `GET /sessions/:id/events` (a per-session SSE
+  feed, tenant-isolated by the run-tree root agent), `GET /events` (a global SSE
+  feed with each frame tagged by its `session` id), and `POST /sessions/:id/stop`
+  (abort a running turn). Sessions are isolated per session id and run
+  **concurrently** (a same-session second `/run` gets 409; different sessions
+  overlap); all per-session extension state is keyed on the run-tree root Agent.
 - `test/` — the full offline suite, roughly one file per primitive/extension.
 - `examples/extensions/` — worked example extensions.
 - `docs/EXTENSIONS.md` — the extension author's guide.
@@ -196,13 +183,10 @@ install`). A command that writes without that call bypasses the security model.
 - **Zero runtime dependencies in the engine (except `jiti`).** The kernel,
   providers, extensions, server, and CLI-engine — everything the SEA `bin/eagent`
   bundles — stay zero-runtime-dep: providers use the global `fetch`; nothing pulls
-  in an SDK. The **one exception is the `src/tui/` front end**, which MAY use
-  vetted, pinned, import-isolated dependencies (`ink` + `react`) for the rich Ink
-  terminal client. That isolation is enforced by `test/tui-isolation.test.ts`
-  (AC9): nothing outside `src/tui/` may import `ink`/`react`, and the SEA engine
-  binary stays Ink-free (it never imports `src/tui/`, so esbuild tree-shakes it
-  away). Do not add any other npm dependency, and do not let `ink`/`react` leak out
-  of `src/tui/`.
+  in an SDK. Do not add any other npm dependency. Enforced by
+  `test/zero-dep.test.ts` (runtime `dependencies` ⊆ `{ jiti }`; no ink/react
+  imports under `src/` or `test/`). A future web front end is a **separate**
+  package/surface, not a license to put UI frameworks in the engine.
 - **Tests use `node:test` run via `tsx`**, and must run offline. Every extension
   is capability-gated and ships with tests.
 - **Capabilities are the security vocabulary.** Privileged tools declare

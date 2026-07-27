@@ -311,7 +311,7 @@ the HTTP server defaults `yolo: true` (fallback **allow**, auto-granting every
 capability). See `SECURITY.md`.
 
 Four **engine** front ends share that one assembly, so they all load exactly the
-same extensions (a fifth, the Ink client, shares it too — see below):
+same extensions:
 
 - **Interactive REPL** — `src/cli.ts` when stdin is a TTY (`/help`, `/tools`,
   `/reload`, …).
@@ -321,17 +321,13 @@ same extensions (a fifth, the Ink client, shares it too — see below):
 - **HTTP server** — `src/server.ts` (`eagent-serve`, default `PORT` 8787),
   `node:http` only.
 
-A fifth front end, the rich **Ink terminal client** (`eagent-tui`), lives under
-`src/tui/` and is a separate ESM module run via Node — never the SEA `bin/eagent`
-binary, so its `ink`/`react` dependency stays isolated to `src/tui/`
-(`test/tui-isolation.test.ts` enforces it). Its single-session mode drives the same
-`createAgentHost` assembly in-process (an `InProcessSource`), so it loads exactly
-the same extensions; its `--monitor` dashboard is a pure HTTP/SSE client
-(`RemoteSource`) that attaches to one or more running hosts. The plain CLI's own
-human rendering is the zero-dep `src/engine-render.ts`, a minimal ordering-aware
-plain renderer over the shared neutral view model (`src/view-model.ts` +
-`src/attribution.ts` + `src/tty.ts`) that de-interleaves reasoning-search forks and
-keeps full tool params reachable on every non-Ink path. See `docs/TUI.md`.
+The plain CLI's human rendering is the zero-dep `src/engine-render.ts`, a minimal
+ordering-aware plain renderer over the shared neutral view model
+(`src/view-model.ts` + `src/attribution.ts` + `src/tty.ts`) that de-interleaves
+reasoning-search forks and keeps full tool params reachable. The engine stays at
+**zero runtime dependencies except `jiti`** (`test/zero-dep.test.ts`). Rich
+browser UI is planned as a separate front end over the monitor HTTP/SSE endpoints
+below — not a full-screen terminal framework. See `docs/TUI.md`.
 
 ```mermaid
 sequenceDiagram
@@ -356,14 +352,13 @@ is `"required"` or `"open"`); `DELETE /sessions/:id` forgets a conversation.
 Sessions give multi-turn continuity; the server runs one turn at a time and shuts
 down gracefully on SIGTERM/SIGINT.
 
-The rich terminal client's `--monitor` dashboard attaches through additive,
-read-mostly endpoints (zero-dep, Ink-free): `GET /sessions` lists live sessions
-(`{id, running, usage, costUsd}`); `GET /sessions/:id/events` is a per-session SSE
-feed (tenant-isolated by the run-tree root agent — the same
-`currentRootAgent() === agent` filter `/run` uses); `GET /events` is a global SSE
-feed with each frame tagged by its `session` id; `POST /sessions/:id/stop` aborts a
-running turn. They reuse the existing bearer auth + session pool and add no kernel
-change.
+Remote clients attach through additive, read-mostly **monitor** endpoints
+(zero-dep): `GET /sessions` lists live sessions (`{id, running, usage, costUsd}`);
+`GET /sessions/:id/events` is a per-session SSE feed (tenant-isolated by the
+run-tree root agent — the same `currentRootAgent() === agent` filter `/run` uses);
+`GET /events` is a global SSE feed with each frame tagged by its `session` id;
+`POST /sessions/:id/stop` aborts a running turn. They reuse the existing bearer
+auth + session pool and add no kernel change.
 
 ## The minimalism guard
 

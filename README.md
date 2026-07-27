@@ -369,13 +369,14 @@ different sessions overlap, and `GET /sessions/:id` returns a session's usage + 
 authenticated by one shared token, so for per-tenant authorization isolate tenants by running **one
 process per tenant** (see `SECURITY.md`).
 
-Additive, read-mostly **monitor endpoints** let a client (the `eagent-tui --monitor`
-dashboard) observe a host without mutating it: `GET /sessions` lists live sessions
+Additive, read-mostly **monitor endpoints** let a remote client observe a host
+without mutating it: `GET /sessions` lists live sessions
 (`{id, running, usage, costUsd}`); `GET /sessions/:id/events` is a per-session
 Server-Sent-Events feed (tenant-isolated to that session) and `GET /events` is a
 global feed tagging each frame with its `session` id; `POST /sessions/:id/stop`
 aborts a running turn. They reuse the same bearer auth + session pool and add no
-kernel change.
+kernel change. A browser (web) front end is the planned rich consumer of these
+endpoints.
 Set `EAGENT_HARDENED=1` for a one-switch **defense-in-depth** profile: it enables
 `risk-guard` (LLM-classifies every `shell:exec` call), `provenance` (injection-defends
 tool output), `sandbox.tier=workspace-write` (confines subprocess writes to the
@@ -411,11 +412,12 @@ inside.
 
 This renderer (`src/engine-render.ts`) is a **minimal, zero-dep, append-only**
 plain renderer over a shared view model — no alt screen, no framework, every line
-written exactly once. It is what pipes, `--eval`, batch, dumb terminals, and the
-standalone `bin/eagent` binary use, so none of those paths ever leak
-cursor-control bytes; `--json` emits the machine JSONL stream instead (see
-[`docs/JSONL.md`](docs/JSONL.md)). For a live, full-screen experience use the
-`eagent-tui` rich client (below).
+written exactly once. It is what the interactive REPL, pipes, `--eval`, batch,
+dumb terminals, and the standalone `bin/eagent` binary use, so none of those
+paths ever leak cursor-control bytes; `--json` emits the machine JSONL stream
+instead (see [`docs/JSONL.md`](docs/JSONL.md)). Rich multi-session display is
+planned as a **web** front end over the HTTP/SSE monitor endpoints above — not a
+full-screen terminal framework.
 
 **Display modes**, set with `/details`:
 
@@ -434,37 +436,6 @@ cursor-control bytes; `--json` emits the machine JSONL stream instead (see
 
 The `N tok` in a header is a char-derived estimate, not a provider token count.
 See [`docs/TUI.md`](docs/TUI.md) for the full controls reference.
-
-## The rich terminal client (`eagent-tui`)
-
-`eagent-tui` is a **rich full-screen Ink (React) client** — a separate front end
-that renders the same section tree live: streaming text, collapsible reasoning,
-structured tool cards, nested sub-agents, a persistent input + status bar, and a
-side panel at ≥ 100 columns, with delta coalescing + viewport windowing so the
-reasoning-search flood stays smooth. Its single-session mode drives the same
-`createAgentHost` assembly in-process, so it runs identical agent behavior — only
-the view is richer.
-
-```bash
-eagent-tui                 # rich single-session client (a local agent)
-eagent-tui --monitor       # multi-session dashboard over running hosts
-```
-
-**Node runtime required.** The Ink client is an **ESM front end run via Node**;
-`ink`/`react` are isolated to `src/tui/` and are **not** bundled into the CJS SEA
-`bin/eagent` binary (which stays headless + zero-dep). Install it from npm, or
-build the self-contained bundle with `npm run build:tui`, and run it under Node —
-the standalone binary cannot launch it. On a capable terminal the plain `eagent`
-prints a one-line hint suggesting `eagent-tui`.
-
-**Multi-session monitor.** `eagent-tui --monitor` attaches to one or more running
-EAgent HTTP hosts and lists their live sessions with status/usage/cost, drills
-into a session's live SSE feed, and can stop a running turn or forget a session.
-Point it at hosts with repeatable `--instance url[,token]` flags (a
-`{ url, token }[]` list); with none it defaults to a local `eagent-serve` on
-`127.0.0.1:8787` (honoring `EAGENT_TOKEN`). It rides the server's additive monitor
-endpoints (above). Keys: `[j/k]` move · `[enter]` open a session · `[s]` stop ·
-`[f]` forget · `[r]` refresh · `[q]` quit.
 
 ## Build a single binary
 
@@ -524,10 +495,9 @@ src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       terminal host: REPL + one-shot + batch + --json
 src/engine-render.ts  the engine's plain, append-only human renderer
                  (over src/view-model.ts + src/attribution.ts + src/tty.ts)
+src/session-source.ts  host SessionSource (in-process + remote HTTP/SSE client)
 src/server.ts    HTTP host: /health, /run (streaming), /sessions,
                  DELETE /sessions/:id, monitor SSE feeds (/events, …)
-src/tui/         the Ink (React) rich terminal client + --monitor dashboard
-                 (eagent-tui; the only place ink/react are imported)
 examples/        worked example extensions
 test/            the full offline suite — every primitive and extension
 ```
@@ -538,10 +508,9 @@ test/            the full offline suite — every primitive and extension
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
 - [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
   the CLI `--json` stream and the HTTP `/run` stream.
-- [`docs/TUI.md`](docs/TUI.md) — the interactive display + the `eagent-tui` rich
-  client: display modes, the `/details`/`/expand`/`/collapse` commands, the Ink
-  client + monitor keys and architecture, the multi-instance `{ url, token }[]`
-  config, and the out-of-CI real-TTY smoke procedure.
+- [`docs/TUI.md`](docs/TUI.md) — the interactive plain-CLI display: display
+  modes, `/details`/`/expand`/`/collapse`, and the shared view-model substrate
+  for a planned web front end.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.
