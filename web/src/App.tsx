@@ -23,7 +23,7 @@ import {
 } from "./api/client.js";
 import { agentStatuses, mergeSessionList } from "./chat/agents.js";
 import { reduceAsk, type AskState } from "./chat/ask-state.js";
-import { newSessionId, planClear, shouldAcceptFrame } from "./chat/session.js";
+import { newSessionId, planClear, planSwitchSession, shouldAcceptFrame } from "./chat/session.js";
 import { JsonView } from "./ui/json-view.js";
 import { Markdown } from "./ui/markdown.js";
 
@@ -197,6 +197,8 @@ export function App() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailModel, setDetailModel] = useState<ViewModel>(() => initialModel("auto"));
   const [showAgents, setShowAgents] = useState(true);
+  /** Banner after switching into an existing server session from Sessions. */
+  const [resumeNote, setResumeNote] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const boundRef = useRef({ session: sessionId, generation });
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -338,12 +340,49 @@ export function App() {
     setTurns([]);
     setAsk(reduceAsk(ask, { type: "clear" }));
     setError(null);
+    setResumeNote(null);
     try {
       await stopSession(token, plan.previousId).catch(() => {});
       await deleteSession(token, plan.previousId).catch(() => {});
     } catch {
       /* best-effort */
     }
+    void refreshSessions().catch(() => {});
+  }
+
+  /**
+   * Bind Chat to an existing session (from Sessions list) so further sends
+   * POST /run with that session id and continue the server conversation.
+   * Local transcript starts clean — the server keeps the prior history.
+   */
+  function switchToSession(targetId: string, opts: { fromMonitor?: boolean } = {}) {
+    if (!targetId) return;
+    if (targetId === sessionId && opts.fromMonitor) {
+      // Already bound — just open Chat.
+      setDetailId(null);
+      go("chat");
+      setResumeNote(`Already on session ${shortId(targetId)}. New messages continue this conversation.`);
+      return;
+    }
+    if (targetId === sessionId) return;
+
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRunning(false);
+
+    const plan = planSwitchSession(sessionId, targetId, generation);
+    setSessionId(plan.currentId);
+    setGeneration(plan.generation);
+    setModel(initialModel(model.mode));
+    setTurns([]);
+    setAsk({ kind: "idle" });
+    setError(null);
+    setInput("");
+    setDetailId(null);
+    setResumeNote(
+      `Continuing session ${shortId(targetId)}. Prior turns live on the server; this view starts fresh and new messages continue that conversation.`,
+    );
+    go("chat");
     void refreshSessions().catch(() => {});
   }
 
@@ -543,6 +582,20 @@ export function App() {
           </div>
         )}
 
+        {resumeNote && (
+          <div className="banner banner-info" role="status">
+            {resumeNote}
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ marginLeft: 8, padding: "0.15rem 0.45rem" }}
+              onClick={() => setResumeNote(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {route === "chat" && (
           <div className="chat-layout">
             <div className="chat-col">
@@ -711,7 +764,12 @@ export function App() {
                       {sessionRows.map((s) => (
                         <li key={s.id} className={`session-item${s.current ? " session-current" : ""}`}>
                           <div className="session-title-row">
-                            <button type="button" className="session-id" onClick={() => setDetailId(s.id)}>
+                            <button
+                              type="button"
+                              className="session-id"
+                              title="Open in Chat and continue this session"
+                              onClick={() => switchToSession(s.id, { fromMonitor: true })}
+                            >
                               {s.id}
                             </button>
                             {s.current && <span className="pill current-pill">this chat</span>}
@@ -724,6 +782,22 @@ export function App() {
                             {" · "}${s.costUsd.toFixed(4)}
                           </div>
                           <div className="session-actions">
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
+                              onClick={() => switchToSession(s.id, { fromMonitor: true })}
+                            >
+                              {s.current ? "Open chat" : "Continue"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
+                              onClick={() => setDetailId(s.id)}
+                            >
+                              Watch
+                            </button>
                             <button
                               type="button"
                               className="btn btn-ghost"

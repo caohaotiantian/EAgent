@@ -440,6 +440,16 @@ a:hover {
   color: var(--text);
 }
 
+.banner-info {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--text-secondary);
+  margin: 0.65rem 1.1rem 0;
+  padding: 0.65rem 0.85rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+}
+
 .banner-auth .row {
   display: flex;
   gap: 0.5rem;

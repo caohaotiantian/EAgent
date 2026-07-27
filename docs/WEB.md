@@ -47,7 +47,9 @@ Layout follows common open-source LLM UIs (Open WebUI, LobeChat, LibreChat):
 - **Tool / reasoning cards** with expand/collapse, status pills, JSON args highlight
 - **Answer** body rendered as lightweight Markdown (code fences, bold, lists, links)
 - **Agents** side panel: live status per `actingId` (root vs sub-agents, tools running/done)
-- **Sessions**: always shows **this chat** session (local or server), tagged `this chat`
+- **Sessions**: always shows **this chat** session (local or server), tagged `this chat`;
+  click a row or **Continue** to bind Chat to that session id (server history continues;
+  local transcript starts clean — no history API yet). **Watch** opens live SSE only.
 
 No extra UI framework — CSS variables + React only under `web/`.
 

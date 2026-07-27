@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { planClear, shouldAcceptFrame, newSessionId } from "./session.js";
+import { planClear, planSwitchSession, shouldAcceptFrame, newSessionId } from "./session.js";
 import { initialModel, reduce, applyControl, type TaggedEvent } from "@eagent/view-model";
 import { reduceAsk } from "./ask-state.js";
 
@@ -35,6 +35,14 @@ test("AC11: Clear mints new session; old binding rejected", () => {
   m = initialModel(m.mode);
   assert.equal(m.sections.length, 0);
   assert.equal(m.mode, "collapsed");
+});
+
+test("planSwitchSession binds target id and bumps generation", () => {
+  const plan = planSwitchSession("aaa", "bbb", 3);
+  assert.equal(plan.previousId, "aaa");
+  assert.equal(plan.currentId, "bbb");
+  assert.equal(plan.generation, 4);
+  assert.equal(shouldAcceptFrame("aaa", 3, plan.currentId, plan.generation), false);
 });
 
 test("AC6: ask dismiss rules", () => {

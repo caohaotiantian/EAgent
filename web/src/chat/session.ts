@@ -22,6 +22,24 @@ export function planClear(currentId: string, generation: number): ClearPlan {
   };
 }
 
+/**
+ * Switch the chat binding to an existing server (or other) session id so the
+ * next POST /run continues that conversation. Bumps generation to drop in-flight
+ * frames from the previous binding. No-op identity change still bumps generation
+ * when `force` is true (caller usually skips if id unchanged).
+ */
+export function planSwitchSession(
+  currentId: string,
+  targetId: string,
+  generation: number,
+): ClearPlan {
+  return {
+    previousId: currentId,
+    currentId: targetId,
+    generation: generation + 1,
+  };
+}
+
 export function shouldAcceptFrame(
   boundSession: string,
   boundGeneration: number,
