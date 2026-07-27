@@ -2,6 +2,7 @@
 
 Slug: `2026-07-23-tui-ink-rebuild`
 Status: closed
+Superseded-by: 2026-07-27-drop-ink-tui (Ink client surface only; plain renderer + monitor substrate retained)
 Closing-commit: `da3efd8`
 Closed-on: 2026-07-23
 Deferred: none

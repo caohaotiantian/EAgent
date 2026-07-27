@@ -1,10 +1,14 @@
 # Implementation — Drop the rich Ink TUI; keep the plain CLI + web substrate
 
 Slug: `2026-07-27-drop-ink-tui`
-Status: L2 closed (ready for L3)
-Date: 2026-07-27
-Design: `docs/design/2026-07-27-drop-ink-tui.md` (L1 closed)
+Status: closed
+Closing-commit: `2d03dfd` (code complete); F closeout: this commit
+Closed-on: 2026-07-27
+Deferred: none
+Design: `docs/design/2026-07-27-drop-ink-tui.md`
 L2-review: rounds 1–3; closed on consecutive clean r2+r3
+L3: phase1 3ee5520; phase2 f3f3197; phase3 2d03dfd
+Date: 2026-07-27
 
 ## 1. Task Index
 

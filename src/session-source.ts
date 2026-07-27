@@ -1,7 +1,7 @@
 /**
- * The `SessionSource` abstraction: one interface a host view consumes — an
- * ordered, attribution-tagged lifecycle event stream plus a control surface
- * (run a turn, answer an elicitation, stop) — with two backends.
+ * The `SessionSource` abstraction: one interface a host or remote client
+ * consumes — an ordered, attribution-tagged lifecycle event stream plus a
+ * control surface (run a turn, answer an elicitation, stop) — with two backends.
  *
  *   - `InProcessSource` wraps a local `Agent`. It tags the agent's hook-bus events
  *     via the shared in-process attribution adapter (`wireEvents`), so concurrent
@@ -45,7 +45,7 @@ export type SourceEvent =
   | { kind: "error"; where: string; message: string }
   | { kind: "action_required"; id: number; question: string; options: string[] | null };
 
-/** The interface the TUI view consumes: an event stream + a bounded control surface. */
+/** The interface a host or remote client consumes: an event stream + a bounded control surface. */
 export interface SessionSource {
   /** Subscribe to the ordered event stream; dispose to unsubscribe. */
   subscribe(listener: (event: SourceEvent) => void): Disposable;

@@ -1,9 +1,13 @@
 # Design — Drop the rich Ink TUI; keep the plain CLI + web substrate
 
 Slug: `2026-07-27-drop-ink-tui`
-Status: L1 closed (ready for L2)
-Date: 2026-07-27
+Status: closed
+Closing-commit: `2d03dfd` (code complete); F closeout: this commit
+Closed-on: 2026-07-27
+Deferred: none (Cycle B web frontend is a separate task, not a deferred Cycle A deliverable)
 L1-review: rounds 1–4; closed on consecutive clean r3+r4 (0 severe / 0 general)
+Full-cycle: L1 closed; L2 closed (r1–r3); L3 phases 1–3 landed; F whole-project review pass
+Date: 2026-07-27
 Supersedes (partial): `docs/design/2026-07-23-tui-ink-rebuild.md` — **only** the
 Ink client / `eagent-tui` / `src/tui/` surface and the ink/react charter exception.
 The shared plain renderer, view-model, attribution, and HTTP/SSE monitor endpoints
@@ -51,7 +55,7 @@ product direction, while the web work still needs the same substrate.
 
 ## 2. Deliverables
 
-- [ ] **D1 — Remove the Ink client surface.** Delete `src/tui/` (including
+- [x] **D1 — Remove the Ink client surface.** Delete `src/tui/` (including
       Ink-only and ink-free helpers that are *not* extracted — e.g. `instance.ts`
       `InstanceClient`, `coalesce.ts`, `app.tsx`, `monitor.tsx`, …), `test/tui/`,
       `test/tui-isolation.test.ts`, the `eagent-tui` bin, `build:tui` / `test:tui`
@@ -60,17 +64,17 @@ product direction, while the web work still needs the same substrate.
       `"test/**/*.test.tsx"` glob from the default `test` script (and `jsx` from
       `tsconfig` if no `.tsx` remains). No remaining import of `ink` or `react`
       anywhere in the tree.
-- [ ] **D2 — Restore the engine zero-dep charter.** Amend CLAUDE.md /
+- [x] **D2 — Restore the engine zero-dep charter.** Amend CLAUDE.md /
       ARCHITECTURE.md / README so the only runtime dependency remains `jiti` (no
       ink/react exception). SEA binary stays Ink-free by construction (it never
       imported `src/tui/`). Replace the deleted isolation suite with a permanent
       offline pin (see D6 / AC1): runtime `dependencies` ⊆ `{ jiti }` and no
       `ink`/`react` imports under `src/` or `test/`.
-- [ ] **D3 — CLI is plain-only.** Keep `wireRendering` → `EngineRenderer` as the
+- [x] **D3 — CLI is plain-only.** Keep `wireRendering` → `EngineRenderer` as the
       sole interactive human path. Remove the startup “run eagent-tui” hint and
       the `shouldSuggestTui` predicate (and its tests). Keep `/details`,
       `/expand`, `/collapse` on the plain renderer.
-- [ ] **D4 — Preserve web substrate (no behavior change).** The **only** retained
+- [x] **D4 — Preserve web substrate (no behavior change).** The **only** retained
       substrate is:
       - `src/view-model.ts`, `src/attribution.ts`, `src/tty.ts` (minus
         `shouldSuggestTui`), `src/engine-render.ts`
@@ -83,14 +87,14 @@ product direction, while the web work still needs the same substrate.
       needed): `InstanceClient` (`instance.ts`), delta coalescing, Ink views,
       monitor.tsx UI, args/main entry. “Preserve web substrate” does **not** mean
       “all former remote-monitor client code survives.”
-- [ ] **D5 — Doc reconciliation.** Update CLAUDE.md, ARCHITECTURE.md, README.md,
+- [x] **D5 — Doc reconciliation.** Update CLAUDE.md, ARCHITECTURE.md, README.md,
       CHANGELOG.md, and **rewrite in place** `docs/TUI.md` (keep the path; no
       rename) so it describes the plain CLI display only and points rich UX at
       “web frontend (planned Cycle B)”, with no `eagent-tui` usage instructions.
       Close the superseded Ink-client claims in the relationship section of this
       doc; do not re-open the closed `2026-07-23` design’s status block beyond a
       supersedes note if needed at F.
-- [ ] **D6 — Green offline gates.** `npm run typecheck`, `npm run typecheck:test`,
+- [x] **D6 — Green offline gates.** `npm run typecheck`, `npm run typecheck:test`,
       `npm test`, `npm run eval`, `npm run build`, and `npm run build:binary` all
       pass with no `build:tui` / `test:tui` requirement. A permanent offline test
       (e.g. `test/zero-dep.test.ts`) enforces AC1 so the charter cannot regress

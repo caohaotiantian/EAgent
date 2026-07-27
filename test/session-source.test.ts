@@ -1,7 +1,7 @@
 /**
- * Phase 3 — the `SessionSource` abstraction (design D2, KDD3, AC5).
+ * The `SessionSource` abstraction (host-level monitor-API client).
  *
- * One interface the TUI view consumes — an ordered, attribution-tagged lifecycle
+ * One interface a host or remote client consumes — an ordered, attribution-tagged lifecycle
  * event stream plus a control surface (run / answer / stop) — with two backends:
  *
  *   - T3.1 `InProcessSource` wraps a local `Agent`; subscribing yields the ordered
