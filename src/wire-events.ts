@@ -3,7 +3,8 @@
  * No I/O, no Node APIs — browser-safe.
  *
  * Input is a parsed JSON object (one JSONL line or SSE data payload), not raw SSE framing.
- * Remote feeds have no per-agent id: actingId === rootId === session (flat transcript).
+ * Prefer wire `actingId`/`rootId` when present (server tags sub-agents); fall
+ * back to session for both (flat transcript on older servers).
  */
 
 import type { Role, StopReason, ToolCallBlock, ToolResult, Usage } from "./kernel/types.js";
@@ -30,7 +31,9 @@ export function wireObjectToSourceEvent(
   p: Record<string, unknown>,
   ctx: WireEventContext,
 ): SourceEvent | undefined {
-  const tag = { actingId: ctx.session, rootId: ctx.session, at: ctx.at };
+  const actingId = typeof p.actingId === "string" && p.actingId ? p.actingId : ctx.session;
+  const rootId = typeof p.rootId === "string" && p.rootId ? p.rootId : ctx.session;
+  const tag = { actingId, rootId, at: ctx.at };
   switch (p.type) {
     case "text_delta":
       return { kind: "text_delta", text: String(p.text ?? ""), ...tag };

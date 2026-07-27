@@ -73,3 +73,15 @@ test("agent_end / usage / error / action_required", () => {
 test("unknown type returns undefined", () => {
   assert.equal(wireObjectToSourceEvent({ type: "nope" }, ctx), undefined);
 });
+
+test("wire actingId/rootId override session fallback (sub-agent nesting)", () => {
+  const t = wireObjectToSourceEvent(
+    { type: "text_delta", text: "child", actingId: "a2", rootId: "a0" },
+    ctx,
+  );
+  assert.equal(t?.kind, "text_delta");
+  if (t?.kind === "text_delta") {
+    assert.equal(t.actingId, "a2");
+    assert.equal(t.rootId, "a0");
+  }
+});

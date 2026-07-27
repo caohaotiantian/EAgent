@@ -35,6 +35,20 @@ elicitation channel over the wire.
 
 ## Canonical event shapes
 
+### Actor tags (optional, additive)
+
+When events are emitted from a live agent run (HTTP `/run` and monitor SSE via
+`wireJsonl`), each common streaming object may also carry:
+
+```json
+{ "actingId": "a0", "rootId": "a0" }
+```
+
+Stable string ids for the leaf acting agent and the run-tree root (same scheme as
+in-process attribution). Sub-agents get a different `actingId` with the same
+`rootId`. Absent on pure `eventToJsonl(...)` unit usage and outside ALS. Clients
+should treat them as optional.
+
 ### `text_delta`
 
 An incremental chunk of assistant text.

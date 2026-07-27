@@ -42,12 +42,21 @@ the wire).
 Layout follows common open-source LLM UIs (Open WebUI, LobeChat, LibreChat):
 
 - **Full-height shell** with a left nav rail (Chat / Sessions) and sticky top bar
-- **Scrollable transcript** with user bubbles vs agent section cards
+- **Scrollable transcript** with **per-turn** user bubbles + agent section cards
 - **Sticky composer** at the bottom (Enter to send, Shift+Enter newline)
-- **Tool / reasoning cards** with expand/collapse and status pills
-- **Monitor** as a session list + optional live detail panel
+- **Tool / reasoning cards** with expand/collapse, status pills, JSON args highlight
+- **Answer** body rendered as lightweight Markdown (code fences, bold, lists, links)
+- **Agents** side panel: live status per `actingId` (root vs sub-agents, tools running/done)
+- **Sessions**: always shows **this chat** session (local or server), tagged `this chat`
 
 No extra UI framework — CSS variables + React only under `web/`.
+
+### Multi-agent status
+
+When the server run is inside an agent ALS context, JSONL/SSE frames carry optional
+`actingId` / `rootId` (see `wireJsonl` in `src/jsonl.ts`). The pure mapper and
+view-model then nest sub-agent tool cards under spawn parents. Older flat streams
+still work (ids fall back to the session id).
 
 ## Auth
 

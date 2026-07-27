@@ -15,7 +15,7 @@
  * same mapper.
  */
 
-import type { Agent } from "./kernel/index.js";
+import { currentActingAgent, currentRootAgent, type Agent } from "./kernel/index.js";
 import type { ContentBlock, Disposable, Message, Role, StopReason, ToolCallBlock, ToolResult, Usage } from "./kernel/types.js";
 
 /** The `(type, payload)` pairs the mapper accepts. As a rest-parameter tuple union,
@@ -82,14 +82,40 @@ export function eventToJsonl(...args: JsonlArgs): JsonlEvent {
  * Register the six common streaming handlers on `agent.hooks`, each emitting its
  * canonical JSONL object, and return their subscriptions for the caller to dispose.
  * The terminal, `error`, and `action_required` events stay wired per front end.
+ *
+ * When handlers run inside an agent ALS context (`currentActingAgent` /
+ * `currentRootAgent`), each object is tagged with stable string `actingId` and
+ * `rootId` so remote clients can nest sub-agent work (same identity scheme as
+ * `src/attribution.ts`). Outside ALS (unit mocks) the canonical object is
+ * emitted unchanged so byte-stable tests keep their golden strings.
  */
 export function wireJsonl(emit: (obj: unknown) => void, agent: Agent): Disposable[] {
+  const ids = new WeakMap<Agent, string>();
+  let counter = 0;
+  const idOf = (a: Agent | undefined): string => {
+    if (!a) return "root";
+    let id = ids.get(a);
+    if (id === undefined) {
+      id = "a" + counter++;
+      ids.set(a, id);
+    }
+    return id;
+  };
+  const withActor = (obj: JsonlEvent): unknown => {
+    const acting = currentActingAgent();
+    const root = currentRootAgent();
+    // No ALS → leave the object byte-identical to eventToJsonl alone.
+    if (!acting && !root) return obj;
+    const rootId = idOf(root ?? acting);
+    const actingId = acting ? idOf(acting) : rootId;
+    return { ...obj, actingId, rootId };
+  };
   return [
-    agent.hooks.on("text_delta", (p) => emit(eventToJsonl("text_delta", p))),
-    agent.hooks.on("reasoning_delta", (p) => emit(eventToJsonl("reasoning_delta", p))),
-    agent.hooks.on("message", (p) => emit(eventToJsonl("message", p))),
-    agent.hooks.on("tool_start", (p) => emit(eventToJsonl("tool_start", p))),
-    agent.hooks.on("tool_end", (p) => emit(eventToJsonl("tool_end", p))),
-    agent.hooks.on("usage", (p) => emit(eventToJsonl("usage", p))),
+    agent.hooks.on("text_delta", (p) => emit(withActor(eventToJsonl("text_delta", p)))),
+    agent.hooks.on("reasoning_delta", (p) => emit(withActor(eventToJsonl("reasoning_delta", p)))),
+    agent.hooks.on("message", (p) => emit(withActor(eventToJsonl("message", p)))),
+    agent.hooks.on("tool_start", (p) => emit(withActor(eventToJsonl("tool_start", p)))),
+    agent.hooks.on("tool_end", (p) => emit(withActor(eventToJsonl("tool_end", p)))),
+    agent.hooks.on("usage", (p) => emit(withActor(eventToJsonl("usage", p)))),
   ];
 }

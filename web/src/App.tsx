@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyControl,
-  bodyLines,
   estTokens,
   headerLine,
   initialModel,
@@ -21,12 +20,21 @@ import {
   saveToken,
   stopSession,
   subscribeSessionEvents,
-  type SessionRow,
 } from "./api/client.js";
+import { agentStatuses, mergeSessionList } from "./chat/agents.js";
 import { reduceAsk, type AskState } from "./chat/ask-state.js";
 import { newSessionId, planClear, shouldAcceptFrame } from "./chat/session.js";
+import { JsonView } from "./ui/json-view.js";
+import { Markdown } from "./ui/markdown.js";
 
 type Route = "chat" | "monitor";
+
+/** One user message + the section index range produced after it. */
+type Turn = {
+  id: string;
+  user: string;
+  sectionFrom: number;
+};
 
 function routeFromHash(): Route {
   const h = location.hash.replace(/^#\/?/, "");
@@ -56,7 +64,6 @@ function SectionCard({
 }: {
   s: Section;
   depth?: number;
-  /** Top-level only: parent drives expand via view-model controls */
   onToggleTop?: () => void;
 }) {
   const [localOpen, setLocalOpen] = useState(!s.collapsed);
@@ -75,12 +82,10 @@ function SectionCard({
         <span className="card-kind">{kindLabel(s)}</span>
         <span className="card-title" title={headerLine(s)}>
           {s.kind === "tool"
-            ? `${s.name}${
-                Object.keys(s.arguments).length > 0
-                  ? ` · ${Object.keys(s.arguments).slice(0, 2).join(", ")}${Object.keys(s.arguments).length > 2 ? "…" : ""}`
-                  : ""
-              }`
+            ? s.name
             : `${estTokens(s.text)} tok`}
+          {s.kind !== "tool" && s.actingId !== s.rootId ? ` · ${shortId(s.actingId)}` : ""}
+          {s.kind === "tool" && s.actingId !== s.rootId ? ` · agent ${shortId(s.actingId)}` : ""}
         </span>
         <span className={`card-status ${st.cls}`}>{st.text}</span>
         <span className="card-status" style={{ color: "var(--muted)" }}>
@@ -89,11 +94,22 @@ function SectionCard({
       </button>
       {open && (
         <div className="card-body">
-          <div className="pre">
-            {bodyLines(s).map((line, i) => (
-              <div key={i}>{line}</div>
-            ))}
-          </div>
+          {s.kind === "answer" ? (
+            <Markdown text={s.text} />
+          ) : s.kind === "reasoning" ? (
+            <div className="pre reasoning-body">{s.text}</div>
+          ) : (
+            <>
+              <div className="tool-label">arguments</div>
+              <JsonView value={s.arguments} />
+              {s.result && (
+                <>
+                  <div className="tool-label">{s.result.isError ? "error output" : "output"}</div>
+                  <div className="pre">{s.result.content}</div>
+                </>
+              )}
+            </>
+          )}
           {s.children.length > 0 && (
             <div className="card-children">
               {s.children.map((c) => (
@@ -112,14 +128,7 @@ function AskFreeText({ onSubmit }: { onSubmit: (t: string) => void }) {
   return (
     <div className="chip-row" style={{ width: "100%" }}>
       <input
-        style={{
-          flex: 1,
-          minWidth: "12rem",
-          padding: "0.45rem 0.65rem",
-          borderRadius: 8,
-          border: "1px solid var(--border)",
-          background: "var(--bg-elevated)",
-        }}
+        className="ask-input"
         value={v}
         onChange={(e) => setV(e.target.value)}
         placeholder="Type your answer…"
@@ -134,6 +143,40 @@ function AskFreeText({ onSubmit }: { onSubmit: (t: string) => void }) {
   );
 }
 
+function AgentPanel({ sections, rootId }: { sections: Section[]; rootId?: string }) {
+  const agents = useMemo(() => agentStatuses(sections, rootId), [sections, rootId]);
+  if (agents.length === 0) {
+    return <div className="agent-empty">No agent activity yet this session.</div>;
+  }
+  return (
+    <ul className="agent-list">
+      {agents.map((a) => (
+        <li key={a.id} className={`agent-item${a.streaming ? " agent-live" : ""}`}>
+          <div className="agent-head">
+            <span className="agent-name">{a.isRoot ? "Root agent" : `Sub-agent`}</span>
+            <code className="agent-id">{shortId(a.id)}</code>
+            {a.streaming ? <span className="pill live">working</span> : <span className="pill">idle</span>}
+          </div>
+          <div className="agent-stats">
+            tools {a.toolsDone} done
+            {a.toolsRunning > 0 ? ` · ${a.toolsRunning} running` : ""}
+            {a.toolsError > 0 ? ` · ${a.toolsError} err` : ""}
+          </div>
+          {a.labels.length > 0 && (
+            <div className="agent-tools">
+              {a.labels.slice(0, 6).map((n) => (
+                <span key={n} className="tool-chip">
+                  {n}
+                </span>
+              ))}
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function App() {
   const [route, setRoute] = useState<Route>(routeFromHash);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -143,14 +186,17 @@ export function App() {
   const [sessionId, setSessionId] = useState(newSessionId);
   const [generation, setGeneration] = useState(0);
   const [model, setModel] = useState<ViewModel>(() => initialModel("auto"));
-  const [userBubbles, setUserBubbles] = useState<{ id: string; text: string }[]>([]);
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ask, setAsk] = useState<AskState>({ kind: "idle" });
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [sessions, setSessions] = useState<
+    Array<{ id: string; running: boolean; usage: { inputTokens: number; outputTokens: number }; costUsd: number }>
+  >([]);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailModel, setDetailModel] = useState<ViewModel>(() => initialModel("auto"));
+  const [showAgents, setShowAgents] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const boundRef = useRef({ session: sessionId, generation });
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -175,13 +221,12 @@ export function App() {
       .catch(() => setAuthRequired(false));
   }, [token]);
 
-  // Auto-scroll transcript when content grows (ChatGPT / Open WebUI pattern)
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
     if (nearBottom || running) el.scrollTop = el.scrollHeight;
-  }, [model.sections, userBubbles, running, ask]);
+  }, [model.sections, turns, running, ask]);
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -195,7 +240,7 @@ export function App() {
   useEffect(() => {
     if (route !== "monitor") return;
     void refreshSessions();
-    const t = setInterval(() => void refreshSessions(), 5000);
+    const t = setInterval(() => void refreshSessions(), 3000);
     const onFocus = () => void refreshSessions();
     window.addEventListener("focus", onFocus);
     return () => {
@@ -203,6 +248,12 @@ export function App() {
       window.removeEventListener("focus", onFocus);
     };
   }, [route, refreshSessions]);
+
+  // Keep monitor list fresh while chatting so current session appears after first run
+  useEffect(() => {
+    if (route !== "chat") return;
+    void refreshSessions().catch(() => {});
+  }, [route, sessionId, running, refreshSessions]);
 
   useEffect(() => {
     if (!detailId) return;
@@ -249,7 +300,10 @@ export function App() {
     if (!text || running) return;
     setInput("");
     setError(null);
-    setUserBubbles((b) => [...b, { id: `${Date.now()}`, text }]);
+    setTurns((t) => [
+      ...t,
+      { id: `${Date.now()}`, user: text, sectionFrom: model.sections.length },
+    ]);
     setRunning(true);
     const ac = new AbortController();
     abortRef.current = ac;
@@ -271,6 +325,7 @@ export function App() {
       setAsk((s) => reduceAsk(s, { type: "stream_end" }));
       abortRef.current = null;
       taRef.current?.focus();
+      void refreshSessions().catch(() => {});
     }
   }
 
@@ -280,7 +335,7 @@ export function App() {
     setSessionId(plan.currentId);
     setGeneration(plan.generation);
     setModel(initialModel(model.mode));
-    setUserBubbles([]);
+    setTurns([]);
     setAsk(reduceAsk(ask, { type: "clear" }));
     setError(null);
     try {
@@ -289,6 +344,7 @@ export function App() {
     } catch {
       /* best-effort */
     }
+    void refreshSessions().catch(() => {});
   }
 
   async function onStop() {
@@ -317,13 +373,18 @@ export function App() {
 
   const mode = model.mode;
   const setMode = (m: DisplayMode) => setModel((prev) => applyControl(prev, { kind: "mode", mode: m }));
-  const topSections = useMemo(() => model.sections, [model.sections]);
-  const empty = userBubbles.length === 0 && topSections.length === 0;
+  const empty = turns.length === 0 && model.sections.length === 0;
+
+  const sessionRows = useMemo(
+    () => mergeSessionList(sessions, sessionId, running),
+    [sessions, sessionId, running],
+  );
 
   const go = (r: Route) => {
     location.hash = r === "monitor" ? "#/monitor" : "#/";
     setRoute(r);
     setSidebarOpen(false);
+    if (r === "monitor") void refreshSessions();
   };
 
   const resizeTa = () => {
@@ -333,8 +394,18 @@ export function App() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   };
 
+  /** Sections belonging to turn i (until next turn or end). */
+  const sectionsForTurn = (i: number): Section[] => {
+    const from = turns[i]!.sectionFrom;
+    const to = i + 1 < turns.length ? turns[i + 1]!.sectionFrom : model.sections.length;
+    return model.sections.slice(from, to);
+  };
+
+  // Orphan sections before first turn (shouldn't happen) — show under agent
+  const orphanSections = turns.length === 0 ? model.sections : model.sections.slice(0, turns[0]!.sectionFrom);
+
   return (
-    <div className={`shell${sidebarOpen ? " sidebar-open" : ""}`}>
+    <div className={`shell${sidebarOpen ? " sidebar-open" : ""}${showAgents && route === "chat" ? " with-agents" : ""}`}>
       <button type="button" className="sidebar-backdrop" aria-label="Close menu" onClick={() => setSidebarOpen(false)} />
 
       <aside className="sidebar">
@@ -356,8 +427,8 @@ export function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <div className="session-chip" title={sessionId}>
-            session {shortId(sessionId)}
+          <div className={`session-chip${running ? " live-chip" : ""}`} title={sessionId}>
+            {running ? "● " : ""}session {shortId(sessionId)}
           </div>
           <div className="token-row">
             <label>API token</label>
@@ -390,7 +461,7 @@ export function App() {
           <div>
             <div className="topbar-title">{route === "chat" ? "Chat" : "Sessions"}</div>
             <div className="topbar-meta">
-              {route === "chat" ? "Streaming transcript · view-model sections" : "Live multi-session monitor"}
+              {route === "chat" ? "Multi-agent transcript · shared view-model" : "Live multi-session monitor"}
             </div>
           </div>
           <div className="topbar-actions">
@@ -401,6 +472,14 @@ export function App() {
             )}
             {route === "chat" && (
               <>
+                <button
+                  type="button"
+                  className={`btn btn-ghost${showAgents ? " btn-active" : ""}`}
+                  onClick={() => setShowAgents((v) => !v)}
+                  title="Toggle agent status panel"
+                >
+                  Agents
+                </button>
                 <select className="select" value={mode} onChange={(e) => setMode(e.target.value as DisplayMode)} title="Display mode">
                   <option value="auto">Auto collapse</option>
                   <option value="full">Expand all</option>
@@ -465,110 +544,153 @@ export function App() {
         )}
 
         {route === "chat" && (
-          <>
-            <div className="transcript" ref={scrollRef}>
-              <div className="transcript-inner">
-                {empty && (
-                  <div className="empty">
-                    <div className="empty-icon">✦</div>
-                    <h2>What should we work on?</h2>
-                    <p>
-                      Messages stream over <code>POST /run</code>. Reasoning, answers, and tools render as collapsible cards — same
-                      view-model as the CLI.
-                    </p>
-                  </div>
-                )}
-
-                {/* Interleave is approximate: users first, then agent stack for the turn.
-                    Multi-turn: all users then cumulative sections — acceptable for v1 polish. */}
-                {userBubbles.map((b) => (
-                  <div key={b.id} className="msg msg-user">
-                    <div className="avatar avatar-user">You</div>
-                    <div className="msg-body">
-                      <div className="msg-label">You</div>
-                      <div className="bubble bubble-user">{b.text}</div>
+          <div className="chat-layout">
+            <div className="chat-col">
+              <div className="transcript" ref={scrollRef}>
+                <div className="transcript-inner">
+                  {empty && (
+                    <div className="empty">
+                      <div className="empty-icon">✦</div>
+                      <h2>What should we work on?</h2>
+                      <p>
+                        Turns stream over <code>POST /run</code>. Sub-agents appear nested when the server tags{" "}
+                        <code>actingId</code> — open <strong>Agents</strong> or <strong>Sessions</strong> for live status.
+                      </p>
                     </div>
-                  </div>
-                ))}
+                  )}
 
-                {topSections.length > 0 && (
-                  <div className="msg">
-                    <div className="avatar avatar-agent">E</div>
-                    <div className="msg-body" style={{ maxWidth: "100%", flex: 1 }}>
-                      <div className="msg-label">EAgent</div>
-                      <div className="stack">
-                        {topSections.map((s, i) => (
-                          <SectionCard
-                            key={s.id}
-                            s={s}
-                            onToggleTop={() =>
-                              setModel((m) =>
-                                applyControl(m, {
-                                  kind: s.collapsed ? "expand" : "collapse",
-                                  n: i + 1,
-                                }),
-                              )
-                            }
-                          />
-                        ))}
+                  {orphanSections.length > 0 && (
+                    <div className="msg">
+                      <div className="avatar avatar-agent">E</div>
+                      <div className="msg-body" style={{ maxWidth: "100%", flex: 1 }}>
+                        <div className="stack">
+                          {orphanSections.map((s, i) => (
+                            <SectionCard
+                              key={s.id}
+                              s={s}
+                              onToggleTop={() =>
+                                setModel((m) =>
+                                  applyControl(m, { kind: s.collapsed ? "expand" : "collapse", n: i + 1 }),
+                                )
+                              }
+                            />
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {ask.kind === "pending" && (
-                  <div className="ask-card">
-                    <h3>Question for you</h3>
-                    <p>{ask.ask.question}</p>
-                    {ask.ask.options && ask.ask.options.length > 0 ? (
-                      <div className="chip-row">
-                        {ask.ask.options.map((o) => (
-                          <button key={o} type="button" className="chip" onClick={() => void onAnswer(o)}>
-                            {o}
-                          </button>
-                        ))}
+                  {turns.map((turn, ti) => {
+                    const secs = sectionsForTurn(ti);
+                    const globalOffset = turn.sectionFrom;
+                    return (
+                      <div key={turn.id} className="turn">
+                        <div className="msg msg-user">
+                          <div className="avatar avatar-user">You</div>
+                          <div className="msg-body">
+                            <div className="msg-label">You</div>
+                            <div className="bubble bubble-user">{turn.user}</div>
+                          </div>
+                        </div>
+                        {(secs.length > 0 || (ti === turns.length - 1 && running)) && (
+                          <div className="msg">
+                            <div className="avatar avatar-agent">E</div>
+                            <div className="msg-body" style={{ maxWidth: "100%", flex: 1 }}>
+                              <div className="msg-label">EAgent</div>
+                              <div className="stack">
+                                {secs.map((s, i) => (
+                                  <SectionCard
+                                    key={s.id}
+                                    s={s}
+                                    onToggleTop={() =>
+                                      setModel((m) =>
+                                        applyControl(m, {
+                                          kind: s.collapsed ? "expand" : "collapse",
+                                          n: globalOffset + i + 1,
+                                        }),
+                                      )
+                                    }
+                                  />
+                                ))}
+                                {ti === turns.length - 1 && running && secs.length === 0 && (
+                                  <div className="thinking-hint">
+                                    <span className="pill live">Thinking</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    ) : (
-                      <AskFreeText onSubmit={(t) => void onAnswer(t)} />
-                    )}
-                  </div>
-                )}
+                    );
+                  })}
+
+                  {ask.kind === "pending" && (
+                    <div className="ask-card">
+                      <h3>Question for you</h3>
+                      <p>{ask.ask.question}</p>
+                      {ask.ask.options && ask.ask.options.length > 0 ? (
+                        <div className="chip-row">
+                          {ask.ask.options.map((o) => (
+                            <button key={o} type="button" className="chip" onClick={() => void onAnswer(o)}>
+                              {o}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <AskFreeText onSubmit={(t) => void onAnswer(t)} />
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
 
-            <div className="composer-wrap">
-              <div className="composer">
-                <textarea
-                  ref={taRef}
-                  value={input}
-                  rows={1}
-                  placeholder="Message EAgent…"
-                  disabled={running || ask.kind === "pending"}
-                  onChange={(e) => {
-                    setInput(e.target.value);
-                    resizeTa();
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      void onSend();
-                    }
-                  }}
-                />
-                <div className="composer-bar">
-                  <span className="composer-hint">Enter to send · Shift+Enter newline</span>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    disabled={running || ask.kind === "pending" || !input.trim()}
-                    onClick={() => void onSend()}
-                  >
-                    Send
-                  </button>
+              <div className="composer-wrap">
+                <div className="composer">
+                  <textarea
+                    ref={taRef}
+                    value={input}
+                    rows={1}
+                    placeholder="Message EAgent…"
+                    disabled={running || ask.kind === "pending"}
+                    onChange={(e) => {
+                      setInput(e.target.value);
+                      resizeTa();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        void onSend();
+                      }
+                    }}
+                  />
+                  <div className="composer-bar">
+                    <span className="composer-hint">Enter to send · Shift+Enter newline</span>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={running || ask.kind === "pending" || !input.trim()}
+                      onClick={() => void onSend()}
+                    >
+                      Send
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </>
+
+            {showAgents && (
+              <aside className="agents-panel">
+                <div className="agents-head">
+                  <h2>Agents</h2>
+                  <span className="muted" style={{ fontSize: "0.75rem" }}>
+                    work status
+                  </span>
+                </div>
+                <AgentPanel sections={model.sections} rootId={model.rootId} />
+              </aside>
+            )}
+          </div>
         )}
 
         {route === "monitor" && (
@@ -578,19 +700,23 @@ export function App() {
                 <div className="panel-head">
                   <h2>Live sessions</h2>
                   <span className="pill" style={{ marginLeft: "auto" }}>
-                    {sessions.length} total
+                    {sessionRows.length} total
                   </span>
                 </div>
                 <div className="panel-body">
-                  {sessions.length === 0 ? (
+                  {sessionRows.length === 0 ? (
                     <div className="empty-list">No sessions yet. Start a chat to create one.</div>
                   ) : (
                     <ul className="session-list">
-                      {sessions.map((s) => (
-                        <li key={s.id} className="session-item">
-                          <button type="button" className="session-id" onClick={() => setDetailId(s.id)}>
-                            {s.id}
-                          </button>
+                      {sessionRows.map((s) => (
+                        <li key={s.id} className={`session-item${s.current ? " session-current" : ""}`}>
+                          <div className="session-title-row">
+                            <button type="button" className="session-id" onClick={() => setDetailId(s.id)}>
+                              {s.id}
+                            </button>
+                            {s.current && <span className="pill current-pill">this chat</span>}
+                            {s.localOnly && <span className="pill">local</span>}
+                          </div>
                           <div className="session-stats">
                             {s.running ? <span className="pill live">running</span> : <span className="pill">idle</span>}
                             {" · "}
@@ -602,6 +728,7 @@ export function App() {
                               type="button"
                               className="btn btn-ghost"
                               style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
+                              disabled={s.localOnly && !s.running}
                               onClick={() => void stopSession(token, s.id).then(refreshSessions)}
                             >
                               Stop
@@ -610,6 +737,7 @@ export function App() {
                               type="button"
                               className="btn btn-ghost"
                               style={{ fontSize: "0.75rem", padding: "0.3rem 0.5rem" }}
+                              disabled={s.localOnly}
                               onClick={() => void deleteSession(token, s.id).then(refreshSessions)}
                             >
                               Forget
@@ -633,6 +761,9 @@ export function App() {
                       Close
                     </button>
                   </div>
+                  <div className="agents-inline">
+                    <AgentPanel sections={detailModel.sections} rootId={detailModel.rootId} />
+                  </div>
                   <div className="detail-stream">
                     {detailModel.sections.length === 0 ? (
                       <div className="empty-list">Waiting for events on this session…</div>
@@ -649,3 +780,4 @@ export function App() {
     </div>
   );
 }
+
