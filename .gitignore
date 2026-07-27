@@ -10,3 +10,4 @@ bin/
 .env
 .env.*
 !.env.example
+web/tsconfig.tsbuildinfo

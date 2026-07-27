@@ -1,7 +1,10 @@
 # Design — Web frontend (TUI feature parity, single-host)
 
 Slug: `2026-07-27-web-frontend`
-Status: L1 closed (ready for L2)
+Status: closed
+Closing-commit: `925bd55`
+Closed-on: 2026-07-27
+Deferred: multi-host monitor; wire actingId; CLI open-url hint
 Date: 2026-07-27
 L1-review: rounds 1–10; closed on consecutive clean r9+r10 (0 severe / 0 general)
 Depends on: `docs/design/2026-07-27-drop-ink-tui.md` (Cycle A closed — plain CLI +
@@ -40,7 +43,7 @@ transcript exist only as a plain append-only CLI and raw HTTP/SSE.
 
 ## 2. Deliverables
 
-- [ ] **D1 — `web/` SPA.** Vite + React + TypeScript app with two primary modes
+- [x] **D1 — `web/` SPA.** Vite + React + TypeScript app with two primary modes
       (v1 **parity cut-line** — see §3):
       - **Chat / transcript:** client-generated session id (UUID); multi-turn
         accumulation with user “clear”; stream a turn via **`POST /run` JSONL
@@ -50,31 +53,31 @@ transcript exist only as a plain append-only CLI and raw HTTP/SSE.
       - **Monitor:** single-host `GET /sessions` list (`id`, `running`, `usage`,
         `costUsd`); open detail via per-session SSE; stop
         (`POST /sessions/:id/stop`); forget (`DELETE /sessions/:id`) when idle.
-- [ ] **D2 — Browser API client + pure wire mapper.** Fetch-based client for
+- [x] **D2 — Browser API client + pure wire mapper.** Fetch-based client for
       REST + **chat JSONL** + **monitor SSE** (KDD4/KDD5). Export a **pure**
       `frameToTaggedEvent` (or equivalent) from a host-shared pure module that
       both Node `RemoteSource` and the web client import — **no** private
       method copy. Offline tests pin the mapper once.
-- [ ] **D3 — Shared pure view-model.** SPA folds `src/view-model.ts`
+- [x] **D3 — Shared pure view-model.** SPA folds `src/view-model.ts`
       (`initialModel`, `reduce`, `applyControl`). DOM renders from `Section`
       fields; CLI helpers `headerLine`/`bodyLines` are optional, not the UI
       contract. Web must **not** import `session-source` (Node http),
       `attribution` (ALS), `server`, or `cli`.
-- [ ] **D4 — Static hosting on `eagent-serve`.** Zero new engine runtime deps.
+- [x] **D4 — Static hosting on `eagent-serve`.** Zero new engine runtime deps.
       API routes first; **static GET assets + SPA `index.html` are auth-exempt**
       (KDD9), like `/health`. SPA fallback for unmatched GETs that are not API
       prefixes. Path-traversal denied. Missing web root → soft hint, API still
       works. Dev: Vite proxy to API (forwards `Authorization`; no prod CORS).
-- [ ] **D5 — Auth UX.** `/health` → if `auth: "required"`, prompt for token;
+- [x] **D5 — Auth UX.** `/health` → if `auth: "required"`, prompt for token;
       store in **`sessionStorage` only** (KDD10); send `Authorization: Bearer`
       on all API/SSE/JSONL requests. Document XSS→token risk + yolo server
       authority in `docs/WEB.md` + SECURITY cross-link.
-- [ ] **D6 — Build/test/docs.** Root scripts `build:web`, `dev:web`, `test:web`
+- [x] **D6 — Build/test/docs.** Root scripts `build:web`, `dev:web`, `test:web`
       (web tests live under `web/`, **not** root `test/` so zero-dep scan stays
       React-free). Offline engine tests for static serve + pure mapper.
       New **`docs/WEB.md`**; update `docs/TUI.md` to point rich UI at web;
       README / CLAUDE / ARCHITECTURE / CHANGELOG.
-- [ ] **D7 — Quality budget.** Gzipped production assets ceiling (KDD7); ACCEPT
+- [x] **D7 — Quality budget.** Gzipped production assets ceiling (KDD7); ACCEPT
       fails if exceeded. Text-safe DOM rendering of model/tool strings (no
       `dangerouslySetInnerHTML` of untrusted content).
 
