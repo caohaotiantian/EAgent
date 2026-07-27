@@ -41,7 +41,10 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { dirname, extname, join, normalize, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Agent, currentRootAgent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
@@ -67,6 +70,9 @@ export interface ServeOptions extends AgentHostOptions {
    *  before falling back to proceed-with-assumption. Default 120 s; a tiny
    *  value keeps tests fast. */
   askTimeoutMs?: number;
+  /** Directory of built web SPA assets (`index.html`, js/css). Defaults to
+   *  `EAGENT_WEB_ROOT` or `<package>/web/dist`. Missing root is soft-fail. */
+  webRoot?: string;
 }
 
 const DEFAULT_MAX_BODY = 1024 * 1024;
@@ -160,6 +166,7 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
 
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
+  const webRoot = resolveWebRoot(opts.webRoot);
 
   // No token means /run and DELETE /sessions are unauthenticated, and the agent
   // is built with yolo (every capability auto-granted, including shell:exec).
@@ -218,9 +225,22 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
     // uncaught exception and takes the whole process down; route(...).catch only
     // catches promise rejections, not EventEmitter errors.
     res.on("error", () => {});
-    route(req, res, built.agent, built.host.list(), sessions, running, sessionlessRoots, { token, maxBody }, elicit, askTimeoutMs, built.config, costUsdFor, hasLiveJob).catch((err) =>
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }),
-    );
+    route(
+      req,
+      res,
+      built.agent,
+      built.host.list(),
+      sessions,
+      running,
+      sessionlessRoots,
+      { token, maxBody },
+      elicit,
+      askTimeoutMs,
+      built.config,
+      costUsdFor,
+      hasLiveJob,
+      webRoot,
+    ).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
   });
 
   // Idempotent teardown: a second close (e.g. a second signal) must not re-emit
@@ -259,16 +279,32 @@ async function route(
   config: Config,
   costUsdFor: (agent: Agent) => number,
   hasLiveJob: (agent: Agent) => boolean,
+  webRoot: string | undefined,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
+  const method = req.method ?? "GET";
 
-  // /health is always open (for liveness probes); everything else needs auth
-  // when a token is configured.
-  if (req.method === "GET" && url.pathname === "/health") {
+  // /health is always open (for liveness probes).
+  if (method === "GET" && url.pathname === "/health") {
     sendJson(res, 200, { ok: true, model: template.model, extensions, sessions: sessions.size, auth: security.token ? "required" : "open" });
     return;
   }
 
+  // Auth-exempt static SPA GET (KDD9): boot the UI without a token, then prompt.
+  // Reserved API prefixes never fall through to static. Use the raw request path
+  // (not url.pathname) so ".." segments are not normalized away by URL().
+  const rawPath = (req.url ?? "/").split("?")[0] ?? "/";
+  if (method === "GET" && !isApiPath(rawPath) && !isApiPath(url.pathname)) {
+    if (tryServeStatic(res, rawPath, webRoot)) return;
+    // Missing web root: soft hint on `/` only; other non-API GETs fall through to auth/404.
+    if (rawPath === "/" || rawPath === "") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end("EAgent HTTP API is up. Build the web UI with `npm run build:web` (see docs/WEB.md).\n");
+      return;
+    }
+  }
+
+  // Everything else (API + unknown paths) requires Bearer when a token is set.
   if (security.token && !authorized(req, security.token)) {
     sendJson(res, 401, { error: "unauthorized; provide Authorization: Bearer <token>" });
     return;
@@ -747,6 +783,90 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
   if (res.headersSent) return; // the stream already owns this response; never re-writeHead
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+/** API paths that must never be SPA-fallbacked or served as static files. */
+export function isApiPath(pathname: string): boolean {
+  if (pathname === "/health" || pathname === "/run" || pathname === "/answer" || pathname === "/events") return true;
+  if (pathname === "/sessions" || pathname.startsWith("/sessions/")) return true;
+  return false;
+}
+
+/** Resolve web asset root from opts / env / package-relative default. */
+export function resolveWebRoot(explicit?: string): string | undefined {
+  const raw = explicit ?? process.env.EAGENT_WEB_ROOT;
+  if (raw) {
+    const abs = resolve(raw);
+    return existsSync(abs) ? abs : undefined;
+  }
+  // Default: <repo-or-package>/web/dist next to the compiled server or source.
+  const here = dirname(fileURLToPath(import.meta.url));
+  // dist/server.js → ../web/dist; src/server.ts via tsx → ../web/dist
+  const candidates = [join(here, "..", "web", "dist"), join(process.cwd(), "web", "dist")];
+  for (const c of candidates) {
+    if (existsSync(c)) return resolve(c);
+  }
+  return undefined;
+}
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".map": "application/json",
+  ".woff2": "font/woff2",
+};
+
+/**
+ * Serve a file under webRoot or SPA index.html. Returns true if a response was
+ * written. Path traversal outside webRoot is denied (false → caller continues).
+ */
+export function tryServeStatic(res: ServerResponse, pathname: string, webRoot: string | undefined): boolean {
+  if (!webRoot) return false;
+  const root = resolve(webRoot);
+  // Decode and normalize; reject null bytes.
+  let rel = decodeURIComponent(pathname.split("?")[0] ?? "/");
+  if (rel.includes("\0")) return false;
+  if (rel === "/" || rel === "") rel = "index.html";
+  // Never pass an absolute segment to join (it would discard root on POSIX).
+  rel = rel.replace(/^\/+/, "");
+  if (rel.includes("..") || rel.startsWith("..") || sep + rel === sep) {
+    // Explicit reject of parent-segment traversal before join.
+    sendJson(res, 400, { error: "invalid path" });
+    return true;
+  }
+  const candidate = resolve(root, rel);
+  if (!candidate.startsWith(root + sep) && candidate !== root) {
+    sendJson(res, 400, { error: "invalid path" });
+    return true;
+  }
+  let file = candidate;
+  try {
+    if (existsSync(file) && statSync(file).isDirectory()) {
+      file = join(file, "index.html");
+    }
+    if (existsSync(file) && statSync(file).isFile()) {
+      const body = readFileSync(file);
+      const type = MIME[extname(file).toLowerCase()] ?? "application/octet-stream";
+      res.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
+      res.end(body);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  // SPA fallback: non-file, non-API GET → index.html
+  const index = join(root, "index.html");
+  if (existsSync(index) && statSync(index).isFile()) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+    res.end(readFileSync(index));
+    return true;
+  }
+  return false;
 }
 
 /** A loopback bind address (off-box unreachable): 127.0.0.1, ::1, or localhost. */
