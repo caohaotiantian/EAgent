@@ -24,11 +24,15 @@ import type { DecisionChoice, DecisionRequest, Logger, UI } from "eagent";
 
 import { readdirSync } from "node:fs";
 
+import { TODO_ACCESSOR_KEY } from "eagent/extensions/todo";
+
 import { subscribe } from "./bridge.js";
+import { applyMode, type Mode } from "./modes.js";
 import { initialHistory, record, type HistoryState } from "./input/history.js";
 import { initialState, reduce, type TranscriptState } from "./model/transcript.js";
 import { envFromProcess, refusalReason } from "./tty.js";
 import { App, type PendingQuestion } from "./ui/App.js";
+import type { Task } from "./ui/Status.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 
 const USAGE = `EAgent — a minimalist agent with a tiny core and Emacs-grade extensibility
@@ -135,6 +139,27 @@ async function main(): Promise<void> {
   registerHostCommands(commands, host, agent);
   await agent.hooks.emit("session_start", {});
 
+  // Permission modes drive the capability layer directly. `--yolo` starts in the
+  // matching mode so the flag and the indicator cannot disagree.
+  let modeGrants: { dispose: () => void }[] = [];
+  const setMode = (m: Mode): void => {
+    modeGrants = applyMode(
+      m,
+      {
+        setFallback: (d) => agent.capabilities.setFallback(d),
+        grant: (p) => agent.capabilities.grant(p),
+        setPlanMode: (on) => host.storeFor("planmode").set("enabled", on),
+      },
+      modeGrants,
+    );
+  };
+
+  /** The live checklist, read through the accessor rather than by parsing /todos. */
+  const readTasks = (): Task[] => {
+    const accessor = host.storeFor("todo").get<(a: typeof agent) => Task[]>(TODO_ACCESSOR_KEY);
+    return typeof accessor === "function" ? accessor(agent) : [];
+  };
+
   let state: TranscriptState = initialState();
   let repaint: (s: TranscriptState) => void = () => {};
   const unsubscribe = subscribe(agent, {
@@ -184,6 +209,10 @@ async function main(): Promise<void> {
     const [s, setS] = React.useState(state);
     const [hist, setHist] = React.useState<HistoryState>(initialHistory());
     const [pending, setPending] = React.useState<PendingQuestion | null>(null);
+    const [mode, setModeState] = React.useState<Mode>(args.yolo ? "yolo" : "manual");
+    // Re-read on every repaint: the model replaces the whole list each turn, so
+    // there is nothing to subscribe to and nothing to keep in sync.
+    const tasks = readTasks();
     React.useEffect(() => {
       repaint = setS;
       openDialog = (q) =>
@@ -213,6 +242,12 @@ async function main(): Promise<void> {
             void submit(text);
           }}
           pending={pending}
+          mode={mode}
+          onModeChange={(m) => {
+            setMode(m);
+            setModeState(m);
+          }}
+          tasks={tasks}
           suggestions={{
             commands: () => commands.list().map((x) => ({ name: x.name, description: x.description })),
             readDir: (dir) =>

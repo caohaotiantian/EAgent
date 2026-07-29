@@ -53,6 +53,10 @@ export interface TranscriptState {
   seq: number;
   /** Cumulative tokens reported by `usage`, for the status line. */
   tokens: number;
+  /** How many leading items are finalised. Monotonic, advanced only at
+   *  `agent_end`, so the CURRENT turn stays repaintable while it runs and a
+   *  committed item can never return to the live tail. */
+  committed: number;
 }
 
 export type TranscriptEvent =
@@ -71,7 +75,7 @@ export type TranscriptEvent =
 export type Tagged = TranscriptEvent & { actingId: string; at: number };
 
 export function initialState(): TranscriptState {
-  return { items: [], running: false, run: 0, seq: 0, tokens: 0 };
+  return { items: [], running: false, run: 0, seq: 0, tokens: 0, committed: 0 };
 }
 
 const isText = (i: Item): i is TextItem => i.kind !== "tool";
@@ -193,6 +197,9 @@ export function reduce(prev: TranscriptState, ev: Tagged): TranscriptState {
     case "agent_end":
       for (const it of next.items) if (it.status === "streaming") it.status = "done";
       next.running = false;
+      // The turn is over: everything it produced is final and can be written to
+      // scrollback once and never touched again.
+      next.committed = next.items.length;
       break;
   }
 
@@ -200,15 +207,20 @@ export function reduce(prev: TranscriptState, ev: Tagged): TranscriptState {
 }
 
 /**
- * Split the transcript at the boundary Ink's `<Static>` needs: everything before
- * the first still-streaming item is finished for good and can be committed to
- * scrollback; the rest is the live tail that repaints. A finished item can never
- * re-enter the tail, which is the invariant `<Static>` depends on.
+ * Split the transcript at the boundary Ink's `<Static>` needs. Everything from a
+ * COMPLETED turn is committed to scrollback and never repainted; the current turn
+ * is the live tail.
+ *
+ * Committing per TURN rather than per item is deliberate. A card committed the
+ * instant it finished could never be expanded again, so a display toggle like
+ * Ctrl+O would be unable to affect the work being watched. Keeping the in-flight
+ * turn live costs one bounded repaint region and buys that back.
  */
 export function partition(state: TranscriptState): { committed: Item[]; live: Item[] } {
-  const firstOpen = state.items.findIndex((i) => i.status === "streaming");
-  if (firstOpen === -1) return { committed: state.items, live: [] };
-  return { committed: state.items.slice(0, firstOpen), live: state.items.slice(firstOpen) };
+  // Idle between turns: everything is final, including a prompt typed but not yet
+  // run, so nothing repaints and the session costs nothing to hold open.
+  const upto = state.running ? state.committed : state.items.length;
+  return { committed: state.items.slice(0, upto), live: state.items.slice(upto) };
 }
 
 /** Char-derived token estimate (~4 chars/token). Labelled an estimate on screen. */

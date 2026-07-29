@@ -18,8 +18,10 @@ import { useEffect, useState, type ReactElement } from "react";
 
 import type { HistoryState } from "../input/history.js";
 import type { SuggestContext } from "../input/suggest.js";
+import { cycle, type Mode } from "../modes.js";
 import { partition, type TranscriptState } from "../model/transcript.js";
 import { Dialog, type Choice } from "./Dialog.js";
+import { Status, TaskList, type Task } from "./Status.js";
 import { ItemView } from "./items.js";
 import { Prompt } from "./Prompt.js";
 
@@ -45,6 +47,11 @@ export interface AppProps {
   /** A modal question awaiting an answer — a permission ask or an elicitation.
    *  While one is open it owns the keyboard and the prompt is hidden. */
   pending?: PendingQuestion | null;
+  /** The active permission mode, and the sink for Shift+Tab. */
+  mode?: Mode;
+  onModeChange?: (m: Mode) => void;
+  /** Read fresh each render — the model rewrites the whole list per turn. */
+  tasks?: Task[];
 }
 
 /** A question the agent is blocked on. `detail` renders the tool arguments. */
@@ -71,9 +78,14 @@ export function App({
   onSubmit,
   suggestions,
   pending,
+  mode = "manual",
+  onModeChange,
+  tasks = [],
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const [tick, setTick] = useState(0);
+  const [showTasks, setShowTasks] = useState(true);
+  const [verbose, setVerbose] = useState(false);
 
   // The spinner is the only thing driving repaints while a tool runs, so it is
   // stopped the moment the turn ends — an idle TUI must be completely quiet.
@@ -103,7 +115,18 @@ export function App({
     if (key.ctrl && input === "d" && !state.running) {
       onExit();
       exit();
+      return;
     }
+    // Shift+Tab cycles the permission mode. Ink reports it as tab with shift.
+    if (key.tab && key.shift) {
+      onModeChange?.(cycle(mode));
+      return;
+    }
+    if (key.ctrl && input === "t") {
+      setShowTasks((v) => !v);
+      return;
+    }
+    if (key.ctrl && input === "o") setVerbose((v) => !v);
   });
 
   const { committed, live } = partition(state);
@@ -114,8 +137,10 @@ export function App({
       <Static items={committed}>{(item) => <ItemView key={item.id} item={item} />}</Static>
 
       {live.map((item) => (
-        <ItemView key={item.id} item={item} live />
+        <ItemView key={item.id} item={item} live verbose={verbose} />
       ))}
+
+      {showTasks ? <TaskList tasks={tasks} /> : null}
 
       {state.running ? (
         <Box marginTop={1}>
@@ -127,10 +152,14 @@ export function App({
         </Box>
       ) : (
         <Box marginTop={1}>
-          <Text dimColor>
-            {status.model} · {status.provider}
-            {status.live ? "" : " (offline mock)"} · ctrl+c to exit
-          </Text>
+          <Status
+            model={status.model}
+            provider={status.provider}
+            live={status.live}
+            mode={mode}
+            tokens={state.tokens}
+            verbose={verbose}
+          />
         </Box>
       )}
 

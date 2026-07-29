@@ -151,15 +151,34 @@ test("usage updates the running token total", () => {
 
 // -- the <Static> invariant --------------------------------------------------
 
-test("AC10: partition commits everything before the first streaming item", () => {
+test("AC10: while a turn runs, the whole turn is the live tail", () => {
   const s = fold([
     { kind: "user", text: "go" },
+    { kind: "agent_start" },
     { kind: "text_delta", text: "working" },
   ]);
 
   const { committed, live } = partition(s);
-  assert.deepEqual(texts(committed), ["go"]);
-  assert.deepEqual(texts(live), ["working"]);
+  assert.deepEqual(texts(committed), [], "nothing from this turn has been finalised");
+  assert.deepEqual(texts(live), ["go", "working"], "so all of it can still repaint");
+});
+
+test("AC10: a finished turn commits, and the next turn is live on its own", () => {
+  const first = fold([
+    { kind: "user", text: "one" },
+    { kind: "agent_start" },
+    { kind: "text_delta", text: "answer one" },
+    { kind: "agent_end", reason: "end_turn" },
+  ]);
+  const second = [
+    { kind: "user" as const, text: "two" },
+    { kind: "agent_start" as const },
+    { kind: "text_delta" as const, text: "answer two" },
+  ].reduce((s, e) => reduce(s, { actingId: ROOT, ...e, at: ++clock }), first);
+
+  const { committed, live } = partition(second);
+  assert.deepEqual(texts(committed), ["one", "answer one"], "the finished turn is in scrollback");
+  assert.deepEqual(texts(live), ["two", "answer two"], "the new turn repaints");
 });
 
 test("AC10: with nothing streaming the whole transcript is committed", () => {

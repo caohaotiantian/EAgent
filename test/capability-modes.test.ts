@@ -267,3 +267,14 @@ test("a rejecting decide() surfaces as a rejection, not an unhandled one", async
 
   assert.deepEqual(unhandled, [], "the .finally() chain must not orphan the rejection");
 });
+
+test("setFallback writes an audit entry — a policy change is never silent", () => {
+  const caps = new CapabilityManager({ fallback: "ask" });
+
+  caps.setFallback("allow");
+  caps.setFallback("deny");
+
+  const policy = caps.audit().filter((a) => a.source === "setFallback");
+  assert.equal(policy.length, 2, "both switches are recorded");
+  assert.deepEqual(policy.map((a) => a.decision), ["allow", "deny"]);
+});

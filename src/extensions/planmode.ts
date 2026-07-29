@@ -20,8 +20,9 @@
 
 import type { ExtensionAPI } from "../kernel/extension.js";
 
-/** Store key for the plan-mode on/off flag. */
-const ENABLED_KEY = "enabled";
+/** Store key for the plan-mode on/off flag. Exported so a front end can read the
+ *  current mode; the flag is already store-backed, so no accessor is needed. */
+export const ENABLED_KEY = "enabled";
 
 /**
  * The policy knob. A tool is treated as mutating if it declares any of these

@@ -18,7 +18,7 @@ function tail(text: string, n: number): string[] {
   return lines.slice(-n);
 }
 
-function ToolCard({ item, live }: { item: ToolItem; live: boolean }): ReactElement {
+function ToolCard({ item, live, verbose }: { item: ToolItem; live: boolean; verbose: boolean }): ReactElement {
   const mark = item.status === "error" ? "✗" : item.status === "streaming" ? "…" : "✓";
   const color = item.status === "error" ? "red" : item.status === "streaming" ? "yellow" : "green";
   const summary = argSummary(item.arguments);
@@ -42,6 +42,16 @@ function ToolCard({ item, live }: { item: ToolItem; live: boolean }): ReactEleme
             </Text>
           ))
         : null}
+      {/* Ctrl+O reveals the full result for a SUCCEEDED call too — the detail a
+          collapsed card hides. An error always shows its first line. */}
+      {verbose && item.result && !item.result.isError
+        ? tail(item.result.content, 20).map((l, n) => (
+            <Text key={n} dimColor>
+              {"  "}
+              {l}
+            </Text>
+          ))
+        : null}
       {item.status === "error" && item.result ? (
         <Text color="red">
           {"  "}
@@ -52,8 +62,16 @@ function ToolCard({ item, live }: { item: ToolItem; live: boolean }): ReactEleme
   );
 }
 
-export function ItemView({ item, live = false }: { item: Item; live?: boolean }): ReactElement {
-  if (item.kind === "tool") return <ToolCard item={item} live={live} />;
+export function ItemView({
+  item,
+  live = false,
+  verbose = false,
+}: {
+  item: Item;
+  live?: boolean;
+  verbose?: boolean;
+}): ReactElement {
+  if (item.kind === "tool") return <ToolCard item={item} live={live} verbose={verbose} />;
 
   if (item.kind === "user") {
     return (
@@ -72,7 +90,7 @@ export function ItemView({ item, live = false }: { item: Item; live?: boolean })
   if (item.kind === "reasoning") {
     // Finished reasoning collapses to a header: it is context for the answer,
     // not the answer, and a long chain would otherwise flood the window.
-    if (item.status !== "streaming") {
+    if (item.status !== "streaming" && !verbose) {
       return (
         <Text dimColor>
           ◆ Reasoning · ~{estTokens(item.text)} tok
