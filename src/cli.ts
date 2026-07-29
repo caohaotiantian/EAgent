@@ -34,8 +34,8 @@ Usage: eagent-headless [options]
 
 ${OPTIONS_HELP}
 
-This entry is non-interactive: it reads --eval or piped stdin and exits. The
-interactive TUI lives in the \`tui/\` package and is not part of this build yet.
+This entry is non-interactive: it reads --eval or piped stdin and exits. For the
+interactive terminal UI, install the \`eagent\` package (npm i -g eagent).
 With no API key, EAgent runs the deterministic offline mock provider.`;
 
 const C = {
@@ -123,7 +123,7 @@ export async function runHeadless(argv: string[] = process.argv.slice(2)): Promi
       // block on a stream that will not close — a silent hang with no prompt.
       // This entry is machine-only; say so and exit rather than appear frozen.
       console.error(C.yellow("This entry is non-interactive: pass --eval <text> or pipe stdin."));
-      console.error(C.dim("The interactive TUI (tui/ package) is not part of this build yet."));
+      console.error(C.dim("For the interactive terminal UI: npm i -g eagent"));
       exitCode = 2;
     } else {
       // Piped, non-interactive stdin: treat each line as a command or a turn.
@@ -220,9 +220,9 @@ async function readVersion(): Promise<string> {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version?: string };
-    return `eagent ${pkg.version ?? "unknown"}`;
+    return `@eagent/core ${pkg.version ?? "unknown"}`;
   } catch {
-    return "eagent unknown";
+    return "@eagent/core unknown";
   }
 }
 

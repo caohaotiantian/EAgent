@@ -12,7 +12,7 @@
  */
 
 import { Box, Text, useInput } from "ink";
-import { useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 
 import {
   initialEditor,
@@ -45,6 +45,14 @@ export interface PromptProps {
   /** Ctrl+G: hand the buffer to $EDITOR and resolve with what came back.
    *  Injected so tests never spawn a process. */
   externalEdit?: (text: string) => Promise<string | null>;
+  /** Raised whenever the suggestion popup opens or closes. App needs it because
+   *  Ink fans every keypress to EVERY mounted handler with no way to stop
+   *  propagation, so Shift+Tab would otherwise both accept a completion and
+   *  cycle the permission mode. */
+  onPopupChange?: (open: boolean) => void;
+  /** The draft, lifted so it survives the prompt being unmounted (Ctrl+O). */
+  draft?: string;
+  onDraftChange?: (text: string) => void;
 }
 
 export function Prompt({
@@ -55,19 +63,28 @@ export function Prompt({
   disabled = false,
   suggestions,
   externalEdit,
+  onPopupChange,
+  draft,
+  onDraftChange,
 }: PromptProps): ReactElement {
-  const [ed, setEd] = useState<EditorState>(() => initialEditor());
+  const [ed, setEd] = useState<EditorState>(() => initialEditor(draft ?? ""));
   const [search, setSearch] = useState<SearchState | null>(null);
   const [pick, setPick] = useState(0);
   const [dismissed, setDismissed] = useState(false);
 
-  const apply = (a: Action): void => setEd((s) => reduceEditor(s, a));
+  const apply = (a: Action): void =>
+    setEd((s) => {
+      const next = reduceEditor(s, a);
+      onDraftChange?.(next.text);
+      return next;
+    });
 
   // Recomputed every render from the buffer, so the popup can never disagree
   // with what is typed — there is no separate popup state to fall out of sync.
   const trigger = suggestions && !dismissed ? findTrigger(ed.text, ed.cursor) : null;
   const hits = trigger && suggestions ? suggest(trigger, suggestions) : [];
   const popupOpen = hits.length > 0;
+  useEffect(() => onPopupChange?.(popupOpen), [popupOpen, onPopupChange]);
   const chosen = hits[Math.min(pick, hits.length - 1)];
 
   const take = (): void => {
@@ -148,6 +165,7 @@ export function Prompt({
         if (text === "") return;
         onSubmit(text);
         setEd(initialEditor());
+        onDraftChange?.("");
         return;
       }
       if (key.ctrl && input === "j") return apply({ kind: "newline" });
@@ -208,12 +226,20 @@ export function Prompt({
 
         const trailing = /[\r\n]$/.test(input);
         const normalized = input.replace(/[\r\n]+$/, "").replace(/\r\n?/g, "\n");
-        if (normalized) apply({ kind: "insert", text: normalized });
+        // Submit what the REDUCER produces. Insert happens at the cursor, so
+        // re-deriving the text by concatenation sends the wrong string whenever
+        // the cursor is not at the end of the buffer.
+        const after = normalized ? reduceEditor(ed, { kind: "insert", text: normalized }) : ed;
+        if (normalized) {
+          setEd(after);
+          onDraftChange?.(after.text);
+        }
         if (trailing) {
-          const text = (ed.text + normalized).trim();
+          const text = after.text.trim();
           if (text !== "") {
             onSubmit(text);
             setEd(initialEditor());
+            onDraftChange?.("");
           }
         }
       }

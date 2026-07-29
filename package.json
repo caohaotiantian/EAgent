@@ -48,7 +48,8 @@
     "./providers/openai": "./dist/providers/openai.js",
     "./providers/gemini": "./dist/providers/gemini.js",
     "./providers/cassette": "./dist/providers/cassette.js",
-    "./cli": "./dist/cli.js"
+    "./cli": "./dist/cli.js",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

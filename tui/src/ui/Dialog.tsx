@@ -29,6 +29,9 @@ export interface DialogProps<T> {
   detail?: string;
   /** Free-text answers are allowed (the ask tool); typing switches to a field. */
   allowFreeText?: boolean;
+  /** Answer used when the dialog is cancelled with Esc. A permission ask passes
+   *  a value that denies; an elicitation passes its "no answer" sentinel. */
+  cancelValue?: T;
 }
 
 /**
@@ -45,7 +48,14 @@ export function sanitize(text: string, max = 400): string {
   return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
 
-export function Dialog<T>({ question, choices, onAnswer, detail, allowFreeText = false }: DialogProps<T>): ReactElement {
+export function Dialog<T>({
+  question,
+  choices,
+  onAnswer,
+  detail,
+  allowFreeText = false,
+  cancelValue,
+}: DialogProps<T>): ReactElement {
   const [index, setIndex] = useState(0);
   const [free, setFree] = useState<string | null>(null);
 
@@ -63,6 +73,13 @@ export function Dialog<T>({ question, choices, onAnswer, detail, allowFreeText =
       return;
     }
 
+    // Esc and Ctrl+C cancel. A modal with no escape hatch is a trap: App's
+    // handler is inert while one is open, and exitOnCtrlC is off, so without
+    // this the only way out of a permission prompt is to answer it.
+    if (key.escape || (key.ctrl && input === "c")) {
+      if (cancelValue !== undefined) onAnswer(cancelValue);
+      return;
+    }
     if (key.upArrow) return setIndex((i) => (i === 0 ? choices.length - 1 : i - 1));
     if (key.downArrow) return setIndex((i) => (i + 1) % choices.length);
     if (key.return) {
@@ -70,13 +87,15 @@ export function Dialog<T>({ question, choices, onAnswer, detail, allowFreeText =
       if (chosen) onAnswer(chosen.value);
       return;
     }
-    // A digit picks a choice directly — faster than arrowing for a 3-way answer.
-    const n = Number(input);
-    if (Number.isInteger(n) && n >= 1 && n <= choices.length) {
-      onAnswer(choices[n - 1]!.value);
-      return;
+    // Free text wins when it is allowed: an elicitation answer may legitimately
+    // begin with a digit, and shadowing it would make that answer untypeable.
+    if (allowFreeText && input && !key.ctrl && !key.meta) return setFree(input);
+    // Otherwise a single digit picks a choice — faster than arrowing for a
+    // three-way answer. Matched strictly, since Number() also accepts "1e0".
+    if (/^[1-9]$/.test(input)) {
+      const chosen = choices[Number(input) - 1];
+      if (chosen) onAnswer(chosen.value);
     }
-    if (allowFreeText && input && !key.ctrl && !key.meta) setFree(input);
   });
 
   if (free !== null) {

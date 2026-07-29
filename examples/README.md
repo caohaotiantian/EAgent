@@ -20,4 +20,4 @@ the design rationale is in [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 These examples import the kernel by relative path (`../../src/kernel/...`)
 because they live inside this repo. An installed extension would import from the
-published package instead (`import { defineTool } from "eagent"`).
+published package instead (`import { defineTool } from "@eagent/core"`).

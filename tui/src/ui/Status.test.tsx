@@ -105,7 +105,7 @@ test("AC13: Shift+Tab cycles the mode", async () => {
   stdin.write("\x1b[Z"); // Shift+Tab
   await tick();
 
-  assert.deepEqual(modes, ["acceptEdits"]);
+  assert.deepEqual(modes, ["plan"]);
 });
 
 test("AC13: Ctrl+T hides and shows the task list", async () => {

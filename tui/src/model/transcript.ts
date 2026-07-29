@@ -144,6 +144,10 @@ export function reduce(prev: TranscriptState, ev: Tagged): TranscriptState {
     case "agent_start":
       next.running = true;
       next.run = prev.run + 1;
+      // Everything that existed BEFORE this turn is final. Without this the
+      // commit boundary would jump backwards to the previous turn's mark and
+      // re-render the intervening items — the user's own prompt included.
+      next.committed = next.items.length;
       break;
 
     case "reasoning_delta":

@@ -39,7 +39,7 @@ test("AC13: Shift+Tab cycles forward through every mode and wraps", () => {
     seen.push(m);
   }
 
-  assert.deepEqual(seen, ["manual", "acceptEdits", "plan", "yolo", "manual"]);
+  assert.deepEqual(seen, ["manual", "plan", "yolo", "manual"]);
 });
 
 test("cycling backwards is symmetric", () => {
@@ -58,13 +58,25 @@ test("AC13: each mode installs its own fallback", () => {
 test("AC13: cycling away REVOKES the previous mode's grants", () => {
   const t = spy();
 
-  const disposers = applyMode("acceptEdits", t);
-  assert.deepEqual(t.granted, ["fs:write"]);
+  const disposers = applyMode("plan", t);
+  assert.deepEqual(t.granted, ["fs:read"]);
 
   applyMode("manual", t, disposers);
 
-  assert.deepEqual(t.revoked, ["fs:write"], "leaving accept-edits drops the write grant");
-  assert.deepEqual(t.granted, ["fs:write"], "and manual grants nothing new");
+  assert.deepEqual(t.revoked, ["fs:read"], "leaving plan mode drops its grant");
+  assert.deepEqual(t.granted, ["fs:read"], "and manual grants nothing new");
+});
+
+test("there is no mode whose grants the host already provides", () => {
+  // An "accept edits" mode was dropped for exactly this: the host pre-grants
+  // fs:read/fs:write/skill:read, and grants are checked BEFORE the fallback, so
+  // a mode granting one of them would be indistinguishable from manual.
+  const hostPreGrants = ["fs:write", "skill:read"];
+  for (const mode of MODES) {
+    for (const g of MODE_INFO[mode].grants) {
+      assert.ok(!hostPreGrants.includes(g), `${mode} grants ${g}, which the host already grants`);
+    }
+  }
 });
 
 test("plan mode is read-only and turns the approval gate on", () => {

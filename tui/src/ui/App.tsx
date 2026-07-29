@@ -67,6 +67,8 @@ export interface PendingQuestion {
   detail?: string;
   choices: Choice<string>[];
   allowFreeText?: boolean;
+  /** What Esc answers with. Defaults to "", which `decide` maps to reject. */
+  cancelValue?: string;
   answer: (value: string) => void;
 }
 
@@ -97,6 +99,11 @@ export function App({
   const [showTasks, setShowTasks] = useState(true);
   const [verbose, setVerbose] = useState(false);
   const [viewing, setViewing] = useState(false);
+  // Ink fans each keypress to EVERY mounted handler with no way to stop
+  // propagation, so App must know when the prompt's popup has claimed Tab.
+  const [popupOpen, setPopupOpen] = useState(false);
+  // Held here so the draft survives the prompt unmounting for the viewer.
+  const [draft, setDraft] = useState("");
 
   // The spinner is the only thing driving repaints while a tool runs, so it is
   // stopped the moment the turn ends — an idle TUI must be completely quiet.
@@ -128,8 +135,11 @@ export function App({
       exit();
       return;
     }
-    // Shift+Tab cycles the permission mode. Ink reports it as tab with shift.
-    if (key.tab && key.shift) {
+    // Shift+Tab cycles the permission mode — but NOT while the suggestion popup
+    // is open, where Tab accepts a completion. Both handlers see the keypress,
+    // so without this guard one press would silently change the security posture
+    // behind a popup that is covering the mode indicator.
+    if (key.tab && key.shift && !popupOpen) {
       onModeChange?.(cycle(mode));
       return;
     }
@@ -197,6 +207,7 @@ export function App({
           choices={pending.choices}
           allowFreeText={pending.allowFreeText}
           onAnswer={pending.answer}
+          cancelValue={pending.cancelValue ?? ""}
         />
       ) : onSubmit && history && onHistoryChange ? (
         <Prompt
@@ -206,6 +217,9 @@ export function App({
           disabled={state.running}
           suggestions={suggestions}
           externalEdit={externalEdit}
+          onPopupChange={setPopupOpen}
+          draft={draft}
+          onDraftChange={setDraft}
         />
       ) : null}
     </Box>

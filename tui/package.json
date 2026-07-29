@@ -8,7 +8,7 @@
     "eagent": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm --prefix .. run build",
     "test": "node --import tsx --test \"src/**/*.test.ts?(x)\"",
@@ -31,6 +31,26 @@
   },
   "files": [
     "dist",
-    "README.md"
-  ]
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "caohaotiantian",
+  "keywords": [
+    "agent",
+    "llm",
+    "ai",
+    "tui",
+    "terminal",
+    "ink",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caohaotiantian/eagent.git",
+    "directory": "tui"
+  },
+  "homepage": "https://github.com/caohaotiantian/eagent#readme",
+  "bugs": {
+    "url": "https://github.com/caohaotiantian/eagent/issues"
+  }
 }

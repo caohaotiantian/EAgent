@@ -47,6 +47,10 @@ import { App, type PendingQuestion } from "./ui/App.js";
 import type { Task } from "./ui/Status.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 
+/** Bound on captured `!` output. Unbounded, a `yes` would grow the heap and
+ *  then be injected wholesale into the conversation. */
+const MAX_SHELL_OUTPUT = 200_000;
+
 const USAGE = `EAgent — a minimalist agent with a tiny core and Emacs-grade extensibility
 
 Usage: eagent [options] [prompt]
@@ -79,6 +83,15 @@ async function main(): Promise<void> {
 
   if (args.help) {
     console.log(USAGE);
+    return;
+  }
+  if (args.version) {
+    // Advertised in OPTIONS_HELP, so it must actually work — without this the
+    // flag falls through and mounts an interactive session instead.
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version?: string };
+    console.log(`eagent ${pkg.version ?? "unknown"}`);
     return;
   }
 
@@ -187,6 +200,7 @@ async function main(): Promise<void> {
   /** Run a shell command and fold its output into the conversation. */
   async function runShell(command: string): Promise<void> {
     const started = Date.now();
+    state = reduce(state, { kind: "agent_start", actingId: "root", at: started });
     state = reduce(state, {
       kind: "tool_start",
       callId: `sh:${started}`,
@@ -200,7 +214,15 @@ async function main(): Promise<void> {
     const output = await new Promise<{ out: string; code: number }>((resolve) => {
       const child = spawn(command, { shell: true });
       let out = "";
+      let truncated = false;
       const take = (b: Buffer): void => {
+        if (out.length >= MAX_SHELL_OUTPUT) {
+          if (!truncated) {
+            truncated = true;
+            out += `\n… output truncated at ${MAX_SHELL_OUTPUT} bytes`;
+          }
+          return;
+        }
         out += b.toString();
         state = reduce(state, {
           kind: "tool_progress",
@@ -213,28 +235,36 @@ async function main(): Promise<void> {
       };
       child.stdout.on("data", take);
       child.stderr.on("data", take);
+      // Only clear the handle if it is still OURS: a backgrounded command that
+      // exits later must not disable Ctrl+B for whatever is running now.
+      const release = (): void => {
+        if (liveShell === handle) liveShell = null;
+      };
       child.on("close", (code) => {
-        liveShell = null;
+        release();
         resolve({ out, code: code ?? 0 });
       });
       child.on("error", (err) => {
-        liveShell = null;
+        release();
         resolve({ out: String(err), code: 1 });
       });
 
       // Ctrl+B stops WATCHING the command; it keeps running, detached, and its
       // output so far is what enters the conversation. Killing it would be a
       // different feature (and a worse default for a long build).
-      liveShell = {
+      const handle = {
         pid: child.pid,
-        detach: () => {
+        detach: (): void => {
           child.stdout.off("data", take);
           child.stderr.off("data", take);
+          // unref() only drops the parent's event-loop reference; the child is
+          // still in this process group, so it does not outlive the TUI.
           child.unref();
-          liveShell = null;
-          resolve({ out: out + `\n[backgrounded — pid ${child.pid ?? "?"}]`, code: 0 });
+          release();
+          resolve({ out: out + `\n[stopped watching — pid ${child.pid ?? "?"}]`, code: 0 });
         },
       };
+      liveShell = handle;
     });
 
     state = reduce(state, {
@@ -245,6 +275,7 @@ async function main(): Promise<void> {
       actingId: "root",
       at: Date.now(),
     });
+    state = reduce(state, { kind: "agent_end", reason: "end_turn", actingId: "root", at: Date.now() });
     repaint(state);
 
     // The output enters the conversation so the model can be asked about it on
@@ -417,6 +448,10 @@ async function main(): Promise<void> {
     console.error(err);
     void teardown(1);
   });
+  // SIGINT too: without it `kill -INT` skips teardown entirely, leaking MCP
+  // children and temp dirs and leaving the alternate screen on if the viewer
+  // was open. Ink's exitOnCtrlC is off, so nothing else covers this.
+  process.once("SIGINT", () => void teardown(130));
   process.once("SIGTERM", () => void teardown(143));
   process.once("SIGHUP", () => void teardown(129));
 

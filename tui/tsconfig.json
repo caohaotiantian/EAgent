@@ -11,7 +11,9 @@
     "outDir": "dist",
     "rootDir": "src",
     "declaration": false,
-    "sourceMap": true,
+    // No sourcemaps in the published build: `files` ships `dist` without `src`,
+    // so every map would point at paths that are not in the tarball.
+    "sourceMap": false,
     "skipLibCheck": true,
     // Every strict flag the engine uses, including noImplicitOverride, which
     // web/'s tsconfig omitted.

@@ -464,8 +464,8 @@ repo/dev convenience unless you point `library.dir` at a shipped copy of the tre
 The kernel is usable headless, without the CLI:
 
 ```ts
-import { Agent } from "eagent";
-import { MockProvider } from "eagent/providers/mock";
+import { Agent } from "@eagent/core";
+import { MockProvider } from "@eagent/core/providers/mock";
 
 const agent = new Agent({ capabilities: /* ... */ });
 agent.providers.register(new MockProvider([

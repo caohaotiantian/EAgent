@@ -17,8 +17,8 @@ receives the `ExtensionAPI` and registers tools, hooks, commands, or providers
 on it.
 
 ```ts
-import { defineTool } from "eagent";
-import type { ExtensionAPI } from "eagent";
+import { defineTool } from "@eagent/core";
+import type { ExtensionAPI } from "@eagent/core";
 
 export default function activate(e: ExtensionAPI) {
   e.registerTool(
@@ -130,7 +130,7 @@ just returns a `ToolResult` — `{ content, isError? }` — so you can build one
 inline.
 
 ```ts
-import { defineTool } from "eagent";
+import { defineTool } from "@eagent/core";
 
 e.registerTool(
   defineTool({
@@ -474,8 +474,8 @@ you the `ok`/`fail` helpers.)
 
 ```ts
 // .eagent/extensions/notes.ts — auto-discovered, then `/reload`
-import { defineTool } from "eagent";
-import type { ExtensionAPI } from "eagent";
+import { defineTool } from "@eagent/core";
+import type { ExtensionAPI } from "@eagent/core";
 
 export default function activate(e: ExtensionAPI) {
   e.log.info("notes extension activated");

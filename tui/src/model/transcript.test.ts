@@ -151,7 +151,7 @@ test("usage updates the running token total", () => {
 
 // -- the <Static> invariant --------------------------------------------------
 
-test("AC10: while a turn runs, the whole turn is the live tail", () => {
+test("AC10: while a turn runs, only what the turn PRODUCES is the live tail", () => {
   const s = fold([
     { kind: "user", text: "go" },
     { kind: "agent_start" },
@@ -159,8 +159,11 @@ test("AC10: while a turn runs, the whole turn is the live tail", () => {
   ]);
 
   const { committed, live } = partition(s);
-  assert.deepEqual(texts(committed), [], "nothing from this turn has been finalised");
-  assert.deepEqual(texts(live), ["go", "working"], "so all of it can still repaint");
+  // The prompt is final the moment the turn starts. Leaving it in the live tail
+  // is what made it render twice — once in <Static>, once below it — for the
+  // whole duration of the turn.
+  assert.deepEqual(texts(committed), ["go"], "the prompt is already final");
+  assert.deepEqual(texts(live), ["working"], "only the answer repaints");
 });
 
 test("AC10: a finished turn commits, and the next turn is live on its own", () => {
@@ -177,8 +180,38 @@ test("AC10: a finished turn commits, and the next turn is live on its own", () =
   ].reduce((s, e) => reduce(s, { actingId: ROOT, ...e, at: ++clock }), first);
 
   const { committed, live } = partition(second);
-  assert.deepEqual(texts(committed), ["one", "answer one"], "the finished turn is in scrollback");
-  assert.deepEqual(texts(live), ["two", "answer two"], "the new turn repaints");
+  assert.deepEqual(
+    texts(committed),
+    ["one", "answer one", "two"],
+    "the finished turn AND the new prompt are in scrollback",
+  );
+  assert.deepEqual(texts(live), ["answer two"], "only the new answer repaints");
+});
+
+test("AC10: the commit boundary only ever moves FORWARD across a turn boundary", () => {
+  // The regression this guards: `agent_start` used to leave `committed` at the
+  // previous turn's mark, so the boundary jumped backwards and re-rendered
+  // everything typed since.
+  const events: TranscriptEvent[] = [
+    { kind: "user", text: "one" },
+    { kind: "agent_start" },
+    { kind: "text_delta", text: "a" },
+    { kind: "agent_end", reason: "end_turn" },
+    { kind: "user", text: "two" },
+    { kind: "agent_start" },
+    { kind: "text_delta", text: "b" },
+    { kind: "agent_end", reason: "end_turn" },
+  ];
+
+  let state = initialState();
+  let high = 0;
+  let at = 0;
+  for (const e of events) {
+    state = reduce(state, { actingId: ROOT, ...e, at: ++at });
+    const { committed } = partition(state);
+    assert.ok(committed.length >= high, `boundary went backwards: ${high} -> ${committed.length}`);
+    high = Math.max(high, committed.length);
+  }
 });
 
 test("AC10: with nothing streaming the whole transcript is committed", () => {

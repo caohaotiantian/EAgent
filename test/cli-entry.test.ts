@@ -99,7 +99,7 @@ test("--json emits only parseable JSONL on stdout, human echo diverted to stderr
 test("an unknown flag fails; --help and --version succeed", () => {
   assert.equal(runCli(["--nope"]).status, 1, "unknown flag exits non-zero");
   assert.equal(runCli(["--help"]).status, 0);
-  assert.match(runCli(["--version"]).stdout, /eagent \d/, "--version prints a version");
+  assert.match(runCli(["--version"]).stdout, /@eagent\/core \d/, "--version names the package it is");
 });
 
 test("a value-taking flag with no value fails instead of silently consuming the next flag", () => {

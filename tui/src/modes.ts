@@ -10,9 +10,9 @@
  * order and labels are testable without a capability manager.
  */
 
-export type Mode = "manual" | "acceptEdits" | "plan" | "yolo";
+export type Mode = "manual" | "plan" | "yolo";
 
-export const MODES: readonly Mode[] = ["manual", "acceptEdits", "plan", "yolo"];
+export const MODES: readonly Mode[] = ["manual", "plan", "yolo"];
 
 export interface ModeInfo {
   label: string;
@@ -28,16 +28,14 @@ export interface ModeInfo {
 export const MODE_INFO: Record<Mode, ModeInfo> = {
   manual: {
     label: "manual",
-    hint: "ask before every privileged call",
+    // NOT "ask before every privileged call": the host pre-grants fs:read,
+    // fs:write and skill:read at construction (src/host.ts), and grants are
+    // checked before the fallback, so file access never prompts in any mode.
+    // An "accept edits" mode was dropped for exactly this reason -- its only
+    // content was a redundant fs:write grant, making it a no-op.
+    hint: "ask before shell, code, network, and spawns",
     fallback: "ask",
     grants: [],
-    plan: false,
-  },
-  acceptEdits: {
-    label: "accept edits",
-    hint: "file writes pre-approved, everything else asks",
-    fallback: "ask",
-    grants: ["fs:write"],
     plan: false,
   },
   plan: {
