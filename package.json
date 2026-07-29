@@ -36,12 +36,20 @@
   "exports": {
     ".": "./dist/kernel/index.js",
     "./host": "./dist/host.js",
+    "./host-commands": "./dist/host-commands.js",
+    "./args": "./dist/args.js",
+    "./print": "./dist/print.js",
+    "./complete": "./dist/complete.js",
+    "./jsonl": "./dist/jsonl.js",
+    "./session-disk": "./dist/session-disk.js",
     "./server": "./dist/server.js",
+    "./extensions/*": "./dist/extensions/*.js",
     "./providers/mock": "./dist/providers/mock.js",
     "./providers/anthropic": "./dist/providers/anthropic.js",
     "./providers/openai": "./dist/providers/openai.js",
     "./providers/gemini": "./dist/providers/gemini.js",
-    "./providers/cassette": "./dist/providers/cassette.js"
+    "./providers/cassette": "./dist/providers/cassette.js",
+    "./cli": "./dist/cli.js"
   },
   "files": [
     "dist",

@@ -22,65 +22,17 @@ import type { Agent } from "./kernel/agent.js";
 import type { CommandRegistry } from "./kernel/commands.js";
 import type { ExtensionHost } from "./kernel/extension.js";
 import type { Logger, UI } from "./kernel/types.js";
+import { OPTIONS_HELP, parseArgs } from "./args.js";
 import { createAgentHost, loadEnvFile, thinkingFromEnv } from "./host.js";
+import { registerHostCommands } from "./host-commands.js";
 import { eventToJsonl, wireJsonl } from "./jsonl.js";
 import { wirePlainPrinting } from "./print.js";
-
-interface Args {
-  model?: string;
-  provider?: string;
-  think?: string;
-  eval?: string;
-  yolo: boolean;
-  extensions: string[];
-  help: boolean;
-  version: boolean;
-  json: boolean;
-}
-
-function parseArgs(argv: string[]): Args {
-  const args: Args = { yolo: false, extensions: [], help: false, version: false, json: false };
-  // Read the value following a value-taking flag, erroring if it is missing.
-  // `allowDash` lets free-form values (eval text) begin with '-'; for the rest a
-  // dash-prefixed token means the next flag, not a value (so `--model --yolo`
-  // errors instead of silently setting model to "--yolo").
-  const takeValue = (flag: string, i: number, allowDash = false): string => {
-    const v = argv[i + 1];
-    if (v === undefined || (!allowDash && v.startsWith("-"))) {
-      throw new Error(`option ${flag} requires a value`);
-    }
-    return v;
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a === "--model" || a === "-m") args.model = takeValue(a, i++);
-    else if (a === "--provider" || a === "-p") args.provider = takeValue(a, i++);
-    else if (a === "--think") args.think = takeValue(a, i++);
-    else if (a === "--eval" || a === "-e") args.eval = takeValue(a, i++, true);
-    else if (a === "--yolo") args.yolo = true;
-    else if (a === "--ext") args.extensions.push(takeValue(a, i++));
-    else if (a === "--help" || a === "-h") args.help = true;
-    else if (a === "--version" || a === "-v") args.version = true;
-    else if (a === "--json") args.json = true;
-    else throw new Error(`unknown option: ${a} (try --help)`);
-  }
-  return args;
-}
 
 const USAGE = `EAgent — a minimalist agent with a tiny core and Emacs-grade extensibility
 
 Usage: eagent-headless [options]
 
-Options:
-  -e, --eval <text>      Run one turn with <text> and exit
-  -m, --model <name>     Model to use (e.g. claude-fable-5, gpt-4o)
-  -p, --provider <name>  Provider: anthropic | openai | gemini | mock
-      --think <level>    Reasoning effort: off | low | medium | high
-      --ext <path>       Load an extra extension file (repeatable)
-      --yolo             Auto-grant capabilities (no approval prompts)
-      --json             Emit lifecycle events as JSONL (programmatic mode)
-  -h, --help             Show this help and exit
-  -v, --version          Print the version and exit
+${OPTIONS_HELP}
 
 This entry is non-interactive: it reads --eval or piped stdin and exits. The
 interactive TUI lives in the \`tui/\` package and is not part of this build yet.
@@ -94,13 +46,15 @@ const C = {
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,
 };
 
-async function main(): Promise<number> {
+/** The headless run, exported so the TUI package can hand off to it in-process
+ *  when an invocation turns out to be non-interactive. Returns the exit code. */
+export async function runHeadless(argv: string[] = process.argv.slice(2)): Promise<number> {
   // Pick up a local .env (without overriding the real environment) so keys and
   // model selection configured there are honored before providers are built.
   loadEnvFile();
   let exitCode = 0;
 
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(argv);
 
   if (args.help) {
     console.log(USAGE);
@@ -160,8 +114,10 @@ async function main(): Promise<number> {
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
 
-    if (args.eval !== undefined) {
-      await runTurn(agent, args.eval);
+    // A positional prompt is equivalent to --eval for this entry.
+    const once = args.eval ?? args.prompt;
+    if (once !== undefined) {
+      await runTurn(agent, once);
     } else if (stdin.isTTY) {
       // A TTY never sends EOF on its own, so falling through to batch() would
       // block on a stream that will not close — a silent hang with no prompt.
@@ -259,74 +215,6 @@ async function runTurn(agent: Agent, input: string): Promise<void> {
   }
 }
 
-/** Register the host's slash commands. Exported so a unit test can drive them
- *  without a live process — the same in-process test seam as `entryShouldRun`. */
-export function registerHostCommands(commands: CommandRegistry, host: ExtensionHost, agent: Agent): void {
-  commands.register({
-    name: "help",
-    description: "Show available commands.",
-    run: (ctx) => {
-      const lines = commands.list().map((c) => `  /${c.name.padEnd(12)} ${c.description}`);
-      ctx.print([C.bold("Commands:"), ...lines, "", C.dim("Type anything else to talk to the agent.")].join("\n"));
-    },
-  });
-  commands.register({
-    name: "reload",
-    description: "Hot-reload extensions (optionally one by id).",
-    run: async (ctx) => {
-      await host.reload(ctx.args.trim() || undefined);
-      ctx.print(C.green(`Reloaded ${ctx.args.trim() || "all extensions"}.`));
-    },
-  });
-  commands.register({
-    name: "extensions",
-    description: "List loaded extensions.",
-    run: (ctx) => ctx.print(host.list().map((id) => `  ${id}`).join("\n") || "(none)"),
-  });
-  commands.register({
-    name: "caps",
-    description: "Show the capability audit log.",
-    run: (ctx) => {
-      const audit = agent.capabilities.audit();
-      ctx.print(
-        audit.length
-          ? audit.map((a) => `  ${a.decision === "allow" ? "✓" : "✗"} ${a.capability.padEnd(14)} ${a.source}`).join("\n")
-          : "(no capability checks yet)",
-      );
-    },
-  });
-  commands.register({
-    name: "model",
-    description: "Get or set the model (e.g. /model claude-fable-5).",
-    run: (ctx) => {
-      if (ctx.args.trim()) {
-        agent.model = ctx.args.trim();
-        ctx.print(C.green(`model = ${agent.model}`));
-      } else ctx.print(`model = ${agent.model}`);
-    },
-  });
-  commands.register({
-    name: "provider",
-    description: "Get or set the active provider (mock|anthropic|openai|gemini).",
-    run: (ctx) => {
-      const name = ctx.args.trim();
-      if (name) {
-        agent.providerName = name;
-        agent.providers.setDefault(name);
-        ctx.print(C.green(`provider = ${name}`));
-      } else ctx.print(`provider = ${agent.providerName ?? "(default)"}`);
-    },
-  });
-  commands.register({
-    name: "clear",
-    description: "Clear the conversation transcript.",
-    run: (ctx) => {
-      ctx.agent.clear();
-      ctx.print(C.dim("Transcript cleared (start a new topic)."));
-    },
-  });
-}
-
 /** Read this package's version from package.json (one level up from src or dist). */
 async function readVersion(): Promise<string> {
   try {
@@ -357,7 +245,7 @@ export function entryShouldRun(argv1: string | undefined, importMetaUrl: string,
   }
 }
 if (entryShouldRun(process.argv[1], import.meta.url, isSea())) {
-  main()
+  runHeadless()
     .then((code) => {
       if (code !== 0) process.exitCode = code;
     })

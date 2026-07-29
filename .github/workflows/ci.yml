@@ -25,6 +25,13 @@ jobs:
       - run: npm test
       - run: npm run eval
       - run: npm run build
+      # The TUI is a separate package, so the root gates above never touch it.
+      # Without these steps its suite would run only on a developer's machine.
+      # `npm ci` here needs the root build above: tui/ resolves the engine
+      # through the `exports` map, which points at dist/.
+      - run: npm ci --prefix tui
+      - run: npm --prefix tui run typecheck
+      - run: npm --prefix tui test
 
   # Real-backend sandbox confinement coverage (RW9.3-1 / RW6c-3). The
   # `test/sandbox-tiers.test.ts` real-backend cases gate on
