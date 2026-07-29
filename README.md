@@ -425,6 +425,10 @@ npm run build:binary   # -> bin/eagent  (host platform only)
 printf 'hi\n' | bin/eagent -p mock
 ```
 
+The binary bundles the **headless** entry, so it is machine-only: `--eval`, `--json`,
+and piped batch. The interactive TUI is not in it — `yoga-layout` ships a WASM
+artifact Node's SEA facility cannot embed without a separate asset-injection step.
+
 The script (`scripts/build-binary.mjs`) bundles `dist/cli.js` with `esbuild` into a
 CJS blob and injects it into a copy of the running `node` via Node's [Single
 Executable Applications](https://nodejs.org/api/single-executable-applications.html)

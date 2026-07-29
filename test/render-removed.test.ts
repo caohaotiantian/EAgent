@@ -3,8 +3,10 @@
  *
  * A `readFileSync` source-scan (NOT shell grep, which silently skips files
  * containing ◆/→/σ — the CLAUDE.md macOS gotcha): the directory no longer exists,
- * and no `src/` or `test/` file imports a `../render/*` module. The pure reducer,
- * the attribution adapter, and the terminal seam were relocated to `src/`.
+ * and no `src/` or `test/` file imports a `../render/*` module. The reducer, the
+ * attribution adapter, and the terminal seam that briefly lived at `src/` were
+ * themselves removed with the display layer; this stays as a cheap permanent pin
+ * that the old directory cannot come back.
  */
 
 import assert from "node:assert/strict";
