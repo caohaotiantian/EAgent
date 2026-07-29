@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+**All shipped human UI surfaces.** The `web/` browser SPA (and its `EAGENT_WEB_ROOT`
+/ static-serving path in `eagent-serve`, `build:web` / `dev:web` / `test:web`
+scripts, and `docs/WEB.md`) is deleted, as is the terminal render layer:
+`src/engine-render.ts`, `src/view-model.ts`, `src/attribution.ts`, `src/tty.ts`,
+`src/wire-events.ts`, and `src/session-source.ts`. The `/details`, `/expand`, and
+`/collapse` display commands and the interactive readline REPL go with them. A
+bare `GET /` on the HTTP host now returns a plain-text liveness line instead of
+the SPA; every path the static branch used to serve auth-exempt is now gated.
+
+### Added
+
+**`src/print.ts` — the headless plain printer.** The only human-readable output
+the engine emits: assistant text to stdout, sub-agent text / reasoning / tool
+calls / errors to stderr, and no cursor, alt-screen, or spinner byte by
+construction. Only the root agent's text reaches stdout, so concurrent sub-agent
+forks can no longer interleave into a piped answer. `src/cli.ts` is now
+non-interactive by definition (`--eval`, `--json`, piped batch) and is also
+installed as `eagent-headless`; on a TTY with no input it explains itself and
+exits 2 rather than blocking on a stream that never closes.
+
+The rich interactive experience is being rebuilt as an Ink + React `eagent` TUI
+in a separate `tui/` package, which depends on the engine rather than the
+reverse. The engine keeps its zero-runtime-dependency charter (`jiti` only).
+
+
 ### Added
 
 **Web UI (browser SPA, TUI feature parity for single-host).** Vite + React app under

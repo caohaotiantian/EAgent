@@ -17,7 +17,7 @@ want to change is a hot-reloadable extension you can edit while the agent runs.
 flowchart TB
     subgraph FE["Front ends — one shared wiring (src/host.ts)"]
         direction LR
-        REPL["Interactive REPL"]
+        TUI["Interactive TUI (tui/)"]
         ONE["One-shot (-e)"]
         BATCH["Batch (piped)"]
         HTTP["HTTP server"]
@@ -97,7 +97,7 @@ For newer official OpenAI models that require `max_completion_tokens`, set
 `OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`. The output-length cap defaults to
 8192 tokens; raise it per provider with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS`
 / `GEMINI_MAX_TOKENS` for long generations or high thinking budgets. When a turn is
-cut off at that cap the interactive REPL flags it (`⚠ response truncated
+cut off at that cap the printer flags it on stderr (`⚠ response truncated
 (max_tokens)`), and the opt-in `autocontinue` extension can resume it automatically.
 
 ## How a turn works
@@ -331,12 +331,12 @@ So setting the per-agent turn bound during development is a one-liner —
 `config.json` entry — no source edit. See `docs/EXTENSIONS.md` for the `Config`
 API. (Secrets like API keys are not config and are never printed by `/config`.)
 
-## Four engine front ends, one kernel
+## Engine front ends, one kernel
 
 ```mermaid
 flowchart LR
     subgraph CLI["src/cli.ts"]
-        REPL["Interactive REPL<br/>(TTY)"]
+        TUI["Interactive TUI<br/>(tui/ package)"]
         ONE["One-shot<br/>eagent -e / --json"]
         BATCH["Batch<br/>(piped stdin)"]
     end
@@ -398,43 +398,21 @@ docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
   -v "$PWD:/workspace" eagent
 ```
 
-## Interactive display
-
-The default interactive CLI renders each reasoning block, answer, and tool call
-as an **ordered, collapsible section** — progressive disclosure, so a long
-reasoning stream no longer floods the window and a tool call's full
-parameters/results stay reachable on demand. Concurrent work (e.g. the
-`reasoning-search` forks) is attributed per agent and rendered in strict arrival
-order, never interleaved. A finished reasoning block collapses to a one-line
-header — `◆ Reasoning · N tok · 1.4s` — and a subagent call renders as a card
-whose header names the subagent and its task, with the child's own work nested
-inside.
+## Terminal surfaces
 
 The rich interactive experience is the **`eagent` TUI** — an Ink + React
 application in the `tui/` package, modelled on Claude Code's interactive mode.
+It depends on the engine rather than the reverse, which is what keeps `src/`
+free of runtime dependencies and embeddable as a library.
+
 The engine itself ships only `src/print.ts`, a plain stream printer for the
-machine paths (`--eval`, piped batch, and the standalone `bin/eagent` binary), so
-none of those ever leak cursor-control bytes; `--json` emits the machine JSONL
-stream instead (see [`docs/JSONL.md`](docs/JSONL.md)). See
-[`docs/TUI.md`](docs/TUI.md).
+**machine** paths — `eagent-headless --eval`, piped batch, and the standalone
+`bin/eagent` binary. Assistant text streams to stdout; sub-agent text, reasoning,
+tool calls, and errors are annotated on stderr, so `--eval … | tee` yields the
+answer and nothing else and no cursor-control byte can reach a pipe. `--json`
+emits the machine JSONL stream instead (see [`docs/JSONL.md`](docs/JSONL.md)).
 
-**Display modes**, set with `/details`:
-
-- **auto** (default) — only the newest section stays expanded; older ones
-  collapse to their headers as new sections begin.
-- **full** — every section expanded (all arguments and every result line shown).
-- **collapsed** — headers only.
-
-**Commands** (slash commands, not raw-mode keys):
-
-| Command | What it does |
-| --- | --- |
-| `/details [full\|collapsed\|auto]` | Set the display mode (no argument prints the current one). |
-| `/expand <n>` | Expand section *n* to its full, untruncated content. |
-| `/collapse <n>` | Collapse section *n* back to its header. |
-
-The `N tok` in a header is a char-derived estimate, not a provider token count.
-See [`docs/TUI.md`](docs/TUI.md) for the full controls reference.
+See [`docs/TUI.md`](docs/TUI.md) for both surfaces.
 
 ## Build a single binary
 

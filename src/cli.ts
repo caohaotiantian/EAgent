@@ -82,9 +82,9 @@ Options:
   -h, --help             Show this help and exit
   -v, --version          Print the version and exit
 
-This entry is non-interactive: it reads --eval or piped stdin and exits. For the
-interactive terminal UI, run \`eagent\`. With no API key, EAgent runs the
-deterministic offline mock provider.`;
+This entry is non-interactive: it reads --eval or piped stdin and exits. The
+interactive TUI lives in the \`tui/\` package and is not part of this build yet.
+With no API key, EAgent runs the deterministic offline mock provider.`;
 
 const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -94,20 +94,21 @@ const C = {
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,
 };
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   // Pick up a local .env (without overriding the real environment) so keys and
   // model selection configured there are honored before providers are built.
   loadEnvFile();
+  let exitCode = 0;
 
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) {
     console.log(USAGE);
-    return;
+    return exitCode;
   }
   if (args.version) {
     console.log(await readVersion());
-    return;
+    return exitCode;
   }
 
   // Headless by definition: there is no one to prompt, so capability requests
@@ -160,7 +161,14 @@ async function main(): Promise<void> {
     process.once("SIGTERM", shutdown);
 
     if (args.eval !== undefined) {
-      await runTurn(agent, args.eval, args.json);
+      await runTurn(agent, args.eval);
+    } else if (stdin.isTTY) {
+      // A TTY never sends EOF on its own, so falling through to batch() would
+      // block on a stream that will not close — a silent hang with no prompt.
+      // This entry is machine-only; say so and exit rather than appear frozen.
+      console.error(C.yellow("This entry is non-interactive: pass --eval <text> or pipe stdin."));
+      console.error(C.dim("The interactive TUI (tui/ package) is not part of this build yet."));
+      exitCode = 2;
     } else {
       // Piped, non-interactive stdin: treat each line as a command or a turn.
       await batch(agent, commands, host, args.json);
@@ -175,6 +183,7 @@ async function main(): Promise<void> {
   }
 
   await host.dispose();
+  return exitCode;
 }
 
 /** Read all of stdin and process it line by line, then exit. */
@@ -190,7 +199,7 @@ async function batch(agent: Agent, commands: CommandRegistry, host: ExtensionHos
       await dispatchCommand(line, commands, agent, host, json);
     } else {
       echo(C.bold(`\n› ${line}`));
-      await runTurn(agent, line, json);
+      await runTurn(agent, line);
     }
   }
 }
@@ -240,15 +249,13 @@ function wireJsonRendering(agent: Agent): void {
   );
 }
 
-async function runTurn(agent: Agent, input: string, json: boolean): Promise<void> {
+async function runTurn(agent: Agent, input: string): Promise<void> {
   try {
     await agent.run(input);
   } catch (err) {
-    // In --json mode a run throw goes to stderr (the JSON renderer already emits an
-    // `error` lifecycle event on stdout); plain mode keeps the red line on stdout.
-    const msg = C.red(`✗ ${err instanceof Error ? err.message : String(err)}`);
-    if (json) console.error(msg);
-    else console.log(msg);
+    // Always stderr: in --json mode stdout is reserved for JSONL, and in plain
+    // mode stdout is reserved for the answer.
+    console.error(C.red(`✗ ${err instanceof Error ? err.message : String(err)}`));
   }
 }
 
@@ -350,8 +357,12 @@ export function entryShouldRun(argv1: string | undefined, importMetaUrl: string,
   }
 }
 if (entryShouldRun(process.argv[1], import.meta.url, isSea())) {
-  main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  main()
+    .then((code) => {
+      if (code !== 0) process.exitCode = code;
+    })
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
 }

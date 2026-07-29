@@ -22,7 +22,7 @@ npm test         # offline test suite (node:test via tsx) — no network, no API
 npm run typecheck # tsc --noEmit, strict
 npm run eval     # offline evals-as-CI gate (runs evals/*.eval.json; exits non-zero on failure)
 npm run build    # tsc -> dist/
-npm run dev      # interactive REPL (src/cli.ts via tsx)
+npm run dev      # headless CLI (src/cli.ts via tsx; --eval or piped stdin)
 npm run serve    # HTTP server (src/server.ts; GET /health, POST /run, POST /answer, DELETE /sessions/:id; PORT=8787)
 ```
 

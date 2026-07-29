@@ -69,7 +69,7 @@ npm test          # node:test via tsx; runs offline against MockProvider (no API
 npm run typecheck # tsc --noEmit   (alias: npm run lint)
 npm run build     # tsc -> dist/
 npm run build:binary # esbuild+Node-SEA -> a single standalone bin/eagent (posix; needs npx)
-npm run dev       # node --import tsx src/cli.ts     (interactive REPL)
+npm run dev       # node --import tsx src/cli.ts     (headless: --eval / piped stdin)
 npm run serve     # node --import tsx src/server.ts  (HTTP host)
 npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits non-zero on failure
 ```

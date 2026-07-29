@@ -28,7 +28,7 @@ extensions are loaded. Everything above the kernel is policy.
 flowchart TB
     subgraph L4["Front ends"]
         direction LR
-        REPL["REPL"]
+        TUI["TUI (tui/)"]
         ONE["one-shot / --json"]
         BATCH["batch"]
         HTTP["HTTP server"]
@@ -313,8 +313,7 @@ capability). See `SECURITY.md`.
 Four **engine** front ends share that one assembly, so they all load exactly the
 same extensions:
 
-- **Interactive REPL** — `src/cli.ts` when stdin is a TTY (`/help`, `/tools`,
-  `/reload`, …).
+- **Interactive TUI** — the `eagent` command from the `tui/` package (Ink + React).
 - **One-shot** — `eagent -e "…"` runs a single turn and exits; `--json` emits
   lifecycle events as JSONL on stdout (diagnostics on stderr).
 - **Batch** — piped, non-interactive stdin, processed line by line.
