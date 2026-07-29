@@ -42,6 +42,9 @@ export interface PromptProps {
   disabled?: boolean;
   /** Suggestion sources. Omitted in tests that only exercise editing. */
   suggestions?: SuggestContext;
+  /** Ctrl+G: hand the buffer to $EDITOR and resolve with what came back.
+   *  Injected so tests never spawn a process. */
+  externalEdit?: (text: string) => Promise<string | null>;
 }
 
 export function Prompt({
@@ -51,6 +54,7 @@ export function Prompt({
   placeholder = "ask anything · ctrl+j for a newline · ctrl+r to search",
   disabled = false,
   suggestions,
+  externalEdit,
 }: PromptProps): ReactElement {
   const [ed, setEd] = useState<EditorState>(() => initialEditor());
   const [search, setSearch] = useState<SearchState | null>(null);
@@ -147,6 +151,12 @@ export function Prompt({
         return;
       }
       if (key.ctrl && input === "j") return apply({ kind: "newline" });
+      if (key.ctrl && input === "g" && externalEdit) {
+        void externalEdit(ed.text).then((edited) => {
+          if (edited !== null) apply({ kind: "set", text: edited });
+        });
+        return;
+      }
 
       // -- readline motion and killing ---------------------------------------
       if (key.ctrl && input === "a") return apply({ kind: "lineStart" });
@@ -197,6 +207,9 @@ export function Prompt({
     );
   }
 
+  const shell = ed.text.startsWith("!");
+  const glyph = shell ? "! " : "› ";
+  const glyphColor = shell ? "magenta" : "cyan";
   const lines = ed.text.split("\n");
   return (
     <Box flexDirection="column">
@@ -208,8 +221,8 @@ export function Prompt({
       ) : (
         lines.map((line, i) => (
           <Text key={i}>
-            <Text color="cyan">{i === 0 ? "› " : "  "}</Text>
-            {line}
+            <Text color={glyphColor}>{i === 0 ? glyph : "  "}</Text>
+            {i === 0 && shell ? line.slice(1) : line}
           </Text>
         ))
       )}

@@ -20,14 +20,18 @@ import React from "react";
 import { OPTIONS_HELP, parseArgs, type Args } from "eagent/args";
 import { createAgentHost, loadEnvFile, thinkingFromEnv } from "eagent/host";
 import { registerHostCommands } from "eagent/host-commands";
-import type { DecisionChoice, DecisionRequest, Logger, UI } from "eagent";
+import { text as textMessage, type DecisionChoice, type DecisionRequest, type Logger, type UI } from "eagent";
 
-import { readdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { TODO_ACCESSOR_KEY } from "eagent/extensions/todo";
 
 import { subscribe } from "./bridge.js";
 import { applyMode, type Mode } from "./modes.js";
+import { editorCommand, shellCommand, shellTranscriptEntry, stripEditorComments } from "./input/shell.js";
 import { initialHistory, record, type HistoryState } from "./input/history.js";
 import { initialState, reduce, type TranscriptState } from "./model/transcript.js";
 import { envFromProcess, refusalReason } from "./tty.js";
@@ -169,8 +173,86 @@ async function main(): Promise<void> {
     },
   });
 
-  /** Run one turn. A slash command is dispatched instead of sent to the model. */
+  /** Run a shell command and fold its output into the conversation. */
+  async function runShell(command: string): Promise<void> {
+    const started = Date.now();
+    state = reduce(state, {
+      kind: "tool_start",
+      callId: `sh:${started}`,
+      name: "shell",
+      arguments: { command },
+      actingId: "root",
+      at: started,
+    });
+    repaint(state);
+
+    const output = await new Promise<{ out: string; code: number }>((resolve) => {
+      const child = spawn(command, { shell: true });
+      let out = "";
+      const take = (b: Buffer): void => {
+        out += b.toString();
+        state = reduce(state, {
+          kind: "tool_progress",
+          callId: `sh:${started}`,
+          chunk: b.toString(),
+          actingId: "root",
+          at: Date.now(),
+        });
+        repaint(state);
+      };
+      child.stdout.on("data", take);
+      child.stderr.on("data", take);
+      child.on("close", (code) => resolve({ out, code: code ?? 0 }));
+      child.on("error", (err) => resolve({ out: String(err), code: 1 }));
+    });
+
+    state = reduce(state, {
+      kind: "tool_end",
+      callId: `sh:${started}`,
+      content: output.out,
+      isError: output.code !== 0,
+      actingId: "root",
+      at: Date.now(),
+    });
+    repaint(state);
+
+    // The output enters the conversation so the model can be asked about it on
+    // the next turn without re-running anything.
+    agent.load([textMessage("user", shellTranscriptEntry({ command, stdout: output.out, exitCode: output.code }))]);
+  }
+
+  /** Hand the buffer to $EDITOR and return what came back. */
+  async function externalEdit(text: string): Promise<string | null> {
+    const editor = editorCommand(process.env as { VISUAL?: string; EDITOR?: string });
+    if (editor === null) return null;
+
+    const dir = mkdtempSync(join(tmpdir(), "eagent-edit-"));
+    const file = join(dir, "prompt.md");
+    writeFileSync(file, text);
+    try {
+      instance.clear();
+      await new Promise<void>((resolve) => {
+        const child = spawn(editor, [file], { stdio: "inherit", shell: true });
+        child.on("close", () => resolve());
+        child.on("error", () => resolve());
+      });
+      return stripEditorComments(readFileSync(file, "utf8"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** Run one turn. A slash command is dispatched instead of sent to the model;
+   *  a `!` line runs a shell command without involving the model at all. */
   async function submit(text: string): Promise<void> {
+    const shell = shellCommand(text);
+    if (shell !== null) {
+      state = reduce(state, { kind: "user", text, actingId: "root", at: Date.now() });
+      repaint(state);
+      await runShell(shell);
+      return;
+    }
+
     state = reduce(state, { kind: "user", text, actingId: "root", at: Date.now() });
     repaint(state);
 
@@ -248,6 +330,7 @@ async function main(): Promise<void> {
             setModeState(m);
           }}
           tasks={tasks}
+          externalEdit={externalEdit}
           suggestions={{
             commands: () => commands.list().map((x) => ({ name: x.name, description: x.description })),
             readDir: (dir) =>

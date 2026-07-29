@@ -52,6 +52,8 @@ export interface AppProps {
   onModeChange?: (m: Mode) => void;
   /** Read fresh each render — the model rewrites the whole list per turn. */
   tasks?: Task[];
+  /** Ctrl+G handler, threaded to the prompt. */
+  externalEdit?: (text: string) => Promise<string | null>;
 }
 
 /** A question the agent is blocked on. `detail` renders the tool arguments. */
@@ -81,6 +83,7 @@ export function App({
   mode = "manual",
   onModeChange,
   tasks = [],
+  externalEdit,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const [tick, setTick] = useState(0);
@@ -181,6 +184,7 @@ export function App({
           onSubmit={onSubmit}
           disabled={state.running}
           suggestions={suggestions}
+          externalEdit={externalEdit}
         />
       ) : null}
     </Box>
