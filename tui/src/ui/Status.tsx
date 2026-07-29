@@ -74,7 +74,7 @@ export function Status({ model, provider, live, mode, tokens, verbose }: StatusP
         {model} · {provider}
         {live ? "" : " (offline mock)"}
         {tokens > 0 ? ` · ${tokens} tok` : ""}
-        {verbose ? " · verbose" : ""} · shift+tab mode · ctrl+o verbose · ctrl+c to exit
+        {verbose ? " · verbose" : ""} · shift+tab mode · ctrl+o transcript · ctrl+c to exit
       </Text>
     </Box>
   );

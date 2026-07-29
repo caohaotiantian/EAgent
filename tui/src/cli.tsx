@@ -20,7 +20,14 @@ import React from "react";
 import { OPTIONS_HELP, parseArgs, type Args } from "@eagent/core/args";
 import { createAgentHost, loadEnvFile, thinkingFromEnv } from "@eagent/core/host";
 import { registerHostCommands } from "@eagent/core/host-commands";
-import { text as textMessage, type DecisionChoice, type DecisionRequest, type Logger, type UI } from "@eagent/core";
+import {
+  imageMessage,
+  text as textMessage,
+  type DecisionChoice,
+  type DecisionRequest,
+  type Logger,
+  type UI,
+} from "@eagent/core";
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -32,6 +39,7 @@ import { TODO_ACCESSOR_KEY } from "@eagent/core/extensions/todo";
 import { subscribe } from "./bridge.js";
 import { applyMode, type Mode } from "./modes.js";
 import { editorCommand, shellCommand, shellTranscriptEntry, stripEditorComments } from "./input/shell.js";
+import { imageMentions, mediaType } from "./input/images.js";
 import { initialHistory, record, type HistoryState } from "./input/history.js";
 import { initialState, reduce, type TranscriptState } from "./model/transcript.js";
 import { envFromProcess, refusalReason } from "./tty.js";
@@ -173,6 +181,9 @@ async function main(): Promise<void> {
     },
   });
 
+  /** The in-flight shell child, if any — what Ctrl+B detaches. */
+  let liveShell: { pid: number | undefined; detach: () => void } | null = null;
+
   /** Run a shell command and fold its output into the conversation. */
   async function runShell(command: string): Promise<void> {
     const started = Date.now();
@@ -202,8 +213,28 @@ async function main(): Promise<void> {
       };
       child.stdout.on("data", take);
       child.stderr.on("data", take);
-      child.on("close", (code) => resolve({ out, code: code ?? 0 }));
-      child.on("error", (err) => resolve({ out: String(err), code: 1 }));
+      child.on("close", (code) => {
+        liveShell = null;
+        resolve({ out, code: code ?? 0 });
+      });
+      child.on("error", (err) => {
+        liveShell = null;
+        resolve({ out: String(err), code: 1 });
+      });
+
+      // Ctrl+B stops WATCHING the command; it keeps running, detached, and its
+      // output so far is what enters the conversation. Killing it would be a
+      // different feature (and a worse default for a long build).
+      liveShell = {
+        pid: child.pid,
+        detach: () => {
+          child.stdout.off("data", take);
+          child.stderr.off("data", take);
+          child.unref();
+          liveShell = null;
+          resolve({ out: out + `\n[backgrounded — pid ${child.pid ?? "?"}]`, code: 0 });
+        },
+      };
     });
 
     state = reduce(state, {
@@ -283,6 +314,19 @@ async function main(): Promise<void> {
       return;
     }
 
+    // An @-mentioned image is attached as a real ImageBlock before the turn, so
+    // the model receives the picture rather than a path it cannot open.
+    for (const path of imageMentions(text)) {
+      const mime = mediaType(path);
+      if (mime === null) continue;
+      try {
+        agent.load([imageMessage({ mimeType: mime, data: readFileSync(path).toString("base64") }, `attached ${path}`)]);
+      } catch {
+        state = reduce(state, { kind: "notice", text: `could not read ${path}`, actingId: "root", at: Date.now() });
+        repaint(state);
+      }
+    }
+
     // A run throw already reaches the transcript through the `error` hook.
     await agent.run(text).catch(() => {});
   }
@@ -331,6 +375,8 @@ async function main(): Promise<void> {
           }}
           tasks={tasks}
           externalEdit={externalEdit}
+          canBackground={liveShell !== null}
+          onBackground={() => liveShell?.detach()}
           suggestions={{
             commands: () => commands.list().map((x) => ({ name: x.name, description: x.description })),
             readDir: (dir) =>

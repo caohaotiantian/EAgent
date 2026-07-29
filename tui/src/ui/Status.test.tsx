@@ -130,7 +130,20 @@ test("AC13: Ctrl+T hides and shows the task list", async () => {
   assert.match(lastFrame() ?? "", /current thing/, "and back");
 });
 
-test("AC13: Ctrl+O toggles verbose, revealing a live tool call's full result", async () => {
+test("AC13: Ctrl+O opens the full-screen transcript viewer", async () => {
+  const { stdin, lastFrame } = render(
+    <App state={fold([{ kind: "user", text: "a question" }])} onInterrupt={() => {}} onExit={() => {}} status={status} frame={0} />,
+  );
+  assert.doesNotMatch(lastFrame() ?? "", /q close/, "not open yet");
+
+  stdin.write("\x0f"); // Ctrl+O
+  await tick();
+
+  assert.match(lastFrame() ?? "", /q close/, "the viewer took over the screen");
+  assert.match(lastFrame() ?? "", /a question/);
+});
+
+test("AC13: Ctrl+V toggles verbose, revealing a live tool call's full result", async () => {
   // Verbose applies to the LIVE region and to items rendered from now on.
   // Committed history is painted once through <Static> and never repainted —
   // that is what keeps native scrollback intact, and it is the deliberate cost.
@@ -145,7 +158,7 @@ test("AC13: Ctrl+O toggles verbose, revealing a live tool call's full result", a
   );
   assert.doesNotMatch(lastFrame() ?? "", /full file body/, "results are collapsed by default");
 
-  stdin.write("\x0f"); // Ctrl+O
+  stdin.write("\x16"); // Ctrl+V
   await tick();
 
   assert.match(lastFrame() ?? "", /full file body/, "verbose reveals the result");

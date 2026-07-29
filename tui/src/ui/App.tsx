@@ -22,6 +22,7 @@ import { cycle, type Mode } from "../modes.js";
 import { partition, type TranscriptState } from "../model/transcript.js";
 import { Dialog, type Choice } from "./Dialog.js";
 import { Status, TaskList, type Task } from "./Status.js";
+import { Viewer } from "./Viewer.js";
 import { ItemView } from "./items.js";
 import { Prompt } from "./Prompt.js";
 
@@ -54,6 +55,10 @@ export interface AppProps {
   tasks?: Task[];
   /** Ctrl+G handler, threaded to the prompt. */
   externalEdit?: (text: string) => Promise<string | null>;
+  /** Ctrl+B while a turn runs: detach the running shell command. */
+  onBackground?: () => void;
+  /** True when something is backgroundable — drives the hint. */
+  canBackground?: boolean;
 }
 
 /** A question the agent is blocked on. `detail` renders the tool arguments. */
@@ -84,11 +89,14 @@ export function App({
   onModeChange,
   tasks = [],
   externalEdit,
+  onBackground,
+  canBackground = false,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const [tick, setTick] = useState(0);
   const [showTasks, setShowTasks] = useState(true);
   const [verbose, setVerbose] = useState(false);
+  const [viewing, setViewing] = useState(false);
 
   // The spinner is the only thing driving repaints while a tool runs, so it is
   // stopped the moment the turn ends — an idle TUI must be completely quiet.
@@ -99,9 +107,9 @@ export function App({
   }, [state.running, frame]);
 
   useInput((input, key) => {
-    // A modal question owns the keyboard; Esc must close it, not interrupt the
-    // turn that is blocked ON it.
-    if (pending) return;
+    // A modal question or the viewer owns the keyboard; Esc must close it, not
+    // interrupt the turn that is blocked ON it.
+    if (pending || viewing) return;
     if (key.escape) {
       if (state.running) onInterrupt();
       return;
@@ -129,8 +137,20 @@ export function App({
       setShowTasks((v) => !v);
       return;
     }
-    if (key.ctrl && input === "o") setVerbose((v) => !v);
+    if (key.ctrl && input === "o") {
+      setViewing(true);
+      return;
+    }
+    // Verbose expands the LIVE region in place; the viewer is where committed
+    // history can be expanded, since <Static> never repaints.
+    if (key.ctrl && input === "v") {
+      setVerbose((v) => !v);
+      return;
+    }
+    if (key.ctrl && input === "b" && canBackground) onBackground?.();
   });
+
+  if (viewing) return <Viewer state={state} onClose={() => setViewing(false)} />;
 
   const { committed, live } = partition(state);
   const spinnerFrame = frame ?? tick;
@@ -151,6 +171,7 @@ export function App({
           <Text dimColor>
             {" "}
             working · {state.tokens} tok · esc to interrupt
+            {canBackground ? " · ctrl+b to background" : ""}
           </Text>
         </Box>
       ) : (
