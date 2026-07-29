@@ -16,8 +16,10 @@
 import { Box, Static, Text, useApp, useInput } from "ink";
 import { useEffect, useState, type ReactElement } from "react";
 
+import type { HistoryState } from "../input/history.js";
 import { partition, type TranscriptState } from "../model/transcript.js";
 import { ItemView } from "./items.js";
+import { Prompt } from "./Prompt.js";
 
 /** Braille spinner frames — the same set the old renderer used. */
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -31,13 +33,18 @@ export interface AppProps {
   status: { model: string; provider: string; live: boolean };
   /** Injected in tests so the spinner does not need a real timer. */
   frame?: number;
+  /** Prompt history; omitted in render-only tests that do not need input. */
+  history?: HistoryState;
+  onHistoryChange?: (h: HistoryState) => void;
+  /** A submitted prompt. Absent means the input box is not shown at all.  */
+  onSubmit?: (text: string) => void;
 }
 
 function Spinner({ frame }: { frame: number }): ReactElement {
   return <Text color="cyan">{FRAMES[frame % FRAMES.length]}</Text>;
 }
 
-export function App({ state, onInterrupt, onExit, status, frame }: AppProps): ReactElement {
+export function App({ state, onInterrupt, onExit, status, frame, history, onHistoryChange, onSubmit }: AppProps): ReactElement {
   const { exit } = useApp();
   const [tick, setTick] = useState(0);
 
@@ -96,6 +103,18 @@ export function App({ state, onInterrupt, onExit, status, frame }: AppProps): Re
           </Text>
         </Box>
       )}
+
+      {/* The input box stays mounted while a turn runs — disabled, so the
+          transcript owns the keyboard, but visible so the layout does not jump
+          every time a turn starts and ends. */}
+      {onSubmit && history && onHistoryChange ? (
+        <Prompt
+          history={history}
+          onHistoryChange={onHistoryChange}
+          onSubmit={onSubmit}
+          disabled={state.running}
+        />
+      ) : null}
     </Box>
   );
 }

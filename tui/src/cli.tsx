@@ -23,6 +23,7 @@ import { registerHostCommands } from "eagent/host-commands";
 import type { Logger, UI } from "eagent";
 
 import { subscribe } from "./bridge.js";
+import { initialHistory, record, type HistoryState } from "./input/history.js";
 import { initialState, reduce, type TranscriptState } from "./model/transcript.js";
 import { envFromProcess, refusalReason } from "./tty.js";
 import { App } from "./ui/App.js";
@@ -101,8 +102,45 @@ async function main(): Promise<void> {
     },
   });
 
+  /** Run one turn. A slash command is dispatched instead of sent to the model. */
+  async function submit(text: string): Promise<void> {
+    state = reduce(state, { kind: "user", text, actingId: "root", at: Date.now() });
+    repaint(state);
+
+    if (text.startsWith("/")) {
+      const [name, ...rest] = text.slice(1).split(" ");
+      const command = commands.get(name ?? "");
+      if (!command) {
+        state = reduce(state, { kind: "notice", text: `unknown command: /${name}`, actingId: "root", at: Date.now() });
+        repaint(state);
+        return;
+      }
+      try {
+        // `print` is synchronous and line-based, and its strings already carry
+        // ANSI — they are folded in verbatim rather than re-styled.
+        await command.run({
+          agent,
+          args: rest.join(" "),
+          print: (line) => {
+            state = reduce(state, { kind: "notice", text: line, actingId: "root", at: Date.now() });
+            repaint(state);
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        state = reduce(state, { kind: "notice", text: `/${name}: ${message}`, actingId: "root", at: Date.now() });
+        repaint(state);
+      }
+      return;
+    }
+
+    // A run throw already reaches the transcript through the `error` hook.
+    await agent.run(text).catch(() => {});
+  }
+
   function Root(): React.ReactElement {
     const [s, setS] = React.useState(state);
+    const [hist, setHist] = React.useState<HistoryState>(initialHistory());
     React.useEffect(() => {
       repaint = setS;
       return () => {
@@ -116,6 +154,12 @@ async function main(): Promise<void> {
           onInterrupt={() => agent.stop()}
           onExit={() => void teardown(0)}
           status={{ model, provider: agent.providerName ?? "default", live }}
+          history={hist}
+          onHistoryChange={setHist}
+          onSubmit={(text) => {
+            setHist((h) => record(h, text));
+            void submit(text);
+          }}
         />
       </ErrorBoundary>
     );
@@ -151,12 +195,10 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => void teardown(143));
   process.once("SIGHUP", () => void teardown(129));
 
+  // A prompt on the command line runs immediately; the session then stays open
+  // for follow-ups, the same as typing it into the box.
   const prompt = args.prompt ?? "";
-  if (prompt) {
-    state = reduce(state, { kind: "user", text: prompt, actingId: "root", at: Date.now() });
-    repaint(state);
-    await agent.run(prompt).catch(() => {});
-  }
+  if (prompt) await submit(prompt);
 
   await instance.waitUntilExit();
   await teardown(0);
