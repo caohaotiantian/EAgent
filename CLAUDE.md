@@ -9,6 +9,16 @@ of truth**; where this file and the code disagree, the code wins — fix this fi
 - _engineering-norms_   → "## House conventions"
 - _load-bearing-docs_   → "## Load-Bearing Documents"
 
+## Two packages
+
+- **`@eagent/core`** (repo root) — the engine: kernel, providers, extensions, the
+  HTTP host, and the headless `eagent-headless` CLI. Zero runtime deps but `jiti`.
+- **`eagent`** (`tui/`) — the installable product: the interactive Ink + React
+  TUI, which owns the `eagent` command and depends on `@eagent/core`.
+
+They release in lockstep (`scripts/release-tui.mjs` rewrites the `file:..`
+dependency to the real version at publish time).
+
 ## What this is
 
 EAgent is a minimalist AI-agent kernel: a tiny, stable, observable core plus an
@@ -76,6 +86,8 @@ npm run typecheck # tsc --noEmit   (alias: npm run lint)
 npm run build     # tsc -> dist/
 npm run build:binary # esbuild+Node-SEA -> a single standalone bin/eagent (posix; needs npx)
 npm run dev       # node --import tsx src/cli.ts     (headless: --eval / piped stdin)
+npm --prefix tui run dev   # the interactive TUI (Ink + React)
+npm --prefix tui test      # the TUI suite (also gated in CI)
 npm run serve     # node --import tsx src/server.ts  (HTTP host)
 npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits non-zero on failure
 ```
@@ -187,7 +199,9 @@ install`). A command that writes without that call bypasses the security model.
   in an SDK. Do not add any other npm dependency. Enforced by
   `test/zero-dep.test.ts` (runtime `dependencies` ⊆ `{ jiti }`; no ink/react
   imports under `src/` or `test/`). The **`tui/`** package may take `ink`/`react`
-  as its own package deps — not engine runtime deps, not under root `test/`.
+  as its own package deps — not engine runtime deps, not under root `test/`. The
+  dependency arrow points ONE way: `tui/` depends on `@eagent/core`, never the
+  reverse, which is what keeps a library consumer from downloading React.
 - **Tests use `node:test` run via `tsx`**, and must run offline. Every extension
   is capability-gated and ships with tests.
 - **Capabilities are the security vocabulary.** Privileged tools declare

@@ -8,10 +8,20 @@ EAgent has two terminal surfaces, split by audience:
    `--eval`, `--json`, and piped batch. It mounts no display, so no cursor,
    alt-screen, or spinner byte can reach a pipe by construction.
 
-> **Status:** the excision has landed — the previous plain renderer, its view
-> model, and the `web/` SPA are removed. The `tui/` package is being built in
-> phases; until it lands, only the headless CLI and `eagent-serve` are usable.
-> See `.agent/plan.md` on the working branch for the phase sequence.
+The TUI ships as the **`eagent`** npm package; the engine ships as
+**`@eagent/core`**, which it depends on. That direction is the whole point: a
+library consumer of the engine never downloads React.
+
+## What the TUI does
+
+Streaming transcript with tool cards and live `tool_progress` output; a full
+readline-style input box (multiline, kill ring, history, `Ctrl+R` reverse
+search); `/` command and `@` file popups; three-way permission dialogs and
+mid-turn elicitation; `Shift+Tab` permission modes; `Ctrl+T` task list;
+`Ctrl+O` verbose; `!` shell mode; `Ctrl+G` $EDITOR handoff.
+
+Finished turns are written to native scrollback once and never repainted; only
+the in-flight turn redraws.
 
 ## Why a package, not a directory
 

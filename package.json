@@ -1,7 +1,7 @@
 {
-  "name": "eagent",
+  "name": "@eagent/core",
   "version": "0.2.0",
-  "description": "A minimalist AI agent with a tiny stable core and Emacs-grade extensibility. Everything is a hot-reloadable extension.",
+  "description": "The EAgent engine: a minimalist AI-agent kernel with a tiny stable core and Emacs-grade extensibility. Zero runtime dependencies.",
   "type": "module",
   "license": "MIT",
   "author": "caohaotiantian",
@@ -27,7 +27,6 @@
     "url": "https://github.com/caohaotiantian/eagent/issues"
   },
   "bin": {
-    "eagent": "./dist/cli.js",
     "eagent-headless": "./dist/cli.js",
     "eagent-serve": "./dist/server.js"
   },
@@ -58,7 +57,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "build:binary": "node scripts/build-binary.mjs",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",

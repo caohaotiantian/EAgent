@@ -18,6 +18,34 @@ scripts, and `docs/WEB.md`) is deleted, as is the terminal render layer:
 bare `GET /` on the HTTP host now returns a plain-text liveness line instead of
 the SPA; every path the static branch used to serve auth-exempt is now gated.
 
+### Changed
+
+**BREAKING — two packages.** The engine is now published as **`@eagent/core`**
+(zero runtime dependencies but `jiti`, so embedding it never pulls in React), and
+the installable product is **`eagent`** from `tui/` — the interactive Ink + React
+TUI, which owns the `eagent` command and depends on the engine. The engine keeps
+`eagent-headless` and `eagent-serve`. They release in lockstep;
+`scripts/release-tui.mjs` rewrites the development `file:..` dependency to the
+real version at publish time.
+
+`npm i -g eagent` gets the TUI. `npm i @eagent/core` gets the library.
+
+### Added
+
+**The interactive TUI.** Streaming transcript with tool cards and live
+`tool_progress` output; a readline-style input box (multiline via `Ctrl+J` or a
+trailing backslash, kill ring, word motion, undo, history with `Ctrl+R` reverse
+search, bracketed paste); `/` command and `@` file popups; three-way permission
+dialogs and mid-turn elicitation; `Shift+Tab` permission modes (manual /
+accept-edits / plan / yolo) that revoke what they granted on the way out;
+`Ctrl+T` task list read through a new `TODO_ACCESSOR_KEY`; `Ctrl+O` verbose;
+`!` shell mode whose output enters the conversation; `Ctrl+G` $EDITOR handoff.
+
+A completed turn is written to native scrollback once and never repainted; only
+the in-flight turn redraws. The TUI refuses to mount on a pipe, a redirect,
+`TERM=dumb`, or in CI, handing off to the headless runner instead — so no cursor
+byte can reach a log file.
+
 ### Added
 
 **Kernel seams for permission modes and live tool output.** `UI.decide?` is an

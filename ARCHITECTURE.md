@@ -318,7 +318,9 @@ capability). See `SECURITY.md`.
 Four **engine** front ends share that one assembly, so they all load exactly the
 same extensions:
 
-- **Interactive TUI** — the `eagent` command from the `tui/` package (Ink + React).
+- **Interactive TUI** — the `eagent` command, published from `tui/` as its own
+  package (Ink + React) depending on `@eagent/core`. It is the product users
+  install; the engine is the library they embed.
 - **One-shot** — `eagent -e "…"` runs a single turn and exits; `--json` emits
   lifecycle events as JSONL on stdout (diagnostics on stderr).
 - **Batch** — piped, non-interactive stdin, processed line by line.

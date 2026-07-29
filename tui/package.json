@@ -1,12 +1,11 @@
 {
-  "name": "eagent-tui",
-  "private": true,
+  "name": "eagent",
   "version": "0.2.0",
-  "description": "The interactive EAgent terminal UI — Ink + React over the zero-dep engine.",
+  "description": "EAgent — a minimalist AI agent with a tiny stable core and Emacs-grade extensibility.",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "eagent-tui": "./dist/cli.js"
+    "eagent": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -16,7 +15,7 @@
     "dev": "node --import tsx src/cli.tsx"
   },
   "dependencies": {
-    "eagent": "file:..",
+    "@eagent/core": "file:..",
     "ink": "^7.1.1",
     "react": "^19.2.0"
   },
@@ -29,5 +28,9 @@
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }

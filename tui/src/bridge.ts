@@ -10,7 +10,7 @@
  * remount or a hot reload cannot leave two bridges feeding one reducer.
  */
 
-import { currentActingAgent, type Agent } from "eagent";
+import { currentActingAgent, type Agent } from "@eagent/core";
 import type { Tagged, TranscriptEvent } from "./model/transcript.js";
 
 export interface BridgeOptions {

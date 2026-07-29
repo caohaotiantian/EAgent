@@ -17,17 +17,17 @@
 import { render } from "ink";
 import React from "react";
 
-import { OPTIONS_HELP, parseArgs, type Args } from "eagent/args";
-import { createAgentHost, loadEnvFile, thinkingFromEnv } from "eagent/host";
-import { registerHostCommands } from "eagent/host-commands";
-import { text as textMessage, type DecisionChoice, type DecisionRequest, type Logger, type UI } from "eagent";
+import { OPTIONS_HELP, parseArgs, type Args } from "@eagent/core/args";
+import { createAgentHost, loadEnvFile, thinkingFromEnv } from "@eagent/core/host";
+import { registerHostCommands } from "@eagent/core/host-commands";
+import { text as textMessage, type DecisionChoice, type DecisionRequest, type Logger, type UI } from "@eagent/core";
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { TODO_ACCESSOR_KEY } from "eagent/extensions/todo";
+import { TODO_ACCESSOR_KEY } from "@eagent/core/extensions/todo";
 
 import { subscribe } from "./bridge.js";
 import { applyMode, type Mode } from "./modes.js";
@@ -54,7 +54,7 @@ Piped or redirected invocations fall through to the headless runner.`;
  * every flag value survive the handoff unchanged.
  */
 async function headless(): Promise<never> {
-  const { runHeadless } = await import("eagent/cli");
+  const { runHeadless } = await import("@eagent/core/cli");
   return process.exit(await runHeadless());
 }
 

@@ -62,14 +62,29 @@ a core small enough to read in one sitting, and a single extension surface
 powerful enough that new behavior never requires forking. The bet — the same one
 pi and Emacs make — is that a minimal, observable, malleable core beats a big one.
 
-## Quickstart
+## Install
 
 ```bash
-npm install
-npm run build
-npm test          # the full offline suite — no network or API key required
+npm i -g eagent    # the interactive TUI — this is the product
+eagent             # start a session
+```
 
-# Talk to it offline — a deterministic mock LLM drives everything:
+Embedding the engine instead? Depend on **`@eagent/core`**, which has zero runtime
+dependencies but `jiti` — no React, no Ink, nothing pulled in behind your back.
+
+```bash
+npm i @eagent/core
+```
+
+## Quickstart (from a clone)
+
+```bash
+npm install && npm run build
+npm test                    # the full offline suite — no network or API key
+npm --prefix tui install
+npm --prefix tui run dev    # the interactive TUI
+
+# Or drive the machine entry offline — a deterministic mock LLM:
 node dist/cli.js -e "hello"
 
 # Load an example extension and poke around:

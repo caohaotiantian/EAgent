@@ -5,8 +5,12 @@ name: Release
 # published tarball to this workflow run and commit via OIDC, so consumers can
 # verify where and how the package was built. Requires `id-token: write`.
 #
+# TWO packages release in lockstep: `@eagent/core` (the zero-dep engine, from the
+# repo root) and `eagent` (the installable TUI, from tui/, which depends on it).
+# The engine publishes FIRST so the TUI's pinned dependency resolves.
+#
 # One-time setup by the maintainer: add an `NPM_TOKEN` repository secret (an npm
-# automation/granular token with publish rights); own the `eagent` name on npm;
+# automation/granular token with publish rights); own both names on npm;
 # and keep this repo public (npm validates a provenance attestation against a
 # public source repo). Release by pushing a stable tag that matches the package
 # version, e.g. `git tag v0.2.1 && git push origin v0.2.1`. Only `vX.Y.Z` tags fire
@@ -47,6 +51,16 @@ jobs:
       - run: npm test
       - run: npm run eval
       - run: npm run build
+      - run: npm --prefix tui ci
+      - run: npm --prefix tui run typecheck
+      - run: npm --prefix tui test
+      # The engine first: the TUI's dependency on it must be resolvable.
       - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Rewrite the tui's "file:.." dependency to the real version, then publish.
+      - run: node scripts/release-tui.mjs
+      - run: npm --prefix tui run build
+      - run: npm --prefix tui publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
