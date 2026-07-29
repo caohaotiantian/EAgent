@@ -410,14 +410,13 @@ header — `◆ Reasoning · N tok · 1.4s` — and a subagent call renders as a
 whose header names the subagent and its task, with the child's own work nested
 inside.
 
-This renderer (`src/engine-render.ts`) is a **minimal, zero-dep, append-only**
-plain renderer over a shared view model — no alt screen, no framework, every line
-written exactly once. It is what the interactive REPL, pipes, `--eval`, batch,
-dumb terminals, and the standalone `bin/eagent` binary use, so none of those
-paths ever leak cursor-control bytes; `--json` emits the machine JSONL stream
-instead (see [`docs/JSONL.md`](docs/JSONL.md)). Rich multi-session display is the
-**web** SPA (`npm run build:web`, then open `eagent-serve` in a browser) over the
-HTTP/SSE monitor endpoints above — see [`docs/WEB.md`](docs/WEB.md).
+The rich interactive experience is the **`eagent` TUI** — an Ink + React
+application in the `tui/` package, modelled on Claude Code's interactive mode.
+The engine itself ships only `src/print.ts`, a plain stream printer for the
+machine paths (`--eval`, piped batch, and the standalone `bin/eagent` binary), so
+none of those ever leak cursor-control bytes; `--json` emits the machine JSONL
+stream instead (see [`docs/JSONL.md`](docs/JSONL.md)). See
+[`docs/TUI.md`](docs/TUI.md).
 
 **Display modes**, set with `/details`:
 
@@ -492,10 +491,9 @@ src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
 src/extensions/  65 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
-src/cli.ts       terminal host: REPL + one-shot + batch + --json
-src/engine-render.ts  the engine's plain, append-only human renderer
-                 (over src/view-model.ts + src/attribution.ts + src/tty.ts)
-src/session-source.ts  host SessionSource (in-process + remote HTTP/SSE client)
+src/cli.ts       headless host: one-shot (--eval) + batch + --json
+src/print.ts     the engine's plain stream printer for the machine paths
+tui/             the interactive `eagent` TUI (Ink + React; its own package)
 src/server.ts    HTTP host: /health, /run (streaming), /sessions,
                  DELETE /sessions/:id, monitor SSE feeds (/events, …)
 examples/        worked example extensions
@@ -508,10 +506,8 @@ test/            the full offline suite — every primitive and extension
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
 - [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
   the CLI `--json` stream and the HTTP `/run` stream.
-- [`docs/TUI.md`](docs/TUI.md) — the interactive plain-CLI display: display
-  modes, `/details`/`/expand`/`/collapse`, and the shared view-model substrate.
-- [`docs/WEB.md`](docs/WEB.md) — the browser SPA (chat + monitor) served by
-  `eagent-serve`.
+- [`docs/TUI.md`](docs/TUI.md) — the two terminal surfaces: the interactive
+  `eagent` TUI package and the headless machine CLI.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.

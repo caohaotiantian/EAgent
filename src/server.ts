@@ -41,10 +41,7 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, extname, join, normalize, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { Agent, currentRootAgent } from "./kernel/agent.js";
 import type { Config } from "./kernel/store.js";
@@ -77,9 +74,6 @@ export interface ServeOptions extends AgentHostOptions {
    *  before falling back to proceed-with-assumption. Default 120 s; a tiny
    *  value keeps tests fast. */
   askTimeoutMs?: number;
-  /** Directory of built web SPA assets (`index.html`, js/css). Defaults to
-   *  `EAGENT_WEB_ROOT` or `<package>/web/dist`. Missing root is soft-fail. */
-  webRoot?: string;
   /** Directory for durable HTTP session transcripts. Defaults to
    *  `EAGENT_SESSIONS_DIR` or `~/.eagent/http-sessions`. */
   sessionsDir?: string;
@@ -178,7 +172,6 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
 
   const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY;
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT;
-  const webRoot = resolveWebRoot(opts.webRoot);
   // Persist by default outside the node:test runner (NODE_TEST_CONTEXT). Unit
   // tests that want disk round-trips pass sessionsDir / persistSessions: true.
   const underTest = process.env.NODE_TEST_CONTEXT !== undefined;
@@ -258,7 +251,6 @@ export async function createHttpServer(opts: ServeOptions = {}): Promise<HttpSer
       built.config,
       costUsdFor,
       hasLiveJob,
-      webRoot,
       sessionsDir,
     ).catch((err) => sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) }));
   });
@@ -299,7 +291,6 @@ async function route(
   config: Config,
   costUsdFor: (agent: Agent) => number,
   hasLiveJob: (agent: Agent) => boolean,
-  webRoot: string | undefined,
   sessionsDir: string | undefined,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -311,18 +302,13 @@ async function route(
     return;
   }
 
-  // Auth-exempt static SPA GET (KDD9): boot the UI without a token, then prompt.
-  // Reserved API prefixes never fall through to static. Use the raw request path
-  // (not url.pathname) so ".." segments are not normalized away by URL().
+  // A bare `/` is a liveness courtesy for a human hitting the host in a browser;
+  // every other non-API path falls through to auth/404.
   const rawPath = (req.url ?? "/").split("?")[0] ?? "/";
-  if (method === "GET" && !isApiPath(rawPath) && !isApiPath(url.pathname)) {
-    if (tryServeStatic(res, rawPath, webRoot)) return;
-    // Missing web root: soft hint on `/` only; other non-API GETs fall through to auth/404.
-    if (rawPath === "/" || rawPath === "") {
-      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-      res.end("EAgent HTTP API is up. Build the web UI with `npm run build:web` (see docs/WEB.md).\n");
-      return;
-    }
+  if (method === "GET" && (rawPath === "/" || rawPath === "") && !isApiPath(url.pathname)) {
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    res.end("EAgent HTTP API is up. See docs/TUI.md for the terminal client.\n");
+    return;
   }
 
   // Everything else (API + unknown paths) requires Bearer when a token is set.
@@ -898,86 +884,6 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
 export function isApiPath(pathname: string): boolean {
   if (pathname === "/health" || pathname === "/run" || pathname === "/answer" || pathname === "/events") return true;
   if (pathname === "/sessions" || pathname.startsWith("/sessions/")) return true;
-  return false;
-}
-
-/** Resolve web asset root from opts / env / package-relative default. */
-export function resolveWebRoot(explicit?: string): string | undefined {
-  const raw = explicit ?? process.env.EAGENT_WEB_ROOT;
-  if (raw) {
-    const abs = resolve(raw);
-    return existsSync(abs) ? abs : undefined;
-  }
-  // Default: <repo-or-package>/web/dist next to the compiled server or source.
-  const here = dirname(fileURLToPath(import.meta.url));
-  // dist/server.js → ../web/dist; src/server.ts via tsx → ../web/dist
-  const candidates = [join(here, "..", "web", "dist"), join(process.cwd(), "web", "dist")];
-  for (const c of candidates) {
-    if (existsSync(c)) return resolve(c);
-  }
-  return undefined;
-}
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-  ".map": "application/json",
-  ".woff2": "font/woff2",
-};
-
-/**
- * Serve a file under webRoot or SPA index.html. Returns true if a response was
- * written. Path traversal outside webRoot is denied (false → caller continues).
- */
-export function tryServeStatic(res: ServerResponse, pathname: string, webRoot: string | undefined): boolean {
-  if (!webRoot) return false;
-  const root = resolve(webRoot);
-  // Decode and normalize; reject null bytes.
-  let rel = decodeURIComponent(pathname.split("?")[0] ?? "/");
-  if (rel.includes("\0")) return false;
-  if (rel === "/" || rel === "") rel = "index.html";
-  // Never pass an absolute segment to join (it would discard root on POSIX).
-  rel = rel.replace(/^\/+/, "");
-  if (rel.includes("..") || rel.startsWith("..") || sep + rel === sep) {
-    // Explicit reject of parent-segment traversal before join.
-    sendJson(res, 400, { error: "invalid path" });
-    return true;
-  }
-  const candidate = resolve(root, rel);
-  if (!candidate.startsWith(root + sep) && candidate !== root) {
-    sendJson(res, 400, { error: "invalid path" });
-    return true;
-  }
-  let file = candidate;
-  try {
-    if (existsSync(file) && statSync(file).isDirectory()) {
-      file = join(file, "index.html");
-    }
-    if (existsSync(file) && statSync(file).isFile()) {
-      const body = readFileSync(file);
-      const type = MIME[extname(file).toLowerCase()] ?? "application/octet-stream";
-      res.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
-      res.end(body);
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  // SPA entry only for `/` (hash routing keeps client paths on the fragment).
-  // Do not map arbitrary GETs to index.html — that would mask API 404s.
-  if (pathname === "/" || pathname === "") {
-    const index = join(root, "index.html");
-    if (existsSync(index) && statSync(index).isFile()) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-      res.end(readFileSync(index));
-      return true;
-    }
-  }
   return false;
 }
 

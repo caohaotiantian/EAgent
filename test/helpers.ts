@@ -7,55 +7,6 @@ import { MemoryBackend, MemoryStore } from "../src/kernel/store.js";
 import type { StoreBackend } from "../src/kernel/store.js";
 import type { CompletionRequest, Logger, Provider, StreamEvent, UI } from "../src/kernel/types.js";
 import { MockProvider, type MockResponder } from "../src/providers/mock.js";
-import type { Term } from "../src/tty.js";
-
-/** A recording fake `Term` for the render tests. `columns`/`isTTY`/`rows` are
- *  mutable so a test can simulate a resize (SIGWINCH); every write is captured. */
-export interface FakeTerm extends Term {
-  isTTY: boolean;
-  columns: number | undefined;
-  rows: number | undefined;
-  readonly writes: string[];
-  /** Everything written so far, concatenated. */
-  readonly output: string;
-  raw: boolean[];
-}
-
-/**
- * Raw key byte sequences a terminal sends, for tests that simulate keystroke
- * input — the bytes a real stdin `data` listener would pass through in production.
- */
-export const KEYS = {
-  CTRL_T: "\x14",
-  CTRL_C: "\x03",
-  UP: "\x1b[A",
-  DOWN: "\x1b[B",
-  PGUP: "\x1b[5~",
-  PGDN: "\x1b[6~",
-  ENTER: "\r",
-  BACKSPACE: "\x7f",
-} as const;
-
-export function makeFakeTerm(opts: { isTTY?: boolean; columns?: number | undefined; rows?: number } = {}): FakeTerm {
-  const writes: string[] = [];
-  const raw: boolean[] = [];
-  return {
-    isTTY: opts.isTTY ?? true,
-    columns: "columns" in opts ? opts.columns : 80,
-    rows: opts.rows ?? 24,
-    writes,
-    raw,
-    write(s: string): void {
-      writes.push(s);
-    },
-    setRawMode(r: boolean): void {
-      raw.push(r);
-    },
-    get output(): string {
-      return writes.join("");
-    },
-  };
-}
 
 /**
  * A thin provider that delegates to a MockProvider but reports a different

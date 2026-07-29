@@ -1,7 +1,7 @@
 node_modules/
 dist/
-web/node_modules/
-web/dist/
+tui/node_modules/
+tui/dist/
 bin/
 *.log
 .eagent/
@@ -10,4 +10,8 @@ bin/
 .env
 .env.*
 !.env.example
-web/tsconfig.tsbuildinfo
+tui/tsconfig.tsbuildinfo
+
+# Ephemeral per-task plan (three-loop-workflow skill)
+.agent/
+.claude/

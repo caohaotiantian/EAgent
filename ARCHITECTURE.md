@@ -321,14 +321,12 @@ same extensions:
 - **HTTP server** — `src/server.ts` (`eagent-serve`, default `PORT` 8787),
   `node:http` only.
 
-The plain CLI's human rendering is the zero-dep `src/engine-render.ts`, a minimal
-ordering-aware plain renderer over the shared neutral view model
-(`src/view-model.ts` + `src/attribution.ts` + `src/tty.ts`) that de-interleaves
-reasoning-search forks and keeps full tool params reachable. The engine stays at
-**zero runtime dependencies except `jiti`** (`test/zero-dep.test.ts`). Rich
-browser UI is a separate Vite+React SPA under `web/`, served same-origin by
-`eagent-serve` over the monitor HTTP/SSE endpoints below. See `docs/WEB.md` and
-`docs/TUI.md`.
+The engine's own human output is `src/print.ts`, a plain stream printer for the
+machine paths only — assistant text to stdout, annotations to stderr, and no
+cursor or alt-screen byte by construction. The engine keeps
+**zero runtime dependencies except `jiti`** (`test/zero-dep.test.ts`), which is why the rich
+interactive experience is a separate Ink + React package (`tui/`) that depends on
+the engine rather than the reverse. See `docs/TUI.md`.
 
 ```mermaid
 sequenceDiagram

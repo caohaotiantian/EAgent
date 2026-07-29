@@ -3,6 +3,12 @@
 Orientation for an AI agent working in this repository. **The code is the source
 of truth**; where this file and the code disagree, the code wins — fix this file.
 
+<!-- Anchor map (read by the three-loop-workflow skill; maps a role to this file's heading) -->
+- _repo-workflow_       → "## Working here"
+- _common-commands_     → "## Key commands"
+- _engineering-norms_   → "## House conventions"
+- _load-bearing-docs_   → "## Load-Bearing Documents"
+
 ## What this is
 
 EAgent is a minimalist AI-agent kernel: a tiny, stable, observable core plus an
@@ -85,29 +91,17 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 - `src/host.ts` — `createAgentHost`: provider selection, `.env` loading, model
   defaulting (honors `*_MODEL` env vars), and the canonical `BUILTIN_EXTENSIONS`
   set and load order.
-- `src/cli.ts` — the terminal host: interactive REPL, batch, one-shot, `--json`.
-  It delegates human rendering to the engine plain renderer (`src/engine-render.ts`)
-  over the shared neutral cores and keeps its `wireRendering(agent, opts?)` export.
-  (The old opt-in alt-screen surface and the former rich Ink terminal client are
-  removed; rich multi-session display is the **web** SPA under `web/`, served by
-  `eagent-serve` — see `docs/WEB.md`.)
-- **The human render layer** (host, not kernel) is a shared neutral core with one
-  shipped consumer. Neutral cores (zero-dep): `src/view-model.ts` (a pure,
-  offline-testable reducer folding lifecycle events into an ordered, collapsible
-  section tree — reasoning/answer/tool cards with nested sub-agent trees,
-  attributed by acting agent), `src/attribution.ts` (the in-process attribution
-  adapter that tags events via `currentActingAgent()`/`currentRootAgent()`), and
-  `src/tty.ts` (the injected `Term` seam, the `isFancy` predicate, and the
-  `RenderController` display-mode seam). Consumer — `src/engine-render.ts`: the
-  engine's minimal plain renderer wired by `cli.ts` for every human path (REPL,
-  pipes, `--eval`, batch, dumb terminals, and the SEA binary's interactive TTY);
-  it de-interleaves reasoning-search forks, collapses finished reasoning to a
-  header, and keeps full tool params reachable via `/details`/`/expand`/`/collapse`.
-- `src/session-source.ts` — host-level `SessionSource` (InProcessSource +
-  RemoteSource over the server's monitor HTTP/SSE); the offline contract oracle
-  for remote clients (including a future web front end).
-- `src/complete.ts` — the REPL Tab-completion engine: a pure, offline-testable
-  `complete(line, ctx)`.
+- `src/cli.ts` — the **headless** host: one-shot (`--eval`), piped batch, and
+  `--json`. It mounts no display, so no cursor or alt-screen byte can reach a pipe
+  by construction.
+- **The human display layer is not in the engine.** `src/print.ts` is the only
+  human-readable output the engine emits — a plain stream printer for the machine
+  paths (assistant text to stdout, tool/reasoning/error annotations to stderr).
+  The rich interactive experience is the `eagent` TUI in the **`tui/` package**
+  (Ink + React), which depends on the engine rather than the reverse; that
+  direction is what keeps `src/` zero-dep and embeddable. See `docs/TUI.md`.
+- `src/complete.ts` — a pure, offline-testable `complete(line, ctx)` completion
+  engine, consumed by the TUI package.
 - `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `POST /answer`
   for a mid-turn elicitation reply, `GET /sessions/:id` for a session's usage +
   cost summary, `DELETE /sessions/:id`), plus additive, read-mostly **monitor
@@ -186,7 +180,7 @@ install`). A command that writes without that call bypasses the security model.
   bundles — stay zero-runtime-dep: providers use the global `fetch`; nothing pulls
   in an SDK. Do not add any other npm dependency. Enforced by
   `test/zero-dep.test.ts` (runtime `dependencies` ⊆ `{ jiti }`; no ink/react
-  imports under `src/` or `test/`). The **web** SPA (`web/`) may use React/Vite
+  imports under `src/` or `test/`). The **`tui/`** package may take `ink`/`react`
   as its own package deps — not engine runtime deps, not under root `test/`.
 - **Tests use `node:test` run via `tsx`**, and must run offline. Every extension
   is capability-gated and ships with tests.
@@ -217,6 +211,21 @@ adding one fails the suite until `CLAUDE.md` (the count above), `ARCHITECTURE.md
 (count + the ordered list), and `README.md` (a `` `name` `` table row + count) are
 all synced. "Add one array line" is really: array entry + import + those three doc
 updates, verified green.
+
+## Load-Bearing Documents
+
+Contract surfaces. A change that alters a rule or shape here takes the Deep tier: alternatives
+recorded before choosing, a plan in `.agent/plan.md`, two independent reviewers, and a closeout pass.
+
+- `src/kernel/*.ts` — kernel core; its surface is already pinned by `test/kernel-surface.test.ts`
+- `package.json` — published `exports` and `bin` entries
+- `ARCHITECTURE.md` — the small-core bet this project is organised around
+- `CLAUDE.md` — this file
+- `docs/EXTENSIONS.md` — the extension API every extension is written against
+- `docs/JSONL.md` — the on-disk session format, which persisted data depends on
+
+**Not** load-bearing — these take Standard or Direct: `src/extensions/**`, `test/**`, `tui/**`,
+`evals/**`, and the remaining `docs/*.md`.
 
 ## Working here
 
