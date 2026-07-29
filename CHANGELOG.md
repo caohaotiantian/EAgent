@@ -20,6 +20,25 @@ the SPA; every path the static branch used to serve auth-exempt is now gated.
 
 ### Added
 
+**Kernel seams for permission modes and live tool output.** `UI.decide?` is an
+optional three-way permission answer (`once` / `always` / `reject`) taking a
+structured `DecisionRequest {capability, source, arguments}` — `confirm` receives
+one pre-formatted sentence, so a dialog could not render the diff or command being
+authorized without parsing prose. A `confirm`-only front end is unaffected: its
+`true` still means `always`. `CapabilityManager.setFallback` / `forget` make a
+runtime permission-mode control possible (the fallback was constructor-only, and
+every answer was remembered forever, so cycling back to `ask` was a silent no-op).
+A new `tool_progress` lifecycle event carries `ctx.progress` chunks to renderers
+instead of only to `logger.debug`. Kernel ceiling 2,265 -> 2,335.
+
+Security notes: an unrecognized `decide` answer denies (whitelist, not blacklist);
+the shared-prompt dedupe keys on arguments as well as capability, so `once` cannot
+grant a whole tool wave and a prompt showing one command cannot authorize another;
+`setFallback` clears the memo, so a lock-down actually locks down; and an answer
+arriving from a dialog opened before `forget` cannot repopulate the memo.
+
+### Added
+
 **`src/print.ts` — the headless plain printer.** The only human-readable output
 the engine emits: assistant text to stdout, sub-agent text / reasoning / tool
 calls / errors to stderr, and no cursor, alt-screen, or spinner byte by

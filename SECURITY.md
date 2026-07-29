@@ -26,6 +26,23 @@ kernel is designed around that assumption rather than trusting the model.
   so those never prompt; the high-authority gates left to *ask*/deny are
   `shell:exec`, `code:exec`, `skill:write`, `net:fetch`, `pkg:install`, and
   `self:extend`. A full audit log is available via `/caps`.
+- **The fallback is mutable at runtime.** `CapabilityManager.setFallback` exists
+  so a front end can offer a permission-mode control; `forget` drops remembered
+  answers. Both are reachable by any extension holding the agent, and **neither
+  writes an audit entry** — a gap, tracked. `setFallback` clears the memo, so a
+  switch to *deny* genuinely locks down capabilities already approved, and a
+  switch to *allow* releases ones already refused.
+- **An `ask` answer can now be scoped to one call.** A front end implementing the
+  optional `UI.decide` may answer *once* (this call only), *always* (remembered
+  for the session), or *reject*. A `confirm`-only front end keeps the historical
+  two-way answer, where yes means *always*. Anything an unrecognized `decide`
+  returns — `undefined`, a `null` off a wire — **denies**; the decision is a
+  whitelist, never a blacklist. Concurrent callers share one prompt only when the
+  capability *and* the arguments match, so approving `bash ls` cannot authorize a
+  concurrent `bash rm -rf /` the human was never shown.
+- **`decide` receives raw tool arguments.** They are model-authored and therefore
+  attacker-influenced under prompt injection. A front end rendering them must
+  escape and bound them; the kernel does not sanitize.
 - **Approval gates.** The `planmode` extension interposes a human approval step
   before any mutating tool runs (`beforeToolCall` advice), independent of the
   capability grant. Under a non-interactive host the default headless UI denies

@@ -196,16 +196,21 @@ flowchart TD
     G -->|no| FB{"fallback policy"}
     FB -->|allow| ALLOW
     FB -->|deny| DENY
-    FB -->|ask| UI{"UI confirm? (answer remembered)"}
-    UI -->|yes| ALLOW
-    UI -->|no| DENY
+    FB -->|ask| UI{"UI decide / confirm"}
+    UI -->|once| ALLOW
+    UI -->|always| ALLOWR["allow + remember"]
+    UI -->|reject| DENY
+    ALLOWR --> ALLOW
     ALLOW --> AUD["append to audit log"]
     DENY --> AUD
 ```
 
 Patterns support a trailing `*` wildcard segment (`fs:*`, `*`). Every check is
-recorded in an audit log that `/caps` can inspect, and an `ask` answer is
-remembered for the session. This layer is the one thing pi deliberately omits —
+recorded in an audit log that `/caps` can inspect. A front end implementing the
+optional `UI.decide` can answer `once` (this call only), `always` (remembered for
+the session), or `reject`; a `confirm`-only front end gets the historical two-way
+answer, where yes means `always`. `setFallback`/`forget` let a front end drive a
+permission-mode control at runtime. This layer is the one thing pi deliberately omits —
 reasonable for a trusted single-user coding agent, but EAgent makes LLM-authored
 code a first-class mode. It enforces *authority*; it does not pretend to sandbox
 arbitrary in-process code (see `SECURITY.md`).
@@ -363,7 +368,7 @@ auth + session pool and add no kernel change.
 `test/kernel-surface.test.ts` pins the kernel's complete public surface: adding a
 new export to `src/kernel/index.ts` fails the test until the author either moves
 the addition into an extension or deliberately updates the expected list. A second
-assertion holds the total line count of `src/kernel/` under a hard ceiling (2,250
+assertion holds the total line count of `src/kernel/` under a hard ceiling (2,335
 lines). Together they make core growth a conscious decision — new capability is an
 extension by construction.
 

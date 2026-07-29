@@ -36,13 +36,13 @@ accounting), `events.ts` (the event/filter maps), `define.ts` (`defineTool` +
 result helpers), `validate.ts` (JSON-Schema argument validation), `store.ts`
 (the namespaced `Store`), and `index.ts` (the public barrel). The whole core is
 held minimal on purpose: `test/kernel-surface.test.ts` pins the public exports
-and keeps `src/kernel/` under a hard line ceiling (2,315 lines; the metric is
-`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,312 — a few
+and keeps `src/kernel/` under a hard line ceiling (2,335 lines; the metric is
+`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,331 — a few
 lines of slack). The ceiling moved from 2,200 to 2,250 when the `Config`
 interface + `envOnlyConfig` fallback were added to `store.ts` for the injected
 `e.config` facility, then from 2,250 to 2,265 for the multi-tenant isolation
 seam (`currentRootAgent()` + a `rootAgentStore` ALS, the `e.agent`/`e.rootAgent`
-getters), then from 2,265 to 2,315 for the TUI permission seams — `UI.decide?`
+getters), then from 2,265 to 2,335 for the TUI permission seams — `UI.decide?`
 (a structured permission request, since `confirm`'s single pre-formatted string
 cannot carry a diff or a command), `CapabilityManager.setFallback`/`forget`
 (without which a permission-mode control cannot exist: the fallback was

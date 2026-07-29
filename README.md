@@ -7,8 +7,8 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~2,248 lines, held just
-under a hard 2,250-line ceiling by a test). There are no built-in tools, no hard-coded prompt
+The kernel is **seven primitives and nothing more** (~2,331 lines, held just
+under a hard 2,335-line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
 want to change is a hot-reloadable extension you can edit while the agent runs.
@@ -160,7 +160,7 @@ flowchart LR
         direction TB
         EVA["agent_start · turn_start"]
         EVB["message · text_delta"]
-        EVC["tool_start · tool_end · tool_batch_end · usage"]
+        EVC["tool_start · tool_progress · tool_end · usage"]
         EVD["turn_end · agent_end · error"]
     end
     subgraph INT["Filter hooks — e.hook() · intervene"]
