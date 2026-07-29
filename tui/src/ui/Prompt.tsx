@@ -29,6 +29,8 @@ import {
   type HistoryState,
   type SearchState,
 } from "../input/history.js";
+import { accept, findTrigger, suggest, type SuggestContext } from "../input/suggest.js";
+import { Suggestions } from "./Suggestions.js";
 
 export interface PromptProps {
   history: HistoryState;
@@ -38,6 +40,8 @@ export interface PromptProps {
   placeholder?: string;
   /** Disabled while a turn runs — the transcript owns the keyboard then. */
   disabled?: boolean;
+  /** Suggestion sources. Omitted in tests that only exercise editing. */
+  suggestions?: SuggestContext;
 }
 
 export function Prompt({
@@ -46,11 +50,28 @@ export function Prompt({
   onSubmit,
   placeholder = "ask anything · ctrl+j for a newline · ctrl+r to search",
   disabled = false,
+  suggestions,
 }: PromptProps): ReactElement {
   const [ed, setEd] = useState<EditorState>(() => initialEditor());
   const [search, setSearch] = useState<SearchState | null>(null);
+  const [pick, setPick] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
 
   const apply = (a: Action): void => setEd((s) => reduceEditor(s, a));
+
+  // Recomputed every render from the buffer, so the popup can never disagree
+  // with what is typed — there is no separate popup state to fall out of sync.
+  const trigger = suggestions && !dismissed ? findTrigger(ed.text, ed.cursor) : null;
+  const hits = trigger && suggestions ? suggest(trigger, suggestions) : [];
+  const popupOpen = hits.length > 0;
+  const chosen = hits[Math.min(pick, hits.length - 1)];
+
+  const take = (): void => {
+    if (!trigger || !chosen) return;
+    const next = accept(ed.text, ed.cursor, trigger, chosen);
+    setEd((s) => ({ ...s, text: next.text, cursor: next.cursor, history: [...s.history, { text: s.text, cursor: s.cursor }] }));
+    setPick(0);
+  };
 
   useInput(
     (input, key) => {
@@ -88,6 +109,28 @@ export function Prompt({
         setSearch(initialSearch());
         return;
       }
+
+      // -- the suggestion popup owns arrows, tab, and enter while open --------
+      if (popupOpen) {
+        if (key.escape) {
+          setDismissed(true);
+          return;
+        }
+        if (key.tab || key.return) {
+          take();
+          return;
+        }
+        if (key.upArrow) {
+          setPick((i) => (i === 0 ? hits.length - 1 : i - 1));
+          return;
+        }
+        if (key.downArrow) {
+          setPick((i) => (i + 1) % hits.length);
+          return;
+        }
+      }
+      // Typing after a dismissal re-opens the popup for the NEXT trigger.
+      if (dismissed && (key.backspace || input)) setDismissed(false);
 
       // -- submission ---------------------------------------------------------
       if (key.return) {
@@ -170,6 +213,7 @@ export function Prompt({
           </Text>
         ))
       )}
+      <Suggestions items={hits} index={Math.min(pick, Math.max(hits.length - 1, 0))} />
     </Box>
   );
 }

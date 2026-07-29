@@ -20,13 +20,15 @@ import React from "react";
 import { OPTIONS_HELP, parseArgs, type Args } from "eagent/args";
 import { createAgentHost, loadEnvFile, thinkingFromEnv } from "eagent/host";
 import { registerHostCommands } from "eagent/host-commands";
-import type { Logger, UI } from "eagent";
+import type { DecisionChoice, DecisionRequest, Logger, UI } from "eagent";
+
+import { readdirSync } from "node:fs";
 
 import { subscribe } from "./bridge.js";
 import { initialHistory, record, type HistoryState } from "./input/history.js";
 import { initialState, reduce, type TranscriptState } from "./model/transcript.js";
 import { envFromProcess, refusalReason } from "./tty.js";
-import { App } from "./ui/App.js";
+import { App, type PendingQuestion } from "./ui/App.js";
 import { ErrorBoundary } from "./ui/ErrorBoundary.js";
 
 const USAGE = `EAgent — a minimalist agent with a tiny core and Emacs-grade extensibility
@@ -70,13 +72,53 @@ async function main(): Promise<void> {
     await headless();
   }
 
+  // The dialog sink, late-bound: React installs it on mount. Declared here so
+  // the UI object below can close over it BEFORE createAgentHost runs — the
+  // `ask` extension grants `ui:ask` only if `ask` is a function at activation
+  // time, so building the UI after Ink mounts would silently disable mid-turn
+  // elicitation.
+  let openDialog: ((q: PendingQuestion) => void) | null = null;
+
+  /** Show a modal question and resolve with the chosen value. */
+  const askDialog = (q: Omit<PendingQuestion, "answer">): Promise<string | null> =>
+    new Promise((resolve) => {
+      if (!openDialog) return resolve(null); // no display yet: fall back
+      openDialog({ ...q, answer: (value) => resolve(value) });
+    });
+
   const ui: UI = {
-    // Built BEFORE createAgentHost and late-binding through these closures: the
-    // `ask` extension grants `ui:ask` only if `ask` is a function at activation
-    // time, so constructing the UI after Ink mounts would silently disable
-    // mid-turn elicitation.
-    confirm: async () => false,
-    ask: async () => null,
+    // Kept for front ends and guards that still call it. Its `true` means
+    // "always" to the capability layer, so the two-way answer maps onto the
+    // three-way dialog's first and last options.
+    confirm: async (question) => (await askDialog({
+      question,
+      choices: [
+        { value: "yes", label: "Yes" },
+        { value: "no", label: "No" },
+      ],
+    })) === "yes",
+
+    decide: async (req: DecisionRequest): Promise<DecisionChoice> => {
+      const answer = await askDialog({
+        question: `Allow ${req.source} to use "${req.capability}"?`,
+        detail: req.arguments ? JSON.stringify(req.arguments) : undefined,
+        choices: [
+          { value: "once", label: "Yes, once", hint: "this call only" },
+          { value: "always", label: "Yes, and don't ask again", hint: "for this session" },
+          { value: "reject", label: "No", hint: "deny and tell the model" },
+        ],
+      });
+      // A dismissed dialog denies: the decision is a whitelist.
+      return answer === "once" || answer === "always" ? answer : "reject";
+    },
+
+    ask: async (question, options) =>
+      askDialog({
+        question,
+        choices: (options ?? []).map((o) => ({ value: o, label: o })),
+        allowFreeText: true,
+      }),
+
     notify: () => {},
   };
   const logger: Logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
@@ -141,10 +183,20 @@ async function main(): Promise<void> {
   function Root(): React.ReactElement {
     const [s, setS] = React.useState(state);
     const [hist, setHist] = React.useState<HistoryState>(initialHistory());
+    const [pending, setPending] = React.useState<PendingQuestion | null>(null);
     React.useEffect(() => {
       repaint = setS;
+      openDialog = (q) =>
+        setPending({
+          ...q,
+          answer: (value) => {
+            setPending(null);
+            q.answer(value);
+          },
+        });
       return () => {
         repaint = () => {};
+        openDialog = null;
       };
     }, []);
     return (
@@ -159,6 +211,15 @@ async function main(): Promise<void> {
           onSubmit={(text) => {
             setHist((h) => record(h, text));
             void submit(text);
+          }}
+          pending={pending}
+          suggestions={{
+            commands: () => commands.list().map((x) => ({ name: x.name, description: x.description })),
+            readDir: (dir) =>
+              readdirSync(dir, { withFileTypes: true }).map((d) => ({
+                name: d.name,
+                isDirectory: d.isDirectory(),
+              })),
           }}
         />
       </ErrorBoundary>

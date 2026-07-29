@@ -17,7 +17,9 @@ import { Box, Static, Text, useApp, useInput } from "ink";
 import { useEffect, useState, type ReactElement } from "react";
 
 import type { HistoryState } from "../input/history.js";
+import type { SuggestContext } from "../input/suggest.js";
 import { partition, type TranscriptState } from "../model/transcript.js";
+import { Dialog, type Choice } from "./Dialog.js";
 import { ItemView } from "./items.js";
 import { Prompt } from "./Prompt.js";
 
@@ -38,13 +40,38 @@ export interface AppProps {
   onHistoryChange?: (h: HistoryState) => void;
   /** A submitted prompt. Absent means the input box is not shown at all.  */
   onSubmit?: (text: string) => void;
+  /** Suggestion sources for the / and @ popups. */
+  suggestions?: SuggestContext;
+  /** A modal question awaiting an answer — a permission ask or an elicitation.
+   *  While one is open it owns the keyboard and the prompt is hidden. */
+  pending?: PendingQuestion | null;
+}
+
+/** A question the agent is blocked on. `detail` renders the tool arguments. */
+export interface PendingQuestion {
+  question: string;
+  detail?: string;
+  choices: Choice<string>[];
+  allowFreeText?: boolean;
+  answer: (value: string) => void;
 }
 
 function Spinner({ frame }: { frame: number }): ReactElement {
   return <Text color="cyan">{FRAMES[frame % FRAMES.length]}</Text>;
 }
 
-export function App({ state, onInterrupt, onExit, status, frame, history, onHistoryChange, onSubmit }: AppProps): ReactElement {
+export function App({
+  state,
+  onInterrupt,
+  onExit,
+  status,
+  frame,
+  history,
+  onHistoryChange,
+  onSubmit,
+  suggestions,
+  pending,
+}: AppProps): ReactElement {
   const { exit } = useApp();
   const [tick, setTick] = useState(0);
 
@@ -57,6 +84,9 @@ export function App({ state, onInterrupt, onExit, status, frame, history, onHist
   }, [state.running, frame]);
 
   useInput((input, key) => {
+    // A modal question owns the keyboard; Esc must close it, not interrupt the
+    // turn that is blocked ON it.
+    if (pending) return;
     if (key.escape) {
       if (state.running) onInterrupt();
       return;
@@ -107,12 +137,21 @@ export function App({ state, onInterrupt, onExit, status, frame, history, onHist
       {/* The input box stays mounted while a turn runs — disabled, so the
           transcript owns the keyboard, but visible so the layout does not jump
           every time a turn starts and ends. */}
-      {onSubmit && history && onHistoryChange ? (
+      {pending ? (
+        <Dialog
+          question={pending.question}
+          detail={pending.detail}
+          choices={pending.choices}
+          allowFreeText={pending.allowFreeText}
+          onAnswer={pending.answer}
+        />
+      ) : onSubmit && history && onHistoryChange ? (
         <Prompt
           history={history}
           onHistoryChange={onHistoryChange}
           onSubmit={onSubmit}
           disabled={state.running}
+          suggestions={suggestions}
         />
       ) : null}
     </Box>
