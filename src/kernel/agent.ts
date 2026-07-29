@@ -520,15 +520,19 @@ export class Agent {
       return { content: `Invalid arguments for ${call.name}:\n- ${final.errors.join("\n- ")}`, isError: true };
     }
 
-    for (const cap of tool.capabilities ?? []) {
-      await this.capabilities.require(cap, tool.spec.name);
-    }
+    // The validated args ride along so a `decide` UI can show what is actually
+    // being authorized — the command, the path — not just the capability name.
+    const authArgs = final.value as Record<string, unknown>;
+    for (const cap of tool.capabilities ?? []) await this.capabilities.require(cap, tool.spec.name, authArgs);
 
     const ctx: ToolContext = {
       toolCallId: call.id,
       signal: this.#abort!.signal,
-      require: (cap) => this.capabilities.require(cap, tool.spec.name),
-      progress: (chunk) => this.logger.debug(`[${tool.spec.name}] ${chunk}`),
+      require: (cap) => this.capabilities.require(cap, tool.spec.name, authArgs),
+      progress: (chunk) => {
+        this.logger.debug(`[${tool.spec.name}] ${chunk}`);
+        void this.hooks.emit("tool_progress", { call, chunk });
+      },
       ui: this.ui,
       agent: this.handle,
       log: this.logger,

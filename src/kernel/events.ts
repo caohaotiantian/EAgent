@@ -39,6 +39,9 @@ export type KernelEvents = {
   reasoning_delta: { text: string };
 
   tool_start: { call: ToolCallBlock };
+  /** Incremental output from a running tool (`ctx.progress`), so a renderer can
+   *  stream a long shell command inside its card instead of awaiting the result. */
+  tool_progress: { call: ToolCallBlock; chunk: string };
   /** `step` carries the call-time (pre-increment) per-run counter. */
   tool_end: { call: ToolCallBlock; result: ToolResult; step: number };
   /** A parallel tool wave settled; carries the ordered {call,result} pairs and the call-time `step`. */

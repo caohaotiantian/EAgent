@@ -68,7 +68,16 @@ test("the kernel source stays small", async () => {
   for (const f of readdirSync(dir)) {
     if (f.endsWith(".ts")) lines += readFileSync(join(dir, f), "utf8").split("\n").length;
   }
-  assert.ok(lines < 2265, `kernel is ${lines} lines; keep the core minimal (ceiling 2265)`);
+  // 2,265 -> 2,315 (+50, the same size as the 2,200 -> 2,250 Config raise) for the
+  // TUI parity seams: `UI.decide?` — a structured permission request that
+  // `confirm`'s single pre-formatted string cannot carry — the `setFallback` /
+  // `forget` pair without which a permission-mode control cannot exist (the
+  // fallback was constructor-only and an answer was remembered forever, so
+  // cycling back to `ask` was a silent no-op), and `tool_progress` for live tool
+  // output. Each is load-bearing for a named product feature; the alternative was
+  // dropping those features. NOTE the metric is `split("\n").length`, which counts
+  // one more per file than `wc -l` — 12 files, so it reads ~12 above a wc count.
+  assert.ok(lines <= 2315, `kernel is ${lines} lines; keep the core minimal (ceiling 2315)`);
 });
 
 /** The stable member set of the object handed to every extension at activation. */

@@ -19,7 +19,7 @@
  * Patterns support a trailing `*` wildcard segment (`fs:*`, `*`).
  */
 
-import type { Disposable, UI } from "./types.js";
+import type { DecisionChoice, Disposable, UI } from "./types.js";
 
 export type Decision = "allow" | "deny" | "ask";
 
@@ -67,6 +67,22 @@ export class CapabilityManager {
     this.#ui = ui;
   }
 
+  /** Swap the fallback at runtime — what a permission-mode control drives.
+   *  Without it the mode is fixed at construction. */
+  setFallback(fallback: Decision): void {
+    this.#fallback = fallback;
+  }
+
+  /** Drop remembered answers (all, or those matching `pattern`) so `ask` prompts
+   *  again. Cycling back to `ask` is otherwise a no-op — every prior answer
+   *  would still short-circuit the prompt. */
+  forget(pattern?: string): void {
+    if (pattern === undefined) return this.#remembered.clear();
+    for (const cap of [...this.#remembered.keys()]) {
+      if (matchPattern(cap, pattern)) this.#remembered.delete(cap);
+    }
+  }
+
   /** Add a granted pattern at runtime (e.g. an extension declaring its needs). */
   grant(pattern: string): Disposable {
     this.#grant.push(pattern);
@@ -78,7 +94,7 @@ export class CapabilityManager {
    * Enforce a capability. Resolves if allowed, throws `CapabilityError` if not.
    * `source` identifies the requester for the audit log.
    */
-  async require(capability: string, source: string): Promise<void> {
+  async require(capability: string, source: string, args?: Record<string, unknown>): Promise<void> {
     if (matchesAny(capability, this.#deny)) {
       this.record(capability, "deny", source, false);
       throw new CapabilityError(capability, `matches deny rule`);
@@ -109,10 +125,20 @@ export class CapabilityManager {
       this.record(capability, "deny", source, false);
       throw new CapabilityError(capability, "not granted and no UI to prompt");
     }
-    // Concurrent callers needing the same unremembered cap share ONE confirm.
+    // Concurrent callers needing the same unremembered cap share ONE prompt.
     let ask = this.#pending.get(capability);
     if (!ask) {
-      this.#pending.set(capability, (ask = this.#ui.confirm(`Allow ${source} to use capability "${capability}"?`).then((ok) => (this.#remembered.set(capability, ok), ok))));
+      const ui = this.#ui;
+      // `confirm`'s historical `true` means "allow and stop asking", so it maps
+      // to `always`; only a UI implementing `decide` can express "allow once".
+      const choice: Promise<DecisionChoice> = ui.decide
+        ? ui.decide({ capability, source, arguments: args })
+        : ui.confirm(`Allow ${source} to use capability "${capability}"?`).then((ok) => (ok ? "always" : "reject"));
+      ask = choice.then((c) => {
+        if (c !== "once") this.#remembered.set(capability, c === "always");
+        return c !== "reject";
+      });
+      this.#pending.set(capability, ask);
       void ask.finally(() => this.#pending.delete(capability));
     }
     const ok = await ask;

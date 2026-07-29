@@ -36,13 +36,19 @@ accounting), `events.ts` (the event/filter maps), `define.ts` (`defineTool` +
 result helpers), `validate.ts` (JSON-Schema argument validation), `store.ts`
 (the namespaced `Store`), and `index.ts` (the public barrel). The whole core is
 held minimal on purpose: `test/kernel-surface.test.ts` pins the public exports
-and keeps `src/kernel/` under a hard line ceiling (2,265 lines; the metric is
-`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,260 — a few
+and keeps `src/kernel/` under a hard line ceiling (2,315 lines; the metric is
+`split("\n").length` summed over `src/kernel/*.ts`, currently ~2,312 — a few
 lines of slack). The ceiling moved from 2,200 to 2,250 when the `Config`
 interface + `envOnlyConfig` fallback were added to `store.ts` for the injected
 `e.config` facility, then from 2,250 to 2,265 for the multi-tenant isolation
 seam (`currentRootAgent()` + a `rootAgentStore` ALS, the `e.agent`/`e.rootAgent`
-getters) — deliberate explicit decisions. Adding to the kernel means golfing
+getters), then from 2,265 to 2,315 for the TUI permission seams — `UI.decide?`
+(a structured permission request, since `confirm`'s single pre-formatted string
+cannot carry a diff or a command), `CapabilityManager.setFallback`/`forget`
+(without which a permission-mode control cannot exist: the fallback was
+constructor-only and every answer was remembered forever, so cycling back to
+`ask` was a silent no-op), and the `tool_progress` event for live tool output —
+deliberate explicit decisions. Adding to the kernel means golfing
 something else out or an explicit decision; new capability is an extension, not a
 core change.
 

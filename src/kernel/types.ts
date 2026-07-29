@@ -282,9 +282,28 @@ export interface Provider {
 // Ambient services exposed to tools/extensions
 // ---------------------------------------------------------------------------
 
+/** A permission request as DATA: `confirm` gets one pre-formatted sentence, so a
+ *  front end cannot render the diff or shell command without parsing prose. */
+export interface DecisionRequest {
+  capability: string;
+  /** The requesting tool name or extension id. */
+  source: string;
+  /** The call's arguments, when the request came from a tool dispatch. */
+  arguments?: Record<string, unknown>;
+}
+
+/** `once` grants this call only; `always` is remembered for the session. */
+export type DecisionChoice = "once" | "always" | "reject";
+
 export interface UI {
   /** Ask the human a yes/no question. Resolves to the decision. */
   confirm(question: string): Promise<boolean>;
+  /**
+   * Resolve a permission request with a three-way answer. Optional: a UI that
+   * cannot offer "allow once" simply omits it and the capability layer falls
+   * back to `confirm`, whose `true` means `always` (its historical meaning).
+   */
+  decide?(request: DecisionRequest): Promise<DecisionChoice>;
   notify(message: string): void;
   /**
    * Ask the human a free-form or multiple-choice question and resolve with the
