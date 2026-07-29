@@ -190,9 +190,33 @@ export function Prompt({
         return;
       }
 
-      // Printable text — including a bracketed paste, which Ink delivers as one
-      // multi-character `input`, so a pasted block arrives intact.
-      if (input && !key.ctrl && !key.meta) apply({ kind: "insert", text: input });
+      // Printable text, which may arrive as one multi-character chunk: a paste,
+      // or fast typing the terminal coalesced. Ink reports such a chunk with
+      // `key.return === false` even when it ENDS in a carriage return, so the
+      // submit branch above never sees it — inserting it verbatim would leave a
+      // stray control character in the buffer and silently swallow the Enter.
+      // Split it: interior newlines are real (a multi-line paste), a trailing
+      // one is the submit the user pressed.
+      if (input && !key.ctrl && !key.meta) {
+        // A SINGLE character is a keypress, not a chunk. A lone newline is
+        // Ctrl+J (which some terminals deliver as a bare \n with no ctrl flag),
+        // so it inserts a line break rather than submitting.
+        if (input.length === 1) {
+          if (input === "\n" || input === "\r") return apply({ kind: "newline" });
+          return apply({ kind: "insert", text: input });
+        }
+
+        const trailing = /[\r\n]$/.test(input);
+        const normalized = input.replace(/[\r\n]+$/, "").replace(/\r\n?/g, "\n");
+        if (normalized) apply({ kind: "insert", text: normalized });
+        if (trailing) {
+          const text = (ed.text + normalized).trim();
+          if (text !== "") {
+            onSubmit(text);
+            setEd(initialEditor());
+          }
+        }
+      }
     },
     { isActive: !disabled },
   );

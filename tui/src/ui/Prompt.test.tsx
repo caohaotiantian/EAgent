@@ -194,3 +194,47 @@ test("a pasted multi-line block arrives intact rather than submitting at the fir
   assert.match(frame, /line one/);
   assert.match(frame, /line two/);
 });
+
+// A regression the unit tests missed for four phases, because they wrote the
+// text and the Enter as SEPARATE stdin writes. A real terminal coalesces: a
+// paste ending in a newline, or fast typing, arrives as one chunk with
+// `key.return === false`, so the submit branch never sees it.
+test("text arriving in ONE chunk ending in Enter still submits", async () => {
+  const { stdin, submitted, lastFrame } = mount();
+
+  stdin.write("hello\r");
+  await tick();
+
+  assert.deepEqual(submitted, ["hello"], "the coalesced Enter still submitted");
+  assert.doesNotMatch(lastFrame() ?? "", /hello/, "and the prompt cleared");
+});
+
+test("a chunk ending in Enter leaves no stray control character behind", async () => {
+  const { stdin, submitted } = mount();
+
+  stdin.write("first\r");
+  await tick();
+  stdin.write("second\r");
+  await tick();
+
+  assert.deepEqual(submitted, ["first", "second"], "consecutive coalesced turns both submit");
+});
+
+test("a multi-line paste ENDING in a newline submits the whole block", async () => {
+  const { stdin, submitted } = mount();
+
+  stdin.write("line one\nline two\n");
+  await tick();
+
+  assert.deepEqual(submitted, ["line one\nline two"], "interior newlines survive, the trailing one submits");
+});
+
+test("a multi-line paste with NO trailing newline still does not submit", async () => {
+  const { stdin, submitted, lastFrame } = mount();
+
+  stdin.write("line one\nline two");
+  await tick();
+
+  assert.deepEqual(submitted, [], "still composing");
+  assert.match(lastFrame() ?? "", /line two/);
+});
