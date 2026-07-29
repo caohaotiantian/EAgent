@@ -29,14 +29,14 @@ const ROOTS = [
  * The ONLY permitted `process.env.EAGENT_*` reads (a small allowlist), keyed by
  * file basename:
  *   - `memory.ts`      — the embed API key (a secret, never surfaced by /config).
- *   - `server.ts`      — the auth token (a secret) + optional web SPA root path.
+ *   - `server.ts`      — the auth token (a secret) + the session transcript dir.
  *   - `http.ts`        — the SSE cap, kept as the provider-without-host fallback.
  * Anything else is a violation. (config-cmd's own `EAGENT_CONFIG` kill switch is
  * resolved inside `LayeredConfig.enabled("config")`, not by a direct env read.)
  */
 const READ_ALLOWLIST: Record<string, Set<string>> = {
   "memory.ts": new Set(["EAGENT_MEMORY_EMBED_API_KEY"]),
-  "server.ts": new Set(["EAGENT_TOKEN", "EAGENT_WEB_ROOT", "EAGENT_SESSIONS_DIR"]),
+  "server.ts": new Set(["EAGENT_TOKEN", "EAGENT_SESSIONS_DIR"]),
   "http.ts": new Set(["EAGENT_MAX_SSE_EVENT_BYTES"]),
 };
 

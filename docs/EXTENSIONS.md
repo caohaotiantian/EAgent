@@ -17,8 +17,8 @@ receives the `ExtensionAPI` and registers tools, hooks, commands, or providers
 on it.
 
 ```ts
-import { defineTool } from "eagent";
-import type { ExtensionAPI } from "eagent";
+import { defineTool } from "@eagent/core";
+import type { ExtensionAPI } from "@eagent/core";
 
 export default function activate(e: ExtensionAPI) {
   e.registerTool(
@@ -130,7 +130,7 @@ just returns a `ToolResult` — `{ content, isError? }` — so you can build one
 inline.
 
 ```ts
-import { defineTool } from "eagent";
+import { defineTool } from "@eagent/core";
 
 e.registerTool(
   defineTool({
@@ -247,6 +247,7 @@ change anything. From `src/kernel/events.ts`:
 | `text_delta` | `{ text }` | Incremental assistant text during streaming. |
 | `reasoning_delta` | `{ text }` | Incremental reasoning ("thinking") text during streaming, for models that expose it. |
 | `tool_start` | `{ call }` | A tool call is about to run. |
+| `tool_progress` | `{ call, chunk }` | Incremental output from a running tool (`ctx.progress`), for live tool cards. |
 | `tool_end` | `{ call, result, step }` | A tool call finished. |
 | `tool_batch_end` | `{ batch, step }` | A parallel tool wave settled (the ordered `{call,result}` pairs). |
 | `usage` | `{ usage, cumulative }` | Token usage for the just-finished model call, plus the running total. |
@@ -473,8 +474,8 @@ you the `ok`/`fail` helpers.)
 
 ```ts
 // .eagent/extensions/notes.ts — auto-discovered, then `/reload`
-import { defineTool } from "eagent";
-import type { ExtensionAPI } from "eagent";
+import { defineTool } from "@eagent/core";
+import type { ExtensionAPI } from "@eagent/core";
 
 export default function activate(e: ExtensionAPI) {
   e.log.info("notes extension activated");

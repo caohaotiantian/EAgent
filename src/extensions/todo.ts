@@ -76,6 +76,11 @@ function validate(raw: unknown): ValidateResult {
   return { ok: true, items };
 }
 
+/** Store key holding `(agent) => TodoItem[]`, so a front end can render the
+ *  checklist directly instead of parsing the human output of `/todos`. Mirrors
+ *  `JOBS_ACCESSOR_KEY` / `COST_ACCESSOR_KEY`. */
+export const TODO_ACCESSOR_KEY = "todoItems";
+
 export default function activate(e: ExtensionAPI): () => void {
   // Session-scoped list, keyed on the run-tree ROOT (`e.rootAgent`) so it is shared
   // across a session's fork tree but isolated BETWEEN sessions (each on its own
@@ -87,6 +92,8 @@ export default function activate(e: ExtensionAPI): () => void {
     if (!s) byRoot.set(agent, (s = { items: [] }));
     return s;
   };
+
+  e.store.set(TODO_ACCESSOR_KEY, (agent: Agent): TodoItem[] => byRoot.get(agent)?.items ?? []);
 
   const offTool = e.registerTool(
     defineTool({

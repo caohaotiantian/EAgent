@@ -1,11 +1,17 @@
 /**
- * Doc surface pin after dropping the Ink TUI (design 2026-07-27-drop-ink-tui AC6).
- * Ensures CLAUDE/README/ARCHITECTURE/docs/TUI.md/CHANGELOG cannot re-advertise
- * eagent-tui as a shipped product surface.
+ * Doc surface pin for the terminal UI (AC16).
+ *
+ * The load-bearing half is negative: the docs must never re-advertise a removed
+ * surface, and must never sanction `ink`/`react` inside the engine. That guard is
+ * what keeps the `tui/` package boundary honest, so this file is rewritten as the
+ * surface changes — never deleted.
+ *
+ * The positive half asserts the docs describe what actually ships today: a
+ * headless engine CLI plus a separate Ink TUI package.
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -16,60 +22,47 @@ function read(rel: string): string {
   return readFileSync(join(repoRoot, rel), "utf8");
 }
 
-/** Forbidden as *install/run instructions* for the removed product. */
-const INSTALL_HINTS = [/npm run build:tui/, /npm run test:tui/, /eagent-tui\s+--monitor/, /^eagent-tui\s*$/m];
+/** Modules deleted with the old display layer; no doc may present them as shipped. */
+const REMOVED_MODULES = [/engine-render/, /view-model/, /src\/attribution/, /src\/tty/];
 
-test("AC6: CLAUDE.md zero-dep charter and no shipped eagent-tui / src/tui", () => {
+test("AC16: CLAUDE.md keeps the engine zero-dep charter and sanctions no in-engine ink", () => {
   const md = read("CLAUDE.md");
   assert.match(md, /jiti/, "mentions jiti");
   assert.match(md, /[Zz]ero runtime dependenc/, "states zero runtime deps");
-  assert.doesNotMatch(md, /src\/tui\//, "must not document src/tui/ as a path");
-  assert.doesNotMatch(md, /eagent-tui/, "must not document eagent-tui");
-  assert.doesNotMatch(md, /MAY use[\s\S]{0,80}ink/i, "must not allow ink under a tui exception");
-  assert.doesNotMatch(md, /test\/tui-isolation/, "isolation suite replaced by zero-dep pin");
+  assert.doesNotMatch(md, /src\/tui\//, "the TUI is a package, not src/tui/");
+  assert.doesNotMatch(md, /MAY use[\s\S]{0,80}ink/i, "must not allow ink inside the engine");
 });
 
-test("AC6: README.md does not instruct eagent-tui / build:tui / list src/tui as Ink client", () => {
-  const md = read("README.md");
-  assert.doesNotMatch(md, /eagent-tui/, "no eagent-tui usage");
-  assert.doesNotMatch(md, /build:tui|test:tui/, "no tui build scripts");
-  assert.doesNotMatch(md, /src\/tui\//, "layout must not list src/tui/");
-  assert.match(md, /engine-render/, "still documents plain renderer");
-  assert.match(md, /[Ww]eb|browser|WEB\.md/, "points rich UX at web/browser");
-});
-
-test("AC6: ARCHITECTURE.md no shipped eagent-tui / src/tui; zero-dep except jiti", () => {
+test("AC16: ARCHITECTURE.md keeps zero-dep and documents no removed module", () => {
   const md = read("ARCHITECTURE.md");
-  assert.doesNotMatch(md, /eagent-tui/, "no eagent-tui");
-  assert.doesNotMatch(md, /src\/tui\//, "no src/tui/");
-  assert.doesNotMatch(md, /test\/tui-isolation/, "no tui-isolation reference");
   assert.match(md, /jiti/, "mentions jiti");
   assert.match(md, /zero runtime dependenc/i, "zero runtime deps");
-});
-
-test("AC6: docs/TUI.md is plain-CLI + planned web; no eagent-tui install/usage", () => {
-  const md = read("docs/TUI.md");
-  assert.doesNotMatch(md, /eagent-tui/, "no eagent-tui");
-  assert.doesNotMatch(md, /build:tui|test:tui/, "no tui scripts");
-  assert.match(md, /engine-render/, "describes plain CLI renderer");
-  assert.match(md, /[Ww]eb|WEB\.md/, "mentions web UI");
-  for (const re of INSTALL_HINTS) {
-    assert.doesNotMatch(md, re, `must not match install hint ${re}`);
+  assert.doesNotMatch(md, /src\/tui\//, "no src/tui/");
+  for (const re of REMOVED_MODULES) {
+    assert.doesNotMatch(md, re, `must not document the removed ${re}`);
   }
 });
 
-test("AC9: docs/WEB.md documents build:web and eagent-serve", () => {
-  const md = read("docs/WEB.md");
-  assert.match(md, /build:web/);
-  assert.match(md, /eagent-serve|npm run serve/);
-  assert.doesNotMatch(md, /eagent-tui/);
+test("AC16: README.md documents no removed module and no deleted web SPA workflow", () => {
+  const md = read("README.md");
+  assert.doesNotMatch(md, /src\/tui\//, "layout must not list src/tui/");
+  assert.doesNotMatch(md, /build:web|dev:web|test:web/, "web SPA scripts are gone");
+  for (const re of REMOVED_MODULES) {
+    assert.doesNotMatch(md, re, `must not document the removed ${re}`);
+  }
 });
 
-test("AC6: CHANGELOG notes removal of Ink eagent-tui client", () => {
-  const md = read("CHANGELOG.md");
-  // Top Unreleased should include a Removed note about eagent-tui / Ink client.
-  const head = md.slice(0, 2500);
-  assert.match(head, /### Removed/, "Unreleased has Removed section");
-  assert.match(head, /eagent-tui/, "removal note names eagent-tui");
-  assert.match(head, /[Ii]nk/, "removal note mentions Ink");
+test("AC16: docs/TUI.md describes the headless CLI and the Ink TUI package", () => {
+  const md = read("docs/TUI.md");
+  assert.match(md, /headless/i, "documents the headless machine CLI");
+  assert.match(md, /[Ii]nk/, "names the Ink TUI package");
+  assert.match(md, /zero runtime dependenc/i, "restates the engine charter");
+  assert.doesNotMatch(md, /build:web/, "no web build instructions");
+  for (const re of REMOVED_MODULES) {
+    assert.doesNotMatch(md, re, `must not document the removed ${re}`);
+  }
+});
+
+test("AC16: docs/WEB.md is gone — the web SPA is not a shipped surface", () => {
+  assert.equal(existsSync(join(repoRoot, "docs", "WEB.md")), false, "docs/WEB.md was removed with web/");
 });

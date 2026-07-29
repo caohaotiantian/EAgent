@@ -73,7 +73,10 @@ test("AC2: no eagent-tui bin, build:tui/test:tui scripts, tsx globs, or tui dirs
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
   };
-  assert.equal(pkg.bin?.["eagent-tui"], undefined, "no eagent-tui bin");
+  // The TUI ships from `tui/`, which has its own bin and its own scripts. The
+  // root package must not grow a parallel set — that is what would drag ink back
+  // into the engine's dependency tree.
+  assert.equal(pkg.bin?.["eagent-tui"], undefined, "the tui bin belongs to tui/package.json");
   assert.equal(pkg.scripts?.["build:tui"], undefined, "no build:tui script");
   assert.equal(pkg.scripts?.["test:tui"], undefined, "no test:tui script");
   assert.ok(
@@ -126,3 +129,69 @@ test("AC4: server header still documents monitor routes + session summary", () =
   }
 });
 
+
+test("AC5: tui/ is the ONLY place ink and react may appear", () => {
+  // Topology: the published `eagent` command IS the TUI package, and it depends
+  // on `@eagent/core` — the engine, which stays embeddable and dependency-free.
+  // The boundary that makes the whole topology work. The engine stays embeddable
+  // — a library consumer of `eagent` must never download React — while the TUI
+  // package is free to take whatever it needs.
+  const tuiPkgPath = join(repoRoot, "tui", "package.json");
+  assert.ok(existsSync(tuiPkgPath), "tui/package.json exists");
+
+  const tui = JSON.parse(readFileSync(tuiPkgPath, "utf8")) as {
+    private?: boolean;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const tuiDeps = { ...(tui.dependencies ?? {}), ...(tui.devDependencies ?? {}) };
+  for (const name of ["ink", "react"] as const) {
+    assert.ok(tuiDeps[name], `tui/ declares ${name}`);
+  }
+  assert.ok(tui.dependencies?.["@eagent/core"], "tui/ depends on the engine, not the reverse");
+
+  // No engine file may import from the TUI package: the dependency arrow points
+  // one way, and reversing it would put React on the engine's load path.
+  for (const file of walk(join(repoRoot, "src"), (n) => /\.tsx?$/.test(n))) {
+    const src = readFileSync(file, "utf8");
+    assert.doesNotMatch(
+      src,
+      /from\s+["'][^"']*\/tui\//,
+      `${relative(repoRoot, file)} must not import from tui/`,
+    );
+  }
+});
+
+test("AC15: the SEA binary bundles the HEADLESS entry, and says so", () => {
+  // D6's accepted divergence, enforced rather than incidental: `yoga-layout`
+  // ships a WASM artifact Node's SEA facility cannot embed without a separate
+  // asset-injection step, so `bin/eagent` is machine-only. A future change that
+  // pointed the bundler at the TUI would silently ship a broken binary.
+  const script = readFileSync(join(repoRoot, "scripts", "build-binary.mjs"), "utf8");
+
+  assert.match(script, /dist\/cli\.js/, "the bundler entry is the headless CLI");
+  assert.doesNotMatch(script, /tui/, "the TUI is not bundled");
+
+  const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+  assert.match(readme, /headless/, "and the README says the binary is headless");
+});
+
+test("AC15: the two packages are named and wired for a lockstep release", () => {
+  const root = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+    name?: string;
+    version?: string;
+    bin?: Record<string, string>;
+  };
+  const tui = JSON.parse(readFileSync(join(repoRoot, "tui", "package.json"), "utf8")) as {
+    name?: string;
+    version?: string;
+    bin?: Record<string, string>;
+  };
+
+  assert.equal(root.name, "@eagent/core", "the engine is the scoped library");
+  assert.equal(tui.name, "eagent", "the product users install is the TUI");
+  assert.equal(tui.bin?.["eagent"], "./dist/cli.js", "`eagent` runs the TUI");
+  assert.equal(root.bin?.["eagent"], undefined, "the engine does not also claim the name");
+  assert.ok(root.bin?.["eagent-headless"], "the machine entry keeps its own name");
+  assert.equal(root.version, tui.version, "they release in lockstep");
+});

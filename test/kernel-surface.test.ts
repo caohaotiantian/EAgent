@@ -68,7 +68,22 @@ test("the kernel source stays small", async () => {
   for (const f of readdirSync(dir)) {
     if (f.endsWith(".ts")) lines += readFileSync(join(dir, f), "utf8").split("\n").length;
   }
-  assert.ok(lines < 2265, `kernel is ${lines} lines; keep the core minimal (ceiling 2265)`);
+  // 2,265 -> 2,335 (+70, the largest raise so far; the prior two were +50 and +15)
+  // for the TUI permission seams and the hardening a kernel review demanded of
+  // them. The seams: `UI.decide?` — a structured permission request that
+  // `confirm`'s single pre-formatted string cannot carry — the `setFallback` /
+  // `forget` pair without which a permission-mode control cannot exist (the
+  // fallback was constructor-only and an answer was remembered forever, so
+  // cycling back to `ask` was a silent no-op), and `tool_progress` for live tool
+  // output. The hardening, all of it security-load-bearing: fail CLOSED on an
+  // unrecognized answer, key the shared-prompt dedupe on arguments as well as
+  // capability (so `once` cannot grant a whole wave, and a prompt showing
+  // `bash ls` cannot authorize `bash rm -rf /`), clear the memo on a mode switch
+  // (it is consulted BEFORE the fallback, so a lock-down was otherwise inert),
+  // and an epoch so an answer from a pre-`forget` dialog cannot re-populate it.
+  // NOTE the metric is `split("\n").length`, one more per file than `wc -l` —
+  // 12 files, so it reads ~12 above a wc count.
+  assert.ok(lines < 2335, `kernel is ${lines} lines; keep the core minimal (ceiling 2335)`);
 });
 
 /** The stable member set of the object handed to every extension at activation. */

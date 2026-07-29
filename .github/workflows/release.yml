@@ -5,8 +5,12 @@ name: Release
 # published tarball to this workflow run and commit via OIDC, so consumers can
 # verify where and how the package was built. Requires `id-token: write`.
 #
+# TWO packages release in lockstep: `@eagent/core` (the zero-dep engine, from the
+# repo root) and `eagent` (the installable TUI, from tui/, which depends on it).
+# The engine publishes FIRST so the TUI's pinned dependency resolves.
+#
 # One-time setup by the maintainer: add an `NPM_TOKEN` repository secret (an npm
-# automation/granular token with publish rights); own the `eagent` name on npm;
+# automation/granular token with publish rights); own both names on npm;
 # and keep this repo public (npm validates a provenance attestation against a
 # public source repo). Release by pushing a stable tag that matches the package
 # version, e.g. `git tag v0.2.1 && git push origin v0.2.1`. Only `vX.Y.Z` tags fire
@@ -41,12 +45,28 @@ jobs:
             echo "tag v$TAG != package.json version $PKG" >&2
             exit 1
           fi
+      # Lockstep guard BEFORE anything is published. npm versions are immutable,
+      # so discovering a version mismatch after the engine is out would strand the
+      # release at a version the TUI can never occupy.
+      - run: node scripts/release-tui.mjs --check
       # Full gate before publishing (mirrors CI). prepublishOnly also builds.
       - run: npm run typecheck
       - run: npm run typecheck:test
       - run: npm test
       - run: npm run eval
       - run: npm run build
+      - run: npm --prefix tui ci
+      - run: npm --prefix tui run typecheck
+      - run: npm --prefix tui test
+      # BOTH tarballs are fully prepared before EITHER is published: the "file:.."
+      # dependency is rewritten to the real version and the TUI is built, so a
+      # failure here costs nothing. Publishing the engine first is still required
+      # — the TUI's pinned dependency has to be resolvable.
+      - run: node scripts/release-tui.mjs
+      - run: npm --prefix tui run build
       - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm --prefix tui publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

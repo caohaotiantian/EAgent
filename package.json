@@ -1,7 +1,7 @@
 {
-  "name": "eagent",
+  "name": "@eagent/core",
   "version": "0.2.0",
-  "description": "A minimalist AI agent with a tiny stable core and Emacs-grade extensibility. Everything is a hot-reloadable extension.",
+  "description": "The EAgent engine: a minimalist AI-agent kernel with a tiny stable core and Emacs-grade extensibility. Zero runtime dependencies.",
   "type": "module",
   "license": "MIT",
   "author": "caohaotiantian",
@@ -27,7 +27,7 @@
     "url": "https://github.com/caohaotiantian/eagent/issues"
   },
   "bin": {
-    "eagent": "./dist/cli.js",
+    "eagent-headless": "./dist/cli.js",
     "eagent-serve": "./dist/server.js"
   },
   "main": "./dist/kernel/index.js",
@@ -35,12 +35,21 @@
   "exports": {
     ".": "./dist/kernel/index.js",
     "./host": "./dist/host.js",
+    "./host-commands": "./dist/host-commands.js",
+    "./args": "./dist/args.js",
+    "./print": "./dist/print.js",
+    "./complete": "./dist/complete.js",
+    "./jsonl": "./dist/jsonl.js",
+    "./session-disk": "./dist/session-disk.js",
     "./server": "./dist/server.js",
+    "./extensions/*": "./dist/extensions/*.js",
     "./providers/mock": "./dist/providers/mock.js",
     "./providers/anthropic": "./dist/providers/anthropic.js",
     "./providers/openai": "./dist/providers/openai.js",
     "./providers/gemini": "./dist/providers/gemini.js",
-    "./providers/cassette": "./dist/providers/cassette.js"
+    "./providers/cassette": "./dist/providers/cassette.js",
+    "./cli": "./dist/cli.js",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -49,7 +58,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "build:binary": "node scripts/build-binary.mjs",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -60,9 +69,6 @@
     "test:coverage": "node --import tsx --test --experimental-test-coverage \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/cli.ts",
     "serve": "node --import tsx src/server.ts",
-    "build:web": "npm --prefix web run build",
-    "dev:web": "npm --prefix web run dev",
-    "test:web": "npm --prefix web run test && npm --prefix web run check-bundle",
     "start": "node dist/cli.js"
   },
   "dependencies": {

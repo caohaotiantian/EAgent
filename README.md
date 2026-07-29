@@ -7,8 +7,8 @@ language in which *almost everything is redefinable at runtime*. Primitives live
 in the core; policy lives in the extension language. EAgent applies that decision
 to AI agents.
 
-The kernel is **seven primitives and nothing more** (~2,248 lines, held just
-under a hard 2,250-line ceiling by a test). There are no built-in tools, no hard-coded prompt
+The kernel is **seven primitives and nothing more** (~2,331 lines, held just
+under a hard 2,335-line ceiling by a test). There are no built-in tools, no hard-coded prompt
 strategy, no memory policy, no sub-agents baked in. The four "built-in" tools
 (`read`, `write`, `edit`, `bash`) are themselves an extension. Everything you'd
 want to change is a hot-reloadable extension you can edit while the agent runs.
@@ -17,7 +17,7 @@ want to change is a hot-reloadable extension you can edit while the agent runs.
 flowchart TB
     subgraph FE["Front ends — one shared wiring (src/host.ts)"]
         direction LR
-        REPL["Interactive REPL"]
+        TUI["Interactive TUI (tui/)"]
         ONE["One-shot (-e)"]
         BATCH["Batch (piped)"]
         HTTP["HTTP server"]
@@ -62,14 +62,29 @@ a core small enough to read in one sitting, and a single extension surface
 powerful enough that new behavior never requires forking. The bet — the same one
 pi and Emacs make — is that a minimal, observable, malleable core beats a big one.
 
-## Quickstart
+## Install
 
 ```bash
-npm install
-npm run build
-npm test          # the full offline suite — no network or API key required
+npm i -g eagent    # the interactive TUI — this is the product
+eagent             # start a session
+```
 
-# Talk to it offline — a deterministic mock LLM drives everything:
+Embedding the engine instead? Depend on **`@eagent/core`**, which has zero runtime
+dependencies but `jiti` — no React, no Ink, nothing pulled in behind your back.
+
+```bash
+npm i @eagent/core
+```
+
+## Quickstart (from a clone)
+
+```bash
+npm install && npm run build
+npm test                    # the full offline suite — no network or API key
+npm --prefix tui install
+npm --prefix tui run dev    # the interactive TUI
+
+# Or drive the machine entry offline — a deterministic mock LLM:
 node dist/cli.js -e "hello"
 
 # Load an example extension and poke around:
@@ -97,7 +112,7 @@ For newer official OpenAI models that require `max_completion_tokens`, set
 `OPENAI_MAX_TOKENS_PARAM=max_completion_tokens`. The output-length cap defaults to
 8192 tokens; raise it per provider with `ANTHROPIC_MAX_TOKENS` / `OPENAI_MAX_TOKENS`
 / `GEMINI_MAX_TOKENS` for long generations or high thinking budgets. When a turn is
-cut off at that cap the interactive REPL flags it (`⚠ response truncated
+cut off at that cap the printer flags it on stderr (`⚠ response truncated
 (max_tokens)`), and the opt-in `autocontinue` extension can resume it automatically.
 
 ## How a turn works
@@ -160,7 +175,7 @@ flowchart LR
         direction TB
         EVA["agent_start · turn_start"]
         EVB["message · text_delta"]
-        EVC["tool_start · tool_end · tool_batch_end · usage"]
+        EVC["tool_start · tool_progress · tool_end · usage"]
         EVD["turn_end · agent_end · error"]
     end
     subgraph INT["Filter hooks — e.hook() · intervene"]
@@ -331,12 +346,12 @@ So setting the per-agent turn bound during development is a one-liner —
 `config.json` entry — no source edit. See `docs/EXTENSIONS.md` for the `Config`
 API. (Secrets like API keys are not config and are never printed by `/config`.)
 
-## Four engine front ends, one kernel
+## Engine front ends, one kernel
 
 ```mermaid
 flowchart LR
     subgraph CLI["src/cli.ts"]
-        REPL["Interactive REPL<br/>(TTY)"]
+        TUI["Interactive TUI<br/>(tui/ package)"]
         ONE["One-shot<br/>eagent -e / --json"]
         BATCH["Batch<br/>(piped stdin)"]
     end
@@ -398,44 +413,21 @@ docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
   -v "$PWD:/workspace" eagent
 ```
 
-## Interactive display
+## Terminal surfaces
 
-The default interactive CLI renders each reasoning block, answer, and tool call
-as an **ordered, collapsible section** — progressive disclosure, so a long
-reasoning stream no longer floods the window and a tool call's full
-parameters/results stay reachable on demand. Concurrent work (e.g. the
-`reasoning-search` forks) is attributed per agent and rendered in strict arrival
-order, never interleaved. A finished reasoning block collapses to a one-line
-header — `◆ Reasoning · N tok · 1.4s` — and a subagent call renders as a card
-whose header names the subagent and its task, with the child's own work nested
-inside.
+The rich interactive experience is the **`eagent` TUI** — an Ink + React
+application in the `tui/` package, modelled on Claude Code's interactive mode.
+It depends on the engine rather than the reverse, which is what keeps `src/`
+free of runtime dependencies and embeddable as a library.
 
-This renderer (`src/engine-render.ts`) is a **minimal, zero-dep, append-only**
-plain renderer over a shared view model — no alt screen, no framework, every line
-written exactly once. It is what the interactive REPL, pipes, `--eval`, batch,
-dumb terminals, and the standalone `bin/eagent` binary use, so none of those
-paths ever leak cursor-control bytes; `--json` emits the machine JSONL stream
-instead (see [`docs/JSONL.md`](docs/JSONL.md)). Rich multi-session display is the
-**web** SPA (`npm run build:web`, then open `eagent-serve` in a browser) over the
-HTTP/SSE monitor endpoints above — see [`docs/WEB.md`](docs/WEB.md).
+The engine itself ships only `src/print.ts`, a plain stream printer for the
+**machine** paths — `eagent-headless --eval`, piped batch, and the standalone
+`bin/eagent` binary. Assistant text streams to stdout; sub-agent text, reasoning,
+tool calls, and errors are annotated on stderr, so `--eval … | tee` yields the
+answer and nothing else and no cursor-control byte can reach a pipe. `--json`
+emits the machine JSONL stream instead (see [`docs/JSONL.md`](docs/JSONL.md)).
 
-**Display modes**, set with `/details`:
-
-- **auto** (default) — only the newest section stays expanded; older ones
-  collapse to their headers as new sections begin.
-- **full** — every section expanded (all arguments and every result line shown).
-- **collapsed** — headers only.
-
-**Commands** (slash commands, not raw-mode keys):
-
-| Command | What it does |
-| --- | --- |
-| `/details [full\|collapsed\|auto]` | Set the display mode (no argument prints the current one). |
-| `/expand <n>` | Expand section *n* to its full, untruncated content. |
-| `/collapse <n>` | Collapse section *n* back to its header. |
-
-The `N tok` in a header is a char-derived estimate, not a provider token count.
-See [`docs/TUI.md`](docs/TUI.md) for the full controls reference.
+See [`docs/TUI.md`](docs/TUI.md) for both surfaces.
 
 ## Build a single binary
 
@@ -447,6 +439,10 @@ files you opt into with `/library install`:
 npm run build:binary   # -> bin/eagent  (host platform only)
 printf 'hi\n' | bin/eagent -p mock
 ```
+
+The binary bundles the **headless** entry, so it is machine-only: `--eval`, `--json`,
+and piped batch. The interactive TUI is not in it — `yoga-layout` ships a WASM
+artifact Node's SEA facility cannot embed without a separate asset-injection step.
 
 The script (`scripts/build-binary.mjs`) bundles `dist/cli.js` with `esbuild` into a
 CJS blob and injects it into a copy of the running `node` via Node's [Single
@@ -468,8 +464,8 @@ repo/dev convenience unless you point `library.dir` at a shipped copy of the tre
 The kernel is usable headless, without the CLI:
 
 ```ts
-import { Agent } from "eagent";
-import { MockProvider } from "eagent/providers/mock";
+import { Agent } from "@eagent/core";
+import { MockProvider } from "@eagent/core/providers/mock";
 
 const agent = new Agent({ capabilities: /* ... */ });
 agent.providers.register(new MockProvider([
@@ -492,10 +488,9 @@ src/providers/   mock · anthropic · openai · gemini (fetch + SSE, no SDK;
                  shared retry/SSE in http.ts) · cassette (record/replay)
 src/extensions/  65 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
-src/cli.ts       terminal host: REPL + one-shot + batch + --json
-src/engine-render.ts  the engine's plain, append-only human renderer
-                 (over src/view-model.ts + src/attribution.ts + src/tty.ts)
-src/session-source.ts  host SessionSource (in-process + remote HTTP/SSE client)
+src/cli.ts       headless host: one-shot (--eval) + batch + --json
+src/print.ts     the engine's plain stream printer for the machine paths
+tui/             the interactive `eagent` TUI (Ink + React; its own package)
 src/server.ts    HTTP host: /health, /run (streaming), /sessions,
                  DELETE /sessions/:id, monitor SSE feeds (/events, …)
 examples/        worked example extensions
@@ -508,10 +503,8 @@ test/            the full offline suite — every primitive and extension
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
 - [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
   the CLI `--json` stream and the HTTP `/run` stream.
-- [`docs/TUI.md`](docs/TUI.md) — the interactive plain-CLI display: display
-  modes, `/details`/`/expand`/`/collapse`, and the shared view-model substrate.
-- [`docs/WEB.md`](docs/WEB.md) — the browser SPA (chat + monitor) served by
-  `eagent-serve`.
+- [`docs/TUI.md`](docs/TUI.md) — the two terminal surfaces: the interactive
+  `eagent` TUI package and the headless machine CLI.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.
