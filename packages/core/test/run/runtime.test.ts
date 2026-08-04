@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { compileOrThrow } from "../../src/graph/compile.ts";
+import { validate } from "../../src/schema.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { NodeId } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
@@ -335,4 +336,25 @@ test("rewind refuses to undo past an irreversible action with no compensation", 
   });
 
   await assert.rejects(() => engine.rewind(runId, 1, "undo the charge"), /E_RESTORE_ILLEGAL|declares no compensation/);
+});
+
+// ── schema (regression) ──────────────────────────────────────────────────────
+
+test("a bare {type:'object'} schema passes every key through", () => {
+  // It previously stripped them all, so a permissive schema silently meant "the
+  // empty object" — which is never what anyone writing it intended.
+  const r = validate({ type: "object" }, { a: 1, nested: { b: 2 } });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.value, { a: 1, nested: { b: 2 } });
+});
+
+test("a DECLARED shape still drops undeclared keys", () => {
+  const r = validate({ type: "object", properties: { a: { type: "number" } } }, { a: 1, stray: "x" });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.value, { a: 1 }, "declaring a shape is what makes a key stray");
+});
+
+test("additionalProperties:false still rejects strays explicitly", () => {
+  const r = validate({ type: "object", additionalProperties: false }, { a: 1 });
+  assert.equal(r.ok, false);
 });

@@ -1351,7 +1351,10 @@ export class Engine {
         continue;
       }
 
-      const iteration = e.kind === "loop" ? w.task.iteration + 1 : 0;
+      // The iteration counter PROPAGATES through the loop body and only increments on
+      // the back-edge. Resetting it to 0 on a forward edge made the second pass
+      // re-target the FIRST pass's TaskId — which the fold marks ready again, forever.
+      const iteration = e.kind === "loop" ? w.task.iteration + 1 : w.task.iteration;
       events.push({
         type: "task.ready",
         payload: { nodeId: e.to, branchPath: encodeBranch(w.task.branch), edgesIn: [e.id] },

@@ -5,6 +5,7 @@
   "AnthropicOptions",
   "AppendInput",
   "AppendResult",
+  "AuthoringDeps",
   "BUILTINS",
   "BinaryOp",
   "BranchCoordinate",
@@ -117,6 +118,7 @@
   "OpenAIAdapter",
   "OpenAIOptions",
   "OverflowPolicy",
+  "PROPOSE_INSTRUCTIONS",
   "ParsedTaskId",
   "PolicyActor",
   "PolicyDecision",
@@ -209,6 +211,7 @@
   "applyWrites",
   "assertGraphMatches",
   "assertWithin",
+  "authoringGraph",
   "branchChain",
   "buildEnv",
   "builtinTools",
@@ -298,6 +301,7 @@
   "ulid",
   "validate",
   "validateGraph",
+  "validateGraphSpecFunction",
   "validateSuite",
   "viewFor"
 ]

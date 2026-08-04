@@ -19,6 +19,7 @@ rejects, and what would reverse it.
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
 | M8 intervention window | **done** | an interrupt mid-window means the effect never starts | 407 tests; `test/run/oversight.test.ts` (20 cases) |
+| M10 authoring graph | **done** | a bad draft is corrected by the compiler's own diagnostics | 428 tests; `test/builtin/authoring.test.ts` (12 cases) |
 | M9 AI-suite safety rules | **done** | a suite written after the candidate is refused | 413 tests |
 | M7b single binary | **done** | `bin/loom` runs alone in an empty dir; 0 third-party modules | verified by copying the binary into an isolated directory |
 | M5c console | **done** | G5 closed: an operator console ships in the binary | 386 tests; `test/server/console.test.ts` (11 cases) |
@@ -36,9 +37,9 @@ Open threads that need resolving before the milestone they block:
 
 - **T1 (blocks M1e):** YAML→JSON conversion lives outside core. Core is JSON-only.
   The CLI will need a YAML reader; decide dep-vs-subset-parser at M2.
-- **T2 (blocks M2):** the `function` node resource loader needs a sandbox story for
-  v1. Current plan: `function` resources are trusted, pinned, and loaded via dynamic
-  `import()` of a digest-addressed file. Not untrusted-input safe — by design (A13).
+- **T2 (open):** the `function` node resource loader still registers bodies in-process
+  rather than loading them from digest-addressed files. Trusted-code-only by design
+  (A13); the loader is packaging work, not a safety question.
 - **T3 (blocks M2):** `node:sqlite` is still flagged experimental in Node 24; it
   prints a warning on first use. Need to decide whether to suppress it for CLI UX.
 - **T4: RESOLVED (M2).** Branch-scoped channels are bindings keyed by branch path,
@@ -994,3 +995,47 @@ code either way.
 **Absent metadata is not a silent pass.** With no `proposedAt`/`proposedBy` the checks
 report a pass with a readable reason — that is the human-driven path, and it should
 look different from a verified one.
+
+---
+
+## 2026-08-05 — M10 — The authoring agent is itself a Loom graph
+
+**Decision (answers Q7).** `graph-from-goal` is a built-in GraphSpec:
+`propose` (agent) → `validate` (evaluator running the REAL compiler) → loop back on
+diagnostics, bounded at 3 → `accept` (human gate).
+
+**Why a graph rather than a special mode.** Three properties fall out for free:
+the compiler's 21 rules become the critic (and every diagnostic already carries an
+actionable `fix`, written for exactly this); the loop is bounded by `GRAPH006` so a
+model that cannot converge fails rather than spins; and the authoring path dogfoods an
+agent node, an evaluator, a bounded loop, and a gate — so if authoring works, the
+runtime works.
+
+**The critic is deliberately not a rubric judge.** A model asked "is this graph good?"
+says yes. The compiler says `GRAPH009_BUDGET_OVERCOMMIT: worst-case declared spend is
+$22.50 but the graph budget is $12.00`, which is both true and actionable.
+
+**What the model cannot propose**, tested: a graph that weakens oversight
+(`GRAPH014`), an unbounded fan-out (`GRAPH007`), or a fan-out with no join
+(`GRAPH021`). Those are compile errors, not preferences it can argue with.
+
+---
+
+## 2026-08-05 — M10 — Two real bugs, both found by running the authoring loop
+
+**1. A bare `{type:"object"}` schema stripped every key.** The object validator
+dropped undeclared keys, which is right when a shape IS declared and catastrophic when
+one is not — `{type:"object"}` silently meant "the empty object". Now: no `properties`
+at all means "it is an object and nothing more", and every key passes through; only a
+declared shape makes a key stray.
+
+**2. The loop iteration did not propagate, so the graph looped forever.** `#activate`
+set `iteration = 0` on every non-loop edge. So pass 2's `propose@root#1` took its `seq`
+edge to `validate@root#0` — pass 1's Task, already succeeded — which the fold marked
+ready again. Infinite. The counter now propagates through the loop body and increments
+only on the back-edge, which is what "everything inside the loop shares an iteration"
+actually means.
+
+Neither was reachable from the walking skeleton, which has no loop and no permissive
+output schema. Worth recording as evidence for building the *second* real workflow
+early: the first one only exercises the paths you designed it to exercise.

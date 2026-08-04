@@ -121,6 +121,15 @@ function check(schema: JSONSchema, value: unknown, path: string, errors: string[
         return value;
       }
       const input = value as Record<string, unknown>;
+
+      // No `properties` at all means "it is an object" and nothing more — every key
+      // passes through. Only a DECLARED shape makes an undeclared key stray. Without
+      // this distinction `{type:"object"}` silently means "the empty object", which
+      // is never what anyone writing that schema intended.
+      if (schema.properties === undefined && schema.additionalProperties !== false) {
+        return input;
+      }
+
       const out: Record<string, unknown> = {};
 
       for (const key of schema.required ?? []) {
