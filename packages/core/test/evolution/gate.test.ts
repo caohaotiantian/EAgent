@@ -45,6 +45,7 @@ test("a suite of recorded runs replays and passes against the same graph", async
     name: "skeleton",
     version: 1,
     frozen: true,
+    frozenAt: 1_000,
     cases: [
       { id: "happy", runId: ok, mustPass: true, expect: { status: "succeeded", noIrreversibleWithoutGate: true } },
       { id: "rejected", runId: rejected, mustPass: true, expect: { status: "failed" } },
@@ -66,7 +67,7 @@ test("the gate costs no live model calls — it is replay all the way down", asy
 
   await runEvalSuite({
     store: h.store,
-    suite: { name: "s", version: 1, frozen: true, cases: [{ id: "a", runId, mustPass: true, expect: {} }] },
+    suite: { name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [{ id: "a", runId, mustPass: true, expect: {} }] },
     graph: compileSkeleton(),
     engine: engineOf(h),
   });
@@ -80,7 +81,7 @@ test("an expectation mismatch fails the case with a readable reason", async () =
   const runId = await recordRun(h);
   const report = await runEvalSuite({
     store: h.store,
-    suite: { name: "s", version: 1, frozen: true, cases: [{ id: "a", runId, mustPass: true, expect: { status: "failed" } }] },
+    suite: { name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [{ id: "a", runId, mustPass: true, expect: { status: "failed" } }] },
     graph: compileSkeleton(),
     engine: engineOf(h),
   });
@@ -94,7 +95,7 @@ test("a channel expectation that does not hold fails the case", async () => {
   const runId = await recordRun(h);
   const report = await runEvalSuite({
     store: h.store,
-    suite: { name: "s", version: 1, frozen: true, cases: [{ id: "a", runId, mustPass: true, expect: { channels: { digests: [] } } }] },
+    suite: { name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [{ id: "a", runId, mustPass: true, expect: { channels: { digests: [] } } }] },
     graph: compileSkeleton(),
     engine: engineOf(h),
   });
@@ -109,6 +110,7 @@ test("a suite of only happy paths is flagged as weak", () => {
     name: "s",
     version: 1,
     frozen: true,
+    frozenAt: 1_000,
     cases: [{ id: "a", runId: "r" as RunId, mustPass: true, expect: { status: "succeeded" } }],
     composition: { minCases: 5, minMustPass: 2, minFailureCases: 1 },
   });
@@ -122,6 +124,7 @@ test("duplicate case ids are rejected", () => {
     name: "s",
     version: 1,
     frozen: true,
+    frozenAt: 1_000,
     cases: [
       { id: "a", runId: "r" as RunId, mustPass: false, expect: {} },
       { id: "a", runId: "r2" as RunId, mustPass: false, expect: {} },
@@ -136,6 +139,7 @@ function report(over: Partial<EvalReport> = {}): EvalReport {
   return {
     suite: "s",
     suiteVersion: 1,
+    suiteFrozenAt: 1_000,
     cases: [],
     passed: 10,
     total: 10,
@@ -208,6 +212,68 @@ test("a malformed suite certifies nothing, so it blocks promotion too", () => {
 
 test("every criterion reports a readable detail, pass or fail", () => {
   const v = gateCandidate({ ...baseInput, candidate: report() });
-  assert.equal(v.checks.length, 9);
+  assert.equal(v.checks.length, 11);
   for (const c of v.checks) assert.ok(c.detail.length > 0, c.id);
+});
+
+// ── the two rules that make an AI-AUTHORED suite trustworthy ─────────────────
+
+test("A SUITE WRITTEN AFTER THE CANDIDATE PROVES NOTHING", () => {
+  // The whole safety argument for AI-generated suites reduces to this: it does not
+  // matter who wrote the exam if it existed before the student did.
+  const v = gateCandidate({
+    ...baseInput,
+    candidate: report({ suiteFrozenAt: 5_000 }),
+    proposedAt: 4_000,
+  });
+  assert.equal(v.promote, false);
+  assert.match(v.checks.find((c) => c.id === "9-suite-predates-candidate")!.detail, /exam written for a known student/);
+});
+
+test("a suite frozen before the candidate is accepted", () => {
+  const v = gateCandidate({ ...baseInput, candidate: report({ suiteFrozenAt: 1_000 }), proposedAt: 2_000 });
+  assert.equal(v.checks.find((c) => c.id === "9-suite-predates-candidate")?.pass, true);
+  assert.equal(v.promote, true);
+});
+
+test("a suite and candidate from the SAME lineage are refused", () => {
+  const v = gateCandidate({
+    ...baseInput,
+    candidate: report({ suiteGeneratedBy: "agent_profile/optimiser@3" }),
+    proposedAt: 2_000,
+    proposedBy: "agent_profile/optimiser@3",
+  });
+  assert.equal(v.promote, false);
+  assert.match(v.checks.find((c) => c.id === "10-separate-lineage")!.detail, /shared lineage converges the exam/);
+});
+
+test("different lineages pass", () => {
+  const v = gateCandidate({
+    ...baseInput,
+    candidate: report({ suiteGeneratedBy: "agent_profile/adversary@1" }),
+    proposedAt: 2_000,
+    proposedBy: "agent_profile/optimiser@3",
+  });
+  assert.equal(v.promote, true);
+});
+
+test("the checks are skipped, not silently passed, when the metadata is absent", () => {
+  // Absent `proposedAt`/`proposedBy` means "a human is driving this", which is the
+  // pre-existing path. Both checks report a pass with a readable reason rather than
+  // pretending they verified something.
+  const v = gateCandidate({ ...baseInput, candidate: report() });
+  assert.equal(v.checks.find((c) => c.id === "9-suite-predates-candidate")?.pass, true);
+  assert.equal(v.checks.find((c) => c.id === "10-separate-lineage")?.pass, true);
+});
+
+test("a suite with no frozenAt cannot certify anything", () => {
+  const { suiteValid, suiteIssues } = validateSuite({
+    name: "s",
+    version: 1,
+    frozen: true,
+    frozenAt: 0,
+    cases: [{ id: "a", runId: "r" as RunId, mustPass: true, expect: {} }],
+  });
+  assert.equal(suiteValid, false);
+  assert.match(suiteIssues.join(" "), /frozenAt is required/);
 });

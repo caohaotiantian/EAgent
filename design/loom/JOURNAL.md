@@ -18,6 +18,8 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M8 intervention window | **done** | an interrupt mid-window means the effect never starts | 407 tests; `test/run/oversight.test.ts` (20 cases) |
+| M9 AI-suite safety rules | **done** | a suite written after the candidate is refused | 413 tests |
 | M7b single binary | **done** | `bin/loom` runs alone in an empty dir; 0 third-party modules | verified by copying the binary into an isolated directory |
 | M5c console | **done** | G5 closed: an operator console ships in the binary | 386 tests; `test/server/console.test.ts` (11 cases) |
 | M7a redaction + secrets | **done** | a secret cannot be interpolated; pii tokenises stably | 375 tests; `test/security/redact.test.ts` (19 cases) |
@@ -927,3 +929,68 @@ runtime, which is the honest cost of "no installation required".
 signature, injects, and re-signs ad-hoc. Without that the produced file is killed by
 the kernel on launch with no useful error — worth recording because the failure looks
 like a build bug rather than a signing one.
+
+---
+
+## 2026-08-04 — M8 — Implementing the hold proved the hold was dead code
+
+**What happened.** I implemented the pre-irreversible hold from D4 deviation 5, then
+could not write a test that made it fire. Posture folds by `max`, so an `irreversible`
+action always computes to `in` — which means "let this run on-the-loop for the next
+hour" was not *expressible*, and the window could never occur.
+
+`deescalate` as written only removed entries from `#escalations`, which are additive
+terms in the same `max`. It could not lower a class floor. So the one operation the
+asymmetry rule exists to constrain did nothing at all for the cases that matter.
+
+**Decision.** De-escalation is a **ceiling**: a clamp applied AFTER the `max` fold,
+stored separately from escalations because they compose differently. It is the only
+thing in the system that can lower a posture — human-only, justification required,
+journaled.
+
+**The hard floor.** A ceiling may take an `irreversible` or `externally_visible` action
+to `on`, **never to `out`**. At `out` nobody is watching and the action cannot be taken
+back; `on` at least keeps someone there with a window to stop it. Clamped in
+`effectivePosture`, not left to review.
+
+**Why this is worth recording.** The design described three postures and an
+intervention window without noticing that the lattice made one of them unreachable for
+the class of action the window exists to protect. Writing the test is what found it.
+
+---
+
+## 2026-08-04 — M8 — `reversible_write` holds for 0 ms, not 2000
+
+**Deviation from D7.10, deliberate.** A hold on an action Loom can undo is pure latency
+for no recoverable benefit. Worse, a hold that fires on every file write is one
+operators learn to dismiss — which costs exactly the interruptions the mechanism exists
+to enable. The window is reserved for actions where stopping in time is the only remedy.
+
+---
+
+## 2026-08-04 — M9 — "Human-authored suites" replaced by two mechanical checks
+
+**Context.** The original D10 rule was that eval suites must be human-authored, because
+an optimiser that writes its own exam passes it. That is the safe default and it does
+not scale.
+
+**Decision.** AI-authored suites are permitted under two checks that are verifiable
+rather than aspirational:
+
+1. **`suite.frozenAt < candidate.proposedAt`.** It does not matter who wrote the exam
+   if it existed before the student did. This converts an unfalsifiable question into a
+   timestamp comparison, and it has a useful side effect: it forces suites to be built
+   continuously from production traffic, because a suite assembled the moment you need
+   it is a suite assembled to be passed.
+2. **Separate lineage.** The suite's generator and the candidate's proposer must
+   differ. A shared model and prompt lineage converges the exam on what the candidate
+   already does.
+
+**What did NOT change.** Assertions still anchor to deterministic verifiers, never to a
+judge's opinion; and must-pass cases are still derived from recorded failures rather
+than invented. AI decides *which* runs matter and *what to assert*; the assertion is
+code either way.
+
+**Absent metadata is not a silent pass.** With no `proposedAt`/`proposedBy` the checks
+report a pass with a readable reason — that is the human-driven path, and it should
+look different from a verified one.

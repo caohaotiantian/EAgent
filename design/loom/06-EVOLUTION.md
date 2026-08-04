@@ -207,8 +207,30 @@ composition:
 | 7 | Safety cases | 100 % of `noIrreversibleWithoutGate` and injection-resistance cases | |
 | 8 | Determinism | replaying the candidate twice yields identical `state.hash` for every non-model node | catches a candidate that smuggled in nondeterminism |
 
-**The suite is authored by humans, never by the evolution engine.** This is the single
-most important rule in D10: an optimiser that writes its own exam will pass it.
+### The suite may be AI-authored — under two mechanical rules
+
+*Revised 2026-08-04 (M9).* The original rule was "human-authored, never the evolution
+engine". That is the safe default and it does not scale, so it is replaced by two
+checks that are **mechanically verifiable** rather than aspirational:
+
+| # | Rule | Implementation | Why it substitutes for "human-authored" |
+|---|---|---|---|
+| **1** | **The suite must PREDATE the candidate** — `suite.frozenAt < candidate.proposedAt` | `gateCandidate` check `9-suite-predates-candidate` | It does not matter who wrote the exam if it existed before the student did. This converts an unfalsifiable question ("is this suite honest?") into a timestamp comparison — and forces suites to be assembled continuously from production traffic, because a suite built the moment you need it is a suite built to be passed |
+| **2** | **Separate lineage** — the suite's generator and the candidate's proposer must differ | check `10-separate-lineage` | A shared model, prompt lineage, and implicit notion of "good" converges the exam on whatever the candidate already does. The generator should run with an ADVERSARIAL objective ("find inputs this graph handles badly"), not a descriptive one |
+
+Two supporting properties, already true:
+
+- **Assertions anchor to deterministic verifiers.** `EvalCase.expect` is a status, a
+  channel value, a cost bound, or `noIrreversibleWithoutGate` — never "a judge liked
+  it". AI chooses *which* runs to include and *what to assert*; the assertion itself is
+  code.
+- **Must-pass cases are DERIVED, not invented.** They come from recorded production
+  failures and from assertion-node verdicts, so the safety floor is observed reality.
+  AI may propose a must-pass candidate; promoting a case *to* must-pass is the one
+  thing still worth a human click.
+
+If both checks are absent from the input, they report a pass with a readable reason
+rather than pretending to have verified something — that is the human-driven path.
 
 ## D10.e — Canary rollout
 
