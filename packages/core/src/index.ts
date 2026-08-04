@@ -32,6 +32,7 @@ export * from "./run/log.ts";
 export * from "./run/policy.ts";
 export * from "./run/registry.ts";
 export * from "./run/context.ts";
+export * from "./run/delivery.ts";
 export * from "./run/gates.ts";
 export * from "./run/engine.ts";
 export * from "./run/replay.ts";

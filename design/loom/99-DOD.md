@@ -61,7 +61,7 @@ remains as documented in the original matrix above the fold.
 |---|---|---|
 | L1 streaming reconciliation after reconnect | **PROVEN** | `Last-Event-ID` resumes at `seq+1`, contiguous; out-of-window yields a `snapshot` frame. `test/server/http.test.ts` |
 | L1 500-node rendering | **PARTIAL** | Measured at 500 nodes / 4,900 edges: compile 61 ms, 500 exact layout ranks, 485 KiB one-time snapshot, 10k-event fold 3 ms, 500-way fan-out 126 ms at peak concurrency 16. `test/scale.test.ts`. Browser paint remains unmeasured — the console is an HTML string, so it cannot be timed from Node |
-| L1 gate surfacing / routing / escalation | **PARTIAL** | Surfaced in the console, listed and resolved over HTTP and CLI, and a rejection requires a reason. Delivery channels and SLA sweep are implemented in the broker but untested against a real channel |
+| L1 gate surfacing / routing / escalation | **PROVEN** | `run/delivery.ts`: injected channels, a zero-dep `WebhookChannel` on global `fetch`, a `ConsoleChannel` fallback that cannot fail, per-channel failure journaling, and a tiered escalation chain whose clock resets per tier. 20 tests, including four separate ways delivery failure could have leaked into an approval |
 | L2 what is durable at ACK | **PROVEN** | The 202 body names the durable set; a test asserts the journal contains it |
 | L2 idempotency keys | **PROVEN** | Duplicate submit returns the original `runId` and creates nothing |
 | L3 concurrency model | **PROVEN** | Work parallel, commits serialized through one chain with `expectedSeq` |
@@ -92,6 +92,5 @@ remains as documented in the original matrix above the fold.
 
 1. **Browser paint at 500 nodes** — everything upstream of it is measured; the render
    itself needs a headless browser the zero-dep rule keeps out of this package.
-2. **Gate delivery channels** — the broker is built and tested; no real channel is wired.
-3. **Retention tiering** (L5) — designed, unbuilt.
-4. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
+2. **Retention tiering** (L5) — designed, unbuilt.
+3. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.

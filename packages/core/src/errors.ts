@@ -121,6 +121,8 @@ export const CODES = {
   E_EVAL_REGRESSION: "E_EVAL_REGRESSION",
   E_INSUFFICIENT_COHORT: "E_INSUFFICIENT_COHORT",
   E_POLICY_UNAVAILABLE: "E_POLICY_UNAVAILABLE",
+  /** A channel did not accept a gate. NEVER an approval — see run/delivery.ts. */
+  E_GATE_DELIVERY_FAILED: "E_GATE_DELIVERY_FAILED",
 
   // not_found
   E_RESOURCE_NOT_FOUND: "E_RESOURCE_NOT_FOUND",

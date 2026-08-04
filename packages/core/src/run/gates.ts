@@ -18,6 +18,7 @@ import { digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import { newGateId, type GateId, type NodeId, type RunId, type TaskId } from "../ids.ts";
 import { SYSTEM_ACTOR, type Actor } from "../journal/events.ts";
+import { GateDispatcher, formatRecipients, nextTier, tierRecipients, type DeliverySpec } from "./delivery.ts";
 import { foldRun, openGates, type GateRecord, type RunProjection } from "./projection.ts";
 import type { RunLog } from "./log.ts";
 
@@ -46,6 +47,8 @@ export interface GateRequest {
   readonly defaultAction?: GateDecision;
   /** Channels an `edit` decision may write. Anything else is rejected. */
   readonly allowEdit?: readonly string[];
+  /** How this gate reaches a human, and who it escalates to when nobody answers. */
+  readonly delivery?: DeliverySpec;
 }
 
 export interface GateSummary extends GateRecord {
@@ -56,6 +59,8 @@ export interface GateSummary extends GateRecord {
   readonly onTimeout: TimeoutAction;
   readonly approvers: readonly string[];
   readonly allowEdit: readonly string[] | undefined;
+  /** Which escalation tier this gate is currently on. 0 is the original delivery. */
+  readonly tier: number;
 }
 
 export interface ResolveInput {
@@ -67,6 +72,15 @@ export interface ResolveInput {
 
 export interface GateBrokerOptions {
   readonly now?: () => number;
+  /**
+   * Delivers gates and escalations.
+   *
+   * OPTIONAL, and its absence is a real configuration: a broker with no dispatcher
+   * raises durable gates that only the console and the HTTP API surface. That is a
+   * usable mode, not a broken one — but the SLA sweep still runs, so an unanswered gate
+   * still escalates and still expires.
+   */
+  readonly dispatcher?: GateDispatcher;
 }
 
 /**
@@ -83,9 +97,13 @@ export class HumanGateBroker {
   readonly #requests = new Map<GateId, GateRequest & { deadline: number | undefined }>();
   /** `(gateId, approverId)` → decision, so a double-click collapses to one decision. */
   readonly #idempotency = new Map<string, GateDecisionKind>();
+  /** gateId → current escalation tier. Rebuilt from `gate.escalated` on restart. */
+  readonly #tiers = new Map<GateId, number>();
+  readonly #dispatcher: GateDispatcher | undefined;
 
   constructor(opts: GateBrokerOptions = {}) {
     this.#now = opts.now ?? Date.now;
+    this.#dispatcher = opts.dispatcher;
   }
 
   /**
@@ -121,7 +139,39 @@ export class HumanGateBroker {
       { taskId: req.taskId },
     );
 
+    // Delivery happens AFTER the gate is durable, and its result never changes whether
+    // the gate exists. A crash here loses a notification, not a decision — and the SLA
+    // sweep will re-deliver on the next tier.
+    if (this.#dispatcher !== undefined && req.delivery !== undefined) {
+      const summary = this.#summarize(gateId, req, this.#now());
+      await this.#dispatcher.deliver(log, summary, req.delivery, { tier: 0 });
+    }
+
     return gateId;
+  }
+
+  /** A GateSummary for a gate that has just been raised, before any projection exists. */
+  #summarize(gateId: GateId, req: GateRequest & { deadline?: number }, at: number): GateSummary {
+    return {
+      gateId,
+      runId: req.runId,
+      taskId: req.taskId,
+      nodeId: req.nodeId,
+      state: "open",
+      policyRef: req.policyRef,
+      raisedAtTs: at,
+      // Not yet known — the append that made this gate durable has not been projected.
+      // A channel does not need it; the projection is authoritative once it exists.
+      raisedAtSeq: 0,
+      contentDigest: digest(req.payload),
+      payload: req.payload,
+      slaMs: req.slaMs,
+      deadline: req.deadline,
+      onTimeout: req.onTimeout ?? "fail",
+      approvers: req.approvers ?? [],
+      allowEdit: req.allowEdit,
+      tier: this.#tiers.get(gateId) ?? 0,
+    };
   }
 
   /**
@@ -218,6 +268,55 @@ export class HumanGateBroker {
           actor: SYSTEM_ACTOR("gate-broker:timeout"),
           idempotencyKey: `timeout:${gate.gateId}`,
         });
+      } else if (action === "escalate") {
+        // THE CHAIN, and the clock reset that makes it a chain rather than a cascade.
+        const spec = req.delivery;
+        const tier = this.#tiers.get(gate.gateId) ?? 0;
+        const next = spec === undefined ? undefined : nextTier(spec, tier, now);
+
+        if (next === undefined) {
+          // Exhausted. An escalation chain that runs out is an expiry, not a silent
+          // return to waiting — otherwise the gate sits open forever with nobody left
+          // to ask.
+          await log.append([
+            { type: "gate.timeout", payload: { gateId: gate.gateId, action: "fail" }, actor: SYSTEM_ACTOR("gate-broker") },
+            {
+              type: "run.failed",
+              payload: {
+                error: {
+                  class: "timeout",
+                  code: CODES.E_GATE_EXPIRED,
+                  message: `gate "${gate.gateId}" exhausted its escalation chain with no decision`,
+                  retryable: false,
+                },
+              },
+              actor: SYSTEM_ACTOR("gate-broker"),
+            },
+          ]);
+        } else {
+          this.#tiers.set(gate.gateId, next.tier);
+          this.#requests.set(gate.gateId, { ...req, deadline: next.deadline });
+          const to = tierRecipients(spec!, next.tier);
+          await log.append([
+            {
+              type: "gate.escalated",
+              payload: { gateId: gate.gateId, tier: next.tier, to: formatRecipients(to) },
+              actor: SYSTEM_ACTOR("gate-broker"),
+            },
+          ]);
+          if (this.#dispatcher !== undefined) {
+            const p2 = await this.project(log);
+            const record = p2?.gates[gate.gateId];
+            if (record !== undefined) {
+              await this.#dispatcher.deliver(
+                log,
+                { ...record, runId: log.runId, payload: req.payload, slaMs: req.slaMs, deadline: next.deadline, onTimeout: action, approvers: req.approvers ?? [], allowEdit: req.allowEdit, tier: next.tier },
+                spec!,
+                { tier: next.tier },
+              );
+            }
+          }
+        }
       } else {
         await log.append([
           { type: "gate.timeout", payload: { gateId: gate.gateId, action }, actor: SYSTEM_ACTOR("gate-broker") },
@@ -259,6 +358,7 @@ export class HumanGateBroker {
         onTimeout: req?.onTimeout ?? "fail",
         approvers: req?.approvers ?? [],
         allowEdit: req?.allowEdit,
+        tier: this.#tiers.get(g.gateId) ?? 0,
       };
     });
   }

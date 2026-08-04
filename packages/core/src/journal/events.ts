@@ -203,6 +203,21 @@ export interface EventPayloads {
   // ── oversight ────────────────────────────────────────────────────────────
   "gate.raised": { readonly gateId: GateId; readonly nodeId: NodeId; readonly policyRef: string; readonly contentDigest: string };
   "gate.delivered": { readonly gateId: GateId; readonly channel: string; readonly receipt: string };
+  /**
+   * A channel failed.
+   *
+   * Journaled per channel, and never fatal: delivery failure is a NOTIFICATION problem,
+   * not an authorization one. The gate stays open either way — this exists so that
+   * "why did nobody see this?" has an answer.
+   */
+  "gate.delivery_failed": {
+    readonly gateId: GateId;
+    readonly channel: string;
+    readonly error: string;
+    readonly tier: number;
+    /** True when no channel succeeded and the console queue caught it. */
+    readonly fellBack: boolean;
+  };
   "gate.decided": {
     readonly gateId: GateId;
     readonly decision: "approve" | "reject" | "edit" | "redirect";
@@ -281,7 +296,7 @@ export const EVENT_TYPES = [
   "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending", "fanout.planned",
   "state.reduced", "channel.written",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
-  "gate.raised", "gate.delivered", "gate.decided", "gate.timeout", "gate.escalated", "gate.cancelled",
+  "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.decided", "gate.timeout", "gate.escalated", "gate.cancelled",
   "policy.decided", "policy.escalated", "policy.deescalated",
   "budget.reserved", "budget.settled", "budget.exhausted",
   "graph.mutated", "checkpoint.created", "checkpoint.restored",

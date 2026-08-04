@@ -1301,3 +1301,52 @@ body, which runs to completion before any sibling starts, so it reported a peak 
 matter what the scheduler did. With an async body it reports 16 — the configured
 `maxParallelism`, which is the actual claim.
 
+---
+
+## 2026-08-05 — Wave E — Delivery failure never auto-approves, and the clock resets
+
+**The rule the file is built around.** Every channel failing is a NOTIFICATION problem,
+not an authorization one. The gate stays open, each failure is journaled per channel, and
+the only ways out remain a human decision or the declared timeout policy. Anything else
+would turn an unreachable Slack workspace into a way to approve a production restart.
+
+Pinned by tests for each way it could leak: a dead webhook, an unknown channel name, a
+partial failure, and an exhausted escalation chain. None ends in `gate.decided`.
+
+**Delivery happens AFTER the gate is durable.** A crash between them loses a
+notification, not a decision — and the SLA sweep re-delivers on the next tier.
+
+**Zero-dep by construction.** Two built-in channels: `ConsoleChannel`, which cannot fail
+and is therefore the fallback, and `WebhookChannel` on the global `fetch`. A Slack
+incoming webhook, a PagerDuty Events endpoint, and an internal approvals service are all
+that shape, so one implementation covers the realistic cases without `@loom/core`
+learning any vendor's API. A real SDK integration is a `DeliveryChannel` living outside
+the package.
+
+**The escalation chain had a hole: the clock.** `sweepTimeouts` journaled `gate.timeout`
+on `escalate` and did nothing else — no tier advance, no re-delivery. Building it
+surfaced the reason the design says "clock resets": a tier that inherited the original
+deadline breaches the instant it is reached, so ONE sweep walks the entire chain and
+pages the director about something the on-call never saw. Each tier now gets its own
+`afterMs` window from the moment it is reached.
+
+An exhausted chain EXPIRES the gate. Returning it to "waiting" would leave it open
+forever with nobody left to ask.
+
+---
+
+## 2026-08-05 — Wave E — DEVIATION: gate redaction is field-scoped, not classification-scoped
+
+D7.2 says `redact: [pii]`. Implemented literally — `redactPayload(payload, "pii")` — it
+tokenises the WHOLE payload, so the approver sees
+`{"command":"pii:3ace…","blastRadius":"pii:91b2…"}`.
+
+**A human cannot approve what they cannot see.** A gate rendered unreadable is a gate
+that gets rubber-stamped, which is worse than no gate: it manufactures a record of
+informed consent nobody gave.
+
+So the knob is the FIELD SET. `redact: ["email"]` replaces that key wherever it appears,
+recursively, and everything else stays legible. Matched by key name rather than by path
+on purpose — `email` is `email` three objects down, and a path list silently misses the
+nested one.
+
