@@ -17,6 +17,7 @@ import { basename, join, resolve } from "node:path";
 
 import { InProcessEventBus } from "./bus.ts";
 import { isLoomError, toLoomError } from "./errors.ts";
+import { parseYamlSpec } from "./graph/yaml.ts";
 import { compile } from "./graph/compile.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
@@ -32,12 +33,12 @@ import type { GateId, RunId } from "./ids.ts";
 const USAGE = `loom — graph-native multi-agent orchestration
 
   loom serve   [--workspace .] [--port 8787] [--token T]   start the control plane
-  loom compile <graph.json>                                validate and print diagnostics
-  loom run     <graph.json> [--input JSON]                 run to completion or to a gate
+  loom compile <graph.json|yaml>                           validate and print diagnostics
+  loom run     <graph.json|yaml> [--input JSON]            run to completion or to a gate
   loom gates   <runId>                                     list open gates
   loom approve <runId> <gateId> [--reject REASON]          resolve a gate
-  loom replay  <runId> --graph <graph.json>                replay and verify
-  loom trace   <runId> --graph <graph.json>                print the span tree
+  loom replay  <runId> --graph <graph.json|yaml>           replay and verify
+  loom trace   <runId> --graph <graph.json|yaml>           print the span tree
 
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
   --data-dir  DIR   journal location (default: <workspace>/.loom)
@@ -134,8 +135,21 @@ export function openWorkspace(args: Args): Workspace {
   return { root, dataDir, store, engine, bus, resolver, close: () => store.close() };
 }
 
+/**
+ * Read a spec from JSON or YAML.
+ *
+ * YAML is authoring sugar and stops here: it is converted to a plain value before
+ * anything downstream sees it, so a digest is only ever taken over JSON. Two authors who
+ * write the same graph in different formats get the same hash.
+ */
+function readSpec(file: string): GraphSpec {
+  const path = resolve(file);
+  const text = readFileSync(path, "utf8");
+  return (/\.ya?ml$/i.test(path) ? parseYamlSpec(text, { filename: basename(path) }) : JSON.parse(text)) as GraphSpec;
+}
+
 function loadGraph(ws: Workspace, file: string): RunGraph {
-  const spec = JSON.parse(readFileSync(resolve(file), "utf8")) as GraphSpec;
+  const spec = readSpec(file);
   const result = compile({
     spec,
     resolver: ws.resolver,
@@ -158,7 +172,7 @@ function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
   const out: Record<string, RunGraph> = {};
   if (!existsSync(dir)) return out;
   for (const file of readdirSync(dir)) {
-    if (!file.endsWith(".json")) continue;
+    if (!/\.(json|ya?ml)$/i.test(file)) continue;
     try {
       const graph = loadGraph(ws, join(dir, file));
       out[graph.spec.metadata.name] = graph;

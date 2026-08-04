@@ -48,8 +48,8 @@ deliberate v2 deferral with the interfaces already shaped for it.
 
 Open threads that need resolving before the milestone they block:
 
-- **T1 (blocks M1e):** YAML→JSON conversion lives outside core. Core is JSON-only.
-  The CLI will need a YAML reader; decide dep-vs-subset-parser at M2.
+- **T1 (CLOSED 2026-08-05):** `graph/yaml.ts` is a restricted subset parser, zero-dep.
+  Core is still JSON-only — YAML converts at the CLI boundary and never reaches a digest.
 - **T2 (CLOSED 2026-08-05):** `resources/functions.ts` loads bodies from
   digest-addressed resources, compiled and cached per digest. Hand-registered bodies
   still win, so embedding and testing are unchanged.
@@ -1622,4 +1622,42 @@ cross-realm array produces another cross-realm array. `Array.from` is the host's
 builds a host array. The test that caught it asserts on the PROTOTYPE, because
 `Array.isArray` is realm-agnostic and passes either way — which is exactly why the bug
 was invisible.
+
+---
+
+## 2026-08-05 — T1 closed — a YAML subset, and the one that stays a string
+
+**The question T1 asked:** take a YAML dependency for the CLI, or write a subset parser?
+
+`@loom/core` has zero runtime dependencies, checked in CI and demonstrated by a binary
+that boots from an empty directory. Spending that on authoring sugar is a poor trade —
+especially since almost none of real YAML appears in a hand-written GraphSpec. Anchors,
+aliases, tags, five scalar styles, and the implicit typing rules that turn `1:30` into a
+sexagesimal number are all absent from every YAML block in the design documents.
+
+**Everything outside the subset is REFUSED with a line number.** That is the entire point.
+A parser that silently mishandles an anchor produces a graph the author did not write, and
+the compiler then validates the wrong thing perfectly. Anchors, aliases, tags, merge keys,
+a second document, and tabs in the indentation all fail loudly.
+
+**`on` STAYS A STRING.** YAML 1.1 turns `on`, `yes`, and `off` into booleans — the most
+notorious footgun in the format, and catastrophic *here specifically*, because `on` is a
+posture. `posture: on` silently becoming `posture: true` would turn on-the-loop oversight
+into a type error at best and a wrong posture at worst.
+
+**A duplicate key is an error, not last-wins.** JSON silently keeps the last one. In a
+GraphSpec a duplicate means two declarations disagree and one is being ignored, which is
+exactly what an author needs told.
+
+**YAML stops at the CLI boundary.** It is converted to a plain value before anything
+downstream sees it, so a digest is only ever taken over JSON — two authors who write the
+same graph in different formats get the same hash. Verified end to end: a hand-written
+`hello.yaml` compiled and ran through the standalone binary in an empty directory.
+
+**The flow-collection parser is a parser, not a regex.** The first version quoted bare
+words with a regex and handed the result to `JSON.parse`; it broke on
+`capabilities: [fs:write]`, reading the colon in a capability NAME as a key separator and
+producing `["fs":write]`. Any regex that tells those two colons apart is already a parser,
+so it became one — it tracks whether it is inside `{}` or `[]`, which is the actual
+difference.
 
