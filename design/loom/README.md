@@ -36,6 +36,7 @@ Read in order. Each file carries the `D<n>` headings from the brief verbatim.
 
 ## Conventions
 
+- `HANDOFF.md` — **start here.** What is left, what to read first, and what will bite you.
 - `ASSUMPTION:` — an underspecified point resolved by fiat. All collected in **D14**.
 - `DEFERRED-v2` — explicitly outside the 6–8 week v1, each with a one-line
   justification. All collected in **D13**.
