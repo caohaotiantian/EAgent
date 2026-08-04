@@ -10,7 +10,7 @@ Legend: **PROVEN** — a test asserts it. **DESIGNED** — specified, not yet bu
 
 | # | Requirement | Design | Code | Evidence |
 |---|---|---|---|---|
-| 1 | Every inter-layer edge in D2 maps to a named interface in D3 | PASS | **PROVEN** | 16 edges → 24 interfaces; every one now has an implementation except the distributed swaps (G3) |
+| 1 | Every inter-layer edge in D2 maps to a named interface in D3 | PASS | **PROVEN** | 16 edges → 24 interfaces; every one now has an implementation except the distributed swaps (G3). All eight node types execute — `subgraph` was the last one the compiler accepted but the executor refused |
 | 2 | Every interface defines its error taxonomy and cancellation behaviour | PASS | **PROVEN** | One `LoomError` taxonomy, class-driven retry and HTTP mapping, all tested. The 8 boundary interfaces now enumerate their own codes and cancellation behaviour (D3.17–D3.24) — G1 closed |
 | 3 | One `GraphSpec` consumed by UI, executor, observability, resources, evolution — no parallel representations | PASS | **PROVEN** | `reconstruct(trace) ⊆ declared(graph.hash)` is a test, plus its negative (a tampered span claiming an undeclared edge fails it) |
 | 4 | All three postures expressible by configuration alone | PASS | **PROVEN** | Skeleton row 11: the same graph runs autonomously when the gate node is removed; row 11b: a system floor of `in` gates a run that would otherwise be autonomous |

@@ -1520,3 +1520,55 @@ This one was found by being a user for four minutes. The walking skeleton, the a
 graph, and incident-triage all supply their own tools; none of them could have hit this,
 because none of them used a built-in tool from a graph they did not also write.
 
+---
+
+## 2026-08-05 — P1 — Subgraph execution, and the compile-then-fail hole it closed
+
+**The hole.** `subgraph` is one of the eight node types. The compiler accepted it and
+validated its mappings in full (GRAPH016: depth, cycles, both directions of the channel
+map, and a recursive validation of the child). The executor threw
+`E_INTERNAL: "subgraph nodes are not implemented in v1"`.
+
+So a graph could pass every one of the 22 compile rules and then die at run time — the
+exact failure the compile stage exists to prevent, sitting inside the executor. Every
+other guarantee here is conditional on "if it compiles, it runs".
+
+**Decision: the child is a SEPARATE RUN, not an inlined region.**
+
+- It gets its own `runId`, journal, gates, and replayable history, so it is auditable on
+  its own terms and the parent's journal stays the size of the parent rather than of the
+  whole tree.
+- The child run id is DERIVED — `parentRunId~taskId` — for the same reason a `TaskId` is.
+  A random id would silently break replay and restart.
+- **The invocation is an EFFECT.** `effect.completed` records the mapped outputs, so a
+  parent replay serves them instead of re-running the child. Pinned by a test where the
+  child charges a card: replay matches, and the shadow rig's charge counter stays empty.
+
+**One human decision, not two.** A child that hits a gate suspends the parent, and the
+parent's gate payload names the child run, the child node, and the child's gate. The
+human answers once, on the parent; `#forwardGateDecision` carries that answer into the
+child. Two gates for one question would be the obvious implementation and the wrong one —
+it splits an audit trail across two runs and asks a person the same thing twice.
+
+**The child's spend rolls up.** Without it, a graph could exceed its declared cost by
+nesting, which is the one thing GRAPH009 proves at compile time cannot happen. The slice
+is carved from what the parent still HAS, not from its original limit: a subgraph reached
+late in an expensive run gets less, which is correct.
+
+---
+
+## 2026-08-05 — P1 — A gate had no way to show what it was asking
+
+**Found while testing the subgraph gate.** The projection carries a gate's durable half —
+who, which node, what state. The rendered payload, which is the half a human actually
+reads, lived only inside `HumanGateBroker`'s in-memory map with no accessor. The HTTP
+`GET /runs/:id/gates` returned projection rows; the console rendered the same.
+
+A gate surfaced without what it is asking about is a gate that gets approved on trust.
+That is precisely the failure the oversight layer exists to prevent, and it was in the
+one place nobody thought to look — the *display* path, not the decision path.
+
+`Engine.openGates(runId)` returns the broker summaries, and the HTTP handler joins them
+onto the projection rows. It matters most for a `subgraph` gate, where the real question
+is in another run entirely and the projection row says only "node `delegate` is waiting".
+

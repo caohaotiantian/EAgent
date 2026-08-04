@@ -266,6 +266,27 @@ export interface EventPayloads {
     readonly proposedByNode: NodeId;
     readonly budgetConsumed: number;
   };
+  /**
+   * A `subgraph` node started a CHILD RUN.
+   *
+   * The child has its own journal, its own gates, and its own replayable history. This
+   * event is the only link between them, which is what keeps a parent's journal the size
+   * of the parent rather than of its whole tree.
+   */
+  "subgraph.started": {
+    readonly childRunId: RunId;
+    readonly ref: string;
+    readonly graphHash: string;
+    /** The slice carved from the parent's REMAINING budget, or null when unbounded. */
+    readonly budgetUsd: number | null;
+  };
+  "subgraph.completed": {
+    readonly childRunId: RunId;
+    readonly ref: string;
+    readonly status: string;
+    readonly usage: UsageRecord;
+    readonly outputs: readonly string[];
+  };
   "checkpoint.created": { readonly checkpointId: CheckpointId; readonly atSeq: Seq; readonly kind: string; readonly openTasks: number };
   /**
    * A rewind is APPEND-ONLY: this marker hides events in `(atSeq, thisSeq)` from the
@@ -299,7 +320,7 @@ export const EVENT_TYPES = [
   "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.decided", "gate.timeout", "gate.escalated", "gate.cancelled",
   "policy.decided", "policy.escalated", "policy.deescalated",
   "budget.reserved", "budget.settled", "budget.exhausted",
-  "graph.mutated", "checkpoint.created", "checkpoint.restored",
+  "graph.mutated", "subgraph.started", "subgraph.completed", "checkpoint.created", "checkpoint.restored",
   "operator.command", "config.reloaded", "hook.applied",
 ] as const satisfies readonly EventType[];
 

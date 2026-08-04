@@ -171,6 +171,8 @@ export const CODES = {
   // internal
   E_INTERNAL: "E_INTERNAL",
   E_REPLAY_DIVERGENCE: "E_REPLAY_DIVERGENCE",
+  /** A child graph ended in a non-success state. */
+  E_SUBGRAPH_FAILED: "E_SUBGRAPH_FAILED",
   E_FLOATING_REF_AT_RUNTIME: "E_FLOATING_REF_AT_RUNTIME",
   E_TRACE_INCONSISTENT: "E_TRACE_INCONSISTENT",
   /** A run finished without writing any declared output — a path was stranded. */

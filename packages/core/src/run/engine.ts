@@ -48,7 +48,7 @@ import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
 import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
-import { compile } from "../graph/compile.ts";
+import { compile, compileOrThrow } from "../graph/compile.ts";
 import {
   ESCALATION_RULES,
   FailureStreaks,
@@ -69,7 +69,7 @@ import {
   type Contribution,
 } from "../state/channels.ts";
 import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from "../vocab.ts";
-import { HumanGateBroker, type GateDecision, type ResolveInput } from "./gates.ts";
+import { HumanGateBroker, type GateDecision, type GateSummary, type ResolveInput } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
@@ -134,6 +134,16 @@ export interface SubmitInput {
   readonly inputs: Readonly<Record<string, unknown>>;
   readonly idempotencyKey?: string;
   readonly workflow?: string;
+  /**
+   * Use this id instead of minting one.
+   *
+   * A subgraph's child run needs a DERIVED id for the same reason a TaskId does: replay
+   * must find the same child, and a random id silently breaks it. Never set by an
+   * external caller.
+   */
+  readonly runId?: RunId;
+  /** Overrides the run budget — a subgraph carves its slice from its parent's. */
+  readonly budgetUsd?: number;
 }
 
 /**
@@ -207,6 +217,7 @@ export class Engine {
   readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly #contextTokens: number;
   readonly #resolver: ResourceResolver;
+  readonly #childGraphs = new Map<string, RunGraph>();
   readonly #sequences: SequenceIndex | undefined;
   readonly #baseline: CohortBaseline | undefined;
 
@@ -254,8 +265,8 @@ export class Engine {
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   async submit(input: SubmitInput): Promise<RunId> {
-    const runId = newRunId(this.#now());
-    const ctx = this.#contextFor(runId, input.graph);
+    const runId = input.runId ?? newRunId(this.#now());
+    const ctx = this.#contextFor(runId, input.graph, input.budgetUsd);
 
     // Durable at ACK: run.submitted + the compiled graph + the manifest. NOT any
     // execution — a 202 means "this WILL run", never "this HAS run".
@@ -387,6 +398,22 @@ export class Engine {
     return (await this.#project(ctx))!;
   }
 
+  /**
+   * Open gates WITH their rendered payload.
+   *
+   * The projection carries the durable half of a gate — who, which node, what state. The
+   * payload is the half a human actually reads, and it lived only inside the broker with
+   * no way out. A gate surfaced without what it is asking about is a gate that gets
+   * approved on trust, which is the failure mode the whole oversight layer exists to
+   * avoid; it matters most for a `subgraph` gate, where the real question is in another
+   * run entirely.
+   */
+  async openGates(runId: RunId): Promise<readonly GateSummary[]> {
+    const ctx = this.#runs.get(runId);
+    if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
+    return this.gates.list(ctx.log);
+  }
+
   async resolveGate(runId: RunId, input: ResolveInput): Promise<RunProjection> {
     const ctx = this.#require(runId);
     await this.gates.resolve(ctx.log, input);
@@ -492,7 +519,7 @@ export class Engine {
     return ctx;
   }
 
-  #contextFor(runId: RunId, graph: RunGraph): RunContext {
+  #contextFor(runId: RunId, graph: RunGraph, budgetUsd?: number): RunContext {
     const existing = this.#runs.get(runId);
     if (existing !== undefined) return existing;
     const ctx: RunContext = {
@@ -506,6 +533,7 @@ export class Engine {
       }),
       policy: new PolicyEngine({
         ...this.#policyOpts,
+        ...(budgetUsd === undefined ? {} : { budget: { ...this.#policyOpts.budget, runUsd: budgetUsd } }),
         onEscalate: (rule, from, to, scope) => {
           void ctx.log.append([
             { type: "policy.escalated", payload: { rule, from, to, scope }, actor: SYSTEM_ACTOR("policy") },
@@ -784,7 +812,7 @@ export class Engine {
           gate: { policyRef: w.node.humanGate?.ref ?? "", payload: this.#gatePayload(ctx, p, w.node, w.task) },
         };
       case "subgraph":
-        throw err.internal(CODES.E_INTERNAL, "subgraph nodes are not implemented in v1");
+        return this.#runSubgraph(ctx, p, w);
     }
   }
 
@@ -1198,6 +1226,179 @@ export class Engine {
    * produce a different summary and every downstream state hash would diverge for a
    * reason that has nothing to do with the graph.
    */
+  /**
+   * Run a pinned child graph, and map its channels in and out.
+   *
+   * THE CHILD IS A SEPARATE RUN with its own journal, its own gates, and its own
+   * replayable history — not an inlined region of the parent. That is what makes a
+   * subgraph worth having: the child is auditable on its own terms, and the parent's
+   * journal stays the size of the parent.
+   *
+   * The invocation is an EFFECT. `subgraph.completed` records the mapped outputs, so a
+   * parent replay serves them instead of re-running the child — which matters most when
+   * the child did something irreversible.
+   */
+  async #runSubgraph(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
+    const sub = w.node.subgraph!;
+    const key = effectKey(w.task.taskId, "subgraph", 0);
+
+    // Replay: the child ran once, in the recorded past. Running it again would repeat
+    // every side effect it had.
+    if (this.#replay !== undefined) {
+      const recorded = this.#replay.require(key).result as { writes: Record<string, unknown> };
+      return { status: "succeeded", writes: { ...recorded.writes }, usage: { ...ZERO_USAGE } };
+    }
+
+    const childSpec = this.#resolver.subgraph?.(sub.ref);
+    if (childSpec === undefined) {
+      throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `subgraph "${sub.ref}" does not resolve to a GraphSpec`);
+    }
+    const childGraph = this.#compileChild(sub.ref, childSpec);
+
+    // DERIVED, like every other id here: replay and a restart must find the same child.
+    const childRunId = `${ctx.runId}~${w.task.taskId}` as RunId;
+
+    const scope = scopeFor(p, ctx.graph.spec.channels, w.task.branch);
+    const inputs: Record<string, unknown> = {};
+    for (const [childCh, parentCh] of Object.entries(sub.inputs)) inputs[childCh] = scope[parentCh];
+
+    // The slice is carved from what the PARENT still has, not from its original limit:
+    // a subgraph reached late in an expensive run gets less, which is correct.
+    const share = sub.budgetShare ?? 1;
+    const slice = Number.isFinite(ctx.policy.remainingUsd) ? ctx.policy.remainingUsd * share : undefined;
+
+    const existing = await this.projection(childRunId);
+    if (existing === undefined) {
+      await this.submit({
+        graph: childGraph,
+        inputs,
+        runId: childRunId,
+        workflow: sub.ref,
+        ...(slice === undefined ? {} : { budgetUsd: slice }),
+      });
+      await this.#serialize(() =>
+        ctx.log.append(
+          [
+            {
+              type: "subgraph.started",
+              payload: { childRunId, ref: sub.ref, graphHash: childGraph.graphHash, budgetUsd: slice ?? null },
+              actor: SYSTEM_ACTOR("executor"),
+              taskId: w.task.taskId,
+            },
+          ],
+          { taskId: w.task.taskId },
+        ),
+      );
+    } else {
+      this.attach(childRunId, childGraph);
+      // ONE HUMAN DECISION, not two. If the parent's gate was answered, that answer was
+      // about the child's question — forward it rather than asking again in the child's
+      // own console.
+      await this.#forwardGateDecision(ctx, p, w, childRunId);
+    }
+
+    const childP = await this.advance(childRunId);
+
+    if (childP.status === "awaiting_gate") {
+      const open = Object.values(childP.gates).find((g) => g.state === "open");
+      return {
+        status: "gate",
+        writes: {},
+        usage: { ...ZERO_USAGE },
+        gate: {
+          policyRef: `subgraph:${sub.ref}`,
+          payload: {
+            subgraph: sub.ref,
+            childRunId,
+            childNode: open?.nodeId,
+            childGateId: open?.gateId,
+            channels: childP.channels,
+          },
+        },
+      };
+    }
+
+    const usage: UsageRecord = { ...ZERO_USAGE, costUsd: childP.usage.costUsd, wallMs: childP.usage.wallMs };
+    if (childP.status !== "succeeded") {
+      return {
+        status: "failed",
+        writes: {},
+        usage,
+        error: err.internal(
+          CODES.E_SUBGRAPH_FAILED,
+          `subgraph "${sub.ref}" ended ${childP.status}: ${childP.error?.message ?? "no reason recorded"}`,
+          { details: { childRunId, status: childP.status } },
+        ),
+      };
+    }
+
+    const writes: Record<string, unknown> = {};
+    for (const [parentCh, childCh] of Object.entries(sub.outputs)) writes[parentCh] = childP.channels[childCh];
+
+    await this.#serialize(() =>
+      ctx.log.append(
+        [
+          { type: "effect.started", payload: { key, kind: "mailbox", attempt: 1 }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
+          {
+            type: "effect.completed",
+            payload: { key, result: { writes }, resultDigest: digest(writes) },
+            actor: SYSTEM_ACTOR("executor"),
+            taskId: w.task.taskId,
+          },
+          {
+            type: "subgraph.completed",
+            payload: { childRunId, ref: sub.ref, status: childP.status, usage: childP.usage, outputs: Object.keys(writes) },
+            actor: SYSTEM_ACTOR("executor"),
+            taskId: w.task.taskId,
+          },
+        ],
+        { taskId: w.task.taskId },
+      ),
+    );
+
+    // The child's spend counts against the parent's budget. Without this a graph could
+    // exceed its declared cost by nesting, which is the one thing GRAPH009 proves at
+    // compile time cannot happen.
+    ctx.policy.settle(ctx.policy.reserve(`subgraph:${w.node.id}`, 0), childP.usage.costUsd);
+
+    return { status: "succeeded", writes, usage };
+  }
+
+  /** Answer the child's open gate with the decision the human gave on the parent. */
+  async #forwardGateDecision(ctx: RunContext, p: RunProjection, w: Wave, childRunId: RunId): Promise<void> {
+    const settled = Object.values(p.gates).find((g) => g.taskId === w.task.taskId && g.state === "decided");
+    if (settled === undefined) return;
+    const childP = await this.projection(childRunId);
+    const open = Object.values(childP?.gates ?? {}).find((g) => g.state === "open");
+    if (open === undefined) return;
+
+    const decision: GateDecision =
+      settled.decision === "reject"
+        ? { kind: "reject", reason: settled.justification ?? "rejected on the parent graph" }
+        : { kind: "approve" };
+
+    await this.resolveGate(childRunId, {
+      gateId: open.gateId,
+      decision,
+      actor: SYSTEM_ACTOR("executor:subgraph"),
+      idempotencyKey: `parent:${w.task.taskId}`,
+    });
+  }
+
+  /** Compile a child graph once per ref. The tree is fixed, so the cache never stales. */
+  #compileChild(ref: string, spec: GraphSpec): RunGraph {
+    const hit = this.#childGraphs.get(ref);
+    if (hit !== undefined) return hit;
+    const compiled = compileOrThrow({
+      spec,
+      resolver: this.#resolver,
+      tools: this.tools.manifests(),
+      tenantCapabilities: this.#policyOpts.granted,
+    });
+    this.#childGraphs.set(ref, compiled);
+    return compiled;
+  }
+
   async #summarizeEffect(ctx: RunContext, w: Wave, text: string): Promise<string> {
     const key = effectKey(w.task.taskId, "summarize", 0);
     if (this.#replay !== undefined) return String(this.#replay.require(key).result);

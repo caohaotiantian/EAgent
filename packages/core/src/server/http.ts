@@ -315,9 +315,19 @@ export class ControlPlane {
         method: "GET",
         pattern: /^\/runs\/([^/]+)\/gates$/,
         handle: async ({ res, params }) => {
-          const p = await engine.projection(params[0] as RunId);
-          if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${params[0]} not found`);
-          send(res, 200, { gates: Object.values(p.gates).filter((g) => g.state === "open") });
+          const runId = params[0] as RunId;
+          const p = await engine.projection(runId);
+          if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          // Joined with the rendered payload where the broker still has it. A queue that
+          // lists gates without saying what each one asks is a queue people clear rather
+          // than read — and for a `subgraph` gate the question is in another run entirely.
+          const detailed = await engine.openGates(runId).catch(() => []);
+          const byId = new Map(detailed.map((g) => [g.gateId, g]));
+          send(res, 200, {
+            gates: Object.values(p.gates)
+              .filter((g) => g.state === "open")
+              .map((g) => ({ ...g, payload: byId.get(g.gateId)?.payload, deadline: byId.get(g.gateId)?.deadline })),
+          });
         },
       },
 
