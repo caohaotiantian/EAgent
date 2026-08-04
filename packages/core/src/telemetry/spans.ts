@@ -107,9 +107,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       //
       // The journal is the source of truth and must keep real values — redacting it
       // would corrupt channel state, since `state.reduced` payloads ARE the state.
-      // Erasure obligations against the journal are handled by classification-driven
-      // crypto-shredding (R13), not by redaction. Spans leave the process, so they
-      // are redacted on the way out.
+      // Spans leave the process, so they are redacted on the way out.
       attributes: redactAttributes({ ...o.attributes, ...extra }),
       links: o.links,
       events: o.events,

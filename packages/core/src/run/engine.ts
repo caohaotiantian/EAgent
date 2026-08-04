@@ -57,7 +57,7 @@ import {
 import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from "../vocab.ts";
 import { HumanGateBroker, type GateDecision, type ResolveInput } from "./gates.ts";
 import { RunLog } from "./log.ts";
-import { PolicyEngine, classificationOf, type PolicyEngineOptions } from "./policy.ts";
+import { PolicyEngine, classificationOf, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -96,6 +96,8 @@ export interface EngineOptions {
   /** In-flight Tasks per run. Level 2 backpressure: the fan-out edge blocks (D6.3). */
   readonly maxParallelism?: number;
   readonly policy?: Omit<PolicyEngineOptions, "onEscalate">;
+  /** Injected so an intervention hold never makes tests wait on a real clock. */
+  readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /**
    * Replay mode. When present, every effect is served from the journal and no tool
    * body or model adapter is ever reached. A missing key is E_REPLAY_DIVERGENCE —
@@ -164,6 +166,7 @@ export class Engine {
   readonly #maxParallelism: number;
   readonly #policyOpts: Omit<PolicyEngineOptions, "onEscalate">;
   readonly #replay: ReplayEffects | undefined;
+  readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
 
   readonly #runs = new Map<RunId, RunContext>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
@@ -182,6 +185,7 @@ export class Engine {
     this.#maxParallelism = Math.max(1, opts.maxParallelism ?? 16);
     this.#policyOpts = opts.policy ?? { granted: ["*"] };
     this.#replay = opts.replay;
+    this.#sleep = opts.sleep ?? defaultSleep;
   }
 
   get replaying(): boolean {
@@ -292,6 +296,35 @@ export class Engine {
 
       await this.#runWave(ctx, wave);
     }
+  }
+
+  /**
+   * Lower a posture for this run. Human only, journaled, and clamped.
+   *
+   * A separate method from anything that tightens, on purpose: the signature alone
+   * rejects an agent, the deny-list rejects the evolution engine, and the ceiling it
+   * sets can never take a hard-to-undo action below `on` — someone stays watching.
+   */
+  async deescalate(
+    runId: RunId,
+    scope: string,
+    to: Posture,
+    justification: string,
+    actor: PolicyActor,
+  ): Promise<RunProjection> {
+    const ctx = this.#require(runId);
+    const before = ctx.policy.ceilingFor(scope) ?? "in";
+    ctx.policy.deescalate(scope, to, justification, actor);
+    await this.#serialize(() =>
+      ctx.log.append([
+        {
+          type: "policy.deescalated",
+          payload: { from: before, to, scope, justification },
+          actor: { kind: "human", subject: actor.id, via: "api" },
+        },
+      ]),
+    );
+    return (await this.#project(ctx))!;
   }
 
   async resolveGate(runId: RunId, input: ResolveInput): Promise<RunProjection> {
@@ -534,6 +567,36 @@ export class Engine {
     if (decision.effect === "deny") {
       return { status: "failed", writes: {}, usage: { ...ZERO_USAGE }, error: decision.error };
     }
+    if (decision.effect === "allow" && decision.holdMs > 0) {
+      // The pre-irreversible hold (D4 deviation 5). Without it, "the supervisor may
+      // interrupt" is a promise the system cannot keep — by the time a human sees the
+      // action in a stream it has already happened.
+      await this.#serialize(() =>
+        ctx.log.append(
+          [
+            {
+              type: "action.pending",
+              payload: {
+                nodeId: node.id,
+                irreversibility: this.#irreversibilityOf(node),
+                windowMs: decision.holdMs,
+                ...(node.tool === undefined ? {} : { toolName: node.tool.name }),
+              },
+              actor: SYSTEM_ACTOR("policy"),
+              taskId: task.taskId,
+            },
+          ],
+          { taskId: task.taskId },
+        ),
+      );
+      await this.#sleep(decision.holdMs, ctx.abort.signal);
+      // An interrupt during the window means the effect NEVER STARTS — which is the
+      // entire difference between an interruption window and a notification.
+      if (ctx.abort.signal.aborted) {
+        return { status: "failed", writes: {}, usage: { ...ZERO_USAGE }, error: err.cancelled("interrupted during the intervention window") };
+      }
+    }
+
     if (decision.effect === "gate") {
       return {
         status: "gate",
@@ -1500,6 +1563,20 @@ export class Engine {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/** Abort-aware sleep: an interrupt ends the hold immediately rather than after it. */
+function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(finish, ms);
+    function finish(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    }
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
 
 /** What one recorded model turn contains. Replay reconstructs the turn from this. */
 interface RecordedModelTurn {

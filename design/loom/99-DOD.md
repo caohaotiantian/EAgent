@@ -73,7 +73,7 @@ remains as documented in the original matrix above the fold.
 | L5 span taxonomy | **PROVEN** | Spans derived from the journal; `gen_ai.*` conventions on model spans |
 | L5 sampling | **PROVEN** | Deterministic per run; always keeps gated/failed/escalated/irreversible |
 | L5 retention tiering | **DESIGNED** | Unbuilt |
-| L5 PII redaction at emit | **PROVEN** | Applied to span attributes and the HTTP wire — deliberately NOT to the journal, which must keep real values |
+| L5 PII redaction at emit | **PROVEN** | Applied to span attributes and the HTTP wire — deliberately NOT to the journal, which must keep real values. Justified by leak prevention, not by any erasure mandate |
 | L5 deterministic replay | **PROVEN** | Zero model calls, zero side effects, zero file reads across a full replay |
 | L6 authoritative vs derived | **PROVEN** | `state.reduced` is the only event that changes channel state — asserted by reconstructing state from inputs + that event type alone |
 | 3.1 durable suspension across restart | **PROVEN** | `kill -9` with a gate open, resumed from a new process |

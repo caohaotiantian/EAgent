@@ -248,9 +248,19 @@ remember.
 | # | Path | Required authority | Additional requirement | Journal |
 |---|---|---|---|---|
 | D1 | Operator lowers posture for one run | `oversight:loosen` **and** run-scoped RBAC | free-text justification, non-empty | `policy.deescalated{scope:"run", justification, actor}` |
+| **D1a** | **THE HARD FLOOR (implementation, M8).** A ceiling may lower an `irreversible` or `externally_visible` action to `on` — never to `out` | — | clamped in `PolicyEngine.effectivePosture`, not by review | — |
 | D2 | Operator lowers a workflow's declared floor | `oversight:loosen` + `workflow:admin` | a change to the versioned OversightPolicy Resource → normal promotion pipeline | `resource.promoted` + `policy.deescalated` |
 | D3 | Trust tier auto-approves a class | `oversight:loosen`, **enabled once by a human**, bounded scope, revocable | ≥ 50 consecutive approvals, 0 rejects, 0 edits, within one (tenant, tool, node) | `policy.deescalated{scope:"trust_tier"}` + 5 % sampled post-hoc review |
 | D4 | Evolution engine lowers anything | **impossible** | — | — |
+
+> **Implementation note (M8): de-escalation is a CEILING, not an escalation-remover.**
+>
+> Tightening composes by `max`, so an `irreversible` action always computes to `in` —
+> which means "let this run on-the-loop for the next hour" could not be *expressed*,
+> and the intervention window in D4 deviation 5 could never fire. A human ceiling is
+> therefore a separate clamp applied after the `max` fold. It is the only thing in the
+> system that can lower a posture, it is human-only, it requires a justification, and
+> for hard-to-undo actions it is clamped at `on` — someone stays watching.
 
 ### The asymmetry rule — two independent enforcement points
 

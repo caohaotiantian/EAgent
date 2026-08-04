@@ -50,10 +50,13 @@ tenancy:
     budget: { costUsdPerDay: 250, tokensPerDay: 50000000 }   # HOT
 
 oversight:
-  floor: on                       # HOT-TIGHTEN ONLY — the system-wide posture floor
+  floor: on                       # HOT-TIGHTEN ONLY — the system-wide posture floor.
+                                  # This is the DEFAULT (M8): nearly free, since the
+                                  # read_only window is 0 ms, and it is the only way to
+                                  # have a lever between "automatic" and "blocking gate".
   interventionWindowMs:           # HOT
     read_only: 0
-    reversible_write: 2000
+    reversible_write: 0           # a hold on an undoable action is pure latency (M8)
     irreversible: 5000
     externally_visible: 5000
   gateDefaults: { onTimeout: fail, respondWithinMs: 900000 }   # HOT-TIGHTEN ONLY

@@ -14,6 +14,11 @@
  * The ordering matters: a design that leads with detection is a design that has
  * already accepted leaks.
  *
+ * NOTE ON PURPOSE. This exists to stop a credential or a personal detail in MODEL
+ * OUTPUT from reaching a span or a browser. It is not an erasure mechanism and the
+ * journal is never redacted — `state.reduced` payloads ARE the channel state, so a
+ * redacted journal folds to corrupted state.
+ *
  * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.6.
  */
 

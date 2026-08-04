@@ -27,6 +27,7 @@ import {
   isLoosening,
   maxClassification,
   maxPosture,
+  postureRank,
   type Classification,
   type IrreversibilityClass,
   type Posture,
@@ -47,7 +48,17 @@ export interface PolicyRequest {
 }
 
 export type PolicyDecision =
-  | { readonly effect: "allow"; readonly posture: "out" | "on"; readonly reasons: readonly string[] }
+  | {
+      readonly effect: "allow";
+      readonly posture: "out" | "on";
+      readonly reasons: readonly string[];
+      /**
+       * How long to hold before the action runs, so an on-the-loop supervisor has a
+       * bounded window to interrupt. Zero for everything except hard-to-undo actions
+       * at posture `on`.
+       */
+      readonly holdMs: number;
+    }
   | { readonly effect: "gate"; readonly posture: "in"; readonly reasons: readonly string[] }
   | { readonly effect: "deny"; readonly error: LoomError; readonly reasons: readonly string[] };
 
@@ -68,8 +79,26 @@ export interface PolicyEngineOptions {
   readonly granted: readonly string[];
   /** Deny beats allow, always. */
   readonly denied?: readonly string[];
+  /**
+   * The system-wide posture floor. Defaults to `on`.
+   *
+   * `on` is very nearly free — the intervention window for `read_only` is 0 ms, so
+   * pure reads pay nothing — and it buys the thing that is expensive to add later:
+   * every action is in the supervisor's stream and carries an interruption window
+   * before it commits. `out` is not unsafe (irreversibility classes do the real
+   * work); it just leaves no lever between "fully automatic" and "blocking gate".
+   */
   readonly systemFloor?: Posture;
   readonly budget?: BudgetLimits;
+  /**
+   * The interruption window per irreversibility class, applied only at posture `on`.
+   *
+   * DEVIATION from D7.10's table, deliberate: `reversible_write` defaults to 0, not
+   * 2000 ms. A hold on an action Loom can undo is pure latency for no recoverable
+   * benefit — and holds that fire constantly are holds operators learn to ignore,
+   * which costs exactly the interruptions the mechanism exists to enable.
+   */
+  readonly interventionWindowMs?: Partial<Record<IrreversibilityClass, number>>;
   /** Escalation rules armed for this run. See D7.7 E1–E11. */
   readonly onEscalate?: (rule: string, from: Posture, to: Posture, scope: string) => void;
 }
@@ -95,8 +124,16 @@ export const EVOLUTION_ACTOR: PolicyActor = {
   denied: ["oversight:loosen", "resource:promote(stable)", "policy:write", "graph:mutate(policy)"],
 };
 
+const DEFAULT_WINDOWS: Readonly<Record<IrreversibilityClass, number>> = {
+  read_only: 0,
+  reversible_write: 0,
+  irreversible: 5000,
+  externally_visible: 5000,
+};
+
 export class PolicyEngine {
   readonly #granted: readonly string[];
+  readonly #windows: Readonly<Record<IrreversibilityClass, number>>;
   readonly #denied: readonly string[];
   readonly #systemFloor: Posture;
   readonly #budget: BudgetLimits;
@@ -104,6 +141,13 @@ export class PolicyEngine {
 
   /** Runtime escalations, keyed by scope (`run:<id>` or `node:<runId>/<nodeId>`). */
   readonly #escalations = new Map<string, Posture>();
+  /**
+   * Human-set CEILINGS, the only thing that can lower a posture below its computed
+   * floor. Separate from `#escalations` because they compose differently: escalations
+   * fold in by `max` and anyone may add one; a ceiling is a clamp, and only a human
+   * holding `oversight:loosen` may set it.
+   */
+  readonly #ceilings = new Map<string, Posture>();
   readonly #reservations = new Map<string, Reservation>();
   #spentUsd = 0;
   #reservedUsd = 0;
@@ -112,8 +156,9 @@ export class PolicyEngine {
   constructor(opts: PolicyEngineOptions) {
     this.#granted = opts.granted;
     this.#denied = opts.denied ?? [];
-    this.#systemFloor = opts.systemFloor ?? "out";
+    this.#systemFloor = opts.systemFloor ?? "on";
     this.#budget = opts.budget ?? {};
+    this.#windows = { ...DEFAULT_WINDOWS, ...(opts.interventionWindowMs ?? {}) };
     this.#onEscalate = opts.onEscalate;
   }
 
@@ -150,7 +195,12 @@ export class PolicyEngine {
     reasons.push(`effective posture ${posture}`);
 
     if (posture === "in") return { effect: "gate", posture, reasons };
-    return { effect: "allow", posture, reasons };
+
+    // The hold applies ONLY at `on`. At `in` a gate is strictly stronger; at `out`
+    // there is no supervisor watching, so holding would delay nobody's decision.
+    const holdMs = posture === "on" ? this.#windows[req.irreversibility] : 0;
+    if (holdMs > 0) reasons.push(`intervention window ${holdMs}ms`);
+    return { effect: "allow", posture, reasons, holdMs };
   }
 
   /**
@@ -168,7 +218,7 @@ export class PolicyEngine {
         ? "in"
         : "out";
 
-    return maxPosture(
+    const floor = maxPosture(
       this.#systemFloor,
       CLASS_DEFAULT_POSTURE[req.irreversibility],
       dataFloor,
@@ -177,6 +227,23 @@ export class PolicyEngine {
       this.#escalations.get(`run:${req.runId}`) ?? "out",
       this.#escalations.get(`node:${req.runId}/${req.nodeId}`) ?? "out",
     );
+
+    // A human ceiling clamps the computed floor. Without this, de-escalation is inert
+    // for exactly the cases it exists for: an irreversible action always computes to
+    // `in`, so "let this run on-the-loop" could never be expressed and the
+    // intervention window could never fire.
+    const ceiling =
+      this.#ceilings.get(`node:${req.runId}/${req.nodeId}`) ?? this.#ceilings.get(`run:${req.runId}`);
+    if (ceiling === undefined) return floor;
+
+    // THE HARD FLOOR. A human may lower a hard-to-undo action to `on` — someone is
+    // still watching and can interrupt — but never to `out`, where nobody is.
+    const clamped =
+      req.irreversibility === "irreversible" || req.irreversibility === "externally_visible"
+        ? maxPosture(ceiling, "on")
+        : ceiling;
+
+    return postureRank(clamped) < postureRank(floor) ? clamped : floor;
   }
 
   // ── the asymmetry rule ────────────────────────────────────────────────────
@@ -209,9 +276,17 @@ export class PolicyEngine {
     if (justification.trim() === "") {
       throw err.validation(CODES.E_HUMAN_APPROVAL_REQUIRED, "de-escalation requires a non-empty justification");
     }
-    const current = this.#escalations.get(scope);
-    if (current !== undefined && isLoosening(current, to)) this.#escalations.set(scope, to);
-    else this.#escalations.delete(scope);
+    this.#escalations.delete(scope);
+    this.#ceilings.set(scope, to);
+  }
+
+  /** Restore the computed floor by removing a human ceiling. Always allowed: it tightens. */
+  clearCeiling(scope: string): void {
+    this.#ceilings.delete(scope);
+  }
+
+  ceilingFor(scope: string): Posture | undefined {
+    return this.#ceilings.get(scope);
   }
 
   escalationsFor(scope: string): Posture | undefined {

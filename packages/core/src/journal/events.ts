@@ -122,6 +122,19 @@ export interface EventPayloads {
   "task.skipped": { readonly reason: string };
   "task.cancelled": { readonly clean: boolean; readonly reason: string };
   "task.retry_scheduled": { readonly attempt: number; readonly afterMs: number; readonly code: string };
+  /**
+   * A hard-to-undo action is about to run under posture `on`, and the executor is
+   * holding for `windowMs` so a supervisor can intervene.
+   *
+   * Without this event, "the supervisor may interrupt" is a promise the system cannot
+   * keep: by the time a human sees the action in a stream, it has already happened.
+   */
+  "action.pending": {
+    readonly nodeId: NodeId;
+    readonly irreversibility: string;
+    readonly windowMs: number;
+    readonly toolName?: string;
+  };
 
   // ── state ────────────────────────────────────────────────────────────────
   /**
@@ -233,7 +246,7 @@ export const EVENT_TYPES = [
   "run.submitted", "run.compiled", "run.started", "run.suspended", "run.resumed",
   "run.completed", "run.failed", "run.cancelled",
   "task.ready", "task.leased", "task.started", "task.progress", "task.committed",
-  "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled",
+  "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending",
   "state.reduced", "channel.written",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
   "gate.raised", "gate.delivered", "gate.decided", "gate.timeout", "gate.escalated", "gate.cancelled",

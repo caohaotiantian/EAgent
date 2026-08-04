@@ -273,12 +273,13 @@ reconstructed from the journal on demand.
 | **Hot** | last 7 d of spans, metrics, run/task read models | SQLite + DuckDB → ClickHouse | 7 d | < 100 ms |
 | **Warm** | 30 d of spans as Parquet, aggregated metrics | local fs → S3 + Athena/ClickHouse | 30 d | seconds |
 | **Cold** | **the full journal**, compressed, per run | local fs → S3 Glacier IR | 1 y (configurable) | minutes |
-| **Audit** | `AuditRecord`s only | separate append-only store, WORM where available | **7 y**, independent lifecycle | seconds |
+| **Audit** | `AuditRecord`s only | separate append-only store, WORM where available | operator's choice; no external mandate applies | seconds |
 | **Artifacts** | blobs by digest | local CAS → S3 | referenced-count GC, min 30 d | ms |
 
 The journal sits in **cold** rather than hot because it is large and rarely read — but it
-is never *pruned*, only tiered. Audit records are duplicated into their own store because
-regulatory retention must not depend on the same lifecycle as debugging telemetry.
+is never *pruned*, only tiered. Audit records are duplicated into their own store so a
+retention change made for telemetry cost reasons cannot silently shorten the record of
+who approved what.
 
 ## D9.5 — Deterministic replay
 

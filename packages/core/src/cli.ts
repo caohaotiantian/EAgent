@@ -116,7 +116,9 @@ export function openWorkspace(args: Args): Workspace {
     tools,
     functions: new FunctionRegistry(),
     models,
-    policy: { granted: ["fs:read", "fs:write", "net:fetch"], systemFloor: "out" },
+    // systemFloor defaults to `on`: everything is observable and interruptible,
+    // and irreversibility classes still force a gate where one is warranted.
+    policy: { granted: ["fs:read", "fs:write", "net:fetch"] },
   });
 
   const resolver: ResourceResolver = {
