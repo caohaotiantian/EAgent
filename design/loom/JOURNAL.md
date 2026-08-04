@@ -1709,3 +1709,37 @@ one shape: 24 succeeded and one awaiting a gate is a fan-out waiting on a human,
 rendering it green is a lie of omission. That ordering was buried in a `dominant()` helper
 in the HTML string; it is now `STATE_PRIORITY`, exported and tested.
 
+---
+
+## 2026-08-05 — The scheduler seam — G3's claim, made testable without building G3
+
+**What checklist item 7 actually claimed.** "Local → distributed changes implementations,
+never call sites." For the journal that is discharged: one conformance suite passes
+against `MemoryStateStore` and `SqliteStateStore`. For the SCHEDULER it was a claim about
+code that had no seam at all — selection was twenty lines inline in `Engine.advance`, so
+"swap the implementation" would have meant editing the executor.
+
+**The seam is deliberately small.** A `Scheduler` answers exactly one question: *given
+what the journal says, which Tasks should this worker run right now?* Leasing, executing,
+committing, and the fencing token stay in the executor, because those must not vary
+between deployments — a scheduler that could also decide HOW a Task runs would be a second
+executor.
+
+**`LeasedScheduler` is not idle documentation.** It runs against the same journal and
+passes the same conformance suite as the in-process one, plus the three things a
+multi-worker selector must do and a single-worker one never has to: skip a Task another
+worker holds, reclaim an expired lease, and take back its own without waiting. Running it
+anyway is the double execution the fencing token catches *after the fact* — and after the
+fact is too late for a tool that already sent an email.
+
+**The projection was shaped for one worker.** `task.leased` carries a `workerId` and a
+fencing token; the fold turned it into a state and threw both away. With one worker there
+is nothing to ask. A second worker's first question is "is anyone on this?", so the read
+model now keeps the lease — which is the change that made the seam usable at all, and a
+good example of a read model quietly encoding a deployment assumption.
+
+**Still `DEFERRED-v2`: partition assignment (G3).** The genuinely risky part is not
+selection but *who runs which run*. That needs a coordinator, and shipping half a
+coordinator is worse than shipping none. What has changed is that the risk is now
+localised to one named thing rather than spread through the executor.
+

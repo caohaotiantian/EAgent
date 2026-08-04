@@ -82,6 +82,14 @@ export interface TaskRecord {
   readonly writes: Readonly<Record<string, unknown>>;
   readonly error?: ErrorRecord;
   readonly retryAfter?: number;
+  /**
+   * Who holds this Task, and since when.
+   *
+   * The journal has always recorded it; the read model discarded it, because with one
+   * worker there is nothing to ask. A second worker's first question is "is anyone on
+   * this?" — so folding it in is what makes the scheduler seam usable at all.
+   */
+  readonly lease?: { readonly workerId: string; readonly at: number; readonly fencingToken: number };
   readonly usage: UsageRecord;
 }
 
@@ -396,7 +404,11 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     return;
   }
   if (isEvent(e, "task.leased") && e.taskId) {
-    upsertTask(p, e.taskId, { state: "leased", attempt: e.payload.attempt });
+    upsertTask(p, e.taskId, {
+      state: "leased",
+      attempt: e.payload.attempt,
+      lease: { workerId: e.payload.workerId, at: e.ts, fencingToken: e.payload.fencingToken },
+    });
     return;
   }
   if (isEvent(e, "task.committed") && e.taskId) {

@@ -48,6 +48,7 @@ import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
 import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
+import { InProcessScheduler, type Scheduler } from "./scheduler.ts";
 import { compile, compileOrThrow } from "../graph/compile.ts";
 import {
   ESCALATION_RULES,
@@ -117,6 +118,8 @@ export interface EngineOptions {
   readonly contextTokens?: number;
   /** Used when validating a runtime graph mutation. */
   readonly resolver?: ResourceResolver;
+  /** Which Tasks this worker takes. Default: one worker, every ready Task. */
+  readonly scheduler?: Scheduler;
   /** E5's evidence. Absent ⇒ the rule never fires, which is right with no history. */
   readonly sequences?: SequenceIndex;
   /** E7's evidence. Absent ⇒ the rule never fires. */
@@ -218,6 +221,7 @@ export class Engine {
   readonly #contextTokens: number;
   readonly #resolver: ResourceResolver;
   readonly #childGraphs = new Map<string, RunGraph>();
+  readonly #scheduler: Scheduler;
   readonly #sequences: SequenceIndex | undefined;
   readonly #baseline: CohortBaseline | undefined;
 
@@ -243,6 +247,7 @@ export class Engine {
     // Mutations must resolve the same refs the original compile did. Without a real
     // resolver a mutation can only add nodes that reference nothing.
     this.#resolver = opts.resolver ?? { resolve: () => undefined };
+    this.#scheduler = opts.scheduler ?? new InProcessScheduler();
     this.#sequences = opts.sequences;
     this.#baseline = opts.baseline;
   }
@@ -349,23 +354,20 @@ export class Engine {
         return done!;
       }
 
-      // Within-run ordering: longest remaining path first, so the run's makespan
-      // shrinks without extra concurrency. Ties break on branch coordinate, which
-      // keeps execution order deterministic for replay.
-      const wave = ready
-        .map((task): Wave | undefined => {
-          const node = ctx.index.byId.get(task.nodeId);
-          return node === undefined ? undefined : { task, node };
-        })
-        .filter((w): w is Wave => w !== undefined)
-        .sort((a, b) => {
-          const ca = ctx.graph.plans[a.task.nodeId]?.criticalPathLength ?? 0;
-          const cb = ctx.graph.plans[b.task.nodeId]?.criticalPathLength ?? 0;
-          return cb - ca || compareBranch(a.task.branch, b.task.branch);
-        })
-        .slice(0, this.#maxParallelism);
+      // WHICH Tasks to run is the scheduler's question; HOW they run is not, and never
+      // varies between deployments. Swapping in a partitioned scheduler is a constructor
+      // argument, which is the whole content of "changes implementations, never call
+      // sites" for this component.
+      const wave = this.#scheduler.select({
+        projection: p,
+        graph: ctx.graph,
+        nodes: ctx.index.byId,
+        maxParallelism: this.#maxParallelism,
+        now: this.#now(),
+        workerId: this.#workerId,
+      });
 
-      await this.#runWave(ctx, wave);
+      await this.#runWave(ctx, [...wave]);
     }
   }
 

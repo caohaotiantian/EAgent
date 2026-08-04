@@ -33,6 +33,7 @@ export * from "./run/projection.ts";
 export * from "./run/log.ts";
 export * from "./run/policy.ts";
 export * from "./run/registry.ts";
+export * from "./run/scheduler.ts";
 export * from "./run/context.ts";
 export * from "./run/delivery.ts";
 export * from "./run/escalation.ts";
