@@ -45,3 +45,4 @@ export * from "./sandbox/subprocess.ts";
 export * from "./resources/store.ts";
 export * from "./evolution/gate.ts";
 export * from "./server/http.ts";
+export * from "./builtin/tools.ts";

@@ -701,9 +701,14 @@ export class Engine {
         error: err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, result.content),
       };
     }
+    // A tool's channel write is its `writes` when it declares one, otherwise its
+    // model-legible `content`. NEVER `details`: that field is documented as "for
+    // renderers and telemetry, never sent to the model", and letting it land in a
+    // channel makes it reachable by the next node's prompt — which is exactly the
+    // distinction the field exists to draw.
     return {
       status: "succeeded",
-      writes: this.#assignWrites(ctx, w.node, result.writes ?? { [firstWrite(w.node) ?? "_"]: result.details ?? result.content }, ZERO_USAGE),
+      writes: this.#assignWrites(ctx, w.node, result.writes ?? { [firstWrite(w.node) ?? "_"]: result.content }, ZERO_USAGE),
       usage: { ...ZERO_USAGE },
     };
   }

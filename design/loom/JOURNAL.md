@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M5b CLI | **done** | DoD item 6 demonstrated: empty dir → real graph → real file | 356 tests; `test/cli/cli.test.ts` (10 cases) |
 | M5a control plane | **done** | HTTP surface with gap-free SSE reconnect | 346 tests; `test/server/http.test.ts` (17 cases, real sockets) |
 | M6 resources + eval gate | **done** | pinning rule proven; promotion criteria enforced | 329 tests; `test/resources/store.test.ts` (17) + `test/evolution/gate.test.ts` (15) |
 | M4c tool sandbox | **done** | a tool cannot read the engine's env, escape its jail, or outlive its timeout | 297 tests; `test/sandbox/subprocess.test.ts` (19 cases) |
@@ -51,8 +52,10 @@ Open threads that need resolving before the milestone they block:
   different from replay (it re-executes for real).
 - **T9: RESOLVED (M5a).** `ControlPlane` serves the run lifecycle, gates, commands,
   and a gap-free SSE stream over `node:http` — no framework, so zero-dep holds.
-- **T10 (blocks GA):** no CLI yet, so "boots as a single binary with an empty data
-  directory" (DoD item 6) is still UNPROVEN.
+- **T10: RESOLVED (M5b).** `loom run` from an empty directory creates the journal,
+  registers built-in tools, runs a real graph, and writes a real file — verified
+  against the COMPILED `dist/cli.js`, not just the source. SEA packaging itself
+  (`build:binary`) remains a build-tooling task.
 - **T11 (blocks M5b):** no web console. The control plane is the contract it will
   consume; the graph canvas and oversight queue are the remaining L1 work.
 
@@ -794,3 +797,36 @@ gets `401` even for a path that does not exist.
 unauthenticated caller which routes exist. The token comparison is `timingSafeEqual`
 over a padded buffer for the same reason — a length-sensitive or early-exit compare
 leaks the token one byte at a time.
+
+---
+
+## 2026-08-04 — M5b — A tool's channel write is its `content`, never its `details`
+
+**The bug.** `#runToolNode` wrote `result.details ?? result.content` into the target
+channel. So `fs.read` — whose `details` is `{path, bytes, truncated}` — put an OBJECT
+into a `string` channel, and the downstream `fs.write` failed schema validation with
+"value.body must be a string".
+
+**Why it matters beyond the type error.** `details` is documented as "structured
+payload for renderers and telemetry; NEVER sent to the model". Letting it land in a
+channel makes it reachable by the next node's prompt, which is precisely the
+distinction the field exists to draw. The fix restores the invariant: a tool writes
+`result.writes` when it declares one, otherwise its model-legible `content`.
+
+**How it was found.** Not by a unit test — by running the CLI end to end from an empty
+directory against the built-in tools. Worth noting: this is the class of bug the
+walking skeleton could not catch, because its test tools happened to return the shape
+the engine assumed.
+
+---
+
+## 2026-08-04 — M5b — Graphs are JSON, and `loom fmt` will live elsewhere
+
+**Decision (closing T1).** The CLI reads GraphSpec JSON. `@loom/core` never parses
+YAML.
+
+**Why.** Zero-dep is the constraint that keeps the single binary possible, and hashing
+needs one unambiguous representation — canonical JSON has exactly one form of a
+document; YAML has several. A YAML→JSON converter is genuinely useful for authoring
+and belongs in a CLI-only package that may take the dependency, where a mis-parse
+cannot change a `graph.hash`.

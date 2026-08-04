@@ -19,5 +19,8 @@
   "dependencies": {},
   "scripts": {
     "build": "tsc -b"
+  },
+  "bin": {
+    "loom": "./dist/cli.js"
   }
 }
