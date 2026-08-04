@@ -312,6 +312,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   rule006Cycles(spec, idx, channelTypes, d);
   rule007Fanout(spec, expansion, d);
   rule008Joins(spec, idx, d);
+  rule021FanoutHasJoin(spec, idx, d);
   rule009And018Budgets(spec, idx, expansion, d);
   rule010ConcurrentWriters(spec, idx, d);
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
@@ -742,6 +743,37 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
           at: { nodeId: n.id },
         });
       }
+    }
+  }
+}
+
+// ── GRAPH021 ─────────────────────────────────────────────────────────────────
+
+/**
+ * Every fan-out must converge on a join.
+ *
+ * Without one, the branches' writes have no defined fold point: they would have to be
+ * applied in arrival order, which is exactly the nondeterminism the branch-coordinate
+ * fold exists to remove. Requiring the join makes "when do these merge?" a question
+ * the author answers rather than one the scheduler answers by accident.
+ */
+function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
+  for (const e of spec.edges) {
+    if (e.kind !== "fanout") continue;
+    const joined = spec.nodes.some(
+      (n) =>
+        n.join !== undefined &&
+        n.join.branches.includes(e.to) &&
+        (idx.ancestors.get(n.id)?.has(e.to) ?? false),
+    );
+    if (!joined) {
+      d.push({
+        severity: "error",
+        code: "GRAPH021_FANOUT_WITHOUT_JOIN",
+        message: `fanout edge "${e.id}" expands "${e.to}" but no downstream join waits on it`,
+        at: { edgeId: e.id },
+        fix: `add a join node downstream of "${e.to}" with branches: [${e.to}]`,
+      });
     }
   }
 }

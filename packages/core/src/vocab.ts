@@ -97,6 +97,35 @@ export const CLASSIFICATION_POSTURE_FLOOR: Readonly<Record<Classification, Postu
 };
 
 // ---------------------------------------------------------------------------
+// Disposables
+// ---------------------------------------------------------------------------
+
+/**
+ * Every registration returns one of these so a reload is a clean swap rather than a
+ * process restart. Named `Disposable` deliberately, but declared here rather than
+ * relying on the TC39 `Disposable` global so a consumer on an older lib target still
+ * type-checks.
+ */
+export interface Disposable {
+  dispose(): void;
+}
+
+export function combineDisposables(...ds: readonly Disposable[]): Disposable {
+  return {
+    dispose() {
+      // Reverse order, and a failing teardown must not block the others.
+      for (const d of [...ds].reverse()) {
+        try {
+          d.dispose();
+        } catch {
+          /* teardown must not throw */
+        }
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Accounting
 // ---------------------------------------------------------------------------
 

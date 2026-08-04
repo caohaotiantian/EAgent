@@ -96,7 +96,18 @@ export interface EventPayloads {
   };
 
   // ── task lifecycle ───────────────────────────────────────────────────────
-  "task.ready": { readonly nodeId: NodeId; readonly branchPath: string; readonly edgesIn: readonly string[] };
+  "task.ready": {
+    readonly nodeId: NodeId;
+    readonly branchPath: string;
+    readonly edgesIn: readonly string[];
+    /**
+     * The per-branch item bound by a `fanout` edge's `as`. Travels with the Task
+     * that needs it rather than as a separate event, because there is exactly one
+     * Task per branch anyway — and recording it makes the value durable instead of
+     * something replay has to re-derive from a channel that may have moved on.
+     */
+    readonly binding?: { readonly channel: string; readonly value: unknown };
+  };
   "task.leased": { readonly workerId: string; readonly attempt: number; readonly fencingToken: number };
   "task.started": { readonly nodeType: string; readonly attempt: number };
   "task.progress": { readonly chunk: string };
@@ -113,8 +124,18 @@ export interface EventPayloads {
   "task.retry_scheduled": { readonly attempt: number; readonly afterMs: number; readonly code: string };
 
   // ── state ────────────────────────────────────────────────────────────────
+  /**
+   * THE ONLY event that changes channel state.
+   *
+   * `task.committed.writes` is a *proposal* carrying the branch that made it; this
+   * carries the *result* after the reducer folded every contribution in branch order.
+   * Separating them is what lets a fan-out's writes wait for its join instead of
+   * being applied in arrival order — and it keeps the fold trivially correct, since
+   * a projection only ever has to copy `values` in.
+   */
   "state.reduced": {
     readonly channels: readonly string[];
+    readonly values: Readonly<Record<string, unknown>>;
     readonly branchCount: number;
     readonly skipped: number;
     readonly degraded: boolean;

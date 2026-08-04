@@ -18,7 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
-| M2 walking skeleton | pending | all 12 rows of `08-PLAN.md` D13.3 | — |
+| M2 walking skeleton | **done** | all 12 rows of `08-PLAN.md` D13.3 | 218 tests; `test/run/skeleton.test.ts` — 23 cases incl. the kill -9 gate-durability test |
 
 Open threads that need resolving before the milestone they block:
 
@@ -29,11 +29,18 @@ Open threads that need resolving before the milestone they block:
   `import()` of a digest-addressed file. Not untrusted-input safe — by design (A13).
 - **T3 (blocks M2):** `node:sqlite` is still flagged experimental in Node 24; it
   prints a warning on first use. Need to decide whether to suppress it for CLI UX.
-- **T4 (blocks M2):** **branch-scoped channels.** A fan-out edge's `as` channel holds
-  one value *per branch*, but `reduceState` is currently global. The executor needs a
-  per-branch state overlay: a Task at `root/e1[7]` sees `signal` = element 7, while
-  `findings` is shared. Compile-side is done (GRAPH007 requires `as` to be declared);
-  the runtime scoping is M2 work and is the main open modelling question left.
+- **T4: RESOLVED (M2).** Branch-scoped channels are bindings keyed by branch path,
+  resolved by walking a Task's path prefixes (deepest wins), so nested fan-outs shadow
+  their parent's item channel without anything copying state.
+- **T5 (blocks M3):** fan-out materialises every branch Task in one append, so a join's
+  `expected` width is just "how many sibling Tasks exist". Lazy materialisation under
+  backpressure (D6.3 level 2) would break that — it needs a *planned* width recorded at
+  fan-out time. Do it when backpressure lands, not before.
+- **T6 (blocks M3):** rollback-to-checkpoint is recorded (`checkpoint.created`) but not
+  yet executable. A rejected gate currently fails the run, which satisfies "nothing
+  irreversible happened" but is not the `rewind` semantics in D3.11.
+- **T7 (blocks M4):** retries are declared in `GraphSpec.retry` and validated, but the
+  executor does not yet schedule them (`task.retry_scheduled` is unemitted).
 
 ---
 
@@ -365,3 +372,93 @@ specifiers.
 gets disabled or worked around; and the same regex that mis-fires here would silently
 miss a specifier written in a shape it does not match. The surface guard already asks
 the compiler; this one now does too.
+
+---
+
+## 2026-08-04 — M2 — A Task inside a fan-out holds its writes until the join
+
+**Decision.** `task.committed.writes` is a *proposal*; `state.reduced` is the only
+event that changes channel state. A Task at the root branch reduces immediately; a
+Task inside a fan-out holds, and the join folds every sibling in branch-coordinate
+order.
+
+**Why.** Applying writes on arrival makes the result depend on which branch finished
+first — the exact nondeterminism the branch-coordinate fold exists to remove. Pinned
+by acceptance row 4, which deliberately makes branch 0 take an extra tool round-trip
+so it commits *last*, then asserts `digests` is still in document order.
+
+**Consequence.** A fan-out without a join has no defined fold point, so GRAPH021 now
+requires one. "When do these merge?" is a question the author answers, not one the
+scheduler answers by accident.
+
+---
+
+## 2026-08-04 — M2 — Work is parallel; commits are serialized
+
+**Decision.** Node bodies run under `Promise.all`; every journal append goes through a
+single promise chain with an explicit `expectedSeq`.
+
+**Why.** The CAS is what makes at-least-once execution produce exactly-once state, but
+in one process there is no reason to *lose* work to a conflict — serializing the
+commits means the parallelism is where it pays (model and tool calls) and the log has
+exactly one writer. When the executor becomes multi-process the chain disappears and
+the CAS does the same job across processes, unchanged.
+
+**Also.** `RunLog.append` retries on conflict (the events are unconditional facts);
+`RunLog.commit` never does (its validity depended on the head not moving). Two methods
+because conflating them would silently retry a stale decision.
+
+---
+
+## 2026-08-04 — M2 — Three bugs the acceptance suite caught
+
+**1. A join is notified by TERMINATION, not by edge selection.** A failed branch takes
+no outgoing edge, so the join never heard about it — a fan-out whose last branch failed
+hung forever waiting for an arrival that could never come. `#activate` now walks the
+node's `join` edges regardless of `take`.
+
+**2. `onBranchError: skip` was a lie.** One failed branch failed the whole run, because
+`#finish` fails on any failed Task with no error edge. A Task whose failure is absorbed
+by a downstream join is now exempt.
+
+**3. Budget exhaustion is a RUN-level condition.** With (2) fixed, a budget breach in
+five branches was silently absorbed by the join and the run carried on to the gate —
+i.e. the ladder in D6.5 was defeated by the fix for (1). `budget.exhausted` is now
+journaled and checked before `advance` picks another wave, so it survives a restart and
+no join can swallow it.
+
+The three form a chain: fixing one exposed the next. Worth recording because it is the
+argument for the acceptance suite existing at all — none of the three is visible from
+reading the code.
+
+---
+
+## 2026-08-04 — M2 — The mock model's turn counter is per-conversation
+
+**The bug.** `MockModelAdapter` counted turns on the adapter. With five fan-out branches
+calling one adapter, the counter interleaved arbitrarily and each branch saw a turn
+number unrelated to its own progress — three branches ended up scripted as the same
+document.
+
+**Decision.** `turn` is derived from the request: the number of assistant messages
+already in the conversation.
+
+**Why it matters beyond the test.** A mock that cannot script *concurrent* agents
+deterministically is useless to a graph runtime, which is the one thing this system
+does that EAgent did not. The offline-deterministic-mock property is load-bearing for
+every replay and acceptance test, so it has to hold under fan-out.
+
+---
+
+## 2026-08-04 — M2 — v1 convention: where a node's output goes
+
+**Decision.** Any declared write channel whose reducer is `sum` receives the Task's
+cost; the node's own output value goes to the first remaining declared write channel.
+
+**Why.** `writes: [findings, costUsd]` is the common shape, and the alternative —
+making every agent emit a keyed object naming its own channels — pushes plumbing into
+every prompt. Explicit and dull beats clever here.
+
+**Reverses if.** A node needs to write two non-cost channels. Then the agent's
+`outputSchema` should name them and the executor should key on it; the current rule
+becomes the one-channel special case.

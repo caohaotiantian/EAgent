@@ -24,3 +24,11 @@ export * from "./graph/spec.ts";
 export * from "./graph/expr.ts";
 export * from "./graph/validate.ts";
 export * from "./graph/compile.ts";
+
+export * from "./schema.ts";
+export * from "./run/projection.ts";
+export * from "./run/log.ts";
+export * from "./run/policy.ts";
+export * from "./run/registry.ts";
+export * from "./run/gates.ts";
+export * from "./run/engine.ts";
