@@ -1,0 +1,25 @@
+{
+  "name": "loom-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Loom — graph-native multi-agent collaboration and orchestration framework",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b --pretty && tsc -p packages/core/tsconfig.test.json --pretty",
+    "typecheck:clean": "tsc -b --clean && npm run typecheck",
+    "test": "node --test \"packages/*/test/**/*.test.ts\"",
+    "test:watch": "node --test --watch \"packages/*/test/**/*.test.ts\"",
+    "build": "tsc -b",
+    "check": "npm run typecheck && npm test && node scripts/check-zero-dep.mjs && node scripts/check-surface.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
