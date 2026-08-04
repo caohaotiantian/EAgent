@@ -120,3 +120,23 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
   assert.equal(EVENT_TYPES.length, 47, "update this count when the vocabulary grows, deliberately");
 });
+
+test("SQLITE EMITS NO EXPERIMENTAL WARNING (open thread T3)", () => {
+  // T3 asked whether to suppress `node:sqlite`'s ExperimentalWarning for CLI UX. As of
+  // Node 24.16 it no longer emits one, so the answer is "nothing to suppress" — and this
+  // guard is what turns that from a thing that happens to be true today into a thing we
+  // would notice stopping. Suppressing warnings globally was the alternative, and it
+  // would have hidden every OTHER warning too.
+  const seen: string[] = [];
+  const onWarning = (w: Error): void => {
+    if (w.name === "ExperimentalWarning" && /sqlite/i.test(w.message)) seen.push(w.message);
+  };
+  process.on("warning", onWarning);
+
+  const db = new SqliteStateStore({ path: ":memory:" });
+  db.close();
+
+  process.off("warning", onWarning);
+  assert.deepEqual(seen, [], "if this fires, decide suppression deliberately — do not silence process warnings wholesale");
+});
+

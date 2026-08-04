@@ -53,8 +53,10 @@ Open threads that need resolving before the milestone they block:
 - **T2 (CLOSED 2026-08-05):** `resources/functions.ts` loads bodies from
   digest-addressed resources, compiled and cached per digest. Hand-registered bodies
   still win, so embedding and testing are unchanged.
-- **T3 (blocks M2):** `node:sqlite` is still flagged experimental in Node 24; it
-  prints a warning on first use. Need to decide whether to suppress it for CLI UX.
+- **T3 (CLOSED 2026-08-05):** Node 24.16 no longer emits an ExperimentalWarning for
+  `node:sqlite`, so there is nothing to suppress. A guard in `test/journal/store.test.ts`
+  fails if one returns, so the decision is revisited deliberately rather than by someone
+  silencing process warnings wholesale.
 - **T4: RESOLVED (M2).** Branch-scoped channels are bindings keyed by branch path,
   resolved by walking a Task's path prefixes (deepest wins), so nested fan-outs shadow
   their parent's item channel without anything copying state.
@@ -1660,4 +1662,19 @@ words with a regex and handed the result to `JSON.parse`; it broke on
 producing `["fs":write]`. Any regex that tells those two colons apart is already a parser,
 so it became one — it tracks whether it is inside `{}` or `[]`, which is the actual
 difference.
+
+---
+
+## 2026-08-05 — T3 closed — the warning went away on its own
+
+`node:sqlite` no longer emits an `ExperimentalWarning` on Node 24.16, so the question T3
+asked — suppress it for CLI UX, or live with it — has no subject. Verified directly and
+through the standalone binary's `run` and `serve` paths: no warning on either.
+
+**A guard rather than a note.** `test/journal/store.test.ts` listens for a
+sqlite-flavoured `ExperimentalWarning` while constructing the store and asserts none
+arrives. That converts "it happens not to warn today" into "we would notice it starting",
+and it names the alternative in its own failure message: the tempting fix was
+`process.removeAllListeners("warning")` or `--no-warnings`, which would have hidden every
+OTHER warning too — including the ones that mean something.
 
