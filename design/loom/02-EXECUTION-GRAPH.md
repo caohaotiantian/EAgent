@@ -443,6 +443,16 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 | `GRAPH016` | `subgraph` nesting depth ≤ `maxDepth`; no cyclic subgraph reference | error | traversal over pinned digests |
 | `GRAPH017` | Declared capabilities ⊆ tenant-granted capabilities | error | set containment |
 | `GRAPH018` | Estimated worst-case node count ≤ `expansion.maxNodes` | warning | `Σ maxWidth × maxIterations` |
+| `GRAPH019` | A posture declaration that a higher floor overrides | warning | posture lattice comparison |
+| `GRAPH020` | Exactly one type block per node, and it matches `type` | error | structural; gates the semantic rules |
+| `GRAPH021` | Every `fanout` converges on a `join` | error | **added during M2**: without a join, branch writes have no defined fold point and would apply in arrival order — the nondeterminism the branch-coordinate fold exists to remove |
+
+> **Implementation note (M1e/M2).** Two rules were added while building: `GRAPH020`
+> (structural, and it *gates* the semantic rules — one accurate error beats twelve
+> derived ones) and `GRAPH021`. Two definitions were also sharpened: entry nodes have
+> no inbound edge **except a loop back-edge**, so a compensation target is not treated
+> as a start node; and an edge condition may reference its source node's
+> `reads ∪ writes`, because edge conditions evaluate on post-commit state.
 
 **Termination is bounded, not proved.** Loom does not attempt to prove a graph
 terminates; it makes non-termination *impossible by construction* via mandatory

@@ -1,6 +1,9 @@
 # Loom — architecture
 
-> **Status:** design, pre-implementation.
+> **Status:** design + implementation in progress. M0–M6 are built and green
+> (`npm run check`); see [`JOURNAL.md`](JOURNAL.md) for the milestone log and the
+> decisions taken while building, and [`99-DOD.md`](99-DOD.md) for what the code now
+> *proves* versus what remains designed.
 > **Target:** a working single-node deployment in **6–8 weeks** by a small team, with
 > the distributed path open but unbuilt.
 > **Predecessor:** EAgent, frozen at tag `eagent-v1` on branch `init`. Reference, not
@@ -28,7 +31,8 @@ Read in order. Each file carries the `D<n>` headings from the brief verbatim.
 | [`06-EVOLUTION.md`](06-EVOLUTION.md) | **D10** | Trajectory capture, the scoring function, synthesis, the offline gate, canary and auto-rollback, failure modes, and what this loop will not fix |
 | [`07-CONFIG-DEPLOY.md`](07-CONFIG-DEPLOY.md) | **D11** · **D12** | Four-level configuration with security-asymmetric merge; single binary → K8s mesh with an implementation-swap table |
 | [`08-PLAN.md`](08-PLAN.md) | **D13** · **D14** | Risk register, the walking skeleton, ordered milestones to v1, the assumption register, the open questions |
-| [`99-DOD.md`](99-DOD.md) | Definition of Done | Every checklist item from the brief, the section that discharges it, and an honest pass/fail |
+| [`JOURNAL.md`](JOURNAL.md) | Implementation log | Append-only. Milestone status board, decisions taken while building, and the bugs that changed the design |
+| [`99-DOD.md`](99-DOD.md) | Definition of Done | Every checklist item, the section that discharges it, and whether the **code proves it** |
 
 ## Conventions
 
