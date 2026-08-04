@@ -129,6 +129,19 @@ export interface EventPayloads {
    * Without this event, "the supervisor may interrupt" is a promise the system cannot
    * keep: by the time a human sees the action in a stream, it has already happened.
    */
+  /**
+   * A fan-out's PLANNED width, recorded once when the edge activates.
+   *
+   * Branch Tasks are then materialised in bounded waves, so a 500-way fan-out costs
+   * O(maxParallelism) rows in flight rather than O(maxWidth). The join needs this
+   * because it can no longer infer the width from "how many sibling Tasks exist".
+   */
+  "fanout.planned": {
+    readonly edgeId: string;
+    readonly parentBranch: string;
+    readonly nodeId: NodeId;
+    readonly width: number;
+  };
   "action.pending": {
     readonly nodeId: NodeId;
     readonly irreversibility: string;
@@ -246,7 +259,7 @@ export const EVENT_TYPES = [
   "run.submitted", "run.compiled", "run.started", "run.suspended", "run.resumed",
   "run.completed", "run.failed", "run.cancelled",
   "task.ready", "task.leased", "task.started", "task.progress", "task.committed",
-  "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending",
+  "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending", "fanout.planned",
   "state.reduced", "channel.written",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
   "gate.raised", "gate.delivered", "gate.decided", "gate.timeout", "gate.escalated", "gate.cancelled",

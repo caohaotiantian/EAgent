@@ -139,6 +139,14 @@ export interface RunProjection {
    * on spending. Durable, so it survives a restart.
    */
   readonly budgetExhausted: boolean;
+  /**
+   * `edgeId@parentBranch` → the fan-out's PLANNED width.
+   *
+   * A join reads this rather than counting sibling Tasks, which is what makes lazy
+   * materialisation safe: with branches created in bounded waves, "how many siblings
+   * exist" is a count of what has started, not of what will.
+   */
+  readonly fanouts: Readonly<Record<string, { readonly nodeId: NodeId; readonly width: number }>>;
   readonly suspendedReason?: "gate" | "operator" | "budget" | "backoff";
 }
 
@@ -161,6 +169,7 @@ interface MutableProjection {
   openEffects: Set<string>;
   everStarted: Set<string>;
   budgetExhausted: boolean;
+  fanouts: Record<string, { nodeId: NodeId; width: number }>;
   suspendedReason?: "gate" | "operator" | "budget" | "backoff";
 }
 
@@ -200,6 +209,7 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
       openEffects: new Set(),
       everStarted: new Set(),
       budgetExhausted: false,
+      fanouts: {},
     };
     p.seq = e.seq;
     apply(p, e);
@@ -223,6 +233,7 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
     unknownEffects: [...p.openEffects].sort(),
     startedEffects: [...p.everStarted].sort(),
     budgetExhausted: p.budgetExhausted,
+    fanouts: p.fanouts,
     ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
     ...(p.error === undefined ? {} : { error: p.error }),
     ...(p.suspendedReason === undefined ? {} : { suspendedReason: p.suspendedReason }),
@@ -424,6 +435,13 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   }
 
   // ── budget ────────────────────────────────────────────────────────────────
+  if (isEvent(e, "fanout.planned")) {
+    p.fanouts[`${e.payload.edgeId}@${e.payload.parentBranch}`] = {
+      nodeId: e.payload.nodeId,
+      width: e.payload.width,
+    };
+    return;
+  }
   if (isEvent(e, "budget.exhausted")) {
     p.budgetExhausted = true;
     return;

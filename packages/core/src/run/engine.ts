@@ -48,6 +48,7 @@ import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
 import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex } from "../graph/validate.ts";
 import { validate, type JSONSchema } from "../schema.ts";
+import { assembleContext } from "./context.ts";
 import {
   reduceState,
   stateHash,
@@ -98,6 +99,8 @@ export interface EngineOptions {
   readonly policy?: Omit<PolicyEngineOptions, "onEscalate">;
   /** Injected so an intervention hold never makes tests wait on a real clock. */
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Prompt token budget per agent turn, before the compaction ladder fires. */
+  readonly contextTokens?: number;
   /**
    * Replay mode. When present, every effect is served from the journal and no tool
    * body or model adapter is ever reached. A missing key is E_REPLAY_DIVERGENCE —
@@ -167,6 +170,7 @@ export class Engine {
   readonly #policyOpts: Omit<PolicyEngineOptions, "onEscalate">;
   readonly #replay: ReplayEffects | undefined;
   readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  readonly #contextTokens: number;
 
   readonly #runs = new Map<RunId, RunContext>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
@@ -186,6 +190,7 @@ export class Engine {
     this.#policyOpts = opts.policy ?? { granted: ["*"] };
     this.#replay = opts.replay;
     this.#sleep = opts.sleep ?? defaultSleep;
+    this.#contextTokens = opts.contextTokens ?? 100_000;
   }
 
   get replaying(): boolean {
@@ -814,13 +819,33 @@ export class Engine {
       .filter((t) => allowed.has(t.name))
       .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
 
+    // Context is assembled from DECLARED reads, then bounded by the compaction ladder.
+    // The prompt envelope below is a stable contract with the model; the ladder is a
+    // contract with the context window. Keeping them separate means changing one does
+    // not silently change the other.
+    const assembled = await assembleContext(
+      {
+        system: `You are node ${w.node.id}.`,
+        instruction: promptOverride ?? agent?.prompt ?? "",
+        channels: Object.fromEntries(view.visible.map((c) => [c, view.get(c)])),
+        channelSpecs: ctx.graph.spec.channels,
+      },
+      {
+        maxTokens: this.#contextTokens,
+        dropBelowPriority: 35,
+        // The summarizer is an EFFECT, so replay serves the same summary and rung 3
+        // stays deterministic.
+        summarize: (text) => this.#summarizeEffect(ctx, w, text),
+      },
+    );
+
     const messages: Message[] = [
       {
         role: "user",
         content: JSON.stringify({
           node: w.node.id,
           prompt: promptOverride ?? agent?.prompt ?? "",
-          state: Object.fromEntries(view.visible.map((c) => [c, view.get(c)])),
+          state: assembled.channels,
         }),
       },
     ];
@@ -971,6 +996,43 @@ export class Engine {
     }
 
     return { status: "succeeded", writes: this.#assignWrites(ctx, w.node, undefined, usage, value.value), usage };
+  }
+
+  /**
+   * Rung 3's summarizer, wrapped as a recorded effect.
+   *
+   * Without the effect boundary the ladder would be nondeterministic: a replay would
+   * produce a different summary and every downstream state hash would diverge for a
+   * reason that has nothing to do with the graph.
+   */
+  async #summarizeEffect(ctx: RunContext, w: Wave, text: string): Promise<string> {
+    const key = effectKey(w.task.taskId, "summarize", 0);
+    if (this.#replay !== undefined) return String(this.#replay.require(key).result);
+
+    const adapter = this.models.require();
+    let summary = "";
+    for await (const ev of adapter.stream(
+      {
+        model: "compaction",
+        system: "Summarize the following prior turns in under 200 words. Preserve decisions and identifiers.",
+        messages: [{ role: "user", content: text }],
+        tools: [],
+      },
+      ctx.abort.signal,
+    )) {
+      if (ev.type === "done") summary = ev.message.content;
+    }
+
+    await this.#serialize(() =>
+      ctx.log.append(
+        [
+          { type: "effect.started", payload: { key, kind: "model", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+          { type: "effect.completed", payload: { key, result: summary, resultDigest: digest(summary) }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+        ],
+        { taskId: w.task.taskId },
+      ),
+    );
+    return summary;
   }
 
   async #runAgentToolCall(
@@ -1328,19 +1390,24 @@ export class Engine {
       if (e.kind === "fanout") {
         const items = scope[e.over ?? ""];
         const list = Array.isArray(items) ? items.slice(0, e.maxWidth ?? 0) : [];
-        for (let i = 0; i < list.length; i++) {
-          const branch = childBranch(w.task.branch, e.id, i);
-          events.push({
-            type: "task.ready",
-            payload: {
-              nodeId: e.to,
-              branchPath: encodeBranch(branch),
-              edgesIn: [e.id],
-              binding: { channel: e.as ?? "item", value: list[i] },
-            },
-            actor: SYSTEM_ACTOR("scheduler"),
-            taskId: makeTaskId(e.to, branch, 0),
-          });
+
+        // Record the PLANNED width before materialising anything: the join reads it
+        // instead of counting siblings, which is what lets branches be created in
+        // bounded waves without the barrier firing early.
+        events.push({
+          type: "fanout.planned",
+          payload: { edgeId: e.id, parentBranch: encodeBranch(w.task.branch), nodeId: e.to, width: list.length },
+          actor: SYSTEM_ACTOR("scheduler"),
+          taskId: w.task.taskId,
+        });
+
+        // Lazy materialisation: a 500-way fan-out costs O(maxParallelism) rows in
+        // flight, not O(maxWidth). The branch COORDINATES are all determined —
+        // `list[i]` is a pure function of the channel and the index — so nothing about
+        // replay or the fold changes.
+        const firstWave = Math.min(list.length, this.#maxParallelism);
+        for (let i = 0; i < firstWave; i++) {
+          events.push(this.#branchReady(e, w.task.branch, i, list[i]));
         }
         continue;
       }
@@ -1362,6 +1429,11 @@ export class Engine {
         taskId: makeTaskId(e.to, w.task.branch, iteration),
       });
     }
+
+    // Materialise the next branch of the fan-out this Task belongs to, if any remain
+    // and a slot has freed. This is what keeps in-flight width bounded without ever
+    // losing a branch.
+    events.push(...this.#topUpFanout(ctx, p, w));
 
     // A join is notified by TERMINATION, not by edge selection. A failed branch takes
     // no outgoing edge, but it still counts toward the barrier — otherwise a fan-out
@@ -1391,6 +1463,66 @@ export class Engine {
     return false;
   }
 
+  /** One branch Task of a fan-out, at a determined coordinate. */
+  #branchReady(e: EdgeSpec, parent: BranchCoordinate, index: number, item: unknown): NewEvent {
+    const branch = childBranch(parent, e.id, index);
+    return {
+      type: "task.ready",
+      payload: {
+        nodeId: e.to,
+        branchPath: encodeBranch(branch),
+        edgesIn: [e.id],
+        binding: { channel: e.as ?? "item", value: item },
+      },
+      actor: SYSTEM_ACTOR("scheduler"),
+      taskId: makeTaskId(e.to, branch, 0),
+    };
+  }
+
+  /**
+   * Create the next unmaterialised branch(es) of the fan-out that produced this Task.
+   *
+   * Called after a branch commits, so the in-flight count has just dropped by one.
+   * Nothing is lost if the process dies mid-fan-out: the plan is journaled and the
+   * materialised set is derivable from the Task records.
+   */
+  #topUpFanout(ctx: RunContext, p: RunProjection, w: Wave): NewEvent[] {
+    const last = w.task.branch.segments.at(-1);
+    if (last === undefined) return [];
+
+    const parent: BranchCoordinate = { segments: w.task.branch.segments.slice(0, -1) };
+    const parentPath = encodeBranch(parent);
+    const plan = p.fanouts[`${last.edgeId}@${parentPath}`];
+    const edge = ctx.index.edgeById.get(last.edgeId as EdgeId);
+    if (plan === undefined || edge === undefined) return [];
+
+    const siblings = Object.values(p.tasks).filter(
+      (t) => t.nodeId === plan.nodeId && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
+    );
+    const materialised = siblings.length;
+    if (materialised >= plan.width) return [];
+
+    // Exclude the committing Task: `p` predates its commit, so it still reads as
+    // `leased` — and counting it would leave zero room forever at maxParallelism 1.
+    const inFlight = siblings.filter(
+      (t) => t.taskId !== w.task.taskId && (t.state === "ready" || t.state === "leased"),
+    ).length;
+    const room = Math.max(0, this.#maxParallelism - inFlight);
+    if (room === 0) return [];
+
+    // Re-read `over` at the PARENT branch: the item list is state, and reading it here
+    // rather than caching it keeps the materialisation a pure function of the journal.
+    const scope = scopeFor(p, ctx.graph.spec.channels, parent);
+    const items = scope[edge.over ?? ""];
+    if (!Array.isArray(items)) return [];
+
+    const out: NewEvent[] = [];
+    for (let i = materialised; i < Math.min(plan.width, materialised + room); i++) {
+      out.push(this.#branchReady(edge, parent, i, items[i]));
+    }
+    return out;
+  }
+
   /**
    * Decide whether a join's barrier is satisfied. The join Task is created at the
    * PARENT branch — that is what "a join collapses branches back to one instance"
@@ -1412,14 +1544,18 @@ export class Engine {
     const joinTaskId = makeTaskId(edge.to, parent, 0);
     if (p.tasks[joinTaskId] !== undefined) return undefined; // already fired
 
-    // `expected` is simply how many sibling Tasks exist: a fan-out materialises them
-    // all in one append, so the width is known the moment the first branch commits.
-    // (Lazy materialisation under backpressure would make this a count of *planned*
-    // branches instead — deferred, and noted in the journal.)
     const siblings = Object.values(p.tasks).filter(
       (t) => join.branches.includes(t.nodeId) && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
     );
-    const expected = siblings.length;
+
+    // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
+    // materialisation a sibling count is "how many have started", so using it would
+    // fire the barrier as soon as the first wave finished — silently dropping every
+    // branch that had not been created yet.
+    const planned = Object.entries(p.fanouts)
+      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && join.branches.includes(plan.nodeId))
+      .reduce((a, [, plan]) => a + plan.width, 0);
+    const expected = planned > 0 ? planned : siblings.length;
 
     // `p` predates this Task's own commit, so substitute its outcome rather than
     // counting it twice — once as still-running and once as finished.
@@ -1461,6 +1597,35 @@ export class Engine {
 
   async #finish(ctx: RunContext, p: RunProjection): Promise<void> {
     if (isTerminal(p.status)) return;
+
+    // A safety net for lazy materialisation: never complete a run that still has
+    // unmaterialised branches. Reaching here means a top-up was missed, and finishing
+    // would silently report a partial result as a whole one.
+    for (const [key, plan] of Object.entries(p.fanouts)) {
+      const parentPath = key.slice(key.indexOf("@") + 1);
+      const started = Object.values(p.tasks).filter(
+        (t) => t.nodeId === plan.nodeId && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
+      ).length;
+      if (started < plan.width) {
+        await this.#serialize(() =>
+          ctx.log.append([
+            {
+              type: "run.failed",
+              payload: {
+                error: {
+                  class: "internal",
+                  code: CODES.E_INTERNAL,
+                  message: `fan-out "${key}" planned ${plan.width} branches but only ${started} were materialised`,
+                  retryable: false,
+                },
+              },
+              actor: SYSTEM_ACTOR("executor"),
+            },
+          ]),
+        );
+        return;
+      }
+    }
 
     const failed = Object.values(p.tasks).filter(
       (t) =>

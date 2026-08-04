@@ -37,9 +37,18 @@ export type ReducerName =
 
 export type ChannelType = "string" | "number" | "boolean" | "object" | "array";
 
+/**
+ * What a node's prompt actually sees of a channel.
+ *
+ * Declarative rather than a path expression: `fields` + `take` covers the real use
+ * ("these three fields of the last twenty items") without a second parser, a second
+ * error taxonomy, and a second determinism argument.
+ */
 export interface ContextProjection {
-  /** A path expression selecting what a node's prompt actually sees. */
-  readonly select: string;
+  /** Keep only these keys — of each element for an array, or of the object itself. */
+  readonly fields?: readonly string[];
+  /** Positive keeps the first N; negative keeps the last N. */
+  readonly take?: number;
   readonly maxTokens: number;
   readonly overflow: "summarize" | "truncate_tail" | "error";
 }

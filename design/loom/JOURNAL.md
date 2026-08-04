@@ -19,6 +19,7 @@ rejects, and what would reverse it.
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
 | M8 intervention window | **done** | an interrupt mid-window means the effect never starts | 407 tests; `test/run/oversight.test.ts` (20 cases) |
+| Wave A context + lazy fan-out | **done** | ladder deterministic; a 5-way fan-out runs at maxParallelism 1 | 446 tests; `test/run/context.test.ts` (18 cases) |
 | M10 authoring graph | **done** | a bad draft is corrected by the compiler's own diagnostics | 428 tests; `test/builtin/authoring.test.ts` (12 cases) |
 | M9 AI-suite safety rules | **done** | a suite written after the candidate is refused | 413 tests |
 | M7b single binary | **done** | `bin/loom` runs alone in an empty dir; 0 third-party modules | verified by copying the binary into an isolated directory |
@@ -45,10 +46,9 @@ Open threads that need resolving before the milestone they block:
 - **T4: RESOLVED (M2).** Branch-scoped channels are bindings keyed by branch path,
   resolved by walking a Task's path prefixes (deepest wins), so nested fan-outs shadow
   their parent's item channel without anything copying state.
-- **T5 (blocks M3):** fan-out materialises every branch Task in one append, so a join's
-  `expected` width is just "how many sibling Tasks exist". Lazy materialisation under
-  backpressure (D6.3 level 2) would break that — it needs a *planned* width recorded at
-  fan-out time. Do it when backpressure lands, not before.
+- **T5: RESOLVED (Wave A).** `fanout.planned` records the width before any branch is
+  created; the join reads the plan, and branches materialise in waves of
+  `maxParallelism`. `#finish` refuses to complete a run with unmaterialised branches.
 - **T6: RESOLVED (M4a).** `Engine.rewind` appends a `checkpoint.restored` marker and
   the fold suppresses `(atSeq, marker)`. History is never edited.
 - **T7: RESOLVED (M4a).** Retries schedule with deterministic backoff; a
@@ -1039,3 +1039,56 @@ actually means.
 Neither was reachable from the walking skeleton, which has no loop and no permissive
 output schema. Worth recording as evidence for building the *second* real workflow
 early: the first one only exercises the paths you designed it to exercise.
+
+---
+
+## 2026-08-05 — Wave A — Lazy fan-out needs a PLANNED width, not a sibling count
+
+**Decision.** A `fanout.planned` event records the width before any branch Task exists.
+The join reads it; branches are created in waves of `maxParallelism` and topped up as
+each one commits.
+
+**Why the sibling count had to go.** With lazy materialisation, "how many siblings
+exist" is a count of what has STARTED, not of what will. Using it fires the barrier as
+soon as wave 1 finishes and silently drops every branch not yet created — a partial
+result reported as a whole one. Pinned by a test that runs a 5-way fan-out at
+`maxParallelism: 1` and asserts all five fold.
+
+**Two bugs found writing it:**
+
+1. **The committing Task counted itself as in-flight.** `p` predates its own commit, so
+   it still reads `leased`; at `maxParallelism: 1` that left zero room forever and the
+   fan-out stalled after one branch.
+2. **`#finish` completed the stalled run anyway**, reporting success with one of five
+   branches done. There is now a guard: a run with unmaterialised branches fails
+   loudly. A safety net like this is worth having precisely because the first bug
+   produced a *plausible* wrong answer rather than a crash.
+
+---
+
+## 2026-08-05 — Wave A — Rung 4 must not truncate the system prompt
+
+**The bug.** Hard truncation cut sections by priority — including, eventually, the
+system prompt. A system prompt cut to two tokens "fits" and is useless.
+
+**Decision.** `system` and `instruction` are inviolable. If those alone exceed the
+budget, `E_CONTEXT_OVERFLOW` fires — the author has a modelling problem and should be
+told, not handed a mutilated prompt.
+
+**Also:** the truncation MARKER costs tokens. Cutting to `room` and then appending
+`[...truncated N tokens...]` overshoots the budget by exactly the marker's length,
+which is how this first failed.
+
+---
+
+## 2026-08-05 — Wave A — Projections are declarative, not a path language
+
+**DEVIATION from D5.3's `select: "$[*].{title: title}"`.** Projections are
+`{fields?, take?}` — keep these keys, take the first or last N. A path language needs
+its own parser, error taxonomy, and determinism argument, for a feature whose real use
+is "these three fields of the last twenty items".
+
+**Rung 3 stays deterministic** because the summarizer is injected and, in the executor,
+wrapped as a recorded effect. Without that boundary a replay would produce a different
+summary and every downstream state hash would diverge for a reason unrelated to the
+graph.
