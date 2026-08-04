@@ -214,7 +214,9 @@ async function ensureGraph(hash) {
 }
 
 // ── rendering ───────────────────────────────────────────────────────────────
-const W = 190, H = 52, GAPX = 70, GAPY = 26;
+// The node BOX only. Spacing and positions come from the server — these two are here
+// because the SVG shape has to be drawn at some size, and that is a drawing decision.
+const W = 190, H = 52;
 
 function draw() {
   $("stat").textContent = current.status || "";
@@ -237,49 +239,32 @@ function drawGraph() {
     for (const e of t.take || []) acc.take.add(e);
     byNode.set(t.nodeId, acc);
   }
+  const taken = new Set();
+  for (const acc of byNode.values()) for (const e of acc.take) taken.add(e);
 
-  // Positions come from the COMPILER's layoutRank. The browser never lays out.
-  const rows = new Map();
-  for (const n of g.nodes) {
-    const rank = g.plans[n.id]?.layoutRank ?? 0;
-    if (!rows.has(rank)) rows.set(rank, []);
-    rows.get(rank).push(n);
-  }
-  const ranks = [...rows.keys()].sort((a, b) => a - b);
-  const pos = new Map();
-  let width = 0;
-  ranks.forEach((rank, row) => {
-    rows.get(rank).forEach((n, i) => {
-      pos.set(n.id, { x: 20 + i * (W + GAPX), y: 20 + row * (H + GAPY) });
-      width = Math.max(width, 40 + (i + 1) * (W + GAPX));
-    });
-  });
-  const height = 40 + ranks.length * (H + GAPY);
-
+  // GEOMETRY COMES FROM THE SERVER, cached by graphHash alongside the structure. This
+  // function turns numbers into SVG and decides nothing about where anything goes —
+  // which is the whole content of "the browser never runs graph layout".
   const parts = [];
-  parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="execution graph">');
+  parts.push('<svg viewBox="0 0 ' + g.width + ' ' + g.height + '" role="img" aria-label="execution graph">');
   parts.push('<defs><marker id="a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 z" fill="var(--line)"/></marker></defs>');
 
   for (const e of g.edges) {
-    const a = pos.get(e.from), b = pos.get(e.to);
-    if (!a || !b) continue;
-    const taken = [...byNode.values()].some((v) => v.take.has(e.id));
-    const x1 = a.x + W / 2, y1 = a.y + H, x2 = b.x + W / 2, y2 = b.y;
-    const mid = (y1 + y2) / 2;
-    parts.push('<path class="edge' + (taken ? " taken" : "") + '" d="M' + x1 + ' ' + y1 + ' C' + x1 + ' ' + mid + ' ' + x2 + ' ' + mid + ' ' + x2 + ' ' + y2 + '"/>');
+    const cls = "edge" + (taken.has(e.id) ? " taken" : "");
+    parts.push('<path class="' + cls + '" d="M' + e.x1 + ' ' + e.y1 + ' C' + e.x1 + ' ' + e.midY + ' ' + e.x2 + ' ' + e.midY + ' ' + e.x2 + ' ' + e.y2 + '"/>');
   }
 
-  for (const n of g.nodes) {
-    const p = pos.get(n.id);
-    const acc = byNode.get(n.id);
+  for (const node of g.nodes) {
+    const acc = byNode.get(node.id);
     const state = acc ? dominant(acc.states) : "";
-    parts.push('<g class="node ' + state + '" transform="translate(' + p.x + ',' + p.y + ')">');
+    const count = acc ? acc.count : 0;
+    parts.push('<g class="node ' + state + '" transform="translate(' + node.x + ',' + node.y + ')">');
     parts.push('<rect width="' + W + '" height="' + H + '" rx="9"/>');
-    parts.push('<text x="12" y="21">' + esc(n.id) + '</text>');
-    parts.push('<text class="sub" x="12" y="37">' + esc(n.type) + (state ? " · " + state : "") + '</text>');
-    if (acc && acc.count > 1) {
+    parts.push('<text x="12" y="21">' + esc(node.id) + '</text>');
+    parts.push('<text class="sub" x="12" y="37">' + esc(node.type) + (state ? " · " + state : "") + '</text>');
+    if (count > 1) {
       parts.push('<circle class="badge-bg" cx="' + (W - 18) + '" cy="18" r="11"/>');
-      parts.push('<text class="badge" x="' + (W - 18) + '" y="22" text-anchor="middle">' + acc.count + '</text>');
+      parts.push('<text class="badge" x="' + (W - 18) + '" y="22" text-anchor="middle">' + count + '</text>');
     }
     parts.push('</g>');
   }

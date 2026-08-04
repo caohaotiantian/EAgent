@@ -1678,3 +1678,34 @@ and it names the alternative in its own failure message: the tempting fix was
 `process.removeAllListeners("warning")` or `--no-warnings`, which would have hidden every
 OTHER warning too — including the ones that mean something.
 
+---
+
+## 2026-08-05 — P5 — Layout moved out of the browser, and became measurable
+
+**The claim and where it lived.** D8 says "the browser never runs graph layout". The code
+implementing it was inside `CONSOLE_HTML` — a JavaScript string served to a browser, where
+nothing could check it, nothing could measure it, and the DoD's 500-node row had to say
+"unmeasured" for the whole thing rather than for the one part that genuinely is.
+
+**`server/layout.ts` is a pure function of `(RunGraph, tasks)`.** Extracting it bought
+three things that mattered more than tidiness:
+
+1. **Measurable.** 500 nodes and 4,900 edges lay out in **0.95 ms**, and 100→500 costs
+   6.6× for 5× the nodes and 25× the edges — linear in edges, which is what a rank-based
+   placement should be. Only literal paint is left unmeasured, and it is a browser
+   property that a headless-browser dependency would be required to measure.
+2. **Testable.** Rank assignment, fan-out collapsing, and edge routing are now failing
+   tests when wrong rather than a diagram that looks slightly off.
+3. **Cacheable by `graphHash`.** Geometry ships with the structure payload, so a run
+   streaming a thousand task updates recomputes zero positions. Asserted directly:
+   layouts with and without tasks have identical coordinates.
+
+**The console now draws what it is given.** `drawGraph` turns numbers into SVG and decides
+nothing about where anything goes. A test asserts the page contains no `layoutRank` and no
+`GAPX`/`GAPY` — the claim checked against the artifact rather than against a comment.
+
+**A collapsed fan-out shows the WORST state, not the commonest.** Twenty-five branches,
+one shape: 24 succeeded and one awaiting a gate is a fan-out waiting on a human, and
+rendering it green is a lie of omission. That ordering was buried in a `dominant()` helper
+in the HTML string; it is now `STATE_PRIORITY`, exported and tested.
+

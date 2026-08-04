@@ -367,3 +367,40 @@ async function settle(r: Rig, runId: string): Promise<void> {
     await new Promise((res) => setTimeout(res, 20));
   }
 }
+
+// ── geometry ships with structure ────────────────────────────────────────────
+
+test("THE STRUCTURE PAYLOAD CARRIES GEOMETRY — the browser never lays out", async () => {
+  // The content of D8's claim, as a fact about the wire rather than about code inside an
+  // HTML string. Positions and edge control points are computed server-side and cached
+  // by graphHash, so a run streaming a thousand task updates recomputes zero of them.
+  const r = await rig();
+  const graph = compileSkeleton();
+  const res = await fetch(`${r.base}/graphs/by-hash/${encodeURIComponent(graph.graphHash)}`);
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as unknown as {
+    graphHash: string;
+    width: number;
+    height: number;
+    nodes: { id: string; x: number; y: number; rank: number }[];
+    edges: { id: string; x1: number; midY: number }[];
+  };
+
+  assert.equal(body.graphHash, graph.graphHash);
+  assert.ok(body.width > 0 && body.height > 0, "a canvas the client sizes to, not one it computes");
+  assert.equal(body.nodes.length, graph.spec.nodes.length);
+  assert.equal(body.edges.length, graph.spec.edges.length);
+  for (const node of body.nodes) {
+    assert.ok(Number.isFinite(node.x) && Number.isFinite(node.y), `${node.id} has no position`);
+  }
+  for (const edge of body.edges) assert.ok(Number.isFinite(edge.midY), `${edge.id} has no control point`);
+  r.close();
+});
+
+test("an unknown graph hash is a clean 404, not an empty canvas", async () => {
+  const r = await rig();
+  const res = await fetch(`${r.base}/graphs/by-hash/sha256%3Adeadbeef`);
+  assert.equal(res.status, 404);
+  r.close();
+});
+

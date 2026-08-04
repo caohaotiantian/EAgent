@@ -55,6 +55,7 @@ export * from "./evolution/trajectory.ts";
 export * from "./evolution/score.ts";
 export * from "./workflows/incident-triage.ts";
 export * from "./server/http.ts";
+export * from "./server/layout.ts";
 export * from "./builtin/tools.ts";
 export * from "./builtin/authoring.ts";
 export * from "./security/redact.ts";

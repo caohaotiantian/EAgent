@@ -124,8 +124,9 @@ test("the console can drive a full run: submit, watch, approve", async () => {
 test("the page escapes node ids before injecting them into SVG", () => {
   // The graph is authored data, and an id containing markup must not become markup.
   assert.match(CONSOLE_HTML, /function esc\(s\)/);
-  assert.match(CONSOLE_HTML, /esc\(n\.id\)/);
-  assert.match(CONSOLE_HTML, /esc\(g\.nodeId\)/);
+  assert.match(CONSOLE_HTML, /esc\(node\.id\)/, "the node label");
+  assert.match(CONSOLE_HTML, /esc\(node\.type\)/, "and its type");
+  assert.match(CONSOLE_HTML, /esc\(g\.nodeId\)/, "and the gate's node");
 });
 
 test("the page coalesces deltas rather than repainting per event", () => {
@@ -144,7 +145,7 @@ test("the page reconnects with lastEventId rather than starting over", () => {
 });
 
 test("the page collapses fan-out into one shape with a count", () => {
-  assert.match(CONSOLE_HTML, /acc\.count > 1/);
+  assert.match(CONSOLE_HTML, /count > 1/, "a badge only when there is more than one");
   assert.match(CONSOLE_HTML, /function dominant\(states\)/);
 });
 
@@ -154,3 +155,14 @@ test("rejecting from the console requires a reason", () => {
   assert.match(CONSOLE_HTML, /Why are you rejecting this\?/);
   assert.match(CONSOLE_HTML, /if \(reason\) decide/);
 });
+
+test("THE PAGE COMPUTES NO POSITIONS — geometry arrives from the server", () => {
+  // The content of "the browser never runs graph layout", checked rather than claimed.
+  // Layout lives in `server/layout.ts`, is measured at 500 nodes, and ships with the
+  // structure payload keyed by graphHash.
+  assert.doesNotMatch(CONSOLE_HTML, /layoutRank/, "rank-to-row assignment is the server's job");
+  assert.doesNotMatch(CONSOLE_HTML, /GAPX|GAPY/, "and so is spacing");
+  assert.match(CONSOLE_HTML, /translate\(' \+ node\.x \+ ',' \+ node\.y \+ '\)/, "it places what it is given");
+  assert.match(CONSOLE_HTML, /e\.midY/, "including the edge control points");
+});
+

@@ -29,6 +29,7 @@ import type { RunGraph } from "../graph/spec.ts";
 import type { Engine } from "../run/engine.ts";
 import type { GateDecision } from "../run/gates.ts";
 import { redactPayload } from "../security/redact.ts";
+import { layoutGraph } from "./layout.ts";
 import { CONSOLE_HTML } from "./console.ts";
 
 export interface ControlPlaneOptions {
@@ -191,13 +192,17 @@ export class ControlPlane {
           const hash = decodeURIComponent(params[0]!);
           const graph = Object.values(this.#opts.graphs ?? {}).find((g) => g.graphHash === hash);
           if (graph === undefined) throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no graph with hash ${hash}`);
-          // Structure ONCE, keyed by hash: the client caches it and only deltas
-          // stream afterwards. `plans` carries the compiler's layoutRank, so the
-          // browser never runs a graph layout.
+          // Structure ONCE, keyed by hash: the client caches it and only deltas stream
+          // afterwards. The GEOMETRY ships with it — positions and edge control points
+          // are computed here, so "the browser never runs graph layout" is a fact about
+          // the payload rather than a claim about code nobody can measure.
+          const layout = layoutGraph(graph);
           send(res, 200, {
             graphHash: graph.graphHash,
-            nodes: graph.spec.nodes.map((n) => ({ id: n.id, type: n.type })),
-            edges: graph.spec.edges.map((e) => ({ id: e.id, from: e.from, to: e.to, kind: e.kind })),
+            width: layout.width,
+            height: layout.height,
+            nodes: layout.nodes,
+            edges: layout.edges,
             plans: Object.fromEntries(
               Object.entries(graph.plans).map(([id, p]) => [id, { layoutRank: p.layoutRank, maxInstances: p.maxInstances, posture: p.posture }]),
             ),
