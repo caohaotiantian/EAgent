@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M6 resources + eval gate | **done** | pinning rule proven; promotion criteria enforced | 329 tests; `test/resources/store.test.ts` (17) + `test/evolution/gate.test.ts` (15) |
 | M4c tool sandbox | **done** | a tool cannot read the engine's env, escape its jail, or outlive its timeout | 297 tests; `test/sandbox/subprocess.test.ts` (19 cases) |
 | M4b model adapters | **done** | real Anthropic/OpenAI adapters, offline via injected fetch | 278 tests; `test/providers/providers.test.ts` (24 cases) |
 | M4a retry/cancel/rewind | **done** | declared-but-ignored runtime features now implemented | 254 tests; `test/run/runtime.test.ts` (14 cases) |
@@ -694,3 +695,58 @@ an argv element and asserts a canary file survives.
 **Why.** A tool that spawns its own children (a shell script, a build) would otherwise
 leave orphans running after a timeout — holding files, ports, and memory the engine
 believes it reclaimed. Pinned by a test that ignores SIGTERM and still dies.
+
+---
+
+## 2026-08-04 — M6 — A resource digest covers IDENTITY, not just content
+
+**The bug.** `function/passthrough` and `function/merge-digests`, both with content
+`{}`, produced the SAME digest under pure content-addressing. The second `publish`
+silently returned the first resource's version — and its channel — so promoting the
+second threw `cannot promote stable → canary` on a resource that had never been
+promoted.
+
+**Decision.** `digest({kind, name, content})`.
+
+**Why this is the right shape.** "Identical content ⇒ same version" is the property
+that matters *within* a resource: it makes republishing idempotent without a key and
+makes "did anything change?" a digest comparison. Across resources it is not merely
+useless but wrong, because a Resource's identity is `kind/name`, not its bytes. The
+cost is that two identical prompts under different names no longer share a cache
+entry, which is a trade nobody will notice.
+
+---
+
+## 2026-08-04 — M6 — The pinning rule is now proven, not asserted
+
+**The test.** Compile the skeleton against `@stable`; start a run; let it suspend on
+its gate; then publish a NEW version and promote it to `stable`; then assert:
+
+1. the run's manifest still names the ORIGINAL digest;
+2. `fetch(originalDigest)` still returns the original content;
+3. the run completes on the pinned version;
+4. a NEW compile picks up the new version.
+
+**Why it is worth a dedicated test.** Every claim about safe rollback, cache
+correctness, and "a resource change cannot break production mid-flight" reduces to
+this one property, and it is the kind of property that quietly stops holding when
+someone adds a convenience `fetch(ref)` overload. `fetch` refusing a floating ref with
+an `internal`-class error is the guard that keeps it true.
+
+---
+
+## 2026-08-04 — M6 — The eval gate ships in v1; synthesis does not
+
+**Decision.** `runEvalSuite` + `gateCandidate` are in v1. Trajectory synthesis and
+canary rollout remain `DEFERRED-v2`.
+
+**Why this split and not the other one.** The gate is immediately useful for *human*
+prompt and graph changes — it is a regression suite that costs no model calls, because
+it is replay all the way down. The generator is useless until a corpus exists, and
+shipping it early guarantees the loop's first candidates are fitted to noise.
+
+**The rule that makes the gate meaningful:** the suite is authored by humans, never by
+the evolution engine. An optimiser that writes its own exam will pass it. `validateSuite`
+enforces the shape a suite needs to certify anything — including a minimum number of
+FAILURE cases, because a suite of only happy paths certifies only that the happy path
+still works.

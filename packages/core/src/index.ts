@@ -41,3 +41,6 @@ export * from "./providers/openai.ts";
 export * from "./providers/fallback.ts";
 
 export * from "./sandbox/subprocess.ts";
+
+export * from "./resources/store.ts";
+export * from "./evolution/gate.ts";
