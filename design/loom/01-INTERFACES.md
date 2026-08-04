@@ -822,9 +822,16 @@ export interface EvolutionEngine extends Versioned {
 
 ---
 
-## D3.17–D3.24 — Boundary interfaces (abridged)
+## D3.17–D3.24 — Boundary interfaces
 
-These complete the D2 edge mapping. Each obeys the universal method contract.
+These complete the D2 edge mapping. Each obeys the universal method contract, and each
+now ENUMERATES its own error codes and cancellation behaviour rather than inheriting
+them silently — closing gap G1.
+
+Why enumerate rather than inherit: a caller writing a `retry.onlyIf` list, or a UI
+deciding whether to show "try again", needs to know which codes a method can actually
+produce. "Whatever the universal contract allows" is a set of fifty, and a caller who
+must handle fifty handles none.
 
 ```ts
 /** ① Edge L1→L2. The ONLY externally reachable surface. */
@@ -890,6 +897,41 @@ export interface SecretProvider extends Versioned {
 // SecretValue is a wrapper whose toString()/toJSON()/util.inspect all return "[secret]".
 // Journal, prompts, spans, and tool args record the REF; only the sandbox boundary sees the value.
 ```
+
+### The boundary error taxonomy
+
+Every code below is from the one `LoomError` union (D3.0); the class drives retry and
+HTTP status. `cancel` describes what an `AbortSignal` does mid-call.
+
+| Interface | Method | Codes it can raise | On cancel |
+|---|---|---|---|
+| `ControlPlaneAPI` | `submitRun` | `E_GRAPH_INVALID`, `E_OVERSIGHT_LOOSENED`, `E_CAP_DENIED`, `E_RESOURCE_NOT_FOUND`, `E_RESOURCE_YANKED`, `E_NOT_AUTHORIZED`, `E_IDEMPOTENCY_MISMATCH`, `E_ADMISSION_REJECTED` | nothing is durable; no run exists |
+| | `getRun` / `listRuns` | `E_RUN_NOT_FOUND`, `E_NOT_AUTHORIZED` | read is abandoned; no state changes |
+| | `command` | `E_RUN_NOT_FOUND`, `E_NOT_AUTHORIZED`, `E_OVERSIGHT_LOOSEN_FORBIDDEN` | the command is either journaled or not; never half-applied |
+| | `answerGate` | `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_GATE_NOT_AUTHORIZED`, `E_HUMAN_APPROVAL_REQUIRED` | the decision is not recorded; the gate stays open |
+| `RunEventStream` | `open` / `openTenant` | `E_RUN_NOT_FOUND`, `E_NOT_AUTHORIZED` | the iterator ends; the run is unaffected |
+| `RunLifecycle` | `transition` | `E_RUN_NOT_FOUND`, `E_ILLEGAL_TRANSITION`, `E_SEQ_CONFLICT` | the transition is not journaled |
+| `GateDelivery` | `deliver` | `E_GATE_DELIVERY_FAILED` **only** | delivery is abandoned; **the gate stays open and is never auto-approved** |
+| | `parseCallback` | `E_GATE_NOT_AUTHORIZED`, `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED` | no decision is recorded |
+| `ToolTransport` | `call` | `E_TOOL_NOT_FOUND`, `E_TOOL_TIMEOUT`, `E_CAP_DENIED`, `E_TOOL_SOURCE_UNAVAILABLE`, `E_TOOL_SCHEMA_INVALID` | `SIGTERM` → grace → `SIGKILL` on the process **group**; an effect whose outcome is unknown is reported as unknown, never as "did not happen" |
+| | `probe` | `E_TOOL_SOURCE_UNAVAILABLE` | probe abandoned; the breaker's state is unchanged |
+| `JournalReader` | `scan` | `E_RUN_NOT_FOUND` | the iterator ends |
+| | `replay` | `E_RUN_NOT_FOUND`, `E_REPLAY_DIVERGENCE`, `E_GRAPH_INVALID` | replay stops; it has no side effects to undo |
+| `BlobStore` | `put` | `E_STORAGE_FULL` | a partial blob is never addressable — the digest is computed over the whole stream |
+| | `get` / `head` | `E_RESOURCE_NOT_FOUND` | stream closes |
+| `SecretProvider` | `resolve` | `E_SECRET_UNAVAILABLE`, `E_NOT_AUTHORIZED` | nothing is cached; a partially-resolved secret never exists |
+
+Three of these rows are load-bearing rather than descriptive:
+
+- **`GateDelivery.deliver` raises exactly one code.** Any other failure would tempt a
+  caller into branching, and every branch out of "the notification failed" that is not
+  "leave the gate open" is a way to approve something nobody approved.
+- **`ToolTransport.call` on cancel reports unknown as unknown.** The alternative — a
+  cancelled charge recorded as "did not happen" — is the single most expensive lie this
+  system could tell.
+- **`BlobStore.put` is content-addressed, so a partial upload is not addressable.** There
+  is no cleanup path because there is nothing to clean up.
+
 
 ---
 

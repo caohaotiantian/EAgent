@@ -10,8 +10,8 @@ Legend: **PROVEN** — a test asserts it. **DESIGNED** — specified, not yet bu
 
 | # | Requirement | Design | Code | Evidence |
 |---|---|---|---|---|
-| 1 | Every inter-layer edge in D2 maps to a named interface in D3 | PASS | **PROVEN** | 16 edges → 24 interfaces; every one now has an implementation except `GateDelivery` (deferred) and the distributed swaps |
-| 2 | Every interface defines its error taxonomy and cancellation behaviour | PARTIAL (G1) | **PARTIAL** | One `LoomError` taxonomy, 50 codes, class-driven retry and HTTP mapping, all tested. The 8 boundary interfaces still inherit rather than restate — G1 stands |
+| 1 | Every inter-layer edge in D2 maps to a named interface in D3 | PASS | **PROVEN** | 16 edges → 24 interfaces; every one now has an implementation except the distributed swaps (G3) |
+| 2 | Every interface defines its error taxonomy and cancellation behaviour | PASS | **PROVEN** | One `LoomError` taxonomy, class-driven retry and HTTP mapping, all tested. The 8 boundary interfaces now enumerate their own codes and cancellation behaviour (D3.17–D3.24) — G1 closed |
 | 3 | One `GraphSpec` consumed by UI, executor, observability, resources, evolution — no parallel representations | PASS | **PROVEN** | `reconstruct(trace) ⊆ declared(graph.hash)` is a test, plus its negative (a tampered span claiming an undeclared edge fails it) |
 | 4 | All three postures expressible by configuration alone | PASS | **PROVEN** | Skeleton row 11: the same graph runs autonomously when the gate node is removed; row 11b: a system floor of `in` gates a run that would otherwise be autonomous |
 | 5 | Escalation/de-escalation as a decision table; asymmetry enforced | PASS | **PROVEN** | `run/escalation.ts` holds E1–E10 as data; all ten are wired and tested end to end, including two properties of the table itself — every rule only tightens, and every rule names itself in the journal |
@@ -24,10 +24,12 @@ Legend: **PROVEN** — a test asserts it. **DESIGNED** — specified, not yet bu
 
 ## Gaps, restated honestly
 
-**G1 — boundary interfaces abridged.** *Still open.* The 16 required interfaces carry
-full property tables; the 8 additional boundary interfaces inherit their semantics from
-the universal contract. `ControlPlaneAPI` and `RunEventStream` are now implemented and
-tested, so their real error codes could be enumerated — that is the next cheap win.
+**G1 — boundary interfaces abridged.** *Closed.* All 8 boundary interfaces now enumerate
+their own error codes and cancellation behaviour in D3.17–D3.24, drawn from the
+implementations rather than guessed. The reason it mattered: a caller writing a
+`retry.onlyIf` list needs to know which codes a method can actually produce, and
+"whatever the universal contract allows" is a set of fifty — a caller who must handle
+fifty handles none.
 
 **G2 — single-binary boot.** *Closed, literally.* `scripts/build-binary.mjs` bundles
 with esbuild and injects a Node SEA blob. The build **fails** if any `node_modules`

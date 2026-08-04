@@ -425,6 +425,7 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 
 | Code | Rule | Severity | Why it is decidable |
 |---|---|---|---|
+| `GRAPH000` | `apiVersion` is one this compiler understands | error | a spec written against a different version may mean something else entirely, and guessing is worse than refusing |
 | `GRAPH001` | Every node is reachable from an input node | error | graph traversal |
 | `GRAPH002` | Every terminal path reaches an output node or a declared terminal | error | traversal |
 | `GRAPH003` | No duplicate node/edge/channel ids | error | set check |

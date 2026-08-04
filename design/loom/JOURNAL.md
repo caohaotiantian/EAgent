@@ -1442,3 +1442,36 @@ retry it — the same bad shape comes back. The honest test is a three-way fan-o
 every branch fails: three separate Tasks, one node, nothing succeeding in between, which
 is exactly the "broken right now" signal E4 exists for.
 
+---
+
+## 2026-08-05 — G1 closed, and pinned so it stays closed
+
+**Why it mattered.** The eight boundary interfaces inherited their error semantics from
+the universal contract. That reads as complete and is not: a caller writing a
+`retry.onlyIf` list, or a UI deciding whether to offer "try again", needs to know which
+codes a method can ACTUALLY produce. "Whatever the universal contract allows" is a set of
+fifty, and a caller who must handle fifty handles none.
+
+D3.17–D3.24 now enumerate per method, drawn from the implementations rather than guessed.
+Three rows are load-bearing rather than descriptive:
+
+- **`GateDelivery.deliver` raises exactly ONE code.** Any second code invites a caller to
+  branch, and every branch out of "the notification failed" that is not "leave the gate
+  open" is a way to approve something nobody approved.
+- **`ToolTransport.call` on cancel reports unknown as unknown.** A cancelled charge
+  recorded as "did not happen" is the most expensive lie this system could tell.
+- **`BlobStore.put` is content-addressed, so a partial upload is not addressable.** There
+  is no cleanup path because there is nothing to clean up.
+
+**`test/docs-drift.test.ts` keeps it closed.** Writing it immediately found real drift:
+the compiler emits `GRAPH000` (apiVersion), added after D5's rule table was written, and
+the design never mentioned it. A diagnostic an author cannot look up is a diagnostic they
+will guess at.
+
+**One test was deleted for being vacuous.** A first draft asserted that documents
+claiming "N event types" agree with `EVENT_TYPES.length`. The only such claim is in this
+JOURNAL, which said 42 when 42 was true — and a historical record rewritten to match the
+present is not a record. A test that looks like coverage and is not is worse than no
+test, so it was replaced with the node-type, edge-kind, and GRAPH-rule checks, which
+pin genuine contract surfaces.
+
