@@ -29,6 +29,7 @@ import type { RunGraph } from "../graph/spec.ts";
 import type { Engine } from "../run/engine.ts";
 import type { GateDecision } from "../run/gates.ts";
 import { redactPayload } from "../security/redact.ts";
+import { CONSOLE_HTML } from "./console.ts";
 
 export interface ControlPlaneOptions {
   readonly engine: Engine;
@@ -156,6 +157,54 @@ export class ControlPlane {
     const { engine, store } = this.#opts;
 
     return [
+      {
+        method: "GET",
+        pattern: /^\/$/,
+        handle: async ({ res }) => {
+          // The console ships inside the binary: one document, no bundler, no build
+          // step. An approval queue nobody can reach is an oversight model that does
+          // not exist.
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end(CONSOLE_HTML);
+        },
+      },
+
+      {
+        method: "GET",
+        pattern: /^\/graphs$/,
+        handle: async ({ res }) => {
+          send(res, 200, {
+            graphs: Object.entries(this.#opts.graphs ?? {}).map(([name, g]) => ({
+              name,
+              graphHash: g.graphHash,
+              nodes: g.spec.nodes.length,
+              edges: g.spec.edges.length,
+            })),
+          });
+        },
+      },
+
+      {
+        method: "GET",
+        pattern: /^\/graphs\/by-hash\/([^/]+)$/,
+        handle: async ({ res, params }) => {
+          const hash = decodeURIComponent(params[0]!);
+          const graph = Object.values(this.#opts.graphs ?? {}).find((g) => g.graphHash === hash);
+          if (graph === undefined) throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no graph with hash ${hash}`);
+          // Structure ONCE, keyed by hash: the client caches it and only deltas
+          // stream afterwards. `plans` carries the compiler's layoutRank, so the
+          // browser never runs a graph layout.
+          send(res, 200, {
+            graphHash: graph.graphHash,
+            nodes: graph.spec.nodes.map((n) => ({ id: n.id, type: n.type })),
+            edges: graph.spec.edges.map((e) => ({ id: e.id, from: e.from, to: e.to, kind: e.kind })),
+            plans: Object.fromEntries(
+              Object.entries(graph.plans).map(([id, p]) => [id, { layoutRank: p.layoutRank, maxInstances: p.maxInstances, posture: p.posture }]),
+            ),
+          });
+        },
+      },
+
       {
         method: "GET",
         pattern: /^\/health$/,

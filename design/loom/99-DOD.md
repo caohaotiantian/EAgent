@@ -43,9 +43,12 @@ journal now records ~30 decisions in the four-part form, including several the d
 did not anticipate (`RUN_FATAL_CODES`, `startedEffects` vs `unknownEffects`, absence
 semantics in the expression language, identity-aware resource digests).
 
-**G5 — NEW: the web console does not exist.** L1 is specified (D9 §L1) and the control
-plane it would consume is built and tested, but no UI code exists. The 500-node
-rendering strategy and the oversight queue are unvalidated.
+**G5 — the web console.** *Closed for v1.* A zero-dependency console ships inside the
+binary: graph canvas laid out from the compiler's ranks, fan-out collapsed to one shape
+with a count, SSE deltas coalesced at 60 ms, and an approve/reject queue. The four D9
+§L1 rendering decisions are implemented and tested. What is NOT validated: visual
+correctness (no browser in CI) and behaviour at genuinely 500 nodes — the strategy is
+right and the constant factors are unmeasured.
 
 ## Coverage matrix — implementation status
 
@@ -55,8 +58,8 @@ remains as documented in the original matrix above the fold.
 | Requirement | Status | Where |
 |---|---|---|
 | L1 streaming reconciliation after reconnect | **PROVEN** | `Last-Event-ID` resumes at `seq+1`, contiguous; out-of-window yields a `snapshot` frame. `test/server/http.test.ts` |
-| L1 500-node rendering | **DESIGNED** | Layout ranks are computed at compile and shipped in the `RunGraph`; no renderer exists (G5) |
-| L1 gate surfacing / routing / escalation | **PARTIAL** | Gates are listed and resolved over HTTP and CLI. Delivery channels and SLA sweep are implemented in the broker but untested against a real channel |
+| L1 500-node rendering | **PARTIAL** | Renderer implemented: compiler layout ranks, collapsed fan-out, 60 ms coalescing, structure cached by hash. Unmeasured at 500 nodes |
+| L1 gate surfacing / routing / escalation | **PARTIAL** | Surfaced in the console, listed and resolved over HTTP and CLI, and a rejection requires a reason. Delivery channels and SLA sweep are implemented in the broker but untested against a real channel |
 | L2 what is durable at ACK | **PROVEN** | The 202 body names the durable set; a test asserts the journal contains it |
 | L2 idempotency keys | **PROVEN** | Duplicate submit returns the original `runId` and creates nothing |
 | L3 concurrency model | **PROVEN** | Work parallel, commits serialized through one chain with `expectedSeq` |
@@ -68,7 +71,7 @@ remains as documented in the original matrix above the fold.
 | L5 span taxonomy | **PROVEN** | Spans derived from the journal; `gen_ai.*` conventions on model spans |
 | L5 sampling | **PROVEN** | Deterministic per run; always keeps gated/failed/escalated/irreversible |
 | L5 retention tiering | **DESIGNED** | Unbuilt |
-| L5 PII redaction at emit | **PARTIAL** | Classification is carried on every event; the redactor itself is unbuilt |
+| L5 PII redaction at emit | **PROVEN** | Applied to span attributes and the HTTP wire — deliberately NOT to the journal, which must keep real values |
 | L5 deterministic replay | **PROVEN** | Zero model calls, zero side effects, zero file reads across a full replay |
 | L6 authoritative vs derived | **PROVEN** | `state.reduced` is the only event that changes channel state — asserted by reconstructing state from inputs + that event type alone |
 | 3.1 durable suspension across restart | **PROVEN** | `kill -9` with a gate open, resumed from a new process |
@@ -77,17 +80,14 @@ remains as documented in the original matrix above the fold.
 | 3.2 model agnosticism + fallback chains | **PROVEN** | Anthropic + OpenAI adapters, normalized taxonomy, chains keyed on codes |
 | 3.2 content filter never falls through | **PROVEN** | A chain naming `E_CONTENT_FILTERED` fails at *construction* |
 | 3.2 tool sandboxing | **PARTIAL** | Subprocess confinement built and tested; seccomp/cgroups deferred |
-| 3.2 secret injection never reaching traces or prompts | **PARTIAL** | Env allowlist proven (a child reads `undefined` for an engine secret); a `SecretValue` wrapper is unbuilt |
+| 3.2 secret injection never reaching traces or prompts | **PROVEN** | `SecretValue` yields `[secret]` through `toString`/`toJSON`/interpolation/`inspect`; env allowlist proven separately |
 | 3.2 prompt-injection containment | **PROVEN** | The tool allowlist is computed from the node spec before the turn; an injected tool name is refused pre-dispatch |
 | 3.2 cost governance | **PROVEN** | Reservation-based budgets; `GRAPH009` proves `Σ(branch budgets) ≤ run budget` at compile |
 | 3.2 determinism & replay limits | **PROVEN** | Six honest limits documented; the unknown-outcome case marks a replay non-hermetic |
 
 ## What is left before this is a product
 
-1. **The web console** (G5) — the largest single gap.
-2. **SEA packaging** — one build step to turn the CLI into a literal single file.
-3. **Redaction and `SecretValue`** — designed, and the classification metadata that
-   drives them is already carried on every event.
-4. **The compaction ladder** and **lazy fan-out materialisation** (T5).
+1. **SEA packaging** — one build step to turn the CLI into a literal single file.
+2. **The compaction ladder** and **lazy fan-out materialisation** (T5).
 5. **Dynamic graph mutation** — specified in D5.7, unbuilt.
 6. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
