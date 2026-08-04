@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M4b model adapters | **done** | real Anthropic/OpenAI adapters, offline via injected fetch | 278 tests; `test/providers/providers.test.ts` (24 cases) |
 | M4a retry/cancel/rewind | **done** | declared-but-ignored runtime features now implemented | 254 tests; `test/run/runtime.test.ts` (14 cases) |
 | M3 replay + spans | **done** | replay reproduces state hashes with zero side effects; reconstruct(trace) ⊆ declared | 240 tests; `test/run/replay.test.ts` (22 cases) |
 | M2 walking skeleton | **done** | all 12 rows of `08-PLAN.md` D13.3 | 218 tests; `test/run/skeleton.test.ts` — 23 cases incl. the kill -9 gate-durability test |
@@ -578,3 +579,69 @@ the dangerous direction: retrying a charge that already went through.
 **Precise consequence.** A failure *before* the sandbox (schema validation, policy
 deny) touched nothing, so it retries even for a non-idempotent tool. A failure after is
 never auto-retried.
+
+---
+
+## 2026-08-04 — M4b — The normalized taxonomy is the product; the transport is not
+
+**Decision.** `normalizeError(status, body, headers)` maps every provider failure onto
+the one `LoomError` taxonomy, and both adapters go through it.
+
+**Why it is the valuable part.** A fallback chain is only *declarative*
+(`when: [E_PROVIDER_RATE_LIMIT]`) because the codes are provider-independent. Without
+it, every chain would need provider-specific branching and the config in D3.8 would be
+a lie.
+
+**The mappings that carry weight:**
+
+| Native | Normalized | Class | Consequence |
+|---|---|---|---|
+| 400 "context length" | `E_CONTEXT_OVERFLOW` | validation | **not** retryable — the same prompt cannot fit next time |
+| 400 "content policy" | `E_CONTENT_FILTERED` | policy | **never** falls through (see below) |
+| 429 | `E_PROVIDER_RATE_LIMIT` | exhausted | retry, honouring `retry-after` |
+| 529/503 | `E_PROVIDER_OVERLOADED` | unavailable | retry with backoff |
+
+---
+
+## 2026-08-04 — M4b — A content filter never falls through, and the chain fails to BUILD
+
+**Decision.** `NEVER_FALL_THROUGH = {E_CONTENT_FILTERED, E_PROVIDER_BAD_REQUEST,
+E_CANCELLED}`. A chain that *names* one of these in a `when` clause throws at
+construction.
+
+**Why construction rather than call time.** Trying a second vendor after a safety
+refusal is evasion, not resilience. Catching it when the chain is built means the
+misconfiguration fails in CI; catching it at call time means it fails once, in
+production, on the request that triggered the filter.
+
+---
+
+## 2026-08-04 — M4b — Post-first-event failures never fall through either
+
+**Decision.** Both the retry loop in `postJson` and the tier loop in `FallbackAdapter`
+stop once the first event has been yielded.
+
+**Why.** After the first delta the caller has already rendered text and counted usage.
+Re-streaming from another tier would duplicate both. This is the same rule EAgent
+arrived at for `onProviderError` (`agent.ts:427-441`) and it is worth restating: a
+partly-consumed stream is not retryable, whatever the error says.
+
+**Tested** by an adapter that yields one delta and then throws: the fallback tier is
+never reached and exactly one event is observed.
+
+---
+
+## 2026-08-04 — M4b — Two kinds of record/replay, deliberately
+
+`ReplayEffects` (M3) replays a **run** from its journal. A `Cassette` captures a
+**provider** so an adapter's own parsing can be tested against real bytes offline.
+
+They answer different questions — "did the run behave the same?" versus "did we parse
+this provider correctly?" — and conflating them would mean an adapter change could
+only be tested by re-running whole graphs.
+
+**Test-harness note.** The first fallback tests failed because the fake errors were
+`Object.assign(new Error(), {...})` lookalikes, not `LoomError` instances, so
+`isLoomError` wrapped them and the `when` match never fired. Fixed by using the real
+`err.*` constructors — a good reminder that a hand-shaped error is not the same type,
+and that testing through the real constructor is the only version that proves anything.

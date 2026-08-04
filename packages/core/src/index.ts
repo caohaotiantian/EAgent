@@ -34,3 +34,8 @@ export * from "./run/gates.ts";
 export * from "./run/engine.ts";
 export * from "./run/replay.ts";
 export * from "./telemetry/spans.ts";
+
+export * from "./providers/http.ts";
+export * from "./providers/anthropic.ts";
+export * from "./providers/openai.ts";
+export * from "./providers/fallback.ts";
