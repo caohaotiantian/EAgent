@@ -10,3 +10,8 @@
 export * from "./ids.ts";
 export * from "./errors.ts";
 export * from "./canonical.ts";
+
+export * from "./journal/events.ts";
+export * from "./journal/store.ts";
+export * from "./journal/memory.ts";
+export * from "./journal/sqlite.ts";

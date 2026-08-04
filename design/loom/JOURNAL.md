@@ -14,7 +14,7 @@ rejects, and what would reverse it.
 |---|---|---|---|
 | M0 scaffold + CI | **done** | `npm run check` green offline, no runtime deps | 32 tests, both guards pass |
 | M1a ids/errors/canonical | **done** | branch order total; digests stable; codes unique | `packages/core/test/{ids,canonical,errors}.test.ts` |
-| M1b journal StateStore | in progress | racing appends → exactly one lands | — |
+| M1b journal StateStore | **done** | racing appends → exactly one lands | 76 tests; one conformance suite passes against both memory and SQLite stores |
 | M1c EventBus | pending | slow subscriber cannot stall the producer | — |
 | M1d channels + reducers | pending | fold order independent of arrival order | — |
 | M1e GraphCompiler | pending | incident-triage compiles; every rule has a negative test | — |
@@ -122,3 +122,68 @@ produce results in an order no author would predict — deterministic, but wrong
 **Test.** `ids.test.ts` "compareBranch is a total order with prefixes first" asserts
 `e1[10]` sorts after `e1[1]`, and a second test sorts the same set from a reversed
 input to prove arrival order is irrelevant.
+
+---
+
+## 2026-08-04 — M1b — Two StateStore implementations, one conformance suite
+
+**Decision.** `MemoryStateStore` and `SqliteStateStore` are both first-class, and
+`test/journal/conformance.ts` runs an identical 18-case suite against both.
+
+**Why.** DoD item 7 claims "swapping local → distributed changes only
+implementations, never call sites". That is an assertion until two implementations
+pass the same tests. It also caught a real difference while writing: the memory store
+originally let a concurrent append extend an in-flight `read`, while the SQLite store
+pinned its upper bound — the suite forced both to the stricter semantics ("read
+returns a consistent prefix").
+
+**Rejects.** A SQLite-only store with the memory one as a test double. A test double
+that is allowed to differ is exactly where migration bugs hide.
+
+**Reverses if.** Never. When Postgres lands, it joins the same suite.
+
+---
+
+## 2026-08-04 — M1b — `BEGIN IMMEDIATE`, not `BEGIN`
+
+**Decision.** The append transaction opens with `BEGIN IMMEDIATE`.
+
+**Why.** SQLite's default deferred transaction takes a read lock first and upgrades to
+a write lock at the first mutation. That upgrade can fail with `SQLITE_BUSY` *after*
+we have already read the head and decided the CAS passed — so the check would be
+against a head another writer has since moved. `BEGIN IMMEDIATE` takes the write lock
+at statement one, making read-check-insert-update genuinely serializable.
+
+**Rejects.** Deferred transactions plus a retry loop (retrying a CAS whose premise
+may have changed is the bug, not the fix).
+
+---
+
+## 2026-08-04 — M1b — Fencing is scoped per (run, task), not per run
+
+**Decision.** `task_fence(run_id, task_id) -> max_token`; an append carrying a lower
+token than the highest already seen for that task is rejected `E_FENCING_STALE`.
+
+**Why.** `expectedSeq` alone stops two workers double-committing the same position,
+but not a worker whose lease expired, whose Task was re-leased and completed, and
+which then wakes up and writes at a position that happens to be free. Fencing per task
+is the right scope because leases are per task — a per-run token would make two
+unrelated Tasks in the same run fight over one counter.
+
+**Test.** `conformance.ts` "fencing is scoped per task" and "fencing allows the same
+and higher tokens" (the same worker writing twice inside one lease must not
+self-reject).
+
+---
+
+## 2026-08-04 — M1b — `EventPayloads` is an exhaustive map, not `payload: unknown`
+
+**Decision.** Every one of the 42 event types has a declared payload shape.
+
+**Why.** The journal is the system's whole durable vocabulary; if any subsystem can
+append `{type: "task.committed", payload: <whatever>}`, folds become defensive and the
+log stops being a contract. The exhaustive map means adding a durable fact is a
+reviewable diff in one file.
+
+**Cost.** Payload shapes will churn during M2 as the executor lands. That churn is the
+point — it happens in one place and the compiler finds every fold that must change.
