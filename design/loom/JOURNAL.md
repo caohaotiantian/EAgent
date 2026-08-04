@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M7b single binary | **done** | `bin/loom` runs alone in an empty dir; 0 third-party modules | verified by copying the binary into an isolated directory |
 | M5c console | **done** | G5 closed: an operator console ships in the binary | 386 tests; `test/server/console.test.ts` (11 cases) |
 | M7a redaction + secrets | **done** | a secret cannot be interpolated; pii tokenises stably | 375 tests; `test/security/redact.test.ts` (19 cases) |
 | M5b CLI | **done** | DoD item 6 demonstrated: empty dir → real graph → real file | 356 tests; `test/cli/cli.test.ts` (10 cases) |
@@ -61,8 +62,8 @@ Open threads that need resolving before the milestone they block:
 - **T11: RESOLVED (M5c).** A zero-dependency console ships inside the binary: graph
   canvas from compiler layout ranks, collapsed fan-out, SSE deltas coalesced at 60 ms,
   and an approve/reject queue. A React SPA can come later against the same API.
-- **T12 (open):** SEA packaging. `node --experimental-sea-config` to turn dist/cli.js
-  into one literal file. Build tooling, not architecture.
+- **T12: RESOLVED (M7b).** `npm run build:binary` → `bin/loom`, 120 MB, application
+  bundle 219 KB, **0 third-party modules**. The build fails if any appear.
 
 ---
 
@@ -904,3 +905,25 @@ recover from if they are wrong — that the page is served and self-contained, t
 structure endpoint carries layout, that ids are escaped before injection, and that the
 cache key is the graph hash. Visual correctness is not asserted, and the tests do not
 pretend to.
+
+---
+
+## 2026-08-04 — M7b — The build FAILS if any third-party module reaches the bundle
+
+**Decision.** `build-binary.mjs` runs esbuild twice: once to produce the bundle, once
+with `metafile: true` to inspect its inputs. Any input path containing `node_modules`
+aborts the build.
+
+**Why not just trust the guard.** `check-zero-dep.mjs` reads declared dependencies and
+import specifiers in `src/`. That catches the ordinary case. It would NOT catch a
+transitive import introduced through a path it does not scan, or a build-time shim
+quietly bundled in. Checking the metafile verifies the property where it finally
+matters — in the artifact that ships — rather than in the source that produces it.
+
+**Result.** 120 MB binary, of which the application is 219 KB. The rest is the Node
+runtime, which is the honest cost of "no installation required".
+
+**Note on macOS.** A signed binary rejects injected sections, so the script strips the
+signature, injects, and re-signs ad-hoc. Without that the produced file is killed by
+the kernel on launch with no useful error — worth recording because the failure looks
+like a build bug rather than a signing one.

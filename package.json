@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Loom — graph-native multi-agent collaboration and orchestration framework",
+  "description": "Loom \u2014 graph-native multi-agent collaboration and orchestration framework",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -16,10 +16,13 @@
     "test": "node --test \"packages/*/test/**/*.test.ts\"",
     "test:watch": "node --test --watch \"packages/*/test/**/*.test.ts\"",
     "build": "tsc -b",
-    "check": "npm run typecheck && npm test && node scripts/check-zero-dep.mjs && node scripts/check-surface.mjs"
+    "check": "npm run typecheck && npm test && node scripts/check-zero-dep.mjs && node scripts/check-surface.mjs",
+    "build:binary": "npm run build && node scripts/build-binary.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.1",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^5.9.0"
   }
 }

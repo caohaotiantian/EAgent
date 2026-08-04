@@ -2,6 +2,7 @@
 node_modules/
 dist/
 build/
+bin/
 *.tsbuildinfo
 
 # local runtime state (Loom data dir)

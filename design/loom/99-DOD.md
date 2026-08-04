@@ -15,7 +15,7 @@ Legend: **PROVEN** — a test asserts it. **DESIGNED** — specified, not yet bu
 | 3 | One `GraphSpec` consumed by UI, executor, observability, resources, evolution — no parallel representations | PASS | **PROVEN** | `reconstruct(trace) ⊆ declared(graph.hash)` is a test, plus its negative (a tampered span claiming an undeclared edge fails it) |
 | 4 | All three postures expressible by configuration alone | PASS | **PROVEN** | Skeleton row 11: the same graph runs autonomously when the gate node is removed; row 11b: a system floor of `in` gates a run that would otherwise be autonomous |
 | 5 | Escalation/de-escalation as a decision table; asymmetry enforced | PASS | **PARTIAL** | `maxPosture`/`isLoosening` + `deescalate` requiring a `HumanActor` + the evolution deny-list are all tested. The E1–E11 *automatic* triggers are implemented for budget and taint only |
-| 6 | Boots as a single binary with no external dependencies | UNPROVEN (G2) | **PROVEN** | `loom run` against **compiled** `dist/cli.js` from an empty directory: creates the journal, runs a real graph, writes a real file. Zero runtime deps enforced by a parser-based CI guard. *SEA packaging itself is build tooling, not yet wired* |
+| 6 | Boots as a single binary with no external dependencies | UNPROVEN (G2) | **PROVEN** | `npm run build:binary` produces `bin/loom`, one file, **0 third-party modules in the bundle** (the build fails if any appear). Copied alone into an empty directory it compiles and runs a graph and writes a file. Zero runtime deps also enforced by a parser-based CI guard |
 | 7 | Local → distributed changes implementations, never call sites | PASS in design (G3) | **PARTIAL** | One conformance suite passes against both `MemoryStateStore` and `SqliteStateStore`. The scheduler swap (G3) remains the genuinely risky one and is unbuilt |
 | 8 | Self-evolution cannot promote without an eval gate, and can roll back | PASS | **PROVEN** | 9 promotion criteria as a pure function; one must-pass failure blocks promotion; a candidate lowering oversight is refused; rollback is a selector move, tested |
 | 9 | Terminology consistent with D1 | PASS | **PROVEN** | `Session`, `Job`, `Sub-agent` appear nowhere in `src/` |
@@ -29,9 +29,11 @@ full property tables; the 8 additional boundary interfaces inherit their semanti
 the universal contract. `ControlPlaneAPI` and `RunEventStream` are now implemented and
 tested, so their real error codes could be enumerated — that is the next cheap win.
 
-**G2 — single-binary boot.** *Closed.* Demonstrated against the compiled CLI. What
-remains is packaging: `node --experimental-sea-config` to produce one file. That is a
-build step, not an architectural question.
+**G2 — single-binary boot.** *Closed, literally.* `scripts/build-binary.mjs` bundles
+with esbuild and injects a Node SEA blob. The build **fails** if any `node_modules`
+input reaches the bundle, so "zero runtime dependencies" is verified at package time
+rather than asserted. esbuild and postject are build-only and never appear in
+`packages/core/package.json`.
 
 **G3 — the scheduler swap is genuinely risky.** *Still open and unchanged.* Twelve of
 thirteen local→distributed swaps are mechanical; in-process DWRR over an in-memory
@@ -87,7 +89,6 @@ remains as documented in the original matrix above the fold.
 
 ## What is left before this is a product
 
-1. **SEA packaging** — one build step to turn the CLI into a literal single file.
-2. **The compaction ladder** and **lazy fan-out materialisation** (T5).
+1. **The compaction ladder** and **lazy fan-out materialisation** (T5).
 5. **Dynamic graph mutation** — specified in D5.7, unbuilt.
 6. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
