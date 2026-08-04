@@ -28,6 +28,7 @@ import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { Engine } from "../run/engine.ts";
 import type { GateDecision } from "../run/gates.ts";
+import { redactPayload } from "../security/redact.ts";
 
 export interface ControlPlaneOptions {
   readonly engine: Engine;
@@ -363,9 +364,22 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-/** The wire shape of an event. Deliberately the stored shape, redaction included. */
+/**
+ * The wire shape of an event, redacted on the way out.
+ *
+ * The journal keeps real values — it is the source of truth, and redacting it would
+ * corrupt channel state. Anything crossing the process boundary is redacted using the
+ * event's own declared classification.
+ */
 function frame(e: JournalEvent): unknown {
-  return { seq: e.seq, ts: e.ts, type: e.type, taskId: e.taskId, actor: e.actor, payload: e.payload };
+  return {
+    seq: e.seq,
+    ts: e.ts,
+    type: e.type,
+    taskId: e.taskId,
+    actor: e.actor,
+    payload: redactPayload(e.payload, e.classification),
+  };
 }
 
 /**
@@ -381,8 +395,11 @@ function summarise(p: import("../run/projection.ts").RunProjection): unknown {
     seq: p.seq,
     graphHash: p.graphHash,
     posture: p.posture,
-    channels: p.channels,
-    outputs: p.outputs,
+    // Channel values reach a browser here, so they are swept on the way out. The
+    // per-channel classification lives in the GraphSpec; without it in hand the
+    // conservative `internal` sweep still catches credential shapes in model output.
+    channels: redactPayload(p.channels, "internal"),
+    outputs: redactPayload(p.outputs, "internal"),
     usage: p.usage,
     reservedUsd: p.reservedUsd,
     budgetExhausted: p.budgetExhausted,

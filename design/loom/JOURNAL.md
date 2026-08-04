@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M7a redaction + secrets | **done** | a secret cannot be interpolated; pii tokenises stably | 375 tests; `test/security/redact.test.ts` (19 cases) |
 | M5b CLI | **done** | DoD item 6 demonstrated: empty dir → real graph → real file | 356 tests; `test/cli/cli.test.ts` (10 cases) |
 | M5a control plane | **done** | HTTP surface with gap-free SSE reconnect | 346 tests; `test/server/http.test.ts` (17 cases, real sockets) |
 | M6 resources + eval gate | **done** | pinning rule proven; promotion criteria enforced | 329 tests; `test/resources/store.test.ts` (17) + `test/evolution/gate.test.ts` (15) |
@@ -830,3 +831,40 @@ needs one unambiguous representation — canonical JSON has exactly one form of 
 document; YAML has several. A YAML→JSON converter is genuinely useful for authoring
 and belongs in a CLI-only package that may take the dependency, where a mis-parse
 cannot change a `graph.hash`.
+
+---
+
+## 2026-08-04 — M7a — Redaction applies on the way OUT, never to the journal
+
+**The trap.** The obvious reading of "redact at emit time" is to redact journal
+payloads. That would destroy the system: `state.reduced` payloads **are** the channel
+state, so a redacted journal folds to corrupted state.
+
+**Decision.** The journal keeps real values. Redaction is applied at the two places
+data crosses the process boundary — span attributes and the HTTP wire. Erasure
+obligations against the journal are met by classification-driven crypto-shredding
+(R13), which destroys a key rather than rewriting history.
+
+**Why this is the right split.** The journal is the source of truth; a source of truth
+you have edited for display is no longer one. Redaction is a *presentation* concern
+with a security purpose, and it belongs where presentation happens.
+
+---
+
+## 2026-08-04 — M7a — `SecretValue` makes the failure mode loud instead of silent
+
+**Decision.** Secrets are objects whose `toString`, `toJSON`, template interpolation,
+and `util.inspect` all yield `[secret]`. `reveal()` is the only way out, named so it
+is greppable in review.
+
+**Why.** An accidental `` `Bearer ${token}` `` now produces `Bearer [secret]` — a
+broken request someone notices in minutes — instead of a credential sitting in a
+journal payload, which nobody notices. The whole point is to convert a silent,
+permanent failure into a loud, immediate one.
+
+**Ordering of mechanisms, stated deliberately.** Declared classification first;
+detector sweep second, as a backstop that *will* have false negatives. A design that
+leads with detection has already accepted leaks. The detector list is short on
+purpose: false positives train people to ignore redaction, so only shapes that are
+essentially never legitimate content are matched, and a test asserts ordinary prose
+passes through untouched.

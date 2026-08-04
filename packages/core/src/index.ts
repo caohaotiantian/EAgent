@@ -46,3 +46,4 @@ export * from "./resources/store.ts";
 export * from "./evolution/gate.ts";
 export * from "./server/http.ts";
 export * from "./builtin/tools.ts";
+export * from "./security/redact.ts";
