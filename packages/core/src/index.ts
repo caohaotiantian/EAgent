@@ -46,6 +46,8 @@ export * from "./sandbox/subprocess.ts";
 
 export * from "./resources/store.ts";
 export * from "./evolution/gate.ts";
+export * from "./evolution/trajectory.ts";
+export * from "./evolution/score.ts";
 export * from "./server/http.ts";
 export * from "./builtin/tools.ts";
 export * from "./builtin/authoring.ts";

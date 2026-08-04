@@ -143,3 +143,43 @@ export function sameContent(a: unknown, b: unknown): boolean {
 export function frozenClone<T>(value: T): T {
   return JSON.parse(canonicalize(value)) as T;
 }
+
+/**
+ * The TYPE SHAPE of a value, with every value erased.
+ *
+ * `{namespace: "prod-payments", replicas: 3}` becomes `{namespace:string,replicas:number}`.
+ *
+ * This is what a trajectory records instead of tool arguments. Structure generalises —
+ * "this strategy calls k8s.describe with a pod name" is a fact about the strategy —
+ * while values do not generalise and do leak: a trajectory store that keeps them is a
+ * second copy of production data, subject to every rule the first copy is.
+ *
+ * Keys are kept and sorted, so two calls with the same argument structure render
+ * identically regardless of key order.
+ */
+export function shapeOf(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    // A union, so a heterogeneous array is described rather than misdescribed by
+    // whatever happened to be first.
+    const members = [...new Set(value.map(shapeOf))].sort();
+    return `[${members.join("|")}]`;
+  }
+  switch (typeof value) {
+    case "object": {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .map(([k, v]) => `${k}:${shapeOf(v)}`)
+        .sort();
+      return `{${entries.join(",")}}`;
+    }
+    case "boolean":
+    case "number":
+    case "string":
+      return typeof value;
+    default:
+      return "unknown";
+  }
+}
+

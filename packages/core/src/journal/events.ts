@@ -190,6 +190,14 @@ export interface EventPayloads {
     readonly idempotent: boolean;
     readonly ok: boolean;
     readonly ms: number;
+    /**
+     * The argument TYPE SHAPE — `{pod:string,tail:number}`, never the values.
+     *
+     * Recorded at emit rather than derived later, because the arguments are not in the
+     * journal anywhere else and adding them would make every journal a copy of the
+     * production data the tools were called with.
+     */
+    readonly argsShape: string;
   };
 
   // ── oversight ────────────────────────────────────────────────────────────

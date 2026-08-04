@@ -1155,3 +1155,63 @@ tool as well would both charge the card and overwrite the receipt that proves it
 green. Both times the mechanism was the same: a new *shape* of run (a restart, a loop)
 reaching code that the original workflow's shape never reached.
 
+---
+
+## 2026-08-05 — Wave C — Normalization is what makes "similar trajectory" mean anything
+
+**Decision.** Four normalization rules, all in the fold: retries collapse to the
+succeeding attempt (count becomes an attribute), fan-out branches are re-indexed by the
+digest of **what they did**, payloads become digests, and tool arguments become type
+SHAPES via `shapeOf`.
+
+**Why re-indexing by content and not by arrival.** Two runs that investigated the same
+five signals in a different order are the same strategy. Indexed by arrival they are two
+strategies, and a cohort of "similar trajectories" is noise. Verified directly: with the
+heavy branch at arrival index 0 it canonicalises to `root/e0[1]`; with the heavy branch at
+index 1 it stays at `root/e0[1]`. Same fold either way.
+
+**`shapeOf` is the privacy boundary.** `{namespace:"prod-payments", replicas:3}` becomes
+`{namespace:string,replicas:number}`. Structure generalises — "this strategy calls
+`k8s.describe` with a pod name" is a fact about the strategy — while values do not
+generalise and do leak. Without it a trajectory store is a second copy of production
+data, subject to every rule the first copy is.
+
+`tool.called` gained `argsShape`, computed at emit. Deriving it later is impossible: the
+arguments are nowhere in the journal, and putting them there would make every journal
+the copy the shapes exist to avoid.
+
+**DEVIATION from D10.a.** The fold optionally takes the `RunGraph`. `promptRef` is a
+property of the graph, not the journal, and D10.c's delta extraction is keyed on
+`(node, promptRef)` — without it the corpus cannot be grouped by the thing being
+optimised. Both inputs are immutable and content-addressed, so the fold stays pure.
+
+---
+
+## 2026-08-05 — Wave C — The ladder's protection is structural, not arithmetic
+
+**The temptation.** Make the outcome formula punish weak signals — divide by the TOTAL
+weight rather than by the weights present, so a run with only a rubric scores low.
+
+**Why that is wrong.** It punishes a run for the absence of a human, which is not
+evidence against the run. Absence is absence. Dividing by the present weights is
+correct: `outcome = Σ(wᵢ·sᵢ) / Σ(wᵢ)` over what was actually observed.
+
+**So the protection lives elsewhere, in two structural places:**
+
+1. `isGolden` condition 1 requires a signal from `{S1, S2, S3}`. A rubric that scored 1.0
+   yields `outcome = 1.0` and still fails, because the condition is about the KIND of
+   evidence, not its magnitude.
+2. `promotionCeiling` caps an S4-only candidate at `canary` with mandatory human
+   sign-off, whatever the score.
+
+Two independent barriers, because reward hacking is the failure this whole subsystem is
+built against and one barrier is a single point of failure.
+
+**S5 is captured and weighted 0.00, not dropped.** A system that never recorded
+self-reports could not later measure how often they were wrong — which is the evidence
+for keeping the weight at zero.
+
+**A weight change invalidates the cohort, and `scoreTrajectory` THROWS rather than
+warns.** The failure mode being prevented is a self-improving system reporting an
+improvement it measured with a different ruler.
+

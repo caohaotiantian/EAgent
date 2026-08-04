@@ -24,7 +24,7 @@
  * See design/loom/03-RUNTIME.md D6 and 02-EXECUTION-GRAPH.md D4.
  */
 
-import { digest } from "../canonical.ts";
+import { digest, shapeOf } from "../canonical.ts";
 import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
 import {
   ROOT_BRANCH,
@@ -1221,6 +1221,7 @@ export class Engine {
               idempotent: tool.idempotent,
               ok: result.isError !== true,
               ms: this.#now() - started,
+              argsShape: shapeOf(final.value),
             },
             actor: SYSTEM_ACTOR("tool-executor"),
             taskId: task.taskId,

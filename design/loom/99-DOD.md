@@ -75,6 +75,7 @@ remains as documented in the original matrix above the fold.
 | L5 retention tiering | **DESIGNED** | Unbuilt |
 | L5 PII redaction at emit | **PROVEN** | Applied to span attributes and the HTTP wire — deliberately NOT to the journal, which must keep real values. Justified by leak prevention, not by any erasure mandate |
 | L5 deterministic replay | **PROVEN** | Zero model calls, zero side effects, zero file reads across a full replay |
+| L6 trajectory capture + scoring | **PROVEN** | `evolution/trajectory.ts` + `evolution/score.ts`; 30 tests. Re-indexing verified to reorder; S4-only proven unable to reach golden or `stable` |
 | L6 authoritative vs derived | **PROVEN** | `state.reduced` is the only event that changes channel state — asserted by reconstructing state from inputs + that event type alone |
 | 3.1 durable suspension across restart | **PROVEN** | `kill -9` with a gate open, resumed from a new process |
 | 3.1 irreversibility → default posture | **PROVEN** | An irreversible tool gates even when the graph says `out` |
@@ -89,10 +90,8 @@ remains as documented in the original matrix above the fold.
 
 ## What is left before this is a product
 
-1. **Trajectory capture and scoring** (D10.a/b) — the evolution loop can gate a
-   candidate but cannot yet say which trajectories argue for one.
-2. **A second real workflow end to end** and the 500-node rendering measurement — the
+1. **A second real workflow end to end** and the 500-node rendering measurement — the
    skeleton and the authoring graph each found defects the other structurally could not.
-3. **Gate delivery channels** — the broker is built and tested; no real channel is wired.
-4. **Retention tiering** (L5) — designed, unbuilt.
-5. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
+2. **Gate delivery channels** — the broker is built and tested; no real channel is wired.
+3. **Retention tiering** (L5) — designed, unbuilt.
+4. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
