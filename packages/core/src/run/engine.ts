@@ -260,8 +260,15 @@ export class Engine {
         return (await this.#project(ctx))!;
       }
 
-      const ready = tasksInState(p, "ready");
+      const ready = tasksInState(p, "ready").filter(
+        (t) => t.retryAfter === undefined || t.retryAfter <= this.#now(),
+      );
       if (ready.length === 0) {
+        // A Task still in backoff is not "nothing left to do" — finishing here would
+        // complete a run that has work pending. Return instead, so the caller can
+        // advance again once the clock has moved.
+        const backingOff = tasksInState(p, "ready").some((t) => (t.retryAfter ?? 0) > this.#now());
+        if (backingOff) return p;
         await this.#finish(ctx, p);
         const done = await this.#project(ctx);
         return done!;
@@ -313,8 +320,75 @@ export class Engine {
     this.#contextFor(runId, graph);
   }
 
-  cancel(runId: RunId): void {
-    this.#runs.get(runId)?.abort.abort();
+  /**
+   * Cancel a run.
+   *
+   * Reports `clean: false` and lists `unknownEffects` when cancellation raced an
+   * effect that started and never recorded an outcome. A framework that reports every
+   * cancel as clean is lying to its operator.
+   */
+  async cancel(runId: RunId, reason = "operator"): Promise<RunProjection> {
+    const ctx = this.#require(runId);
+    // Journal the command BEFORE dispatching it, so a crash here re-drives the cancel
+    // on restart rather than losing it.
+    await this.#serialize(() =>
+      ctx.log.append([
+        { type: "operator.command", payload: { kind: "cancel", args: { reason } }, actor: SYSTEM_ACTOR("operator") },
+      ]),
+    );
+    ctx.abort.abort();
+
+    const p = (await this.#project(ctx))!;
+    if (isTerminal(p.status)) return p;
+
+    await this.#serialize(() =>
+      ctx.log.append([
+        {
+          type: "run.cancelled",
+          payload: { clean: p.unknownEffects.length === 0, unknownEffects: p.unknownEffects, forced: false },
+          actor: SYSTEM_ACTOR("operator"),
+        },
+      ]),
+    );
+    return (await this.#project(ctx))!;
+  }
+
+  /**
+   * Rewind to a checkpoint by APPENDING a restore marker.
+   *
+   * The original journal is never edited; the fold hides `(atSeq, marker)` instead.
+   * So a rewind is itself auditable, and a trace still shows what was undone.
+   */
+  async rewind(runId: RunId, atSeq: Seq, reason: string): Promise<RunProjection> {
+    const ctx = this.#require(runId);
+    const p = (await this.#project(ctx))!;
+
+    // Refuse to rewind past a committed irreversible effect with no compensation —
+    // the store must not offer a silently-unsafe undo.
+    for (const t of Object.values(p.tasks)) {
+      const node = ctx.index.byId.get(t.nodeId);
+      const tool = node?.tool === undefined ? undefined : this.tools.get(node.tool.name);
+      if (tool === undefined || t.state !== "succeeded") continue;
+      const irreversible = tool.irreversibility === "irreversible" || tool.irreversibility === "externally_visible";
+      if (irreversible && tool.compensation === undefined) {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `cannot rewind past "${t.nodeId}": ${tool.name} is ${tool.irreversibility} and declares no compensation`,
+          { details: { taskId: t.taskId, tool: tool.name } },
+        );
+      }
+    }
+
+    await this.#serialize(() =>
+      ctx.log.append([
+        {
+          type: "checkpoint.restored",
+          payload: { checkpointId: `cp_${atSeq}` as never, mode: "rewind", atSeq, reason },
+          actor: SYSTEM_ACTOR("operator"),
+        },
+      ]),
+    );
+    return (await this.#project(ctx))!;
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
@@ -972,6 +1046,34 @@ export class Engine {
       return;
     }
 
+    // A retryable failure with attempts left is rescheduled instead of committed.
+    // The slot is released during the backoff, so a retry storm costs queue depth
+    // rather than concurrency (D6.3 level 3).
+    if (outcome.status === "failed") {
+      const retry = this.#retryDecision(ctx, p, w, outcome);
+      if (retry !== undefined) {
+        await ctx.log.commit(
+          p.seq,
+          [
+            {
+              type: "task.retry_scheduled",
+              payload: { attempt: w.task.attempt + 1, afterMs: retry.afterMs, code: retry.code },
+              actor: SYSTEM_ACTOR("executor"),
+              taskId: w.task.taskId,
+            },
+            {
+              type: "task.ready",
+              payload: { nodeId: w.node.id, branchPath: encodeBranch(w.task.branch), edgesIn: [...w.task.edgesIn] },
+              actor: SYSTEM_ACTOR("scheduler"),
+              taskId: w.task.taskId,
+            },
+          ],
+          { taskId: w.task.taskId },
+        );
+        return;
+      }
+    }
+
     const events: NewEvent[] = [];
     const take = outcome.status === "failed" ? this.#errorEdges(ctx, w) : this.#edgesToTake(ctx, p, w, outcome);
 
@@ -1038,6 +1140,52 @@ export class Engine {
     events.push(...this.#activate(ctx, p, w, take, outcome, outcome.status === "failed" ? "failed" : "succeeded"));
 
     await ctx.log.commit(p.seq, events, { taskId: w.task.taskId });
+  }
+
+  /**
+   * Whether to retry, and after how long.
+   *
+   * Three independent refusals, each for a different reason:
+   *   - a NON-RETRYABLE class (validation, policy) will fail identically next time;
+   *   - a RUN-FATAL code is not about this Task at all;
+   *   - a NON-IDEMPOTENT tool that already reached its sandbox may have done its
+   *     work. Retrying is the dangerous option, so the answer is no, and the run
+   *     takes its error edge or surfaces the gap.
+   */
+  #retryDecision(
+    ctx: RunContext,
+    p: RunProjection,
+    w: Wave,
+    outcome: NodeOutcome,
+  ): { afterMs: number; code: string } | undefined {
+    const policy = w.node.retry;
+    const error = outcome.error;
+    if (policy === undefined || error === undefined) return undefined;
+
+    const attempt = w.task.attempt + 1;
+    if (attempt >= policy.maxAttempts) return undefined;
+    if (!error.retryable) return undefined;
+    if (RUN_FATAL_CODES.has(error.code)) return undefined;
+    if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
+
+    const tool = w.node.tool === undefined ? undefined : this.tools.get(w.node.tool.name);
+    // Only refuse once the call REACHED the sandbox. A failure before that (schema
+    // validation, a policy deny) touched nothing, so retrying it is safe even for a
+    // non-idempotent tool.
+    if (tool !== undefined && !tool.idempotent && this.#effectStarted(p, w.task.taskId)) return undefined;
+
+    const initial = policy.initialMs ?? 500;
+    const max = policy.maxMs ?? 30_000;
+    const raw = policy.backoff === "fixed" ? initial : initial * 2 ** (attempt - 1);
+    // No jitter here: the delay must be a pure function of (policy, attempt) or
+    // replay diverges. Real jitter belongs in the distributed scheduler, where the
+    // delay is not part of the recorded decision.
+    return { afterMs: Math.min(raw, max), code: error.code };
+  }
+
+  /** True when this Task already started an effect — i.e. the bell may have rung. */
+  #effectStarted(p: RunProjection, taskId: TaskId): boolean {
+    return p.startedEffects.some((k) => k.startsWith(`${taskId}:`));
   }
 
   #immediateReduce(

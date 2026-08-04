@@ -126,6 +126,14 @@ export interface RunProjection {
   /** Effects that started with no terminal record. Never claim these did not happen. */
   readonly unknownEffects: readonly string[];
   /**
+   * Every effect key that ever STARTED, whatever its outcome.
+   *
+   * Distinct from `unknownEffects` on purpose: "did this reach the world?" and "do we
+   * know what the world did?" are different questions, and the non-idempotent retry
+   * refusal needs the first one.
+   */
+  readonly startedEffects: readonly string[];
+  /**
    * A budget breach is a RUN-level condition, not a branch-level one — otherwise a
    * join with `onBranchError: skip` would silently absorb it and the run would carry
    * on spending. Durable, so it survives a restart.
@@ -151,6 +159,7 @@ interface MutableProjection {
   outputs: Record<string, unknown>;
   error?: ErrorRecord;
   openEffects: Set<string>;
+  everStarted: Set<string>;
   budgetExhausted: boolean;
   suspendedReason?: "gate" | "operator" | "budget" | "backoff";
 }
@@ -166,7 +175,14 @@ interface MutableProjection {
 export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefined {
   let p: MutableProjection | undefined;
 
-  for (const e of events) {
+  // A rewind never edits history — it appends a `checkpoint.restored` marker. The
+  // fold honours it by SUPPRESSING the events between the checkpoint and the marker,
+  // so the journal stays append-only and the rewind is itself auditable.
+  const all = [...events];
+  const suppressed = suppressedRanges(all);
+
+  for (const e of all) {
+    if (suppressed.some(([from, to]) => e.seq > from && e.seq < to)) continue;
     p ??= {
       runId: e.runId,
       graphHash: "",
@@ -182,6 +198,7 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
       reservedUsd: 0,
       outputs: {},
       openEffects: new Set(),
+      everStarted: new Set(),
       budgetExhausted: false,
     };
     p.seq = e.seq;
@@ -204,11 +221,23 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
     reservedUsd: p.reservedUsd,
     outputs: p.outputs,
     unknownEffects: [...p.openEffects].sort(),
+    startedEffects: [...p.everStarted].sort(),
     budgetExhausted: p.budgetExhausted,
     ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
     ...(p.error === undefined ? {} : { error: p.error }),
     ...(p.suspendedReason === undefined ? {} : { suspendedReason: p.suspendedReason }),
   };
+  return out;
+}
+
+/** `(checkpointSeq, markerSeq)` exclusive ranges hidden by a rewind. */
+function suppressedRanges(events: readonly JournalEvent[]): [number, number][] {
+  const out: [number, number][] = [];
+  for (const e of events) {
+    if (!isEvent(e, "checkpoint.restored") || e.payload.mode !== "rewind") continue;
+    const at = (e.payload as { atSeq?: number }).atSeq;
+    if (typeof at === "number") out.push([at, e.seq]);
+  }
   return out;
 }
 
@@ -343,6 +372,7 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   // ── effects ───────────────────────────────────────────────────────────────
   if (isEvent(e, "effect.started")) {
     p.openEffects.add(e.payload.key);
+    p.everStarted.add(e.payload.key);
     return;
   }
   if (isEvent(e, "effect.completed") || isEvent(e, "effect.failed")) {

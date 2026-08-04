@@ -207,7 +207,18 @@ export interface EventPayloads {
     readonly budgetConsumed: number;
   };
   "checkpoint.created": { readonly checkpointId: CheckpointId; readonly atSeq: Seq; readonly kind: string; readonly openTasks: number };
-  "checkpoint.restored": { readonly checkpointId: CheckpointId; readonly mode: "rewind" | "fork"; readonly newRunId?: RunId };
+  /**
+   * A rewind is APPEND-ONLY: this marker hides events in `(atSeq, thisSeq)` from the
+   * fold rather than deleting them. History is never edited, so the rewind itself is
+   * auditable and a trace still shows what was undone.
+   */
+  "checkpoint.restored": {
+    readonly checkpointId: CheckpointId;
+    readonly mode: "rewind" | "fork";
+    readonly atSeq: Seq;
+    readonly reason: string;
+    readonly newRunId?: RunId;
+  };
 
   // ── operator + config ────────────────────────────────────────────────────
   "operator.command": { readonly kind: string; readonly args: Readonly<Record<string, unknown>> };

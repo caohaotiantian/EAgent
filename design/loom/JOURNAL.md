@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M4a retry/cancel/rewind | **done** | declared-but-ignored runtime features now implemented | 254 tests; `test/run/runtime.test.ts` (14 cases) |
 | M3 replay + spans | **done** | replay reproduces state hashes with zero side effects; reconstruct(trace) ⊆ declared | 240 tests; `test/run/replay.test.ts` (22 cases) |
 | M2 walking skeleton | **done** | all 12 rows of `08-PLAN.md` D13.3 | 218 tests; `test/run/skeleton.test.ts` — 23 cases incl. the kill -9 gate-durability test |
 
@@ -37,11 +38,15 @@ Open threads that need resolving before the milestone they block:
   `expected` width is just "how many sibling Tasks exist". Lazy materialisation under
   backpressure (D6.3 level 2) would break that — it needs a *planned* width recorded at
   fan-out time. Do it when backpressure lands, not before.
-- **T6 (blocks M3):** rollback-to-checkpoint is recorded (`checkpoint.created`) but not
-  yet executable. A rejected gate currently fails the run, which satisfies "nothing
-  irreversible happened" but is not the `rewind` semantics in D3.11.
-- **T7 (blocks M4):** retries are declared in `GraphSpec.retry` and validated, but the
-  executor does not yet schedule them (`task.retry_scheduled` is unemitted).
+- **T6: RESOLVED (M4a).** `Engine.rewind` appends a `checkpoint.restored` marker and
+  the fold suppresses `(atSeq, marker)`. History is never edited.
+- **T7: RESOLVED (M4a).** Retries schedule with deterministic backoff; a
+  non-idempotent tool that reached its sandbox is never auto-retried.
+- **T8 (blocks M4b):** `fork` mode on rewind is unimplemented — only `rewind`. Fork
+  needs a new runId plus a re-execution policy for effects, which is genuinely
+  different from replay (it re-executes for real).
+- **T9 (blocks M5):** no HTTP surface yet. `ControlPlaneAPI` / `RunEventStream` are
+  designed (D3.17–18) but the engine is only reachable in-process.
 
 ---
 
@@ -520,3 +525,56 @@ failing with one of these is never absorbed and stops `advance` immediately.
 (the first was budget, during M2). "Contain branch failures" and "some failures are
 not about the branch" pull in opposite directions, and the set makes the tension
 explicit and greppable instead of rediscovering it a third time.
+
+---
+
+## 2026-08-04 — M4a — A rewind APPENDS, it never edits
+
+**Decision.** `Engine.rewind(runId, atSeq, reason)` appends a `checkpoint.restored`
+marker; `foldRun` pre-scans for those markers and suppresses events in
+`(atSeq, markerSeq)`.
+
+**Why.** Deleting or rewriting journal entries would destroy the one property every
+other guarantee rests on. Suppression keeps the log append-only, makes the undo itself
+auditable, and means a trace still shows what was undone — which is exactly what an
+incident review needs.
+
+**Refusal.** `rewind` throws `E_RESTORE_ILLEGAL` when a committed `irreversible` or
+`externally_visible` action with no declared compensation lies after the target. A
+store that offers a silently-unsafe undo is worse than one that offers none.
+
+---
+
+## 2026-08-04 — M4a — Retry backoff has NO jitter
+
+**Decision.** `afterMs` is a pure function of `(policy, attempt)`. The `jitter` flag in
+`GraphSpec.retry` is accepted and currently ignored by the in-process executor.
+
+**Why.** The delay is recorded in `task.retry_scheduled`, so a jittered value would be
+a recorded decision replay could not reproduce. Jitter belongs in the distributed
+scheduler, where the delay is a transport concern rather than part of the run's
+history. Pinned by a test that runs the same graph twice and asserts identical delays.
+
+**Reverses if.** Retry storms become a real problem before the distributed path lands.
+Then jitter becomes an *effect* (`ctx.random()`), recorded like any other.
+
+---
+
+## 2026-08-04 — M4a — `startedEffects` vs `unknownEffects`
+
+**The bug.** The non-idempotent retry refusal checked `unknownEffects` and never fired,
+because by the time the decision is made the effect has already recorded a failure —
+so it is no longer *unknown*.
+
+**Decision.** The projection now tracks both: `startedEffects` (every key that ever
+reached the world, whatever the outcome) and `unknownEffects` (started, no terminal
+record).
+
+**Why they are different questions.** "Did this reach the world?" governs whether a
+retry is safe. "Do we know what the world did?" governs whether a cancel can be called
+clean. Conflating them makes one of the two silently wrong — and the failure mode is
+the dangerous direction: retrying a charge that already went through.
+
+**Precise consequence.** A failure *before* the sandbox (schema validation, policy
+deny) touched nothing, so it retries even for a non-idempotent tool. A failure after is
+never auto-retried.
