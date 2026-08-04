@@ -1350,3 +1350,40 @@ recursively, and everything else stays legible. Matched by key name rather than 
 on purpose — `email` is `email` three objects down, and a path list silently misses the
 nested one.
 
+---
+
+## 2026-08-05 — Wave F — Two rules, both about what cannot happen
+
+**The journal is never pruned, only tiered.** Archiving changes where a run's events live
+and how fast they read; it never changes whether they exist. A retention policy that
+deleted journal events would make replay, the evaluation gate, and every trajectory a lie
+about the past. Pinned by a test that archives a real run, rebuilds a store from cold
+storage ALONE, and replays out of it against live tool bodies — if a single effect had
+been dropped, replay would fall through to those bodies and their counters would move.
+
+**Audit records are duplicated into their own store, under their own window.** They are
+derived from the journal, so the copy is redundant by construction — and that is the
+point. Without it, a retention change made to cut telemetry cost silently shortens the
+record of who approved what. Those two decisions have different owners and different
+stakes, and a system where the cheap one can quietly override the expensive one is
+misdesigned. `DEFAULT_RETENTION.audit` is `Infinity` while `cold` is a year, and a test
+cuts cold to one day and asserts the approval record is untouched.
+
+**The audit tier is WORM.** A second write of the same key with DIFFERENT content is
+`E_AUDIT_IMMUTABLE`; an identical re-put is idempotent, because a retry must not be an
+error. An audit store you can rewrite is a story, not a record. Cold is deliberately not
+WORM — a re-archive may legitimately supersede.
+
+**`agent_action` covers what the machine did alone.** A hard-to-undo tool call is an
+audit record whether or not a human was involved; "who did what" is not only about
+people. Read-only calls are excluded, or the audit tier becomes a second copy of the
+journal and stops being cheap enough to keep forever.
+
+**`contentDigest` is the field that earns its keep.** It pins what the approver actually
+saw, which is why gate payloads are rendered server-side. A later "they were shown the
+wrong diff" dispute is otherwise unanswerable.
+
+**Zero-dep, so the backends are memory and filesystem.** Parquet, S3, and Glacier are
+`TierStore` implementations that live outside the package — the same shape as
+`DeliveryChannel` and `StateStore`. `@loom/core` learns no vendor's API.
+

@@ -72,7 +72,7 @@ remains as documented in the original matrix above the fold.
 | L4 addressing, promotion, immutability, rollback, cache, pinning | **PROVEN** | `test/resources/store.test.ts`, including the pinning rule end to end |
 | L5 span taxonomy | **PROVEN** | Spans derived from the journal; `gen_ai.*` conventions on model spans |
 | L5 sampling | **PROVEN** | Deterministic per run; always keeps gated/failed/escalated/irreversible |
-| L5 retention tiering | **DESIGNED** | Unbuilt |
+| L5 retention tiering | **PROVEN** | `journal/retention.ts`: tiers by age, a WORM audit tier with its own window, and `TierManager.archive` writing both. 22 tests, incl. replaying a run rebuilt from cold storage alone and proving a cold-retention cut leaves the approval record intact |
 | L5 PII redaction at emit | **PROVEN** | Applied to span attributes and the HTTP wire — deliberately NOT to the journal, which must keep real values. Justified by leak prevention, not by any erasure mandate |
 | L5 deterministic replay | **PROVEN** | Zero model calls, zero side effects, zero file reads across a full replay |
 | L6 trajectory capture + scoring | **PROVEN** | `evolution/trajectory.ts` + `evolution/score.ts`; 30 tests. Re-indexing verified to reorder; S4-only proven unable to reach golden or `stable` |
@@ -92,5 +92,4 @@ remains as documented in the original matrix above the fold.
 
 1. **Browser paint at 500 nodes** — everything upstream of it is measured; the render
    itself needs a headless browser the zero-dep rule keeps out of this package.
-2. **Retention tiering** (L5) — designed, unbuilt.
-3. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
+2. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.

@@ -159,6 +159,9 @@ export interface Harness {
   readonly store: StateStore;
   readonly bus: InProcessEventBus;
   readonly model: MockModelAdapter;
+  /** Exposed so a replay can be given the same registries the live run had. */
+  readonly tools: ToolRegistry;
+  readonly functions: FunctionRegistry;
   readonly writes: { path: string; body: string }[];
   readonly reads: string[];
   /** Advance the injected clock; nothing in the engine reads the wall clock. */
@@ -274,6 +277,8 @@ export function harness(opts: HarnessOptions = {}): Harness {
     store,
     bus,
     model,
+    tools,
+    functions,
     writes,
     reads,
     tick: (ms) => {
