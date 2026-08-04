@@ -19,3 +19,8 @@ export * from "./journal/sqlite.ts";
 
 export * from "./state/channels.ts";
 export * from "./bus.ts";
+
+export * from "./graph/spec.ts";
+export * from "./graph/expr.ts";
+export * from "./graph/validate.ts";
+export * from "./graph/compile.ts";

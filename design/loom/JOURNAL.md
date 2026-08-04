@@ -17,7 +17,7 @@ rejects, and what would reverse it.
 | M1b journal StateStore | **done** | racing appends → exactly one lands | 76 tests; one conformance suite passes against both memory and SQLite stores |
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
-| M1e GraphCompiler | pending | incident-triage compiles; every rule has a negative test | — |
+| M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
 | M2 walking skeleton | pending | all 12 rows of `08-PLAN.md` D13.3 | — |
 
 Open threads that need resolving before the milestone they block:
@@ -29,6 +29,11 @@ Open threads that need resolving before the milestone they block:
   `import()` of a digest-addressed file. Not untrusted-input safe — by design (A13).
 - **T3 (blocks M2):** `node:sqlite` is still flagged experimental in Node 24; it
   prints a warning on first use. Need to decide whether to suppress it for CLI UX.
+- **T4 (blocks M2):** **branch-scoped channels.** A fan-out edge's `as` channel holds
+  one value *per branch*, but `reduceState` is currently global. The executor needs a
+  per-branch state overlay: a Task at `root/e1[7]` sees `signal` = element 7, while
+  `findings` is shared. Compile-side is done (GRAPH007 requires `as` to be declared);
+  the runtime scoping is M2 work and is the main open modelling question left.
 
 ---
 
@@ -261,3 +266,102 @@ unless the channel declares `onConflict: "last_by_branch"`.
 concurrency: deterministic (branch order is fixed) but arbitrary, and the author never
 said which branch should win. Making them say it costs one line of YAML and removes a
 whole category of "why did that field have the other value?" investigations.
+
+---
+
+## 2026-08-04 — M1e — Absence makes every ordering comparison FALSE
+
+**The bug.** `verdict.score < 0.7` evaluated to **true** on an empty state, because
+`undefined` coerced to `0`. A run would route on a fabricated number and take a branch
+nobody authored. A test written to assert "routing on incomplete state does not crash"
+caught it.
+
+**Decision.** `toNumber` returns `undefined` for anything that is not a finite number;
+arithmetic propagates absence; and every ordering comparison (`< <= > >=`) involving an
+absent value is `false`, in both directions. `==`/`!=` still treat `null` and
+`undefined` as equal, so `x == null` remains the presence test.
+
+**Consequence.** The idiom for "present and low" is `has(v) && v.score < 0.7`, and `&&`
+short-circuits so it is safe. An unwritten channel simply fails to satisfy a
+conditional edge, and the router falls through to its declared `fallbackEdge` — a
+decision an author actually made.
+
+**Known cost.** The classic three-valued-logic trap: `!(x < 1)` is true when `x` is
+absent. Full 3VL would fix it and would also mean every routing predicate could return
+"unknown", which no author expects. Not worth it. Documented on `lt()`.
+
+**Also.** Division by zero yields absence rather than `Infinity`, because `Infinity` is
+not representable in the canonical form and would break digests.
+
+---
+
+## 2026-08-04 — M1e — `parallelWidth` is not `multiplicity`
+
+**The bug.** The worked incident-triage example failed to compile with three false
+GRAPH010 (concurrent write) errors: `verify` "runs up to 3 times in parallel and writes
+verdict". It does not. It runs three times *sequentially*, because 3 is a loop bound.
+
+**Decision.** Two derived quantities, not one:
+
+| | meaning | consumers |
+|---|---|---|
+| `parallelWidth` | Π fan-out widths — instances that can run **at the same time** | GRAPH010 concurrency |
+| `multiplicity` | `parallelWidth × Π loop iterations` — **total** instances over the run | GRAPH009 budget, GRAPH018 task count |
+
+**Why both are needed.** Budget must count loop passes (three iterations cost three
+times as much); concurrency must not (three sequential passes cannot race). Collapsing
+them into one number is wrong for exactly one of the two consumers, whichever you pick.
+
+---
+
+## 2026-08-04 — M1e — Compensation targets are not entry nodes
+
+**Decision.** `dagEdges` (topological order, ancestors) excludes `loop` **and**
+`compensation`; `entryNodes` excludes only `loop`.
+
+**Why.** Compensation is not forward flow — it runs in reverse on the error path — so
+including it in the DAG makes almost every real graph look cyclic. But excluding it
+from the *entry* calculation too would classify `rollback` as a start node, and the
+scheduler would run the rollback at run start. Two different questions, two different
+edge sets.
+
+---
+
+## 2026-08-04 — M1e — Edge conditions may reference `reads ∪ writes`
+
+**Decision.** GRAPH004's declared-reference check uses the source node's `reads` union
+`writes`, not `reads` alone.
+
+**Why.** An edge condition is evaluated on **post-commit** state. `until: verdict.pass`
+on the loop edge leaving `verify` — the node that just wrote `verdict` — is correct and
+must not be rejected. Requiring `verdict` in `verify.reads` would be a lie about the
+dataflow.
+
+---
+
+## 2026-08-04 — M1e — Structural errors gate the semantic rules
+
+**Decision.** `checkStructure` (duplicate ids, dangling edges, missing/duplicated type
+blocks, unknown apiVersion) returns early; the other 19 rules do not run.
+
+**Why.** A node with no type block makes every later rule report derived nonsense — what
+does a typeless node read, can it route, what is its irreversibility class? One accurate
+error beats twelve consequential ones. Pinned by a test so the behaviour is a decision
+rather than an accident.
+
+---
+
+## 2026-08-04 — M1e — The zero-dep guard uses the TypeScript parser
+
+**The bug.** The regex-based guard failed the build on
+`` `join "${n.id}" waits on unknown node "${branch}"` `` — it saw `from "${branch}"`
+inside an error-message template literal and reported a bare import specifier.
+
+**Decision.** Parse each file with `ts.createSourceFile` and read real
+`ImportDeclaration` / `ExportDeclaration` / `ImportType` / dynamic-`import()`
+specifiers.
+
+**Why it matters beyond the false positive.** A guard that can produce false positives
+gets disabled or worked around; and the same regex that mis-fires here would silently
+miss a specifier written in a shape it does not match. The surface guard already asks
+the compiler; this one now does too.
