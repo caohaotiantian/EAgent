@@ -19,6 +19,12 @@ rejects, and what would reverse it.
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
 | M8 intervention window | **done** | an interrupt mid-window means the effect never starts | 407 tests; `test/run/oversight.test.ts` (20 cases) |
+| Wave G escalation table | **done** | all ten E-rules wired; every rule tightens and names itself | 618 tests; `test/run/escalation.test.ts` (31 cases) + `test/docs-drift.test.ts` |
+| Wave F retention tiering | **done** | a run rebuilt from cold storage alone still replays; a cold-retention cut leaves audit intact | 568 tests; `test/journal/retention.test.ts` (22 cases) |
+| Wave E gate delivery | **done** | delivery failure never auto-approves; the escalation clock resets per tier | 546 tests; `test/run/delivery.test.ts` (20 cases) |
+| Wave D incident-triage + scale | **done** | router/evaluator/error/compensation end to end; 500 nodes measured | 518 tests; `test/workflows/incident-triage.test.ts` (17) + `test/scale.test.ts` (8) |
+| Wave C trajectories + scoring | **done** | fan-out order does not change a trajectory; S4 alone never reaches golden | 501 tests; `test/evolution/trajectory.test.ts` (30 cases) |
+| Wave B graph mutation | **done** | a mid-flight restart rebuilds the mutated graph from the journal | 471 tests; `test/graph/mutate.test.ts` (21 cases) |
 | Wave A context + lazy fan-out | **done** | ladder deterministic; a 5-way fan-out runs at maxParallelism 1 | 446 tests; `test/run/context.test.ts` (18 cases) |
 | M10 authoring graph | **done** | a bad draft is corrected by the compiler's own diagnostics | 428 tests; `test/builtin/authoring.test.ts` (12 cases) |
 | M9 AI-suite safety rules | **done** | a suite written after the candidate is refused | 413 tests |
@@ -33,6 +39,12 @@ rejects, and what would reverse it.
 | M4a retry/cancel/rewind | **done** | declared-but-ignored runtime features now implemented | 254 tests; `test/run/runtime.test.ts` (14 cases) |
 | M3 replay + spans | **done** | replay reproduces state hashes with zero side effects; reconstruct(trace) ⊆ declared | 240 tests; `test/run/replay.test.ts` (22 cases) |
 | M2 walking skeleton | **done** | all 12 rows of `08-PLAN.md` D13.3 | 218 tests; `test/run/skeleton.test.ts` — 23 cases incl. the kill -9 gate-durability test |
+
+**Every non-deferred item in `99-DOD.md` is now PROVEN.** What remains is two things, both
+blocked by a stated constraint rather than by effort: browser paint at 500 nodes (the
+console is an HTML string, and measuring its render needs a headless browser the zero-dep
+rule keeps out of this package) and the distributed scheduler swap, G3, which is a
+deliberate v2 deferral with the interfaces already shaped for it.
 
 Open threads that need resolving before the milestone they block:
 
