@@ -17,6 +17,7 @@ import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
+import type { GateDecision } from "../../src/run/gates.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { resolver } from "./skeleton.ts";
 
@@ -272,6 +273,65 @@ test("an irreversible action GATES by default — no hold needed", async () => {
   const p = await r.engine.advance(runId);
   assert.equal(p.status, "awaiting_gate");
   assert.equal(r.charged(), 0);
+});
+
+/** Approve the one open gate on a run. */
+async function approve(r: Rig, runId: RunId, decision: GateDecision) {
+  const p = await r.engine.projection(runId);
+  const gate = Object.values(p!.gates).find((g) => g.state === "open")!;
+  return r.engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision,
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "k1",
+  });
+}
+
+test("APPROVING A WORK NODE MEANS GO AHEAD — the action actually runs", async () => {
+  // The bug this pins: treating approval as completion. The Task would go straight to
+  // `succeeded`, the run would report success, and the charge would never happen —
+  // silently, in the one place a human was explicitly asked to look.
+  const r = chargeRig();
+  const runId = await r.engine.submit({ graph: compileCharge(), inputs: { amount: 10 } });
+  await r.engine.advance(runId);
+
+  const p = await approve(r, runId, { kind: "approve" });
+  assert.equal(p.status, "succeeded");
+  assert.equal(r.charged(), 1, "approval authorises the action; it does not stand in for it");
+  assert.deepEqual(p.channels["receipt"], { ok: true }, "and the node's real writes landed");
+});
+
+test("approving twice still charges once", async () => {
+  const r = chargeRig();
+  const runId = await r.engine.submit({ graph: compileCharge(), inputs: { amount: 10 } });
+  await r.engine.advance(runId);
+  await approve(r, runId, { kind: "approve" });
+  await r.engine.advance(runId);
+  assert.equal(r.charged(), 1, "a decided gate does not re-open, and a done Task does not re-run");
+});
+
+test("rejecting fails the Task and takes no money", async () => {
+  const r = chargeRig();
+  const runId = await r.engine.submit({ graph: compileCharge(), inputs: { amount: 10 } });
+  await r.engine.advance(runId);
+
+  const p = await approve(r, runId, { kind: "reject", reason: "not this account" });
+  assert.equal(p.status, "failed");
+  assert.equal(r.charged(), 0);
+});
+
+test("an edit SUBSTITUTES the human's outcome rather than running the action", async () => {
+  // `edit` carries channel writes, not tool arguments — so the only coherent reading is
+  // "use these values instead". Running the tool AND applying the edit would both charge
+  // the card and overwrite the receipt that proves it.
+  const r = chargeRig();
+  const runId = await r.engine.submit({ graph: compileCharge(), inputs: { amount: 10 } });
+  await r.engine.advance(runId);
+
+  const p = await approve(r, runId, { kind: "edit", writes: { receipt: { manual: true } } });
+  assert.equal(p.status, "succeeded");
+  assert.equal(r.charged(), 0);
+  assert.deepEqual(p.channels["receipt"], { manual: true });
 });
 
 test("INTERRUPTING DURING THE WINDOW MEANS THE EFFECT NEVER STARTS", async () => {

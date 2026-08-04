@@ -1092,3 +1092,66 @@ is "these three fields of the last twenty items".
 wrapped as a recorded effect. Without that boundary a replay would produce a different
 summary and every downstream state hash would diverge for a reason unrelated to the
 graph.
+
+---
+
+## 2026-08-05 — Wave B — Mutation is compiled, not trusted
+
+**Decision.** `compileMutation(base, mutation, budget)` runs five stages: additive-only,
+dominated-by-the-proposer, expansion budget, then **the identical `compile()`** every
+authored graph goes through, then the gate check. The baseline postures handed to that
+compile are the RUNNING graph's own, so a mutation that lowers oversight anywhere fails
+`GRAPH014_OVERSIGHT_LOOSENED` — the same rule, not a weaker runtime variant.
+
+**Why additive-only.** Removal introduces "what happened to the branch already running
+through the deleted edge?", which has no cheap answer, and it would let a mutation
+retroactively change what events already in the journal mean.
+
+**`canMutate` is declared on the NODE.** Inferring it from the model's output would let
+a model grant itself the power by emitting the right shape. The capability
+`graph:mutate` is checked on top of that, at dispatch.
+
+**Gating is per node, not per run.** `gatedNodes` names exactly which added nodes are
+hard to undo; those escalate to `in`. Escalating the whole run would be a lie — the rest
+of the graph was already reviewed and did not become riskier.
+
+---
+
+## 2026-08-05 — Wave B — A mutated graph must be rebuildable from the journal
+
+**The gap.** `ctx.graph` was swapped in memory. A restarting process re-attaches the
+AUTHORED graph — the only thing on disk — so every derived value (plans, entry nodes,
+`maxInstances`) would have been computed from the wrong spec, and a node that exists
+only in the successor graph would never be scheduled.
+
+**Decision.** `graph.mutated` carries the FULL added specs, not just their ids, and
+`advance()` rebuilds the successor by replaying them through the same compiler. A hash
+mismatch after replay is `E_REPLAY_DIVERGENCE`, not something to paper over.
+
+This is the journal-is-the-sole-durable-truth invariant applied to the graph itself: if
+an event cannot rebuild the thing it describes, it is a log line, not a journal entry.
+
+---
+
+## 2026-08-05 — Wave B — APPROVE MEANS "GO AHEAD", NOT "CONSIDER IT DONE"
+
+**The bug, found by the restart test.** A gate decided for a Task short-circuited into
+`#applyGateDecision`, which on `approve` returned `succeeded` with no execution. Correct
+for a `human_gate` node — that node IS the approval — and wrong for every other node
+type, where there is real work behind the gate.
+
+The failure mode is the worst available: the run reports **success**, the human sees
+their approval recorded, and the action never happens. Silently, in the one place
+someone was explicitly asked to look. It was invisible until a run suspended at a
+policy gate on a *tool* node and resumed; every prior gate test used a `human_gate`
+node, where the old behaviour is right.
+
+**Decision.** Approval on a work node falls through to `#dispatch`. `reject`, `edit`,
+and `redirect` all resolve WITHOUT executing — each is the human substituting their own
+outcome. `edit` in particular carries channel writes, not tool arguments, so running the
+tool as well would both charge the card and overwrite the receipt that proves it.
+
+**Meta.** Second time a Wave test has found a defect in code the previous wave shipped
+green. Both times the mechanism was the same: a new *shape* of run (a restart, a loop)
+reaching code that the original workflow's shape never reached.
+

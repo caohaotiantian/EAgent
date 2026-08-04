@@ -241,6 +241,16 @@ remember.
 | E8 | Tainted channel feeding an `irreversible` action | taint propagation (**D6.8**) | one level up | node | `policy.escalated{rule:"taint"}` | human |
 | E9 | Operator interrupt during an `on` hold | `OversightController` | `on → in` | run | `policy.escalated{rule:"operator"}` | the same operator, explicitly |
 | E10 | Graph mutation introduces an `irreversible` node | `compileMutation` | `* → in` **for that node** | node | `policy.escalated{rule:"mutation"}` | human |
+
+**What approval means.** On a `human_gate` node, approving COMPLETES it — that node's
+entire job is to be the decision. On any other node type there is work behind the gate,
+so approving means *go ahead*: the executor falls through and runs the node. Treating
+approval as completion would report success for an action that never happened, silently,
+in the one place a human was explicitly asked to look.
+
+`reject`, `edit`, and `redirect` all resolve the Task WITHOUT executing it — each is the
+human substituting their own outcome. `edit` carries channel writes, not tool arguments,
+so running the tool as well would both take the action and overwrite the evidence of it.
 | E11 | Model returned `refusal` or `content_filter` | `ModelAdapter` | `out → on` | run | `policy.escalated{rule:"model_refusal"}` | human |
 
 ### De-escalation table (manual only — loosening)

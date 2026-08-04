@@ -24,6 +24,7 @@ export * from "./graph/spec.ts";
 export * from "./graph/expr.ts";
 export * from "./graph/validate.ts";
 export * from "./graph/compile.ts";
+export * from "./graph/mutate.ts";
 
 export * from "./schema.ts";
 export * from "./run/projection.ts";

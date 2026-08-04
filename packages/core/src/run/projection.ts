@@ -435,6 +435,12 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   }
 
   // ── budget ────────────────────────────────────────────────────────────────
+  if (isEvent(e, "graph.mutated")) {
+    // The run is now executing a successor graph. Recording the new hash keeps
+    // `assertGraphMatches` and trace reconstruction honest across the change.
+    p.graphHash = e.payload.newHash;
+    return;
+  }
   if (isEvent(e, "fanout.planned")) {
     p.fanouts[`${e.payload.edgeId}@${e.payload.parentBranch}`] = {
       nodeId: e.payload.nodeId,

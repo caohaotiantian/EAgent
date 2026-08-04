@@ -65,10 +65,10 @@ remains as documented in the original matrix above the fold.
 | L2 what is durable at ACK | **PROVEN** | The 202 body names the durable set; a test asserts the journal contains it |
 | L2 idempotency keys | **PROVEN** | Duplicate submit returns the original `runId` and creates nothing |
 | L3 concurrency model | **PROVEN** | Work parallel, commits serialized through one chain with `expectedSeq` |
-| L3 backpressure under fan-out | **PARTIAL** | `maxParallelism` bounds the in-flight wave (tested). Lazy materialisation and token buckets are unbuilt (T5) |
+| L3 backpressure under fan-out | **PROVEN** | `maxParallelism` bounds the in-flight wave; branches materialise lazily against a journaled `fanout.planned` width, so the join waits for the PLAN, not the first wave |
 | L3 cancellation into in-flight tool calls | **PROVEN** | Signal chain to `SIGTERM`→grace→`SIGKILL` on the process group; unknown-outcome effects reported honestly |
-| L3 context assembly and compaction | **PARTIAL** | Context is rebuilt per Task from declared reads. The compaction ladder is unbuilt |
-| L3 graph mutation validated before execution | **DESIGNED** | `compileMutation` is specified; unbuilt |
+| L3 context assembly and compaction | **PROVEN** | Context is rebuilt per Task from declared reads; the five-rung ladder is built, and rung 3's summarizer is a recorded effect so compaction stays replayable |
+| L3 graph mutation validated before execution | **PROVEN** | `graph/mutate.ts`; 21 tests incl. a mid-flight restart rebuilding the successor graph from the journal |
 | L4 addressing, promotion, immutability, rollback, cache, pinning | **PROVEN** | `test/resources/store.test.ts`, including the pinning rule end to end |
 | L5 span taxonomy | **PROVEN** | Spans derived from the journal; `gen_ai.*` conventions on model spans |
 | L5 sampling | **PROVEN** | Deterministic per run; always keeps gated/failed/escalated/irreversible |
@@ -89,6 +89,10 @@ remains as documented in the original matrix above the fold.
 
 ## What is left before this is a product
 
-1. **The compaction ladder** and **lazy fan-out materialisation** (T5).
-5. **Dynamic graph mutation** — specified in D5.7, unbuilt.
-6. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.
+1. **Trajectory capture and scoring** (D10.a/b) — the evolution loop can gate a
+   candidate but cannot yet say which trajectories argue for one.
+2. **A second real workflow end to end** and the 500-node rendering measurement — the
+   skeleton and the authoring graph each found defects the other structurally could not.
+3. **Gate delivery channels** — the broker is built and tested; no real channel is wired.
+4. **Retention tiering** (L5) — designed, unbuilt.
+5. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.

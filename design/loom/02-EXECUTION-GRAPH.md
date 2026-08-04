@@ -506,6 +506,8 @@ sequenceDiagram
 | Expansion budget | `maxNodes`, `maxDepth`, `maxFanout` decremented per mutation, per Run | executor, journaled |
 | Validation | the identical `GRAPH001..018` pass | `compileMutation` |
 | Oversight | a mutation that introduces a node with irreversibility ≥ `irreversible` **raises a gate before executing it**, regardless of the run's posture | `GRAPH014` + policy |
+| Durability | the `graph.mutated` event carries the **full added specs**, so a restarting process rebuilds the successor graph from the journal rather than scheduling from the authored one | `Engine#rehydrateGraph` |
+| Authority | `canMutate` is declared on the NODE, and `graph:mutate` is checked at dispatch | a model cannot grant itself the power by emitting the right shape |
 | Auditability | `graph.mutated` records the full diff and the proposing Task | journal |
 
 `DEFERRED-v2: mutation that *removes* or *rewires* existing nodes.` Additive-only keeps

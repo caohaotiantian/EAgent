@@ -41,12 +41,14 @@ import {
   type Seq,
   type TaskId,
 } from "../ids.ts";
-import { SYSTEM_ACTOR, errorRecord, type Actor, type NewEvent } from "../journal/events.ts";
+import { SYSTEM_ACTOR, errorRecord, isEvent, type Actor, type NewEvent } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
 import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
-import { indexGraph, type GraphIndex } from "../graph/validate.ts";
+import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
+import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
+import { compile } from "../graph/compile.ts";
 import { validate, type JSONSchema } from "../schema.ts";
 import { assembleContext } from "./context.ts";
 import {
@@ -101,6 +103,8 @@ export interface EngineOptions {
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Prompt token budget per agent turn, before the compaction ladder fires. */
   readonly contextTokens?: number;
+  /** Used when validating a runtime graph mutation. */
+  readonly resolver?: ResourceResolver;
   /**
    * Replay mode. When present, every effect is served from the journal and no tool
    * body or model adapter is ever reached. A missing key is E_REPLAY_DIVERGENCE —
@@ -137,6 +141,8 @@ interface NodeOutcome {
   readonly usage: UsageRecord;
   readonly error?: LoomError;
   readonly gate?: { readonly payload: unknown; readonly policyRef: string };
+  /** An agent node's proposed graph mutation, if it declared `canMutate`. */
+  readonly mutation?: GraphMutation;
   /** Set by a join: the already-folded values, to emit as `state.reduced`. */
   readonly reduced?: {
     readonly values: Record<string, unknown>;
@@ -148,8 +154,11 @@ interface NodeOutcome {
 
 interface RunContext {
   readonly runId: RunId;
-  readonly graph: RunGraph;
-  readonly index: GraphIndex;
+  /** Mutable: an accepted mutation swaps in a successor graph mid-run (D5.7). */
+  graph: RunGraph;
+  index: GraphIndex;
+  /** Nodes added by mutations so far, against `expansion.maxNodes`. */
+  addedNodes: number;
   readonly log: RunLog;
   readonly policy: PolicyEngine;
   readonly abort: AbortController;
@@ -171,6 +180,7 @@ export class Engine {
   readonly #replay: ReplayEffects | undefined;
   readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly #contextTokens: number;
+  readonly #resolver: ResourceResolver;
 
   readonly #runs = new Map<RunId, RunContext>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
@@ -191,6 +201,9 @@ export class Engine {
     this.#replay = opts.replay;
     this.#sleep = opts.sleep ?? defaultSleep;
     this.#contextTokens = opts.contextTokens ?? 100_000;
+    // Mutations must resolve the same refs the original compile did. Without a real
+    // resolver a mutation can only add nodes that reference nothing.
+    this.#resolver = opts.resolver ?? { resolve: () => undefined };
   }
 
   get replaying(): boolean {
@@ -254,6 +267,7 @@ export class Engine {
   async advance(runId: RunId): Promise<RunProjection> {
     const ctx = this.#runs.get(runId);
     if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
+    await this.#rehydrateGraph(ctx);
 
     for (;;) {
       const p = await this.#project(ctx);
@@ -459,9 +473,51 @@ export class Engine {
       }),
       abort: new AbortController(),
       exprCache: new Map(),
+      addedNodes: 0,
     };
     this.#runs.set(runId, ctx);
     return ctx;
+  }
+
+  /**
+   * Rebuild a mutated graph from the journal.
+   *
+   * A caller re-attaches the AUTHORED graph — it is what it has on disk. If this run
+   * previously adopted mutations, the in-memory graph is behind the journal, and every
+   * derived thing (plans, entry nodes, `maxInstances`) would be computed from the wrong
+   * spec. Replaying the recorded specs through the same compiler restores it, and a
+   * hash mismatch after replay is a genuine divergence rather than something to paper
+   * over.
+   */
+  async #rehydrateGraph(ctx: RunContext): Promise<void> {
+    const nodes: NodeSpec[] = [];
+    const edges: EdgeSpec[] = [];
+    let target: string | undefined;
+    let consumed = 0;
+    for await (const e of ctx.log.read(1)) {
+      if (!isEvent(e, "graph.mutated")) continue;
+      nodes.push(...e.payload.nodes);
+      edges.push(...e.payload.edges);
+      consumed += e.payload.nodes.length;
+      target = e.payload.newHash;
+    }
+    if (target === undefined || target === ctx.graph.graphHash) return;
+
+    const result = compile({
+      spec: { ...ctx.graph.spec, nodes: [...ctx.graph.spec.nodes, ...nodes], edges: [...ctx.graph.spec.edges, ...edges] },
+      resolver: this.#resolver,
+      tools: this.tools.manifests(),
+      tenantCapabilities: this.#policyOpts.granted,
+    });
+    if (!result.ok || result.graph.graphHash !== target) {
+      throw err.internal(
+        CODES.E_REPLAY_DIVERGENCE,
+        `run ${ctx.runId} recorded graph ${target} but replaying its mutations produced ${result.ok ? result.graph.graphHash : "a compile error"}`,
+      );
+    }
+    ctx.graph = result.graph;
+    ctx.index = indexGraph(result.graph.spec);
+    ctx.addedNodes = consumed;
   }
 
   #runPosture(graph: RunGraph): Posture {
@@ -537,7 +593,18 @@ export class Engine {
     // approved Task would loop forever, and re-asking a human who already answered
     // is the fastest way to make in-the-loop unusable.
     const settled = Object.values(p.gates).find((g) => g.taskId === task.taskId && g.state === "decided");
-    if (settled !== undefined) return this.#applyGateDecision(settled, node);
+    if (settled !== undefined) {
+      // APPROVE ON A WORK NODE MEANS "GO AHEAD", NOT "CONSIDER IT DONE". A `human_gate`
+      // node is its own approval, so approving completes it; every other node type has
+      // work behind the gate, and treating approval as completion would report success
+      // for an action that never happened — silently, in exactly the place oversight
+      // exists for. `reject`, `edit`, and `redirect` all resolve WITHOUT executing:
+      // each is the human substituting their own outcome for the node's.
+      if (node.type === "human_gate" || settled.decision !== "approve") {
+        return this.#applyGateDecision(settled, node);
+      }
+      return this.#dispatch(ctx, p, w);
+    }
 
     const decision = ctx.policy.decide({
       runId: ctx.runId,
@@ -614,7 +681,12 @@ export class Engine {
       };
     }
 
-    switch (node.type) {
+    return this.#dispatch(ctx, p, w);
+  }
+
+  /** Run the node body. Reached once policy has allowed it — or a human has. */
+  #dispatch(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> | NodeOutcome {
+    switch (w.node.type) {
       case "function":
         return this.#runFunction(ctx, p, w);
       case "router":
@@ -635,7 +707,7 @@ export class Engine {
           status: "gate",
           writes: {},
           usage: { ...ZERO_USAGE },
-          gate: { policyRef: node.humanGate?.ref ?? "", payload: this.#gatePayload(ctx, p, node, w.task) },
+          gate: { policyRef: w.node.humanGate?.ref ?? "", payload: this.#gatePayload(ctx, p, w.node, w.task) },
         };
       case "subgraph":
         throw err.internal(CODES.E_INTERNAL, "subgraph nodes are not implemented in v1");
@@ -995,7 +1067,15 @@ export class Engine {
       };
     }
 
-    return { status: "succeeded", writes: this.#assignWrites(ctx, w.node, undefined, usage, value.value), usage };
+    // A mutation rides on the agent's structured output rather than a side channel, so
+    // it is journaled with the turn that proposed it and replays with it.
+    const proposal = extractMutation(value.value, w);
+    return {
+      status: "succeeded",
+      writes: this.#assignWrites(ctx, w.node, undefined, usage, value.value),
+      usage,
+      ...(proposal === undefined ? {} : { mutation: proposal }),
+    };
   }
 
   /**
@@ -1204,7 +1284,35 @@ export class Engine {
       }
     }
 
-    const events: NewEvent[] = [];
+    // A proposed mutation is validated BEFORE anything it adds can run, by the same
+    // compiler that validated the authored graph.
+    const mutationEvents: NewEvent[] = [];
+    if (outcome.mutation !== undefined) {
+      const applied = this.#applyMutation(ctx, w, outcome.mutation);
+      if (applied.error !== undefined) {
+        return void (await ctx.log.commit(
+          p.seq,
+          [
+            {
+              type: "task.failed",
+              payload: { error: errorRecord(applied.error), attempt: w.task.attempt + 1 },
+              actor: SYSTEM_ACTOR("executor"),
+              taskId: w.task.taskId,
+            },
+            {
+              type: "task.committed",
+              payload: { status: "failed", writes: {}, take: [], usage: outcome.usage, attempt: w.task.attempt + 1 },
+              actor: SYSTEM_ACTOR("executor"),
+              taskId: w.task.taskId,
+            },
+          ],
+          { taskId: w.task.taskId },
+        ));
+      }
+      mutationEvents.push(...applied.events);
+    }
+
+    const events: NewEvent[] = [...mutationEvents];
     const take = outcome.status === "failed" ? this.#errorEdges(ctx, w) : this.#edgesToTake(ctx, p, w, outcome);
 
     if (outcome.status === "failed") {
@@ -1316,6 +1424,75 @@ export class Engine {
   /** True when this Task already started an effect — i.e. the bell may have rung. */
   #effectStarted(p: RunProjection, taskId: TaskId): boolean {
     return p.startedEffects.some((k) => k.startsWith(`${taskId}:`));
+  }
+
+  /**
+   * Validate and adopt a mutation.
+   *
+   * Adoption swaps `ctx.graph` and `ctx.index` for the successor. `graphHash` changes,
+   * which is the point: the journal records `graph.mutated{parentHash, newHash}` so the
+   * chain base → mutations → final is verifiable, and a trace can still be checked
+   * against the graph that actually ran.
+   */
+  #applyMutation(
+    ctx: RunContext,
+    w: Wave,
+    mutation: GraphMutation,
+  ): { events: NewEvent[]; error?: LoomError } {
+    const decision = ctx.policy.decide({
+      runId: ctx.runId,
+      nodeId: w.node.id,
+      taskId: w.task.taskId,
+      kind: "node",
+      irreversibility: "reversible_write",
+      capabilities: ["graph:mutate"],
+      declaredPosture: ctx.graph.plans[w.node.id]?.posture ?? "out",
+    });
+    if (decision.effect === "deny") return { events: [], error: decision.error };
+
+    const result = compileMutation({
+      base: ctx.graph,
+      mutation,
+      budget: { consumedNodes: ctx.addedNodes, expansion: ctx.graph.expansion },
+      resolver: this.#resolver,
+      tools: this.tools.manifests(),
+      ...(this.#policyOpts.systemFloor === undefined ? {} : { systemPostureFloor: this.#policyOpts.systemFloor }),
+    });
+    if (!result.ok) return { events: [], error: result.error };
+
+    const parentHash = ctx.graph.graphHash;
+    ctx.graph = result.graph;
+    ctx.index = indexGraph(result.graph.spec);
+    ctx.addedNodes += result.addedNodes.length;
+
+    // A newly added hard-to-undo action gates before it runs, whatever the run's
+    // posture — a graph that GREW an irreversible step at runtime is exactly where
+    // "somebody should look" is not negotiable. Escalated per node, not per run: the
+    // rest of the graph was already reviewed and does not become riskier.
+    for (const id of result.gatedNodes) {
+      ctx.policy.escalate(`node:${ctx.runId}/${id}`, "in", "mutation_introduced_irreversible");
+    }
+
+    return {
+      events: [
+        {
+          type: "graph.mutated",
+          payload: {
+            parentHash,
+            newHash: result.graph.graphHash,
+            addedNodes: [...result.addedNodes],
+            addedEdges: mutation.addEdges.map((e) => e.id),
+            nodes: [...mutation.addNodes],
+            edges: [...mutation.addEdges],
+            proposedBy: w.task.taskId,
+            proposedByNode: w.node.id,
+            budgetConsumed: ctx.addedNodes,
+          },
+          actor: SYSTEM_ACTOR("executor"),
+          taskId: w.task.taskId,
+        },
+      ],
+    };
   }
 
   #immediateReduce(
@@ -1815,6 +1992,27 @@ function lookup(scope: Readonly<Record<string, unknown>>, path: string): unknown
     cur = (cur as Record<string, unknown>)[part];
   }
   return cur;
+}
+
+/**
+ * Pull a mutation out of an agent's structured output.
+ *
+ * Only when the node declared `canMutate`. Without that flag the key is ignored, so a
+ * model cannot grant itself the ability by emitting the right shape.
+ */
+function extractMutation(value: unknown, w: Wave): GraphMutation | undefined {
+  if (w.node.agent?.canMutate !== true) return undefined;
+  if (value === null || typeof value !== "object") return undefined;
+  const raw = (value as { mutation?: unknown }).mutation;
+  if (raw === null || raw === undefined || typeof raw !== "object") return undefined;
+  const m = raw as { addNodes?: unknown; addEdges?: unknown; reason?: unknown };
+  return {
+    addNodes: Array.isArray(m.addNodes) ? (m.addNodes as NodeSpec[]) : [],
+    addEdges: Array.isArray(m.addEdges) ? (m.addEdges as EdgeSpec[]) : [],
+    proposedBy: w.task.taskId,
+    proposedByNode: w.node.id,
+    ...(typeof m.reason === "string" ? { reason: m.reason } : {}),
+  };
 }
 
 function firstWrite(node: NodeSpec): string | undefined {

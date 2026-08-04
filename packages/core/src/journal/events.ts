@@ -15,6 +15,7 @@
  */
 
 import type { LoomError } from "../errors.ts";
+import type { EdgeSpec, NodeSpec } from "../graph/spec.ts";
 import type { NodeId, RunId, Seq, TaskId, GateId, CheckpointId } from "../ids.ts";
 import type { Classification, Posture, UsageRecord } from "../vocab.ts";
 
@@ -224,12 +225,22 @@ export interface EventPayloads {
   "budget.exhausted": { readonly scope: string; readonly limitUsd: number; readonly action: string };
 
   // ── graph + checkpoints ──────────────────────────────────────────────────
+  /**
+   * A run adopted a successor graph.
+   *
+   * Carries the FULL added specs, not just their ids. The journal is the sole durable
+   * truth, so a process that restarts and re-attaches the authored graph must be able
+   * to rebuild the mutated one from events alone — ids would not be enough.
+   */
   "graph.mutated": {
     readonly parentHash: string;
     readonly newHash: string;
     readonly addedNodes: readonly NodeId[];
     readonly addedEdges: readonly string[];
+    readonly nodes: readonly NodeSpec[];
+    readonly edges: readonly EdgeSpec[];
     readonly proposedBy: TaskId;
+    readonly proposedByNode: NodeId;
     readonly budgetConsumed: number;
   };
   "checkpoint.created": { readonly checkpointId: CheckpointId; readonly atSeq: Seq; readonly kind: string; readonly openTasks: number };

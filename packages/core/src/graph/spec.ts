@@ -88,6 +88,14 @@ export interface AgentNode {
   readonly outputSchema?: unknown;
   readonly maxTurns: number;
   readonly tools?: readonly string[];
+  /**
+   * May this node propose new nodes at runtime (D5.7)?
+   *
+   * Declared on the NODE, not inferred from the model's output — otherwise a model
+   * could grant itself the ability by emitting the right shape. Still gated by the
+   * `graph:mutate` capability at dispatch.
+   */
+  readonly canMutate?: boolean;
 }
 
 export interface ToolNode {
