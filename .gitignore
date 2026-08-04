@@ -1,0 +1,25 @@
+# deps & build output
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# local runtime state (Loom data dir)
+.loom/
+*.db
+*.db-wal
+*.db-shm
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# leftovers from the EAgent archive (branch `init`, tag `eagent-v1`)
+.eagent/
+
+# agent scratch
+.agent/
+
+# os
+.DS_Store
