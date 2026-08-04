@@ -922,7 +922,12 @@ export class Engine {
     // distinction the field exists to draw.
     return {
       status: "succeeded",
-      writes: this.#assignWrites(ctx, w.node, result.writes ?? { [firstWrite(w.node) ?? "_"]: result.content }, ZERO_USAGE),
+      writes: this.#assignWrites(
+        ctx,
+        w.node,
+        mapToolWrites(w.node, result.writes ?? { [firstWrite(w.node) ?? "_"]: result.content }),
+        ZERO_USAGE,
+      ),
       usage: { ...ZERO_USAGE },
     };
   }
@@ -2289,6 +2294,44 @@ function extractMutation(value: unknown, w: Wave): GraphMutation | undefined {
     proposedByNode: w.node.id,
     ...(typeof m.reason === "string" ? { reason: m.reason } : {}),
   };
+}
+
+/**
+ * Map a tool's own write vocabulary onto the NODE's declared channels.
+ *
+ * A TOOL CANNOT KNOW THE GRAPH'S CHANNEL NAMES. `fs.write` calls its output `written`;
+ * the graph that uses it may call the channel `note`, `receipt`, or `audit_row`. Taking
+ * the tool's keys verbatim makes every built-in tool usable only by graphs that happened
+ * to guess its internal vocabulary — and the failure arrives AFTER the side effect, as
+ * `E_CHANNEL_UNDECLARED` on a file already written.
+ *
+ * The rule is the one `#assignWrites` already documents for agent nodes: a value the node
+ * did not name goes to the node's declared write channel. Keys the node DID declare pass
+ * through untouched, which is what a graph-local tool wants.
+ */
+function mapToolWrites(node: NodeSpec, writes: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const declared = new Set(node.writes ?? []);
+  const out: Record<string, unknown> = {};
+  const unmapped: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(writes)) {
+    if (declared.has(key)) out[key] = value;
+    else unmapped[key] = value;
+  }
+
+  const keys = Object.keys(unmapped);
+  if (keys.length === 0) return out;
+
+  // Where does the unnamed value go? The first declared channel this tool has not
+  // already filled. With none left there is nowhere honest to put it, and dropping it
+  // silently would make a tool look like it wrote something it did not.
+  const target = (node.writes ?? []).find((c) => !(c in out));
+  if (target === undefined) return out;
+
+  // One unmapped key unwraps; several stay an object, since collapsing them would lose
+  // which was which.
+  out[target] = keys.length === 1 ? unmapped[keys[0]!] : unmapped;
+  return out;
 }
 
 function firstWrite(node: NodeSpec): string | undefined {

@@ -1475,3 +1475,36 @@ present is not a record. A test that looks like coverage and is not is worse tha
 test, so it was replaced with the node-type, edge-kind, and GRAPH-rule checks, which
 pin genuine contract surfaces.
 
+---
+
+## 2026-08-05 — Closeout — A tool cannot know a graph's channel names
+
+**Found by using the product, not by testing it.** Copying `bin/loom` into an empty
+directory, writing a four-line graph by hand, and running it — which is the exact thing
+the single-binary claim promises — produced:
+
+```
+E_CHANNEL_UNDECLARED: write to undeclared channel "written"
+```
+
+…after `out.txt` had already been written. The built-in `fs.write` returns
+`writes: {written: {...}}`; my graph called the channel `note`. Every built-in tool was
+usable only by a graph that had guessed its internal vocabulary, and the failure arrived
+after the side effect.
+
+**The fix is the convention the engine already documents for agent nodes**: a value the
+node did not name goes to the node's declared write channel. Keys the node DID declare
+pass through untouched, which is what a graph-local tool wants. So `mapToolWrites` is not
+a new rule — it is an existing rule finally applied to the case that needed it.
+
+**The built-in tools had no test file at all.** They now have one, covering the mapping
+plus the two things that actually matter about them: they are the only components that
+touch a disk or a network, so confinement (`fs.read` cannot escape the root, `net.fetch`
+is not even *registered* without an allowlist) is their real contract.
+
+**The lesson, again and more bluntly than before.** Every wave found defects by running a
+new SHAPE of thing: a restart, a loop, a branch that recovers, a graph with a router.
+This one was found by being a user for four minutes. The walking skeleton, the authoring
+graph, and incident-triage all supply their own tools; none of them could have hit this,
+because none of them used a built-in tool from a graph they did not also write.
+
