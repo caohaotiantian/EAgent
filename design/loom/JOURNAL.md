@@ -1387,3 +1387,58 @@ wrong diff" dispute is otherwise unanswerable.
 `TierStore` implementations that live outside the package — the same shape as
 `DeliveryChannel` and `StateStore`. `@loom/core` learns no vendor's API.
 
+---
+
+## 2026-08-05 — Wave G — The escalation table, as data
+
+E1–E10 are now `ESCALATION_RULES`, an object rather than string literals scattered
+through the executor. Two properties hold for the table as a whole, and they are what
+make it safe to extend:
+
+1. **Every rule only TIGHTENS.** They all call `escalate`, which folds by `max`. A new
+   rule is at worst noise, never a hole. Loosening exists solely as `deescalate`, which
+   demands a human actor and a justification.
+2. **Every rule names itself in the journal.** A test walks every `policy.escalated`
+   emitted by a real run and asserts its `rule` is in the table — an anonymous escalation
+   is indistinguishable from a bug.
+
+**E5 and E7's evidence is INJECTED** (`SequenceIndex`, `CohortBaseline`) rather than
+imported. Neither has anything to say about the first run of a new graph, and a
+deployment with no history supplies nothing and they simply never fire. `p99` refuses to
+answer under 10 samples: a p99 over one run is the maximum wearing a hat.
+
+**E5 applies to AGENT nodes only.** The first implementation fired on tool nodes too,
+and the test caught it: a tool node's tool is written in the spec, so if it changed the
+graph hash changed and this is a different graph. Only an agent CHOOSES its sequence at
+run time, so only an agent can produce one nobody has seen.
+
+**E1 treats absence as absence.** A verdict with no numeric score has not scored low; it
+has not scored. Treating missing as zero would escalate every run whose evaluator
+returned a bare `{pass: true}`, and an alarm that always fires is one people learn to
+ignore.
+
+---
+
+## 2026-08-05 — Wave G — Reserve-worst-case makes "80% consumed" ambiguous
+
+**The bug, and it was mine twice over.** E2 fires when a run has consumed 80% of its
+budget. The first implementation re-derived the fraction from `spentUsd + remainingUsd`
+inside the engine, duplicating arithmetic the `PolicyEngine` already owns as `nearLimit`.
+The second put the check only at commit time.
+
+Both were wrong for the same underlying reason: under **reserve-worst-case**, committed
+exposure PEAKS at the reservation and falls back when `settle` credits the real cost. The
+mock reserves ~$0.001 (assuming 1024 output tokens) and settles $0.000024 — a 40× swing.
+A check at commit reads the trough and never fires.
+
+"80% consumed" means 80% COMMITTED — the number that could still be spent, not the number
+already gone. The check now runs at both sites, with a one-shot flag, because a run can
+also drift over the line through settled spend across many cheap tasks without any single
+reservation reaching it.
+
+**E4's test premise was wrong too.** Three retries of a schema mismatch is one failure:
+`E_PROVIDER_BAD_REQUEST` is validation-class, and `#retryDecision` correctly refuses to
+retry it — the same bad shape comes back. The honest test is a three-way fan-out where
+every branch fails: three separate Tasks, one node, nothing succeeding in between, which
+is exactly the "broken right now" signal E4 exists for.
+

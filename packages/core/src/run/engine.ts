@@ -49,6 +49,17 @@ import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
 import { compile } from "../graph/compile.ts";
+import {
+  ESCALATION_RULES,
+  FailureStreaks,
+  detectAnomaly,
+  isLowConfidence,
+  scopeOf,
+  toolNGram,
+  type CohortBaseline,
+  type EscalationRuleId,
+  type SequenceIndex,
+} from "./escalation.ts";
 import { validate, type JSONSchema } from "../schema.ts";
 import { assembleContext } from "./context.ts";
 import {
@@ -106,6 +117,10 @@ export interface EngineOptions {
   readonly contextTokens?: number;
   /** Used when validating a runtime graph mutation. */
   readonly resolver?: ResourceResolver;
+  /** E5's evidence. Absent ⇒ the rule never fires, which is right with no history. */
+  readonly sequences?: SequenceIndex;
+  /** E7's evidence. Absent ⇒ the rule never fires. */
+  readonly baseline?: CohortBaseline;
   /**
    * Replay mode. When present, every effect is served from the journal and no tool
    * body or model adapter is ever reached. A missing key is E_REPLAY_DIVERGENCE —
@@ -162,6 +177,14 @@ interface RunContext {
   addedNodes: number;
   /** Incremental projection state, so a long run does not re-fold its own history. */
   folder: RunFolder;
+  /** E4's counter: consecutive failures per node, reset by any success. */
+  readonly streaks: FailureStreaks;
+  /** Channels written by a tool, i.e. carrying untrusted output. E8's evidence. */
+  readonly tainted: Set<string>;
+  /** Tool names called by each in-flight Task, in order. E5's evidence. */
+  readonly toolCalls: Map<TaskId, string[]>;
+  /** E2 fires once per run, not once per reservation past the line. */
+  warnedBudget: boolean;
   readonly log: RunLog;
   readonly policy: PolicyEngine;
   readonly abort: AbortController;
@@ -184,6 +207,8 @@ export class Engine {
   readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly #contextTokens: number;
   readonly #resolver: ResourceResolver;
+  readonly #sequences: SequenceIndex | undefined;
+  readonly #baseline: CohortBaseline | undefined;
 
   readonly #runs = new Map<RunId, RunContext>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
@@ -207,6 +232,19 @@ export class Engine {
     // Mutations must resolve the same refs the original compile did. Without a real
     // resolver a mutation can only add nodes that reference nothing.
     this.#resolver = opts.resolver ?? { resolve: () => undefined };
+    this.#sequences = opts.sequences;
+    this.#baseline = opts.baseline;
+  }
+
+  /**
+   * Fire an escalation rule, by name.
+   *
+   * One funnel, so every rule is journaled the same way and none can quietly skip the
+   * `policy.escalated` record that tells an operator why the run suddenly asked.
+   */
+  #escalate(ctx: RunContext, id: EscalationRuleId, nodeId?: NodeId, detail?: Record<string, unknown>): void {
+    const rule = ESCALATION_RULES[id];
+    ctx.policy.escalate(scopeOf(rule, ctx.runId, nodeId), rule.to, detail === undefined ? id : `${id} ${JSON.stringify(detail)}`);
   }
 
   get replaying(): boolean {
@@ -478,6 +516,10 @@ export class Engine {
       exprCache: new Map(),
       addedNodes: 0,
       folder: new RunFolder(),
+      streaks: new FailureStreaks(),
+      tainted: new Set(),
+      toolCalls: new Map(),
+      warnedBudget: false,
     };
     this.#runs.set(runId, ctx);
     return ctx;
@@ -637,6 +679,10 @@ export class Engine {
       capabilities: this.#capabilitiesOf(node),
       declaredPosture: ctx.graph.plans[node.id]?.posture ?? "out",
       dataClassification: [classificationOf(spec.channels, [...(node.reads ?? []), ...(node.writes ?? [])])],
+      // E8. A channel a tool wrote carries output from outside the system. Feeding that
+      // into a hard-to-undo action is the prompt-injection path, and the policy layer
+      // already knows what to do with the bit — it was just never being told.
+      tainted: (node.reads ?? []).some((r) => ctx.tainted.has(r)),
     });
 
     await this.#serialize(() =>
@@ -659,6 +705,9 @@ export class Engine {
     );
 
     if (decision.effect === "deny") {
+      // E6. A refused capability is not just this Task's problem: something in this run
+      // tried to do what it was not allowed to, and the rest of the run deserves a human.
+      this.#escalate(ctx, "violation", node.id, { capability: decision.error.details });
       return { status: "failed", writes: {}, usage: { ...ZERO_USAGE }, error: decision.error };
     }
     if (decision.effect === "allow" && decision.holdMs > 0) {
@@ -687,6 +736,9 @@ export class Engine {
       // An interrupt during the window means the effect NEVER STARTS — which is the
       // entire difference between an interruption window and a notification.
       if (ctx.abort.signal.aborted) {
+        // E9. The operator watched and stopped it — that judgement applies to whatever
+        // this run does next, not only to the action they caught.
+        this.#escalate(ctx, "operator", node.id);
         return { status: "failed", writes: {}, usage: { ...ZERO_USAGE }, error: err.cancelled("interrupted during the intervention window") };
       }
     }
@@ -881,12 +933,30 @@ export class Engine {
       const body = this.functions.require(ev.ref);
       const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
       const out = await body(view, { taskId: w.task.taskId, signal: ctx.abort.signal, now: this.#now });
+      this.#checkConfidence(ctx, w, out.writes ?? {}, ev.threshold);
       return { status: "succeeded", writes: { ...(out.writes ?? {}) }, usage: { ...ZERO_USAGE } };
     }
     // A rubric evaluator is one model call that must return a typed Verdict. Its
     // output is the primary NON-HUMAN signal the evolution loop scores on, so the
     // shape is enforced rather than parsed leniently.
-    return this.#runAgent(ctx, p, w, VERDICT_SCHEMA, ev.ref);
+    const outcome = await this.#runAgent(ctx, p, w, VERDICT_SCHEMA, ev.ref);
+    this.#checkConfidence(ctx, w, outcome.writes, ev.threshold);
+    return outcome;
+  }
+
+  /**
+   * E1 — an evaluator came back below its threshold.
+   *
+   * The run continues. A weak verdict is not a failure; it is a reason for someone to be
+   * watching what the run does with it, which is exactly what posture `on` means.
+   */
+  #checkConfidence(ctx: RunContext, w: Wave, writes: Readonly<Record<string, unknown>>, threshold: number): void {
+    for (const value of Object.values(writes)) {
+      if (isLowConfidence(value, threshold)) {
+        this.#escalate(ctx, "low_confidence", w.node.id, { threshold });
+        return;
+      }
+    }
   }
 
   // ── the agent node: a bounded ReAct loop ──────────────────────────────────
@@ -964,9 +1034,18 @@ export class Engine {
         // A replay makes no call, so it reserves nothing. Estimating against a provider
         // that is not there would be inventing a cost for work that never happens.
         reservation = ctx.policy.reserve(`node:${w.node.id}`, adapter?.estimateOf(req) ?? 0);
+        // Checked at RESERVE as well as at commit. Under reserve-worst-case, committed
+        // exposure peaks at the reservation and falls back when `settle` credits the
+        // real cost — so a check only at commit sees the trough and never fires. "80%
+        // consumed" means 80% committed, which is the number that could still be spent.
+        this.#checkBudgetWarning(ctx);
       } catch (e) {
         const le = toLoomError(e);
         if (le.code !== CODES.E_BUDGET_EXHAUSTED) throw le;
+        // E3. `gate` means the graph asked for a human rather than a failure when the
+        // money runs out — the difference between "stop, this is expensive" and "stop".
+        const action = ctx.graph.spec.policy?.onBudgetExhausted ?? "fail";
+        if (action === "gate") this.#escalate(ctx, "budget_exhausted", w.node.id);
         // Run-level, not branch-level: journal it so a join cannot absorb it and so
         // it survives a restart.
         await this.#serialize(() =>
@@ -974,7 +1053,7 @@ export class Engine {
             [
               {
                 type: "budget.exhausted",
-                payload: { scope: `run:${ctx.runId}`, limitUsd: ctx.policy.spentUsd + ctx.policy.remainingUsd, action: "fail" },
+                payload: { scope: `run:${ctx.runId}`, limitUsd: ctx.policy.spentUsd + ctx.policy.remainingUsd, action },
                 actor: SYSTEM_ACTOR("policy"),
                 taskId: w.task.taskId,
               },
@@ -1198,6 +1277,12 @@ export class Engine {
     if (!final.ok) return { content: `invalid arguments after guards:\n- ${final.errors.join("\n- ")}`, isError: true };
 
     const started = this.#now();
+    // Ordered, and recorded before the call: E5 asks what this node TRIED, and a
+    // sequence that ends in a failure is exactly the novel one worth noticing.
+    const calls = ctx.toolCalls.get(task.taskId) ?? [];
+    calls.push(tool.name);
+    ctx.toolCalls.set(task.taskId, calls);
+
     await this.#serialize(() =>
       ctx.log.append(
         [{ type: "effect.started", payload: { key, kind: "tool", attempt: 1 }, actor: SYSTEM_ACTOR("tool-executor"), taskId: task.taskId }],
@@ -1285,6 +1370,8 @@ export class Engine {
       });
       return;
     }
+
+    this.#recordEvidence(ctx, w, outcome);
 
     // A retryable failure with attempts left is rescheduled instead of committed.
     // The slot is released during the backoff, so a retry storm costs queue depth
@@ -1523,6 +1610,88 @@ export class Engine {
         },
       ],
     };
+  }
+
+  /**
+   * Update the evidence the escalation table reads, and fire E4/E5 when it warrants.
+   *
+   * Called once per committed Task, which is the only point where the outcome, the tools
+   * it used, and the channels it wrote are all known together.
+   */
+  #recordEvidence(ctx: RunContext, w: Wave, outcome: NodeOutcome): void {
+    // Also at commit: a run can drift over the line through settled spend across many
+    // cheap tasks, without any single reservation reaching it.
+    this.#checkBudgetWarning(ctx);
+
+    // E8's evidence: a channel a TOOL wrote holds output from outside the system.
+    if (w.node.type === "tool" || (w.node.type === "agent" && (w.node.agent?.tools ?? []).length > 0)) {
+      for (const channel of Object.keys(outcome.writes)) ctx.tainted.add(channel);
+    }
+
+    // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
+    // does not accumulate into an escalation.
+    const streak = ctx.streaks.record(w.node.id, outcome.status !== "failed");
+    if (streak >= 3) this.#escalate(ctx, "repeated_failure", w.node.id, { streak });
+
+    // E5 — a tool sequence never seen in a successful run of this graph.
+    //
+    // AGENT NODES ONLY. A `tool` node's tool is written in the spec: if it changed, the
+    // graph hash changed and this is a different graph. Only an agent CHOOSES its
+    // sequence at run time, so only an agent can produce one nobody has seen.
+    if (this.#sequences !== undefined && outcome.status !== "failed" && w.node.type === "agent") {
+      const names = ctx.toolCalls.get(w.task.taskId);
+      if (names !== undefined && names.length > 0) {
+        const ngram = toolNGram(names);
+        if (!this.#sequences.hasSeen(ctx.graph.graphHash, w.node.id, ngram)) {
+          this.#escalate(ctx, "novel_sequence", w.node.id, { ngram });
+        }
+      }
+    }
+    ctx.toolCalls.delete(w.task.taskId);
+  }
+
+  /**
+   * E2 — the run has consumed 80% of its budget.
+   *
+   * Fires ONCE. A rule that re-escalates on every reservation past the line would flood
+   * the journal with a fact that has not changed, and `max` makes the repeats no-ops
+   * anyway — the flood would be pure noise.
+   */
+  #checkBudgetWarning(ctx: RunContext): void {
+    // `nearLimit` lives on the PolicyEngine, which owns the arithmetic. Re-deriving the
+    // fraction here from `spentUsd + remainingUsd` was the first attempt, and it was
+    // wrong in the way re-derivations usually are: it read the numbers a moment before
+    // `settle` credited the turn's real cost, so it saw the estimate and never fired.
+    if (ctx.warnedBudget || !ctx.policy.nearLimit) return;
+    ctx.warnedBudget = true;
+    const committed = ctx.policy.spentUsd + ctx.policy.reservedUsd;
+    this.#escalate(ctx, "budget_warning", undefined, {
+      spentUsd: Number(committed.toFixed(6)),
+      remainingUsd: Number(ctx.policy.remainingUsd.toFixed(6)),
+    });
+  }
+
+  /**
+   * E7 — this run is an outlier against its own cohort.
+   *
+   * Checked at FINISH, not per task, because "this run cost 3× the p99" is a fact about
+   * the whole run. Escalating at the end still matters: the posture is durable, so a
+   * follow-up or a resumed branch inherits it, and the journal says why.
+   */
+  #checkAnomaly(ctx: RunContext, p: RunProjection): void {
+    if (this.#baseline === undefined) return;
+    const reading = detectAnomaly(this.#baseline, ctx.graph.graphHash, {
+      costUsd: p.usage.costUsd,
+      tokens: p.usage.inputTokens + p.usage.outputTokens,
+      wallMs: this.#now() - p.startedAt,
+    });
+    if (reading === undefined) return;
+    this.#escalate(ctx, "anomaly", undefined, {
+      metric: reading.metric,
+      value: reading.value,
+      p99: reading.p99,
+      ratio: Number(reading.ratio.toFixed(2)),
+    });
   }
 
   #immediateReduce(
@@ -1853,6 +2022,7 @@ export class Engine {
 
   async #finish(ctx: RunContext, p: RunProjection): Promise<void> {
     if (isTerminal(p.status)) return;
+    this.#checkAnomaly(ctx, p);
 
     // A safety net for lazy materialisation: never complete a run that still has
     // unmaterialised branches. Reaching here means a top-up was missed, and finishing
