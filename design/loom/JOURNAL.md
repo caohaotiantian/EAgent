@@ -50,9 +50,9 @@ Open threads that need resolving before the milestone they block:
 
 - **T1 (blocks M1e):** YAML→JSON conversion lives outside core. Core is JSON-only.
   The CLI will need a YAML reader; decide dep-vs-subset-parser at M2.
-- **T2 (open):** the `function` node resource loader still registers bodies in-process
-  rather than loading them from digest-addressed files. Trusted-code-only by design
-  (A13); the loader is packaging work, not a safety question.
+- **T2 (CLOSED 2026-08-05):** `resources/functions.ts` loads bodies from
+  digest-addressed resources, compiled and cached per digest. Hand-registered bodies
+  still win, so embedding and testing are unchanged.
 - **T3 (blocks M2):** `node:sqlite` is still flagged experimental in Node 24; it
   prints a warning on first use. Need to decide whether to suppress it for CLI UX.
 - **T4: RESOLVED (M2).** Branch-scoped channels are bindings keyed by branch path,
@@ -1571,4 +1571,55 @@ one place nobody thought to look — the *display* path, not the decision path.
 `Engine.openGates(runId)` returns the broker summaries, and the HTTP handler joins them
 onto the projection rows. It matters most for a `subgraph` gate, where the real question
 is in another run entirely and the projection row says only "node `delegate` is waiting".
+
+---
+
+## 2026-08-05 — T2 closed — function bodies load from digest-addressed resources
+
+**The gap.** A graph naming `function/merge@stable` only ran if someone had called
+`functions.register` by hand, in the same process. The compiler pinned the ref, the
+resolution manifest recorded its digest, and the executor ignored both — `function` was
+the one node type whose resource reference was decorative.
+
+**Compiled and cached per DIGEST, not per ref.** One digest, one compiled body, however
+it was reached. That is the pinning rule applied to code: a ref repointed at new bytes
+gets a new body, and the old one stays available to a replay that pinned it.
+
+**`node:vm` is not a sandbox, and the module says so in its own docstring.** A fresh
+context is a SCOPING mechanism: it stops a body reaching `process.env` by accident, which
+is the realistic failure for trusted code. Untrusted code goes through the subprocess
+sandbox, behind a tool manifest and a capability. `function` resources are assumption A13
+and this is packaging for that assumption, not a relaxation of it.
+
+**`Date` is bound to `undefined` on purpose.** A `function` node is a pure fold over
+channel state, and a body reading the wall clock breaks its own replay. GRAPH013 already
+refuses clock-dependent *expressions*; leaving the constructor reachable here would be an
+inconsistent seam. `ctx.now` is the injected, recorded way.
+
+**A hand-registered body WINS over a stored one.** An embedder or a test overriding a
+resource is doing so deliberately, and silently preferring the stored version would make
+the override look like it worked while doing nothing.
+
+---
+
+## 2026-08-05 — T2 — Cross-realm values, and the `.map` that did nothing
+
+**Found by `deepStrictEqual` refusing two structurally identical objects.** An object
+literal inside a `vm` context is built from THAT context's intrinsics, so `{writes: {…}}`
+coming back has a different `Object.prototype` than anything in the host. It looks
+identical, passes `typeof`, and any downstream prototype check would quietly disagree
+with itself depending on whether a body was loaded or hand-registered.
+
+`intoHostRealm` rebuilds on the way out, which makes a loaded body indistinguishable from
+a registered one and enforces at the cheapest seam what channel values must be anyway:
+plain JSON-shaped data. Anything not plain — a function, a class instance — passes
+through untouched, so the canonicalizer rejects it with its own clear message rather than
+this helper mangling it into `{}`.
+
+**The first version used `value.map(intoHostRealm)` and did nothing at all.** `map` goes
+through `ArraySpeciesCreate`, which uses the ARRAY'S OWN constructor — so mapping a
+cross-realm array produces another cross-realm array. `Array.from` is the host's, so it
+builds a host array. The test that caught it asserts on the PROTOTYPE, because
+`Array.isArray` is realm-agnostic and passes either way — which is exactly why the bug
+was invisible.
 

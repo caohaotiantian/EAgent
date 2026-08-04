@@ -107,8 +107,24 @@ export interface FunctionOutcome {
 
 export type FunctionBody = (view: StateView, ctx: FunctionContext) => Promise<FunctionOutcome> | FunctionOutcome;
 
+export interface FunctionRegistryOptions {
+  /**
+   * Loads a body a caller never registered by hand.
+   *
+   * The seam exists so `resources/functions.ts` can serve digest-addressed bodies without
+   * the registry importing the resource layer — which would make the run layer depend on
+   * the resource layer for a case most callers never use.
+   */
+  readonly loader?: (ref: string) => FunctionBody | undefined;
+}
+
 export class FunctionRegistry {
   readonly #byRef = new Map<string, FunctionBody>();
+  readonly #loader: FunctionRegistryOptions["loader"];
+
+  constructor(opts: FunctionRegistryOptions = {}) {
+    this.#loader = opts.loader;
+  }
 
   register(ref: string, body: FunctionBody): LoomDisposable {
     this.#byRef.set(ref, body);
@@ -116,7 +132,14 @@ export class FunctionRegistry {
   }
 
   get(ref: string): FunctionBody | undefined {
-    return this.#byRef.get(ref);
+    const hit = this.#byRef.get(ref);
+    if (hit !== undefined) return hit;
+    // A hand-registered body WINS over a loaded one: a test or an embedder overriding a
+    // resource is doing so deliberately, and silently preferring the stored version would
+    // make that override look like it worked while doing nothing.
+    const loaded = this.#loader?.(ref);
+    if (loaded !== undefined) this.#byRef.set(ref, loaded);
+    return loaded;
   }
 
   require(ref: string): FunctionBody {

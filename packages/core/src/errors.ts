@@ -105,6 +105,8 @@ export const CODES = {
   E_PROVIDER_BAD_REQUEST: "E_PROVIDER_BAD_REQUEST",
   E_ROUTE_INVALID: "E_ROUTE_INVALID",
   E_EXPR_INVALID: "E_EXPR_INVALID",
+  /** A resource's content is not what its kind requires. */
+  E_RESOURCE_INVALID: "E_RESOURCE_INVALID",
   E_CONFIG_INVALID: "E_CONFIG_INVALID",
   /** A cohort measured under different score weights is a different metric. */
   E_COHORT_INVALIDATED: "E_COHORT_INVALIDATED",
