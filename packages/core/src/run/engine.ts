@@ -58,6 +58,9 @@ import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from
 import { HumanGateBroker, type GateDecision, type ResolveInput } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, type PolicyEngineOptions } from "./policy.ts";
+// Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
+// would be a real module cycle.
+import type { ReplayEffects } from "./replay.ts";
 import {
   branchChain,
   collectOutputs,
@@ -93,6 +96,12 @@ export interface EngineOptions {
   /** In-flight Tasks per run. Level 2 backpressure: the fan-out edge blocks (D6.3). */
   readonly maxParallelism?: number;
   readonly policy?: Omit<PolicyEngineOptions, "onEscalate">;
+  /**
+   * Replay mode. When present, every effect is served from the journal and no tool
+   * body or model adapter is ever reached. A missing key is E_REPLAY_DIVERGENCE —
+   * a loud failure, never a silent live call.
+   */
+  readonly replay?: ReplayEffects;
 }
 
 export interface SubmitInput {
@@ -101,6 +110,15 @@ export interface SubmitInput {
   readonly idempotencyKey?: string;
   readonly workflow?: string;
 }
+
+/**
+ * Failures a join must NEVER absorb.
+ *
+ * `onBranchError: skip` means "this branch's *work* failed"; it does not mean "the
+ * run may continue past a breached budget or an invalid replay". Without this set,
+ * fixing branch-failure containment silently defeats both.
+ */
+const RUN_FATAL_CODES: ReadonlySet<string> = new Set([CODES.E_BUDGET_EXHAUSTED, CODES.E_REPLAY_DIVERGENCE]);
 
 interface Wave {
   readonly task: TaskRecord;
@@ -145,6 +163,7 @@ export class Engine {
   readonly #workerId: string;
   readonly #maxParallelism: number;
   readonly #policyOpts: Omit<PolicyEngineOptions, "onEscalate">;
+  readonly #replay: ReplayEffects | undefined;
 
   readonly #runs = new Map<RunId, RunContext>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
@@ -162,6 +181,11 @@ export class Engine {
     this.#workerId = opts.workerId ?? "worker-0";
     this.#maxParallelism = Math.max(1, opts.maxParallelism ?? 16);
     this.#policyOpts = opts.policy ?? { granted: ["*"] };
+    this.#replay = opts.replay;
+  }
+
+  get replaying(): boolean {
+    return this.#replay !== undefined;
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -227,9 +251,11 @@ export class Engine {
       if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} has no journal`);
       if (isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") return p;
 
-      // A breached budget stops the run even if Tasks remain runnable. The ladder in
-      // D6.5 (warn → degrade → gate → fail) lives in policy; this is its floor.
-      if (p.budgetExhausted) {
+      // A run-fatal failure stops the run even if Tasks remain runnable. The budget
+      // ladder in D6.5 (warn → degrade → gate → fail) lives in policy; this is its
+      // floor, shared with replay divergence.
+      const fatal = Object.values(p.tasks).some((t) => t.state === "failed" && RUN_FATAL_CODES.has(t.error?.code ?? ""));
+      if (p.budgetExhausted || fatal) {
         await this.#finish(ctx, p);
         return (await this.#project(ctx))!;
       }
@@ -711,11 +737,20 @@ export class Engine {
       );
 
       try {
-        for await (const ev of adapter.stream(req, ctx.abort.signal)) {
-          if (ev.type === "done") {
-            assistant = ev.message;
-            finish = ev.finishReason;
-            turnUsage = ev.usage;
+        if (this.#replay !== undefined) {
+          // Served, not called. `adapter.stream` is never reached, so replay makes
+          // no network request and costs nothing.
+          const rec = this.#replay.require(key) as { result: RecordedModelTurn };
+          assistant = { role: "assistant", content: rec.result.content, ...(rec.result.toolCalls === undefined ? {} : { toolCalls: rec.result.toolCalls }) };
+          finish = rec.result.finishReason;
+          turnUsage = rec.result.usage;
+        } else {
+          for await (const ev of adapter.stream(req, ctx.abort.signal)) {
+            if (ev.type === "done") {
+              assistant = ev.message;
+              finish = ev.finishReason;
+              turnUsage = ev.usage;
+            }
           }
         }
       } catch (e) {
@@ -736,12 +771,8 @@ export class Engine {
       await this.#serialize(() =>
         ctx.log.append(
           [
-            {
-              type: "effect.completed",
-              payload: { key, result: assistant?.content ?? "", resultDigest: digest(assistant?.content ?? "") },
-              actor: SYSTEM_ACTOR("agent"),
-              taskId: w.task.taskId,
-            },
+            // `*.called` BEFORE `effect.completed`: the span fold closes the effect
+            // span on `completed`, so attributes attached afterwards would be dropped.
             {
               type: "model.called",
               payload: {
@@ -751,6 +782,22 @@ export class Engine {
                 finishReason: finish,
                 usage: turnUsage,
               },
+              actor: SYSTEM_ACTOR("agent"),
+              taskId: w.task.taskId,
+            },
+            {
+              type: "effect.completed",
+              // The WHOLE turn, not just the text: replay has to reproduce tool calls
+              // and accounting, not merely the prose.
+              payload: (() => {
+                const rec: RecordedModelTurn = {
+                  content: assistant?.content ?? "",
+                  finishReason: finish,
+                  usage: turnUsage,
+                  ...(assistant?.toolCalls === undefined ? {} : { toolCalls: assistant.toolCalls }),
+                };
+                return { key, result: rec, resultDigest: digest(rec) };
+              })(),
               actor: SYSTEM_ACTOR("agent"),
               taskId: w.task.taskId,
             },
@@ -847,6 +894,11 @@ export class Engine {
 
     let result: ToolResult;
     try {
+      if (this.#replay !== undefined) {
+        // A tool body is NEVER reached on replay — that is what makes replaying a
+        // run with an irreversible action safe.
+        result = this.#replay.require(key).result as ToolResult;
+      } else {
       result = await tool.execute(final.value as Record<string, unknown>, {
         taskId: task.taskId,
         signal: ctx.abort.signal,
@@ -859,8 +911,10 @@ export class Engine {
           );
         },
       });
+      }
     } catch (e) {
       const le = toLoomError(e);
+      if (le.code === CODES.E_REPLAY_DIVERGENCE) throw le;
       await this.#serialize(() =>
         ctx.log.append(
           [{ type: "effect.failed", payload: { key, error: errorRecord(le) }, actor: SYSTEM_ACTOR("tool-executor"), taskId: task.taskId }],
@@ -874,12 +928,6 @@ export class Engine {
       ctx.log.append(
         [
           {
-            type: "effect.completed",
-            payload: { key, result: result.details ?? result.content, resultDigest: digest(result.details ?? result.content) },
-            actor: SYSTEM_ACTOR("tool-executor"),
-            taskId: task.taskId,
-          },
-          {
             type: "tool.called",
             payload: {
               key,
@@ -890,6 +938,12 @@ export class Engine {
               ok: result.isError !== true,
               ms: this.#now() - started,
             },
+            actor: SYSTEM_ACTOR("tool-executor"),
+            taskId: task.taskId,
+          },
+          {
+            type: "effect.completed",
+            payload: { key, result, resultDigest: digest(result) },
             actor: SYSTEM_ACTOR("tool-executor"),
             taskId: task.taskId,
           },
@@ -1190,7 +1244,10 @@ export class Engine {
     if (isTerminal(p.status)) return;
 
     const failed = Object.values(p.tasks).filter(
-      (t) => t.state === "failed" && t.take.length === 0 && (p.budgetExhausted || !this.#absorbedByJoin(ctx, t.nodeId)),
+      (t) =>
+        t.state === "failed" &&
+        t.take.length === 0 &&
+        (p.budgetExhausted || RUN_FATAL_CODES.has(t.error?.code ?? "") || !this.#absorbedByJoin(ctx, t.nodeId)),
     );
     if (failed.length > 0) {
       const first = failed[0]!;
@@ -1290,6 +1347,14 @@ export class Engine {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/** What one recorded model turn contains. Replay reconstructs the turn from this. */
+interface RecordedModelTurn {
+  readonly content: string;
+  readonly finishReason: string;
+  readonly usage: UsageRecord;
+  readonly toolCalls?: readonly ModelToolCall[];
+}
 
 const VERDICT_SCHEMA: JSONSchema = {
   type: "object",

@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M3 replay + spans | **done** | replay reproduces state hashes with zero side effects; reconstruct(trace) ⊆ declared | 240 tests; `test/run/replay.test.ts` (22 cases) |
 | M2 walking skeleton | **done** | all 12 rows of `08-PLAN.md` D13.3 | 218 tests; `test/run/skeleton.test.ts` — 23 cases incl. the kill -9 gate-durability test |
 
 Open threads that need resolving before the milestone they block:
@@ -462,3 +463,60 @@ every prompt. Explicit and dull beats clever here.
 **Reverses if.** A node needs to write two non-cost channels. Then the agent's
 `outputSchema` should name them and the executor should key on it; the current rule
 becomes the one-channel special case.
+
+---
+
+## 2026-08-04 — M3 — Spans are DERIVED from the journal, not emitted alongside it
+
+**Decision.** `spansFrom(events)` is a pure fold. There is no tracer hook in the
+executor, no `TraceEmitter` the engine calls, and no span state held during a run.
+
+**Why.** The usual design emits telemetry alongside execution, creating a second
+source of truth that can disagree with the first — and the disagreement always
+surfaces during an incident, when it is least affordable. Deriving spans means:
+
+- sampling can never lose something the journal has (it only drops *export*);
+- a run recorded before the tracer existed still produces a full trace;
+- `reconstruct(trace) ⊆ declared(graph)` becomes a real assertion about *execution*
+  rather than about the tracer's bookkeeping.
+
+**Cost.** Attribute ordering now matters. `effect.completed` closes an effect span, so
+`model.called` / `tool.called` must be appended BEFORE it or their attributes are
+silently dropped — which is exactly how the gen_ai-attributes test failed first. Noted
+on the emit sites.
+
+---
+
+## 2026-08-04 — M3 — Replay serves effects; it never falls back to a live call
+
+**Decision.** In replay mode `#invokeTool` and the agent's model loop are served from
+`ReplayEffects`. A tool's `execute` is never reached and `adapter.stream` is never
+called. A missing key is `E_REPLAY_DIVERGENCE`.
+
+**Why.** Falling back to a live call would make replaying a run that charged a card
+charge it again. Refusing loudly is the only safe default, and it also makes replay a
+*verification* tool: a divergence means the graph, the recording, or a reducer changed.
+
+**Tested by** three assertions that are easy to get wrong and easy to check:
+`h.writes.length` is unchanged, `h.model.seen.length` is unchanged, and `h.reads` is
+unchanged across a full replay.
+
+**Honest limits** (D9.5, unchanged): secrets are re-resolved, redacted fields serve a
+token, forks re-execute for real, and an effect that started without recording an
+outcome makes the report `hermetic: false` rather than guessing.
+
+---
+
+## 2026-08-04 — M3 — `RUN_FATAL_CODES`: what a join may never absorb
+
+**The bug.** M2 taught joins to absorb branch failures (`onBranchError: skip`). A
+replay divergence in one branch was then absorbed too, and the run sailed on to the
+gate — an invalid replay reporting a plausible result.
+
+**Decision.** `RUN_FATAL_CODES = {E_BUDGET_EXHAUSTED, E_REPLAY_DIVERGENCE}`. A Task
+failing with one of these is never absorbed and stops `advance` immediately.
+
+**Why record it.** This is the second time the same fix caused the same class of bug
+(the first was budget, during M2). "Contain branch failures" and "some failures are
+not about the branch" pull in opposite directions, and the set makes the tension
+explicit and greppable instead of rediscovering it a third time.
