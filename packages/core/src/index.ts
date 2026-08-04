@@ -39,3 +39,5 @@ export * from "./providers/http.ts";
 export * from "./providers/anthropic.ts";
 export * from "./providers/openai.ts";
 export * from "./providers/fallback.ts";
+
+export * from "./sandbox/subprocess.ts";

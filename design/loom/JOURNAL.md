@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M4c tool sandbox | **done** | a tool cannot read the engine's env, escape its jail, or outlive its timeout | 297 tests; `test/sandbox/subprocess.test.ts` (19 cases) |
 | M4b model adapters | **done** | real Anthropic/OpenAI adapters, offline via injected fetch | 278 tests; `test/providers/providers.test.ts` (24 cases) |
 | M4a retry/cancel/rewind | **done** | declared-but-ignored runtime features now implemented | 254 tests; `test/run/runtime.test.ts` (14 cases) |
 | M3 replay + spans | **done** | replay reproduces state hashes with zero side effects; reconstruct(trace) ⊆ declared | 240 tests; `test/run/replay.test.ts` (22 cases) |
@@ -645,3 +646,51 @@ only be tested by re-running whole graphs.
 `isLoomError` wrapped them and the `when` match never fired. Fixed by using the real
 `err.*` constructors — a good reminder that a hand-shaped error is not the same type,
 and that testing through the real constructor is the only version that proves anything.
+
+---
+
+## 2026-08-04 — M4c — Confinement is a different question from authorization
+
+**Decision.** `runSandboxed` exists alongside the capability layer, not instead of it.
+Capabilities answer "is this tool ALLOWED to act?"; the sandbox answers "and if it
+misbehaves, what can it reach?".
+
+**Why both.** An *allowed* tool with a bug can still read the journal file, exhaust
+memory, or run for an hour. Neither layer subsumes the other, and a design that ships
+only one always ships the first — because the first is the one that shows up in a
+threat model discussion.
+
+**v1 controls:** argv array (never a shell string), cwd jail with escape detection,
+env allowlist, SIGTERM → grace → SIGKILL on the process GROUP, output byte cap.
+`DEFERRED-v2`: seccomp/Landlock, cgroup memory limits, the egress proxy.
+
+---
+
+## 2026-08-04 — M4c — The jail check uses `path.relative`, not `startsWith`
+
+**Why it matters.** `"/jail-evil".startsWith("/jail")` is `true`. A prefix check also
+does not resolve `..` at all, so `a/../../etc/passwd` passes it. `path.relative`
+handles both, and the sibling-directory escape has its own test so the reasoning
+survives a future "simplification".
+
+---
+
+## 2026-08-04 — M4c — There is deliberately no string form for `args`
+
+**Decision.** `SandboxOptions.args` is `readonly string[]` with no string alternative,
+and `spawn` is called with `shell: false`.
+
+**Why not offer both.** A single concatenated command line is how argument injection
+happens. Offering the convenience means someone eventually takes it — usually the
+person wiring up a quick integration under deadline. The test passes `"; rm -rf ."` as
+an argv element and asserts a canary file survives.
+
+---
+
+## 2026-08-04 — M4c — Kill the process GROUP, not the process
+
+**Decision.** The child is spawned `detached` on POSIX and signalled via `-pid`.
+
+**Why.** A tool that spawns its own children (a shell script, a build) would otherwise
+leave orphans running after a timeout — holding files, ports, and memory the engine
+believes it reclaimed. Pinned by a test that ignores SIGTERM and still dies.
