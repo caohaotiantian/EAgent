@@ -1215,3 +1215,89 @@ for keeping the weight at zero.
 warns.** The failure mode being prevented is a self-improving system reporting an
 improvement it measured with a different ruler.
 
+---
+
+## 2026-08-05 — Wave D — The second workflow found four defects, as it was meant to
+
+Incident triage is the second real workflow: a router, an assertion evaluator, an error
+edge, and a compensation edge — four surfaces the skeleton and the authoring graph never
+reached together. Building it surfaced four defects, each in code that was green.
+
+**1. A branch with an error path was counted as terminated too early.** `#maybeFireJoin`
+counted a FAILED sibling as terminal. But an investigation that failed onto an error edge
+is still being handled by the quarantine node behind it — the join fired before the
+handler ran, and the recovery the error edge exists for was silently discarded. Findings
+came back 2 of 3, and the run reported success.
+
+The fix reads a declaration that was already there: `join.branches` lists every node that
+counts as part of the branch. An edge to a node OUTSIDE that set is an arrival at the
+join; an edge to a node inside it is a continuation.
+
+**2. A zero-width fan-out stranded the entire downstream graph.** Join notification rides
+on a branch Task's commit, and a width-0 fan-out has no branch Tasks — so the join was
+never notified, nothing downstream ran, and the run still reported `succeeded`. A barrier
+over zero branches is satisfied; it now fires immediately.
+
+**3. A run that produced NONE of its declared outputs reported success.** Found while
+fixing 2, and worth its own guard: `E_OUTPUT_MISSING`. "Succeeded, with nothing to show
+for it" is the plausible-wrong-answer shape this system exists to refuse. Partial outputs
+stay legal — a router arm may write only some.
+
+**4. Replay required a configured model provider.** `models.require()` ran before the
+replay branch, so an audit could not re-derive a run without the provider that produced
+it — exactly the coupling replay exists to remove. A replay now needs no adapter, reserves
+no budget (it makes no call), and takes the provider name from the record.
+
+---
+
+## 2026-08-05 — Wave D — The compiler was right twice and wrong twice
+
+Compiling a realistic graph produced six diagnostics. Two were the compiler being right
+about my modelling, and two were the compiler being wrong.
+
+**Right:** `action` was a `replace` channel written by four router arms. GRAPH010 refused
+it. The channel is now `append_ordered` — and that is better modelling anyway, because a
+run that remediated and was then rolled back took TWO actions, and one `replace` slot
+loses the rollback. Second, GRAPH011 said `remediate` had no error handling. It had a
+compensation edge, but compensation is a REWIND facility — the engine never takes a
+compensation edge on failure — so the node genuinely had none.
+
+**Wrong, and fixed:**
+
+- **GRAPH010 treated router arms as concurrent.** A router takes exactly one case, so its
+  arms are mutually exclusive by construction. Over-approximating here pushes the author
+  into a channel per arm, which is worse modelling forced by a compiler limitation.
+  `armOf` walks back through single-inbound chains — including error and compensation
+  edges, so a rollback inherits the arm of the action it undoes.
+- **GRAPH005 scoped a fan-out binding to the fan-out target only.** A node on the branch's
+  error path reads the same `signal` the investigation did. The binding is in scope for
+  the whole branch.
+- **GRAPH009 counted an `assertion` evaluator as a spender.** It is a plain function over
+  channel state. Only a `rubric` evaluator makes a model call.
+
+---
+
+## 2026-08-05 — Wave D — A run was quadratic in its own history
+
+**Measured, not guessed.** A 500-way fan-out took **1,672 ms** for 500 trivial function
+nodes. `#project` re-read and re-folded the whole journal, and it is called once per task
+and again per commit — so the fold cost grew with the journal exactly when there was most
+work left to do.
+
+`RunFolder` holds the mutable state and consumes only the tail. **1,672 ms → 126 ms.**
+
+**Two details that make it correct rather than merely fast:**
+
+1. **A rewind breaks incrementality.** `checkpoint.restored{mode:"rewind"}` suppresses
+   events that were already folded, so what earlier events mean changes retroactively.
+   The folder flags itself stale and the caller re-folds from seq 1. Rare by
+   construction; paying full cost there is not worth optimising.
+2. **`projection()` copies the top-level maps.** The join fold holds a projection across
+   commits, and it must not watch its own inputs change underneath it. Nested values stay
+   shared, as they already were — they come from event payloads, which are never mutated.
+
+**The peak-concurrency probe was measuring nothing.** It wrapped a SYNCHRONOUS function
+body, which runs to completion before any sibling starts, so it reported a peak of 1 no
+matter what the scheduler did. With an async body it reports 16 — the configured
+`maxParallelism`, which is the actual claim.
+

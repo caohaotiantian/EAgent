@@ -168,6 +168,8 @@ export const CODES = {
   E_REPLAY_DIVERGENCE: "E_REPLAY_DIVERGENCE",
   E_FLOATING_REF_AT_RUNTIME: "E_FLOATING_REF_AT_RUNTIME",
   E_TRACE_INCONSISTENT: "E_TRACE_INCONSISTENT",
+  /** A run finished without writing any declared output — a path was stranded. */
+  E_OUTPUT_MISSING: "E_OUTPUT_MISSING",
 } as const;
 
 export type Code = (typeof CODES)[keyof typeof CODES];

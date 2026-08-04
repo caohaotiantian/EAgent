@@ -67,6 +67,7 @@ import type { ReplayEffects } from "./replay.ts";
 import {
   branchChain,
   collectOutputs,
+  RunFolder,
   foldRun,
   isTerminal,
   scopeFor,
@@ -159,6 +160,8 @@ interface RunContext {
   index: GraphIndex;
   /** Nodes added by mutations so far, against `expansion.maxNodes`. */
   addedNodes: number;
+  /** Incremental projection state, so a long run does not re-fold its own history. */
+  folder: RunFolder;
   readonly log: RunLog;
   readonly policy: PolicyEngine;
   readonly abort: AbortController;
@@ -474,6 +477,7 @@ export class Engine {
       abort: new AbortController(),
       exprCache: new Map(),
       addedNodes: 0,
+      folder: new RunFolder(),
     };
     this.#runs.set(runId, ctx);
     return ctx;
@@ -528,10 +532,28 @@ export class Engine {
     );
   }
 
+  /**
+   * The run's projection, folded INCREMENTALLY.
+   *
+   * This is called once per task and again per commit, so re-reading the whole journal
+   * each time made a run quadratic in its own history — the dominant cost of a wide
+   * fan-out, where the journal is longest exactly when there is most left to do. The
+   * folder keeps the mutable state and consumes only the tail.
+   */
   async #project(ctx: RunContext): Promise<RunProjection | undefined> {
+    if (ctx.folder.stale) ctx.folder = new RunFolder();
     const events = [];
-    for await (const e of ctx.log.read(1)) events.push(e);
-    return foldRun(events);
+    for await (const e of ctx.log.read(ctx.folder.lastSeq + 1)) events.push(e);
+    ctx.folder.push(events);
+    // A rewind invalidates everything already folded, so start over from seq 1. Rare by
+    // construction, and correctness beats cleverness here.
+    if (ctx.folder.stale) {
+      ctx.folder = new RunFolder();
+      const all = [];
+      for await (const e of ctx.log.read(1)) all.push(e);
+      return foldRun(all);
+    }
+    return ctx.folder.projection();
   }
 
   /** Every journal write goes through here, one at a time, in submission order. */
@@ -878,7 +900,10 @@ export class Engine {
   ): Promise<NodeOutcome> {
     const agent = w.node.agent;
     const maxTurns = agent?.maxTurns ?? 1;
-    const adapter = this.models.require();
+    // A replay serves every turn from the journal, so it needs no provider at all.
+    // Requiring one anyway is the coupling replay exists to remove: it would mean an
+    // audit could not re-derive a run without the model that produced it configured.
+    const adapter = this.#replay === undefined ? this.models.require() : undefined;
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
 
     const allowed = new Set(agent?.tools ?? []);
@@ -933,9 +958,12 @@ export class Engine {
         tools: toolSpecs,
       };
 
+      let recordedProvider = "replay";
       let reservation;
       try {
-        reservation = ctx.policy.reserve(`node:${w.node.id}`, adapter.estimateOf(req));
+        // A replay makes no call, so it reserves nothing. Estimating against a provider
+        // that is not there would be inventing a cost for work that never happens.
+        reservation = ctx.policy.reserve(`node:${w.node.id}`, adapter?.estimateOf(req) ?? 0);
       } catch (e) {
         const le = toLoomError(e);
         if (le.code !== CODES.E_BUDGET_EXHAUSTED) throw le;
@@ -979,12 +1007,13 @@ export class Engine {
         if (this.#replay !== undefined) {
           // Served, not called. `adapter.stream` is never reached, so replay makes
           // no network request and costs nothing.
-          const rec = this.#replay.require(key) as { result: RecordedModelTurn };
+          const rec = this.#replay.require(key) as { result: RecordedModelTurn & { provider?: string } };
+          recordedProvider = rec.result.provider ?? recordedProvider;
           assistant = { role: "assistant", content: rec.result.content, ...(rec.result.toolCalls === undefined ? {} : { toolCalls: rec.result.toolCalls }) };
           finish = rec.result.finishReason;
           turnUsage = rec.result.usage;
         } else {
-          for await (const ev of adapter.stream(req, ctx.abort.signal)) {
+          for await (const ev of adapter!.stream(req, ctx.abort.signal)) {
             if (ev.type === "done") {
               assistant = ev.message;
               finish = ev.finishReason;
@@ -1016,7 +1045,7 @@ export class Engine {
               type: "model.called",
               payload: {
                 key,
-                provider: adapter.provider,
+                provider: adapter?.provider ?? recordedProvider,
                 model: req.model,
                 finishReason: finish,
                 usage: turnUsage,
@@ -1583,6 +1612,15 @@ export class Engine {
         // flight, not O(maxWidth). The branch COORDINATES are all determined —
         // `list[i]` is a pure function of the channel and the index — so nothing about
         // replay or the fold changes.
+        if (list.length === 0) {
+          // A BARRIER OVER ZERO BRANCHES IS SATISFIED. Without this the join is never
+          // notified — notification rides on a branch Task's commit, and there are no
+          // branch Tasks — so an alert with no pods strands the entire downstream graph
+          // while the run still reports success.
+          events.push(...this.#fireEmptyJoin(ctx, e, w.task.branch));
+          continue;
+        }
+
         const firstWave = Math.min(list.length, this.#maxParallelism);
         for (let i = 0; i < firstWave; i++) {
           events.push(this.#branchReady(e, w.task.branch, i, list[i]));
@@ -1591,7 +1629,7 @@ export class Engine {
       }
 
       if (e.kind === "join") {
-        const fired = this.#maybeFireJoin(ctx, p, w, e, selfStatus);
+        const fired = this.#maybeFireJoin(ctx, p, w, e, selfStatus, take);
         if (fired !== undefined) events.push(fired);
         continue;
       }
@@ -1619,7 +1657,7 @@ export class Engine {
     // never come.
     for (const e of ctx.index.outbound.get(w.node.id) ?? []) {
       if (e.kind !== "join" || take.includes(e.id)) continue;
-      const fired = this.#maybeFireJoin(ctx, p, w, e, selfStatus);
+      const fired = this.#maybeFireJoin(ctx, p, w, e, selfStatus, take);
       if (fired !== undefined) events.push(fired);
     }
     return events;
@@ -1639,6 +1677,30 @@ export class Engine {
       if (mode === "skip" || mode === "compensate") return true;
     }
     return false;
+  }
+
+  /**
+   * Schedule the join behind a fan-out that planned zero branches.
+   *
+   * The join runs at the PARENT branch with no contributions, which is exactly what an
+   * empty fold means: `findings` stays at its initial value and the verdict downstream
+   * reads "no evidence" rather than the graph quietly stopping.
+   */
+  #fireEmptyJoin(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): NewEvent[] {
+    const events: NewEvent[] = [];
+    for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
+      if (e.kind !== "join") continue;
+      if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
+      const id = makeTaskId(e.to, parent, 0);
+      if (events.some((x) => x.taskId === id)) continue;
+      events.push({
+        type: "task.ready",
+        payload: { nodeId: e.to, branchPath: encodeBranch(parent), edgesIn: [e.id] },
+        actor: SYSTEM_ACTOR("scheduler"),
+        taskId: id,
+      });
+    }
+    return events;
   }
 
   /** One branch Task of a fan-out, at a determined coordinate. */
@@ -1712,6 +1774,7 @@ export class Engine {
     w: Wave,
     edge: EdgeSpec,
     selfStatus: "succeeded" | "failed",
+    take: readonly EdgeId[] = [],
   ): NewEvent | undefined {
     const joinNode = ctx.index.byId.get(edge.to);
     const join = joinNode?.join;
@@ -1739,10 +1802,25 @@ export class Engine {
     // counting it twice — once as still-running and once as finished.
     const isTerminalState = (s: string): boolean =>
       s === "succeeded" || s === "failed" || s === "skipped" || s === "cancelled";
+
+    // A Task that HANDED OFF within the join's own branch set has not terminated its
+    // branch: an investigation that failed onto an error edge is still being handled by
+    // the quarantine node behind it. Counting it as terminal fires the barrier before
+    // the handler has run, and the recovery it exists for is silently discarded.
+    //
+    // `join.branches` already carries this: an edge to a node NOT in that set is an
+    // arrival at the join; an edge to a node inside it is a continuation.
+    const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
+      (t.taskId === w.task.taskId ? take : t.take).some((id) => {
+        const to = ctx.index.edgeById.get(id as EdgeId)?.to;
+        return to !== undefined && join.branches.includes(to);
+      });
+
     let succeeded = 0;
     let terminal = 0;
     for (const t of siblings) {
       const state = t.taskId === w.task.taskId ? selfStatus : t.state;
+      if (continuesInBranch(t)) continue;
       if (state === "succeeded") succeeded++;
       if (isTerminalState(state)) terminal++;
     }
@@ -1832,11 +1910,38 @@ export class Engine {
       return;
     }
 
+    // A run that produced NONE of its declared outputs did not succeed, whatever the
+    // Task states say. Reaching here means a path was stranded — and "succeeded, with
+    // nothing to show for it" is the plausible-wrong-answer shape this system exists to
+    // refuse. Partial outputs are allowed (a router arm may legitimately write only
+    // some); producing not one of them is not.
+    const outputs = collectOutputs(p, ctx.graph.spec);
+    const declared = ctx.graph.spec.outputs;
+    if (declared.length > 0 && Object.keys(outputs).length === 0) {
+      await this.#serialize(() =>
+        ctx.log.append([
+          {
+            type: "run.failed",
+            payload: {
+              error: {
+                class: "internal",
+                code: CODES.E_OUTPUT_MISSING,
+                message: `run finished without writing any of its declared outputs (${declared.join(", ")})`,
+                retryable: false,
+              },
+            },
+            actor: SYSTEM_ACTOR("executor"),
+          },
+        ]),
+      );
+      return;
+    }
+
     await this.#serialize(() =>
       ctx.log.append([
         {
           type: "run.completed",
-          payload: { outputs: collectOutputs(p, ctx.graph.spec), usage: p.usage },
+          payload: { outputs, usage: p.usage },
           actor: SYSTEM_ACTOR("executor"),
         },
       ]),

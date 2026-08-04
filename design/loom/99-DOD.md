@@ -60,7 +60,7 @@ remains as documented in the original matrix above the fold.
 | Requirement | Status | Where |
 |---|---|---|
 | L1 streaming reconciliation after reconnect | **PROVEN** | `Last-Event-ID` resumes at `seq+1`, contiguous; out-of-window yields a `snapshot` frame. `test/server/http.test.ts` |
-| L1 500-node rendering | **PARTIAL** | Renderer implemented: compiler layout ranks, collapsed fan-out, 60 ms coalescing, structure cached by hash. Unmeasured at 500 nodes |
+| L1 500-node rendering | **PARTIAL** | Measured at 500 nodes / 4,900 edges: compile 61 ms, 500 exact layout ranks, 485 KiB one-time snapshot, 10k-event fold 3 ms, 500-way fan-out 126 ms at peak concurrency 16. `test/scale.test.ts`. Browser paint remains unmeasured — the console is an HTML string, so it cannot be timed from Node |
 | L1 gate surfacing / routing / escalation | **PARTIAL** | Surfaced in the console, listed and resolved over HTTP and CLI, and a rejection requires a reason. Delivery channels and SLA sweep are implemented in the broker but untested against a real channel |
 | L2 what is durable at ACK | **PROVEN** | The 202 body names the durable set; a test asserts the journal contains it |
 | L2 idempotency keys | **PROVEN** | Duplicate submit returns the original `runId` and creates nothing |
@@ -90,8 +90,8 @@ remains as documented in the original matrix above the fold.
 
 ## What is left before this is a product
 
-1. **A second real workflow end to end** and the 500-node rendering measurement — the
-   skeleton and the authoring graph each found defects the other structurally could not.
+1. **Browser paint at 500 nodes** — everything upstream of it is measured; the render
+   itself needs a headless browser the zero-dep rule keeps out of this package.
 2. **Gate delivery channels** — the broker is built and tested; no real channel is wired.
 3. **Retention tiering** (L5) — designed, unbuilt.
 4. **Distributed swap** (G3) — deliberately deferred; the interfaces are shaped for it.

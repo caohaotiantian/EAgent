@@ -524,10 +524,14 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
   // A fanout edge introduces its item channel into the target's scope.
   const fanoutItems = new Map<NodeId, Set<string>>();
   for (const e of spec.edges) {
-    if (e.kind === "fanout" && e.as !== undefined) {
-      const set = fanoutItems.get(e.to) ?? new Set<string>();
+    if (e.kind !== "fanout" || e.as === undefined) continue;
+    // The binding is in scope for the whole BRANCH, not only for the fan-out target.
+    // A node on the branch's error path reads the same `signal` the investigation did —
+    // scoping the item to one node would make every realistic error handler warn.
+    for (const id of [e.to, ...descendants(e.to, spec)]) {
+      const set = fanoutItems.get(id) ?? new Set<string>();
       set.add(e.as);
-      fanoutItems.set(e.to, set);
+      fanoutItems.set(id, set);
     }
   }
 
@@ -798,7 +802,13 @@ function rule009And018Budgets(
     const perNode = n.policy?.budget?.costUsd;
     if (perNode === undefined) {
       // Only model-spending node types can consume budget without declaring it.
-      if (n.type === "agent" || n.type === "evaluator" || n.type === "subgraph") unbudgeted.push(n.id);
+      // An `assertion` evaluator is a plain function over channel state — no model
+      // call, so no spend. Only a `rubric` evaluator can consume budget.
+      const spends =
+        n.type === "agent" ||
+        n.type === "subgraph" ||
+        (n.type === "evaluator" && n.evaluator?.kind === "rubric");
+      if (spends) unbudgeted.push(n.id);
       continue;
     }
     declaredTotal += perNode * instances;
@@ -872,6 +882,15 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
         const b = writers[j]!;
         const related = (idx.ancestors.get(a)?.has(b) ?? false) || (idx.ancestors.get(b)?.has(a) ?? false);
         if (related) continue; // sequential — last write is well-defined
+        // A compensation node runs only after its target failed, so the two are ordered
+        // even though `ancestors` deliberately excludes compensation edges (a rollback
+        // must not become an entry node or inherit a layout rank).
+        if (compensationOrdered(spec, idx, a, b)) continue;
+        // Different arms of one router cannot both run: a router takes exactly one
+        // case. Without this, every branch-and-merge graph is unbuildable — the author
+        // is pushed into a per-arm channel per arm, which is worse modelling forced by
+        // an over-approximation.
+        if (routerExclusive(spec, idx, a, b)) continue;
         d.push({
           severity: "error",
           code: "GRAPH010_CONCURRENT_WRITE",
@@ -884,6 +903,68 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
       }
     }
   }
+}
+
+/** Nodes reachable from `from` over forward edges. */
+function descendants(from: NodeId, spec: GraphSpec): NodeId[] {
+  const out = new Set<NodeId>();
+  const stack: NodeId[] = [from];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const e of spec.edges) {
+      if (e.from !== id || e.kind === "loop" || out.has(e.to)) continue;
+      out.add(e.to);
+      stack.push(e.to);
+    }
+  }
+  out.delete(from);
+  return [...out];
+}
+
+/** True when one of the two nodes exists only to undo work the other did. */
+function compensationOrdered(spec: GraphSpec, idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  const ordered = (comp: NodeId, target: NodeId): boolean =>
+    spec.edges.some(
+      (e) =>
+        e.kind === "compensation" &&
+        e.to === comp &&
+        (e.compensates === target || (idx.ancestors.get(comp)?.has(target) ?? false) || e.from === target),
+    );
+  return ordered(a, b) || ordered(b, a);
+}
+
+/**
+ * The router arm a node sits on, if any.
+ *
+ * Walks back through single-inbound chains — including error and compensation edges, so
+ * a rollback inherits the arm of the action it undoes. Returns `undefined` at any node
+ * with two or more ways in, because then the node is a merge point and no single arm
+ * dominates it. Deliberately conservative: it never *adds* exclusivity it cannot prove.
+ */
+function armOf(spec: GraphSpec, node: NodeId): { router: NodeId; edge: EdgeId } | undefined {
+  const seen = new Set<NodeId>();
+  let current = node;
+  for (;;) {
+    if (seen.has(current)) return undefined;
+    seen.add(current);
+    const inbound = spec.edges.filter((e) => e.to === current && e.kind !== "loop");
+    if (inbound.length !== 1) return undefined;
+    const edge = inbound[0]!;
+    const from = spec.nodes.find((x) => x.id === edge.from);
+    if (from?.type === "router") return { router: from.id, edge: edge.id };
+    current = edge.from;
+  }
+}
+
+function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  const armA = armOf(spec, a);
+  const armB = armOf(spec, b);
+  if (armA === undefined || armB === undefined || armA.router !== armB.router) return false;
+  if (armA.edge === armB.edge) return false;
+  const router = spec.nodes.find((x) => x.id === armA.router)?.router;
+  if (router === undefined) return false;
+  // Two edges in the SAME case fire together; two edges in different cases never do.
+  return !router.cases.some((c) => c.take.includes(armA.edge) && c.take.includes(armB.edge));
 }
 
 // ── GRAPH011 + GRAPH012 ──────────────────────────────────────────────────────

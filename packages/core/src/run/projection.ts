@@ -181,6 +181,107 @@ interface MutableProjection {
  * unexpected log is a projection that cannot be used to diagnose the incident that
  * produced the log.
  */
+/**
+ * An INCREMENTAL fold.
+ *
+ * The naive `foldRun` re-reads the whole journal, which the executor called once per
+ * task — quadratic in a run's own history, and the dominant cost of a 500-branch
+ * fan-out. Holding the mutable state and applying only the new tail makes it linear.
+ *
+ * A REWIND breaks incrementality: `checkpoint.restored{mode:"rewind"}` suppresses events
+ * that were already folded, so what earlier events mean changes retroactively. The
+ * folder detects that and asks the caller to start over, which is correct and rare —
+ * paying a full re-fold on a rewind is not a cost worth optimising.
+ */
+export class RunFolder {
+  #p: MutableProjection | undefined;
+  #lastSeq = 0;
+  #stale = false;
+
+  /** The highest seq folded so far. Read the journal from `lastSeq + 1`. */
+  get lastSeq(): number {
+    return this.#lastSeq;
+  }
+
+  /** True once a rewind marker arrived: discard this folder and fold from seq 1. */
+  get stale(): boolean {
+    return this.#stale;
+  }
+
+  push(events: Iterable<JournalEvent>): void {
+    for (const e of events) {
+      if (e.seq <= this.#lastSeq) continue;
+      if (isEvent(e, "checkpoint.restored") && e.payload.mode === "rewind") {
+        this.#stale = true;
+        return;
+      }
+      this.#p ??= emptyProjection(e);
+      this.#p.seq = e.seq;
+      this.#lastSeq = e.seq;
+      apply(this.#p, e);
+    }
+  }
+
+  /**
+   * A snapshot.
+   *
+   * The top-level maps are COPIED. A caller that holds a projection across a commit —
+   * the join fold does exactly that — must not watch its own inputs change underneath
+   * it. Nested values are shared, as they already were: they come from event payloads,
+   * which are never mutated.
+   */
+  projection(): RunProjection | undefined {
+    return this.#p === undefined ? undefined : freeze(this.#p);
+  }
+}
+
+function emptyProjection(e: JournalEvent): MutableProjection {
+  return {
+    runId: e.runId,
+    graphHash: "",
+    status: "queued",
+    seq: 0,
+    startedAt: e.ts,
+    posture: "out",
+    channels: {},
+    bindings: {},
+    tasks: {},
+    gates: {},
+    usage: { ...ZERO_USAGE },
+    reservedUsd: 0,
+    outputs: {},
+    openEffects: new Set(),
+    everStarted: new Set(),
+    budgetExhausted: false,
+    fanouts: {},
+  };
+}
+
+function freeze(p: MutableProjection): RunProjection {
+  return {
+    runId: p.runId,
+    graphHash: p.graphHash,
+    status: p.status,
+    seq: p.seq,
+    startedAt: p.startedAt,
+    posture: p.posture,
+    channels: { ...p.channels },
+    bindings: { ...p.bindings },
+    tasks: { ...p.tasks },
+    gates: { ...p.gates },
+    usage: { ...p.usage },
+    reservedUsd: p.reservedUsd,
+    outputs: { ...p.outputs },
+    unknownEffects: [...p.openEffects].sort(),
+    startedEffects: [...p.everStarted].sort(),
+    budgetExhausted: p.budgetExhausted,
+    fanouts: { ...p.fanouts },
+    ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
+    ...(p.error === undefined ? {} : { error: p.error }),
+    ...(p.suspendedReason === undefined ? {} : { suspendedReason: p.suspendedReason }),
+  };
+}
+
 export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefined {
   let p: MutableProjection | undefined;
 
@@ -192,53 +293,12 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
 
   for (const e of all) {
     if (suppressed.some(([from, to]) => e.seq > from && e.seq < to)) continue;
-    p ??= {
-      runId: e.runId,
-      graphHash: "",
-      status: "queued",
-      seq: 0,
-      startedAt: e.ts,
-      posture: "out",
-      channels: {},
-      bindings: {},
-      tasks: {},
-      gates: {},
-      usage: { ...ZERO_USAGE },
-      reservedUsd: 0,
-      outputs: {},
-      openEffects: new Set(),
-      everStarted: new Set(),
-      budgetExhausted: false,
-      fanouts: {},
-    };
+    p ??= emptyProjection(e);
     p.seq = e.seq;
     apply(p, e);
   }
 
-  if (p === undefined) return undefined;
-  const out: RunProjection = {
-    runId: p.runId,
-    graphHash: p.graphHash,
-    status: p.status,
-    seq: p.seq,
-    startedAt: p.startedAt,
-    posture: p.posture,
-    channels: p.channels,
-    bindings: p.bindings,
-    tasks: p.tasks,
-    gates: p.gates,
-    usage: p.usage,
-    reservedUsd: p.reservedUsd,
-    outputs: p.outputs,
-    unknownEffects: [...p.openEffects].sort(),
-    startedEffects: [...p.everStarted].sort(),
-    budgetExhausted: p.budgetExhausted,
-    fanouts: p.fanouts,
-    ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
-    ...(p.error === undefined ? {} : { error: p.error }),
-    ...(p.suspendedReason === undefined ? {} : { suspendedReason: p.suspendedReason }),
-  };
-  return out;
+  return p === undefined ? undefined : freeze(p);
 }
 
 /** `(checkpointSeq, markerSeq)` exclusive ranges hidden by a rewind. */
