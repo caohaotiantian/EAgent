@@ -19,6 +19,10 @@ rejects, and what would reverse it.
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
 | M8 intervention window | **done** | an interrupt mid-window means the effect never starts | 407 tests; `test/run/oversight.test.ts` (20 cases) |
+| Scheduler seam (G3 partial) | **done** | one conformance suite over two schedulers; the executor takes one | 716 tests; `test/run/scheduler.test.ts` (23 cases) |
+| P5 layout extraction | **done** | 500 nodes lay out in 0.95 ms; the console computes no positions | 693 tests; `test/server/layout.test.ts` (14 cases) |
+| T1/T2/T3 open threads | **done** | YAML subset, digest-addressed function loader, sqlite guard | 676 tests; `test/graph/yaml.test.ts` (26) + `test/resources/functions.test.ts` (19) |
+| P1 subgraph execution | **done** | every node type the compiler accepts now runs | 630 tests; `test/run/subgraph.test.ts` (12 cases) |
 | Wave G escalation table | **done** | all ten E-rules wired; every rule tightens and names itself | 618 tests; `test/run/escalation.test.ts` (31 cases) + `test/docs-drift.test.ts` |
 | Wave F retention tiering | **done** | a run rebuilt from cold storage alone still replays; a cold-retention cut leaves audit intact | 568 tests; `test/journal/retention.test.ts` (22 cases) |
 | Wave E gate delivery | **done** | delivery failure never auto-approves; the escalation clock resets per tier | 546 tests; `test/run/delivery.test.ts` (20 cases) |
@@ -40,13 +44,19 @@ rejects, and what would reverse it.
 | M3 replay + spans | **done** | replay reproduces state hashes with zero side effects; reconstruct(trace) ⊆ declared | 240 tests; `test/run/replay.test.ts` (22 cases) |
 | M2 walking skeleton | **done** | all 12 rows of `08-PLAN.md` D13.3 | 218 tests; `test/run/skeleton.test.ts` — 23 cases incl. the kill -9 gate-durability test |
 
-**Every non-deferred item in `99-DOD.md` is now PROVEN.** What remains is two things, both
-blocked by a stated constraint rather than by effort: browser paint at 500 nodes (the
-console is an HTML string, and measuring its render needs a headless browser the zero-dep
-rule keeps out of this package) and the distributed scheduler swap, G3, which is a
-deliberate v2 deferral with the interfaces already shaped for it.
+**Every open thread is closed and every non-deferred DoD item is PROVEN.** What remains is
+three things, each blocked by a stated constraint rather than by effort:
 
-Open threads that need resolving before the milestone they block:
+1. **Browser paint at 500 nodes.** Layout is now measured at 0.95 ms and the console
+   provably computes no positions; the paint itself needs a headless browser the zero-dep
+   rule keeps out of this package.
+2. **Partition assignment (G3).** Selection is now a seam with two implementations passing
+   one conformance suite. Deciding *which runs a worker considers* needs a coordinator,
+   and half a coordinator is worse than none.
+3. **seccomp/cgroups.** Platform-specific, deliberately `DEFERRED-v2`; subprocess
+   confinement is built and tested.
+
+Open threads that needed resolving before the milestone they blocked — all now closed:
 
 - **T1 (CLOSED 2026-08-05):** `graph/yaml.ts` is a restricted subset parser, zero-dep.
   Core is still JSON-only — YAML converts at the CLI boundary and never reaches a digest.
