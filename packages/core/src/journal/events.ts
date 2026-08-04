@@ -16,6 +16,9 @@
 
 import type { LoomError } from "../errors.ts";
 import type { NodeId, RunId, Seq, TaskId, GateId, CheckpointId } from "../ids.ts";
+import type { Classification, Posture, UsageRecord } from "../vocab.ts";
+
+export type { Classification, Posture, UsageRecord };
 
 // ---------------------------------------------------------------------------
 // Actors
@@ -36,25 +39,10 @@ export type Actor =
 
 export const SYSTEM_ACTOR = (component: string): Actor => ({ kind: "system", component });
 
-/** Drives redaction at write time (D9.6). `secret_ref` payloads carry refs, never values. */
-export type Classification = "public" | "internal" | "pii" | "secret_ref";
-
-export type Posture = "out" | "on" | "in";
-
 export type TaskStatus = "succeeded" | "failed" | "skipped" | "cancelled";
 
 /** Recorded outcome of an effect. `unknown` is the honest third case (D6.1). */
 export type EffectOutcome = "completed" | "failed" | "unknown";
-
-export interface UsageRecord {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheReadTokens?: number;
-  readonly cacheWriteTokens?: number;
-  readonly reasoningTokens?: number;
-  readonly costUsd: number;
-  readonly wallMs: number;
-}
 
 /** A LoomError flattened for the log: no stack, no cause chain. */
 export interface ErrorRecord {

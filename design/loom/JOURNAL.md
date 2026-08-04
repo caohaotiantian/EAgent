@@ -15,8 +15,8 @@ rejects, and what would reverse it.
 | M0 scaffold + CI | **done** | `npm run check` green offline, no runtime deps | 32 tests, both guards pass |
 | M1a ids/errors/canonical | **done** | branch order total; digests stable; codes unique | `packages/core/test/{ids,canonical,errors}.test.ts` |
 | M1b journal StateStore | **done** | racing appends → exactly one lands | 76 tests; one conformance suite passes against both memory and SQLite stores |
-| M1c EventBus | pending | slow subscriber cannot stall the producer | — |
-| M1d channels + reducers | pending | fold order independent of arrival order | — |
+| M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
+| M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | pending | incident-triage compiles; every rule has a negative test | — |
 | M2 walking skeleton | pending | all 12 rows of `08-PLAN.md` D13.3 | — |
 
@@ -187,3 +187,77 @@ reviewable diff in one file.
 
 **Cost.** Payload shapes will churn during M2 as the executor lands. That churn is the
 point — it happens in one place and the compiler finds every fold that must change.
+
+---
+
+## 2026-08-04 — M1c/M1d — `src/vocab.ts`, forced by TS2308
+
+**What happened.** `Classification` ended up declared in both `journal/events.ts` and
+`state/channels.ts`, and the barrel's `export *` hit TS2308 (ambiguous re-export).
+Worth recording because the *silent* version of this bug is worse: under plain ES
+semantics an ambiguous star export is excluded rather than reported, so the type would
+simply have vanished from the public surface with no error.
+
+**Decision.** Cross-cutting value types live in `src/vocab.ts`, a leaf module with no
+imports of its own: `Posture` + the lattice helpers, `IrreversibilityClass` and its
+default-posture map, `Classification`, `UsageRecord`.
+
+**Why here.** The journal must not import the policy engine and the channel model must
+not import the journal, but all three speak these words. A leaf module is the only
+place that does not create a cycle.
+
+**Bonus.** `maxPosture` / `isLoosening` now exist as functions rather than as prose in
+D7.6, so the asymmetry rule is enforceable by a call rather than by review.
+
+---
+
+## 2026-08-04 — M1c — The bus is allowed to lose data; the journal is not
+
+**Decision.** `publish` never throws and never blocks. A subscriber that cannot keep
+up has its own bounded queue trimmed (`drop_oldest` | `drop_newest` | `close`) and
+counts its own `dropped`.
+
+**Why.** The inversion that makes this safe is that the bus is *derived*. Anything a
+subscriber misses is still in the journal, and `replayThenTail` gets it back
+gap-free. If `publish` applied back-pressure, a stalled browser tab could wedge
+production execution — which is the exact class of failure this system exists to
+remove.
+
+**Test.** "one slow subscriber cannot stall a fast one": queue sizes 1 and 100, five
+events; the fast subscriber sees all five and the slow one reports `dropped === 4`.
+
+---
+
+## 2026-08-04 — M1c — `replayThenTail` subscribes BEFORE it reads
+
+**Decision.** Subscribe to live events first, then read the journal, then emit journal
+events followed by live ones with `seq <= lastReplayed` filtered out.
+
+**Why.** The obvious order (read, then subscribe) drops everything appended during the
+read. Subscribing first creates a deliberate overlap, and the dedupe by `seq` turns
+that overlap into a guarantee rather than a duplicate-delivery bug. This is the exact
+path a reconnecting UI takes with `Last-Event-ID`.
+
+---
+
+## 2026-08-04 — M1d — `max`/`min` seed from the first contribution, not an identity
+
+**Decision.** `initialFor` returns `undefined` for `max`/`min`; the first contribution
+in branch order seeds the accumulator.
+
+**Why.** There is no safe identity element. Seeding `max` at 0 silently returns 0 for
+an all-negative channel, and ±Infinity is deliberately not representable in the
+canonical form (it would break digests). Seeding from the first element is total and
+needs no sentinel.
+
+---
+
+## 2026-08-04 — M1d — `merge_object` errors on conflict by default
+
+**Decision.** Two concurrent branches writing different values to the same key throws,
+unless the channel declares `onConflict: "last_by_branch"`.
+
+**Why.** A silent last-writer-wins here is the same class of bug as `replace` under
+concurrency: deterministic (branch order is fixed) but arbitrary, and the author never
+said which branch should win. Making them say it costs one line of YAML and removes a
+whole category of "why did that field have the other value?" investigations.

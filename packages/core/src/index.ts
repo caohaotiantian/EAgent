@@ -7,6 +7,7 @@
  * minimalism guard, corrected".)
  */
 
+export * from "./vocab.ts";
 export * from "./ids.ts";
 export * from "./errors.ts";
 export * from "./canonical.ts";
@@ -15,3 +16,6 @@ export * from "./journal/events.ts";
 export * from "./journal/store.ts";
 export * from "./journal/memory.ts";
 export * from "./journal/sqlite.ts";
+
+export * from "./state/channels.ts";
+export * from "./bus.ts";
