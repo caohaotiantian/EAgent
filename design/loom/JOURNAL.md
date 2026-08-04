@@ -18,6 +18,7 @@ rejects, and what would reverse it.
 | M1c EventBus | **done** | slow subscriber cannot stall the producer | `test/bus.test.ts` — one slow + one fast subscriber, fast sees all 5 |
 | M1d channels + reducers | **done** | fold order independent of arrival order | `test/state/channels.test.ts` — every reducer folded forward and reversed |
 | M1e GraphCompiler | **done** | incident-triage compiles; every rule has a negative test | 195 tests; `test/graph/compile.test.ts` (49 cases) + `expr.test.ts` (30) |
+| M5a control plane | **done** | HTTP surface with gap-free SSE reconnect | 346 tests; `test/server/http.test.ts` (17 cases, real sockets) |
 | M6 resources + eval gate | **done** | pinning rule proven; promotion criteria enforced | 329 tests; `test/resources/store.test.ts` (17) + `test/evolution/gate.test.ts` (15) |
 | M4c tool sandbox | **done** | a tool cannot read the engine's env, escape its jail, or outlive its timeout | 297 tests; `test/sandbox/subprocess.test.ts` (19 cases) |
 | M4b model adapters | **done** | real Anthropic/OpenAI adapters, offline via injected fetch | 278 tests; `test/providers/providers.test.ts` (24 cases) |
@@ -48,8 +49,12 @@ Open threads that need resolving before the milestone they block:
 - **T8 (blocks M4b):** `fork` mode on rewind is unimplemented — only `rewind`. Fork
   needs a new runId plus a re-execution policy for effects, which is genuinely
   different from replay (it re-executes for real).
-- **T9 (blocks M5):** no HTTP surface yet. `ControlPlaneAPI` / `RunEventStream` are
-  designed (D3.17–18) but the engine is only reachable in-process.
+- **T9: RESOLVED (M5a).** `ControlPlane` serves the run lifecycle, gates, commands,
+  and a gap-free SSE stream over `node:http` — no framework, so zero-dep holds.
+- **T10 (blocks GA):** no CLI yet, so "boots as a single binary with an empty data
+  directory" (DoD item 6) is still UNPROVEN.
+- **T11 (blocks M5b):** no web console. The control plane is the contract it will
+  consume; the graph canvas and oversight queue are the remaining L1 work.
 
 ---
 
@@ -750,3 +755,42 @@ the evolution engine. An optimiser that writes its own exam will pass it. `valid
 enforces the shape a suite needs to certify anything — including a minimum number of
 FAILURE cases, because a suite of only happy paths certifies only that the happy path
 still works.
+
+---
+
+## 2026-08-04 — M5a — The 202 body says what is durable
+
+**Decision.** `POST /runs` responds `202` with
+`{runId, graphHash, durable: ["run.submitted","run.compiled"], note: "accepted means
+this WILL run, not that it HAS run"}`.
+
+**Why put it in the payload.** Every client eventually treats a 2xx as "it happened".
+Naming the durable set in the response makes the contract impossible to misread
+without ignoring it on purpose, and it gives a test something to assert. The companion
+test then checks the journal really does contain those events the moment the client is
+told 202.
+
+---
+
+## 2026-08-04 — M5a — Out-of-window reconnect gets a SNAPSHOT, never a silent gap
+
+**Decision.** `Last-Event-ID` within `hotWindow` replays from `seq+1`. Outside it, the
+client receives one `snapshot` frame and then the live tail.
+
+**Why the distinction is explicit.** A client that silently misses events renders a
+wrong graph and has no way to know. Sending a differently-named frame means the client
+can tell "this is a continuation" from "this is a fresh baseline" without inferring it
+from sequence arithmetic. Tested both ways, including that resumed ids are contiguous
+from `lastEventId + 1`.
+
+---
+
+## 2026-08-04 — M5a — 401 before routing
+
+**Decision.** Authorization runs before route matching, so an unauthenticated caller
+gets `401` even for a path that does not exist.
+
+**Why.** Returning `404` for unknown routes and `401` for known ones tells an
+unauthenticated caller which routes exist. The token comparison is `timingSafeEqual`
+over a padded buffer for the same reason — a length-sensitive or early-exit compare
+leaks the token one byte at a time.
