@@ -2538,3 +2538,53 @@ partial spans rather than twelve edits.
 to a scan whose real property is "this boundary splits an append whose tail carries the run's
 status transition"; the day `JournalEvent` can say which append it belonged to, that scan
 becomes one structural check and three special cases go away.
+
+## 2026-08-06 — Fail-open — The second review, and the two assertions that could not fail
+
+**Context.** The phase 2–5 diff went through the same two-reviewer, one-skeptic-per-finding
+pass as phase 1. 20 findings, **17 refuted** — two of them shown byte-identical to the base
+commit (`providers/http.ts` is literally the same blob), one whose claimed observable did not
+reproduce when driven.
+
+**The three that survived, and what each says.**
+
+**`toLoomError` could not tell "threw" from "absent".** `readOwn` collapses both to
+`undefined`. That is correct where the answer is only ever rendered and wrong where it
+decides whether the VALUE may be passed on: a forged error whose `class`, `code` and
+`message` all answered and whose only trap was on `details` was indistinguishable from one
+with no `details`, so it went through by identity with the trap live — and `errorRecord`
+reads `e.details` and `e.retryable` bare into a journal payload. **The question a boundary
+has to ask is not "did this answer for me" but "will it answer for the next reader",** and
+that is what makes a field the function never uses part of its check.
+
+**Two of this wave's own assertions were inert.** The bus test capped each collector at two
+entries, so `notDeepEqual(a, [1,2,3,4])` was a tautology that a perfectly fan-out bus would
+also satisfy. The `shouldExport` half of A18's `runId` fix was never executed, because
+`shouldExport` returns at `ratio >= 1` six lines above the read and the test passed
+`headRatio: 1`. **Both were written in the same wave that added a mutation sweep, by the
+person running it.** A sweep only kills what it mutates: neither line was covered by a
+mutation because neither guard looked like a guard.
+
+**And verifying a finding beat accepting it.** The `slaMs` finding was REFUTED by its
+skeptic, and the underlying defect was real anyway — reproducing it myself found a worse
+shape than the reviewer named: `raisedAt + "1000"` CONCATENATES, giving a deadline ~10^10 ms
+out on a gate an operator believed had a 1 s SLA, while `NaN` threw an untyped
+`CanonicalizationError` out of a public method. `raise` is `#deadlineOf`'s HIGHEST-authority
+source and the previous wave had guarded only the lowest.
+
+**The recurring shape, now four times in two waves.** A19: guarded the write, not the read.
+A14: fixed the slice construction, not the two readers. A12: guarded `rehydrate`, not
+`raise`. A18: refused to spread the container, then passed it to a caller that walked it.
+Each time the fix was correct and the SET it applied to was short. **The habit that finds
+these is not "make the reads total" — it is "name every site that touches this value, and
+write the list into the claim."**
+
+**Rejected.** Fail-closing `class` to `internal` whenever ANY field is trapped. It reads as
+the safe direction and is not: `class` decides the HTTP status and the retry policy, so an
+unrelated `details` trap would turn a real 403 into a 500. The trapped field is dropped and
+the fields that spoke are carried across.
+
+**Reverses when.** `Channel` grows per-consumer cursors. The single-consumer contract is
+documented and pinned rather than enforced, and no one-line mutation can express fan-out —
+so the day that changes, `A SUBSCRIPTION IS ONE CONSUMER'S CHANNEL` is the test to change
+deliberately rather than a test to notice failing.

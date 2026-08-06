@@ -16,9 +16,27 @@ confirmed ones are closed: **A19, A7, A6, A10, A14, A12's residue, A1, A16** and
 quiet reads of **A18**. Each fix was then reviewed by two fresh readers of the diff who filed
 30 findings, of which **27 did not survive adversarial verification** — the three that did
 are closed too, and one of them (the READ side of A19) was a hole the original fix left open.
-**Every guard added was watched failing**: 29 mutations, one per new condition, each reverted
-against the suite. Two were rewritten because they were caught only as a hang, and two are
+**Every guard added was watched failing**: 35 mutations, one per new condition, each reverted
+against the suite. Two were rewritten because they were caught only as a hang, and three are
 recorded as SURVIVING with the reason, rather than being quietly dropped.
+
+**THE ONE PATTERN THIS WAVE FOUND FOUR TIMES, and the reason to read it before starting
+anything.** Every fix was correct and applied to too small a SET. **A19** guarded the write
+and not the read (`Engine.#applyGateDecision` still ran the action for a journaled decision
+it could not parse). **A14** fixed the slice construction and left both readers of the slice.
+**A12** guarded `rehydrate` — `#deadlineOf`'s LOWEST-authority source — and left `raise`,
+its highest. **A18** refused to spread a hostile container and then handed that container to
+`redactAttributes`, which walked it. Three of the four were found by a reviewer or a test
+rather than by the person who wrote the fix. The habit that catches this is not *"make the
+reads total"* — that is the principle, and it was already agreed to every time. It is:
+**name every site that touches the value, and write the list into the claim.** A claim that
+names its set can be checked; "this boundary is total" cannot.
+
+**And two of this wave's own assertions could not fail** — a `notDeepEqual` against a value
+the test made unreachable, and a `shouldExport` call that returned six lines above the guard
+it was named for. Both were written in the same wave that ran the mutation sweep, and the
+sweep missed both because neither guard looked like a guard. **A sweep only kills what it
+mutates.**
 
 For *why* decisions were made, read `JOURNAL.md` (append-only, newest last; the waves are
 those `— Hardening —` entries at the end). For what the system is, read `README.md` →
@@ -44,7 +62,7 @@ Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1331 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| Tests | **1332 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | Test files | 48 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 49 | `node scripts/check-zero-dep.mjs` (it prints the count) |
 | Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:` |
