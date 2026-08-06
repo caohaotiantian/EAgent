@@ -31,7 +31,7 @@ import assert from "node:assert/strict";
 
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
-import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { GraphSpec, NodeSpec } from "../../src/graph/spec.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "../../src/ids.ts";
 import { SYSTEM_ACTOR, type Actor, type JournalEvent, type NewEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
@@ -42,7 +42,15 @@ import { RunLog } from "../../src/run/log.ts";
 import { foldRun, type RunStatus } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { ZERO_USAGE } from "../../src/vocab.ts";
-import { DOCS, compileSkeleton, harness, resolver } from "./skeleton.ts";
+import {
+  DOCS,
+  SKELETON_TENANT_CAPS,
+  SKELETON_TOOLS,
+  compileSkeleton,
+  harness,
+  resolver,
+  skeletonSpec,
+} from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
 const e = (id: string): EdgeId => id as EdgeId;
@@ -557,4 +565,91 @@ test("THE SWEEP DOES NOT FAIL A RUN THAT ALREADY ENDED", async () => {
     false,
     "and no failure was appended to a run that had already ended",
   );
+});
+
+// ── 5 · an expiry splits an append too, and the boundary refusal did not see it ──
+
+/**
+ * The skeleton with a clock on its gate, so the sweep can expire it.
+ *
+ * `onTimeout: "fail"` is what routes the deadline through `HumanGateBroker.#expire`, which
+ * writes `gate.timeout` + `run.failed` in ONE append — the identical two-seq shape the
+ * `gate.decided` arm of `rewind`'s boundary scan refuses, arriving under a different event
+ * type. That is register entry A10.
+ */
+function expiringSpec(): GraphSpec {
+  const base = skeletonSpec();
+  return {
+    ...base,
+    nodes: base.nodes.map((node: NodeSpec) =>
+      node.id !== n("approve")
+        ? node
+        : { ...node, humanGate: { ref: node.humanGate!.ref, sla: { respondWithinMs: 1000, onTimeout: "fail" as const } } },
+    ),
+  };
+}
+
+test("A REWIND ONTO A GATE'S EXPIRY IS REFUSED, for the same reason as one onto its decision", async () => {
+  // Reproduced before the refusal, on this shape: `#expire` wrote `89:gate.timeout
+  // 90:run.failed`; `rewind(runId, 89)` was ACCEPTED; the run folded to
+  // `run=awaiting_gate gate=expired openGates=0`; `advance()` was a no-op with zero writes;
+  // `sweepGates` fired nothing, because the gate is no longer open; and `resolveGate`
+  // answered "is expired, not open". Neither the clock nor a human could move it — the same
+  // permanent wedge the `gate.decided` arm exists to prevent, reached by asking for the seq
+  // one door along.
+  const h = harness();
+  const graph = compileOrThrow({ spec: expiringSpec(), resolver: resolver(), tools: SKELETON_TOOLS, tenantCapabilities: SKELETON_TENANT_CAPS });
+  const runId = await h.engine.submit({ graph, inputs: { paths: DOCS } });
+  const parkedAt = await h.engine.advance(runId);
+  assert.equal(parkedAt.status, "awaiting_gate");
+
+  h.tick(5000);
+  const report = await h.engine.sweepGates();
+  assert.equal(report.fired.length, 1, "the deadline fired");
+
+  const all = await events(h.store, runId);
+  const timeout = all.find((ev) => ev.type === "gate.timeout")!;
+  const failed = all.find((ev) => ev.type === "run.failed")!;
+  assert.equal(failed.seq, timeout.seq + 1, "the expiry and the failure are ONE append, two seqs");
+
+  await assert.rejects(
+    () => h.engine.rewind(runId, timeout.seq, "undo the expiry"),
+    conflict(CODES.E_RESTORE_ILLEGAL),
+    "rewinding onto the expiry's own seq keeps it and drops the failure",
+  );
+
+  // …and both coherent readings of what the operator asked for still work, which is what
+  // makes this a refusal rather than a wall. `atSeq - 1` reopens the gate.
+  const reopened = await h.engine.rewind(runId, (timeout.seq - 1) as Seq, "ask again");
+  assert.equal(reopened.status, "awaiting_gate");
+  assert.equal(Object.values(reopened.gates).filter((g) => g.state === "open").length, 1, "the gate is answerable again");
+  assert.equal(h.writes.length, 0, "and the action behind it still has not run");
+});
+
+test("…and a gate.timeout that is NOT an expiry is still a legal boundary", async () => {
+  // The refusal above is narrowed to `action: "fail"`, and the narrowing is the load-bearing
+  // half: `gate.timeout{default_action}` heads a THREE-event append (timeout + decision +
+  // resume) whose FIRST seq suppresses all three and leaves the gate OPEN — recoverable,
+  // and exactly what an operator asking for that seq wants. Refusing every `gate.timeout`
+  // would take a working boundary away and nothing in the graph-driven suite would notice,
+  // because `GateSlaSpec` cannot declare a `defaultAction` at all — only an embedder driving
+  // `HumanGateBroker` directly can produce that row. So the row is written directly here,
+  // which is also the honest statement of who can reach it.
+  const { h, runId, gateId } = await parked();
+  const at = await suspendedAt(h, runId);
+
+  const log = new RunLog(runId, { store: h.store, now: () => NOW });
+  await log.append([
+    {
+      type: "gate.timeout",
+      payload: { gateId, action: "default_action" },
+      actor: SYSTEM_ACTOR("gate-broker"),
+    },
+  ]);
+  const marker = await h.store.head(runId);
+
+  const rewound = await h.engine.rewind(runId, marker, "undo the clock's no-op");
+  assert.equal(rewound.status, "awaiting_gate", "the run is where it was");
+  assert.equal(rewound.gates[gateId]?.state, "open", "and the gate is still answerable");
+  assert.ok(at <= marker, "the boundary really was inside this run's history");
 });

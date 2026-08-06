@@ -20,7 +20,7 @@
  */
 
 import { CODES, err } from "../errors.ts";
-import type { RunId, TaskId } from "../ids.ts";
+import type { GateId, RunId, TaskId } from "../ids.ts";
 import { isEvent, type JournalEvent } from "../journal/events.ts";
 import { MemoryStateStore } from "../journal/memory.ts";
 import type { StateStore } from "../journal/store.ts";
@@ -173,17 +173,33 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
 
   // Serve recorded human decisions the same way effects are served: a gate's answer
   // is an input from the world, not a decision the replay gets to re-make.
+  //
+  // BOTH PICKS ARE BY TaskId AND JOURNAL ORDER, NOT BY ENUMERATION ORDER. This loop used to
+  // take the first `open` gate `Object.values` happened to yield and then match a recorded
+  // one on `nodeId` ALONE. A node that gates ONCE has one of each and the two agree by
+  // luck; a `human_gate` inside a bounded loop has one gate per ITERATION on the same
+  // `nodeId`, so every iteration was served the FIRST recorded decision — a rejection on
+  // iteration 2 replayed as iteration 1's approval, and nothing said so. `compare` still
+  // reports `match: false`, which is the quiet part: the divergence is blamed on task
+  // states and channels rather than on the harness having answered the wrong question, and
+  // the D10 promotion gate reads that verdict.
+  //
+  // `TaskId` is derived (`nodeId@branchPath#iteration`), so it is stable across the two
+  // runIds and is exactly the coordinate that distinguishes iterations. `served` keeps a
+  // gate from being consumed twice when one Task gates more than once.
   if (opts.replayGates !== false) {
+    const served = new Set<GateId>();
     for (let guard = 0; guard < 32 && replayed.status === "awaiting_gate"; guard++) {
-      const open = Object.values(replayed.gates).find((g) => g.state === "open");
+      const open = oldestOpen(replayed);
       if (open === undefined) break;
-      const recorded = Object.values(original.gates).find((g) => g.nodeId === open.nodeId && g.state === "decided");
+      const recorded = firstUnservedDecision(original, open.taskId, served);
       if (recorded === undefined) {
         throw err.internal(
           CODES.E_REPLAY_DIVERGENCE,
-          `replay raised a gate on node "${open.nodeId}" that the recorded run never decided`,
+          `replay raised a gate on node "${open.nodeId}" (task "${open.taskId}") that the recorded run never decided`,
         );
       }
+      served.add(recorded.gateId);
       replayed = await engine.resolveGate(replayRunId, {
         gateId: open.gateId,
         decision: decisionOf(recorded),
@@ -206,6 +222,44 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     // invent what the world did while the process was dying.
     hermetic: effects.unknownOutcomes.length === 0,
   };
+}
+
+/**
+ * The open gate this run has been waiting on longest, by JOURNAL order.
+ *
+ * The twin of `oldestOpenGate` in `run/engine.ts`, and duplicated rather than exported for
+ * the reason that file's version gives: it is six lines of loop, and exporting it would put
+ * a projection helper on the pinned public surface to save them.
+ */
+function oldestOpen(p: RunProjection): GateRecord | undefined {
+  let oldest: GateRecord | undefined;
+  for (const g of Object.values(p.gates)) {
+    if (g.state !== "open") continue;
+    if (oldest === undefined || g.raisedAtSeq < oldest.raisedAtSeq) oldest = g;
+  }
+  return oldest;
+}
+
+/**
+ * The earliest decision the recorded run made on THIS Task that this replay has not already
+ * re-served.
+ *
+ * Earliest, not latest: a replay walks a run forward, so the answers come back in the order
+ * they were given. `served` is what makes "not already" meaningful — without it a Task that
+ * gates twice would be handed its first decision both times, which is the same defect as
+ * the `nodeId` match one coordinate finer.
+ */
+function firstUnservedDecision(
+  p: RunProjection,
+  taskId: TaskId,
+  served: ReadonlySet<GateId>,
+): GateRecord | undefined {
+  let best: GateRecord | undefined;
+  for (const g of Object.values(p.gates)) {
+    if (g.state !== "decided" || g.taskId !== taskId || served.has(g.gateId)) continue;
+    if (best === undefined || g.raisedAtSeq < best.raisedAtSeq) best = g;
+  }
+  return best;
 }
 
 /**

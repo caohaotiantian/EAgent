@@ -2,13 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { compileOrThrow } from "../../src/graph/compile.ts";
+import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
-import type { RunId } from "../../src/ids.ts";
+import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
+import { FunctionRegistry } from "../../src/run/registry.ts";
 import { ReplayEffects, replayRun } from "../../src/run/replay.ts";
 import { conformsToGraph, reconstructGraph, shouldExport, spansFrom } from "../../src/telemetry/spans.ts";
-import { DOCS, compileSkeleton, harness } from "./skeleton.ts";
+import { DOCS, compileSkeleton, harness, resolver } from "./skeleton.ts";
 
 // A DEPLOYMENT TOKEN KEY, because the two span assertions below read `pii` attributes and
 // `redactAttributes` omits those entirely when none is configured — see `deploymentKey` in
@@ -457,4 +460,104 @@ test("the bus is unused by span derivation — telemetry needs no live hook", as
   // Spans come from a journal read, so a run recorded before any tracer existed
   // still produces a full trace.
   assert.ok(spansFrom(await eventsOf(h.store as MemoryStateStore, runId)).length > 0);
+});
+
+// ── a gate inside a loop: the coordinate that distinguishes two answers ───────
+
+/**
+ * One `human_gate` node, two ITERATIONS, two different human answers.
+ *
+ * `nodeId` is not a coordinate that separates them and `TaskId` is
+ * (`nodeId@branchPath#iteration`), which is the whole of register entry A6: the replay
+ * harness matched a recorded decision on `nodeId` alone and served the first one it found
+ * to every iteration.
+ */
+function loopedGateSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "gate-in-a-loop", project: "replay", version: 1 },
+    policy: { posture: "out", capabilities: [], expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 2, maxLoopIterations: 4 } },
+    channels: { n: { type: "number", reduce: "replace", initial: 0 }, done: { type: "number", reduce: "replace" } },
+    inputs: ["n"],
+    outputs: ["done"],
+    nodes: [
+      { id: "start" as NodeId, type: "function", reads: ["n"], writes: ["done"], function: { ref: "function/seed@stable" } },
+      { id: "gate" as NodeId, type: "human_gate", reads: ["n"], humanGate: { ref: "oversight/loop@stable" } },
+      { id: "work" as NodeId, type: "function", reads: ["n"], writes: ["n"], function: { ref: "function/bump@stable" } },
+    ],
+    edges: [
+      { id: "e0" as EdgeId, from: "start" as NodeId, to: "gate" as NodeId, kind: "seq" },
+      { id: "e1" as EdgeId, from: "gate" as NodeId, to: "work" as NodeId, kind: "seq" },
+      { id: "e2" as EdgeId, from: "work" as NodeId, to: "gate" as NodeId, kind: "loop", until: "n >= 2", maxIterations: 2 },
+    ],
+  };
+}
+
+function loopRig(): { engine: Engine; store: MemoryStateStore; graph: ReturnType<typeof compileOrThrow> } {
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const functions = new FunctionRegistry();
+  functions.register("function/seed@stable", () => ({ writes: { done: 1 } }));
+  functions.register("function/bump@stable", (view) => ({ writes: { n: (view.get<number>("n") ?? 0) + 1 } }));
+  const graph = compileOrThrow({ spec: loopedGateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const engine = new Engine({ store, functions, now: () => 1_700_000_000_000, policy: { granted: ["*"] } });
+  return { engine, store, graph };
+}
+
+test("A GATE INSIDE A LOOP IS REPLAYED PER ITERATION, not per node", async () => {
+  // The recorded run: the human APPROVES iteration 0 and REJECTS iteration 1, so it fails.
+  const live = loopRig();
+  const runId = await live.engine.submit({ graph: live.graph, inputs: { n: 0 } });
+  let p = await live.engine.advance(runId);
+
+  const answers = [
+    { kind: "approve" } as const,
+    { kind: "reject", reason: "not a second time" } as const,
+  ];
+  const askedOf: string[] = [];
+  for (let i = 0; i < answers.length && p.status === "awaiting_gate"; i++) {
+    const open = Object.values(p.gates).filter((g) => g.state === "open").sort((a, b) => a.raisedAtSeq - b.raisedAtSeq)[0]!;
+    askedOf.push(open.taskId);
+    p = await live.engine.resolveGate(runId, {
+      gateId: open.gateId,
+      decision: answers[i]!,
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: `k${i}`,
+    });
+  }
+
+  assert.deepEqual(askedOf, ["gate@root#0", "gate@root#1"], "the loop asked the same node twice, as two Tasks");
+  assert.equal(p.status, "failed", "the second answer was a rejection, so the run failed");
+
+  // The replay must reach the SAME end. Before the fix it matched the recorded decision on
+  // `nodeId` alone, served iteration 0's `approve` to both gates, and the replayed run
+  // SUCCEEDED — a rejection a human actually made, replayed as an approval, with `compare`
+  // reporting the divergence against task states and channels rather than against the
+  // harness that caused it.
+  const shadow = loopRig();
+  const report = await replayRun({
+    store: live.store,
+    runId,
+    graph: live.graph,
+    engine: { functions: shadow.engine.functions, policy: { granted: ["*"] } },
+  });
+
+  assert.equal(report.replayed.status, "failed", "REPLAY SERVED THE APPROVAL TWICE AND THE REJECTION NEVER");
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match), null, 1));
+
+  // WHAT THIS TEST HOLDS IS THE FIX, NOT EACH OF ITS PARTS, and the mutation sweep says so
+  // rather than the docstring claiming otherwise. `firstUnservedDecision` discriminates two
+  // ways — by `taskId`, and by `served` — and either alone is enough here, so reverting
+  // ONE leaves this green while reverting both turns it red. They are kept as a pair on the
+  // same argument the file already makes for `decided`/`decisionOf`: `taskId` is the
+  // coordinate that is CORRECT, and `served` is what stops one decision being spent twice
+  // if a single Task ever gates more than once. The `oldestOpen` pick is a third
+  // redundancy — this run never has two gates open at once, so no fixture can distinguish
+  // it from `find`, and it is here because "the first one the map yields" is not an order
+  // anything states.
+
+  const decisions = Object.values(report.replayed.gates)
+    .sort((a, b) => a.raisedAtSeq - b.raisedAtSeq)
+    .map((g) => `${g.taskId}:${g.decision}`);
+  assert.deepEqual(decisions, ["gate@root#0:approve", "gate@root#1:reject"], "each iteration got its own answer back");
 });

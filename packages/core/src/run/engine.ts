@@ -942,6 +942,38 @@ export class Engine {
           { details: { runId, atSeq, batchId: ev.payload.batchId, gateIds: ev.payload.gateIds } },
         );
       }
+      // AN EXPIRY IS THE SAME BOUNDARY AND IS NOT A DECISION AT ALL — register entry A10.
+      //
+      // `HumanGateBroker.#expire` writes `gate.timeout{action:"fail"}` + `run.failed` in ONE
+      // append, which is the identical two-seq shape the arm below refuses for
+      // `gate.decided`, and the scan walked straight past it because it is a different event
+      // type. Reproduced on the skeleton graph: `#expire` wrote `89:gate.timeout
+      // 90:run.failed`; `rewind(runId, 89)` was ACCEPTED; the run folded to
+      // `run=awaiting_gate gate=expired openGates=0`; `advance()` was a no-op with zero
+      // writes; `sweepTimeouts` fired nothing (the gate is no longer open) and `resolveGate`
+      // answered "is expired, not open". Neither the clock nor a human could move it —
+      // the same permanent wedge, reached by asking for the seq the `gate.decided` refusal
+      // was written to protect.
+      //
+      // ONLY the `fail` action, and that narrowness is the point rather than an oversight.
+      // `gate.timeout{default_action}` heads a THREE-event append (timeout + decision +
+      // resume) and rewinding to its first seq suppresses all three, leaving the gate OPEN —
+      // recoverable, and exactly what an operator asking for that seq wants. Its middle seq
+      // is the `gate.decided` the arm below already refuses. `gate.timeout{escalate}` writes
+      // no terminal at all.
+      //
+      // This is the THIRD event type added to a scan that A10 asks to become a property of
+      // the APPEND instead, and the argument for the narrow fix is unchanged: the journal
+      // records no append boundary, so making the refusal structural means a new field on
+      // `JournalEvent`, both stores writing it, and a defined reading for every journal that
+      // predates it — a change to the durable format invariant 2 makes authoritative.
+      if (isEvent(ev, "gate.timeout") && ev.payload.action === "fail" && ev.seq === atSeq) {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `seq ${atSeq} is the expiry of gate "${ev.payload.gateId}", and the \`run.failed\` it was appended with is at seq ${atSeq + 1}; rewinding to it would keep the expiry and drop the failure, leaving run ${runId} suspended on a gate that can no longer be answered by anyone — rewind to ${atSeq + 1} to keep the expiry, or to ${atSeq - 1} to reopen the gate`,
+          { details: { runId, atSeq, gateId: ev.payload.gateId } },
+        );
+      }
       if (!isEvent(ev, "gate.decided")) continue;
       if (ev.payload.decision === "reject") {
         throw err.conflict(
