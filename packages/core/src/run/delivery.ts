@@ -38,8 +38,8 @@ import { CODES, err, isLoomError, LoomError, type Code, type ErrorClass } from "
 import type { GateId, RunId } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor } from "../journal/events.ts";
 import { maskLiterals, redact } from "../security/redact.ts";
-import { maxClassification, type Classification } from "../vocab.ts";
-import type { GateDecision, GateSummary, ResolveInput } from "./gates.ts";
+import { gateDecisionOf, maxClassification, type Classification, type GateDecision } from "../vocab.ts";
+import type { GateSummary, ResolveInput } from "./gates.ts";
 import type { RunLog } from "./log.ts";
 import { isTerminal, openGates as openGateRecords, type GateRecord, type RunProjection } from "./projection.ts";
 
@@ -701,28 +701,41 @@ function ownedActor(v: unknown): HumanActor | undefined {
  * instead because its reader is a human being shown a question, not a resolver applying one.
  */
 function ownedDecision(v: unknown): GateDecision | undefined {
-  const rawReason = readProp(v, "reason");
-  const reason = typeof rawReason === "string" ? rawReason.slice(0, MAX_REASON) : undefined;
+  // THE ACCEPTANCE SET COMES FROM `gateDecisionOf`; WHAT IS LEFT HERE IS OWNERSHIP.
+  //
+  // This function used to state the union member by member, and so did `checkedDecision`
+  // in `server/http.ts` and `run/replay.ts`'s switch — three statements of one vocabulary,
+  // in front of a broker that stated it nowhere. They agreed only because each was copied
+  // from the last, and they had already drifted on the two things below. Those two are the
+  // part that is genuinely this door's: the value arrives from a VENDOR ADAPTER, so its
+  // reason is bounded and its containers are copied before anything downstream keeps them.
+  const decision = gateDecisionOf(v);
+  if (decision === undefined) return undefined;
 
-  switch (readProp(v, "kind")) {
+  const reason = decision.kind === "approve" ? undefined : decision.reason?.slice(0, MAX_REASON);
+  const withReason = reason === undefined ? {} : { reason };
+
+  switch (decision.kind) {
     case "approve":
-      return { kind: "approve" };
+      return decision;
     case "reject":
       return reason === undefined || reason.trim() === "" ? undefined : { kind: "reject", reason };
     case "edit": {
-      const raw = readProp(v, "writes");
-      if (!isPlainRecord(raw)) return undefined;
-      const writes = ownedJson(raw);
+      // THE INPUT IS SHAPE-CHECKED BEFORE THE COPY, AND THE COPY AGAIN AFTER. `ownedJson`
+      // reports `{}` for every object whose data is not in own properties, so a `Map` of
+      // edits would survive a check made only on the RESULT and be recorded as an edit that
+      // edited nothing — on a gate a human had just been asked to edit. `gateDecisionOf`
+      // decides that `writes` is an object and not an array; whether it is a PLAIN one is
+      // this door's question, because only here can the answer be a vendor's `Map`.
+      if (!isPlainRecord(decision.writes)) return undefined;
+      const writes = ownedJson(decision.writes);
       if (!isPlainRecord(writes)) return undefined;
-      return { kind: "edit", writes: writes as Record<string, unknown>, ...(reason === undefined ? {} : { reason }) };
+      return { kind: "edit", writes: writes as Record<string, unknown>, ...withReason };
     }
-    case "redirect": {
-      const take = ownedJson(readProp(v, "take"));
-      if (!Array.isArray(take) || !take.every((t) => typeof t === "string")) return undefined;
-      return { kind: "redirect", take: take as string[], ...(reason === undefined ? {} : { reason }) };
-    }
-    default:
-      return undefined;
+    case "redirect":
+      // `take` needs no round trip: `gateDecisionOf` built the array itself out of values
+      // it proved were strings, so it is already owned and holds no live code.
+      return { kind: "redirect", take: decision.take, ...withReason };
   }
 }
 

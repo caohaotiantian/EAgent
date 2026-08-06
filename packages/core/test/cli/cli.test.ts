@@ -949,6 +949,12 @@ test("`--graph` WITH NO VALUE IS REFUSED LIKE THE OTHER PATH FLAGS — replay an
     for (const argv of [
       ["approve", "r_nope", "g_nope", "--workspace", d.dir, "--as"],
       ["approve", "r_nope", "g_nope", "--workspace", d.dir, "--as="],
+      // …and the third door to that field. The control plane refuses a caller CLAIMING
+      // `(unidentified)`, and the compiler refuses a graph LISTING one as an approver; this
+      // process authenticates nobody, so it is the one that would journal a decision under
+      // a subject naming nobody — and satisfy an approvers list naming it.
+      ["approve", "r_nope", "g_nope", "--workspace", d.dir, "--as", "(unidentified)"],
+      ["approve", "r_nope", "g_nope", "--workspace", d.dir, "--as", "(shared-token)"],
     ]) {
       await assert.rejects(
         () => run(argv),

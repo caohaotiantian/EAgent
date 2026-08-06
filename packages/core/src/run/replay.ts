@@ -208,8 +208,22 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   };
 }
 
+/**
+ * The recorded decision, re-served — or a DIVERGENCE, never an approval.
+ *
+ * The `default:` arm answered `{kind: "approve"}`, so a journal whose `gate.decided`
+ * carried a word in no vocabulary — which `HumanGateBroker` used to append verbatim — was
+ * replayed as a human having said yes. That is the same fail-open the broker itself had,
+ * one layer in and harder to see: replay is what the D10 promotion gate and the CI state
+ * hash are built on, so the wrong answer here is the one that certifies a candidate.
+ *
+ * `approve` is spelled out rather than left to fall through for the same reason: the
+ * permissive reading has to be something a journal SAYS, not something it fails to say.
+ */
 function decisionOf(g: GateRecord): Parameters<Engine["resolveGate"]>[1]["decision"] {
   switch (g.decision) {
+    case "approve":
+      return { kind: "approve" };
     case "reject":
       return { kind: "reject", reason: g.justification ?? "recorded rejection" };
     case "edit":
@@ -217,7 +231,10 @@ function decisionOf(g: GateRecord): Parameters<Engine["resolveGate"]>[1]["decisi
     case "redirect":
       return { kind: "redirect", take: g.take ?? [] };
     default:
-      return { kind: "approve" };
+      throw err.internal(
+        CODES.E_REPLAY_DIVERGENCE,
+        `the recorded run decided gate "${g.gateId}" with ${JSON.stringify(g.decision)}, which is not a decision replay can re-serve`,
+      );
   }
 }
 

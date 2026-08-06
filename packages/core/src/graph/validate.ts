@@ -19,6 +19,7 @@ import {
   CLASSIFICATION_POSTURE_FLOOR,
   CLASS_DEFAULT_POSTURE,
   isLoosening,
+  isSyntheticSubject,
   maxPosture,
   type IrreversibilityClass,
   type Posture,
@@ -1158,6 +1159,16 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // An approvers list that cannot match anything authorizes everyone, because "names
   // nobody" is the permissive case. Better to refuse the graph than to ship a gate that
   // reads as restricted and is not.
+  //
+  // A SYNTHETIC SUBJECT IS THE OTHER WAY TO WRITE THAT, and it is worse because it MATCHES.
+  // The perimeter mints `(unidentified)` for a caller it could not identify and
+  // `(shared-token)` for one holding the plane's own credential — descriptions of what the
+  // perimeter concluded, not names of anybody — and a graph listing either reads as
+  // restricted while being satisfied by exactly the callers nobody vouched for. The HTTP
+  // door refuses a claimed `(unidentified)` at the perimeter, but that is one door of
+  // three: the signed-callback route and `loom approve --as` each construct the actor
+  // themselves. Refusing the SHAPE at compile time closes it everywhere at once, and
+  // closes it for markers nobody has minted yet.
   for (const who of a.approvers ?? []) {
     if (typeof who !== "string" || who.trim() === "") {
       d.push({
@@ -1166,6 +1177,14 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
         message: `human_gate "${n.id}" lists an approver that is not a subject id`,
         at,
         fix: "approvers are opaque subject strings matched against a human actor's `subject`; roles and groups need an identity resolver that does not exist yet",
+      });
+    } else if (isSyntheticSubject(who.trim())) {
+      d.push({
+        severity: "error",
+        code: "GRAPH014_APPROVER_INVALID",
+        message: `human_gate "${n.id}" lists "${who.trim()}" as an approver, which is a marker the perimeter mints rather than a subject that names anyone`,
+        at,
+        fix: "name the person or service account that must approve; a parenthesised subject describes what authentication concluded and would let exactly the unidentified callers through",
       });
     }
   }

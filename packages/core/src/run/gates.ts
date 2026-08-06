@@ -27,6 +27,7 @@
 
 import { digest } from "../canonical.ts";
 import { CODES, err, toLoomError } from "../errors.ts";
+import { gateDecisionOf, type GateDecision, type GateDecisionKind } from "../vocab.ts";
 import type { BatchingSpec, DedupeSpec } from "../graph/spec.ts";
 import { newGateId, type GateId, type NodeId, type RunId, type Seq, type TaskId } from "../ids.ts";
 import { SYSTEM_ACTOR, type Actor, type JournalEvent, type NewEvent } from "../journal/events.ts";
@@ -35,15 +36,6 @@ import type { EventBus } from "../bus.ts";
 import { GateDispatcher, formatRecipients, nextTier, tierRecipients, type DeliverySpec } from "./delivery.ts";
 import { RunFolder, foldRun, gateOf, isTerminal, openGates, type GateRecord, type RunProjection } from "./projection.ts";
 import { RunLog } from "./log.ts";
-
-export type GateDecisionKind = "approve" | "reject" | "edit" | "redirect";
-
-export type GateDecision =
-  | { readonly kind: "approve" }
-  | { readonly kind: "reject"; readonly reason: string }
-  /** The highest-quality label the evolution loop ever gets (D10.b, signal S2). */
-  | { readonly kind: "edit"; readonly writes: Readonly<Record<string, unknown>>; readonly reason?: string }
-  | { readonly kind: "redirect"; readonly take: readonly string[]; readonly reason?: string };
 
 export type TimeoutAction = "escalate" | "default_action" | "fail";
 
@@ -686,11 +678,19 @@ export class HumanGateBroker {
       );
     }
 
-    if (input.decision.kind !== "approve" && input.decision.kind !== "reject") {
+    // ONE READ OF THE CALLER'S DECISION, CHECKED BEFORE IT IS DESCRIBED. Two things used
+    // to go wrong here at once: a kind in no vocabulary satisfied the narrowing below by
+    // not being either of the two names it tests, and `input.decision.kind` was read once
+    // for the branch and again for the message, on a value from outside that need not
+    // answer the same way twice. `gateDecisionOf` reads it once and totally.
+    const decision = gateDecisionOf(input.decision);
+    if (decision === undefined || (decision.kind !== "approve" && decision.kind !== "reject")) {
       throw err.policy(
         CODES.E_GATE_NOT_AUTHORIZED,
-        `gate batch "${input.batchId}" can only be approved or rejected, not ${input.decision.kind}ed`,
-        { details: { batchId: input.batchId, decision: input.decision.kind } },
+        decision === undefined
+          ? `gate batch "${input.batchId}" was answered with something that is not a decision`
+          : `gate batch "${input.batchId}" can only be approved or rejected, not ${decision.kind}ed`,
+        { details: { batchId: input.batchId, ...(decision === undefined ? {} : { decision: decision.kind }) } },
       );
     }
 
@@ -707,7 +707,7 @@ export class HumanGateBroker {
     for (const g of members) {
       this.#validate(g, {
         gateId: g.gateId,
-        decision: input.decision,
+        decision,
         actor: input.actor,
         idempotencyKey: input.idempotencyKey,
       });
@@ -716,11 +716,11 @@ export class HumanGateBroker {
     const now = this.#now();
     const gateIds = members.map((g) => g.gateId);
     const events: NewEvent[] = members.map((g) =>
-      decidedEvent(g, { gateId: g.gateId, decision: input.decision, actor: input.actor, idempotencyKey: input.idempotencyKey }, now),
+      decidedEvent(g, { gateId: g.gateId, decision, actor: input.actor, idempotencyKey: input.idempotencyKey }, now),
     );
     events.push({
       type: "gate.batch_decided",
-      payload: { batchId: input.batchId, key, gateIds, manifestDigest, decision: input.decision.kind },
+      payload: { batchId: input.batchId, key, gateIds, manifestDigest, decision: decision.kind },
       actor: input.actor,
     });
     // ONE resume for one decision. The run suspended once per gate and it resumes once;
@@ -735,7 +735,7 @@ export class HumanGateBroker {
     // because its retrying `append` almost never fails; this is a compare-and-swap that
     // legitimately loses to a concurrent writer, and recording a decision that did not
     // land would turn the caller's retry into a silent no-op.
-    this.#idempotency.set(idemKey, input.decision.kind);
+    this.#idempotency.set(idemKey, decision.kind);
     return { resolved: true, gateIds };
   }
 
@@ -941,11 +941,13 @@ export class HumanGateBroker {
       );
     }
 
-    this.#validate(gate, input);
+    // The CHECKED decision, and it is what gets journaled — not the object the caller
+    // handed in, which need not answer the same way when `decidedEvent` reads it again.
+    const checked = { ...input, decision: this.#validate(gate, input) };
 
-    this.#idempotency.set(idemKey, input.decision.kind);
+    this.#idempotency.set(idemKey, checked.decision.kind);
 
-    await log.append([decidedEvent(gate, input, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
+    await log.append([decidedEvent(gate, checked, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
 
     await this.#announceRemainder(log, p, gate);
     return { resolved: true };
@@ -1123,13 +1125,37 @@ export class HumanGateBroker {
    * two appends and had a window between them; validating here lets it write the clock's
    * row and the decision it licenses as ONE fact. A second guard chain for the same
    * question is how a gate ends up authorized differently depending on who asked.
+   *
+   * IT RETURNS THE CHECKED DECISION, and every caller must write THAT rather than the one
+   * it was handed. `input.decision` is a value from outside — an embedder's object, a
+   * vendor adapter's return, a `defaultAction` `rehydrate` attached from an unvalidated
+   * source — so a second read of it can answer differently from the read this chain
+   * judged. One read, checked, and every later use is of what that read produced.
    */
-  #validate(gate: GateRecord, input: ResolveInput): void {
-    this.#authorize(gate, input);
+  #validate(gate: GateRecord, input: ResolveInput): GateDecision {
+    // THE ACCEPTANCE SET IS ASSERTED BEFORE ANYTHING ELSE READS THE DECISION, because
+    // `#authorize` below and `decidedEvent` after it both branch on `kind`, and a kind in
+    // no vocabulary satisfied every one of those branches by not being the one they name.
+    // `gateDecisionOf` answers `undefined` for it; the refusal is here because this is the
+    // one chain, and a door that pre-refuses with a better message is an improvement on
+    // top of this rather than a substitute for it.
+    const decision = gateDecisionOf(input.decision);
+    if (decision === undefined) {
+      throw err.validation(
+        CODES.E_HUMAN_APPROVAL_REQUIRED,
+        `gate "${gate.gateId}" was answered with something that is not a decision — it must be one of ` +
+          `{kind:"approve"}, {kind:"reject",reason}, {kind:"edit",writes} or {kind:"redirect",take}`,
+        { details: { gateId: gate.gateId } },
+      );
+    }
 
-    if (input.decision.kind === "reject" && input.decision.reason.trim() === "") {
+    this.#authorize(gate, { ...input, decision });
+
+    if (decision.kind === "reject" && decision.reason.trim() === "") {
       throw err.validation(CODES.E_HUMAN_APPROVAL_REQUIRED, "a rejection requires a reason");
     }
+
+    return decision;
   }
 
   /**
@@ -1564,8 +1590,14 @@ export class HumanGateBroker {
       // turns out to be unusable, and the only expiry that is safe to write is one taken on
       // a journal this call has not already moved. Validating first makes the refusal a
       // decision at `atSeq` like every other decision here.
+      //
+      // A `rehydrate`d default action is also the one decision in this file that reaches
+      // `#validate` having passed through NO compiler and NO door, so the acceptance-set
+      // check there is what stands between an unreadable `defaultAction` and a gate the
+      // clock silently approves. It is refused, and the gate expires instead.
+      let checked: ResolveInput;
       try {
-        this.#validate(gate, input);
+        checked = { ...input, decision: this.#validate(gate, input) };
       } catch (e) {
         return this.#expire(log, atSeq, gate, `expired: its default action was refused (${toLoomError(e).message})`);
       }
@@ -1589,7 +1621,7 @@ export class HumanGateBroker {
       // chain, so "how does a gate get decided" still has one answer.
       const still = await this.#commitForOpenGate(log, atSeq, gate.gateId, [
         { type: "gate.timeout", payload: { gateId: gate.gateId, action }, actor: SYSTEM_ACTOR("gate-broker") },
-        decidedEvent(gate, input, now),
+        decidedEvent(gate, checked, now),
         resumedEvent(input.actor),
       ]);
       // A human answered inside the window. Their decision stands and the clock writes
@@ -2953,8 +2985,20 @@ const MAX_REMINDERS = 8;
  * action that turns out to be unusable.
  */
 function assertDefaultActionIsSatisfiable(req: GateRequest): void {
-  const d = req.defaultAction;
-  if (d === undefined) return;
+  if (req.defaultAction === undefined) return;
+  // The same acceptance set the decision itself is held to, asked at the RAISE. A
+  // `defaultAction` in no vocabulary is the worst member of the class `gateDecisionOf`
+  // exists for: nobody is present when the clock applies it, so a kind that fell through
+  // to the permissive branch would approve at 3am with no operator to notice.
+  const d = gateDecisionOf(req.defaultAction);
+  if (d === undefined) {
+    throw err.validation(
+      CODES.E_HUMAN_APPROVAL_REQUIRED,
+      `the default action for node "${req.nodeId}" is not a decision — it must be one of ` +
+        `{kind:"approve"}, {kind:"reject",reason}, {kind:"edit",writes} or {kind:"redirect",take}`,
+      { details: { nodeId: req.nodeId } },
+    );
+  }
   if (req.mirrorOf !== undefined && (d.kind === "edit" || d.kind === "redirect")) {
     throw err.policy(
       CODES.E_GATE_NOT_AUTHORIZED,

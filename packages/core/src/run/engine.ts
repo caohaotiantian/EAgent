@@ -70,13 +70,12 @@ import {
   type ChannelSpec,
   type Contribution,
 } from "../state/channels.ts";
-import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from "../vocab.ts";
+import { ZERO_USAGE, addUsage, maxPosture, type GateDecision, type Posture, type UsageRecord } from "../vocab.ts";
 import type { DeliverySpec } from "./delivery.ts";
 import {
   GateSweeper,
   HumanGateBroker,
   type GateBatch,
-  type GateDecision,
   type GateSummary,
   type GateSweeperOptions,
   type ResolveBatchInput,

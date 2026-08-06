@@ -49,7 +49,7 @@ import { RunLog } from "../../src/run/log.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { openGates } from "../../src/run/projection.ts";
-import type { GateDecision } from "../../src/run/gates.ts";
+import type { GateDecision } from "../../src/vocab.ts";
 import { compileSkeleton, harness, skeletonSpec, DOCS } from "./skeleton.ts";
 
 const SECRET = "shhh-approvals-service";

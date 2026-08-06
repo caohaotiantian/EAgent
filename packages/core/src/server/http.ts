@@ -95,7 +95,7 @@ import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
-import type { GateDecision } from "../run/gates.ts";
+import { gateDecisionOf, isSyntheticSubject, type GateDecision } from "../vocab.ts";
 import { gateOf } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
 import { redactPayload } from "../security/redact.ts";
@@ -446,9 +446,14 @@ function checkedAuth(who: unknown, source: string): AuthContext {
   const subject: unknown = readField("subject");
   if (typeof subject !== "string" || subject === "") refuse("a subject that is not a non-empty string");
   if (subject.length > MAX_IDENTITY_FIELD) refuse(`a subject of ${subject.length} characters (the limit is ${MAX_IDENTITY_FIELD})`);
-  if (SYNTHETIC_SUBJECTS.includes(subject)) {
+  // THE SHAPE, NOT ONLY THE LIST. The list is what this file mints today; the parenthesised
+  // FORM is what a marker looks like, and refusing it means a source cannot claim
+  // `(admin)` or `(system)` either — markers this plane does not mint but a reader of a
+  // journal would take for one of its own. `isSyntheticSubject` is the same rule the
+  // compiler applies to an `approvers` list, stated once in `vocab.ts`.
+  if (SYNTHETIC_SUBJECTS.includes(subject) || isSyntheticSubject(subject)) {
     refuse(
-      `"${subject}" as a subject — that is one of this control plane's own synthetic markers ` +
+      `"${subject}" as a subject — a parenthesised subject is a synthetic marker like this control plane's own ` +
         `(${SYNTHETIC_SUBJECTS.join(", ")}), which describe what the perimeter concluded rather than name anyone, ` +
         `and no source may claim one`,
     );
@@ -761,16 +766,19 @@ function graphIn(graphs: Readonly<Record<string, RunGraph>>, name: string): RunG
  * Traps list's *approve means "go ahead"* one layer up: **anything not understood defaulted
  * to the permissive reading.**
  *
- * THE OTHER DOOR ALREADY DID THIS. `ownedDecision` in `run/delivery.ts` validates the same
- * union member by member for the UNAUTHENTICATED callback route — so the strict door was
- * the one a stranger reaches and the lax one was behind the bearer token. This mirrors
- * `ownedDecision`'s acceptance set deliberately, member for member, so the two doors agree
- * and unifying them later is a deletion rather than a reconciliation. What it does NOT
- * mirror is that function's `MAX_REASON` truncation: that is a bound on injected code, and
- * here the reason is a JSON string this process parsed.
+ * THE ACCEPTANCE SET IS NO LONGER THIS FUNCTION'S TO STATE. It was written from
+ * `ownedDecision` in `run/delivery.ts`, member for member, "so the two doors agree and
+ * unifying them later is a deletion rather than a reconciliation" — and by the time that
+ * was checked there were THREE such switches (this one, that one, and `run/replay.ts`'s,
+ * whose `default:` arm answered `{kind:"approve"}`), guarding a broker that asserted the
+ * set not at all. They had already drifted. `gateDecisionOf` in `vocab.ts` is the one
+ * statement now; this door keeps only what is genuinely its own — an HTTP status and a
+ * message naming the field the caller got wrong, which a total function returning
+ * `undefined` cannot give them.
  *
  * It reads plain data — `#readBody` is a `JSON.parse` with no reviver — so a field may be
- * read twice without the two reads disagreeing, unlike `checkedAuth`'s input.
+ * read twice without the two reads disagreeing, unlike `checkedAuth`'s input. That is why
+ * the messages below may re-read `kind` after the guard has answered.
  */
 function checkedDecision(v: unknown): GateDecision {
   function refuse(why: string): never {
@@ -785,35 +793,24 @@ function checkedDecision(v: unknown): GateDecision {
     refuse(`is ${v === null ? "null" : Array.isArray(v) ? "an array" : typeof v}, which is not a decision`);
   }
   const d = v as Record<string, unknown>;
-  const kind: unknown = d["kind"];
-  const reason: unknown = d["reason"];
-  switch (kind) {
-    case "approve":
-      return { kind: "approve" };
-    case "reject":
-      // A rejection with no reason is the one member whose missing field used to be a 500.
-      // It stays REQUIRED rather than defaulted: "why was this refused" is the whole value
-      // of a rejection in the audit trail, and `cli.ts`'s `--reject` with no value supplies
-      // `(no reason given)` explicitly rather than leaving it blank.
-      if (typeof reason !== "string" || reason.trim() === "") refuse('is a rejection with no reason — "reject" requires a non-empty `reason`');
-      return { kind: "reject", reason };
-    case "edit": {
-      const writes: unknown = d["writes"];
-      if (typeof writes !== "object" || writes === null || Array.isArray(writes)) {
-        refuse('is an edit with no `writes` object — "edit" requires `writes` to be a JSON object of channel values');
-      }
-      return { kind: "edit", writes: writes as Record<string, unknown>, ...(typeof reason === "string" ? { reason } : {}) };
-    }
-    case "redirect": {
-      const take: unknown = d["take"];
-      if (!Array.isArray(take) || !take.every((t) => typeof t === "string")) {
-        refuse('is a redirect with no `take` — "redirect" requires `take` to be an array of edge ids');
-      }
-      return { kind: "redirect", take: take as string[], ...(typeof reason === "string" ? { reason } : {}) };
-    }
-    default:
-      refuse(`names kind ${JSON.stringify(kind)}, which is not one of "approve", "reject", "edit", "redirect"`);
+  const decision = gateDecisionOf(d);
+  if (decision === undefined) {
+    const kind: unknown = d["kind"];
+    if (kind === "reject") refuse('is a rejection with no reason — "reject" requires a non-empty `reason`');
+    if (kind === "edit") refuse('is an edit with no `writes` object — "edit" requires `writes` to be a JSON object of channel values');
+    if (kind === "redirect") refuse('is a redirect with no `take` — "redirect" requires `take` to be an array of edge ids');
+    refuse(`names kind ${JSON.stringify(kind)}, which is not one of "approve", "reject", "edit", "redirect"`);
   }
+  // A rejection with no reason is the one member whose missing field used to be a 500. The
+  // reason stays REQUIRED rather than defaulted — "why was this refused" is the whole value
+  // of a rejection in the audit trail, and `cli.ts`'s `--reject` with no value supplies
+  // `(no reason given)` explicitly rather than leaving it blank. `gateDecisionOf` decides
+  // the SHAPE (a string); non-empty is this door's policy and `HumanGateBroker.#validate`
+  // states it again at the point of use.
+  if (decision.kind === "reject" && decision.reason.trim() === "") {
+    refuse('is a rejection with no reason — "reject" requires a non-empty `reason`');
+  }
+  return decision;
 }
 
 /**

@@ -17,7 +17,7 @@ import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import type { GateDecision } from "../../src/run/gates.ts";
+import type { GateDecision } from "../../src/vocab.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { resolver } from "./skeleton.ts";
 

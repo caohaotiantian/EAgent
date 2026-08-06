@@ -37,6 +37,7 @@ import { FunctionRegistry, ModelRegistry, MockModelAdapter, ToolRegistry } from 
 import { replayRun } from "./run/replay.ts";
 import { BearerTokenIdentity, ControlPlane, unanswerableGraphs, type ControlPlaneOptions, type IdentitySource } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
+import { isSyntheticSubject } from "./vocab.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId } from "./ids.ts";
 import type { HumanActor } from "./journal/events.ts";
@@ -1253,6 +1254,18 @@ function subjectFlag(args: Args): string {
       CODES.E_CONFIG_INVALID,
       `--as needs a subject: ${v === "" ? "the one given was empty" : "the flag was given with no value at all, and a missing value used to become the four letters \"true\""}. ` +
         `It is written into the journal as the person who decided this gate. Omit it to be recorded as "cli".`,
+    );
+  }
+  // A PARENTHESISED SUBJECT IS A MARKER, NOT A NAME. The control plane mints
+  // `(unidentified)` and `(shared-token)` to record what the perimeter concluded, and the
+  // compiler refuses a graph that lists one as an approver. This is the third door to the
+  // same value — `loom approve <run> <gate> --as "(unidentified)"` would journal a decision
+  // under a subject that names nobody, and satisfy an approvers list naming it.
+  if (isSyntheticSubject(v)) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--as "${v}" is a synthetic marker, not a subject: a parenthesised subject is what the control plane writes when ` +
+        `it could not identify a caller. It is journaled as the person who decided this gate, so it has to name one.`,
     );
   }
   return v;

@@ -2013,6 +2013,11 @@ test("AN IDENTITY SOURCE'S OUTPUT IS VALIDATED — it is injected code, not a tr
     // list now, so a third cannot be forgotten either.
     ["the shared-token marker, claimed as a service", { kind: "service", subject: "(shared-token)", method: "shared-token" }],
     ["the shared-token marker, claimed as a person", { kind: "human", subject: "(shared-token)", method: "bad-sso" }],
+    // …and a marker this plane does NOT mint, which the list alone could never refuse. The
+    // check is on the parenthesised FORM as well, because a reader of the journal takes
+    // `(admin)` for one of the plane's own conclusions whether or not this build wrote it —
+    // and `isSyntheticSubject` is the same rule the compiler applies to an approvers list.
+    ["a marker this plane does not mint", { kind: "human", subject: "(admin)", method: "bad-sso" }],
     // A FIELD THAT DETONATES ON READ, and the three below are the reason `checkedAuth`'s
     // two DECIDING reads had to join its three DESCRIBING ones behind a total accessor.
     // The function's own comment says "a getter or a Proxy answers the two reads

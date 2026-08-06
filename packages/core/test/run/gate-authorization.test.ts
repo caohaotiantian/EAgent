@@ -782,6 +782,34 @@ test("an approver that cannot match anything is refused", () => {
   }
 });
 
+test("AN APPROVER THAT MATCHES THE WRONG THING IS REFUSED TOO — a synthetic marker is not a subject", () => {
+  // The other way to write "this list authorizes everyone", and the worse one, because it
+  // MATCHES. `ControlPlane` mints `(unidentified)` for a caller it could not identify and
+  // `(shared-token)` for one holding the plane's own credential — descriptions of what the
+  // perimeter concluded, not names — so a gate reading "the security lead must approve" is
+  // satisfied by exactly the callers nobody vouched for.
+  //
+  // The HTTP door refuses a CLAIMED `(unidentified)` at the perimeter, which is why this
+  // read as unreachable for two waves. It is one door of three: `SignedWebhookChannel`'s
+  // callback route and `loom approve --as` each construct the actor themselves.
+  for (const who of ["(unidentified)", "(shared-token)", "(admin)", "(system)"]) {
+    const hit = diagnose(withApproval({ approvers: [who] })).filter((x) => x.code === "GRAPH014_APPROVER_INVALID");
+    assert.ok(hit.length > 0, `"${who}" compiled clean as an approver`);
+    assert.equal(hit[0]!.severity, "error");
+  }
+
+  // The refusal is on the parenthesised FORM and not on a list of the two markers this
+  // build happens to mint, so a marker added later is refused by construction. It is also
+  // not a ban on brackets anywhere in a subject: only a subject that is ENTIRELY one.
+  assert.deepEqual(
+    diagnose(withApproval({ approvers: ["u:alice", "svc:deployer", "u:o'brien (sre)", "()"] }))
+      .filter((x) => x.code === "GRAPH014_APPROVER_INVALID")
+      .length,
+    0,
+    "an ordinary subject that merely contains parentheses is still a subject",
+  );
+});
+
 // ── helper ───────────────────────────────────────────────────────────────────
 
 async function events(h: { store: { read: MemoryStateStore["read"] } }, runId: RunId): Promise<JournalEvent[]> {
