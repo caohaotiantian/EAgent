@@ -39,6 +39,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import { HumanGateBroker, type GateRequest } from "../../src/run/gates.ts";
 import { RunLog } from "../../src/run/log.ts";
+import { gateOf } from "../../src/run/projection.ts";
 import { replayRun } from "../../src/run/replay.ts";
 import { gateDecisionOf, type GateDecision } from "../../src/vocab.ts";
 import { DOCS, compileSkeleton, harness } from "./skeleton.ts";
@@ -360,6 +361,36 @@ test("A REHYDRATED SLA THAT IS NOT A NUMBER IS NO SLA, rather than a deadline th
   // …and a usable one still gives the gate a clock, which is what `rehydrate` is for.
   broker.rehydrate(Object.values((await broker.project(log))!.gates)[0]!.gateId, { ...request(), slaMs: 1000 });
   assert.equal(typeof broker.nextDeadline((await broker.project(log))!), "number");
+});
+
+test("…AND `raise` IS THE SOURCE THAT OUTRANKS IT, so guarding only `rehydrate` guarded the weaker one", async () => {
+  // `#deadlineOf` reads three sources in strict order of authority: the JOURNALED deadline,
+  // a journaled `slaMs`, and last an operator's re-supplied one. The test above covers the
+  // last. `raise` computes `raisedAt + req.slaMs` and journals it, so an unusable `slaMs`
+  // there wrote `deadline: NaN` into the gate's own `gate.raised` — permanent, highest
+  // authority, and `now >= NaN` is false forever. The compiler refuses every shape a GRAPH
+  // can declare; `raise` is a public method an embedder calls with no compiler behind it.
+  for (const junk of [NaN, Infinity, -1, 0, 1.5, "1000" as unknown as number]) {
+    const { log, broker, clock } = brokerRig();
+    const gateId = await broker.raise(log, request({ slaMs: junk, onTimeout: "fail" }));
+
+    const p = (await broker.project(log))!;
+    assert.equal(gateOf(p, gateId)?.deadline, undefined, `slaMs: ${String(junk)} was journaled as a deadline`);
+    // …and NOT as an `slaMs` either, which is `#deadlineOf`'s SECOND source: guarding one
+    // field and journaling the other moves the defect one line over.
+    assert.equal(gateOf(p, gateId)?.slaMs, undefined, `slaMs: ${String(junk)} was journaled as an SLA`);
+    assert.equal(broker.nextDeadline(p), undefined);
+
+    // …and the sweep agrees: a gate with no clock is not expired by one.
+    clock.t += 10_000_000;
+    assert.deepEqual(await broker.sweepTimeouts(log), [], `slaMs: ${String(junk)} produced a deadline that never arrives`);
+  }
+
+  // A usable one still journals a deadline and still fires.
+  const { log, broker, clock } = brokerRig();
+  await broker.raise(log, request({ slaMs: 1000, onTimeout: "fail" }));
+  clock.t += 5000;
+  assert.equal((await broker.sweepTimeouts(log)).length, 1, "a real SLA still expires its gate");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

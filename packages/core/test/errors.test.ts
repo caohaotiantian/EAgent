@@ -139,6 +139,28 @@ test("`instanceof` PROVES A PROTOTYPE, NOT PROVENANCE — a forged LoomError is 
     assert.equal(JSON.stringify(direct) === undefined, false);
   }
 
+  // "ABSENT" AND "THREW" ARE DIFFERENT ANSWERS, and this is the case that separates them.
+  // A forged error whose `class`, `code` and `message` all answer cleanly and whose ONLY
+  // trap is on `details` looked identical to one that simply has no `details`, so it was
+  // returned BY IDENTITY with the trap intact — and `errorRecord` in `journal/events.ts`
+  // reads `e.details` and `e.retryable` BARE on the way into a journal payload. A field this
+  // function never uses itself still has to answer, because a later reader will ask it.
+  for (const trapped of ["details", "retryable", "retryAfterMs"]) {
+    const sneaky = Object.create(LoomError.prototype, {
+      class: { value: "policy" },
+      code: { value: CODES.E_CAP_DENIED },
+      message: { value: "denied" },
+      [trapped]: { get(): unknown { throw new Error(`${trapped} trap`); } },
+    }) as LoomError;
+
+    const rebuilt = toLoomError(sneaky);
+    assert.notEqual(rebuilt, sneaky, `a trap on \`${trapped}\` was passed through by identity`);
+    assert.equal(rebuilt.class, "policy", "…while the fields that DID answer are carried across");
+    assert.equal(rebuilt.code, CODES.E_CAP_DENIED);
+    // And the rebuilt value answers for every later reader, bare reads included.
+    assert.doesNotThrow(() => JSON.stringify({ details: rebuilt.details, retryable: rebuilt.retryable }));
+  }
+
   // A class in NO vocabulary is not carried forward, because `class` is the one field
   // generic machinery branches on — `httpStatusFor` returned `undefined` for it, and that
   // is what `#dispatch` writes into a response status.

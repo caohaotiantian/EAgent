@@ -342,8 +342,16 @@ test("A SUBSCRIPTION IS ONE CONSUMER'S CHANNEL, and two loops over one SPLIT the
 
   return both.then(() => {
     assert.deepEqual([...a, ...b].sort((x, y) => x - y), [1, 2, 3, 4], "every event reached exactly one loop");
-    assert.equal(a.length + b.length, 4, "…and none reached both");
-    assert.notDeepEqual(a, [1, 2, 3, 4], "THE STREAM FANNED OUT — two readers each saw the whole run");
+    // DISJOINTNESS is the assertion that can actually fail. Each loop `break`s at two
+    // entries, so `a` can never deep-equal `[1,2,3,4]` and "notDeepEqual to the whole run"
+    // is a tautology — it holds for a bus that fans out perfectly. Under fan-out BOTH loops
+    // would see `[1,2]`; under splitting they see disjoint halves.
+    // No one-line mutation of `Channel` disproves this, and that is a property of the
+    // subject rather than of the assertion: fan-out is a per-consumer cursor, i.e. a
+    // redesign, not a condition to flip. The assertion discriminates — under fan-out both
+    // loops hold `[1, 2]` and this line fails — it just cannot be reached by the sweep.
+    assert.equal(a.some((seq) => b.includes(seq)), false, "THE STREAM FANNED OUT — both readers saw the same event");
+    assert.notDeepEqual(a, b, "…and each reader saw a different half");
     assert.equal(bus.subscriberCount, 0, "and the first loop to leave disposed the subscription for both");
   });
 });

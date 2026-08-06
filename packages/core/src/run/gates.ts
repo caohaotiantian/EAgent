@@ -296,7 +296,19 @@ export class HumanGateBroker {
     const raisedAt = this.#now();
     const gateId = newGateId(raisedAt);
     const contentDigest = digest(req.payload);
-    const deadline = req.slaMs === undefined ? undefined : raisedAt + req.slaMs;
+    // THE SAME `isPositiveWholeMs` `ephemeralOf` APPLIES, AND THIS IS THE SOURCE THAT
+    // OUTRANKS IT. `#deadlineOf` reads the JOURNALED deadline first and an operator's
+    // re-supplied SLA last, so guarding only the last one left the strongest source
+    // unguarded: `raisedAt + NaN` is `NaN`, journaled as this gate's deadline forever, and
+    // `now >= NaN` is false — a gate that can never expire, on a graph that declared a
+    // clock. The compiler refuses every shape a GRAPH can declare, but `raise` is a public
+    // method an embedder calls with no compiler behind it, exactly like `rehydrate`.
+    //
+    // Dropped rather than thrown, to match `ephemeralOf` and `usableReminders`: "this gate
+    // has no clock" is a coherent state the rest of this file already handles, and a raise
+    // that starts throwing is a behaviour change for every embedder rather than a fix.
+    const usableSla = isPositiveWholeMs(req.slaMs) ? req.slaMs : undefined;
+    const deadline = usableSla === undefined ? undefined : raisedAt + usableSla;
 
     // WHAT THE `gate.raised` BELOW WILL FOLD TO, built before it is written.
     //
@@ -358,7 +370,14 @@ export class HumanGateBroker {
         contentDigest,
         ...(req.approvers === undefined ? {} : { approvers: req.approvers }),
         ...(req.allowEdit === undefined ? {} : { allowEdit: req.allowEdit }),
-        ...(req.slaMs === undefined ? {} : { slaMs: req.slaMs }),
+        // ONE usable value for both, so the journal cannot claim a clock the fold will not
+        // read. Writing `req.slaMs` here and a guarded `deadline` beside it would put an
+        // `slaMs` in the record that `#deadlineOf`'s SECOND source then honours — the guard
+        // moved one field over. `NaN` also reached `canonicalize`, which refuses a non-finite
+        // number, so a public method threw an untyped `CanonicalizationError`; and `"1000"`
+        // was worse than either, because `raisedAt + "1000"` CONCATENATES — a deadline
+        // roughly 10¹⁰ ms out, journaled, on a gate an operator believed had a 1 s SLA.
+        ...(usableSla === undefined ? {} : { slaMs: usableSla }),
         ...(deadline === undefined ? {} : { deadline }),
         ...(req.onTimeout === undefined ? {} : { onTimeout: req.onTimeout }),
         ...(req.mirrorOf === undefined ? {} : { mirrorOf: req.mirrorOf }),

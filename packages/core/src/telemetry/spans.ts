@@ -206,7 +206,13 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
 
   const open = new Map<string, Open>();
   const done: Span[] = [];
-  let lastTs = typeof events[0]!.ts === "number" && Number.isFinite(events[0]!.ts) ? events[0]!.ts : 0;
+  // The FIRST READABLE instant in the journal, not `0`. When the first event's `ts` is
+  // unreadable the loop below carries `lastTs` forward, and seeding it at the epoch would
+  // put the run's own span at 1970 and every span before the first good `ts` with it — a
+  // fabricated measurement, which is the failure mode this whole guard exists to avoid.
+  // Scanning forward costs one pass over a list already in memory and finds the earliest
+  // instant the journal actually claims.
+  let lastTs = events.find((x) => typeof x.ts === "number" && Number.isFinite(x.ts))?.ts ?? 0;
 
   const start = (id: string, o: Open): void => {
     if (!open.has(id)) open.set(id, o);

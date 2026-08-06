@@ -1524,6 +1524,12 @@ test("A `ts` THAT IS NOT A NUMBER DOES NOT REORDER THE WATERFALL", () => {
     }
     // The run span starts first and must still sort first.
     assert.equal(spans[0]?.name, "loom.run", `with ts=${String(junk)} the waterfall reordered`);
+    // …and it is placed at the first instant the journal ACTUALLY CLAIMS, not at the epoch.
+    // Seeding `lastTs` at 0 would put the run — and every span before the first readable
+    // `ts` — at 1970, which is a fabricated measurement rather than a missing one, and it
+    // is finite, so the assertions above cannot see it. `ready` is the first readable event
+    // in this fixture.
+    assert.equal(spans[0]?.startTime, ready.ts, `with ts=${String(junk)} the run span was fabricated at the epoch`);
   }
 });
 
@@ -1576,7 +1582,11 @@ test("A runId THAT IS NOT A STRING DOES NOT TAKE THE WHOLE TRACE WITH IT", () =>
     const spans = spansFrom([bad]);
     assert.ok(spans.length > 0, `runId ${String(junk)} produced no spans at all`);
     assert.equal(typeof spans[0]!.traceId, "string");
-    assert.equal(shouldExport([bad], { headRatio: 1 }), true);
+    // A RATIO STRICTLY BETWEEN 0 AND 1, because `shouldExport` returns at `ratio >= 1` six
+    // lines BEFORE it reads the run id. With `headRatio: 1` this assertion passed without
+    // ever reaching the guard it is named for — an inert test, which is the failure this
+    // file's own sweep is meant to catch.
+    assert.equal(typeof shouldExport([bad], { headRatio: 0.5, alwaysKeep: false }), "boolean");
   }
 
   // …and the traceId is still DERIVED, which is the property the trace rests on: a constant

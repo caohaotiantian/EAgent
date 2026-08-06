@@ -84,11 +84,31 @@ export class LoomError extends Error {
 
 /** A property read that costs the property and never the caller. */
 function readOwn(v: unknown, key: string): unknown {
+  const got = probe(v, key);
+  return got === THREW ? undefined : got;
+}
+
+/**
+ * "Absent" and "threw" are DIFFERENT ANSWERS, and `toLoomError` is the one caller that has
+ * to tell them apart.
+ *
+ * `readOwn` collapses them, which is right where the answer is only ever rendered — a field
+ * that will not be read is `undefined` either way. It is wrong where the answer decides
+ * whether the VALUE ITSELF may be passed on: a forged error whose `class`, `code` and
+ * `message` all answer cleanly and whose `details` getter throws looked identical to one
+ * that simply has no `details`, so it was returned BY IDENTITY with the trap intact — and
+ * `errorRecord` in `journal/events.ts` reads `e.details` and `e.retryable` BARE on the way
+ * into a journal payload. The boundary this function exists to be was still open one field
+ * along.
+ */
+const THREW = Symbol("threw");
+
+function probe(v: unknown, key: string): unknown {
   if (v === null || (typeof v !== "object" && typeof v !== "function")) return undefined;
   try {
     return (v as Record<string, unknown>)[key];
   } catch {
-    return undefined;
+    return THREW;
   }
 }
 
@@ -147,17 +167,37 @@ export function isLoomError(e: unknown): e is LoomError {
  */
 export function toLoomError(e: unknown, fallbackCode = CODES.E_INTERNAL): LoomError {
   if (isLoomError(e)) {
-    const cls = readOwn(e, "class");
-    const code = readOwn(e, "code");
-    // Every read this value will face downstream, taken here, once. If they all answer and
-    // the two deciding fields are in the vocabulary, it is safe to pass on as it is.
-    if (typeof cls === "string" && CLASSES.has(cls as ErrorClass) && typeof code === "string") {
-      const rest = [readOwn(e, "message"), readOwn(e, "retryable"), readOwn(e, "retryAfterMs"), readOwn(e, "details")];
-      if (typeof rest[0] === "string") return e;
-      return new LoomError(cls as ErrorClass, code, safeString(rest[0]), { cause: e });
+    // EVERY FIELD A LATER READER WILL TOUCH, PROBED HERE, ONCE — and a read that THREW
+    // disqualifies the value even when the field is one this function never uses itself.
+    // `errorRecord` reads `details` and `retryable` bare into a journal payload, and
+    // `toJSON` reads all five, so "it answered for me" is not the question; "will it answer
+    // for them" is.
+    const cls = probe(e, "class");
+    const code = probe(e, "code");
+    const message = probe(e, "message");
+    const trapped = [cls, code, message, probe(e, "retryable"), probe(e, "retryAfterMs"), probe(e, "details")].includes(
+      THREW,
+    );
+
+    if (!trapped && typeof cls === "string" && CLASSES.has(cls as ErrorClass) && typeof code === "string" && typeof message === "string") {
+      return e;
     }
-    return new LoomError("internal", typeof code === "string" ? code : fallbackCode, safeString(readOwn(e, "message")), {
+    // Rebuilt, carrying across whatever could be read. `code` survives even here, because
+    // control flow branches on it; a class in no vocabulary does not, because generic
+    // machinery branches on THAT and `internal` is the fail-closed reading.
+    // A TRAP DISQUALIFIES THE VALUE, NOT EVERY FIELD ON IT. `class` decides the HTTP status
+    // and the retry policy, so downgrading a `policy` (403) to `internal` (500) because an
+    // unrelated `details` getter threw would lose a fact that answered perfectly well. The
+    // trapped field is dropped; the ones that spoke are carried across. `cls` itself
+    // throwing is the case that does force `internal`, and `THREW` is a symbol so it fails
+    // the `typeof === "string"` test on its own.
+    const keptClass = typeof cls === "string" && CLASSES.has(cls as ErrorClass) ? (cls as ErrorClass) : "internal";
+    const retryAfterMs = readOwn(e, "retryAfterMs");
+    const details = readOwn(e, "details");
+    return new LoomError(keptClass, typeof code === "string" ? code : fallbackCode, safeString(message === THREW ? undefined : message), {
       cause: e,
+      ...(typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) ? { retryAfterMs } : {}),
+      ...(details === undefined ? {} : { details }),
     });
   }
   if (e instanceof Error && readOwn(e, "name") === "AbortError") {
