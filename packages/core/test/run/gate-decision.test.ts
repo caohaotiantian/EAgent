@@ -209,6 +209,52 @@ test("A HOSTILE DECISION COSTS THE DECISION, NEVER THE PROCESS", () => {
   assert.equal(gateDecisionOf({ kind: "redirect", take: hostileTake }), undefined);
 });
 
+test("A `take` IS WALKED BY INDEX UNDER A BOUNDED LENGTH, never through the caller's iterator", () => {
+  // `Array.isArray` answers for the target's exotic-array-ness and says NOTHING about
+  // `Symbol.iterator`, which is an ordinary own property a caller may replace. A `for…of`
+  // therefore drove an iterator the caller wrote, with no element cap — measured under
+  // `--max-old-space-size=96`, an array carrying its own infinite `Symbol.iterator` exited
+  // 134 with "JavaScript heap out of memory". An OOM is not catchable, so the `try` this
+  // function's contract rests on did not hold, on a path one of whose callers is the
+  // UNAUTHENTICATED callback route.
+  // A forged `length` is checked FIRST and with a small number, deliberately: it is the
+  // assertion that distinguishes bounded from unbounded in microseconds. `MAX_TAKE` is 4096
+  // and module-private, so the literal is spelled here — if the cap moves, this moves.
+  const forged = (length: number): unknown =>
+    new Proxy([] as unknown[], {
+      get(t, k) {
+        if (k === "length") return length;
+        if (typeof k === "string" && /^\d+$/.test(k)) return "e1";
+        return Reflect.get(t, k);
+      },
+    });
+  assert.equal(gateDecisionOf({ kind: "redirect", take: forged(4097) }), undefined, "a `take` past the cap was walked");
+  assert.equal(
+    (gateDecisionOf({ kind: "redirect", take: forged(4096) }) as { take: string[] } | undefined)?.take.length,
+    4096,
+    "…and the cap itself is legal",
+  );
+
+  // THE INDICES, NOT THE ITERATOR. An array's `Symbol.iterator` is an ordinary own property
+  // a caller may replace, and `Array.isArray` says nothing about it — so `for…of` reads
+  // values the indices do not hold. Honest `length`, lying iterator:
+  const lying = ["e1", "e2"];
+  Object.defineProperty(lying, Symbol.iterator, {
+    value: function* (): Generator<string> {
+      yield "e-elsewhere";
+    },
+  });
+  assert.deepEqual(
+    gateDecisionOf({ kind: "redirect", take: lying }),
+    { kind: "redirect", take: ["e1", "e2"] },
+    "the caller's iterator was consulted instead of the indices",
+  );
+
+  // …and an ordinary redirect still works, so the cap bounds a hostile value, not an author.
+  const real = Array.from({ length: 64 }, (_, i) => `e${i}`);
+  assert.deepEqual(gateDecisionOf({ kind: "redirect", take: real }), { kind: "redirect", take: real });
+});
+
 test("A `take` ELEMENT IS READ ONCE, so the value checked is the value kept", () => {
   // A getter that answers a legal edge id and then something else would otherwise pass the
   // check and ship the second answer into `gate.decided`'s payload.
@@ -290,9 +336,73 @@ test("A REHYDRATED DEFAULT ACTION IN NO VOCABULARY EXPIRES THE GATE INSTEAD OF A
   assert.notEqual(after.decision, "APPROVE", "and is not journaled as a decision");
 });
 
+test("A REHYDRATED SLA THAT IS NOT A NUMBER IS NO SLA, rather than a deadline that never arrives", async () => {
+  // The same door as the test above and the other half of A12. `rehydrate` takes a
+  // `GateRequest` from an operator re-supplying an SLA for a gate whose journal predates
+  // the field — no compiler behind it — and `#deadlineOf` reads it as its last source.
+  // `deadline = raisedAtTs + NaN` is `NaN`, which loses every comparison, so it is not a
+  // deadline; but it is not ABSENT either, and the difference is visible everywhere a
+  // deadline is a number. `nextDeadline` is the cheapest place to see it: the sweeper asks
+  // it whether a run is worth folding, and `gateQueueOrder` ranks by it — a `NaN` there is
+  // the non-transitive comparator that reorders a queue of questions for humans.
+  const { log, broker } = brokerRig();
+  await broker.raise(log, request());
+
+  for (const junk of [NaN, Infinity, -1, 0, 1.5, "1000" as unknown as number]) {
+    broker.rehydrate(Object.values((await broker.project(log))!.gates)[0]!.gateId, { ...request(), slaMs: junk });
+    assert.equal(
+      broker.nextDeadline((await broker.project(log))!),
+      undefined,
+      `slaMs: ${String(junk)} became a deadline`,
+    );
+  }
+
+  // …and a usable one still gives the gate a clock, which is what `rehydrate` is for.
+  broker.rehydrate(Object.values((await broker.project(log))!.gates)[0]!.gateId, { ...request(), slaMs: 1000 });
+  assert.equal(typeof broker.nextDeadline((await broker.project(log))!), "number");
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // the same question, asked of a journal this build did not write
 // ─────────────────────────────────────────────────────────────────────────────
+
+test("A JOURNALED DECISION THE ENGINE CANNOT READ FAILS THE TASK, instead of running the action", async () => {
+  // THE READING SIDE, WHICH IS A SEPARATE QUESTION FROM THE WRITING SIDE. `gateDecisionOf`
+  // stops a decision outside the union being APPENDED; `Engine.#applyGateDecision` reads
+  // one back out of a FOLD, and it branched on `=== "reject"` alone — so a journal carrying
+  // `decision: "REJECT"` still fell through to `succeeded` and ran the guarded write.
+  //
+  // The journal is authoritative (invariant 2), and *trusted* means "we do not defend
+  // against it", not "it cannot be malformed": a hand-edited database, or one written by a
+  // build older than the guard, is a real shape this repo folds. Fixing only the append
+  // would have left the same fail-open reachable through the one input the system trusts.
+  const h = harness();
+  const runId = await h.engine.submit({ graph: compileSkeleton(), inputs: { paths: DOCS } });
+  const parkedAt = await h.engine.advance(runId);
+  const gate = Object.values(parkedAt.gates).find((g) => g.state === "open")!;
+  assert.equal(h.writes.length, 0);
+
+  // Hand-write the pair `resolve` would have written, with a decision it would now refuse.
+  const log = new RunLog(runId, { store: h.store, now: () => 1_700_000_000_000 });
+  await log.append(
+    [
+      {
+        type: "gate.decided",
+        payload: { gateId: gate.gateId, decision: "REJECT" as never, latencyMs: 0 },
+        actor: alice,
+      },
+      { type: "run.resumed", payload: { by: "gate" }, actor: alice },
+    ],
+    { taskId: gate.taskId },
+  );
+
+  const after = await h.engine.advance(runId);
+  assert.equal(after.status, "failed", "the run completed on a decision nobody can read");
+  assert.equal(h.writes.length, 0, "THE ACTION BEHIND THE GATE RAN");
+  assert.equal(after.error?.code, CODES.E_REPLAY_DIVERGENCE, "…and the failure does not say why");
+  assert.match(String(after.error?.message ?? ""), /not one of "approve", "reject", "edit", "redirect"/);
+  assert.match(String(after.error?.message ?? ""), /has NOT been run/);
+});
 
 test("REPLAY DIVERGES ON A RECORDED DECISION IT CANNOT READ, instead of re-serving it as an approval", async () => {
   // `run/replay.ts`'s `decisionOf` had the same `default: {kind:"approve"}` the broker had,

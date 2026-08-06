@@ -344,6 +344,13 @@ export class Engine {
     this.#workerId = opts.workerId ?? "worker-0";
     this.#maxParallelism = Math.max(1, opts.maxParallelism ?? 16);
     this.#policyOpts = opts.policy ?? { granted: ["*"] };
+    // AT ENGINE CONSTRUCTION, EVEN THOUGH THE ENGINE IS NOT WHAT VALIDATES IT. A
+    // `PolicyEngine` is built lazily per run in `#contextFor`, so an out-of-range
+    // `interventionWindowMs` would otherwise first surface from inside `submit` — an
+    // unstartable RUN rather than an unstartable PROCESS, which is the wrong end of a
+    // deployment's day to discover a config error. Discarding the instance is the point:
+    // the constructor is the check.
+    new PolicyEngine(this.#policyOpts);
     this.#replay = opts.replay;
     this.#sleep = opts.sleep ?? defaultSleep;
     this.#contextTokens = opts.contextTokens ?? 100_000;
@@ -1339,8 +1346,45 @@ export class Engine {
     }
   }
 
-  /** Turn a resolved gate into the Task's outcome. */
+  /**
+   * Turn a resolved gate into the Task's outcome.
+   *
+   * THE READING SIDE OF THE ACCEPTANCE SET, AND IT IS A SEPARATE QUESTION FROM THE WRITING
+   * SIDE. `gateDecisionOf` stops a decision outside the union from being APPENDED; this
+   * method reads one back out of a FOLD, and the journal is authoritative (invariant 2) —
+   * which means "we do not defend against it", not "it cannot say something we did not
+   * write". A hand-edited database, a journal from a build that predates the guard, or a
+   * `rewind`ed history can all carry `decision: "REJECT"`, and this method branched on
+   * `=== "reject"` alone, so every one of those fell through to `succeeded` and ran the
+   * action behind the gate. Fixing only the append would have left the same fail-open
+   * reachable from the one input the system is designed to trust.
+   *
+   * The unreadable case FAILS the Task rather than being read as a rejection. It is not a
+   * rejection — nobody refused anything — and inventing one would put a refusal in the run
+   * record that no human made, which is the same class of lie in the opposite direction.
+   * A failed Task stops the run and names the gate, which is what an operator holding a
+   * journal they cannot account for actually needs.
+   */
   #applyGateDecision(gate: GateRecord, node: NodeSpec, outbound: readonly EdgeId[]): NodeOutcome {
+    if (
+      gate.decision !== "approve" &&
+      gate.decision !== "reject" &&
+      gate.decision !== "edit" &&
+      gate.decision !== "redirect"
+    ) {
+      return {
+        status: "failed",
+        writes: {},
+        usage: { ...ZERO_USAGE },
+        error: err.internal(
+          CODES.E_REPLAY_DIVERGENCE,
+          `node "${node.id}" is behind gate "${gate.gateId}", whose journaled decision is ` +
+            `${JSON.stringify(gate.decision)} — not one of "approve", "reject", "edit", "redirect". ` +
+            `This journal was not written by this build; the action behind the gate has NOT been run`,
+          { details: { gateId: gate.gateId, decision: gate.decision } },
+        ),
+      };
+    }
     if (gate.decision === "reject") {
       return {
         status: "failed",

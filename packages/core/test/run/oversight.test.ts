@@ -170,6 +170,57 @@ test("holdMs is non-zero ONLY for a hard-to-undo action at posture `on`", () => 
   }
 });
 
+test("AN INTERVENTION WINDOW NO TIMER CAN HOLD IS REFUSED, instead of becoming one millisecond", () => {
+  // `decide` returns `holdMs` from this map, `Engine` awaits `#sleep(holdMs)` → `setTimeout`,
+  // and the SAME number is journaled verbatim as `action.pending`'s `windowMs`. `setTimeout`
+  // truncates to 32 bits rather than saturating or throwing, so before this check:
+  //
+  //     interventionWindowMs: {reversible_write: 2 ** 31}
+  //       → {effect: "allow", posture: "on", holdMs: 2147483648}
+  //
+  // slept as ONE MILLISECOND and recorded as 24.8 days. The operator was told they had most
+  // of a month to hit stop; they had a millisecond. That is a false claim in the audit
+  // trail, which is worse than the short sleep.
+  for (const bad of [2 ** 31, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
+    assert.throws(
+      () => new PolicyEngine({ granted: [], interventionWindowMs: { reversible_write: bad } }),
+      (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID",
+      `${bad} was accepted as an intervention window`,
+    );
+  }
+
+  // THE OTHER DIRECTION IS QUIETER AND IS WHY THIS IS A REFUSAL RATHER THAN A CLAMP.
+  // `holdMs > 0` is FALSE for all of these, so no `action.pending` is written at all — a
+  // config typo of `-1` turns the supervision window off with nothing in the journal to show
+  // one was ever declared. A clamp would silently substitute a number nobody chose.
+  for (const bad of [NaN, Infinity, -Infinity, -1, 1.5, "5000" as unknown as number]) {
+    assert.throws(
+      () => new PolicyEngine({ granted: [], interventionWindowMs: { irreversible: bad } }),
+      (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID",
+      `${String(bad)} was accepted as an intervention window`,
+    );
+  }
+
+  // The boundary itself is legal, and so is 0 — "no hold" is a coherent posture and is the
+  // default for the two reversible classes.
+  assert.ok(new PolicyEngine({ granted: [], interventionWindowMs: { irreversible: 2_147_483_647 } }));
+  assert.ok(new PolicyEngine({ granted: [], interventionWindowMs: { irreversible: 0 } }));
+});
+
+test("…and the Engine refuses the same window at ITS construction, not on the first submit", () => {
+  // `PolicyEngine` is built lazily per run in `#contextFor`, so without this the throw first
+  // reaches an operator from inside `submit` — an unstartable RUN rather than an unstartable
+  // PROCESS, which is the wrong end of a deployment's day to find a config error.
+  assert.throws(
+    () =>
+      new Engine({
+        store: new MemoryStateStore(),
+        policy: { granted: ["*"], interventionWindowMs: { irreversible: 2 ** 31 } },
+      }),
+    (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID",
+  );
+});
+
 test("no hold at `in` (a gate is stronger) or at `out` (nobody is watching)", () => {
   const gated = engine().decide(req({ irreversibility: "irreversible" }));
   assert.equal(gated.effect, "gate", "at `in` you gate instead of holding");

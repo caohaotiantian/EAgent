@@ -67,6 +67,14 @@ export const CLASS_AUTO_RETRYABLE: Readonly<Record<IrreversibilityClass, boolean
   externally_visible: false,
 };
 
+/**
+ * The most edges a `redirect` may name, and it is a bound on a HOSTILE value rather than a
+ * limit on a graph: `take` names one node's own outgoing edges, and a graph the compiler
+ * accepts has orders of magnitude fewer. See `gateDecisionOf`'s redirect arm for what a
+ * forged `length` does without it.
+ */
+const MAX_TAKE = 4096;
+
 /** The four things a human may answer a gate with. */
 export type GateDecisionKind = "approve" | "reject" | "edit" | "redirect";
 
@@ -136,14 +144,32 @@ export function gateDecisionOf(v: unknown): GateDecision | undefined {
     case "redirect": {
       const take = readField(v, "take");
       if (!isList(take)) return undefined;
-      // Reading an ELEMENT is a call — an ordinary array can carry an accessor at index 0
-      // — so the walk is inside the try, not merely the container test. Each element is
-      // read ONCE and the value that was checked is the value that is kept: a getter that
-      // answers `"e1"` and then something else would otherwise pass the check and ship the
-      // second answer.
+      // BY INDEX, UNDER A BOUNDED LENGTH — never `for…of`, and this is the whole reason the
+      // walk is written the long way.
+      //
+      // `Array.isArray` answers for the TARGET's exotic-array-ness and says nothing about
+      // `Symbol.iterator`, which is an ordinary own property a caller may replace. A
+      // `for…of` therefore drives an iterator the caller wrote, with no element cap:
+      // measured under `--max-old-space-size=96`, an array carrying its own infinite
+      // `Symbol.iterator` exited **134, "JavaScript heap out of memory"** — and an OOM is
+      // not catchable, so the `try` this function's contract rests on does not hold. One of
+      // the callers is the unauthenticated callback route, where the value comes from a
+      // vendor adapter; the same input under the code this replaced returned `undefined`.
+      //
+      // Indexing reads no iterator, and `MAX_TAKE` bounds a forged `length`. `take` names
+      // this node's own outgoing edges, so the cap is orders of magnitude above anything a
+      // graph the compiler accepts can produce — it is a bound on a hostile value, not a
+      // limit on an author.
+      const n = readField(take, "length");
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > MAX_TAKE) return undefined;
+      // Reading an ELEMENT is still a call — an ordinary array can carry an accessor at
+      // index 0 — so the walk stays inside a try. Each element is read ONCE and the value
+      // that was checked is the value that is kept: a getter answering `"e1"` and then
+      // something else would otherwise pass the check and ship the second answer.
       try {
         const edges: string[] = [];
-        for (const t of take) {
+        for (let i = 0; i < n; i++) {
+          const t = readField(take, String(i));
           if (typeof t !== "string") return undefined;
           edges.push(t);
         }
@@ -171,9 +197,21 @@ export function gateDecisionOf(v: unknown): GateDecision | undefined {
  * `(unidentified)` — and a gate reading "the security lead must approve" would then be
  * satisfied by whatever the perimeter could not identify. An approvers list that names a
  * marker is the "looks supervised, is not" failure written into the graph itself.
+ *
+ * THE SHAPE IS THE MARKER'S OWN GRAMMAR, not "starts with `(` and ends with `)`". The
+ * loose version refused ordinary subjects: measured, `"(sre) alice (oncall)"` → true and
+ * `"( )"` → true, which at the HTTP perimeter means a deployment whose SSO subjects carry
+ * a parenthesised team prefix cannot authenticate anybody. A marker is one parenthesised
+ * lower-case token — that is what `(unidentified)` and `(shared-token)` are, and what any
+ * later one would be — so the pattern says so.
+ *
+ * It TRIMS, because its three callers do not agree about whitespace: `checkApproval` trims
+ * before asking, `subjectFlag` and `checkedAuth` do not, and `" (unidentified)"` is the
+ * same claim as `"(unidentified)"` to every reader of a journal. One rule, one place,
+ * whitespace included.
  */
 export function isSyntheticSubject(subject: string): boolean {
-  return subject.startsWith("(") && subject.endsWith(")") && subject.length > 2;
+  return /^\([a-z][a-z0-9-]*\)$/.test(subject.trim());
 }
 
 /** A property read that costs this value and never the caller. */

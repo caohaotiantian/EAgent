@@ -246,3 +246,88 @@ test("A CHANNEL NAME THAT NAMES AN INHERITED PROPERTY IS NOT A CHANNEL", () => {
   }
   assert.deepEqual(view.visible, ["findings"], "and none of them is visible either");
 });
+
+test("…AND THE SLICE IS BUILT THE SAME WAY, which is the half the allow-list does not cover", () => {
+  // The carve-out above — "the slice cannot hold anything else, it is built from the
+  // allow-list" — is the claim that was wrong. `makeStateView`'s construction loop read
+  // `specs[name]` and `state[name]` BARE, before the `Set` is ever consulted, so an
+  // inherited name in the node's own `reads` reached the slice rather than being skipped.
+  //
+  // And it is reachable from an ordinary graph: `graph/compile` admits `reads:
+  // ["constructor"]` with only a WARNING (`GRAPH005_UNPRODUCED_READ`). Measured before the
+  // fix, one function node declaring it:
+  //
+  //     run status: failed   channels: {}
+  //     run.failed {"code":"E_INTERNAL","message":"CanonicalizationError: function is not
+  //                 representable at constructor"}
+  //
+  // — `digest(slice)` choking on the `Object` function that `state["constructor"]`
+  // returned. The whole run dies with an untyped internal error instead of the
+  // `E_CHANNEL_UNDECLARED` this layer promises for a channel nobody declared.
+  for (const inherited of ["constructor", "toString", "valueOf", "hasOwnProperty"]) {
+    const view = makeStateView(SPECS, { findings: ["a"] }, ["findings", inherited]);
+    assert.deepEqual(view.visible, ["findings"], `"${inherited}" reached the slice`);
+    // All THREE reads, because the slice is built once and read back twice: fixing only
+    // the construction leaves `get` and `require` indexing the slice bare, and the
+    // allow-list does not save them — the node DECLARED this name, so `allowed.has` is
+    // true and the early return never fires.
+    assert.equal(view.get(inherited), undefined, `get("${inherited}") read through the prototype chain`);
+    assert.throws(
+      () => view.require(inherited),
+      (e: unknown) => (e as { code: string }).code === "E_CHANNEL_UNDECLARED",
+      `require("${inherited}") returned a host function instead of refusing`,
+    );
+  }
+
+  // The value side is the same lookup: a spec that IS declared must not pick up a value
+  // from `Object.prototype` when the state has none of its own.
+  const declaredButUnset = makeStateView(SPECS, {}, ["findings"]);
+  assert.deepEqual(declaredButUnset.visible, [], "an unset declared channel is absent, not inherited");
+});
+
+test("A WRITE TO AN INHERITED NAME IS REFUSED, not accepted as a channel nothing declared", () => {
+  // `reduceState` did `const spec = specs[channel]`, and `specs["constructor"]` answers with
+  // the `Object` FUNCTION rather than `undefined` — so `E_CHANNEL_UNDECLARED`, the one check
+  // between a node body's write vocabulary and the graph's declared channels, did not run
+  // for four names. Reproduced against `specs = {findings}`:
+  //
+  //     reduceState({constructor}) → ACCEPTED  channels=["constructor"]  state={}
+  //     reduceState({toString})    → ACCEPTED  channels=["toString"]     state={}
+  //     reduceState({nope})        → refused: E_CHANNEL_UNDECLARED
+  //
+  // Nothing landed in state — `reduceChannel` with `spec = Object` returns `undefined`,
+  // which the spread drops — so it is a fail-OPEN REFUSAL rather than a state corruption.
+  // The cost is the `state.reduced` event, which named a channel in `channels` that no graph
+  // declares and no reducer wrote.
+  for (const inherited of ["constructor", "toString", "valueOf", "hasOwnProperty"]) {
+    assert.throws(
+      () => reduceState(SPECS, {}, { [inherited]: [c(0, "leak")] }),
+      (e: unknown) => (e as { code: string }).code === "E_CHANNEL_UNDECLARED",
+      `a write to "${inherited}" was accepted`,
+    );
+  }
+
+  // `__proto__` is the one name whose answer depends on HOW the wave was built, and both
+  // readings are correct here for different reasons. Assigning it (`wave["__proto__"] = …`)
+  // invokes the SETTER, so the key is never own, `Object.keys` never sees it, and the write
+  // vanishes before `reduceState` is reached. `JSON.parse` does NOT invoke the setter, so it
+  // yields a genuine own property — which reaches the lookup and is refused like any other
+  // name no graph declared. Both are pinned so a future reader does not "fix" either one.
+  assert.deepEqual(
+    reduceState(SPECS, {}, (() => {
+      const wave: Record<string, Contribution[]> = {};
+      wave["__proto__"] = [c(0, "leak")];
+      return wave;
+    })()).channels,
+    [],
+    "an ASSIGNED `__proto__` never becomes an own key, so there is no write to refuse",
+  );
+  assert.throws(
+    () => reduceState(SPECS, {}, JSON.parse('{"__proto__": []}') as Record<string, Contribution[]>),
+    (e: unknown) => (e as { code: string }).code === "E_CHANNEL_UNDECLARED",
+    "a `__proto__` from JSON.parse IS an own key, and is refused like any other undeclared channel",
+  );
+
+  // …and a declared channel still reduces, so this is a lookup rule and not a new refusal.
+  assert.deepEqual(reduceState(SPECS, {}, { findings: [c(0, "a")] }).channels, ["findings"]);
+});

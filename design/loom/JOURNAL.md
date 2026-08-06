@@ -2406,3 +2406,71 @@ to name `C1.4` — an entry with a sub-number the register has never had.
 `docs-drift.test.ts` and leaves this file; the register is for what a test cannot yet hold.
 A2 (fencing), A9 and A10 all reverse the good way — they become tests the day the defect is
 fixed, and the entries go with them.
+
+## 2026-08-06 — Fail-open — A decision in no vocabulary is a refusal, not an approval
+
+**Context.** `GateDecision` is a four-member union and every reader downstream branches on
+`kind === "reject"`. So every kind the union did not name satisfied each of those branches
+by not being the one they tested, and fell through to the permissive reading. Driven against
+`Engine.resolveGate` — the public, pinned-surface method an embedder calls — one fresh
+skeleton run each, the last column being whether the guarded `fs.write` behind the gate
+really ran: `{"kind":"REJECT"}` → `succeeded writes=1`, `{"kind":"nope"}` → `succeeded
+writes=1`, `{}` and `42` → `succeeded writes=1` with no `decision` field on the row at all.
+An operator's caps-lock was an approval, and the journal kept `decision: "REJECT"` beside an
+action that happened — a word in no vocabulary, recorded as the thing a human decided.
+
+**Decision.** One exported guard, `gateDecisionOf`, in `vocab.ts`; `HumanGateBroker.#validate`
+is the point of use and now RETURNS the checked decision, so nothing downstream re-reads the
+caller's object. `GateDecision` moves to `vocab.ts` with it.
+
+**Why `vocab.ts` and not `run/gates.ts`.** `run/gates.ts` imports `run/delivery.ts` at run
+time, so a guard exported from either is an import cycle for the other. `vocab.ts` is a leaf
+module whose whole stated purpose is "value types shared by layers that must not import each
+other", which is exactly the situation. It has no imports, so it raises no errors either —
+`undefined` is its fail-closed answer, and each caller chooses its own code.
+
+**Why one guard rather than a fourth private switch.** There were already THREE independent
+switches over this union — `checkedDecision` (`server/http.ts`), `ownedDecision`
+(`run/delivery.ts`), and `run/replay.ts`'s `decisionOf`, whose `default:` arm returned
+`{kind: "approve"}` — in front of a broker that validated it nowhere. `checkedDecision`'s own
+docstring claimed it mirrored `ownedDecision` "member for member, so unifying them later is a
+deletion rather than a reconciliation"; by the time that was checked they had already drifted
+(one truncates `reason` and JSON-round-trips its containers, the other does neither). Three
+guard chains for one union is what invariant 6 forbids, and a door is not a guard: the next
+route added is the one nobody copies the switch into.
+
+**What did NOT collapse, and why that is the interesting half.** Each door keeps what is
+genuinely its own, because the INPUTS differ. `ownedDecision` reads a vendor adapter's return
+value, so it bounds `reason` and copies `writes` through a JSON round trip — and it keeps a
+`isPlainRecord` check on the INPUT as well as the result, which the first version of this
+change dropped and a test caught within the hour: `ownedJson` renders a `Map` as `{}`, so a
+`Map` of a human's edits would have been journaled as an edit that edited nothing, on a gate
+somebody had just been asked to edit. `checkedDecision` reads `JSON.parse` output and keeps
+its per-member HTTP messages, which a total function returning `undefined` cannot give a
+caller. Folding those in would make one door's bound another door's silent behaviour change.
+
+**A7, in the same change, because it is the same failure one layer out.**
+`GRAPH014_APPROVER_INVALID` accepted any non-empty string, so a graph could list
+`(unidentified)` — the marker the perimeter mints for a caller it could not identify — as an
+approver. That list reads as restricted and is satisfied by exactly the callers nobody
+vouched for. The refusal is on the parenthesised FORM rather than on the two markers this
+build happens to mint, so a marker added later is refused by construction; and it is applied
+at all three doors, because the control plane's perimeter check was only ever one of them —
+`loom approve --as` and the signed-callback route each construct the actor themselves.
+
+**Rejected.** The minimal variant: a total switch inside the private `#validate` only, ~20
+lines and surface-neutral. It closes the fail-open and leaves three validators for one union,
+which is the arrangement that produced the defect. Two deliberate exports are cheaper than
+the fourth copy.
+
+**Every guard was watched failing.** Nine mutations, one per new condition, each reverted
+against the whole suite: eight were killed by the test named for them. The ninth —
+`replay.ts`'s `default:` arm — SURVIVED, because no fixture can reach it any more: the broker
+now refuses to journal a decision outside the vocabulary, which is the fix one layer up. It
+is reachable only from a journal this build did not write, so the test wraps the store and
+rewrites one field on read, keeping every seq and ts identical. It kills the mutation.
+
+**Reverses when.** A fifth `GateDecision` member is added. `gateDecisionOf` is then the one
+place that has to learn it, which is the property the change was made for — and the three
+doors become compile errors rather than silent approvals, which is the property it was made
+against.

@@ -2910,12 +2910,21 @@ const DEDUPE_ACTOR: Actor = SYSTEM_ACTOR("gate-broker:dedupe");
 
 /** Keep the half that cannot authorize anything, and drop the half that can. */
 function ephemeralOf(req: GateRequest): EphemeralGate {
-  const reminders = usableReminders(req.reminders, req.slaMs);
+  // A USABLE SLA OR NONE, for the reason `usableReminders` gives one line down and which
+  // this line did not take: the SLA becomes `deadline = raisedAtTs + slaMs` and is then only
+  // ever COMPARED against `now`, and `NaN` loses every comparison — so `now >= NaN` is false
+  // forever and the gate can never expire. `rehydrate` is the door that matters: it takes
+  // this same request shape from an operator re-supplying an SLA for a gate whose journal
+  // predates it, with no compiler behind it, and `#deadlineOf` reads it as its third and
+  // highest-authority source. "No deadline" and "a deadline that never arrives" look
+  // identical to a sweeper and are opposite answers to the question an operator just asked.
+  const slaMs = isPositiveWholeMs(req.slaMs) ? req.slaMs : undefined;
+  const reminders = usableReminders(req.reminders, slaMs);
   return {
     payload: req.payload,
     ...(req.delivery === undefined ? {} : { delivery: req.delivery }),
     ...(req.defaultAction === undefined ? {} : { defaultAction: req.defaultAction }),
-    ...(req.slaMs === undefined ? {} : { slaMs: req.slaMs }),
+    ...(slaMs === undefined ? {} : { slaMs }),
     ...(reminders === undefined ? {} : { reminders }),
   };
 }

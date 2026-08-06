@@ -343,6 +343,24 @@ own docstring calls worse than none. Reproduced before the floor landed —
 `secret_ref`, with the fix text naming the two that hide anything — three lines next to the
 check that already validates the field is a classification at all.
 
+> **REFUTED 2026-08-06, AND IT IS THE MEASUREMENTS THAT SURVIVE RATHER THAN THE VERDICT.**
+> Every number above still reproduces; what is wrong is the sentence calling the compiler's
+> silence a defect. **The floor IS the published contract**, not a quiet replacement:
+> `DeliverySpec.redactAs`'s own JSDoc states it (*"FLOORED AT `pii` — `public` and
+> `internal` classify data as not sensitive…"*, which is emitted into the `.d.ts` an author
+> reads on hover), `redactFields`'s docstring restates it at length, and
+> `test/run/delivery.test.ts` pins **both** values by name under a comment saying "both
+> reachable from a graph `checkDelivery` accepts" — so the compiler's silence was a
+> considered part of the decision and not an oversight.
+>
+> **And `checkApproval`'s argument does not transfer, which is the part worth keeping.**
+> That argument is about a runtime enforcing LESS than the graph declared — supervision that
+> is not there. Here the runtime hides MORE than the graph declared. A refusal would be
+> defensible on legibility grounds and is a *design* question about whether
+> `Classification` is the right type for this field at all; it is not a fail-open, and it
+> does not belong in a register of things known to be wrong. **Do not "fix" this without
+> reopening the type question first.**
+
 **A12 · Caller-supplied numbers with no bound. `PolicyEngineOptions.interventionWindowMs` is
 what is left; a timer above 2³¹−1 ms means one millisecond, and a cap of `NaN` means no cap.** `setTimeout`, `setInterval` and
 `AbortSignal.timeout` keep their
@@ -789,6 +807,26 @@ So the `""` those branches test is a value the FOLD writes (`projection.ts`'s
 unchanged and is still the only half worth spending time on: can a `gate.raised` be APPENDED
 with no `taskId` **at all**? **Do not add a third `""` branch** to `engine.ts`.
 
+> **ANSWERED 2026-08-06, AND THE ANSWER IS "NOT A DEFECT — A COMMENT".** The question was
+> whether the `taskId === ("" as TaskId)` branches are dead. They are **not**, and the
+> entry's own framing — *"either those two branches are dead and should say so, or something
+> else that reads `taskId` needs the same treatment"* — offered a third reading it did not
+> consider: they are live, and what they defend against is a **hand-written or legacy
+> journal**, which this repo folds routinely and deliberately.
+>
+> There are **four** of them, not two — `HumanGateBroker.#commitForOpenGate`, `claim`,
+> `resolveBatch`'s `lead`, and `cancelOpenGates` in `run/engine.ts` — and a
+> `gate.raised` carrying no `taskId` at all is producible only by writing the journal
+> outside this process's own appenders, which is exactly the input those branches exist
+> for. Every read model is already total against `""` (`projection.ts` mints no Task row,
+> `spans.ts` mints no Task span, `console.ts` renders it as taskless), so a `""` id produces
+> no wrong answer anywhere — which is why this cost nothing while it stood open.
+>
+> **What is left is a comment, not a change.** Those four branches should say *what shape
+> they defend against* rather than reading as dead code the next sweep deletes; and the
+> asymmetry with `raise`/`resolve`, which do NOT strip, is cosmetic rather than a bug.
+> Entry closed as UNCONFIRMED-resolved. **Do not delete the branches.**
+
 `telemetry/spans.ts` is out of this question entirely: `spansFrom` derives its task span from
 a positive test (`typeof e.taskId === "string" && e.taskId !== ""`) rather than from
 `=== undefined`, so `null` and `""` are both simply taskless there. That guard used to be
@@ -998,6 +1036,26 @@ actually covered, which is what `replayThenTail` does; note that a naive move of
 `subscribe` call is not enough, because a long replay can then overflow the 1024-slot queue
 under `drop_oldest` and reintroduce the same hole through the other door.
 
+> **DOWNGRADED 2026-08-06 from "reproduced" to a LATENT HAZARD, and the reproduction above
+> is exactly why the distinction matters.** The order is wrong in principle and this is
+> still the one reconnect path that does not use `replayThenTail`. But **the window is
+> currently EMPTY, and no client can lose an event through it**: both shipped
+> `StateStore`s are fully synchronous (`node:sqlite`'s `DatabaseSync`, and
+> `MemoryStateStore`), so the whole baseline — `store.head`, `engine.projection`,
+> `store.read`, including a paged sqlite read — resolves inside ONE microtask drain, and
+> the code from the last `await` to `bus.subscribe` is straight-line synchronous. Verified
+> by scheduling `setImmediate`, `setTimeout(0)` and `process.nextTick` immediately before
+> each call on both stores: none fired before it resolved.
+>
+> **The reproduction stands and does not contradict that.** It widened the window with a
+> `Proxy` that parks `projection()` — i.e. it proved what an ASYNCHRONOUS store would do,
+> which is what the interface permits and what any future store (Postgres, S3, a network
+> journal) will be. So this is a defect of the CONTRACT, payable the day a store is not
+> synchronous, and not a bug a deployment can hit today. It stays in the register for that
+> reason and because the fix is the same either way; it is not the emergency the "NEW,
+> reproduced, NOT fixed" heading implied. **Anything asserting a live SSE gap on a shipped
+> store is wrong.**
+
 **A21 · `GateDispatcher.deliver`'s prelude reads its `GateSummary` bare, so the one exit the
 whole file is arranged around is still reachable — from the summary rather than from the
 spec.** New, and it is the residue of totalizing `ConsoleChannel` rather than a discovery:
@@ -1022,6 +1080,23 @@ names. **Fix, exactly:** `readProp` for `gateId` and `payload`, and a `shownGate
 its input's fields the way it already copies them, rather than spreading first. It is an
 entry and not an edit because the spread is also what carries fields nobody has added yet,
 so replacing it is a decision about `GateSummary`'s growth and not a one-line total-read.
+
+> **REFUTED AS WRITTEN 2026-08-06 — the exclusion is not undiscovered, it is DOCUMENTED AND
+> PRICED, and the entry names the smaller half of it.** `run/delivery.ts` carries a block
+> headed `THE BOUNDARY` → `WHAT IS DELIBERATELY OUTSIDE IT` → `WHAT THAT EXCLUSION COSTS`,
+> which already says "every own property of the summary, because it spreads it" — verbatim
+> the fact this entry reports as new — and already measures the case it does NOT mention:
+> `deliver`'s other data argument, the `DeliverySpec`, is read just as bare
+> (`{channels: "console"}` → `TypeError: names.map is not a function`, out of the same
+> prelude, zero journal rows, no fallback).
+>
+> So the entry is both **redundant** (a stated limit re-filed as a discovery) and
+> **narrower than the thing it describes**. Rewrite it as one question — *should
+> `GateDispatcher.deliver`'s prelude be inside the boundary at all, for BOTH arguments?* —
+> or close it and let `THE BOUNDARY` block stand as the answer. Its UNCONFIRMED half is
+> unchanged and is the reason not to rush: today's only caller is `HumanGateBroker`, which
+> passes a summary it folded from the journal, so reaching this needs an embedder driving
+> the exported dispatcher directly.
 
 ### B · Mechanism that exists and is not wired to anything
 

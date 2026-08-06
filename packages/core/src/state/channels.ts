@@ -270,6 +270,51 @@ export interface ReduceResult {
   readonly stateHashAfter: Digest;
 }
 
+/**
+ * The channel a graph DECLARED, or nothing — never something `Object.prototype` supplied.
+ *
+ * `specs[channel]` is a bare index, and `specs["constructor"]` answers with the `Object`
+ * FUNCTION rather than `undefined`, so the one check standing between a node body's write
+ * vocabulary and the graph's declared channels did not run for four names. Reproduced
+ * against `specs = {findings}`:
+ *
+ *     reduceState({constructor}) → ACCEPTED  channels=["constructor"]  state={}
+ *     reduceState({toString})    → ACCEPTED  channels=["toString"]     state={}
+ *     reduceState({nope})        → refused: E_CHANNEL_UNDECLARED
+ *
+ * Nothing landed in state, so that half was a fail-OPEN REFUSAL rather than a corruption —
+ * but the `state.reduced` event it emitted named a channel no graph declares and no reducer
+ * wrote. `makeStateView`'s slice loop is the worse half and is the same lookup: `graph/compile`
+ * admits `reads: ["constructor"]` with only a WARNING, and the measured outcome there was the
+ * whole run dying on `digest(slice)` with an untyped `E_INTERNAL` — *"function is not
+ * representable at constructor"* — rather than the `E_CHANNEL_UNDECLARED` the check promises.
+ *
+ * ONE helper rather than a guard at each site: this is the same prototype-chain hazard
+ * `gateOf` was written for in `run/projection.ts`, and that one's docstring makes the
+ * argument — a rule that holds for the door that remembered it is not a rule. `initialState`
+ * deliberately does NOT use it: it iterates `Object.entries(specs)`, which is own-enumerable
+ * only and already total.
+ */
+function declared(
+  specs: Readonly<Record<string, ChannelSpec>>,
+  channel: string,
+): ChannelSpec | undefined {
+  return Object.prototype.hasOwnProperty.call(specs, channel) ? specs[channel] : undefined;
+}
+
+/**
+ * The same rule for a channel's VALUE: `state["toString"]` is not a channel value.
+ *
+ * Used at THREE sites, which is the point — `makeStateView` builds a slice and then `get`
+ * and `require` read it back, and fixing only the construction left the two readers bare.
+ * That is the habit this codebase keeps relearning: making the reads total is a claim about
+ * a SET of reads, so the job is to enumerate the set rather than to fix the one that was
+ * noticed.
+ */
+function own(state: Readonly<Record<string, unknown>>, channel: string): unknown {
+  return Object.prototype.hasOwnProperty.call(state, channel) ? state[channel] : undefined;
+}
+
 /** Apply a whole wave of contributions, grouped by channel. One `state.reduced` event. */
 export function reduceState(
   specs: Readonly<Record<string, ChannelSpec>>,
@@ -282,7 +327,7 @@ export function reduceState(
 
   // Sorted so the emitted `channels` list and any downstream digest are stable.
   for (const channel of Object.keys(wave).sort()) {
-    const spec = specs[channel];
+    const spec = declared(specs, channel);
     if (spec === undefined) {
       throw err.validation(CODES.E_CHANNEL_UNDECLARED, `write to undeclared channel "${channel}"`, {
         details: { channel },
@@ -337,17 +382,24 @@ export function makeStateView(
   const allowed = new Set(reads);
   const slice: Record<string, unknown> = {};
   for (const name of [...allowed].sort()) {
-    const spec = specs[name];
+    const spec = declared(specs, name);
     if (spec === undefined) continue;
-    const v = channelValue(spec, state[name]);
+    const v = channelValue(spec, own(state, name));
     if (v !== undefined) slice[name] = v;
   }
   const hash = digest(slice);
 
   return {
     get<T>(channel: string): T | undefined {
+      // BOTH conditions, and the second is not redundant with the first. The allow-list
+      // stops a channel the node did not declare; it does NOT stop one it DID — and
+      // `graph/compile` admits `reads: ["constructor"]` with only a warning, so
+      // `allowed.has("constructor")` is true and `slice["constructor"]` answers with the
+      // `Object` function. That is a host function pulled through a state read and into the
+      // determinism boundary, which is the thing this method's allow-list exists to prevent,
+      // reached through the door it opens rather than the one it closes.
       if (!allowed.has(channel)) return undefined;
-      return slice[channel] as T | undefined;
+      return own(slice, channel) as T | undefined;
     },
     require<T>(channel: string): T {
       if (!allowed.has(channel)) {
@@ -357,7 +409,7 @@ export function makeStateView(
           { details: { channel, reads: [...allowed] } },
         );
       }
-      const v = slice[channel];
+      const v = own(slice, channel);
       if (v === undefined) {
         throw err.validation(CODES.E_CHANNEL_UNDECLARED, `channel "${channel}" has no value yet`, {
           details: { channel },

@@ -131,6 +131,59 @@ const DEFAULT_WINDOWS: Readonly<Record<IrreversibilityClass, number>> = {
   externally_visible: 5000,
 };
 
+/**
+ * What `setTimeout` can actually hold. Duplicated from `run/delivery.ts` and `cli.ts` for
+ * the reason their copies give: exporting it would put a platform fact on the pinned
+ * public surface.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * The interruption window, refused rather than clamped — and refused in BOTH directions,
+ * because the two wrong answers fail differently and both are silent.
+ *
+ * `decide` returns `holdMs` from this map, `Engine` awaits `#sleep(holdMs)` → `setTimeout`,
+ * and the same number is journaled verbatim as `action.pending`'s `windowMs`. `setTimeout`
+ * keeps its delay in a 32-bit signed integer and TRUNCATES anything larger — it does not
+ * saturate and it does not throw. Measured on node v24.16.0:
+ *
+ *     new PolicyEngine({…, interventionWindowMs: {reversible_write: 2 ** 31}}).decide(…)
+ *       → {effect: "allow", posture: "on", holdMs: 2147483648}
+ *
+ * — slept as ONE MILLISECOND and journaled as 24.8 days. **The interruption window an
+ * operator was given to hit stop is a millisecond, while the audit trail records that they
+ * had most of a month.** That is "looks supervised, is not" written into the journal, which
+ * is the exact failure the oversight layer exists to prevent.
+ *
+ * The other direction is quieter and is why a clamp would not do: `NaN`, `Infinity` and
+ * every negative make `holdMs > 0` FALSE, so no `action.pending` is written at all — a
+ * config typo of `-1` turns the window off with nothing in the journal to show one was ever
+ * declared. A clamp would silently pick a number the operator did not choose; a refusal
+ * makes an unstartable process out of what would otherwise be an unsupervised one.
+ *
+ * At CONSTRUCTION, like every other member of this family. `Engine` validates the same
+ * options where it stores `#policyOpts`, because `PolicyEngine` is built lazily per run —
+ * otherwise this throw first surfaces from inside `submit`.
+ */
+function boundedWindows(
+  supplied: Partial<Record<IrreversibilityClass, number>> | undefined,
+): Readonly<Record<IrreversibilityClass, number>> {
+  if (supplied === undefined) return DEFAULT_WINDOWS;
+  for (const [cls, ms] of Object.entries(supplied)) {
+    if (ms === undefined) continue;
+    if (typeof ms !== "number" || !Number.isInteger(ms) || ms < 0 || ms > MAX_TIMER_MS) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `interventionWindowMs.${cls} is ${String(ms)}, which is not a whole number of milliseconds a timer can hold ` +
+          `(0…${MAX_TIMER_MS}). It is both slept on and journaled as the window an operator had to intervene, ` +
+          `so a value a timer truncates would record supervision that did not happen`,
+        { details: { class: cls, windowMs: ms, max: MAX_TIMER_MS } },
+      );
+    }
+  }
+  return { ...DEFAULT_WINDOWS, ...supplied };
+}
+
 export class PolicyEngine {
   readonly #granted: readonly string[];
   readonly #windows: Readonly<Record<IrreversibilityClass, number>>;
@@ -158,7 +211,7 @@ export class PolicyEngine {
     this.#denied = opts.denied ?? [];
     this.#systemFloor = opts.systemFloor ?? "on";
     this.#budget = opts.budget ?? {};
-    this.#windows = { ...DEFAULT_WINDOWS, ...(opts.interventionWindowMs ?? {}) };
+    this.#windows = boundedWindows(opts.interventionWindowMs);
     this.#onEscalate = opts.onEscalate;
   }
 

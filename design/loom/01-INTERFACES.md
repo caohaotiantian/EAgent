@@ -871,7 +871,7 @@ export type GateDecision =
 
 | Property | Contract |
 |---|---|
-| Errors | `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_GATE_NOT_AUTHORIZED` (also from `raise`, for a `defaultAction` the gate's own `allowEdit` forbids), `E_HUMAN_APPROVAL_REQUIRED` (a rejection with no reason). `E_GATE_EXPIRED` is not thrown — it is the code an expiry writes into `run.failed` |
+| Errors | `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_GATE_NOT_AUTHORIZED` (also from `raise`, for a `defaultAction` the gate's own `allowEdit` forbids), `E_HUMAN_APPROVAL_REQUIRED` — **a decision the union does not name, and a rejection with no reason; both from `resolve`, `resolveBatch` and from `raise` for a `defaultAction`**. `E_GATE_EXPIRED` is not thrown — it is the code an expiry writes into `run.failed` |
 | Idempotency | Keyed per `(gateId, approverId, idempotencyKey)`. A double-click, a webhook retry, and a Slack retry all collapse to one decision |
 | Durability | `raise` persists before returning. **A gate outlives process restart, redeploy, and executor crash by construction** — it is a row plus a journal event, not a `Promise` (EAgent's `UI.confirm`, `src/kernel/types.ts:300`, could not do this) |
 | Cancellation | Cancelling the *run* cancels open gates (`gate.cancelled`); cancelling the `raise` call after persistence does not un-raise |

@@ -800,14 +800,32 @@ test("AN APPROVER THAT MATCHES THE WRONG THING IS REFUSED TOO — a synthetic ma
 
   // The refusal is on the parenthesised FORM and not on a list of the two markers this
   // build happens to mint, so a marker added later is refused by construction. It is also
-  // not a ban on brackets anywhere in a subject: only a subject that is ENTIRELY one.
+  // not a ban on brackets anywhere in a subject.
+  //
+  // THE SHAPE IS THE MARKER'S OWN GRAMMAR — one parenthesised lower-case token — and that
+  // precision is load-bearing in both directions. A looser `startsWith("(") &&
+  // endsWith(")")` refused `"(sre) alice (oncall)"` and `"( )"`, which at the HTTP
+  // perimeter means a deployment whose SSO subjects carry a parenthesised team prefix
+  // cannot authenticate anyone at all.
   assert.deepEqual(
-    diagnose(withApproval({ approvers: ["u:alice", "svc:deployer", "u:o'brien (sre)", "()"] }))
-      .filter((x) => x.code === "GRAPH014_APPROVER_INVALID")
-      .length,
+    diagnose(
+      withApproval({
+        approvers: ["u:alice", "svc:deployer", "u:o'brien (sre)", "(sre) alice (oncall)", "( )", "()", "(Team)"],
+      }),
+    ).filter((x) => x.code === "GRAPH014_APPROVER_INVALID").length,
     0,
     "an ordinary subject that merely contains parentheses is still a subject",
   );
+
+  // …and whitespace is not a way around it. The three doors disagree about trimming —
+  // `checkApproval` trims before asking, `subjectFlag` and `checkedAuth` do not — so the
+  // rule trims, once, where it is stated.
+  for (const padded of [" (unidentified)", "(unidentified) ", "  (shared-token)  "]) {
+    assert.ok(
+      diagnose(withApproval({ approvers: [padded] })).some((x) => x.code === "GRAPH014_APPROVER_INVALID"),
+      `"${padded}" slipped past on whitespace`,
+    );
+  }
 });
 
 // ── helper ───────────────────────────────────────────────────────────────────
