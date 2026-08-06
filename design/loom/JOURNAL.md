@@ -2474,3 +2474,67 @@ rewrites one field on read, keeping every seq and ts identical. It kills the mut
 place that has to learn it, which is the property the change was made for — and the three
 doors become compile errors rather than silent approvals, which is the property it was made
 against.
+
+## 2026-08-06 — Fail-open — The register was verified before it was worked, and the review found the half the fix left open
+
+**Context.** The handoff's known-issues register listed 44 entries and the previous wave's
+own lesson was that a false entry costs more than a missing one. So nothing was fixed until
+every open entry had been reproduced or refuted against the tree: 18 checked, 14 confirmed
+OPEN, **4 refuted** — A11 (the `pii` floor is the published contract, stated in
+`DeliverySpec.redactAs`'s own JSDoc and pinned by name), A17 (the `taskId === ""` branches
+are not dead; they defend hand-written journals), A20 (the SSE window is real in principle
+and EMPTY in practice, because both shipped stores are synchronous), A21 (the exclusion is
+already stated, measured and priced in `run/delivery.ts`'s own `THE BOUNDARY` block, and the
+entry names the smaller half of it). Each refutation is recorded in place rather than the
+entry being deleted.
+
+**Decision.** Nine entries closed: A19, A7, A6, A10, A14, A12's residue, A1, A16, and A18's
+three quiet reads. Each is written up in the register with what it cost to find.
+
+**The finding that justifies the whole method.** The A19 fix — one guard, one point of use,
+three doors collapsed onto it — was reviewed by two fresh readers of the diff, and one of
+them found that it closed the WRITE side and left the READ side open:
+`Engine.#applyGateDecision` reads a decision back out of the FOLD and branched on
+`=== "reject"` alone, so a journal carrying `decision: "REJECT"` still ran the guarded write.
+The journal is authoritative, and *trusted* means "we do not defend against it", not "it
+cannot be malformed". **When a value is guarded on the way in, ask what reads it on the way
+out** — the two are different questions with different attack surfaces, and the fix that
+feels complete is the one that answers only the first.
+
+**The review's arithmetic, because it is the argument for asking for everything.** 30
+findings, **27 refuted** by an independent skeptic per finding. Both findings graded
+*blocking* were downgraded to minor by their verifiers and both were REAL: an unbounded
+`for…of` over a caller-supplied `Symbol.iterator` (an uncatchable heap OOM, exit 134, on a
+path reachable from the unauthenticated callback route) and the read side above. A 90 %
+rejection rate is the cost of a reviewer that does not self-censor, and it is cheaper than
+the two it caught.
+
+**What the sweep caught that no reviewer did.** Reverting one condition at a time and
+counting what turns red found five more: `StateView.get`/`require` reading the slice bare
+after `makeStateView` had been made total (the third recorded instance of *"make the reads
+total" is a claim about a SET of reads*); `ephemeralOf` letting a rehydrated `slaMs` of `NaN`
+become a deadline that never arrives; and two tests that caught their guard only as a HANG
+rather than as a failure, which were rewritten to distinguish in microseconds.
+
+**And one hazard was MOVED rather than closed, which is its own lesson.** `claimedList`
+refused to spread a hostile container and then returned the container — and the next reader,
+`redactAttributes`' `walk`, calls `.map` on anything `Array.isArray` accepts. A `Proxy`
+claiming `length: 2 ** 32 - 1` was refused in one function and walked in the next; the suite
+hung. **A guard that refuses a value and passes it on has relocated the problem.** The
+container is now rendered to a marker.
+
+**Rejected.** Deleting the closed entries. Seven have live cross-references in `design/` and
+`packages/`, and D10's own warning is to run the grep BEFORE deleting rather than after — so
+they are marked RESOLVED in place, which keeps every citation valid and keeps the
+reproduction, which is the part that is worth reading.
+
+Also rejected: a `#iterating` flag making a second `for await` over one `Subscription`
+unrepresentable (it would have to be threaded through `replayThenTail`'s merged iterator, and
+a re-entry after a clean `break` is legitimate and indistinguishable at that seam); and
+making `spansFrom` total over the twelve LOUD partial reads, which is one decision about
+partial spans rather than twelve edits.
+
+**Reverses when.** The journal records an append boundary. A10 is the third event type added
+to a scan whose real property is "this boundary splits an append whose tail carries the run's
+status transition"; the day `JournalEvent` can say which append it belonged to, that scan
+becomes one structural check and three special cases go away.

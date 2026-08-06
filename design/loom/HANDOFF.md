@@ -1,11 +1,24 @@
 # Handoff
 
-State as of 2026-08-05, branch `loom`, last commit `5f06c40`, **working tree uncommitted** —
-the hardening waves sit on top of that commit and none of them is committed yet. How many
-waves is not a number worth writing down twice; the entries are countable:
+State as of **2026-08-06**, branch `loom`, working tree **clean**. The ten hardening waves
+that used to sit uncommitted on top of `5f06c40` are committed (`5451bb2`, `e6cd569`), and a
+fail-open correctness wave sits on top of them. How many waves is not a number worth writing
+down twice; the entries are countable:
 `grep -ac '^## 2026-08-05 — Hardening —' design/loom/JOURNAL.md` → **10** at the time of
 writing. (It read "seven waves … the nine entries at the end" a day ago. Two numbers for one
 thing is one number too many.)
+
+**The fail-open wave, in one paragraph, because it changed what this file says about
+itself.** Every open entry in the register below was reproduced or refuted against the tree
+before anything was touched: 18 checked, **14 confirmed OPEN and 4 refuted** (A11, A17, A20,
+A21 — each now carries the refutation in place rather than being deleted). Nine of the
+confirmed ones are closed: **A19, A7, A6, A10, A14, A12's residue, A1, A16** and the three
+quiet reads of **A18**. Each fix was then reviewed by two fresh readers of the diff who filed
+30 findings, of which **27 did not survive adversarial verification** — the three that did
+are closed too, and one of them (the READ side of A19) was a hole the original fix left open.
+**Every guard added was watched failing**: 29 mutations, one per new condition, each reverted
+against the suite. Two were rewritten because they were caught only as a hang, and two are
+recorded as SURVIVING with the reason, rather than being quietly dropped.
 
 For *why* decisions were made, read `JOURNAL.md` (append-only, newest last; the waves are
 those `— Hardening —` entries at the end). For what the system is, read `README.md` →
@@ -31,12 +44,12 @@ Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1305 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| Test files | 47 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **1331 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| Test files | 48 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 49 | `node scripts/check-zero-dep.mjs` (it prints the count) |
 | Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:` |
-| Public exports, pinned | 461 | `node -e "console.log(require('./scripts/surface.json').length)"` |
-| Public exports, built | 461 | `node scripts/check-surface.mjs` (reads `dist/`, so it is only as fresh as your last build) |
+| Public exports, pinned | 463 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, built | 463 | `node scripts/check-surface.mjs` (reads `dist/`, so it is only as fresh as your last build) |
 | Event types | 52 | `node --test packages/core/test/journal/store.test.ts` (its count is deliberate) |
 | Typecheck | clean | `npx tsc -p packages/core/tsconfig.test.json` |
 
@@ -247,7 +260,33 @@ a claim nobody checked, whichever file it lives in.
 ### A · Security and correctness
 
 **A1 · `errors.ts` has two partial reads, and every boundary except delivery still calls
-through them.** `toLoomError` does `String(e)`, which throws on a value with no primitive
+through them. RESOLVED 2026-08-06, WITH ONE CORRECTION TO THIS ENTRY'S OWN PRESCRIPTION.**
+`toLoomError` is total (`safeString` for the primitive conversion, `readOwn` for `name` and
+`message`), `LoomError.toJSON` reads its own fields through `readOwn`, and `httpStatusFor`
+has the `default` arm its declared `number` return needed — a forged `class` used to fall out
+of the bottom as `undefined`, which `#dispatch` writes into a response status.
+
+The larger half is that **`isLoomError` does not mean "one of ours"**: it is an `instanceof`,
+so a value built on `LoomError.prototype` with throwing accessors passed the check and was
+returned UNCHANGED, traps intact. A `LoomError` is now passed on by identity only when every
+field it will later be read for answers cleanly, once, at that boundary; anything else is
+rebuilt, preserving `code`, because `Engine.#runAgent` and `#invokeTool` branch on it.
+`test/errors.test.ts`.
+
+> **THE CORRECTION IS TO THE LAST CLAUSE, AND IT IS THE USEFUL PART.** This entry said
+> `delivery.ts`'s local wrappers "say in their docstrings that they should be deleted the day
+> it lands." **They say the opposite, at length.** `ownError`'s docstring is an argument for
+> why `toLoomError` *cannot* be them, and `describeFailure`'s likewise; `grep -an delete
+> packages/core/src/run/delivery.ts` finds nothing of the kind. They do a second job — they
+> BOUND and replace `details`, and validate `class`/`code` against the vocabulary — and they
+> stay. A total `toLoomError` is built to the standard they document, not in place of it.
+>
+> The entry's scope was also slightly generous: `http.ts` has since grown `describeFailure`,
+> a second reader that is total by construction. The engine sites it names —
+> `#executeTask`, `#invokeTool`, `#runAgent` ×2 — were the exposed ones and are the reason
+> this mattered.
+
+The original text follows. `toLoomError` does `String(e)`, which throws on a value with no primitive
 conversion; `LoomError.toJSON` and `httpStatusFor` read `this.details` and `this.class`
 bare. Established by reading the file. `run/delivery.ts` is safe because it no longer hands
 out a foreign error, but every other place that calls `toLoomError` on a value from injected
@@ -293,18 +332,44 @@ the 504 still reaches `resolveGate`, applying a decision minutes after its calle
 the request failed. A router-side `Promise.race` fixes the first two; the third needs
 `CallbackRequest.signal`, which is a published-interface change (surface pin + D3.20).
 
-**A6 · Replay picks a gate's recorded decision by enumeration order.** `run/replay.ts` finds
-the first `open` gate in the replayed projection and then finds a `decided` gate in the
-original by matching `nodeId` alone. Two independent order-dependent picks. A node that
-gates twice in one run — a `human_gate` inside a bounded loop — serves the **first** recorded
-decision for every later gate. Latent for subgraphs (a parent replay serves the subgraph as a
-recorded effect), **live for a loop**. **Fix:** match on `taskId` and order by `raisedAtSeq`,
-exactly as `lastDecidedGate` in `engine.ts` already does.
+**A6 · Replay picks a gate's recorded decision by enumeration order. RESOLVED 2026-08-06.**
+`run/replay.ts` found the first `open` gate in the replayed projection and then a `decided`
+gate in the original by matching `nodeId` alone. A `human_gate` inside a bounded loop has one
+gate per ITERATION on the same `nodeId`, so every iteration was served the **first** recorded
+decision. Driven end to end on a two-iteration loop where the human approves `gate@root#0`
+and rejects `gate@root#1`: the recorded run FAILED and the replay SUCCEEDED. Both picks are
+now by `TaskId` (which is derived, so it is stable across the two runIds) and `raisedAtSeq`,
+with a `served` set so one decision cannot be spent twice.
+`test/run/replay.test.ts`.
 
-**A7 · A graph can name `(unidentified)` as an approver.** `GRAPH014_APPROVER_INVALID`
-accepts any non-empty string. The HTTP path is closed by construction — an unidentified
-caller is refused before the list is consulted — but refusing a parenthesised reserved
-subject at compile time would close it everywhere.
+> **What made this worth doing was not that it passes silently — it does not — but WHAT IT
+> BLAMES.** `compare` still reports `match: false`. The harness answered the wrong question
+> and the divergence is then attributed to task states and channels, so a `loom replay` user
+> reads a report about the run when the fault is in the replayer, and D10's promotion gate
+> can fail a candidate for it. **A wrong answer that announces itself as a different wrong
+> answer is not a loud failure.**
+>
+> **And the mutation sweep says the fix is redundant rather than minimal, which is recorded
+> in the test rather than hidden.** `taskId` and `served` each discriminate this case alone,
+> so reverting ONE leaves the suite green and reverting both turns it red. They stay as a
+> pair on the argument the file already makes for `decided`/`decisionOf`.
+
+**A7 · A graph can name `(unidentified)` as an approver. RESOLVED 2026-08-06.**
+`GRAPH014_APPROVER_INVALID` accepted any non-empty string. **The entry's own scoping
+sentence was the wrong half of the story**: it said "the HTTP path is closed by
+construction", which reads as "nothing is reachable" — and the perimeter check is one door of
+THREE. `SignedWebhookChannel`'s callback route and `loom approve --as` each construct the
+actor themselves, so a graph listing the marker was answerable through either.
+`isSyntheticSubject` in `vocab.ts` is now applied at all three, and it refuses the SHAPE
+rather than a list of the two markers this build mints, so one added later is refused by
+construction.
+
+> **The shape had to be the marker's own grammar, and the first spelling was too loose.**
+> `startsWith("(") && endsWith(")")` matched `"(sre) alice (oncall)"` and `"( )"` — at the
+> HTTP perimeter that is a deployment whose SSO subjects carry a parenthesised team prefix
+> unable to authenticate anyone at all. It is now one parenthesised lower-case token, and it
+> TRIMS, because the three callers disagreed about whitespace: `checkApproval` trimmed before
+> asking and the other two did not. Found by a reviewer, not by the sweep.
 
 **A8 · The control plane's idempotency map is unbounded.** `ControlPlane.#idempotency` is
 process-lifetime with no eviction. Stated as a limit in the field's docstring rather than
@@ -322,9 +387,24 @@ keeps the decision and drops the resume, wedging the run. `#expire` writes `gate
 same wedge, reached by asking for the seq the refusal was written to protect. It is
 recoverable the same way — `rewind(runId, 88)` gives `run=awaiting_gate gate=open
 openGates=1` — which is exactly the argument the `gate.decided` arm's own docstring makes for
-refusing rather than repairing. **Fix:** widen the scan to any event whose append carried a
-run-terminal sibling, or make the refusal a property of the append boundary rather than of
-the event type.
+refusing rather than repairing.
+
+**RESOLVED 2026-08-06 by the FIRST of the two fixes, deliberately.** The scan now refuses a
+`gate.timeout` at `atSeq` whose `action` is `"fail"` — the one that carries `run.failed` in
+the same append. It is narrowed to `fail` and the narrowing is load-bearing:
+`gate.timeout{default_action}` heads a three-event append whose first seq suppresses all
+three and leaves the gate OPEN, which is what an operator asking for that seq wants. Both
+halves are pinned in `test/run/gate-lifecycle.test.ts`, and the second needed a hand-written
+row, because `GateSlaSpec` cannot declare a `defaultAction` at all — only an embedder driving
+`HumanGateBroker` directly produces it.
+
+> **The second fix is still the right one and is still not done, and the argument is
+> unchanged.** This is now the THIRD event type added to a scan whose property is really
+> "this boundary splits an append whose tail carries the run's status transition", and every
+> row a future change adds to such an append has to be added here too or it reopens the
+> hole. Making it structural means a new field on `JournalEvent`, both stores writing it, and
+> a defined reading for every journal that predates it — a change to the durable format
+> invariant 2 makes authoritative, and half of that is worse than this.
 
 **A11 · `checkDelivery` accepts a `redactAs` the runtime does not apply literally.** New,
 and it is the residue of closing the delivery-redaction leak rather than a discovery.
@@ -521,8 +601,18 @@ answer differently.** The second half is new, and it found two members in
   *NOTHING RUNS ABOVE THE TRY* pins that a config value `deliver` cannot read is a delivery
   failure and not an unstartable process. `0` stays legal (the hung-endpoint test drives it).
   Pinned by *A TIMEOUT NO TIMER CAN HOLD IS REFUSED, INSTEAD OF BECOMING ONE MILLISECOND*.
-- **`PolicyEngineOptions.interventionWindowMs`. NEW, and the worst of the family, because
-  the journal itself carries the false claim.** `PolicyEngine` is on the pinned surface;
+- ~~**`PolicyEngineOptions.interventionWindowMs`.**~~ **CLOSED 2026-08-06 — and refused in
+  BOTH directions, which the entry below only half saw.** `boundedWindows` in
+  `PolicyEngine`'s constructor refuses anything that is not a whole number in
+  `[0, 2³¹−1]`, and `Engine`'s constructor builds a throwaway `PolicyEngine` so the refusal
+  reaches an operator at PROCESS start rather than from inside the first `submit` —
+  `PolicyEngine` is constructed lazily per run in `#contextFor`. The direction the entry
+  missed is the quieter one: `NaN`, `Infinity` and every negative make `holdMs > 0` FALSE, so
+  **no `action.pending` is written at all** — a config typo of `-1` turns the supervision
+  window off with nothing in the journal to show one was ever declared. A clamp would have
+  silently substituted a number nobody chose; a refusal makes an unstartable process out of
+  what would otherwise be an unsupervised one. Pinned in `test/run/oversight.test.ts`. The
+  reproduction below is unchanged and is why the entry existed: `PolicyEngine` is on the pinned surface;
   `decide` returns `holdMs = this.#windows[req.irreversibility]`, and `Engine` awaits
   `#sleep(decision.holdMs, …)` → `defaultSleep` → `setTimeout`. Reproduced:
   `new PolicyEngine({granted: [], systemFloor: "on", interventionWindowMs: {reversible_write:
@@ -571,12 +661,18 @@ answer differently.** The second half is new, and it found two members in
   correctly-signed timestamp from **2017** was ACCEPTED as current, i.e. the replay window,
   which is the second half of the callback perimeter, was disabled and nothing said so.
   Now bounded in the constructor (`boundedDuration`), pinned by *A REPLAY WINDOW THAT IS NOT
-  A NUMBER IS NOT A WINDOW*. **`GateSpec.slaMs` and `EscalationTier.afterMs` were NOT
-  re-examined by that pass and are therefore UNCONFIRMED, not cleared** — the clearance
-  above covered all three with one argument and that argument is now known to be the wrong
-  question. Ask the right one of each: `slaMs` becomes `deadline = raisedAt + slaMs`, so what
-  does `now >= NaN` do to `sweepTimeouts`, and is a gate that can never expire the direction
-  we want?
+  A NUMBER IS NOT A WINDOW*. ~~**`GateSpec.slaMs` and `EscalationTier.afterMs` … UNCONFIRMED,
+  not cleared**~~ **ASKED AND ANSWERED 2026-08-06, and the answer split the pair.** The
+  compiler refuses every `slaMs`/`afterMs` shape a GRAPH can declare, so neither is a defect
+  there. But `HumanGateBroker.rehydrate` takes the same request shape from an operator with
+  **no compiler behind it**, and `ephemeralOf` passed `slaMs` through untouched to
+  `#deadlineOf`'s third source — where `deadline = raisedAtTs + NaN` is `NaN`, which loses
+  every comparison. "No deadline" and "a deadline that never arrives" are opposite answers to
+  the question the operator just asked, and they were indistinguishable to a sweeper.
+  `ephemeralOf` now applies the same `isPositiveWholeMs` `usableReminders` already used one
+  line below it, pinned in `test/run/gate-decision.test.ts`. **The lesson is the one the
+  third correction above states: "it reaches a comparison, not a timer" is the answer to a
+  question that was not asked.**
 - ~~`maxBodyBytes` and `hotWindow` reach no platform API with a range.~~ **WRONG, and left
   struck through rather than deleted because the reasoning is the lesson.** Both are true
   statements about the platform and neither is a statement about safety: what these numbers
@@ -652,7 +748,36 @@ nothing here has a domain a holder can enumerate. If a deployment starts putting
 identifiers in idempotency keys, that becomes the next row.
 
 **A14 · `reduceState` accepts a write to `constructor`, `toString` or any other inherited
-name, instead of refusing it.** New, and it is the class-sweep residue of pinning
+name, instead of refusing it. RESOLVED 2026-08-06, AND THE ENTRY'S OWN CARVE-OUT WAS WRONG.**
+One module-private `declared()`/`own()` pair in `state/channels.ts`, applied at
+`reduceState` and — the part this entry got backwards — at `makeStateView`. The fix it
+prescribed named `initialState`, which is already total (it iterates `Object.entries`,
+own-enumerable only); and its "Checked and NOT this defect: `StateView.get`/`require` (their
+allow-list is a `Set`)" was the more severe half. The `Set` guards a channel the node did NOT
+declare; it does nothing about one it DID, and `graph/compile` admits `reads: ["constructor"]`
+with only a WARNING. Measured on a single function node declaring it:
+
+```
+run status: failed   channels: {}
+run.failed {"code":"E_INTERNAL","message":"CanonicalizationError: function is not representable at constructor"}
+```
+
+— the whole run dying on `digest(slice)` choking on the `Object` function, rather than the
+`E_CHANNEL_UNDECLARED` this layer promises.
+
+> **THREE reads, not one, and the third was found by the test rather than by the entry.**
+> The slice is BUILT once and READ BACK twice; fixing only the construction left `get` and
+> `require` indexing it bare. That is this codebase's recurring shape — *"make the reads
+> total" is a claim about a SET of reads* — arriving for the fourth recorded time, and it was
+> caught because the test asserted `get` and `require` as well as `visible`. Pinned in
+> `test/state/channels.test.ts`.
+>
+> `__proto__` is the one name whose answer depends on how the wave was built, and both
+> readings are now pinned: ASSIGNING it invokes the setter so the key is never own and there
+> is no write to refuse, while `JSON.parse` yields a genuine own property that is refused
+> like any other undeclared channel.
+
+The original text follows. It is the class-sweep residue of pinning
 `StateView.get`'s allow-list rather than a discovery: the same prototype-chain hazard
 `gateOf` was written for, one layer down and still open. `reduceState` does
 `const spec = specs[channel]; if (spec === undefined) throw E_CHANNEL_UNDECLARED`, and
@@ -724,7 +849,21 @@ remain **UNCONFIRMED** exactly as A13 says, and here is the command:
 **nothing**, so no trajectory crosses any boundary today.
 
 **A16 · A `Subscription` is single-consumer and nothing anywhere says so; two `for await`
-loops over one SPLIT the stream instead of each seeing it.** New, and it is the residue of a
+loops over one SPLIT the stream instead of each seeing it. RESOLVED 2026-08-06 as
+DOCUMENTATION, which is the whole decision.** `Subscription`'s docstring now states the
+contract with the measurement in it, `EventBus.subscribe` and `replayThenTail` each carry a
+one-line restatement, and `test/bus.test.ts` pins the splitting behaviour so that making it
+unrepresentable later is a deliberate change to a test rather than a silent one.
+
+> **Not made unrepresentable, and the reason is worth keeping.** A `#iterating` flag would
+> have to be threaded through `replayThenTail`'s merged iterator as well — which splits
+> identically, and which this entry did not mention — and a second `for await` after a clean
+> `break` is a legitimate re-entry that nothing at that seam can distinguish from the defect.
+> "Nothing says so" was also mildly overstated: `SubscriberOverflowError.lastSeq`'s docstring
+> already names the SEQUENTIAL second-consumer case. That is a statement about overflow, not
+> about the subscription, which is exactly why it did not cover this.
+
+The original text follows. New, and it is the residue of a
 lifecycle sweep over `subscribe`/`dispose`/iterate rather than a discovery — the pair that
 overlaps here is *iterate × iterate*. `Channel[Symbol.asyncIterator]` is a generator over a
 SHARED `#queue` and `#waiters`, so each event is delivered to exactly one of the loops, and
@@ -892,6 +1031,28 @@ treats a non-array as one claim rather than as an iterable. Both are in `spansFr
 twelve above are the same helper applied everywhere else, and that is the change to make in
 one go or not at all.
 
+**THE THREE QUIET ONES ARE CLOSED 2026-08-06; THE TWELVE LOUD ONES ARE NOT, DELIBERATELY.**
+`ts` is normalised once per event and carried forward from the last good one (so the
+waterfall stays monotonic AND transitive — the intransitivity was the sharper half, since the
+spanId tie-break can reorder two WELL-FORMED spans against each other); `claimedList` reads
+the four claim containers; and `runId` goes through `idText` before `digestOf`, here and in
+`shouldExport`. `test/telemetry/spans.test.ts`.
+
+> **THE LIST FIX NEEDED A SECOND HALF THIS ENTRY DID NOT NAME, and it hung the suite before
+> it was found.** "Treat a non-array as one claim" is only half a rule: returning the value
+> ITSELF keeps the hostile container, and the next reader is `redactAttributes`, whose `walk`
+> calls `.map` on anything `Array.isArray` accepts. A `Proxy` over `[]` claiming
+> `length: 2 ** 32 - 1` was therefore refused in `claimedList` and walked in `redact`. The
+> container is now RENDERED — `idText`, the same marker `reconstructGraph` gives a claim's
+> container one screen down. **A guard that refuses a value and then passes it on has moved
+> the hazard, not closed it.**
+>
+> `claimedList`'s length bound is a COST guard and no test holds it: deleting it changes no
+> answer, because the walk throws and the `catch` returns the same marker — after **17.6
+> seconds and several GB**. Tests here may not read a wall clock, so it is stated in the code
+> instead of pinned. That is E4's third kind, and it is on this list rather than mistaken for
+> a hole.
+
 **Checked and NOT this defect, WITH ONE CORRECTION TO THIS PARAGRAPH'S OWN CLEARANCE.**
 `security/redact.ts`'s `walk` marks a cycle, caps depth at 32, replaces a function, and
 renders a `Map`, a `Date` or a `RegExp` as `{}` (data loss, never disclosure); the
@@ -963,8 +1124,35 @@ the check onto its reads (D9.2), and `attributeClass` cannot, because "declared 
 "declarations unreachable" are one observation there.
 
 **A19 · `Engine.resolveGate` reads ANY decision it does not recognise as an APPROVAL, and
-runs the action behind the gate.** New, reproduced, and NOT fixed — the fix is in
-`run/engine.ts` / `run/gates.ts`, which were another agent's files this wave. `GateDecision`
+runs the action behind the gate. RESOLVED 2026-08-06 — kept for the two lessons, which are
+both about where a guard belongs.** `gateDecisionOf` in `vocab.ts` is now the one statement
+of the acceptance set; `HumanGateBroker.#validate` is the point of use and RETURNS the
+checked decision, so nothing downstream re-reads the caller's object. `vocab.ts` and not
+`run/gates.ts` because `gates.ts` imports `delivery.ts` at run time, so a guard exported from
+either is a cycle for the other — `GateDecision` moved there with it. Pinned by
+`test/run/gate-decision.test.ts`.
+>
+> **LESSON ONE: THE WRITE SIDE WAS NOT THE WHOLE OF IT, and the first fix stopped there.**
+> A fresh reviewer found `Engine.#applyGateDecision` reading a decision back out of the FOLD
+> and branching on `=== "reject"` alone, so a journal carrying `decision: "REJECT"` still
+> fell through to `succeeded` and ran the guarded write. The journal is authoritative
+> (invariant 2), and *trusted* means "we do not defend against it", not "it cannot be
+> malformed" — so fixing only the append left the identical fail-open reachable through the
+> one input the system is designed to trust. **When a value is guarded on the way in, ask
+> what reads it on the way out.**
+>
+> **LESSON TWO: A DOOR IS NOT A GUARD.** There were THREE independent switches over this
+> union — `checkedDecision`, `ownedDecision`, and `run/replay.ts`'s, whose `default:` arm
+> answered `{kind:"approve"}` — in front of a broker that had none, and `checkedDecision`'s
+> own docstring claimed it mirrored `ownedDecision` "member for member". By the time that was
+> checked they had drifted. Each door now keeps only what is genuinely its own: an HTTP
+> message, a `MAX_REASON` bound, a JSON round trip over a vendor's `writes`. That last one is
+> load-bearing and was nearly lost — `ownedJson` renders a `Map` as `{}`, so folding the
+> plain-record check into the shared guard would have journaled a `Map` of a human's edits as
+> an edit that edited nothing.
+
+The original entry follows, because the reproduction is the argument. The fix was in
+`run/engine.ts` / `run/gates.ts`, which were another agent's files that wave. `GateDecision`
 is a four-member union (`approve` / `reject` / `edit` / `redirect`) and everything downstream
 branches on `kind === "reject"`, so anything else falls through to the permissive reading.
 Driven directly against `Engine.resolveGate` — the public, pinned-surface method an embedder
@@ -1326,9 +1514,13 @@ codes, `GRAPH` ids, method names and event appenders, not register ids.
 
 ### E · Process and build state
 
-**E1 · The surface pin. RESOLVED 2026-08-05 — kept for the rule.** `node
-scripts/check-surface.mjs --write` re-pinned it and `npm run check` is green:
-`1003 pass / 0 fail`, zero-dep ok (49 files), `surface guard ok: 452 public exports`.
+**E1 · The surface pin. RESOLVED 2026-08-05, and re-pinned once more 2026-08-06 — kept for
+the rule.** The fail-open wave added exactly **two** deliberate exports, `gateDecisionOf` and
+`isSyntheticSubject`, both predicted in the plan before the code was written and both
+reviewed against the final shape. `GateDecision` and `GateDecisionKind` MOVED from
+`run/gates.ts` to `vocab.ts` and the guard reported no change at all, which is the right
+answer and worth knowing: the pin is over NAMES reaching the barrel, not over the file that
+declares them.
 
 The rule is the durable part. **The count of added exports must be read from
 `node scripts/check-surface.mjs` and from nowhere else** — this entry was written asserting
@@ -1336,8 +1528,15 @@ The rule is the durable part. **The count of added exports must be read from
 purpose is to be counted by a program. Adding an export is fine; it just has to be
 deliberate, and re-pinning is a separate commit-worthy act rather than a side effect.
 
-**E2 · Every wave is uncommitted.** The working tree contains all of them on top of
-`5f06c40`. The `JOURNAL.md` entries describing them are appended but likewise uncommitted.
+**E2 · Every wave is uncommitted. RESOLVED 2026-08-06 — kept for the one fact worth
+reusing.** The ten hardening waves are `5451bb2` (code + design docs + `surface.json`) and
+`e6cd569` (`JOURNAL.md` + this file). **They could not be split the other way**: the split was
+tried before it was asserted, and `docs-drift.test.ts` couples `design/loom/*.md` to `src/`
+— stashing all of `design/loom/` and running the guard fails on `01-INTERFACES.md` not
+documenting `CallbackRequest`/`CallbackDecision`. `JOURNAL.md` is excluded from the guard's
+corpus by construction and `HANDOFF.md` happened to pass, which is why exactly those two
+could be a second commit. **A code-only commit in this repo is red by design**, and that is
+the guard working rather than a packaging problem.
 
 **E3 · Two transient failures were observed and could not be reproduced. UNCONFIRMED.**
 During this closing pass, `npx tsc -p packages/core/tsconfig.test.json` once reported
