@@ -1498,3 +1498,90 @@ test("`shouldExport` DOES NOT THROW FOR ANY POLICY — its own `NOT A THROW` had
     "if this stops throwing, `events` has been made total and the docstring's scope must widen with it",
   );
 });
+
+// ── the three QUIET partial reads: a wrong trace, not a failed one ────────────
+
+test("A `ts` THAT IS NOT A NUMBER DOES NOT REORDER THE WATERFALL", () => {
+  // `ts` went straight to `startTime`/`endTime`, and the span sort is
+  // `a.startTime - b.startTime` — `NaN` for any non-number. `NaN` is falsy, so the
+  // `|| (a.spanId < b.spanId ? -1 : 1)` tie-break fires and every pair involving the bad
+  // span is ordered by a HASH. The comparator is intransitive, so it can reorder two
+  // WELL-FORMED spans against each other too. Measured before the guard: a journal whose
+  // `run.submitted` carried `ts: "x"` folded to `startTimes=[1020,"x"]`,
+  // `order=loom.task,loom.run` — the run span, which starts first, sorted LAST.
+  //
+  // A trace is opened to find out what happened when. Being loud would cost the caller
+  // every span for the run, which is what the twelve deliberately-left partial reads in
+  // `spansFrom` already do; being WRONG costs an incident review.
+  for (const junk of ["x", null, undefined, NaN, Infinity, {}, []]) {
+    const bad = { ...submitted, ts: junk } as unknown as JournalEvent;
+    const spans = spansFrom([bad, ready, raised, cancelledRun]);
+
+    for (const s of spans) {
+      assert.equal(typeof s.startTime, "number", `${s.name} startTime is ${String(s.startTime)}`);
+      assert.ok(Number.isFinite(s.startTime), `${s.name} startTime is ${String(s.startTime)}`);
+      assert.ok(s.endTime === undefined || Number.isFinite(s.endTime), `${s.name} endTime is ${String(s.endTime)}`);
+    }
+    // The run span starts first and must still sort first.
+    assert.equal(spans[0]?.name, "loom.run", `with ts=${String(junk)} the waterfall reordered`);
+  }
+});
+
+test("A CLAIM THAT IS NOT A LIST IS ONE CLAIM, not an iterable to be split", () => {
+  // `[...e.payload.edgesIn]` splits a STRING into characters: `edgesIn: "e1"` folded to
+  // `"edges.in": ["e","1"]`, so `reconstructGraph` reported TWO ghost edges where the
+  // journal claimed one — a FABRICATION, in the input to `conformsToGraph`, which is the
+  // verdict a CI job reads. The same spread threw outright on `undefined`, `null` or a
+  // number, costing the caller every span for the run.
+  //
+  // `reconstructGraph` in this same file already takes the correct verdict on exactly this
+  // class ("a container that is not a list is ONE unknown edge"); the journal side did not.
+  const readyWith = (edgesIn: unknown): JournalEvent =>
+    ({ ...ready, payload: { nodeId: "approve", branchPath: "", edgesIn } }) as unknown as JournalEvent;
+
+  const edgesOf = (edgesIn: unknown): unknown => {
+    const task = spansFrom([submitted, readyWith(edgesIn), cancelledRun]).find((s) => s.name === "loom.task");
+    assert.ok(task, "no loom.task span");
+    return task.attributes["edges.in"];
+  };
+
+  assert.deepEqual(edgesOf(["e1", "e2"]), ["e1", "e2"], "an honest list is still a list");
+  assert.deepEqual(edgesOf("e1"), ["e1"], "a string is ONE claim, not two characters");
+  assert.deepEqual(edgesOf(undefined), ["undefined"], "…and an absent one does not cost the whole run its trace");
+  assert.deepEqual(edgesOf(7), ["7"]);
+  assert.deepEqual(edgesOf({ 0: "e1", length: 1 }), ["(object)"], "an array-like is not an array");
+
+  // THE UNREADABLE CONTAINER IS RENDERED, NOT PASSED ON, and this half is what a fix that
+  // stops at "do not spread it" gets wrong. Returning the value itself keeps the hostile
+  // object, and the next reader is `redactAttributes`, whose `walk` calls `.map` on anything
+  // `Array.isArray` accepts — so a `Proxy` over `[]` claiming `length: 2 ** 32 - 1` was
+  // refused here and then walked there. This assertion HUNG the suite before the marker.
+  const forged = new Proxy([] as unknown[], {
+    get(t, k) {
+      if (k === "length") return 2 ** 32 - 1;
+      if (typeof k === "string" && /^\d+$/.test(k)) return "e1";
+      return Reflect.get(t, k);
+    },
+  });
+  assert.deepEqual(edgesOf(forged), ["(object)"], "a forged length was walked, here or downstream");
+});
+
+test("A runId THAT IS NOT A STRING DOES NOT TAKE THE WHOLE TRACE WITH IT", () => {
+  // `digestOf` is `createHash().update(v, "utf8")` and throws `ERR_INVALID_ARG_TYPE` for a
+  // non-string. It is LOUD, which is better than wrong — but it takes `shouldExport` with
+  // it, so a malformed run id becomes a run nothing can decide about rather than a run that
+  // is exported.
+  for (const junk of [null, undefined, 42, {}]) {
+    const bad = { ...submitted, runId: junk } as unknown as JournalEvent;
+    const spans = spansFrom([bad]);
+    assert.ok(spans.length > 0, `runId ${String(junk)} produced no spans at all`);
+    assert.equal(typeof spans[0]!.traceId, "string");
+    assert.equal(shouldExport([bad], { headRatio: 1 }), true);
+  }
+
+  // …and the traceId is still DERIVED, which is the property the trace rests on: a constant
+  // one merges two runs into a single waterfall.
+  const a = spansFrom([{ ...submitted, runId: "run-a" } as unknown as JournalEvent])[0]!.traceId;
+  const b = spansFrom([{ ...submitted, runId: "run-b" } as unknown as JournalEvent])[0]!.traceId;
+  assert.notEqual(a, b);
+});

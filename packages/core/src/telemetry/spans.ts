@@ -194,13 +194,19 @@ interface Open {
  */
 export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   if (events.length === 0) return [];
-  const runId = events[0]!.runId;
+  // `digestOf` is `createHash().update(v, "utf8")`, which throws `ERR_INVALID_ARG_TYPE` for a
+  // non-string — and it takes `shouldExport` with it, so a malformed run id is a run nothing
+  // can decide about rather than a run that is exported. `idText` is the file's existing
+  // answer for "render an id that is not one", and it keeps `spanId`/`traceId` DERIVED,
+  // which is the property the trace rests on: a constant traceId merges two runs into one
+  // waterfall.
+  const runId = idText(events[0]!.runId) as RunId;
   const traceId = digestOf(runId).slice("sha256:".length, "sha256:".length + 32);
   const rootId = spanId(runId, "run");
 
   const open = new Map<string, Open>();
   const done: Span[] = [];
-  let lastTs = events[0]!.ts;
+  let lastTs = typeof events[0]!.ts === "number" && Number.isFinite(events[0]!.ts) ? events[0]!.ts : 0;
 
   const start = (id: string, o: Open): void => {
     if (!open.has(id)) open.set(id, o);
@@ -265,7 +271,25 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   };
 
   for (const e of events) {
-    lastTs = e.ts;
+    // ONE READ OF THE JOURNAL'S `ts`, AND IT IS A NUMBER OR IT IS THE LAST ONE — because
+    // the alternative is a trace that is WRONG rather than one that fails.
+    //
+    // `ts` was handed straight to `startTime`/`endTime`, and the span sort is
+    // `a.startTime - b.startTime`, which is `NaN` for any non-number. `NaN` is falsy, so the
+    // `|| (a.spanId < b.spanId ? -1 : 1)` tie-break fires and every pair involving the bad
+    // span is ordered by a HASH — an intransitive comparator, so it can reorder two
+    // WELL-FORMED spans relative to each other too. Measured: a journal whose
+    // `run.submitted` carried `ts: "x"` folded to `startTimes=[1020,"x"]`,
+    // `order=loom.task,loom.run` — the run span, which starts first, sorted LAST. `ts: null`
+    // gave a span with `startTime: null, endTime: null`.
+    //
+    // Carrying `lastTs` forward is the fail-readable direction: the event is placed where
+    // the journal last was, the waterfall stays monotonic and transitive, and nothing is
+    // invented that a reader could mistake for a measurement. A throw would cost the caller
+    // every span for the run, which is what the twelve LOUD partial reads in this function
+    // already do and what makes them a separate decision.
+    const ts = typeof e.ts === "number" && Number.isFinite(e.ts) ? e.ts : lastTs;
+    lastTs = ts;
     // ONE READ OF THE JOURNAL'S `taskId`, TESTED POSITIVELY — and `=== undefined` was
     // neither. `null` passed it, and `taskSpan` is derived under the same test, so
     // `spanId(runId, "task", null)` came back a perfectly ordinary string: `[…, null].join
@@ -309,7 +333,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(rootId, {
         name: "loom.run",
         kind: "server",
-        start: e.ts,
+        start: ts,
         parent: "",
         attributes: {
           "run.id": runId,
@@ -332,15 +356,15 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "run.suspended")) {
-      note(rootId, "run.suspended", e.ts, { reason: e.payload.reason });
+      note(rootId, "run.suspended", ts, { reason: e.payload.reason });
       continue;
     }
     if (isEvent(e, "run.resumed")) {
-      note(rootId, "run.resumed", e.ts, { by: e.payload.by });
+      note(rootId, "run.resumed", ts, { by: e.payload.by });
       continue;
     }
     if (isEvent(e, "run.completed")) {
-      close(rootId, e.ts, "ok", {
+      close(rootId, ts, "ok", {
         "run.status": "succeeded",
         "usage.input_tokens": e.payload.usage.inputTokens,
         "usage.output_tokens": e.payload.usage.outputTokens,
@@ -349,11 +373,11 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "run.failed")) {
-      close(rootId, e.ts, "error", { "run.status": "failed", "error.code": e.payload.error.code });
+      close(rootId, ts, "error", { "run.status": "failed", "error.code": e.payload.error.code });
       continue;
     }
     if (isEvent(e, "run.cancelled")) {
-      close(rootId, e.ts, "error", {
+      close(rootId, ts, "error", {
         "run.status": "cancelled",
         "cancel.clean": e.payload.clean,
         // The honest field: effects that started and never reported an outcome.
@@ -384,7 +408,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(spanId(runId, "gate", e.payload.gateId), {
         name: "loom.gate",
         kind: "internal",
-        start: e.ts,
+        start: ts,
         // The Task that raised it when there is one, and the RUN when there is not —
         // never nothing. See the block comment above these arms.
         parent: taskSpan ?? rootId,
@@ -413,7 +437,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "gate.decided")) {
-      close(spanId(runId, "gate", e.payload.gateId), e.ts, e.payload.decision === "reject" ? "error" : "ok", {
+      close(spanId(runId, "gate", e.payload.gateId), ts, e.payload.decision === "reject" ? "error" : "ok", {
         "gate.decision": e.payload.decision,
         "gate.latency_ms": e.payload.latencyMs,
         // THE SUBJECT GOES ON RAW AND LEAVES TOKENISED, because `ATTRIBUTE_CLASSES` says
@@ -461,7 +485,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // clear, and the names are one journal read away for anyone entitled to them.
       const id = spanId(runId, "gate", e.payload.gateId);
       attr(id, { "gate.escalations": e.payload.tier });
-      note(id, "gate.escalated", e.ts, {
+      note(id, "gate.escalated", ts, {
         tier: e.payload.tier,
         to: e.payload.to,
         ...(e.payload.deadline === undefined ? {} : { deadline: e.payload.deadline }),
@@ -481,10 +505,10 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // carry, and the decision that follows it says who.
       const id = spanId(runId, "gate", e.payload.gateId);
       if (e.payload.action === "default_action") {
-        note(id, "gate.timeout", e.ts, { action: e.payload.action });
+        note(id, "gate.timeout", ts, { action: e.payload.action });
         continue;
       }
-      close(id, e.ts, "error", { "gate.decision": "timeout", "gate.action": e.payload.action });
+      close(id, ts, "error", { "gate.decision": "timeout", "gate.action": e.payload.action });
       continue;
     }
     if (isEvent(e, "gate.cancelled")) {
@@ -510,7 +534,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // `close` is a no-op on a span already closed, which is the span-side mirror of the
       // fold's only-from-`open` guard in `run/projection.ts`: a cancel arriving after a
       // decision retracts nothing, here or there.
-      close(spanId(runId, "gate", e.payload.gateId), e.ts, "error", {
+      close(spanId(runId, "gate", e.payload.gateId), ts, "error", {
         "gate.decision": "cancelled",
         // Free text, and the only field the payload carries besides the id. It is what
         // separates "an operator withdrew this" from "the budget floor closed it"
@@ -549,7 +573,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(taskSpan, {
         name: "loom.task",
         kind: "internal",
-        start: e.ts,
+        start: ts,
         parent: rootId,
         attributes: {
           // `tid`, not a SECOND read of `e.taskId` — and this is a CONSISTENCY statement
@@ -564,7 +588,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
           "task.id": tid,
           "node.id": e.payload.nodeId,
           "branch.path": e.payload.branchPath,
-          "edges.in": [...e.payload.edgesIn],
+          "edges.in": claimedList(e.payload.edgesIn),
           ...(itemChannel === undefined ? {} : { "branch.item_channel": itemChannel }),
         },
         links: [],
@@ -574,11 +598,11 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     }
     if (isEvent(e, "task.leased")) {
       attr(taskSpan, { "task.attempt": e.payload.attempt, "worker.id": e.payload.workerId });
-      note(taskSpan, "task.leased", e.ts);
+      note(taskSpan, "task.leased", ts);
       continue;
     }
     if (isEvent(e, "task.progress")) {
-      note(taskSpan, "task.progress", e.ts);
+      note(taskSpan, "task.progress", ts);
       continue;
     }
     if (isEvent(e, "policy.decided")) {
@@ -586,18 +610,18 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(id, {
         name: "loom.policy",
         kind: "internal",
-        start: e.ts,
+        start: ts,
         parent: taskSpan,
         attributes: {
           "policy.effect": e.payload.effect,
           "policy.posture": e.payload.posture,
-          "policy.reasons": [...e.payload.reasons],
+          "policy.reasons": claimedList(e.payload.reasons),
           "irreversibility.class": e.payload.irreversibility,
         },
         links: [],
         events: [],
       });
-      close(id, e.ts, e.payload.effect === "deny" ? "error" : "ok");
+      close(id, ts, e.payload.effect === "deny" ? "error" : "ok");
       continue;
     }
     if (isEvent(e, "effect.started")) {
@@ -605,7 +629,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(id, {
         name: e.payload.kind === "model" ? "loom.model" : "loom.tool",
         kind: "client",
-        start: e.ts,
+        start: ts,
         parent: taskSpan,
         attributes: { "loom.effect.key": e.payload.key, "effect.kind": e.payload.kind },
         links: [],
@@ -637,11 +661,11 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "effect.completed")) {
-      close(spanId(runId, "effect", e.payload.key), e.ts, "ok", { "effect.outcome": "completed" });
+      close(spanId(runId, "effect", e.payload.key), ts, "ok", { "effect.outcome": "completed" });
       continue;
     }
     if (isEvent(e, "effect.failed")) {
-      close(spanId(runId, "effect", e.payload.key), e.ts, "error", {
+      close(spanId(runId, "effect", e.payload.key), ts, "error", {
         "effect.outcome": "failed",
         "error.code": e.payload.error.code,
       });
@@ -652,10 +676,10 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(id, {
         name: "loom.state.reduce",
         kind: "internal",
-        start: e.ts,
+        start: ts,
         parent: taskSpan,
         attributes: {
-          channels: [...e.payload.channels],
+          channels: claimedList(e.payload.channels),
           "branch.count": e.payload.branchCount,
           skipped: e.payload.skipped,
           degraded: e.payload.degraded,
@@ -678,12 +702,12 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
         links: [],
         events: [],
       });
-      close(id, e.ts, "ok");
+      close(id, ts, "ok");
       continue;
     }
     if (isEvent(e, "task.committed")) {
-      attr(taskSpan, { "edges.taken": [...e.payload.take], "task.status": e.payload.status });
-      close(taskSpan, e.ts, e.payload.status === "succeeded" ? "ok" : "error");
+      attr(taskSpan, { "edges.taken": claimedList(e.payload.take), "task.status": e.payload.status });
+      close(taskSpan, ts, e.payload.status === "succeeded" ? "ok" : "error");
       continue;
     }
     if (isEvent(e, "task.failed")) {
@@ -691,11 +715,11 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "task.cancelled")) {
-      close(taskSpan, e.ts, "error", { "task.status": "cancelled", "cancel.clean": e.payload.clean });
+      close(taskSpan, ts, "error", { "task.status": "cancelled", "cancel.clean": e.payload.clean });
       continue;
     }
     if (isEvent(e, "task.skipped")) {
-      close(taskSpan, e.ts, "unset", { "task.status": "skipped" });
+      close(taskSpan, ts, "unset", { "task.status": "skipped" });
       continue;
     }
     if (isEvent(e, "checkpoint.created")) {
@@ -703,13 +727,13 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       start(id, {
         name: "loom.checkpoint",
         kind: "internal",
-        start: e.ts,
+        start: ts,
         parent: taskSpan,
         attributes: { "checkpoint.seq": e.payload.atSeq, "checkpoint.kind": e.payload.kind, open_tasks: e.payload.openTasks },
         links: [],
         events: [],
       });
-      close(id, e.ts, "ok");
+      close(id, ts, "ok");
       continue;
     }
   }
@@ -902,6 +926,55 @@ function isList(v: unknown): boolean {
     return false;
   }
 }
+
+/**
+ * A list the JOURNAL claimed, copied — and a container that is not a list is ONE claim, not
+ * an iterable.
+ *
+ * `[...e.payload.edgesIn]` splits a STRING into characters. Measured: `edgesIn: "e1"` folded
+ * to `"edges.in": ["e","1"]`, so `reconstructGraph` reported TWO ghost edges where the
+ * journal claimed one — a FABRICATION, in the input to `conformsToGraph`, which is the
+ * assertion a CI job reads. It also throws outright on `undefined`, `null` or a number,
+ * which costs the caller every span for the run.
+ *
+ * `reconstructGraph` in this same file already takes the correct verdict on exactly this
+ * class — "a container that is not a list is ONE unknown edge" — and the journal side did
+ * not. This is that verdict, applied to the four spread sites, so both halves of the file
+ * answer the question the same way.
+ *
+ * The elements are read through `readProp` under a bounded `length` for the reason the
+ * `Array.isArray` docstring above gives: the container test licenses nothing about the
+ * reads that follow it, and an ordinary array can carry an accessor at index 0.
+ */
+function claimedList(v: unknown): readonly unknown[] {
+  // THE UNREADABLE CONTAINER IS RENDERED, NOT PASSED ON — and this is the half that a fix
+  // stopping at "do not spread it" gets wrong. Returning `[v]` keeps the hostile value, and
+  // the next reader is `redactAttributes`, whose `walk` calls `.map` on anything
+  // `Array.isArray` accepts: a `Proxy` over `[]` claiming `length: 2 ** 32 - 1` was refused
+  // HERE and then walked THERE, four billion times. `idText` is the same rendering
+  // `reconstructGraph` gives a claim's container one screen down — a marker naming the
+  // shape, which is what an attribute for an unreadable claim can honestly be.
+  if (!isList(v)) return [idText(v)];
+  const n = readProp(v, "length");
+  // THE BOUND IS A COST GUARD, NOT A VALUE GUARD, AND NO TEST HOLDS IT — stated here rather
+  // than left to be rediscovered. Deleting it does not change any answer: the walk below
+  // eventually throws (`out` cannot hold 2 ** 32 - 1 entries) and the `catch` returns the
+  // same marker. Measured, `length: 2 ** 32 - 1`: **17.6 seconds and several GB** to arrive
+  // at the identical `["(object)"]`. Tests here are offline and deterministic, so a wall
+  // clock cannot pin it; the difference is real and is exactly the denial-of-service a
+  // trace-rendering path should not offer.
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > MAX_CLAIMED) return [idText(v)];
+  try {
+    const out: unknown[] = [];
+    for (let i = 0; i < n; i++) out.push(readProp(v, String(i)));
+    return out;
+  } catch {
+    return [idText(v)];
+  }
+}
+
+/** A bound on a hostile `length`, far above anything a compiled graph produces. */
+const MAX_CLAIMED = 65_536;
 
 export interface ReconstructedGraph {
   readonly nodes: readonly NodeId[];
@@ -1333,7 +1406,9 @@ export function shouldExport(events: readonly JournalEvent[], policy: SamplingPo
   if (ratio <= 0) return false;
   // Deterministic per run, so the decision is stable across processes and reruns —
   // never Math.random().
-  const runId = events[0]?.runId ?? ("" as RunId);
+  // `idText` for the same reason `spansFrom` uses it: `digestOf` throws on a non-string, and
+  // this function's whole job is to answer yes or no about a run.
+  const runId = events.length === 0 ? "" : idText(events[0]!.runId);
   const bucket = parseInt(digestOf(runId).slice(7, 11), 16) / 0xffff;
   return bucket < ratio;
 }

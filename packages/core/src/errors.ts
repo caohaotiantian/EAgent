@@ -55,17 +55,57 @@ export class LoomError extends Error {
     this.details = init.details;
   }
 
-  /** Safe to put in a span or a journal payload: no `cause` chain, no stack. */
+  /**
+   * Safe to put in a span or a journal payload: no `cause` chain, no stack.
+   *
+   * Every field is read through `readOwn` for one reason: `this` need not be an instance
+   * this constructor built. `isLoomError` is an `instanceof`, so
+   * `Object.create(LoomError.prototype, {details: {get() {throw}}})` is a `LoomError` to
+   * every check in the codebase, and `toLoomError` used to hand such a value back UNCHANGED
+   * — so a channel's booby-trapped error escaped with its traps intact and detonated one
+   * layer out, inside this method, on the HTTP path. That is the Traps list's *`instanceof`
+   * proves a prototype, not provenance*, and this is the boundary half of the fix;
+   * `toLoomError` is the other half.
+   */
   toJSON(): Record<string, unknown> {
     const out: Record<string, unknown> = {
-      class: this.class,
-      code: this.code,
-      message: this.message,
-      retryable: this.retryable,
+      class: readOwn(this, "class"),
+      code: readOwn(this, "code"),
+      message: readOwn(this, "message"),
+      retryable: readOwn(this, "retryable"),
     };
-    if (this.retryAfterMs !== undefined) out["retryAfterMs"] = this.retryAfterMs;
-    if (this.details !== undefined) out["details"] = this.details;
+    const retryAfterMs = readOwn(this, "retryAfterMs");
+    const details = readOwn(this, "details");
+    if (retryAfterMs !== undefined) out["retryAfterMs"] = retryAfterMs;
+    if (details !== undefined) out["details"] = details;
     return out;
+  }
+}
+
+/** A property read that costs the property and never the caller. */
+function readOwn(v: unknown, key: string): unknown {
+  if (v === null || (typeof v !== "object" && typeof v !== "function")) return undefined;
+  try {
+    return (v as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `String(v)`, for a value that may refuse to become one.
+ *
+ * `String(Object.create(null))` throws `TypeError: Cannot convert object to primitive
+ * value`, and so does any value with a throwing `toString` or `Symbol.toPrimitive` — which
+ * is exactly the shape an injected tool executor, model adapter or delivery channel can
+ * throw. `toLoomError`'s whole job is to make a boundary total, and it was the one call in
+ * it that was not.
+ */
+function safeString(v: unknown): string {
+  try {
+    return String(v);
+  } catch {
+    return `[unstringifiable ${typeof v}]`;
   }
 }
 
@@ -76,15 +116,70 @@ export function isLoomError(e: unknown): e is LoomError {
 /**
  * Normalize anything thrown into a LoomError. Used at every interface boundary so
  * callers can rely on the taxonomy without defensive `instanceof` chains.
+ *
+ * IT IS TOTAL, and that is a property of THIS FUNCTION rather than of the values its
+ * callers happen to hand it. Every one of its reads used to be bare, on a path whose
+ * arguments come from injected code — tool executors, model adapters, delivery channels,
+ * `ControlPlane`'s own catch — so the function whose job is to make a boundary safe was
+ * itself a way through it. `String(e)` throws on a value with no primitive conversion;
+ * `e.name` and `e.message` are property reads on a caller's object.
+ *
+ * AND `isLoomError` DOES NOT MEAN "ONE OF OURS". It is an `instanceof`, which proves a
+ * prototype and nothing about provenance, so a value built with `LoomError.prototype` and
+ * throwing accessors passed the check and was returned UNCHANGED — traps intact — to
+ * detonate one layer out in `toJSON` or `httpStatusFor`. Four waves running, the untyped
+ * exit from `run/delivery.ts` was a read of an injected value on an error path, each fixed
+ * one property before the next. The answer is one boundary, not a fifth local `try`.
+ *
+ * So a `LoomError` is returned unchanged only when every field it will later be read for
+ * answers cleanly, ONCE, here. Identity is worth preserving for the ordinary case — callers
+ * compare `code` after re-throwing, and a rebuilt error loses `cause` and `stack` — and it
+ * is not worth preserving for a value that cannot say what its own class is.
+ *
+ * `code` survives every path, deliberately: `Engine.#runAgent` branches on
+ * `le.code !== E_BUDGET_EXHAUSTED` and `#invokeTool` on `le.code === E_REPLAY_DIVERGENCE`,
+ * so an error that loses its code changes control flow rather than merely its message.
+ *
+ * `run/delivery.ts`'s `ownError`/`ownMessage`/`describeFailure` are NOT superseded by this
+ * and must not be deleted: they additionally BOUND and replace `details`, and validate
+ * `class`/`code` against the vocabulary, which is a second job this does not do. This is
+ * built to the standard their docstrings set.
  */
 export function toLoomError(e: unknown, fallbackCode = CODES.E_INTERNAL): LoomError {
-  if (isLoomError(e)) return e;
-  if (e instanceof Error && e.name === "AbortError") {
+  if (isLoomError(e)) {
+    const cls = readOwn(e, "class");
+    const code = readOwn(e, "code");
+    // Every read this value will face downstream, taken here, once. If they all answer and
+    // the two deciding fields are in the vocabulary, it is safe to pass on as it is.
+    if (typeof cls === "string" && CLASSES.has(cls as ErrorClass) && typeof code === "string") {
+      const rest = [readOwn(e, "message"), readOwn(e, "retryable"), readOwn(e, "retryAfterMs"), readOwn(e, "details")];
+      if (typeof rest[0] === "string") return e;
+      return new LoomError(cls as ErrorClass, code, safeString(rest[0]), { cause: e });
+    }
+    return new LoomError("internal", typeof code === "string" ? code : fallbackCode, safeString(readOwn(e, "message")), {
+      cause: e,
+    });
+  }
+  if (e instanceof Error && readOwn(e, "name") === "AbortError") {
     return new LoomError("cancelled", CODES.E_CANCELLED, "aborted", { cause: e });
   }
-  const message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  const message =
+    e instanceof Error ? `${safeString(readOwn(e, "name"))}: ${safeString(readOwn(e, "message"))}` : safeString(e);
   return new LoomError("internal", fallbackCode, message, { cause: e });
 }
+
+/** The vocabulary `toLoomError` checks a claimed `class` against. */
+const CLASSES: ReadonlySet<ErrorClass> = new Set<ErrorClass>([
+  "validation",
+  "policy",
+  "not_found",
+  "conflict",
+  "exhausted",
+  "unavailable",
+  "timeout",
+  "cancelled",
+  "internal",
+]);
 
 // ---------------------------------------------------------------------------
 // Canonical codes
@@ -210,7 +305,13 @@ export const err = {
 
 /** HTTP mapping used by the control plane. Class-driven, never code-driven. */
 export function httpStatusFor(e: LoomError): number {
-  switch (e.class) {
+  // `e.class` IS A READ OF A VALUE THAT MAY NOT BE ONE OF OURS, and this function's declared
+  // `number` return was a lie without the `default` arm below. The switch is exhaustive over
+  // `ErrorClass`, so TypeScript is satisfied — but `toLoomError` used to hand back any object
+  // whose prototype is `LoomError.prototype` unchanged, and `instanceof` proves a prototype
+  // and nothing about provenance. A forged `class` therefore fell out of the bottom as
+  // `undefined`, which `#dispatch` writes into a response status.
+  switch (readOwn(e, "class")) {
     case "validation":
       return 400;
     case "policy":
@@ -228,6 +329,8 @@ export function httpStatusFor(e: LoomError): number {
     case "cancelled":
       return 499;
     case "internal":
+      return 500;
+    default:
       return 500;
   }
 }

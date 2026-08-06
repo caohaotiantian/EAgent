@@ -40,6 +40,29 @@ export interface SubscribeOptions {
   readonly onOverflow: OverflowPolicy;
 }
 
+/**
+ * ONE CONSUMER'S CHANNEL. A second reader wants a second `subscribe`.
+ *
+ * This is a contract statement rather than a note, because the shape does not announce it
+ * and the failure is silent. The iterator is a generator over a SHARED queue, so two
+ * concurrent `for await` loops over one subscription SPLIT the stream — each event is
+ * delivered to exactly one of them — and whichever loop ends first runs the generator's
+ * `finally`, which calls `dispose()` for both. Measured on `InProcessEventBus`, one
+ * subscription, two loops, four events published:
+ *
+ *     consumer A saw [1, 3]   consumer B saw [2, 4]   subscriberCount now 0
+ *
+ * Neither loop threw and neither `dropped` counter moved, so a consumer that assumed a bus
+ * fans out sees half a run and is told nothing. `dropped` cannot help: nothing was dropped.
+ *
+ * `SubscriberOverflowError.lastSeq` already documents the SEQUENTIAL second-reader case
+ * ("a loop started after that has nothing to drain and no resume point of its own") and
+ * `bus.test.ts` pins it, but that is a statement about overflow rather than about the
+ * subscription, which is why it did not cover this. It is documented rather than made
+ * unrepresentable: a `#iterating` flag would have to be threaded through `replayThenTail`'s
+ * merged iterator as well, and refusing a second `for await` would break a consumer that
+ * legitimately re-enters after a clean `break` — a case nothing distinguishes from here.
+ */
 export interface Subscription extends AsyncIterable<JournalEvent>, Disposable {
   /**
    * How many events this subscriber missed. Non-zero means it could not keep up.
@@ -95,8 +118,9 @@ export class SubscriberOverflowError extends Error {
 
 export interface EventBus {
   publish(event: JournalEvent): void;
+  /** One consumer's channel — see `Subscription`. Two readers want two subscriptions. */
   subscribe(filter: EventFilter, opts: SubscribeOptions): Subscription;
-  /** Gap-free catch-up then live tail, deduped by seq. The UI's reconnect path. */
+  /** Gap-free catch-up then live tail, deduped by seq. The UI's reconnect path. Also one consumer's. */
   replayThenTail(runId: RunId, fromSeq: Seq, opts?: Partial<SubscribeOptions>): Subscription;
   readonly subscriberCount: number;
 }

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus, SubscriberOverflowError } from "../src/bus.ts";
-import type { RunId } from "../src/ids.ts";
+import type { RunId, Seq } from "../src/ids.ts";
 import { SYSTEM_ACTOR, type JournalEvent } from "../src/journal/events.ts";
 import { MemoryStateStore } from "../src/journal/memory.ts";
 
@@ -303,4 +303,47 @@ test("replayThenTail honours a starting seq", async () => {
 test("replayThenTail without a store is a construction error, not a runtime surprise", () => {
   const bus = new InProcessEventBus();
   assert.throws(() => bus.replayThenTail(RUN, 1), /requires a StateStore/);
+});
+
+test("A SUBSCRIPTION IS ONE CONSUMER'S CHANNEL, and two loops over one SPLIT the stream", () => {
+  // Not a bug — a contract, and it was nowhere stated. The iterator is a generator over a
+  // SHARED queue, so each event goes to exactly one of two concurrent `for await` loops, and
+  // whichever ends first runs the generator's `finally`, which disposes for BOTH. Neither
+  // loop throws and neither `dropped` counter moves, so a consumer that assumed a bus fans
+  // out sees half a run and is told nothing.
+  //
+  // This test exists to make the sharp edge executable rather than to defend against it:
+  // `Subscription`'s docstring now says so, and if the behaviour is ever made
+  // unrepresentable this is the test that has to change, deliberately.
+  const bus = new InProcessEventBus({ store: new MemoryStateStore() });
+  const sub = bus.subscribe({}, { queueSize: 16, onOverflow: "drop_oldest" });
+
+  const a: number[] = [];
+  const b: number[] = [];
+  const drain = async (into: number[]): Promise<void> => {
+    for await (const e of sub) {
+      into.push(e.seq);
+      if (into.length >= 2) break;
+    }
+  };
+  const both = Promise.all([drain(a), drain(b)]);
+
+  for (let seq = 1; seq <= 4; seq++) {
+    bus.publish({
+      runId: "r" as RunId,
+      seq: seq as Seq,
+      ts: seq,
+      type: "run.started",
+      payload: {},
+      actor: SYSTEM_ACTOR("test"),
+      classification: "internal",
+    } as unknown as JournalEvent);
+  }
+
+  return both.then(() => {
+    assert.deepEqual([...a, ...b].sort((x, y) => x - y), [1, 2, 3, 4], "every event reached exactly one loop");
+    assert.equal(a.length + b.length, 4, "…and none reached both");
+    assert.notDeepEqual(a, [1, 2, 3, 4], "THE STREAM FANNED OUT — two readers each saw the whole run");
+    assert.equal(bus.subscriberCount, 0, "and the first loop to leave disposed the subscription for both");
+  });
 });
