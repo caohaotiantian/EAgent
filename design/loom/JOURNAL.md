@@ -1753,3 +1753,656 @@ selection but *who runs which run*. That needs a coordinator, and shipping half 
 coordinator is worse than shipping none. What has changed is that the risk is now
 localised to one named thing rather than spread through the executor.
 
+
+---
+
+## 2026-08-05 — Hardening — Gate authorization: journaled, required by the type, bound to the gate it mirrors
+
+**One arc, hardened across four waves, and worth reading as one decision** — because each
+fix was the same mistake found one door further in, and the final shape is the only part
+that matters now.
+
+**Where it started: the approvers list lived in memory.** `HumanGateBroker` kept
+`approvers` and `allowEdit` in a private `Map`, so the rule held for the process that
+raised the gate and for nothing else. After a restart the list was gone, which made
+`delivery.ts`'s `approvers.length > 0` check a no-op in the shipped system and made
+`allowEdit` fail **open** — a signed `edit` could then write any channel, including a
+`reduce: sum` budget accumulator. Worse, the distinction that mattered was not
+expressible: "this gate named nobody" and "I could not read who it names" both arrived as
+an empty array, and empty is the permissive case.
+
+**The final shape.** `gate.raised` carries `approvers`, `allowEdit`, `slaMs`, an ABSOLUTE
+`deadline`, `onTimeout` and `mirrorOf`; `gate.escalated` carries the reset deadline. All
+of it folds into `GateRecord`, and `HumanGateBroker.resolve` enforces from that fold — so
+the rule holds at every entry point rather than at the one that remembered to check.
+`isAuthorizedActor` refuses an `agent` or `evolution` actor outright: a model must never
+satisfy a human approval, whatever its `profile` says. The broker's remaining `Map` is
+typed `EphemeralGate` and holds only payload, delivery route and default action, which
+makes reading an authorization decision out of process memory **a compile error rather
+than a discipline**.
+
+**The type carries it, because the guard was missed twice.** `NodeOutcome.gate` has a
+REQUIRED `auth: {approvers, allowEdit}`, computed in exactly one place
+(`gateAuthorizationOf`) and passed through `#commit` unchanged. Before that, `#commit`
+derived authorization from `node.humanGate` — a block `GRAPH020` permits only on a
+`human_gate` node — so the two gates a human answers most often, a tool's posture gate and
+a subgraph's mirror, journaled no approvers and no allow-list. A child declaring
+`approvers: ["u:security-lead"]` in front of a charge was enforced by nobody. Making the
+field required moves "did you think about authorization here?" from a reviewer's memory to
+the compiler, and that is the general lesson: **a guard that is missed twice should be
+made unrepresentable, not re-added.**
+
+**A mirror gate is BOUND to the gate it forwards to.** `#runSubgraph` writes `mirrorOf`
+when it raises the mirror and inherits that specific child gate's approvers;
+`#forwardGateDecision` resolves exactly that gateId or nothing. Inheriting from one
+`find(state === "open")` and forwarding into a second, independent one is not one bug in
+two places — it is a missing binding, and answering any unrestricted child gate between
+the two lookups (ordinary queue work, not an attack) slid a restricted gate under a mirror
+that had inherited nothing. The binding must be durable because the process that raises
+the mirror need not be the one that forwards it. A mirror's `allowEdit` is `[]` and the
+broker refuses `edit` and `redirect` on it outright: `node.writes` on a subgraph node is
+exactly the set needed to forge the delegated result, and approve/reject are the only
+decisions that can cross into another run's namespace.
+
+**Three narrower doors, closed the same way.** `isAuthorizedActor`'s system escape hatch
+became a three-name allow-list (`GATE_SYSTEM_ACTORS`: the broker's own timeout path, the
+subgraph forwarder, and replay) rather than "any `system` actor", because `system:cron`
+was answering gates that named a person. `Engine.resolveGate` is typed to a human plus
+replay-mode, with the executor's own forwarding going through a private
+`#resolveGateAsSystem` — replay-mode is a property of how the Engine was CONSTRUCTED,
+which no route added later can fake. And `#applyGateDecision` now refuses a `redirect`
+naming any edge the node does not declare: "a human cannot invent a target any more than a
+model can" had been a comment with nothing behind it, while `#activate` resolved edge ids
+against the whole graph.
+
+**A graph declares approvers inline, and everything else is a compile error.**
+`HumanGateNode.approval` uses D7.2's field names verbatim, but `mode` other than `single`,
+any `k`, `separationOfDuties` and `delegation` are `GRAPH014_APPROVAL_UNSUPPORTED` errors.
+Accepting the block and enforcing only the implemented part yields a graph that reads "two
+leads must agree" and behaves as "any one", which D7.9 names the worst failure available —
+it looks supervised, so nobody goes looking.
+
+**Rejected.** Resolving the `oversight/<name>@<version>` Resource, where D7.2 actually
+puts this block: `ResourceResolver.resolve` returns a pin, not a document, and nothing in
+`src/` reads Resource content, so being design-faithful meant building a content-resolution
+seam through the compiler and the engine — several times the size of the defect. Also
+rejected: a `NodeSpec.approval` field so any node could restrict its own posture gate (a
+second place to declare approvers is a second thing that can disagree); inheriting the
+child's `allowEdit` into a mirror (it names CHILD channels, so inheriting authorizes
+whatever happens to share a name); and a capability token minted by the executor and
+checked by the broker (it would have to be exported from `gates.ts` for `engine.ts` to
+mint it — importable by exactly the in-process caller it defends against).
+
+**Reversal condition.** Move `approval` onto the Resource the moment a content-resolving
+`ResourceResolver` exists; the node block then becomes an override or is deleted. Widen
+`approvers` from `readonly string[]` to a `{kind, id}` union when an identity resolver can
+expand roles — never before, because a role that expands to nobody is an approvers list
+that authorizes everybody. The `approvers`-inheritance rule is a single-source assignment
+only because just one node type can declare approvers today: the moment a second can,
+`gateAuthorizationOf` must COMPOSE the two rather than let one win, and an empty
+composition must mean "nobody may answer". Reverse the `mirrorOf` pointer if a subgraph is
+ever allowed to mirror more than one child gate at once — the binding then becomes a set.
+
+---
+
+## 2026-08-05 — Hardening — The inbound callback edge: verify before you look anything up
+
+**Choice.** `DeliveryChannel.parseCallback?(req: CallbackRequest)` takes the RAW BYTES plus
+headers and returns `{runId, gateId, decision, actor, idempotencyKey}`.
+`SignedWebhookChannel` implements it with HMAC-SHA256 over Slack's `v0:{ts}:{body}`,
+compared with a length-safe `timingSafeStringEqual`. `GateCallbackRouter.handle` is the one
+inbound dispatch path and runs the signature check BEFORE any lookup; admission (run exists
+∧ not terminal ∧ at least one open gate) then gates only whether a `gate.callback_rejected`
+row is written, never whether the request reaches `resolve`.
+`POST /runs/:id/callbacks/:channel` is exempt from the bearer token, scoped by method AND
+path AND the presence of a configured dispatcher.
+
+**Rationale.** Slack does not hold the control plane's bearer token, and handing one to
+three vendors so they can answer a gate would put a credential that can start and cancel
+runs into their logs. So the HMAC *is* the authentication for that route — a strictly
+narrower one, since it authenticates a single gate decision rather than the whole API.
+Three details are load-bearing. The body reaches the verifier as **bytes**, because
+`JSON.parse` → `JSON.stringify` does not round-trip (key order, `1.0`, `A`), so a
+signature checked against a re-serialization is checkable-by-luck: it passes for the
+payloads a test happens to use and fails in production. The timestamp is INSIDE the signed
+material, because a timestamp checked but not signed is one the attacker edits and the
+replay window is then decoration. And the idempotency key is derived from the signature
+rather than minted, so a channel retry lands on `resolve`'s existing
+`(gateId, approver, key)` check instead of a second mechanism that would drift from it.
+
+**Verifying first was not a tidy-up; the lookup-first order was the bug.** The callback URL
+carries the runId and is handed to a third party, so it is not a secret. With the lookup
+first, 200 unsigned POSTs at a finished run appended 200 journal rows, and the status codes
+were an unauthenticated existence oracle — 403 for a real gated run, 404 for a fictional
+one. Verifying first collapses both, and it is also the cheaper check. In the same pass
+`ControlPlane` learned to parse its own request URL totally: `new URL(req.url, "http://" +
+host)` sat outside the handler's `try`, llhttp accepts `Host: a b`, and one unauthenticated
+packet on a raw socket ended the process along with every in-flight run.
+
+**Where a refusal may be durable, and where it may only be counted.** The split follows
+from the reorder: at perimeter-failure time we no longer know the run exists, and appending
+would conjure a journal for it. A forged, unsigned or replayed callback
+(`PERIMETER_REJECTIONS`) is refused having read nothing and written nothing; a
+signed-then-unauthorized one is journaled to that run, because a caller who demonstrably
+used the secret has earned a durable row. Everything withheld from the journal lands in
+`GateCallbackRouter.refusals()` — a process-lifetime counter keyed by (configured channel
+name) × (closed rejection token set), so it is O(1) in request volume — and `GET /health`
+surfaces it only to a caller holding the shared token. That is invariant 8 exactly:
+backpressure at admission, overflow to the lossy sink, never a lost journal fact. Durable
+rows are additionally capped at 32 per run per process (`#admitRow`), because the secret is
+shared with a third party by construction and the commonest integration bug there is — a
+`parseCallback` that returns without checking the MAC — otherwise buys one row per POST
+forever.
+
+**Rejected.** Journaling every refusal unconditionally: the claimed bound ("the winning
+decision exists") is not one, since N conflicting posts still write N rows. Coalescing
+repeated rejections into one row with a count: a window that flushes only when the next
+attempt arrives loses the tail exactly when the attack stops. Requiring an open gate to
+reach `resolve` at all: it turns a webhook retry of an already-recorded decision into a 404
+that reads as "your approval was lost", breaking the documented idempotency contract.
+Putting `parseCallback` on `WebhookChannel` behind an optional secret: it destroys the only
+cheap test for "can this channel be answered?", since `parseCallback !== undefined` would
+then mean "maybe, depending on config".
+
+**Reversal condition.** Reverse the single-secret-per-channel model if a deployment needs
+per-sender key rotation or asymmetric signatures — `SignedWebhookChannel` then grows a
+key-id header and a resolver, or is replaced by a channel outside `@loom/core`. Reverse the
+URL-carries-runId shape if a vendor cannot template a callback URL per gate; the fallback is
+a global `POST /callbacks/:channel` that derives the run from the signed body, which costs a
+gateId→runId index and loses the pre-parse admission bound on journal writes. Reverse the
+durability split if operators need forged attempts on the record — at which point the answer
+is a bounded sink outside the journal, not a row per packet. Raise or re-shape the 32-row
+cap if a legitimate run ever exceeds it: it is a guess about human behaviour, not a property
+of the protocol.
+
+---
+
+## 2026-08-05 — Hardening — `run/delivery.ts` has ONE boundary, instead of a fifth guarded getter
+
+**Choice.** Values from injected code become values this module OWNS, at one place, and
+everything downstream reads the owned copy: `ownError` for anything a channel or the engine
+throws, `ownedCall`/`ownedDecision`/`ownedActor` for every property of a returned
+`CallbackDecision`, `usableReceipt` for a receipt, `channelName` for a channel's name
+(read once, at construction — an unnameable channel is `E_CONFIG_INVALID` at boot rather
+than an untyped throw at request time), and `safeGateId` for an id on its way into a
+lookup. `#refuse` takes a `LoomError`, so the compiler now states what three waves of
+comments did.
+
+**Rationale — four waves running, the untyped exit from this file was a read of an injected
+value on an error path.** `describeCause`'s `name`, then `journalMessage`'s `message`, then
+`rejectionReasonOf`'s `details`, then `parsed.runId`: each fixed where it was found, each
+followed by the next one property over. The last was worse than a repeat — `toLoomError`
+returns `e` unchanged when `isLoomError(e)`, and `instanceof` proves a prototype, not
+provenance, so the booby-trapped accessor `readProp` had been added to survive escaped WITH
+the error and detonated in `LoomError.toJSON` on the HTTP path, one layer out. Hardening
+readers inside a file while handing the object to callers who read it bare is a boundary
+with a hole shaped exactly like the value it was meant to stop. Three shapes turn out to be
+one bug: a getter that throws, a value that is not the type it claims, and a name that
+resolves through a prototype — `gates["__proto__"]` answered with `Object.prototype`, so a
+gate nobody raised produced a 409 and a durable row asserting `already_resolved` about
+nothing.
+
+**A channel that does not resolve a usable receipt has FAILED, not delivered.** A receipt
+is `string` by contract and injected code's return value in fact. `canonicalize` refuses a
+symbol, so `log.append` threw AFTER every channel had reported — one hostile channel
+deleting every healthy channel's `gate.delivered` row. And the old `"receipt" in r` split
+was true for `{channel, receipt: undefined}`, so a channel that resolved nothing was
+journaled as a delivery and the `ConsoleChannel` safety net was suppressed at the moment it
+was most needed. `usableReceipt` bounds to 200 characters, rejects non-strings and blanks;
+the dispatcher turns each into `E_GATE_DELIVERY_FAILED` with `reason: "receipt"` and splits
+on the error, not on key presence.
+
+**`deliver` raises one code, and now that is true for every exit.** D3's taxonomy calls the
+single code load-bearing and only the non-2xx arm honoured it — the arm that almost never
+fires. `fetch` REJECTS for the two failures that actually happen, so an unreachable endpoint
+escaped as a bare `TypeError` and a hung one as `E_INTERNAL`, i.e. "a bug in Loom", which
+pages. Everything now exits `E_GATE_DELIVERY_FAILED` (class `unavailable`, so `retryable`
+stays true and a declarative `retry.onlyIf` keeps working) with the cause in `details`,
+except a caller-initiated abort, which stays `E_CANCELLED`: retrying a delivery an operator
+cancelled is the wrong branch, and journaling a person's abort as a delivery failure blames
+the network for their action. `WebhookChannel` also masks its own URL, origin, path and
+userinfo out of any cause string via `maskLiterals` — a Slack webhook path IS the bearer
+token, and it was reaching an audit row nobody can rotate.
+
+**Rejected.** A fifth local `try` — three waves of evidence say the next reader added to
+this module will not get its own. Passing `CODES.E_GATE_DELIVERY_FAILED` as `toLoomError`'s
+fallback code, which is the smaller edit: it fixes the code and leaves the class `internal`,
+so one code would live in two classes and `retryable` would silently differ between a
+webhook and a vendor channel. Passing the engine's `details` through: it is the one
+unbounded field on an error and `errorRecord` copies it verbatim, so the owned copy carries
+a closed-set `reason` token or nothing. And owning the values the ENGINE hands this module
+(the `GateSummary` to deliver, the `RunProjection` to return) — those are read models folded
+from this process's own journal, and copying them per call would say nothing true about
+where untrusted values enter, which is `DeliveryChannel` and nothing else. Errors the engine
+or store THROW are not covered by that exemption and are owned like a channel's.
+
+**Reversal condition.** A second module needing the same treatment: `ownError`, `ownedJson`
+and `readProp` move to a shared `untrusted.ts` rather than being copied. The
+one-property-over failure recurring anyway would mean the boundary is in the wrong place —
+the next candidate is the `DeliveryChannel` interface itself, wrapped once at registration
+so no un-owned channel object exists inside the module at all. Delete the local totalizing
+wrappers the day `errors.ts` makes `toLoomError` total and `LoomError` copies its own fields
+at construction. And revisit the receipt rule if a real channel legitimately reports
+delivery without an id it can be asked about later — the right change is then a
+`receiptless` flag declared at construction, not a dispatcher inferring it from `undefined`.
+
+---
+
+## 2026-08-05 — Hardening — The approver's identity comes from the credential, never from the request body
+
+**Choice.** `ControlPlaneOptions` gains an injected `IdentitySource` that resolves an
+`AuthContext` (`human` | `service`) from request headers, and `POST /runs/:id/gates/:id`
+builds its `HumanActor` from that alone. A body `actor` that DISAGREES with the
+authenticated principal is a 403, not a preference; a credential that names no person
+decides as `(unidentified)` and is refused outright on any gate that declares approvers,
+with an error naming the missing configuration. Ships with `BearerTokenIdentity` (one token
+per subject) and `loom serve --identity-file`, a file rather than a flag because argv is
+world-readable via `ps`.
+
+**Rationale.** `subject` began life as an AUDIT LABEL and became an AUTHORIZATION KEY the
+wave approvers started being matched against it — and nobody revisited where it came from.
+One shared bearer token plus `{"actor":"u:security-lead"}` decided a gate that named the
+security lead (reproduced at HTTP 200, with the journal naming them), while the shipped
+console, honestly posting `actor: "console"`, got 403 on the same gate. Forgery was the only
+workflow that worked, in the one place the whole oversight layer terminates. **That is the
+general lesson: an audit label that becomes an authorization key needs its provenance
+re-examined, and nothing about the type system will prompt you.** The seam is injected for
+the same reason `DeliveryChannel` is — identity is the most vendor-shaped thing in a
+deployment and `@loom/core` must stay zero-dependency.
+
+**An injected seam's output is data, not a type.** `checkedAuth` validates what
+`IdentitySource` returns, splitting on what each field DOES: `subject` and `kind` decide, so
+a wrong one is refused (500, `E_CONFIG_INVALID`, naming the source) — including
+`(unidentified)`, which is this file's word for the absence of identity and not a name a
+source may claim, and including an over-long subject, refused rather than truncated because
+truncating turns `u:alice-contractor` into `u:alice`. `via`, `mfa` and `onBehalfOf`
+describe, so a wrong one is dropped. Every field is read ONCE into a `const`: reading
+`raw["via"]` twice — validate, then use — let a getter pass the closed-vocabulary check with
+`console` and write `telepathy` into the journal.
+
+**Nothing a stranger can reach may cause `IdentitySource.identify` to be called.**
+`/health` used to consult the seam so it could decide whether to disclose the refusal
+counters, which meant an SSO outage returned 503 from every healthy process and drained
+them out of rotation — an outage CAUSED by the health check rather than caught by one, and
+an unauthenticated amplifier aimed at the deployment's own identity provider. The counters
+are gated on the shared token instead, and the accepted cost is written down: an
+identity-only deployment with no service token cannot read them. Three routes are open by
+design and the count is exactly three — the callback route, `/health`, and `GET /`, which
+serves the console's static shell because a browser cannot put a bearer token on a top-level
+navigation. The console therefore streams over authenticated `fetch` rather than
+`EventSource`, so the token rides in a header instead of a query string.
+
+**The idempotency map had inherited "there is exactly one principal".** `Idempotency-Key` is
+a string the caller chooses; keyed on that alone it was a shared namespace — sound while
+every caller was the same principal, and a cross-principal collision the day they were not.
+Two teams both call their nightly job "nightly": the second submitter was handed the first's
+`runId`, and with it the projection and event stream of a run they did not submit, while
+their own submission was silently never made. The slot is now `(method, kind, subject, key)`
+via `idempotencySlot`, JSON-encoded so no subject can be spelled to reach across, and both
+idempotent writes use the one helper. The two ways of being wrong are not symmetric — too
+fine a slot costs a duplicate run, too coarse a slot hands one principal another's — so the
+slot errs fine.
+
+**Rejected.** Refusing at compile time, as `GRAPH014_APPROVAL_UNSUPPORTED` refuses
+`mode: quorum`: whether identity exists is DEPLOYMENT config, not graph config, and the same
+graph is answerable where a source is wired and unanswerable where none is. The gap is
+closed at boot instead — `unanswerableGraphs()` names every affected graph on stderr, the
+earliest moment both halves are in one process. Also rejected: ignoring a body `actor`
+rather than refusing it, which leaves a client confidently wrong about what the journal
+says; and refusing an out-of-vocabulary `via` rather than dropping it, because taking a
+deployment down over a label an SSO liked is the wrong trade for a field that describes
+rather than decides.
+
+**Reversal condition.** If a deployment appears that must accept a decider's subject from a
+payload — a broker fronting the API that has already authenticated the human and cannot
+present their credential — this becomes wrong as stated. The honest shape is then a
+delegation field (`onBehalfOf`) on a credential explicitly granted impersonation by the
+`IdentitySource`, never an unauthenticated `actor` string. Equally, if `AuthContext` starts
+accumulating vendor-shaped fields (claims, group lists, token introspection), the seam has
+been drawn too narrow and belongs in its own module with a resolver interface rather than as
+a type in `server/http.ts`.
+
+---
+
+## 2026-08-05 — Hardening — Authentication is not authorization: the control plane's scope limit, chosen and made loud
+
+**Decision, and it is a decision not to build.** `AuthContext` admits a caller, names a
+gate's decider, and namespaces an idempotency slot. It scopes NOTHING else: runs are not
+owned by the principal that submitted them, so every valid credential can list, read, stream
+and cancel every run, and can see every gate payload. Rather than half-build isolation, the
+limit is stated in `http.ts`'s module docstring under "THE LIMIT", in a D3.17 subsection, on
+each of the four unscoped routes, and — the part that cannot be deferred — as a boot warning
+whenever `ControlPlane.distinctPrincipals > 1`, on both boot paths. It is pinned by a test
+that has one principal cancel another's run, so the limit cannot be narrowed without
+rewriting an assertion that states it in full.
+
+**Rationale.** D3.17 puts `auth` on every method precisely so it can scope, and the code
+took it and dropped it — a contract that over-promises. The honest fix needs a DURABLE
+owner: a `submittedBy` on `run.submitted`, folded into the `runs` read model, with
+`listRuns` filtered in the store, plus a designed operator escape. All of that is engine and
+journal work. The only version buildable in the server alone is a process-local ownership
+map, which evaporates on restart, violates invariant 2, and READS as isolation while
+providing none — strictly worse than an honest absence. Configuring per-subject identities
+implies isolation to whoever does it, which is why the warning is the part that ships now
+and why it stays silent at one principal: there is nobody to be isolated from, and a warning
+that fires when nothing is wrong is one operators learn to skip.
+
+**Rejected.** The process-local map above. Also rejected: disclosing the limit through
+`/whoami` or the console header — the false implication belongs to whoever CONFIGURES
+identities, and the boot warning and the docs reach that person, while a new `/whoami` field
+changes a wire contract for a different audience.
+
+**Reversal condition.** Build per-principal access the moment a second tenant or a second
+team shares one control plane, or the moment anything that is not an operator holds a
+credential. The trigger to watch for is a deployment adding subjects to `--identity-file`
+for reasons other than "these people approve gates". When it flips, the ask is exact: the
+`submittedBy` field above; and the limit's test is REWRITTEN rather than deleted, so the new
+boundary is stated as precisely as the old absence was. `IdentitySource.principals` and
+`ControlPlane.distinctPrincipals` exist only to decide whether to warn and lose their
+purpose that day.
+
+---
+
+## 2026-08-05 — Hardening — A terminal operation is not final until every producer of the state it ends is stopped
+
+**A read model with no writer looks exactly like a finished feature.** D7.3's gate FSM had
+`Open --> Cancelled: gate.cancelled` from the day it was drawn, and D6.4 explains why it
+must exist: `ctx.abort` reaches every in-flight effect and cannot reach a gate, because an
+open gate has no work to interrupt — it is a row and a queue entry. The event type was in
+`EVENT_TYPES`; `projection.ts` folded it. **Nothing in `src/` ever appended one**, and a
+`grep` for the string was enough to see it. So `cancel` stopped the run and left its gates
+`open`, `resolve` validated the GATE and had no opinion about the RUN, and `gate.decided`
+carried an unconditional `run.resumed` that the fold applied whatever the status was. Three
+reasonable decisions, one hole: answering a leftover gate on a cancelled run resurrected it
+and performed the irreversible action the operator had just refused. Reproduced end to end —
+`cancelled → succeeded`, with the guarded `fs.write` executed.
+
+**Closing it took four sides, because cancel is not the only producer of an open gate.**
+
+1. **Gates that already exist.** `cancel` and every `run.failed` path in `#finish` emit
+   `gate.cancelled` per open gate, in the SAME append as the terminal event
+   (`cancelOpenGates`) — a crash between the two would leave a stopped run with a live gate,
+   which is exactly the answerable state.
+2. **Gates that do not exist yet.** `cancel` closes the gates that exist; it cannot close one
+   that does not. A Task already in flight reached its gate on a dead run, and the
+   `run.suspended` riding with `gate.raised` carried the status back out of `cancelled`.
+   `raise` now projects and refuses `E_ILLEGAL_TRANSITION` on a terminal run — a state
+   machine refusing a move out of a final state, which is not the same fact as a repeated
+   decision.
+3. **The success path.** `#finish`'s docstring excused `run.completed` on the grounds that
+   "`advance` re-suspends rather than finishing while a gate is open". False: the budget and
+   fatal floors reach `#finish` without passing that check, so a SUCCEEDED run could leave a
+   live question in an approver's queue. **An exemption justified by a claim about a
+   different function survives exactly until that function changes.**
+4. **The fold.** Its terminal guard covered `run.resumed` and nothing else, so
+   `sweepTimeouts` appending `run.failed` to a cancelled run overwrote `cancelled` with
+   `failed`. `RUN_STATUS_EVENTS` now names the six status-moving events and one line at the
+   top of `apply` refuses all of them once the run has ended. The rule had been a property of
+   one EVENT rather than of the STATUS, and the next event to violate it walked straight
+   through.
+
+**`raise` was the one commit path still using `append`, and the reason had expired.**
+`RunLog.append` retries a seq conflict by re-reading the head, which is right for events
+that are facts that happened — and `raise` used to be exactly that. Adding a terminal check
+turns it into a decision made AT a projection, and a retrying append after a check is
+precisely how a check passes and the write behind it lands on a journal that has since
+moved. It uses `log.commit(expectedSeq, …)` now.
+
+**Undoing a failure is a retry; undoing a refusal overrules a person.** `rewind` refuses a
+`cancelled` run — suppressing `run.cancelled` suppresses the `gate.cancelled` events beside
+it, so every gate reopens with the run, one call, no approvers checked — and refuses any
+rewind whose suppressed range contains a `gate.decided{decision:"reject"}`, because a run
+that failed BECAUSE a human refused is also just `failed`. The opposite sign resolves the
+other way for a checkable reason: rewinding past an `approve` stays allowed, because
+suppressing the decision RE-OPENS the gate rather than carrying the approval forward, so
+the same person is asked the same question again before anything runs. Re-asking someone
+who said yes costs a click; re-asking someone who said no is an appeal against a decision
+already made. `edit` and `redirect` go with `approve` — they modify a request, they do not
+refuse one.
+
+**Two orderings that could have gone the other way.** `resolve`'s terminal check sits AFTER
+the idempotency check, not before: a webhook redelivery routinely lands once the run has
+finished, and three tests correctly refused to let a retry of an already-recorded decision
+become a 409. What is refused is a NEW decision on a dead run. And the append-side guards
+stay primary per invariant 2, with the fold's guard doing the narrower job of keeping a
+journal an older build wrote readable.
+
+**Rejected.** Making gate EXPIRY close its sibling gates too. That would require the SLA
+sweep to stop after the first expiry, and a run-wide loop must not abort on one member —
+`ONE GATE CANNOT WEDGE THE SWEEP FOR THE WHOLE RUN` pins the opposite, deliberately. So
+expiry is the one path that still produces a terminal run with an open gate, which is
+exactly why `resolve`'s own check must stay. Also rejected: adding a dedicated
+run-is-terminal error code, which would need an `errors.ts` line and a design-document row
+in the same change; the refusal reuses `E_GATE_ALREADY_RESOLVED`, same `conflict` class,
+with the distinction in the message.
+
+**Reversal condition.** If a legitimate use appears for a status transition out of a
+terminal state — a forced cancel that must overwrite a `failed` run — the answer is a NEW
+event type that says so, not a hole in `RUN_STATUS_EVENTS`. If rewinding past a rejection
+turns out to be a real operational need, it needs its own command with its own approvers
+list and its own journal event; it must not arrive as a relaxation of `rewind`. And the
+dedicated terminal code lands the day `errors.ts` and D3's taxonomy are edited together.
+
+---
+
+## 2026-08-05 — Hardening — Reclaim is a second candidate source, not a filter over `eligible`
+
+**Choice.** `LeasedScheduler.select` unions two sets: `ready` Tasks not held live by another
+worker, and `leased` Tasks whose lease has lapsed. A lease whose deadline is exactly `now`
+counts as LIVE, and a worker does not reclaim its own live lease.
+
+**Rationale.** Reclaim used to be a FILTER over `eligible()`, and `eligible()` returns only
+`ready` Tasks — correct for one worker, and empty for the exact case reclaim exists to
+serve. A worker that dies mid-Task leaves it `leased` forever, because the state only
+advances when its holder commits, so the stranded Tasks were precisely the ones `eligible()`
+excluded: the path was structurally unreachable. It survived the conformance suite because
+that suite builds projections BY HAND and gave the stranded Task `state: "ready"` — a
+combination the real fold only produces after a retry or a resolved gate. Folding real
+journals for two workers (`test/run/contention.test.ts`) turned seven tests red on the first
+run. This is the handoff's own trap one layer up: not "the projection discards a field",
+which was already fixed, but "the CONSUMER still encodes the one-worker assumption in a
+state predicate". The boundary goes to LIVE because the two errors are not symmetric —
+calling a live lease dead double-executes a Task that may already have sent the email;
+calling a dead one live costs one poll interval.
+
+**Rejected.** Widening `eligible()` to include expired `leased` Tasks: that leaks reclaim
+into `InProcessScheduler`, where a `leased` Task is this process's own in-flight wave and
+re-selecting it double-runs it. `eligible()` stays "ready and past its backoff", which is not
+a policy; reclaim is one, and belongs to the implementation that has more than one worker.
+Also rejected: clearing the lease on `task.committed` / `task.retry_scheduled` — keeping it
+is what stops two workers racing a retry the moment its backoff lapses.
+
+**Reversal condition.** Reverse if partition assignment (G3) lands and gives each Task
+exactly one eligible worker by construction; reclaim then becomes the coordinator's job and
+the scheduler goes back to a pure `ready` filter. Revisit the boundary if leases ever become
+short relative to the poll interval, where a lease-duration delay stops being cheap.
+
+**Still open, and named in `HANDOFF.md` → Known issues.** No append in the executor passes
+`fencingToken`, so both stores' fencing checks are unreachable and a stale holder's late
+commit is accepted; `Engine.#fencing` is a process-local counter a second worker would
+collide with; and `advance` gates on ready Tasks before calling the scheduler, so a stranded
+`leased` Task never reaches `select`. The contention suite covers all three the moment the
+executor supplies them.
+
+---
+
+## 2026-08-05 — Hardening — Drift became a guard, and then the guard was made honest about itself
+
+**Choice.** `test/docs-drift.test.ts` reads both `design/loom/**` and `src/` and fails on
+disagreement: span names against `telemetry/spans.ts`, error codes against `errors.ts` in
+both directions, `GRAPH\d+` in both directions, an exact pin on the codes nothing raises,
+an exact pin on the event types nothing APPENDS, and a check that every method a design
+`export interface` declares exists on the real prototype (or the real `src/` interface) of
+the class it names. Documents may describe unbuilt things only through
+`DESIGNED-NOT-BUILT(<identifier>)` — or `NOT-IN-CODE(<identifier>)` where the document names
+a symbol only to say it is absent — each naming one registered identifier, pinned to the
+exact set of files allowed to carry it.
+
+**Rationale.** Three consecutive waves each found the same class of defect by hand:
+a scheduler-tick
+span asserted in four documents and emitted nowhere; `E_ADMISSION_REJECTED` heading a
+three-level admission design with nothing under it. "Fix the design when it turns
+out to be wrong" only works if being wrong is NOTICED, and a human noticing is the step that
+kept failing. The marker rules exist so the escape hatch is an admission rather than a
+silencer: silencing costs two edits in two files, and a caveat cannot outlive its gap
+because building the thing turns the suite red.
+
+**"Who appends this?" is the question that found the severe one.** `NEVER_APPENDED` exists
+because `gate.cancelled` was declared, listed in `EVENT_TYPES` and FOLDED — which is what
+made it so easy to believe in — and written by nothing. Nothing about that is visible from
+any single file. The same check names eight more unappended types, including
+`budget.reserved`/`budget.settled` (D6.5 assumes a crashed worker's reservation is
+recoverable by folding; it is not, and `reservedUsd` is permanently zero) and
+`task.cancelled`/`task.skipped`, whose folds and span arms are unreachable. The widened
+method check found four D3 methods no caller could reach.
+
+**Three rounds were then spent making the guard stop overstating itself, and that is the
+part worth remembering.** A guard that is confidently wrong is worse than no guard, because
+the reader stops looking — the exact failure it exists to prevent, reproduced in the tool.
+(a) It announced that stripping `\p{Cf}` closed the zero-width bypass; that is the wrong
+character class, and U+034F, the variation selectors, the Mongolian FVS and the Hangul
+fillers all render as nothing and each silenced a claim outright. The class is now
+`[\p{Cf}\p{Default_Ignorable_Code_Point}]` over code points, and the homoglyph bypass, which
+cannot be closed without a confusable table larger than the guard, is written down as an
+open limit AND pinned by a test that fails when it closes. (b) Five tail/next join regexes
+INVENTED span names and error codes out of ordinary hard-wrapped prose — gluing a wrapped
+table cell's trailing identifier to the next line's first word, so a nested list item and a
+blockquote each produced a claim nobody had written; they were replaced by one rule for both
+passes — **a normalization may recover a
+claim, it may never invent one** — after which coverage went UP, because mid-segment breaks
+became joinable. (c) The stated honest limit was wrong: a broken identifier did not fail
+silently, it failed LOUDLY under a name nobody wrote, which is a different and worse
+instruction to give a reader.
+
+**Rejected.** Parsing method bodies to attribute error codes to the boundary method that
+raises them — the check D3.17's table actually wants. Tried on `GateDelivery.deliver`, and
+it broke the same afternoon: a refactor moved the mapping into a private helper, the body
+named no code, and the guard reported the method raises nothing. A false negative on a
+security row is worse than no check, so it was replaced by a BEHAVIOURAL check that
+constructs a channel with an injected rejecting `fetch` and reads the code actually thrown.
+Also rejected: a guard over span ATTRIBUTE names, because `spans.ts` writes keys both quoted
+and bare and a regex recovers half while reporting it as the whole; comparing method
+signatures, since `Function.length` reports 1 for `sweepTimeouts(log, now = …)`, exactly
+matching the wrong signature the doc carried; and NFKC normalization, which would rewrite a
+corpus full of `→ ⏎ ⊆ ≥ ·` and still miss Cyrillic.
+
+**Reverses when.** The marker registry stops being read — if it grows past roughly thirty
+entries, or if a wave adds markers without deleting any, the convention has become a
+suppression list and each entry should get a build-or-delete deadline instead. Separately,
+`NEVER_APPENDED` should be derived from running the engine and reading the store rather than
+from `type:` literals the day a fixture journal exists that provably covers every
+`EVENT_TYPE`; the attribute check becomes possible at the same moment. And if `tsc -b`'s
+`.d.ts` output can be assumed present during `npm test`, signature checking becomes
+tractable and the method check widens to the design interfaces that have no class.
+
+---
+
+## 2026-08-05 — Hardening — The corpus caught up with the code, and the promotion gate turned out to be overstated
+
+**Choice.** The assumption register in `08-PLAN.md` now states what the code holds and WHY,
+D3.20's `parseCallback` signature was replaced by the one that shipped, the fairness claims
+were corrected to what the seam can express, and — in this closing pass — D10.d's promotion
+criteria were rewritten to the arithmetic that actually runs.
+
+**Each correction is the same failure in a different place: a document asserting something
+nobody could check.** `A2` said `Node 22+` while `engines.node` is `>=24.0.0`, and the
+rationale offered ("type stripping and `node:sqlite` each require 24") is itself false —
+type stripping is default from v22.18.0 and `node:sqlite` unflagged from v22.13.0, so the
+strict floor they imply is 22.18 and 24 is a CHOICE. **A rationale that is wrong is worse
+than no rationale, because it stops the next person checking.** `A11` said "7 years" where
+`DEFAULT_RETENTION.audit` is `Infinity`, which reads as an oversight until you see that Q3
+put erasure out of scope and "keep the approval record until a human deliberately shortens
+it" is the direction that fails safe. `A12` promised React + Vite + Zustand for a console
+that is one vanilla-JS document embedded as a string constant — the point being not that we
+wrote vanilla JS but that the console INHERITS the zero-dependency rule rather than being
+exempted from it. `01-INTERFACES.md` claimed ready Tasks are drawn by weighted DRR over Runs
+then Tenants, which is not merely unbuilt but unexpressible at the shipped seam:
+`Scheduler.select` receives ONE run's projection.
+
+**The most consequential one was the promotion gate, and it was found last.** D10.d
+described criterion 2 as McNemar's paired test with a 95 % lower bound on the paired
+difference; `gateCandidate` compares two point estimates and asks whether the difference
+clears a margin. Criterion 3 said "median cost"; the code divides one suite TOTAL by
+another, and `EvalReport` has no median field at all. Criterion 7 claimed
+injection-resistance cases are required; nothing reads them, and `EvalCase.expect` has no
+field in which a suite could declare one. This is the gate that stops self-evolution
+shipping a regression, so an overstated description of it is the worst doc defect the
+programme had left — a reader who trusts the table believes a candidate cleared a
+significance test it never took. The table now states the arithmetic, and the gap between
+design and code is recorded as a defect with a fix, not smoothed over.
+
+**Rejected.** Re-adding a "documentation drift to fix" register. The previous one outlived
+its own items: it quoted four strings that had been removed, so a newcomer opening the file
+to fix them found none of the text and could not tell whether the work had been done or the
+file had moved — the one question such a list exists to answer. **A list of documentation to
+fix is itself documentation, and it rots faster than what it points at.** Corrections go
+into the sentences that are wrong, in the change that finds them; the diff is the record.
+Also rejected: striking out the resolved register rows the way D14.2 strikes answered
+questions — `A2` and `A11` are only PARTLY settled, and a struck row is one nobody re-reads.
+
+**Reverses when.** A claim becomes cheaper to check than to read — i.e. when
+`test/docs-drift.test.ts` can pin it mechanically; that is the standing instruction to widen
+the guard rather than re-audit by hand. The D10.d correction reverses in the good direction:
+when the paired test, the median and an injection-resistance expectation are BUILT, the
+table goes back to describing them, and this entry becomes the record of the window in which
+it did not.
+
+---
+
+## 2026-08-05 — Hardening — The register was audited against the tree, and two of its entries were fiction
+
+**Context.** The previous wave replaced a rotting "documentation drift" list with a
+known-issues register in `HANDOFF.md`, on the argument that a register of *defects* ages
+better than a register of *edits*. An adversarial read of that register found it had
+committed the same error it was built to end, in the opposite direction: it listed defects
+that no longer existed. **A1** described `HumanGateBroker.resolve` indexing the gate map
+bare and answering `409 E_GATE_ALREADY_RESOLVED` for `__proto__`; **A8** described the fold
+letting `gate.decided` and `gate.timeout` overwrite a terminal gate state. Both had been
+fixed before the register was written, and A1 cited as its provenance a reading of a file
+that could not have produced it.
+
+**Decision.** Every entry was reproduced or refuted against this tree before the register
+was touched. 36 checked: 2 refuted and removed with the refutation recorded in place, 32
+reproduced, 2 left explicitly UNCONFIRMED, 5 added. The removals are written down rather
+than silently made, because "an entry vanished" and "an entry was never real" are the two
+readings a reader cannot otherwise distinguish — and the second one is the one that
+destroys the register.
+
+**Why a false known-issue is worse than a missing one.** A missing entry costs the reader
+the bug. A false entry costs them a day reproducing something already fixed, and then costs
+them the whole document: having found one entry that was fiction, the rational move is to
+stop trusting the other thirty-eight. The register's only asset is that a reader can act on
+it without checking it first.
+
+**What the audit found that reading alone would not have.** Four of the five new entries
+came from executing something rather than reading it, and they are exactly the four the
+previous pass missed. `#expire` appends `run.failed` without re-reading the gate, so a
+decision landing inside `sweepTimeouts`' own read→append window is recorded, resumes the
+run, and is then killed by the deadline it beat (`gate=decided decision=approve run=failed`
+— fail-closed, live, untested). `Engine.rewind`'s boundary refusal is written against the
+event type `gate.decided` when the hazard is an append that spans two seqs, so `#expire`'s
+`gate.timeout` + `run.failed` reproduces the identical wedge through a door the refusal does
+not watch. And three load-bearing guards turned out to have no test at all: reverting each
+one and running the whole suite left it at 1003 pass, 0 fail — including
+`presented.length === expected.length`, without which `Bearer s3cretEXTRA` authenticates,
+and the `typeof token !== "string"` half of the constructor refusal, without which
+`token: []` yields a plane that answers `GET /runs` **200 with no credential** while
+`/health` reports `auth: "required"`.
+
+**The pattern worth keeping.** A correction made against a file must be followed by a grep
+of that file for the claim just refuted. The D10.d correction was read out of
+`evolution/gate.ts` and left three refuted copies inside `gate.ts`'s own docstring —
+"authored by humans, never by the evolution engine" (replaced in M9), "median cost" (the
+code divides totals), and "the eight criteria" (the function pushes eleven, which
+`99-DOD.md` row 8 had already called out). The same shape appeared in `run/delivery.ts`,
+which still described `resolve` indexing bare four waves after it stopped.
+
+**Rejected.** Keeping A1 and A8 "in case they come back", and renumbering nothing. Both are
+the comfortable option and both are dishonest: a register that never shrinks is a register
+nobody prunes, and stable-but-wrong ids are how six cross-references in `design/loom/` came
+to name `C1.4` — an entry with a sub-number the register has never had.
+
+**Reverses when.** An entry can be pinned mechanically. Every one that can becomes a test in
+`docs-drift.test.ts` and leaves this file; the register is for what a test cannot yet hold.
+A2 (fencing), A9 and A10 all reverse the good way — they become tests the day the defect is
+fixed, and the entries go with them.

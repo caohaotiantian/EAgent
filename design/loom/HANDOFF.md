@@ -1,94 +1,139 @@
 # Handoff
 
-State as of 2026-08-05, branch `loom`, head `bdedd23`.
+State as of 2026-08-05, branch `loom`, last commit `5f06c40`, **working tree uncommitted** —
+the hardening waves sit on top of that commit and none of them is committed yet. How many
+waves is not a number worth writing down twice; the entries are countable:
+`grep -ac '^## 2026-08-05 — Hardening —' design/loom/JOURNAL.md` → **10** at the time of
+writing. (It read "seven waves … the nine entries at the end" a day ago. Two numbers for one
+thing is one number too many.)
 
-For *why* decisions were made, read `JOURNAL.md` (append-only, newest last). For what the
-system is, read `README.md` → `00-OVERVIEW.md`. This file is only: **what is left, what to
-read first, and what will bite you.**
+For *why* decisions were made, read `JOURNAL.md` (append-only, newest last; the waves are
+those `— Hardening —` entries at the end). For what the system is, read `README.md` →
+`00-OVERVIEW.md`. This file is only: **what is left, what is known to be wrong, what to read
+first, and what will bite you.**
+
+> **Cite symbols, not line numbers.** Everything in this file points into code under active
+> edit, and three separate citations here — `gates.ts:191`, `engine.ts:652`, a test count of
+> 39 — were stale within a week, each one pointing a reader at something unrelated and
+> confidently wrong. Name the method, the class, or the distinctive line of source instead:
+> `HumanGateBroker.raise`'s dispatcher guard survives a refactor and `gates.ts:191` did not.
+> Counts age the same way; **every number below carries the command that produces it, so you
+> can re-derive it instead of believing it.**
+> `packages/core/test/docs-drift.test.ts` mechanises the part of this that can be
+> mechanised — see `README.md` → Conventions for the `DESIGNED-NOT-BUILT` marker.
 
 ---
 
 ## Where things stand
 
-```
-716 tests passing · 0 runtime dependencies · 426 pinned exports · 49 source files
-bin/loom — 114 MB single binary, 282 KB application bundle, 0 third-party modules
-```
+Measured 2026-08-05, at the end of the verification pass described under *Known issues*.
+Re-run the command in the right-hand column rather than trusting the left.
 
-Verified working from an empty directory: copy `bin/loom` in, write a graph by hand in
-JSON or YAML, `./loom compile` then `./loom run`. It writes a real file.
+| | Measured | Command |
+|---|---|---|
+| Tests | **1305 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| Test files | 47 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Source files | 49 | `node scripts/check-zero-dep.mjs` (it prints the count) |
+| Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:` |
+| Public exports, pinned | 461 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, built | 461 | `node scripts/check-surface.mjs` (reads `dist/`, so it is only as fresh as your last build) |
+| Event types | 52 | `node --test packages/core/test/journal/store.test.ts` (its count is deliberate) |
+| Typecheck | clean | `npx tsc -p packages/core/tsconfig.test.json` |
 
-All eight node types execute. All ten escalation rules fire. Every open thread (T1–T7) is
-closed. `npm run check` is the gate and it is green.
+**The suite total moved four times while this file was being written** — 984 at the start of
+the closing pass, then 998, then 1002, then 1003 — because `src/` and `test/` were still
+being edited around it. Every reading was green. That is the argument for the command
+column, not a defect: **any number written here is a measurement, not a fact about the
+repository.** The 1002 that stood here through the previous wave was one of those readings,
+left behind when the suite moved; so was a `451` that never matched any build.
+
+> **`npm run check` is THE gate, and it is GREEN** as of 2026-08-05, after the pass
+> described under *Known issues*: `1003 pass / 0 fail`, `zero-dep guard ok` (49 files),
+> `surface guard ok: 452 public exports, unchanged`, typecheck clean.
+>
+> Its surface arm was red for the length of the programme, on purpose — the hardening waves
+> added **26** public exports (`ApprovalSpec`, `AuthContext`, `BearerSubject`,
+> `BearerTokenIdentity`, `CALLBACK_REJECTIONS`, `CallbackDecision`, `CallbackEngine`,
+> `CallbackInput`, `CallbackRejection`, `CallbackRequest`, `CallbackResult`,
+> `CallbackRouterOptions`, `DelegationSpec`, `GateCallbackRouter`, `HumanActor`,
+> `IdentityRequest`, `IdentitySource`, `SignedWebhookChannel`,
+> `SignedWebhookChannelOptions`, `UNIDENTIFIED_SUBJECT`, `callbackRejection`, `gateOf`,
+> `maskLiterals`, `rejectionReasonOf`, `timingSafeStringEqual`, `unanswerableGraphs`) and
+> `node scripts/check-surface.mjs --write` re-pinned them in one deliberate act at the end,
+> so the review of what became public happened once, against the final shape, rather than
+> twenty-six times against intermediate ones. **Re-run the gate rather than believing this
+> paragraph** — it is a measurement with a date on it, like every other number here.
+
+All eight node types execute. All ten escalation rules fire. The `(C)` list the previous
+handoff opened with — inbound callbacks, queue saturation, contention — is closed or
+superseded; see *What is left* and *Known issues*.
+
+**`bin/loom` was stale and has been rebuilt.** The binary in this tree before the closing
+pass predated every hardening wave — `grep -a cancelOpenGates bin/loom` found nothing, and
+neither did `distinctPrincipals` — so the "verified working from an empty directory" claim
+that used to sit here described a binary the source no longer matched. `npm run
+build:binary` was run against the current tree (114.6 MB, application bundle 364 KB,
+**0 third-party modules**) and the claim was re-established end to end; `99-DOD.md` row 6
+records exactly what was observed. Both symbols are present in the rebuilt binary.
+
+That rebuild happened **twice**, and the second time is the one that counts. The first
+predated two `src/` edits made later in the same pass — so a row asserting "re-established
+against the current tree" was, for a few hours, describing a binary older than the tree
+again. The failure is not carelessness; it is that "current" is a claim with a timestamp in
+it, and nothing in the repo timestamps it. The rebuild on record was taken after the last
+`src/` edit and after `npm run check` passed at 1003 tests.
+
+**It goes stale again on the next `src/` edit.** It is gitignored, so it is a local
+artifact and nothing rebuilds it for you. Before repeating any claim about the binary, run
+`npm run build:binary` and check a symbol your change touched — that check is two seconds
+and it is the only thing standing between "the binary works" and "a binary worked once".
 
 ---
 
 ## What is left
 
-Three categories, and the distinction matters: **(A)** blocked by a constraint we chose,
-**(B)** deferred by an explicit design decision, **(C)** genuinely unbuilt and unblocked.
+Four categories. **(D)** is new and is where the remaining product work is: **(A)** blocked
+by a constraint we chose, **(B)** deferred by an explicit design decision, **(C)** genuinely
+unbuilt and unblocked — now empty — and **(D)** designed in full, deliberately not started.
 
-Start with (C). Nothing there is hard; they were missed rather than decided against.
+### (D) The oversight feature set — D7.2, D7.3 and D7.9
 
-### (C) Unbuilt and unblocked — start here
+Nine mechanisms, **five of them now built** (rows 4 and 5 — the saturation controls — plus
+6, 7 and 8). Read `04-OVERSIGHT.md` D7.2 (the policy schema), D7.3 (the lifecycle, which now
+carries the built `Claimed` lock) and D7.9 (queue saturation) before touching any of the
+rest; all three are specified to implementation detail, and D7.9 carries an
+implementation-deviation block for the two that landed there. This heading read "the
+oversight feature set that was never begun" until they did.
 
-#### C1 · Inbound gate callbacks (`GateDelivery.parseCallback`)
+**Three of them are currently COMPILE ERRORS, not silent no-ops, and that distinction is the
+whole design.** `graph/validate.ts`'s `checkApproval` raises
+`GRAPH014_APPROVAL_UNSUPPORTED` for each. A graph that reads "two of the SRE leads must
+agree" and behaves as "any one of them" is the worst failure available — it *looks*
+supervised, so nobody goes looking — so the unimplemented half refuses the graph instead.
+**Implementing any of these three means DELETING a check, not adding one.** Delete the
+refusal and the enforcement in the same change, or you have shipped exactly the failure the
+refusal exists to prevent.
 
-**Status:** declared in D3.20, zero implementation. **This is the largest real gap.**
+| # | Mechanism | Where it is specified | State today |
+|---|---|---|---|
+| 1 | **Approval quorum** (`mode: quorum`, `k`) | D7.2 `approval.mode`/`k`; D7.3's `PartiallyDecided` state | `ApprovalSpec.mode` and `.k` exist in `graph/spec.ts` **only so they can be refused**. `mode` other than `single`, and any `k` at all, are compile errors. `GateRecord` has no partial-decision shape and the broker has no counter |
+| 2 | **Separation of duties** | D7.2 `approval.separationOfDuties` | Compile error. Also **blocked on a prerequisite**: it means "an approver may not be the run's initiator", and the initiator is not journaled — `run.submitted` is written with a system control-plane actor and `SubmitInput` has no actor field. It needs the same `submittedBy` the per-principal work needs (see Known issues) |
+| 3 | **Delegation** | D7.2 `approval.delegation{allowed, maxDepth, mustStayInGroup}`; D7.3's `Delegated` state | Compile error. `DelegationSpec` exists in `graph/spec.ts` *solely* so a graph asking for delegation is rejected rather than silently run as if it had asked for nothing |
+| 4 | **Batching** | D7.9 row 2 | **BUILT.** `HumanGateNode.batching` → `checkSaturation` (`graph/validate.ts`) → `batchFor`/`listBatches`/`resolveBatch` in `run/gates.ts`, `Engine.openGateBatches`/`resolveGateBatch`, receipt `gate.batch_decided`. N gates stay N gates; the batch is derived from the fold. Read D7.9's implementation-deviation block before changing it — "pure UX, no oversight semantics change" was true only once the merge predicate (`sameAuthority`), the **batch's journaled governance** (`batchGovernance` — the founder's `key`/`windowMs`/`maxBatch`/delivery digest, added after a joiner was found able to raise the cap from 2 to 20), the **one-page-per-tier** escalation rule (`siblingReachedTier`, decided at the seq the write swaps on — reading it back after the commit let two overlapping sweeps each conclude the other had paged, and nobody was) and `expectManifest` were all built. A joiner is suppressed only while the batch still holds an OPEN member (`batchHasOpenMember`): a batch every member of which is answered is a message nobody is holding. `test/run/gate-saturation.test.ts` |
+| 5 | **Deduplication** | D7.9 row 3 | **BUILT.** `HumanGateNode.dedupe` → `#inheritable` in `run/gates.ts`, which reruns the decision through the one `#validate` chain rather than writing a decided gate directly. `gate.deduped` is in `EVENT_TYPES` with an appender. Inherits **only from a `decided`** gate **that a HUMAN decided** (`GateRecord.decidedBy`, the actor KIND folded from `gate.decided`), keyed on the **journaled** digest (D7.8). Without that second condition a gate the CLOCK decided by default action was inheritable, and a chain of duplicates carried one click 1000 s past a declared 60 s window. Same test file |
+| 6 | **Reminders** | D7.2 `delivery.reminders[{afterMs}]` | **BUILT**, and on `GateSlaSpec.reminders` rather than on `DeliverySpec` — a reminder chooses no new recipients and no new channels, so all it carries is an instant, which is the same rule that put `escalation` on `delivery`. `gate.reminded{gateId,tier,nth}` is in `EVENT_TYPES` with an appender (`HumanGateBroker.#remind`); the fold counts ROWS into `GateRecord.remindersSent`, which is what makes the write change its own trigger. It resets nothing — not the SLA, not the tier, not the deadline — and is not counted in `SweepReport.fired`. `nextDeadline` returns the earlier of the expiry and the next nudge, so the sweeper wakes for it on the same tick. One nudge per BATCH per entry, keyed like the escalation page and sound because the schedule is inside `deliveryDigest`. Bounded by three things at once: a finite list consumed in order, the journaled counter, and every instant strictly inside the SLA (`checkSla`, and `usableReminders` again at run time). `test/run/gate-clock.test.ts`, `test/run/gate-saturation.test.ts`, `test/run/gate-guards.test.ts` |
+| 7 | **Priority + SLA queue ordering** | D7.9 row 5 | **BUILT, AND FOR ONE WAVE IT REACHED ONE CALLER.** `HumanGateBroker.list` → `gateQueueOrder` in `run/gates.ts`: `min(deadline, raisedAtTs + AGEING_MS) − radiusCredit`, ascending, ties by `raisedAtSeq`. Presentation only — the same set, the same authority, and `openGates`/`nextDeadline`/`sweepTimeouts` all still read the projection directly. It reads NO clock (ordering by absolute deadline is ordering by remaining time, at every instant), so it is a pure function of the projection. `blast_radius` is the DECISION's — how many open gates one click closes — because the action's irreversibility class is journaled nowhere. **`cost_at_risk` is deliberately absent**: it is a run-level number and this is a run-level queue, so it would shift every rank equally and order nothing; it needs a cross-run queue first, and `server/http.ts` is where that would surface. Starvation bound, stated and driven: nothing raised more than `(RADIUS_CAP−1)·PER_MEMBER_MS` after a gate can ever displace it. Still not `Scheduler.select` — that orders **Tasks**, this orders **questions for humans**. **WHICH SURFACES CARRY IT is now a table in `05-RESOURCES-OBSERVABILITY.md` §3 rather than an assumption** — `GET /runs/:id/gates` and the console read it as of this wave; `summarise` and the CLI still do not. See **B8** |
+| 8 | **The `Claimed` soft lock** | D7.3 | **BUILT**, and built as a FIELD on an `Open` gate rather than as a fifth state — which is the design, not a shortcut: a claim grants nothing and blocks nothing, so a state a reader could branch on would be the wrong shape. `HumanGateBroker.claim(log, {gateId, actor})` → `gate.claimed{gateId, until}` (the claiming human is the event's ACTOR; no subject in the payload) → `GateRecord.claimedBy`/`claimedUntil`, 5 min per `CLAIM_TTL_MS`. `resolve`, `resolveBatch` and `#fireTimeout` read no claim AT ALL — that is what keeps it soft, and it is why one credential claiming a whole queue stalls nothing. The claim door is deliberately NARROWER than the decision door: only a person, whatever `GATE_SYSTEM_ACTORS` admits to `resolve`, and only a named approver where the gate names any. One claim per BATCH (`claimHolder`), like one page and one nudge. **The FOLD is the arbiter** — `claim` appends and reads its answer back out of it — keeping the first live claim, dropping a second by another subject, refreshing the holder's own, and arbitrating at the ARRIVING EVENT'S `ts` because the fold has no clock. No `gate.claim_expired` and no sweeper: `until` is absolute, so a claim expires by being ignored. `claim` is back in D3.14 (`delegate` is not, and stays a compile error). `test/run/gate-claim.test.ts` |
+| 9 | **Trust tiers** | D7.9 row 4 | Nothing. **Read D7.7 before starting**: this one is a LOOSENING. Per `(tenant, tool, node)`, ≥ 50 consecutive approvals with 0 rejects and 0 edits ⇒ auto-approve in that exact scope, with 5 % still sampled and any reject resetting to 0. Enabling it must go through `PolicyEngine.deescalate` — human actor, justification, journaled — and **not** a config flag. Default OFF, and it should stay OFF |
 
-Wave E built *outbound* delivery — `DeliveryChannel.deliver`, a `WebhookChannel` on global
-`fetch`, a `ConsoleChannel` fallback, per-channel failure journaling, and a tiered
-escalation chain. What does not exist is the return path: a Slack button click, a
-PagerDuty acknowledgement, or an approvals-service POST arriving as a `GateDecision`.
+Row 1 of D7.9 — class-based auto-approve, i.e. `read_only` actions never gating — **is**
+built; it falls out of D7.6's default posture and is not a loosening.
 
-Today a gate raised through a webhook can only be answered through the HTTP API or the
-console. That is *safe* — no path bypasses `HumanGateBroker.resolve` — but it makes the
-webhook channel a notifier rather than a decision surface, which is half a feature.
+### (C) Unbuilt and unblocked
 
-**Where the seam is:** `src/run/delivery.ts`. Add `parseCallback(raw, target)` to
-`DeliveryChannel`; wire an HTTP route in `src/server/http.ts` that dispatches to the named
-channel and then calls `engine.resolveGate`.
-
-**What makes it security-sensitive, and non-negotiable:**
-
-- **Verify the signature before anything else.** An unauthenticated callback endpoint is a
-  way to approve production actions by POSTing JSON.
-- **Enforce a replay window.** A captured approval must not be replayable tomorrow.
-- **Map the caller to a real `Actor`.** `resolve` records who decided; a channel that
-  reports `{kind: "system"}` destroys the audit trail's entire point.
-- The existing idempotency key in `resolve` already collapses a double-click, a webhook
-  retry, and a channel retry into one decision — reuse it, do not invent a second one.
-
-**Done looks like:** a test that forges a callback with a bad signature and asserts the
-gate stays open.
-
-#### C2 · Approval-queue saturation (D7.9)
-
-**Status:** designed in full, zero implementation. Neither `batching` nor `trust` appears
-anywhere in `src/`.
-
-D7.9 specifies two mechanisms for when a human is the bottleneck:
-
-- **Batching** — group gates by a key (`node.id + plan.namespace`) inside a window, so
-  twenty near-identical approvals arrive as one decision over twenty items.
-- **Trust tiers** — after N consecutive approvals with no rejects and no edits, sample
-  rather than gate every instance.
-
-**Read the design section before touching this**, because the second mechanism is a
-*loosening* and the design says so explicitly: enabling trust tiers is subject to D7.7's
-asymmetry rule. It must go through `PolicyEngine.deescalate` — human actor, justification,
-journaled — and not through a config flag. Default is OFF and should stay OFF.
-
-Batching is the safer half and is worth doing first; it is pure UX with no oversight
-implications.
-
-#### C3 · Fairness under partitioning is untested
-
-The `Scheduler` seam exists with two implementations passing one conformance suite
-(`test/run/scheduler.test.ts`). What is untested is behaviour under *contention*: two
-`LeasedScheduler`s against one journal, with lease expiry racing real execution.
-
-That is a test, not a feature. It would meaningfully de-risk G3 (below) for a day's work.
+**Empty.** Inbound gate callbacks shipped (mechanism *and* authorization *and* perimeter);
+scheduler contention is tested against real two-worker journals. What remains of both is
+recorded under *Known issues* as specific defects rather than as an open feature.
 
 ### (B) Deferred by explicit design decision — do not "fix" these casually
 
@@ -98,73 +143,1400 @@ reopening any of them; they were closed for reasons, not forgotten.
 | Item | The reason, compressed |
 |---|---|
 | **G3 · partition assignment** | Selection is now a seam; deciding *which runs a worker considers* needs a coordinator, and half a coordinator is worse than none |
+| **Cross-run / cross-tenant fairness** | Not expressible at the shipped seam at all: `Scheduler.select` receives ONE run's projection, so D6.2's DWRR-over-Runs-then-Tenants has nowhere to live. G3's second debt |
 | **Evolution synthesis + canary + auto-promotion** | Under ~30 scored trajectories per cohort, any candidate is fitted to noise. Capture and scoring ship; the generator does not |
 | **Subtractive graph mutation** | Additive-only keeps the executed graph a superset of the compiled one. Removal asks "what happened to the branch already running through the deleted edge?", which has no cheap answer |
 | **seccomp / Landlock** | Platform-specific; subprocess + fs jail + egress allowlist covers the v1 threat model |
 | **Custom user-authored reducers** | Arbitrary code inside the determinism boundary |
 | **Free-form agent chatter / blackboard** | Makes termination unprovable and replay quadratic |
+| **Vendor callback PARSING (Slack/Feishu/Teams/email)** | Delivery *to* them is not deferred — one `WebhookChannel` covers it. The return trip needs per-vendor signature verification and actor mapping; `SignedWebhookChannel` is the worked example |
 | **Distributed deployment (K8s/Postgres/NATS/S3)** | A distributed v1 by a small team yields a distributed prototype, not a product |
 
 ### (A) Blocked by a constraint we chose
 
 | Item | The constraint |
 |---|---|
-| **Browser paint at 500 nodes** | Layout is measured (0.95 ms) and the console provably computes no positions. Timing the *paint* needs a headless browser, which the zero-dep rule keeps out of `@loom/core`. If it matters, measure it in a separate package — do not add the dependency here |
+| **Browser paint at 500 nodes** | Layout is measured and the console provably computes no positions. Timing the *paint* needs a headless browser, which the zero-dep rule keeps out of `@loom/core`. If it matters, measure it in a separate package — do not add the dependency here |
+| **Scheduler-tick telemetry** | The span DL-1 named as its reversal metric is emitted nowhere. `07-CONFIG-DEPLOY.md` and `05-RESOURCES-OBSERVABILITY.md` now name the runnable substitute the journal already carries (`task.leased.ts − task.ready.ts`, per Task) rather than the span |
 
 ---
 
-## Documentation drift to fix
+## Known issues
 
-Four register entries no longer describe the code. None is dangerous; all are misleading
-to a newcomer. Fix the register, not the code — the code is right in each case.
+**This section is the point of this file.** Everything here is *known to be wrong, unwired,
+or unverified right now*, established by a command that is written next to it. It lives in
+`HANDOFF.md` rather than in its own file on purpose: the previous "documentation drift to
+fix" section rotted precisely because it was a second place to maintain, and a register in
+the file people already open is one place. Delete an entry when you fix it, in the same
+change.
 
-| Where | Says | Actually |
+**Status markers, all three of them:**
+
+| Marker | Means | What to do about it |
 |---|---|---|
-| `08-PLAN.md` A8 | "Gate delivery in v1 is console-only" | Outbound delivery ships with a webhook channel and an escalation chain (Wave E). Only the *inbound* path (C1) is missing |
-| `08-PLAN.md` A12 | "UI stack is React + Vite + Zustand" | The console is hand-written vanilla JS + inline SVG, one document, no bundler. A React console can come later against the same API |
-| `08-PLAN.md` A11 | "audit records for 7 years" | `DEFAULT_RETENTION.audit` is `Infinity`, deliberately — no external mandate applies (GDPR was ruled out of scope), and "keep forever unless someone says otherwise" fails safe |
-| `08-PLAN.md` A2 | "Node 22+" | `engines: >=24.0.0`. Native TS type stripping and `node:sqlite` both require it |
+| *(none)* | Reproduced against this tree, by the command or the reading named in the entry | Fix it, or decide not to |
+| **UNCONFIRMED** | Suspected. Neither reproduced nor refuted, and it is here because deleting an unproved suspicion is how a suspicion becomes a surprise | Reproduce it or refute it, then edit this line |
+| **UNVERIFIED** | A measurement or an audit that was true once and has not been re-run against this tree | Re-run it |
 
-The `DEFERRED-v2` register's "Slack / Feishu / Teams / email gate delivery" row is also
-now half-true: a Slack *incoming webhook* works today via `WebhookChannel`. What remains
-deferred is vendor-specific callback parsing, which is C1.
+`UNVERIFIED` used to be undefined here while one entry carried it, which is the same class
+of defect as the register's own miscounts: a marker whose meaning a reader has to guess is a
+marker that means whatever they guessed.
+
+**Every entry below was reproduced or refuted in a verification pass on 2026-08-05.** Two
+entries were **removed because they did not reproduce**, and the removals are recorded here
+rather than silently made, because "an entry vanished" and "an entry was never real" are the
+two readings a reader cannot otherwise tell apart:
+
+- *A gate can be looked up through `Object.prototype`.* **REFUTED.** `HumanGateBroker.resolve`
+  calls `gateOf`, not a bare index, and `gateOf` → `gateIn` checks `name !== "__proto__"` and
+  `Object.prototype.hasOwnProperty`. Driven over real HTTP against an authenticated plane:
+  `POST /runs/:id/gates/__proto__` answers **404 `E_GATE_NOT_FOUND`**, and so do `toString`,
+  `constructor`, `valueOf` and `hasOwnProperty` — identically to a name nobody has ever used.
+  The entry's own provenance ("established by reading `gates.ts`'s lookup") could not have
+  been true of the file as it stands; the fix it proposed was already in the tree when it was
+  written.
+- *The fold still lets `gate.decided` and `gate.timeout` overwrite any gate state.* **REFUTED.**
+  Both arms in `projection.ts` are restricted to `open` (`if (g?.state !== "open") return;`
+  and `if (g?.state === "open" && …)`). Driven through `foldRun` on the hand-written journals
+  the entry said were the only way to reach it: `decided→decided` keeps the first decision,
+  `cancelled→decided` stays `cancelled`, `decided→timeout` stays `decided`, `expired→decided`
+  stays `expired`. Nothing overwrites anything. What IS true about that guard was a different
+  claim — that nothing tested it — and it was entered as **E7** and has since been closed:
+  `test/run/gate-guards.test.ts`'s "guard 9" block drives all four transitions through
+  `foldRun` over hand-written journals, and reverting either `open` conjunct turns them red.
+
+**A false known-issue is worse than a missing one.** Both of the above would have cost the
+next reader a day reproducing a fixed bug, and the day after that they would have stopped
+believing the rest of this page. Nothing goes in here that has not been personally
+reproduced; nothing comes out that has not been personally refuted.
+
+**The tally, so the pass itself is auditable — and it is a COMMAND rather than a number.**
+The register's size is
+
+```bash
+grep -cE '^\*\*[A-E][0-9]+ ·' design/loom/HANDOFF.md
+```
+
+and nothing else. **The total is deliberately not written here**, which is a step past the
+rest of this file's "a number plus its command": what stood here was "39 stood" plus a
+four-row table whose counts summed to 39, and it was the third count in this file to be
+false — after the test count of 39 the header warns about and E1's 25-that-was-26. All three
+were true when written. Entries are closed *in the change that fixes them* and added the
+same way, so a total is stale on the next commit by construction; the grep above moved
+**twice while this paragraph was being written**, once for the entry this change added
+(A12) and once for one a concurrent change added (A11). Run it. Do not copy its answer back
+into this file.
+
+What the counting was actually FOR survives without a total, and those rows stay:
+
+| | Which |
+|---|---|
+| Refuted and removed | the two above — recorded rather than silently deleted, because "an entry vanished" and "an entry was never real" are the two readings a reader cannot otherwise tell apart |
+| Left **UNCONFIRMED** | D3 (an audit nobody has run) and E3 (a flake that did not recur) — neither is provable or disprovable from the tree alone, so both stay |
+| Added by that pass, each reproduced first | A10, D10, E8 — the pass added five, and **A9 and E7 have since been closed**. A list of ids inside a dated table decays exactly like a count, one name at a time |
+
+Three of the reproduced entries needed their own text corrected — E1 (its count was 25, the
+guard prints 26), D4 (it listed two numbers `99-DOD.md` does not quote), D8 (its example was
+right, and is now dated). The method for each entry is written into the entry: a command, a
+reading with the symbol named, or a reproduction whose output is quoted. **The four entries
+that carry a reproduction running real code rather than a reading — A9, A10, E7, E8 — are
+the four that were wrong or missing before this pass.** That is the argument for the method,
+and it is the same argument the drift guard makes one layer down: a claim nobody executed is
+a claim nobody checked, whichever file it lives in.
+
+### A · Security and correctness
+
+**A1 · `errors.ts` has two partial reads, and every boundary except delivery still calls
+through them.** `toLoomError` does `String(e)`, which throws on a value with no primitive
+conversion; `LoomError.toJSON` and `httpStatusFor` read `this.details` and `this.class`
+bare. Established by reading the file. `run/delivery.ts` is safe because it no longer hands
+out a foreign error, but every other place that calls `toLoomError` on a value from injected
+code — tool executors, model adapters, `http.ts`'s own catch — has the same latent
+partiality. **Fix:** make `toLoomError` total and have `LoomError` copy its own fields at
+construction; the local wrappers in `delivery.ts` say in their docstrings that they should be
+deleted the day it lands.
+
+**A2 · The executor never arms the fencing token, so the store-level fence is dead code.**
+`StateStore.append` takes `{taskId, fencingToken}` and both stores enforce it against the
+highest token seen; `RunLog.append`/`commit` forward it. `grep -ran fencingToken
+packages/core/src` finds the two stores, `log.ts`, `projection.ts`, and exactly one line of
+`engine.ts`: the `task.leased` payload literal that mints `fencingToken: ++this.#fencing`
+and then never uses it again. `E_LEASE_LOST` is consequently unraisable. `Engine.#fencing`
+is also process-local, so worker B's first token is `1` — not greater than worker A's `3`.
+With one worker nothing is lost; the day there are two, a stale holder's commit is accepted.
+The contention suite covers all of it the moment the executor supplies the token.
+
+**A3 · Every valid credential is a full operator credential.** Runs are not owned by the
+principal that submitted them, so any authenticated caller can list, read, stream, cancel
+and see the gate payloads of every run. This was **decided, not overlooked** — see the
+`JOURNAL.md` entry and `http.ts`'s "THE LIMIT" docstring — because the honest fix needs a
+durable owner and the only version buildable in the server alone evaporates on restart.
+The deployment is warned at boot when `ControlPlane.distinctPrincipals > 1`, and a test
+(`EVERY VALID CREDENTIAL IS A FULL OPERATOR CREDENTIAL`) has one principal cancel another's
+run so the limit cannot be narrowed silently. **Fix, exactly:** a
+`submittedBy: {kind, subject, method}` on the `run.submitted` payload, written by
+`Engine.submit` from a new `SubmitInput` field, folded into the `runs` read model with a
+column `listRuns` can filter on, plus a designed operator escape.
+
+**A4 · Nobody is recorded as having started or stopped a run.** `run.submitted` carries a
+system control-plane actor; `Engine.cancel(runId, reason)` and `rewind` take a string, not
+an actor, and journal a system operator. So "who started this run that spent money" and "who
+cancelled it" are unanswerable from the journal even in a deployment where the control plane
+knows. Same prerequisite as A3 and as D7.2's separation of duties.
+
+**A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
+carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot
+cancel the channel call. Three consequences: each hung POST leaks a pending continuation
+holding the body buffer, on an unauthenticated route; counting and journaling both happen
+after `parse` resolves, so the refusal is recorded nowhere; and a channel that resolves after
+the 504 still reaches `resolveGate`, applying a decision minutes after its caller was told
+the request failed. A router-side `Promise.race` fixes the first two; the third needs
+`CallbackRequest.signal`, which is a published-interface change (surface pin + D3.20).
+
+**A6 · Replay picks a gate's recorded decision by enumeration order.** `run/replay.ts` finds
+the first `open` gate in the replayed projection and then finds a `decided` gate in the
+original by matching `nodeId` alone. Two independent order-dependent picks. A node that
+gates twice in one run — a `human_gate` inside a bounded loop — serves the **first** recorded
+decision for every later gate. Latent for subgraphs (a parent replay serves the subgraph as a
+recorded effect), **live for a loop**. **Fix:** match on `taskId` and order by `raisedAtSeq`,
+exactly as `lastDecidedGate` in `engine.ts` already does.
+
+**A7 · A graph can name `(unidentified)` as an approver.** `GRAPH014_APPROVER_INVALID`
+accepts any non-empty string. The HTTP path is closed by construction — an unidentified
+caller is refused before the list is consulted — but refusing a parenthesised reserved
+subject at compile time would close it everywhere.
+
+**A8 · The control plane's idempotency map is unbounded.** `ControlPlane.#idempotency` is
+process-lifetime with no eviction. Stated as a limit in the field's docstring rather than
+silently fixed, because eviction changes what "idempotent" means at the boundary — a slow
+retry becomes a second run — and deserves its own test.
+
+**A10 · The rewind boundary refusal covers `gate.decided` only, and `#expire` writes the same
+split.** `Engine.rewind` refuses a boundary that lands on a `gate.decided`, because `resolve`
+writes `gate.decided` + `run.resumed` in ONE append — two seqs — and a rewind to the first
+keeps the decision and drops the resume, wedging the run. `#expire` writes `gate.timeout` +
+`run.failed` in one append, the identical shape, and the scan skips it (`if (!isEvent(ev,
+"gate.decided")) continue;`). Reproduced end to end on the skeleton graph: `#expire` wrote
+`89:gate.timeout 90:run.failed`; `rewind(runId, 89)` was **accepted**; the run folded to
+`run=awaiting_gate gate=expired openGates=0`; `advance()` was a no-op with zero writes. The
+same wedge, reached by asking for the seq the refusal was written to protect. It is
+recoverable the same way — `rewind(runId, 88)` gives `run=awaiting_gate gate=open
+openGates=1` — which is exactly the argument the `gate.decided` arm's own docstring makes for
+refusing rather than repairing. **Fix:** widen the scan to any event whose append carried a
+run-terminal sibling, or make the refusal a property of the append boundary rather than of
+the event type.
+
+**A11 · `checkDelivery` accepts a `redactAs` the runtime does not apply literally.** New,
+and it is the residue of closing the delivery-redaction leak rather than a discovery.
+`DeliverySpec.redactAs` is a `Classification`, and two of the four — `public`, `internal` —
+classify data as NOT sensitive; `redact`'s arm for them is the detector sweep, which is a
+backstop for free text and returns anything it does not match. So `redact: ["ssn"],
+redactAs: "internal"` used to redact nothing at all. `redactFields` now floors the
+classification at `pii` (`maxClassification(as, "pii")`), which is the safe direction and is
+tested — but the COMPILER still accepts the declaration and says nothing, so a graph author
+reads back a `redactAs` the runtime quietly replaced. That is the shape `checkApproval`'s
+own docstring calls worse than none. Reproduced before the floor landed —
+`redactFields({command:"restart", email:"oncall@example.com", ssn:123456789}, ["email",
+"ssn"], as)` returned the email and the ssn **verbatim** for `as` = `public` and
+`internal`, the token for `pii`, and `[secret]` for `secret_ref`. **Fix:** a
+`GRAPH014_DELIVERY_INVALID` in `checkDelivery` for a `redactAs` that is not `pii` or
+`secret_ref`, with the fix text naming the two that hide anything — three lines next to the
+check that already validates the field is a classification at all.
+
+**A12 · Caller-supplied numbers with no bound. `PolicyEngineOptions.interventionWindowMs` is
+what is left; a timer above 2³¹−1 ms means one millisecond, and a cap of `NaN` means no cap.** `setTimeout`, `setInterval` and
+`AbortSignal.timeout` keep their
+delay in a 32-bit signed integer and TRUNCATE anything larger; they do not saturate and they
+do not throw, they print a `TimeoutOverflowWarning` naming no call site. Measured on node
+v24.16.0: `setInterval(fn, 2 ** 31)` fired after 1 ms, `AbortSignal.timeout(2 ** 31)` aborted
+after 1 ms with a `TimeoutError`, and `NaN`, `Infinity` and every negative land in the same
+place. See `positive`'s docstring in `cli.ts` for why every one of these is a REFUSAL rather
+than a clamp.
+
+**Bounded now** — `cli.ts`'s `positive` (`--sweep-ms`, a channel's `timeoutMs` and
+`toleranceMs`), `ControlPlane`'s constructor (`requestTimeoutMs`, and now `maxBodyBytes`
+and `hotWindow` through `boundedCount`), `postJson` (`HttpOptions.baseDelayMs`,
+`.maxDelayMs`, `.maxAttempts`, **and `Retry-After`**), and `runSandboxed`
+(`SandboxOptions.timeoutMs`, `.gracePeriodMs`, and now `.maxOutputBytes` through
+`boundedBytes`). And one that is not an *option* at all: **`GET /runs?limit=`**, the first
+member of this class a request supplies rather than a config file. It was
+`listRuns(Number.isFinite(limit) ? limit : 50)`, and finiteness is the one property a
+`LIMIT` clause does not care about — measured on six runs, `?limit=-1` returned **6 from
+SQLite** (`LIMIT -1` is *no limit*) and **5 from the memory store** (`slice(0, -1)`),
+`?limit=1.5` **threw `datatype mismatch`** on the real store, which `#dispatch` reports as
+a 500, and `?limit=abc` quietly became 50. Now a 400 through `pageLimit`.
+
+**A THIRD CORRECTION, AND IT IS TO THIS ENTRY'S SWEEP RATHER THAN TO ITS ARITHMETIC — the
+grep below is organised by the WRONG THING, and both defects it missed were in files it had
+already cleared.** The sweep asks *which platform API consumes this number*
+(`setTimeout|setInterval|AbortSignal.timeout|.listen`). What actually decides whether an
+unbounded number is dangerous is *what it is compared against*, and `NaN` loses every
+comparison — so a knob whose entire job is to say "stop here" stops nothing, and no grep
+for a timer will ever find it. Three members were found by re-asking the question that way
+and all three are now closed:
+
+- **`SandboxOptions.maxOutputBytes` — the last unbounded number in the sandbox, and the
+  worst placement available for one.** It is read inside a `'data'` listener, which is a
+  call from Node's event loop with no `try` above the frame, in the file whose docstring
+  promises *the kill path must not kill the host*. Reproduced, node v24.16.0:
+  `maxOutputBytes: 2 ** 31` (a legal, ordinary "plenty of headroom" number, and ~4× V8's
+  536 870 888-character string limit) against a child writing 600 MiB ended as
+  **`RangeError: Invalid string length`, UNCAUGHT — host dead**; `{valueOf() { throw }}`
+  did the same on the first chunk, because `outBytes >= maxBytes` is a coercion and a
+  coercion is a call. `NaN` and `Infinity` **disabled the cap entirely** — 4 MiB captured
+  against a 1 MiB default, with `truncated` reported **false**. Bounded to
+  `[0, buffer.constants.MAX_STRING_LENGTH]`, refused before `spawn`, and `typeof` is what
+  keeps the hostile case safe: it never invokes `valueOf`.
+- **`ControlPlaneOptions.maxBodyBytes` — cleared by this entry's own "checked and NOT this
+  defect" list, and it is the one member with a REMOTE party on the far side.** It is what
+  stands between an unauthenticated `POST /runs/:id/callbacks/:channel` and this process's
+  heap. Reproduced: 8 MiB of JSON at `POST /runs` against the 1 MiB default →
+  `400 E_PROVIDER_BAD_REQUEST` as designed, but with `maxBodyBytes: NaN` or `Infinity` the
+  whole 8 MiB was buffered, concatenated and `JSON.parse`d, while `/health` went on
+  reporting a healthy plane.
+- **`ControlPlaneOptions.hotWindow`** — cleared by the same bullet. `head - lastSeq > NaN`
+  is false, so every reconnect takes the REPLAY branch and a run with a million events is
+  streamed frame by frame to a browser that asked for a snapshot. Quietest of the three and
+  the same construction.
+
+Both `ControlPlane` knobs are now **read once at construction** into `#maxBodyBytes` /
+`#hotWindow` as well as validated, which is this file's existing rule for `#token` and
+`#identity`.
+
+**A FOURTH CORRECTION, AND IT IS TO THE SENTENCE THAT USED TO END THAT PARAGRAPH.** It said
+those two were "the last two options that were still read off `#opts` per request". There
+were **five**, and the one it missed is the option in that record whose refusal has a
+reproduction written next to it. Counted by driving every route behind a `Proxy` over the
+options record: `requestTimeoutMs`, `graphs`, `bus`, `store`, `engine`. And
+`requestTimeoutMs` is not a cosmetic member — reproduced against `ControlPlane` with a
+plain record MUTATED after construction, no getter required, and an identity source
+answering in 5 ms:
+
+```
+before mutation → 200 {"runs":[]}
+after  mutation → 504 {"error":{… "message":"no response for /runs within 2147483648ms"}}
+```
+
+— which is verbatim the failure the constructor's `requestTimeoutMs` check exists to
+prevent, on a plane whose constructor validated 30 000. (The elided wire code is the
+undeclared literal `#withDeadline` writes; this file does not spell it, because the drift
+guard would then want it registered, and it is deliberately not in `CODES`.) `graphs` was
+read on `/health`, the
+one route a stranger reaches and the route whose whole promise is that it answers from
+process-local state alone. `ControlPlane` no longer has an `#opts` field.
+
+**A FIFTH CORRECTION, AND IT IS TO THE RULE THE FOURTH ONE WROTE — the property did not
+hold and the test that was supposed to pin it structurally could not see the violation.**
+That paragraph ended: "the constructor is the only method that may name the options record,
+and `THE OPTIONS RECORD IS READ AT CONSTRUCTION AND NEVER AGAIN` … asserts zero reads after
+`listen` rather than listing fields." By that spelling the class complied and the property
+was false. `logFor` — the log factory the constructor hands `GateCallbackRouter` — is a
+CLOSURE over `opts`, so `opts.store`, `opts.bus` and `opts.now` were written inside the
+constructor's own source text and READ PER REQUEST, from the unauthenticated callback
+route. **Where a read is written and when it happens are different questions, and the rule
+was about the first one.**
+
+The test could not detect it, which is the worse half: its record had no `dispatcher`, so
+`#callbacks` was `undefined` and `logFor` was never built. It asserted zero reads of a
+closure that did not exist. Reproduced against the source it was passing on, with a
+dispatcher wired and a correctly-signed callback naming a different run (a refusal past the
+perimeter, which is the arm that journals):
+
+```
+reads after POST /runs           → []
+reads after the callback refusal → ["store","bus","bus","now","now"]
+```
+
+and the consequence, plain assignment after `listen`, no getter:
+
+```
+record.store = elsewhere;  record.now = () => 4102444800000;
+the run's OWN journal → (no refusal row)
+elsewhere             → 1:gate.callback_rejected@4102444800000
+```
+
+The one durable record that an unauthenticated endpoint is being hammered went to a store
+the plane was never constructed with, on a clock it was never constructed with, while every
+other route kept writing to the real one — invariant 2, reached around by an assignment.
+**FIXED**: `#now` is now a captured field and `logFor` reads `this.#store` / `this.#bus` /
+`this.#now`. The rule is restated in the field block as a statement about TIME — *no value
+used to serve a request may be read off the options record after the constructor returns,
+including by a function the constructor created* — and the test wires every option including
+the dispatcher, drives the callback route to a durable refusal, and asserts both the read
+count and where the row landed. Each half was watched failing on the reintroduced violation
+before it was believed.
+
+**A COUNT OF WHAT IS LEFT IS THE THING THIS ENTRY KEEPS GETTING WRONG** — "the last two",
+"two paths … both outside those two files" when there were four, and 25-that-was-26 in E1.
+Three miscounts, one entry. Write the DERIVATION, never the total. And now a fourth kind of
+wrong that is not a count at all: **a rule stated as a property of SYNTAX rather than of
+time, pinned by a test whose fixture omitted the only configuration that could break it.**
+Before believing a structural pin, ask which configurations it does not construct.
+
+The sweep to run in future is not a grep at all: **for each caller-supplied number, name
+the comparison or the allocation it ends at, and ask what `NaN` does to it — and for each
+caller-supplied VALUE, name every site that reads it and ask whether the second read can
+answer differently.** The second half is new, and it found two members in
+`sandbox/subprocess.ts` that a sweep over numbers could not, both now closed:
+
+- **`SandboxOptions.command`, read from THREE listeners and never snapshotted** — the
+  child's `'error'` handler, the `'close'` handler's cancelled arm, and
+  `reportUncontained`, which runs from a `setTimeout`. Every one is a property access on a
+  caller's record from a frame with no `try` above it, in the file whose docstring promises
+  *no listener in this file may throw*. Reproduced, node v24.16.0, with a getter that
+  answers `spawn` and throws on the next read: **UNCAUGHT in the `'error'` listener** — the
+  listener whose job is to turn a failed spawn into a clean rejection — and again in the
+  `'close'` listener when the run was aborted. Now `boundedCommand`, before `spawn`.
+- **`SandboxOptions.stdin`, read AFTER `spawn`** — and this one is not about the host, it
+  is about containment. `child.stdin.end(opts.stdin)` sits between the child and the
+  promise that arms `timeoutMs`, so a non-string threw `ERR_INVALID_ARG_TYPE` out of
+  `runSandboxed` with a child running, no kill scheduled and nothing holding a handle to
+  it. Measured: `PipeWrap ×3, ProcessWrap` still live, child alive 1.8 s later, caller told
+  loudly and the tool not contained. Now `boundedStdin`, also before `spawn`.
+
+**Still unbounded, each reproduced against this tree:**
+
+- ~~**`WebhookChannelOptions.timeoutMs`, when the class is constructed directly.**~~
+  **CLOSED.** Bounded in `WebhookChannel.#timeout` to a whole number in `[0, 2³¹−1]`,
+  refused as a DELIVERY FAILURE naming the knob rather than as a constructor throw — the one
+  place this family's usual "refuse at construction" rule does not apply, because
+  *NOTHING RUNS ABOVE THE TRY* pins that a config value `deliver` cannot read is a delivery
+  failure and not an unstartable process. `0` stays legal (the hung-endpoint test drives it).
+  Pinned by *A TIMEOUT NO TIMER CAN HOLD IS REFUSED, INSTEAD OF BECOMING ONE MILLISECOND*.
+- **`PolicyEngineOptions.interventionWindowMs`. NEW, and the worst of the family, because
+  the journal itself carries the false claim.** `PolicyEngine` is on the pinned surface;
+  `decide` returns `holdMs = this.#windows[req.irreversibility]`, and `Engine` awaits
+  `#sleep(decision.holdMs, …)` → `defaultSleep` → `setTimeout`. Reproduced:
+  `new PolicyEngine({granted: [], systemFloor: "on", interventionWindowMs: {reversible_write:
+  2 ** 31}}).decide({irreversibility: "reversible_write", …})` returns
+  **`{effect: "allow", posture: "on", holdMs: 2147483648}`**, and that number is both slept
+  on — as ONE MILLISECOND — and journaled verbatim as `action.pending`'s `windowMs`. So the
+  interruption window an operator was given to hit stop is a millisecond, while the audit
+  trail records 24.8 days. That is "looks supervised, is not" written into the journal,
+  which is the exact failure the oversight layer exists to prevent. It bites only at posture
+  `on` (at `in` a gate is strictly stronger and there is no hold) and only on a class whose
+  window an operator set — `DEFAULT_WINDOWS` is 0 / 0 / 5000 / 5000 — so a default
+  deployment is not exposed.
+  **Fix:** the ceiling in `PolicyEngine`'s constructor, where `#windows` is merged.
+
+**TWO CORRECTIONS TO THIS ENTRY'S OWN TEXT, and the second is the useful one.**
+
+1. The count. It said "two paths … both outside those two files" and there were **four**;
+   two are fixed above and two remain, which is two by coincidence and not by the same
+   arithmetic. Do not write the number without re-deriving it — the sweep is
+   `grep -ranE '(setTimeout|setInterval|AbortSignal\.timeout|\.listen)\(' packages/core/src`,
+   fourteen hits, of which three are constants inside `console.ts`'s browser-JS string.
+2. **`NodeSpec.retry.initialMs` / `.maxMs` was listed here and DOES NOT REACH A TIMER.** The
+   entry claimed "`defaultSleep` hands that to `setTimeout`". It does not: `#sleep` is
+   called from exactly one place in `engine.ts` and with `holdMs`, never with `afterMs`. The
+   retry delay is journaled as `task.retry_scheduled`, folded to an ABSOLUTE INSTANT
+   (`retryAfter = e.ts + afterMs` in `projection.ts`), and thereafter only ever **compared**
+   against `now` — `scheduler.ts`'s two `task.retryAfter > input.now` guards and
+   `engine.ts`'s two. A graph declaring a 25-day backoff therefore gets a 25-day backoff,
+   not an immediate retry. This is what a claim looks like when it is reasoned from a
+   plausible call graph instead of executed: the fix it prescribed (a `GRAPH` diagnostic in
+   `graph/validate.ts`) would have been real work aimed at nothing. `initialMs: NaN` IS a
+   defect there — `NaN > now` is false, so the task is instantly eligible and retries with
+   no backoff at all — but it is a comparison bug, not this entry's.
+
+**Checked and NOT this defect**, each by measurement rather than by reading:
+
+- `resources/functions.ts`'s `compileTimeoutMs` → `vm.runInContext({timeout})`. `vm` keeps
+  its timeout in int64 microseconds and does **not** truncate: `vm.runInNewContext("while
+  (true){}", {}, {timeout: 2 ** 31})` was still running after 4 s. Different platform API,
+  different range, no defect.
+- ~~`GateSpec.slaMs`, `EscalationTier.afterMs`, `SignedWebhookChannelOptions.toleranceMs` —
+  all reach comparisons … never a delay.~~ **HALF WRONG, and it is the third correction's
+  own lesson written as a clearance.** "It reaches a comparison, not a timer" is the answer
+  to the question this entry stopped asking; `NaN` loses every comparison. Measured on
+  `SignedWebhookChannel`: with `toleranceMs: NaN` — and identically with `Infinity` — a
+  correctly-signed timestamp from **2017** was ACCEPTED as current, i.e. the replay window,
+  which is the second half of the callback perimeter, was disabled and nothing said so.
+  Now bounded in the constructor (`boundedDuration`), pinned by *A REPLAY WINDOW THAT IS NOT
+  A NUMBER IS NOT A WINDOW*. **`GateSpec.slaMs` and `EscalationTier.afterMs` were NOT
+  re-examined by that pass and are therefore UNCONFIRMED, not cleared** — the clearance
+  above covered all three with one argument and that argument is now known to be the wrong
+  question. Ask the right one of each: `slaMs` becomes `deadline = raisedAt + slaMs`, so what
+  does `now >= NaN` do to `sweepTimeouts`, and is a gate that can never expire the direction
+  we want?
+- ~~`maxBodyBytes` and `hotWindow` reach no platform API with a range.~~ **WRONG, and left
+  struck through rather than deleted because the reasoning is the lesson.** Both are true
+  statements about the platform and neither is a statement about safety: what these numbers
+  reach is a `>` in `#readRaw` and in `#streamEvents`, and `NaN` wins nothing and loses
+  every comparison. Both are now bounded — see the third correction above. (`maxBodyBytes:
+  0` still rejects every non-empty request body, `??` defaulting only on `undefined`, and
+  that stays legal on purpose: "accept no request body" is a coherent posture.)
+- **`--port` is bounded by `httpPort` AND the bind failure is handled, which are two
+  different things this entry used to run together — and there turned out to be a THIRD.**
+  Every *legal* port once exited through `ControlPlane.listen`'s unhandled `'error'` event
+  — reproduced, `loom serve --port 1` → `node:events:487 throw er; // Unhandled 'error'
+  event / Error: listen EACCES: permission denied 127.0.0.1:1`, a raw stack naming neither
+  the flag nor the mistake, which is the failure `httpPort`'s own docstring cited as its
+  reason for existing. `listen` rejects with `E_CONFIG_INVALID could not bind
+  127.0.0.1:<port>`. The third: an out-of-range port never reaches a bind at all —
+  `server.listen(port, host)` throws `ERR_SOCKET_BAD_PORT` **synchronously inside the
+  promise executor**, so `-1`, `65536`, `1.5`, `NaN` and `2 ** 31` each rejected with a raw
+  `RangeError` carrying no code, no `details` and none of the contract's text, while `"80"`
+  (a string) reached the OS and failed EACCES like any other privileged port. The
+  synchronous throw is now caught and mapped through the same `E_CONFIG_INVALID`, pinned by
+  *A PORT NO SOCKET CAN HOLD REJECTS THROUGH THE SAME CONTRACT* in `test/server/http.test.ts`.
+
+**THE ONE MEMBER OF THIS CLASS A REMOTE PARTY CONTROLS, now closed and worth stating
+separately, because everything else above is an operator's own foot.** A provider's
+`Retry-After` header reached `setTimeout` through `postJson` with no clamp at all — the
+`??` in `sleep(last.retryAfterMs ?? Math.min(base * 2 ** n, max))` skipped the ceiling that
+was right there. Measured, one row per header: `86400` slept **86 400 000 ms** (a worker
+parked for a day, legally, under the ceiling, no warning anywhere); `2147484` slept
+2 147 484 000, i.e. **1 ms** — a hot retry loop aimed at the provider that asked for it, and
+a way to burn a budget from the outside; and `""`, `"  "` and `"-5"` all became **0** through
+`Number()`, the same hot loop reached by a header that is not a duration at all. The header
+is now parsed strictly (RFC 9110 `1*DIGIT` or an HTTP-date, anything else is *no advice*
+rather than advice of zero) and the delay is clamped into `[our own curve, maxDelayMs]`, so
+it can ask for more patience and never for less. **A sweep of the whole class found exactly
+one remote-controlled member**; no callback shape, tool manifest or graph duration field
+carries a number a remote party chooses. If a second ever appears, it belongs on this line.
+
+**A13 · `evolution/trajectory.ts` digests low-cardinality inputs with no key. UNCONFIRMED,
+and it is what is LEFT of a four-site entry whose other three are closed.** The
+construction is certain; the crossing is not. `inputDigest: digest(inputs)` and
+`observationDigest: digest(s.writes)` sit under a module table that says "Payloads become
+digests; tool arguments become type SHAPES" because "a trajectory store is a second copy of
+production data" — and `shapeOf` honours that where an unkeyed digest does not: a digest of
+an input you can enumerate is a lookup key for anyone holding it. What is unverified is
+whether a trajectory ever leaves the process; nothing in `src/` persists or ships one
+today, which is why this stayed a bullet for two waves. **Reproduce or refute it by
+answering one question — does a `Trajectory` reach any sink outside this process? — and if
+it does, the fix is the one the span attributes just took: a `pii` classification through
+`redact`, not a second hashing scheme.**
+
+> **The other three sites are FIXED**, and are recorded here only so the shape is
+> findable: `spans.ts`'s `gate.approver` (an unkeyed 48-bit prefix of a subject drawn from
+> the graph's own `approvers` list — inverted from four candidates in 0.011 ms),
+> `gate.content_digest` (a confirmation oracle that recovered a five-digit `employeeId`
+> the delivery path had just redacted, in 50 ms), and `state.hash.before/after` (the same
+> oracle over the whole channel map, 63 ms). All three now carry a `pii` classification
+> through `redactAttributes` — see `ATTRIBUTE_CLASSES` in `telemetry/spans.ts` and the
+> boundary table under D9.1 in `05-RESOURCES-OBSERVABILITY.md`. **The correction this
+> entry needed in its own text was its scope**: it prescribed "giving the gate arm
+> `{"gate.approver": "pii"}`", which is per-arm and is the shape that gets missed the
+> second time. The map is keyed by attribute name and consulted in `close`, the one place
+> a span leaves the file, so it covers arms nobody has written yet.
+
+Checked and NOT this defect: `spanId`/`traceId` (`digestOf(runId)` — a run id is not a
+secret, and it MUST stay derived: a constant traceId merges two runs into one waterfall,
+which is now pinned), `retention.ts`'s `digest(e.payload.argsShape)` (a shape, by
+construction), `resources/store.ts`'s content addresses (inside the boundary),
+`BearerTokenIdentity`'s `sha256(token)` (a process-local map key over a high-entropy secret
+that is never emitted), and `run.submitted`'s `idempotency.key` and `config.digest`, which
+are exported in the clear on `loom.run` — the first is caller-authored and could carry
+anything, but it is an OTel-conventional attribute an operator correlates ingress with, and
+nothing here has a domain a holder can enumerate. If a deployment starts putting customer
+identifiers in idempotency keys, that becomes the next row.
+
+**A14 · `reduceState` accepts a write to `constructor`, `toString` or any other inherited
+name, instead of refusing it.** New, and it is the class-sweep residue of pinning
+`StateView.get`'s allow-list rather than a discovery: the same prototype-chain hazard
+`gateOf` was written for, one layer down and still open. `reduceState` does
+`const spec = specs[channel]; if (spec === undefined) throw E_CHANNEL_UNDECLARED`, and
+`specs["constructor"]` answers with the `Object` **function** — not `undefined` — so the
+refusal never fires. **Reproduced** against `specs = {findings}`:
+
+```
+reduceState({constructor}) → ACCEPTED  channels=["constructor"]  state={}
+reduceState({toString})    → ACCEPTED  channels=["toString"]     state={}
+reduceState({nope})        → refused: E_CHANNEL_UNDECLARED
+```
+
+Nothing lands in state (`reduceChannel` with `spec = Object` returns `undefined`, which the
+spread drops), so this is a **fail-open refusal rather than a state corruption** — but the
+`state.reduced` event it emits names a channel in `channels` that no graph declares and no
+reducer wrote, and the one check standing between a node body's write vocabulary and the
+graph's declared channels does not run for four names. Whether a node can reach it depends
+on what filters `NodeOutcome.writes` upstream, which is the part that is **UNCONFIRMED**;
+the `reduceState` behaviour itself is measured. **Fix, exactly:** the same
+`Object.prototype.hasOwnProperty` test `gateIn` uses, in `reduceState` and in
+`initialState`'s sibling lookups — `state/channels.ts` is one file and this is one helper,
+not four call sites. Checked and NOT this defect: `StateView.get`/`require` (their allow-list
+is a `Set`, and it is now pinned by *A CHANNEL NAME THAT NAMES AN INHERITED PROPERTY IS NOT A
+CHANNEL*), `projection.ts`'s `gates` map (`gateOf`/`gateIn`), and its `tasks`, `bindings` and
+`channels` maps, whose prototypes `freeze`'s spread launders before any caller sees them.
+
+**A15 · A digest is classified by where it is EMITTED, not by where it is COMPUTED — and
+that filing rule is what let three unkeyed digests out of the process. RESOLVED for the
+span path; kept for the rule and for the two sinks nobody has swept.** The three sites and
+their reproductions are recorded above under A13; what belongs here is the reasoning error
+that hid them, because it will hide the next one. A13's own "checked and NOT this defect"
+list cleared `state/channels.ts`'s state hashes on the grounds that they live in *the
+journal and the store, both inside the boundary*. They do. `telemetry/spans.ts` also
+exported them per Task to a third-party collector, which no amount of reading
+`channels.ts` reveals — the site that computes a digest is not the site that discloses it,
+and a sweep organised by construction rather than by sink will keep missing that.
+
+Two properties were lost at each site, not one: inversion of a low-cardinality input, and —
+quieter, and the one that survives a long value — an unkeyed digest is an **equality oracle
+across runs and tenants**, so a collector could tell that two runs reached byte-identical
+channel state, or that one person answered a gate in each, while holding neither value. The
+keyed token closes the first; the **run-scoped** key `tokenKey` requires of any caller
+outside the boundary closes the second.
+
+**One sink has NOT had this sweep, and that is what is left of this entry: `server/http.ts`,
+where the same "one bag redacted, its neighbours not" shape that hid the span events is
+visible by inspection.** `frame` redacts `e.payload` and sends `e.actor` beside it
+untouched, so a `gate.decided` frame carries the approver's real subject; `summarise`
+redacts `channels` and `outputs` under a docstring that says "channel values reach a
+browser here, so they are swept on the way out" — and then sends `gates`, `outputs`' sibling
+`error`, and each task's `error` raw, so a gate record's `approvers` and `contentDigest`
+reach the browser unswept. **This is very probably fine and it has never been argued.**
+`tokenKey`'s docstring makes the argument that would settle it — this reader is an
+authenticated operator who can read the same values unredacted from the journal and from
+`GET /runs/:id/gates` anyway (A3: every valid credential is a full operator credential) —
+and if that is the answer, it belongs in `frame`'s and `summarise`'s docstrings, next to
+the fields it licenses. Read it against the question this wave asked of every span
+attribute: **could the holder of this reconstruct an input they are not entitled to?**
+A bounded afternoon, and `server/console.ts`'s browser JS is the same afternoon.
+
+Checked and NOT this defect, each by reading the input rather than the construction:
+`"graph.hash"` and `"config.digest"` are digests of operator-authored documents, not of
+per-record data, and their audience is the operator who wrote them; `spanId`/`traceId`
+(`digestOf(runId)`) and the `headRatio` sampling bucket are over a run id, which is not a
+secret; `resources/store.ts`'s content addresses and `retention.ts`'s `digest(argsShape)`
+stay inside the boundary. `evolution/trajectory.ts`'s `inputDigest`/`observationDigest`
+remain **UNCONFIRMED** exactly as A13 says, and here is the command:
+`grep -ran "Trajectory" packages/core/src | grep -v "^packages/core/src/evolution/"` returns
+**nothing**, so no trajectory crosses any boundary today.
+
+**A16 · A `Subscription` is single-consumer and nothing anywhere says so; two `for await`
+loops over one SPLIT the stream instead of each seeing it.** New, and it is the residue of a
+lifecycle sweep over `subscribe`/`dispose`/iterate rather than a discovery — the pair that
+overlaps here is *iterate × iterate*. `Channel[Symbol.asyncIterator]` is a generator over a
+SHARED `#queue` and `#waiters`, so each event is delivered to exactly one of the loops, and
+the generator's `finally` calls `dispose()` — so whichever loop ends first unregisters the
+subscription for both. **Reproduced** on `InProcessEventBus`, one subscription, two
+concurrent loops, four events published:
+
+```
+consumer A saw [1, 3]   consumer B saw [2, 4]   subscriberCount now 0
+```
+
+Neither loop threw and neither `dropped` counter moved, so a consumer that assumed a bus
+fans out silently sees half a run. `Subscription` is on the pinned public surface and
+`EventBus.subscribe`'s docstring does not claim single-consumer; nothing in `src/` does it
+(`grep -ran "for await (const e of sub" packages/core/src` → `server/http.ts`'s SSE
+handler, once), so this is an embedder-facing sharp edge rather than a live bug. **Fix, exactly:** one sentence in
+`Subscription`'s docstring saying a subscription is a single consumer's channel and a second
+reader wants a second `subscribe`, plus — if it is to be unrepresentable rather than
+documented — a `#iterating` flag whose second entry throws. `bus.ts` was another agent's
+file this wave, which is why this is an entry and not an edit.
+
+**A17 · Two branches in `engine.ts` contemplate a gate with no `taskId`, and nothing says
+whether either is reachable. UNCONFIRMED — and it is what is LEFT of the entry that used to
+stand here.** That entry was the SECOND one numbered **A16**, which is its own small defect
+in a register whose ids are cited from five files; it is renumbered rather than deleted so
+the residue survives. Its measured half — *a gate raised by an event carrying no `taskId` is
+invisible in the trace, not mis-drawn but absent* — **is fixed and pinned**: the five gate
+arms of `spansFrom` now sit ABOVE `if (taskSpan === undefined || tid === undefined)
+continue;` and parent on `taskSpan ?? rootId`, so such a gate traces with the run as its
+parent, and *A GATE RAISED BY AN EVENT CARRYING NO `taskId` IS STILL ON THE TRACE* in
+`test/telemetry/spans.test.ts` drives the whole shape (raise → escalate → decide) and turns
+red if the arms move back.
+
+What is unresolved is the question that made it a defect rather than a hypothetical:
+`GateRequest.taskId` is required, so `HumanGateBroker.raise` cannot produce one — and yet
+`cancelOpenGates` and `#commitForOpenGate` each branch on `gate.taskId === ("" as TaskId)`
+with a comment saying a gate raised by an event carrying no `taskId` folds to `""`. **Either
+those two branches are dead and should say so, or a journal can carry such an event and
+something else that reads `taskId` needs the same treatment the fold just got.** The trace
+is now correct under both answers, which is why this is UNCONFIRMED rather than open: it
+costs nothing to leave undecided, and deciding it means reading `engine.ts` end to end.
+
+**HALF OF IT IS MEASURED, AND ONE OF THE TWO MEASUREMENTS WAS WRONG — corrected here, with
+the reproduction that refutes it.** The two facts as this entry used to state them:
+
+- **A journal event cannot carry `taskId: null`.** `journal/sqlite.ts` and
+  `journal/memory.ts` each map the row back with `row.task_id === null ? base : { ...base,
+  taskId }`, so a NULL column becomes an ABSENT field, never a present `null`; and
+  `store.ts`'s `prepare` writes `e.taskId ?? input.taskId ?? null`. Both stores agree, at
+  both ends. **STILL TRUE.**
+- ~~**`taskId: ""` is deliberately never appended.** `run/gates.ts`'s `#commitForOpenGate`
+  and `run/engine.ts` both STRIP the field.~~ **REFUTED**, and struck through rather than
+  deleted because the reasoning is the lesson: the two strips are real and they are not a
+  property of the file, let alone of the pair. Read against both files —
+
+  - `run/gates.ts` strips at **two** appends: `#commitForOpenGate` (the clock's timeouts,
+    escalations and expiries) and `resolveBatch`'s `lead`. It does **not** strip in `raise`
+    (`{ taskId: req.taskId }`) or in `resolve` (`{ taskId: gate.taskId }`) — the raise and
+    the DECISION, the two appends a gate cannot happen without;
+  - `run/engine.ts`'s `cancelOpenGates` strips the field from the **event**, not from an
+    append. That holds only because every one of its call sites appends with no
+    append-level `taskId`; `prepare` spreads one over every event that lacks its own, so an
+    append-level stamp would put the id straight back;
+  - and `""` **is not nullish**, so that same `e.taskId ?? input.taskId ?? null` passes it
+    through untouched.
+
+  **Reproduced** on both stores, writing exactly the shape `raise` produces for
+  `req.taskId === ""` — the field on the event and the stamp on the append — and reading it
+  straight back:
+
+  ```
+  memory [{"type":"gate.raised","hasTaskId":true,"taskId":""}]
+  sqlite [{"type":"gate.raised","hasTaskId":true,"taskId":""}]
+  ```
+
+  Pinned by *`taskId: ""` IS APPENDABLE ON BOTH STORES* in `test/telemetry/spans.test.ts`.
+
+So the `""` those branches test is a value the FOLD writes (`projection.ts`'s
+`taskId: e.taskId ?? ("" as TaskId)`) **and** a value the journal can carry. The open half is
+unchanged and is still the only half worth spending time on: can a `gate.raised` be APPENDED
+with no `taskId` **at all**? **Do not add a third `""` branch** to `engine.ts`.
+
+`telemetry/spans.ts` is out of this question entirely: `spansFrom` derives its task span from
+a positive test (`typeof e.taskId === "string" && e.taskId !== ""`) rather than from
+`=== undefined`, so `null` and `""` are both simply taskless there. That guard used to be
+described — in this entry and in the file's own `tid` comment — as merely agreeing with an
+engine that never appends either shape. **It is not agreement; it is the one place that is
+total**, which is a stronger reason to keep it and the reason the comment now carries the
+measurement above. Before it, `null` passed BOTH halves of the old guard
+(`spanId(runId, "task", null)` is an ordinary string, because `[…, null].join("|")` renders
+`null` as the empty one), so every taskless event in a journal merged into ONE `loom.task`
+span keyed on the empty task id and a gate arm parented on an id no span carried — an orphan.
+Pinned by *A taskId THAT IS null OR EMPTY IS NO taskId*. The rest of `spansFrom` below the
+guard is still deliberately untouched — every arm there either patches the Task's own span
+or derives a span id from the `taskId`, so a taskless event has no coordinates rather than
+the wrong ones.
+
+**A18 · `spansFrom` reads the journal's PAYLOADS partially in twelve places and wrongly in
+three, and the three are the entry. NEW, and it is the residue of a sweep rather than a
+discovery: the class-sweep asked of `telemetry/spans.ts` and `security/redact.ts` "every
+place these two files read a value the JOURNAL supplied".** The journal is authoritative and
+trusted (invariant 2), and *trusted* means "we do not defend against it", not "it cannot be
+malformed" — a hand-written or legacy journal is a real shape this repo folds routinely
+(every fixture in `test/telemetry/spans.test.ts` is one, and `trace-fixture.ts` exists to be
+folded in a second process). No shape below can come out of either store's APPEND path; a
+hand-written journal, a hand-edited database, or any caller of this published function can.
+
+**The twelve partial reads are LOUD and are deliberately left**, listed so nobody re-derives
+them. Each throws a `TypeError` out of `spansFrom`, which costs the caller **every span for
+the run** — and for `loom trace`, the process. Reproduced one row per read, node v24.16.0:
+four spreads over a payload list (`[...e.payload.edgesIn]`, `.take`, `.channels`,
+`.reasons` — *"is not iterable"* when the field is absent or `null`), six nested reads
+(`.resolutionManifest.length`, `.usage.inputTokens` on `run.completed` and on
+`model.called`, `.error.code`, `.unknownEffects.length`), `e.actor.kind` on a `null` actor,
+and `String(e.seq)` inside a span id, which runs a hostile `toString` (*"Error: hostile"*).
+**They stay because making `spansFrom` total over a malformed journal is one decision, not
+twelve edits** — it has to answer "does a Task whose payload cannot be read get a partial
+span or none?", which changes several attribute types and belongs in its own change. A
+throw is also the honest failure here: it is loud, and it is not a wrong trace.
+
+**The three QUIET ones are the defect**, because a wrong trace is what an incident review
+reads:
+
+- **`ts` is not checked to be a number, and the waterfall silently reorders.** Measured:
+  a journal whose `run.submitted` carries `ts: "x"` folded to
+  `startTimes=[1020,"x"]  order=loom.task,loom.run` — the run span, which starts first,
+  sorted LAST, because `a.startTime - b.startTime` is `NaN` and an inconsistent comparator
+  discards the ordering. `ts: null` gives a span with `startTime: null, endTime: null`. The
+  sort is still deterministic for one input (same array, same algorithm), so the file's
+  byte-identity promise survives; what does not survive is the one thing a trace is opened
+  for.
+- **`[...e.payload.edgesIn]` splits a STRING into characters.** `edgesIn: "e1"` folded to
+  `"edges.in": ["e","1"]`, so `reconstructGraph` reports two ghost edges where the journal
+  claimed one — a FABRICATION, in the input to the conformance assertion. The same file's
+  `reconstructGraph` already takes the opposite and correct verdict on this exact class
+  ("a container that is not a list is ONE unknown edge"); the journal side does not.
+- **`runId` is handed to `digestOf` unchecked**, which is `createHash().update(v, "utf8")`
+  and throws `ERR_INVALID_ARG_TYPE` for a non-string. Loud, but it takes `shouldExport`
+  with it, so a malformed run id is a run nothing can decide about rather than a run that
+  is exported.
+
+**Fix, exactly:** a `ts` read that refuses a non-number (the same positive test `tid` and
+`headRatio` now use), and `edgesIn`/`take`/`channels`/`reasons` read through one helper that
+treats a non-array as one claim rather than as an iterable. Both are in `spansFrom`; the
+twelve above are the same helper applied everywhere else, and that is the change to make in
+one go or not at all.
+
+**Checked and NOT this defect, WITH ONE CORRECTION TO THIS PARAGRAPH'S OWN CLEARANCE.**
+`security/redact.ts`'s `walk` marks a cycle, caps depth at 32, replaces a function, and
+renders a `Map`, a `Date` or a `RegExp` as `{}` (data loss, never disclosure); the
+asymmetry between the two arguments of `redactAttributes` is the rule and not an accident —
+`attrs` may be guarded loosely because its wrong shapes remove, and `classifications` may not
+because its wrong shapes disclose.
+
+~~`security/redact.ts` is total over everything the journal hands it.~~ **It was total over
+everything the journal hands it and NOT over what its published signature accepts, which is
+the same "reasoned from the caller, written as a property of the function" mistake A12's
+fifth correction is about.** Every read on both arguments was bare, and each of the four
+below is a `Proxy` trap — reproduced, each escaping `redactAttributes` and therefore
+`spansFrom`, which costs the caller **every span for the run**:
+
+```
+classifications: getOwnPropertyDescriptor trap → Error: gopd trap        (via hasOwnProperty)
+classifications: get trap                      → Error: get trap
+attrs:           ownKeys trap                  → Error: ownKeys trap     (via Object.entries)
+attrs:           get trap                      → Error: attrs get trap
+```
+
+~~Both are now total — a classification read that throws answers `secret_ref`, and a bag that
+cannot be enumerated yields `{}` — pinned by *A CLASSIFICATION MAP THAT THROWS COSTS ONE
+ATTRIBUTE, NOT EVERY SPAN IN THE RUN* and *AN ATTRIBUTE BAG THAT THROWS ON ENUMERATION
+REMOVES EVERYTHING*.~~ **THAT SENTENCE WAS FOUR READS SHORT OF TWO, AND BOTH SURVIVORS WERE
+SIBLINGS OF THE READS IT NAMED** — the fix was applied to one helper and not to the one a few
+lines away answering the same question, which is the shape this register keeps finding:
+
+```
+classifications: getPrototypeOf trap → Error: gpo trap   (isClassificationMap, ONE LINE ABOVE the try)
+attrs:           {a:{get x(){throw}}} → Error: nested getter (walk's own Object.entries, depth 1)
+```
+
+- `attributeClass` wrapped `hasOwnProperty` and the index read in a `try` and left
+  `isClassificationMap`'s `Object.getPrototypeOf` outside it — a `Proxy` trap, named as one in
+  that predicate's own docstring, and guarded as though it were a `typeof`. The test pinning
+  the other two had to build its proxies with a well-behaved
+  `getPrototypeOf: () => Object.prototype` in order to REACH them, so the counterexample was a
+  line of its own setup.
+- `redactAttributes` wrapped `Object.entries(attrs)` and left the `redact(v, …)` beneath it
+  bare. `walk` runs `Object.entries` again on every nested container and `v.map` on every
+  nested array, so the shape the depth-0 guard exists for cost the whole bag at depth 0 and
+  the whole RUN at depth 1 — and at depth 1 it needs **no `Proxy` at all**.
+
+**Both closed, and the claim is now a measured one rather than a reasoned one:
+`redactAttributes` does not throw, for any value of any of its three arguments** — 2,576
+combinations of hostile `attrs` × `classifications` × `scope` (every `Proxy` trap throwing, a
+revoked `Proxy`, a cycle, 200 levels of nesting, a throwing element getter, a `toString`
+bomb under a `pii` key, an own `__proto__` from `JSON.parse`), **0 threw**. It is a property of
+that FUNCTION: `redact` and `walk` are unchanged and still throw for these inputs, which is
+what `redactPayload` and `redactFields` call, and a test pins that limit so the sentence cannot
+widen again by being read one word too generously. Pinned by the two tests named above plus
+*A CLASSIFICATION MAP WHOSE PROTOTYPE READ THROWS IS REFUSED, NOT PROPAGATED* and *A VALUE
+INSIDE THE BAG THAT THROWS COSTS ONE ATTRIBUTE*.
+
+**And the disclosure half of the asymmetry has a known, executable LIMIT rather than a
+guard.** `isClassificationMap` is a NAMED-SHAPE REFUSAL — it rejects the containers it can
+recognise (`Map`, `Set`, `Date`, `RegExp`, array, class instance, `null`) and it is defeated
+by `new Proxy(target, {getPrototypeOf: () => Object.prototype})`, which puts `u:alice` back
+on the span in the clear. That is not a fourth iteration waiting to be written: **a `Proxy`
+must tell the truth about exactly one observable, the extensibility of its target**, and
+every ordinary object literal is extensible, so the question has no answer and a
+non-extensibility test would turn every embedder's map into `[secret]`. The real guarantee is
+that `telemetry/spans.ts` passes `ATTRIBUTE_CLASSES`, a module constant. Held executable by
+*A `Proxy` DEFEATS THE SHAPE TEST AND THE DISCLOSURE IS REAL — the limit, made executable*,
+on the `EVERY VALID CREDENTIAL IS A FULL OPERATOR CREDENTIAL` pattern. `telemetry/spans.ts`'s
+twin, `isAttributeBag`, had the same hole and is **deleted**: `reconstructGraph` could move
+the check onto its reads (D9.2), and `attributeClass` cannot, because "declared nothing" and
+"declarations unreachable" are one observation there.
+
+**A19 · `Engine.resolveGate` reads ANY decision it does not recognise as an APPROVAL, and
+runs the action behind the gate.** New, reproduced, and NOT fixed — the fix is in
+`run/engine.ts` / `run/gates.ts`, which were another agent's files this wave. `GateDecision`
+is a four-member union (`approve` / `reject` / `edit` / `redirect`) and everything downstream
+branches on `kind === "reject"`, so anything else falls through to the permissive reading.
+Driven directly against `Engine.resolveGate` — the public, pinned-surface method an embedder
+calls — one fresh skeleton run each, `guardedWrites` being whether the action BEHIND the gate
+really ran:
+
+```
+{"kind":"approve"}  → run=succeeded writes=1  gate.decided decision="approve"
+{"kind":"REJECT"}   → run=succeeded writes=1  gate.decided decision="REJECT"
+{"kind":"nope"}     → run=succeeded writes=1  gate.decided decision="nope"
+{}                  → run=succeeded writes=1  gate.decided with NO decision field
+42                  → run=succeeded writes=1  gate.decided with NO decision field
+{"kind":"redirect"} → run=succeeded writes=1  (no `take` at all)
+```
+
+An operator's caps-lock is an approval, and the journal keeps `decision: "REJECT"` beside
+an action that happened — a word in no vocabulary, recorded as the thing a human decided.
+That is the Traps list's *approve means "go ahead"* one layer up: **the unreadable case
+took the permissive branch.**
+
+**ALL THREE DOORS ARE NOW CLOSED, which is why this is an entry rather than an outage, and
+also why it will be missed.** `GateCallbackRouter` validates member by member in
+`ownedDecision` (the unauthenticated route always did); `cli.ts`'s `approve` constructs the
+literal itself; and `server/http.ts` now has `checkedDecision`, which mirrors
+`ownedDecision`'s acceptance set deliberately. Before that last one the API door was a cast
+— measured over real HTTP, `{"kind":"REJECT"}` answered **200**, the run **succeeded**, and
+the guarded `fs.write` ran. **Fix, exactly:** make the switch total at the point of use, so
+a fifth kind is a refusal rather than an approval, and then `checkedDecision` and
+`ownedDecision` can both collapse into it. Two validators for one union is the second half
+of this entry and is itself the defect the "one dispatch path" invariant is about — they
+agree today because one was written from the other, which is exactly the arrangement that
+drifts.
+
+**A20 · `#streamEvents` reads its baseline and THEN subscribes, so anything appended in
+between reaches neither. NEW, reproduced, NOT fixed — it is a restructure rather than a
+guard, and it is the third distinct way the "gap-free" contract has been broken in this one
+handler.** The other two were the branch (`Last-Event-ID: 1.5` became an OFFSET) and the live
+tail's floor (an id ahead of head got a baseline and then had every subsequent event skipped);
+both are closed. This one is the ORDER of two statements:
+
+```ts
+if (!resumable || head - lastSeq > hot) { …snapshot… } else { …store.read… }   // ← the baseline
+const sub = bus.subscribe({ runId }, …);                                        // ← the tail starts HERE
+```
+
+`EventBus.subscribe` hands back an empty channel, so a subscriber is offered only what is
+published after it exists. Every event appended between the baseline and that line is
+therefore in neither half, and the client cannot tell. **The bus already documents the fix in
+its own docstring** — `replayThenTail`: *"Subscribe FIRST, then read the journal … Order
+matters: subscribing after the read would drop anything appended during it. The overlap is why
+the dedupe exists — it is a guarantee, not a nicety."* — and `#streamEvents` is the one
+reconnect path in the repo that does not use it.
+
+Reproduced over real HTTP by widening the window rather than by racing it: a `Proxy` over the
+engine parks `projection()` after it has resolved, the run's gate is answered while the handler
+is parked, then it is released. Skeleton run, snapshot branch (`?lastEventId=abc`):
+
+```
+head 88
+head after the run finished: 102 (14 events appended while the handler was parked)
+client frames: 1  ["snapshot"]
+```
+
+A baseline at seq 88 and then silence, on a run that reached 102 and completed. The window is
+small in practice — the parking is a stand-in for a slow fold or a long replay — but it is
+widest exactly when it matters: a big journal, a client reconnecting during a burst. **Fix,
+exactly:** subscribe before the baseline and dedupe against the highest seq the baseline
+actually covered, which is what `replayThenTail` does; note that a naive move of the
+`subscribe` call is not enough, because a long replay can then overflow the 1024-slot queue
+under `drop_oldest` and reintroduce the same hole through the other door.
+
+**A21 · `GateDispatcher.deliver`'s prelude reads its `GateSummary` bare, so the one exit the
+whole file is arranged around is still reachable — from the summary rather than from the
+spec.** New, and it is the residue of totalizing `ConsoleChannel` rather than a discovery:
+the fallback and every `owned*` helper it feeds are total now, and the value they are
+DERIVED FROM is not. `shownGate` opens with `{...gate}` and five bare field reads
+(`gate.approvers`, `.allowEdit`, `.take`, `.writes`, `.batch`), and `deliver` reads
+`gate.gateId` and `gate.payload` bare — all in the prelude that sits above every `try`, in
+the file whose single rule is that delivery has one exit. **Reproduced**, node v24.16.0:
+
+```
+GateDispatcher.deliver(log, {get gateId(){throw}, nodeId:"n1"}, {channels:["console"]})
+  → THREW Error: summary gateId getter
+```
+
+— no delivery, no fallback, no `gate.delivery_failed` row, which is the exact outcome
+`ConsoleChannel`'s docstring exists to make impossible, reached one argument along. What is
+**UNCONFIRMED** is reachability from inside this process: today's only caller is
+`HumanGateBroker`, which passes a summary it folded from the journal, so a hostile getter
+needs an embedder driving the exported `GateDispatcher` directly — the same party
+`shownGate`'s own "defence in depth for a caller driving the dispatcher directly" already
+names. **Fix, exactly:** `readProp` for `gateId` and `payload`, and a `shownGate` that reads
+its input's fields the way it already copies them, rather than spreading first. It is an
+entry and not an edit because the spread is also what carries fields nobody has added yet,
+so replacing it is a decision about `GateSummary`'s growth and not a one-line total-read.
+
+### B · Mechanism that exists and is not wired to anything
+
+**B8 · The gate queue's ORDER now reaches four of six surfaces, and the two that are left
+cannot reach it at all.** New, and it is what is LEFT of "D7.9 row 5's ordering reaches the
+API" — that half is fixed and this half is a `run/gates.ts` change, which is why it is an
+entry and not an edit. `gateQueueOrder` is a **pure function of a `RunProjection`** — no
+clock, no engine, verified by reading `rankOf`, `radiusCredit` and `gateBatchGroups` — and it
+is module-private, reachable only through `HumanGateBroker.list`, which takes a `RunLog` from
+an engine that has ATTACHED the run. **The dividing line is not which layer a caller is in;
+it is whether it holds an attached run or only a projection**, which is why `loom run` and
+`loom gates` print the same list and only one of them can rank it:
+
+| Surface | Order | Why |
+|---|---|---|
+| `Engine.openGates` | ranked | it *is* `HumanGateBroker.list` |
+| `GET /runs/:id/gates` | ranked | **fixed this wave** — the projection's SET joined to the queue's ORDER |
+| The console's Oversight panel | ranked | **fixed this wave** — `loadGates` reads `GET /runs/:id/gates` instead of the run summary |
+| `loom run`'s awaiting-gate hint | ranked | **fixed this wave** — this process submitted the run, so it is attached |
+| `GET /runs/:id`, the SSE `snapshot` frame, every mutation response | **journal** | all go through `summarise`, which takes a `RunProjection` and no engine |
+| `loom gates <runId>` | **journal** | a fresh CLI process has attached nothing |
+
+**Reproduced, both halves.** A two-gate graph (two parallel `human_gate` nodes, 900 s and
+60 s SLAs, the patient one declared first) over real HTTP:
+
+```
+engine.openGates(runId) → ["urgent", "slow"]      GET /runs/:id/gates → ["slow", "urgent"]   (before)
+```
+
+and, in a second `Engine` over the same store — which is what `loom gates` is — the
+projection folds fine and the queue is unreachable:
+
+```
+fresh projection: ["slow", "urgent"]
+fresh openGates : THREW E_RUN_NOT_FOUND  run … is not attached to this engine
+```
+
+Both halves are driven: *THE QUEUE'S ORDER REACHES THE API* and *A GATE THE QUEUE DID NOT
+RANK IS STILL SERVED* in `test/server/http.test.ts`, *THE OVERSIGHT PANEL IS READ FROM THE
+RANKED QUEUE* in `test/server/console.test.ts`, and — driving the split itself, so the limit
+cannot rot in either direction — *`loom run`'s GATE HINT IS RANKED AND `loom gates` IS NOT* in
+`test/cli/cli.test.ts`.
+
+**Fix, exactly:** export `gateQueueOrder` from `run/gates.ts` (or give `list` a
+projection-shaped overload) and call it from `summarise` and from `cli.ts`'s `gates` command.
+**Do not re-implement the rank at either call site** — that is two ranking functions for one
+queue, which agree on the day the second is written; it is the same arrangement A19 names for
+`checkedDecision`/`ownedDecision`. The same export also removes the residue inside the fixed
+endpoint: a run this process has not attached is ranked by nothing, so after a restart
+`GET /runs/:id/gates` is journal order too, and the handler's own comment says so.
+
+**B7 · The gate sweep cannot see a run outside the `limit` most recent, and after a restart
+that is a lost SLA.** New, and it is the residue of the fix for B1 rather than a discovery.
+`GateSweeper` finds its runs through `StateStore.listRuns(limit)`, which orders by run id
+descending — run ids are minted from a timestamp, so that is "newest created first" — and
+there is **no read model of open gates** to ask instead. Cursors are kept between ticks, so
+a gate met once stays tracked while its run stays in the window; the hole is a **process
+restart** on a store where more than `limit` runs have been created since the gate was
+raised. That gate's deadline never fires again, silently. Default `limit` is 500
+(`DEFAULT_SWEEP_LIMIT` in `run/gates.ts`), settable through `EngineOptions.sweep`.
+
+**Reproduced.** One run parked on a gate with `slaMs: 1000` and a run id sorting last, six
+newer runs, a fresh `GateSweeper` (the restart), and the clock 5 s past the deadline:
+
+```
+limit=5   → {considered:5, caughtUp:5, swept:0, fired:[]}   gate=open    run=awaiting_gate
+limit=500 → {considered:7, caughtUp:7, swept:1, fired:[g_…]} gate=expired run=failed
+```
+
+The same store, the same clock, the same overdue gate — only the horizon differs.
+**Fix, exactly:** either a `listRuns` ordering by
+`last_ts` ascending (cheap — `run_head` already stores it, and the runs that matter are by
+definition the ones nobody has written to) or a `human_gates` read model the store can
+query. Both are `StateStore` interface changes plus a SQLite migration, which is why the
+knob shipped first and this entry exists rather than the knob quietly standing in for the
+query. Until then: size `limit` above the number of runs a deployment creates within the
+longest SLA it declares.
+
+**B5 · `NodeSpec.timeoutMs` is in the schema and enforced by nothing.** A node with a
+declared timeout runs as long as it likes; `E_TASK_TIMEOUT` is declared and unraisable.
+
+**B6 · Hooks are declared, validated by the compiler, pinned by the resolver, and never
+invoked.** Which is also why `hook.applied` has no appender (C1).
+
+### C · Vocabulary that is declared and never written
+
+**C1 · Eight event types have no appender.** Pinned in `docs-drift.test.ts`'s
+`NEVER_APPENDED` with a reason each: `budget.reserved`, `budget.settled`, `channel.written`,
+`config.reloaded`, `hook.applied`, `task.cancelled`, `task.skipped`, `task.started`. The two
+that matter most: `budget.reserved`/`budget.settled` are held in memory by `PolicyEngine`, so
+D6.5's assumption that a crashed worker's reservation is recoverable by folding is false and
+`RunProjection.reservedUsd` is **permanently zero**; `task.cancelled` means in-flight Tasks
+keep whatever state they last had after a cancel, and the `task.cancelled` arm of `spans.ts`
+is unreachable. Each is a decision someone must take: append it, or delete it from
+`EVENT_TYPES` and from the paragraphs that promise it.
+
+**C2 · Thirteen error codes are declared and raised by nothing.** Pinned in `NEVER_RAISED`.
+A `retry.onlyIf` written against any of them can never fire. `E_ADMISSION_REJECTED` heads a
+three-level admission design with nothing under it; `E_LEASE_LOST` is A2; `E_TASK_TIMEOUT` is
+B5.
+
+**C3 · `E_QUORUM_UNREACHABLE` is misnamed.** Declared under gate-quorum framing; its one
+raise is a **join** with `onBranchError: "fail"`. Two unrelated meanings on one code, and
+quorum itself is a compile error (D1).
+
+### D · Documentation that is wrong or unverified
+
+**D1 · The promotion gate was described as stronger than it is** — corrected in this pass,
+recorded here because **the code gap is real and unfixed**. `06-EVOLUTION.md` D10.d used to
+claim criterion 2 is McNemar's paired test with a 95 % lower bound; `gateCandidate` computes
+`candidate.passRate − baseline.passRate ≥ −margin`, a bare point-estimate comparison.
+Criterion 3 said "median cost"; the code divides one suite total by another and `EvalReport`
+has no median field. Criterion 7 claimed injection-resistance cases are required;
+`gateCandidate`'s safety check filters case reasons for the substring `irreversible` and
+nothing else, and `EvalCase.expect` has **no field in which a suite could declare an
+injection case**. All three verified by reading `evolution/gate.ts` end to end, and
+re-verified 2026-08-05. **This is the gate that stops self-evolution shipping a regression**,
+so it is the most consequential gap on this page.
+
+> **The correction landed in the design file and left three copies behind in the source it
+> was read out of** — which is the same failure one layer down, and is now fixed.
+> `gate.ts`'s module docstring asserted "the suite is authored by humans, never by the
+> evolution engine", the rule M9 replaced and which 06-EVOLUTION.md's own D10.f header note
+> names as contradicted (D2); `maxCostRatio`'s JSDoc said "median cost"; and `gateCandidate`'s
+> docstring said "the eight criteria from D10.d" while the function pushes **eleven**
+> (`grep -ac 'id: "' packages/core/src/evolution/gate.ts`) — a count `99-DOD.md` row 8
+> already called out. **When a document is corrected against a file, grep that file for the
+> claim you just refuted.**
+
+The table now describes the arithmetic; closing the gap means carrying the
+per-case pass/fail vectors into `PromotionInput` and computing the discordant-pair statistic
+(arithmetic only, no dependency), adding `medianCostUsd` where `p95WallMs` already is, and
+designing a deterministic injection-resistance verifier — the last being the only one of the
+three that is a design question.
+
+**D2 · `06-EVOLUTION.md` D10.f states unbuilt machinery in the present tense.** Its
+Mitigation column reads as if a drift detector, a diversity floor, a 5 % holdout, a per-node
+prompt-token ceiling, a previous-prompt control arm, suite/synthesis disjointness enforcement,
+auto-deprecation, a posture-diff journal and a posture SLO dashboard all run. None exists;
+most guard synthesis and canary, both `DEFERRED-v2`. A header note now says so and lists what
+*is* built, but the table body is unchanged — a reader who skips the note will still be
+misled. One row is worse than unbuilt: reward hacking cites "the eval suite is
+human-authored", which D10.d itself replaced in M9.
+
+**D3 · `99-DOD.md`'s **PROVEN** cells are largely unaudited. UNCONFIRMED.** The legend says
+PROVEN means a test asserts it. Exactly one row was audited against the existence of a test;
+the drift guard only checks that the evidence cell is longer than 25 characters. The other
+PROVEN rows may or may not have tests behind them. Auditing them is a bounded afternoon and
+nobody has done it.
+
+**D4 · The performance numbers have not been re-measured. UNVERIFIED.** `99-DOD.md`'s
+coverage matrix quotes compile 61 ms, layout 0.95 ms, a 485 KiB snapshot, a 3 ms 10k-event
+fold and a 126 ms 500-way fan-out. They are machine-dependent, have no tripwire, and were
+not re-run. Binary and bundle size are a separate case and are NOT unverified: row 6 quotes
+114.6 MB and 364 KB, and those come from the build's own output on the rebuild described in
+*Where things stand*, so they are as fresh as that rebuild and no fresher.
+
+**D5 · `05-RESOURCES-OBSERVABILITY.md`'s span-attribute delta table is hand-maintained.**
+Every row was verified by hand against `telemetry/spans.ts` and is accurate today, and there
+is deliberately **no** tripwire — a regex over `spans.ts` recovers only the quoted half of
+the attribute keys and would report that half as the whole, which is the crying-wolf failure
+the guard file calls fatal. It will rot on the next `spans.ts` edit. The tractable fix is a
+fixture journal folded through `spansFrom`, whose coverage is itself proved by asserting it
+contains all 48 `EVENT_TYPES`.
+
+> **Re-verified 2026-08-06, against the `spans.ts` edit described in A17 and A18**, which is
+> the first test of "it will rot on the next edit" since that sentence was written. It did
+> not: no attribute name was added, renamed or removed — `branch.item_channel` is still the
+> only conditional one on `loom.task`, and it is now emitted from a total read rather than
+> from `binding === undefined`. **The re-verification is by hand, exactly as the entry
+> warns**, and is worth no more than the next one.
+
+**D6 · The drift guard checks names in MARKDOWN, not behaviour.** A span renamed in
+`spans.ts` *and* in the document drifts together and passes. Nothing asserts the eight span
+names against a trace derived from a real run. Same fixture-journal fix as D5.
+
+**D7 · Two bypasses of the drift guard remain open, by choice.** Confusable homoglyphs (a
+Cyrillic `о` in `loom.run` hides a claim for one keystroke) cannot be closed without a
+confusable-skeleton table that would be a runtime dependency or larger than the guard.
+Emphasis inside the *first* segment of an unknown identifier is now silent, traded
+deliberately against manufacturing names nobody wrote. Both are pinned by tests that fail
+when the hole closes, which is the right shape for a documented limit.
+
+**D8 · The `why` prose in the guard's own registries is unverified.** `NEVER_APPENDED` and
+`NEVER_RAISED` carry a sentence per entry explaining the consequence; a handful were
+spot-checked and the rest are prose nothing enforces. One is already stale:
+`task.cancelled`'s reason says "`cancel()` appends `run.cancelled` only", which stopped
+being true when `cancel` learned to append `gate.cancelled`. Re-checked 2026-08-05 and still
+true of both halves — the reason still reads that way in `docs-drift.test.ts`'s
+`NEVER_APPENDED`, and `Engine.cancel` still calls `cancelOpenGates`.
+
+**D9 · `01-INTERFACES.md` D3.10 simplifies types a reader may take literally** — it shows
+`payload: unknown` where the code has `EventPayloads[K]`, and a string union where the code
+has `Classification`. Intentional simplification, recorded so nobody "fixes" the code toward
+the document.
+
+**D10 · Cross-references into this register. RESOLVED — kept for the grep.**
+Seven citations named ids that meant something else. Six lived in `design/loom/` and were
+repointed on 2026-08-05 (`C3` → A2, three `C1.4` → B1, two `C1` → B1–B3). The seventh —
+`// E_LEASE_LOST … see HANDOFF C3.` in `docs-drift.test.ts`'s `NEVER_RAISED` — survived that
+pass because it is in `test/`, and the grep that found the others was run over `design/loom/`
+alone. It now reads **A2**. (That is not pedantry: the first draft of this entry claimed the
+count was zero, which the grep it prescribes immediately refuted.)
+
+**AND CLOSING AN ENTRY BREAKS ITS CITATIONS, which is this hazard's second half and the one
+that bites in the other direction.** Deleting `B1` and `B2` when the sweep landed left four
+documents pointing at ids that no longer exist — the same broken link, arrived at by fixing
+something rather than by mistyping something. **Run the grep below BEFORE deleting an entry,
+not after**, and repoint or rewrite every hit in the same change. Live citations as of the
+last such pass: `01-INTERFACES.md` → A2 and B7, `04-OVERSIGHT.md` → A10,
+`docs-drift.test.ts` → A2, plus `08-PLAN.md` and `99-DOD.md`, whose `B1`–`B3` spans still
+need repointing by whoever closes the `bin/loom` wiring. Re-derive rather than believing that
+list.
+
+The entry stays because the *lesson* is the durable part, and it is a small one with sharp
+edges. **Find every one of them, in any tree, with**
+
+```bash
+grep -aroE 'HANDOFF(\.md)?.{0,12}\*{0,2}[A-E][0-9]+' design packages scripts
+```
+
+— note `-a`, without which macOS `grep` silently skips the source files containing `→` or
+`·`, and note the search roots: a cross-reference does not care which tree it lives in, and
+scoping the grep to `design/` is precisely how the seventh one survived a pass whose whole
+purpose was finding it. The guard cannot catch this class at all; it tracks span names, error
+codes, `GRAPH` ids, method names and event appenders, not register ids.
+
+### E · Process and build state
+
+**E1 · The surface pin. RESOLVED 2026-08-05 — kept for the rule.** `node
+scripts/check-surface.mjs --write` re-pinned it and `npm run check` is green:
+`1003 pass / 0 fail`, zero-dep ok (49 files), `surface guard ok: 452 public exports`.
+
+The rule is the durable part. **The count of added exports must be read from
+`node scripts/check-surface.mjs` and from nowhere else** — this entry was written asserting
+25 while the guard printed 26, which is the register miscounting the one number whose whole
+purpose is to be counted by a program. Adding an export is fine; it just has to be
+deliberate, and re-pinning is a separate commit-worthy act rather than a side effect.
+
+**E2 · Every wave is uncommitted.** The working tree contains all of them on top of
+`5f06c40`. The `JOURNAL.md` entries describing them are appended but likewise uncommitted.
+
+**E3 · Two transient failures were observed and could not be reproduced. UNCONFIRMED.**
+During this closing pass, `npx tsc -p packages/core/tsconfig.test.json` once reported
+`Property 'openToEveryCaller' does not exist on type 'ControlPlane'` and
+`test/server/http.test.ts` once failed the matching assertion with `actual: undefined`. Both
+were clean on every subsequent run (typecheck twice, that file four times, the whole suite
+three times). The likely explanation is benign — `src/server/http.ts` was being written while
+the check ran, and its mtime confirms an edit minutes later — but it is recorded rather than
+dismissed, because "it passed the second time" is exactly how a real flake gets filed as
+nothing.
+
+**E4 · Guards with no test come in THREE kinds, and only one of them is a defect — and
+every count in this entry is a measurement, stated with the command that produced it.**
+The eight below cannot have a test: each was reverted and the suite re-run, each left it
+green, and in each case a test would have to assert that two spellings of the same outcome
+are the same outcome. They are documentary defensiveness worth keeping — **read this list
+before "closing" one of them with a test, and before deleting one as dead.** The other two
+kinds are the *equivalent mutants* (the mutated code computes the same answer, so no
+observer anywhere can distinguish them) and the ones that merely *were not* tested; the
+arithmetic note at the end separates all three and says how.
+
+- `#fireTimeout`'s `default_action → fail` degradation. The branch it feeds already requires
+  a default action, and `#expire` writes the literal `"fail"`.
+- `oldestOpenGate`'s `raisedAtSeq` ordering. It cannot disagree with map order on any
+  journal-folded projection.
+- `#commitForOpenGate`'s open-gate re-read, and its terminal-run check. **Both became
+  unobservable in the change that merged the default action's two appends into one**; before
+  that, the expiry of a refused default action was taken at a seq the same call had written,
+  and the re-read was the only thing refusing it (`gate-clock.test.ts`'s *A REFUSED DEFAULT
+  ACTION…* carries the history). Every `atSeq` reaching that method is now the sweep's own
+  fold, so the store's compare-and-swap arbitrates every case: if the gate's state changed,
+  an event was appended, so the head moved and the swap fails. The difference the guards buy
+  is a quiet `undefined` instead of a thrown `E_SEQ_CONFLICT`, and `sweepTimeouts` treats
+  both as "not fired". They stay because they are the METHOD'S CONTRACT — "commit only while
+  the gate is still open, and never onto a terminal run" — which the next caller to supply an
+  `atSeq` read after a write of its own will need and should not have to re-derive.
+- `sweepTimeouts`' per-gate `gate.state !== "open"` re-check. A cheap pre-filter: every path
+  behind it ends at `#commitForOpenGate`, which refuses the same case, so the outcome and the
+  `fired` list are identical either way.
+- `reconstructGraph`'s `s.name !== "loom.task"` skip. It is a scoping statement — *the graph
+  that executed is the set of Tasks that ran* — and no other span carries a `task.id` or an
+  `edges.*` list. `loom.gate` does carry `node.id`, but only ever the node of the Task that
+  raised it, which the task span already contributed.
+- `spans.ts`'s `close` on an already-closed span, and `attr`/`note` on one. All three write
+  into a value nobody reads, so no observation distinguishes them. These were named "in
+  spirit" by the previous arithmetic note and are now on the list proper, having survived the
+  sweep below on their own.
+- `spans.ts`'s redaction of `links`. `SpanLink.attributes` is never populated — D9.1's
+  producer-Task links are designed and unbuilt — so there is no bag to redact and nothing to
+  observe. It is on the list rather than deleted because the arm's own docstring makes the
+  argument: it is the difference between a hole that is closed and a hole that reopens the
+  day somebody writes the feature. **It leaves this list the moment a link carries an
+  attribute**, and that is the test to write in the same change.
+- `server/http.ts`'s `gateOf` in `#refuseUnidentifiedApproval`. It replaced a bare
+  `p.gates[gateId]` on a key that comes off the URL, and NOTHING OBSERVABLE CHANGED:
+  `HumanGateBroker.resolve` has called `gateOf` since it was written, so
+  `POST /runs/:id/gates/__proto__` answered `404 E_GATE_NOT_FOUND` before the swap and
+  answers it after — measured, along with `constructor` and `toString`. What the swap buys
+  is that the file no longer contains the lookup `gateOf`'s own docstring exists to replace,
+  in the one function whose stated job is being the FIRST line for a graph that names
+  `(unidentified)`. **It leaves this list the moment that function stops having a second
+  line under it** — i.e. if anything ever calls it without `resolve` behind it.
+
+The same sweep found SEVEN guards that were unheld and could be held, and they are now
+pinned: the `__proto__` gate id in `projection.ts` (two conditions, one test), the
+`gate.escalated` missing-gate drop, `RunFolder`'s `lastSeq` skip and its non-numeric marker
+range, `spans.ts`'s start-once and its `headRatio >= 1` short-circuit, and `StateView.get`'s
+read allow-list. **The method is the point, not the list**: revert one condition, run the
+whole suite, count what turns red.
+
+**A LATER SWEEP OVER `run/gates.ts` FOUND TWO MORE OF THE SAME KIND, and the way each was
+MISSED is the reusable part.** Both are now pinned in `test/run/gate-saturation.test.ts`.
+
+- `resolveBatch`'s terminal-run check. It had a test named for it — *A BATCH ON A RUN THAT
+  HAS ENDED IS REFUSED* — **which passed for a different reason**: `Engine.cancel` closes
+  every open gate, so the batch was empty and the "every gate is already resolved" arm threw
+  first, with the same `E_GATE_ALREADY_RESOLVED` the check itself throws. One code, two
+  refusals, and the test could not tell them apart. Deleting the check left the whole suite
+  at **1223 pass / 0 fail** while `resolveBatch` decided two gates on a `failed` run and
+  walked two Tasks back to `ready`. The state that reaches it is an EXPIRY, not a cancel: a
+  gate expiry fails the run and leaves every sibling gate open. **A test named for a guard is
+  not evidence that it reached the guard — the way to find out is to delete the guard.**
+- `decisionOf`'s `default:` arm, which refuses a `decided` gate whose journaled `decision` is
+  in no vocabulary. Its own test's docstring CLAIMED the arm was held by it: "it turns red on
+  `decisionOf`'s `default:` arm answering `{kind: "approve"}` instead of `undefined`". It did
+  not — the two closings that test drives are `cancelled` and `expired`, which the state
+  conjunct rejects before `decisionOf` is called. With the arm mutated the suite stayed at
+  **1223 pass / 0 fail**. It is **A19 one layer in**: the unreadable decision would have been
+  copied onto a *second* gate by a system actor, in the append that raises it.
+
+**A THIRD SWEEP OVER `run/gates.ts` — 55 flips, one per guard in the D7.9 half — LEFT 21
+SURVIVORS, AND THE CLASSIFICATION IS THE OUTPUT.** Same method: one flip, whole suite, diff
+the failing SET. Five were real holes and are now pinned in `test/run/gate-saturation.test.ts`;
+each was re-run afterwards and turns exactly the named test red.
+
+- **`usableBatching`/`usableDedupe`'s `enabled !== true`.** The one field of either spec
+  nothing tested, and the one an author writes when they have thought about a mechanism and
+  decided against it. With it deleted, `batching: {enabled: false, …}` MERGED and
+  `dedupe: {enabled: false, …}` inherited a decision — a graph that declared the control off
+  got it on. *A SATURATION BLOCK THAT SAYS `enabled: false` IS OFF IN THE BROKER…*
+- **`sameGovernance`'s `key`, `windowMs` and `maxBatch` conjuncts.** The existing test named
+  for the founding-spec rule refuses its joiners for OTHER reasons — one by the cap being
+  full, one by the window having closed — so the equality itself was never reached. Without
+  the `key` conjunct two DIFFERENT questions (same approvers, same policy, different batching
+  key) merge into one manifest that one click closes. *A JOINER THAT DISAGREES ABOUT THE
+  POLICY STARTS ITS OWN BATCH, INSIDE THE WINDOW AND UNDER THE CAP.*
+- **`batchGovernance`'s unanimity loop.** With it deleted, a batch whose second row declares
+  `maxBatch: 2` admits members under the first row's `20` — whoever wrote that journal
+  chooses the cap by ordering the rows. *A BATCH WHOSE MEMBERS DISAGREE ABOUT ITS OWN POLICY
+  ADMITS NOBODY.*
+- **`#inheritable`'s "most recent identical decision".** Reduced to "first match wins", a
+  duplicate inherited an APPROVE that a later identical question had already had REJECTED.
+  *DEDUP INHERITS THE LATEST ANSWER TO THE QUESTION, NOT THE FIRST ONE FOUND.*
+- **`siblingReachedTier`'s `>=`.** No fixture had ever produced a member two tiers ahead of
+  its siblings, so `>=` narrowing to `===` re-paged a tier that had already seen the
+  manifest. *A MEMBER TWO TIERS AHEAD HAS ALREADY BEEN PAGED AT THE TIER BELOW IT.*
+
+The other 16 are the two harmless kinds, and they are listed so nobody spends the afternoon
+again: **equivalent by construction** — `batchGovernance`'s per-field re-validation of
+`key`/`windowMs`/`maxBatch`/`deliveryDigest` and `usableBatching`'s of `key`/`windowMs` (an
+applicant's marker is always valid, so a journal value that is NOT valid can never compare
+equal to it — `sameGovernance` refuses the join either way; both layers stay, and if both are
+deleted the behaviour DOES change); `batchFor`'s `gov === undefined` skip (`sameGovernance`
+already answers `false` for it); `sameGovernance`'s `a === undefined` arm (members are
+filtered on `batch !== undefined` before they get there); `#inheritable`'s `mirrorOf` early
+return (`sameAuthority` refuses a mirror on both sides — the same "stated twice, both stay"
+pair the file already documents for `decided`/`decisionOf`); `siblingReachedTier`'s
+self-exclusion and `raise`'s `batch.id !== gateId`, both of which became redundant in THIS
+wave's fixes (`next.tier` is always `gate.tier + 1` at the seq the page is decided at, and a
+founder's batch id is not in the projection the raise is decided at); `batchHasOpenMember`'s
+`length > 0` (`gateBatchGroups` never makes an empty bucket); `gateQueueOrder`'s explicit
+`raisedAtSeq` tie-break (the sort is stable and `openGates` is in journal order). **Two
+spellings of one outcome** — `resolveBatch`'s `members.length === 0` (the manifest check
+refuses with the same code) and its `taskId: ""` conditional. **A degenerate-but-harmless
+duration** — `isPositiveWholeMs` accepting `0` or `1.5`, which the compiler refuses anyway.
+And one that needs a hand-written journal to reach at all: `batchFor`'s id tie-break, since
+`batchFor` itself cannot produce two eligible batches with the same anchor.
+
+**THE ARITHMETIC HAS NOW BEEN WRONG TWICE AND MEASURED THREE TIMES, AND THE THIRD
+MEASUREMENT STATES ITS METHOD BEFORE ITS NUMBER — because that is the only thing that makes
+three different answers stop being a contradiction.** The three are: "twelve of thirty-seven
+turned nothing red" (37 mutations across several files, sampled); "**56** mutations over
+`telemetry/spans.ts` alone left **42** survivors"; and this one. A survivor count is a
+property of THE MUTATION SET, so it is a measurement of a set, not a fact about a file, and
+a number quoted without its set is unusable. **Do not compare these three.**
+
+The third, in full, so it can be repeated or refuted:
+
+| | |
+|---|---|
+| **Subject** | `packages/core/src/telemetry/spans.ts`, and nothing else |
+| **Set** | **83** mutations — exactly one flip per guard, comparison, ternary, and `isEvent` arm predicate in the file. No mutation removes a `name: "loom.*"` literal, because the drift guard kills those regardless of the guard under test (that is what mis-scored two of the previous sweep's) |
+| **Kill set** | `node --test --test-force-exit` over the **five** test files that can reach this module at all — `telemetry/spans.test.ts`, `run/replay.test.ts`, `run/gate-clock.test.ts`, `docs-drift.test.ts`, `cli/cli.test.ts`. Derived, not sampled: `spans.ts` is imported by exactly two src files (`cli.ts` and the barrel) and no test imports the barrel, so no other test can call `spansFrom`, `reconstructGraph`, `conformsToGraph` or `shouldExport`. **This cell used to claim the five were STRONGER than the whole suite, which is not a thing a strict subset can be** — every test here is in the suite, so the suite kills everything these kill and possibly more, and the honest claim is that it kills nothing more *for this subject*, because no other file can call the functions. What the subset actually buys is REPEATABILITY: fewer files means fewer ways to read a kill that is not one, which is the failure the row below is about. It was also the only option available: `test/server/http.test.ts` hung indefinitely under a sibling's concurrent edit and would have stalled the sweep at mutation 23 |
+| **Killed** | a test fails that was not already failing on the unmutated tree — the failing SET, never the count |
+| **Result** | **83 mutations, 24 survivors** |
+
+The 24, classified — and the classification is the useful output, not the number:
+
+| Kind | N | Which |
+|---|---|---|
+| **Cannot be observed** | 3 | `redact-links`, `attr`-on-closed, `note`-on-closed — the three added to the list above |
+| **Equivalent mutants** | 2 | `idText`'s string arm (a string falls through to `String(v)` and gets the same answer) and `shouldExport`'s `headRatio <= 0` short-circuit (`bucket < 0` is already false). No observer anywhere can distinguish these; they are not holes and never will be |
+| **An arm no fixture reaches** | 13 | the `isEvent` arms for `run.compiled`, `run.started`, `run.resumed`, `run.completed`, `run.failed`, `run.cancelled`, `task.leased`, `tool.called`, `effect.completed`, `effect.failed`, `task.failed`, `task.cancelled`, `task.skipped`. **Two of those are structurally unreachable** — `task.cancelled` and `task.skipped` have no appender at all (C1). The other eleven happen in the driven run `replay.test.ts` folds, and nothing asserts what they put on a span |
+| **The absent half of an optional attribute** | 2 | `task.ready`'s `binding` and `gate.escalated`'s `deadline`: every fixture supplies both, so "and it is absent when the payload has none" is unheld. **`binding`'s half is now held** — *A `task.ready` WHOSE binding IS null…* drives both the absent and the present case, and the arm it holds is no longer the same arm (it was `binding === undefined ? {} : binding.channel`, which threw a TypeError on `null` and cost the whole trace). `deadline`'s half is still unheld and is still only that |
+| **The taskless-event guard** | 2 | see **A17** (which was the second **A16** when this table was written). The gate half was closed and pinned first; **the Task-scoped half is now held too** — *A taskId THAT IS null OR EMPTY IS NO taskId* drives `task.ready` and `task.committed` under four bogus id shapes and asserts no `loom.task` span is minted. The guard it holds is likewise not the mutated one: the derivation is now a positive `typeof` test rather than `=== undefined` |
+| **A documented scoping statement** | 1 | `reconstructGraph`'s `s.name !== "loom.task"` skip, above. Its listing stands: it survives a mutation that introduces no literal |
+| **A boundary needing a hand-picked run id** | 1 | `bucket < headRatio` vs `<=`. Only distinguishable when a run's bucket is exactly the ratio, which is `k / 0xffff`; the ceiling test already shows how such an id is found |
+
+**Four survivors of the FIRST run of that sweep were real holes and are now pinned**, in
+`test/telemetry/spans.test.ts`: the run scope `close` passes to `redactAttributes` (dropping
+it puts every token under the process key — the cross-run oracle), the span-order
+comparator's tie-break (its fixture had to be chosen so the ids sort against insertion
+order, or a stable sort hides it), `gate.approver`'s human-only conjunct (the old assertion
+was `equal(x, undefined)`, which a PRESENT key holding `undefined` satisfies — the mutation
+produced exactly that), and `shouldExport`'s empty-journal read. The earlier nine that pass
+listed here remain pinned.
+
+**Diff the failing SET, never the count.** Three mutations in the previous sweep read as
+killed and were not: two replaced a `"loom.task"`/`"loom.run"` literal, which the drift
+guard flags on sight regardless of the guard under test, and `server/http.test.ts` fails
+intermittently on a port bind under load, which reads as a kill on whatever ran next. Both
+hazards are why the set above excludes name literals and the kill set above excludes files
+that cannot reach the subject.
+
+**E5 · `rewind`'s rejection scan over-refuses in one corner.** It reads `(atSeq, head]`
+without excluding events an *earlier* rewind already suppressed, so a rejection whose effect
+was already erased still blocks a new rewind. Fail-safe direction; the alternative needed
+`suppressedRanges` exported from `projection.ts`, which `export *` would have pushed into the
+pinned public surface.
+
+**E6 · A mid-flight cancel leaves the in-flight Task `leased` in the read model.**
+`#commit` returns early on a terminal run, and `cancel` appends no `task.cancelled` (C1), so
+task states after a cancel are consistent but untidy.
+
+**E8 · Two load-bearing refusals in `http.ts` have no test, and both fail open when removed.**
+Same method, same result — the suite is **1003 pass, 0 fail** with either one deleted.
+
+- **`presented.length === expected.length`** in `#sharedToken` is what stops the constant-time
+  compare degenerating into a **prefix match**. `presented.padEnd(expected.length,
+  "\0").slice(0, expected.length)` truncates anything longer than the secret, so without the
+  final length check a token that merely *starts* with the secret authenticates. Measured on
+  a live plane with `token: "s3cret"`, guard removed: `Bearer s3cretEXTRA` → **200**,
+  `Bearer s3cretX` → **200**, `Bearer s3cre` → 401, `Bearer s3crez` → 401.
+- **The non-string half of the constructor's token refusal** — `typeof token !== "string"` —
+  is not defensive typing. The compare is over LENGTH, so any zero-length value reproduces the
+  empty-string defect the sibling test documents. Measured with that half removed and
+  `token: [] as unknown as string`: the plane **constructs**, `openToEveryCaller` is `false`,
+  `/health` reports `auth: "required"` — and `GET /runs` **with no `Authorization` header at
+  all returns 200**. Every surface says the perimeter is up while there is none, which is the
+  exact failure the empty-string refusal exists to prevent, reached through the half nobody
+  tests.
+
+---
+
+## Documentation drift
+
+**Do not re-add a drift list.** The one that used to live here outlived its own items: it
+quoted four strings that had been removed, so a newcomer opening the file to fix them found
+none of the text and could not tell whether the work had been done or the file had moved —
+the one question such a list exists to answer. **A list of documentation to fix is itself
+documentation, and it rots faster than what it points at.** If drift is found, fix it in the
+change that records it; the diff is the record. What *is* worth keeping is the register
+above, which lists defects rather than edits, and `test/docs-drift.test.ts`, which turns the
+mechanisable part into a red test instead of a human's memory.
 
 ---
 
 ## Working on this codebase
 
 ```bash
-npm run check                            # THE gate: typecheck + 716 tests + both guards
+npm run check                            # THE gate: typecheck + the whole suite + both guards
 npm test                                 # tests only
 node scripts/check-surface.mjs --write   # re-pin the public surface, then COMMIT surface.json
 npm run build:binary                     # bin/loom; fails if any node_modules input appears
 ```
 
+If several agents or shells are working at once, **do not run `npm run check`, `npm run
+build` or a bare `tsc -b`** — concurrent `tsc -b` races on emit. Use
+`npx tsc -p packages/core/tsconfig.test.json` for a read-only typecheck and
+`node --test <file>` for a single suite.
+
 **Two CI guards will stop you, on purpose:**
 
 - **zero-dep** — parses every source file; a bare import specifier that is not `node:` fails
-  the build. It is a TS-parser check, not a regex, so it will not false-positive on a
-  string.
-- **surface** — pins all 426 public exports. Adding one is fine; it just has to be
-  deliberate. Re-pin and commit `scripts/surface.json` in the same change.
+  the build. It is a TS-parser check, not a regex, so it will not false-positive on a string.
+- **surface** — pins the public export set. Adding an export is fine; it just has to be
+  deliberate. Re-pin and commit `scripts/surface.json` in the same change that adds one.
+  It reads `dist/`, so a stale `dist/` gives a stale answer — build first.
 
-**Toolchain facts that shape the code** (all in `CLAUDE.md`, repeated because they cause
-the most confusion):
+**Toolchain facts that shape the code** (all in `CLAUDE.md`, repeated because they cause the
+most confusion):
 
 - Node 24 native type stripping. Tests run `.ts` directly — no build step, no `tsx`.
-- `erasableSyntaxOnly` is on: **no enums, no namespaces, no parameter properties.** The
-  last one bites; use explicit field assignments in constructors.
+  `engines.node` is `>=24.0.0`, and that is a **choice, not a floor either feature forces**:
+  type stripping runs unflagged from v22.18.0 and `node:sqlite` from v22.13.0, so the strict
+  floor they imply is 22.18. 24 is the LTS line this is developed and tested on, and the line
+  where `node:sqlite` stopped emitting an `ExperimentalWarning`.
+- `erasableSyntaxOnly` is on: **no enums, no namespaces, no parameter properties.** The last
+  one bites; use explicit field assignments in constructors.
 - Source imports use `.ts` specifiers. `tsc` rewrites to `.js` on emit. Never write `.js`.
-- `exactOptionalPropertyTypes` is on: `foo?: T` and `foo: T | undefined` differ. Build
-  objects conditionally — `...(x === undefined ? {} : { x })`.
+- `exactOptionalPropertyTypes` is on: `foo?: T` and `foo: T | undefined` differ. Build objects
+  conditionally — `...(x === undefined ? {} : { x })`.
+- **macOS `grep` silently skips files it decides are binary**, which includes several source
+  files here because they contain `→`, `≥` or `·`. `grep -ran` where a plain `grep -rn`
+  returns nothing that you expected. This cost real time in this very wave: a symbol that
+  exists in `server/http.ts` read as absent.
 
 **Conventions that are load-bearing, not stylistic:**
 
 - Every module docstring says *why it exists*, not what it does.
 - Every non-obvious decision gets a `JOURNAL.md` entry with its reversal condition.
 - Tests are offline and deterministic. Inject clocks and ids; never read the wall clock.
-- **Commits under the human author's identity only.** No AI attribution, no
-  `Co-Authored-By`, no assistant links. Non-negotiable, carried over from EAgent.
+- **Commits under the human author's identity only.** No AI attribution, no `Co-Authored-By`,
+  no assistant links. Non-negotiable, carried over from EAgent.
 
 ---
 
@@ -173,29 +1545,198 @@ the most confusion):
 Each of these cost real debugging time. They are recorded in `JOURNAL.md` in full; this is
 the short list so you recognise the shape.
 
-**Absence is not zero.** `verdict.score < 0.7` is **false** when `verdict` is absent, in
-both the expression language and `isLowConfidence`. The idiom is `has(v) && v.x < 1`. A
-system that coerced absence to `0` would escalate every run whose evaluator returned a
-bare `{pass: true}` — and an alarm that always fires is one people learn to ignore.
+**A guard that is missed twice should be made unrepresentable, not re-added.** Gate
+authorization was derived from the node in `#commit`, so a tool's posture gate and a
+subgraph's mirror journaled no approvers and no allow-list — the same omission, twice, in the
+two gates humans answer most. It is now a **required** `auth` field on `NodeOutcome.gate`
+computed in one place, and the broker's in-memory map is typed `EphemeralGate` so that reading
+an authorization decision out of process memory is a compile error. The question "did you
+think about authorization here?" belongs to the compiler, not to a reviewer's memory.
+
+**An audit label that becomes an authorization key needs its provenance re-examined.** The
+control plane's `subject` started as something to write in the journal and silently became
+the thing matched against approvers lists. Nobody revisited where it came from, so for three
+waves it came from the **request body**: one shared token plus `{"actor":"u:security-lead"}`
+decided a gate naming the security lead, while the honest console got 403. Forgery was the
+only workflow that worked. When a field changes job from *describing* to *deciding*, re-ask
+who supplies it.
+
+**A declared-and-folded event with no appender is a designed transition that was never
+wired.** `gate.cancelled` was in `EVENT_TYPES` and folded by `projection.ts` — which is what
+made it so easy to believe in — and written by nothing, so cancelling a run left its gates
+open and answering one walked the run back to `succeeded`. Nothing about that is visible from
+any single file; only "who appends this?" finds it. `docs-drift.test.ts` now asks that
+question mechanically and names eight more.
+
+**A terminal operation is not final until every producer of the state it ends is also
+stopped.** Closing the gates that exist at cancel time was one of four fixes. A Task already
+in flight can `raise` a *new* gate on a dead run; `rewind` can suppress the terminal event and
+reopen every gate at once; the success path reaches `#finish` without passing the check that
+was supposed to make gate closure unnecessary there; and the fold's terminal guard covered one
+event rather than the status. Ask what else can *create* the state, not only what can read it.
+
+**An exemption justified by a claim about a different function survives exactly until that
+function changes.** `#finish` skipped gate closure on `run.completed` because "`advance`
+re-suspends rather than finishing while a gate is open" — true of `advance`, and irrelevant
+to the budget and fatal floors that reach `#finish` directly.
+
+**A read model can silently encode a deployment assumption, and so can its consumer.**
+`task.leased` always carried a `workerId` and a fencing token; the fold threw both away
+because with one worker there is nothing to ask. That was fixed — and then the *scheduler*
+was found doing the same thing one layer up, filtering reclaim candidates out of a set that
+by definition excluded them. If you add a second worker to anything, check what the
+projection discards **and** what its readers assume about state.
+
+**Absence is not zero.** `verdict.score < 0.7` is **false** when `verdict` is absent, in both
+the expression language and `isLowConfidence`. The idiom is `has(v) && v.x < 1`. A system that
+coerced absence to `0` would escalate every run whose evaluator returned a bare `{pass: true}`
+— and an alarm that always fires is one people learn to ignore. The same asymmetry runs
+through the gate layer: an empty approvers list is the **permissive** case, so "named nobody"
+and "could not read who it names" must never produce the same value.
 
 **Approve means "go ahead", not "consider it done".** On a `human_gate` node, approving
-completes it — that node *is* the decision. On every other node type there is work behind
-the gate. This was a real bug: the run reported success and the action never happened.
+completes it — that node *is* the decision. On every other node type there is work behind the
+gate. This was a real bug: the run reported success and the action never happened.
 
-**A read model can silently encode a deployment assumption.** `task.leased` always carried
-a `workerId` and a fencing token; the fold turned it into a state and threw both away,
-because with one worker there is nothing to ask. If you add a second worker to anything,
-check what the projection is discarding.
+**`instanceof` proves a prototype, not provenance.** `toLoomError` returns the value unchanged
+when `isLoomError(e)`, so a channel's booby-trapped error escaped *with* its traps intact and
+detonated one layer out, inside `LoomError.toJSON` on the HTTP path. Four waves running, the
+untyped exit from `run/delivery.ts` was a read of an injected value on an error path, each
+fixed one property before the next. The answer was one boundary, not a fifth local `try`.
 
-**`node:vm` is not a sandbox.** `resources/functions.ts` uses it for *scoping* — so a
-trusted `function` body cannot reach `process.env` by accident. Untrusted code goes
-through `sandbox/subprocess.ts`. The docstring says this; do not let it drift.
+**"Is this value a plain bag?" has no answer, so stop asking it and make the READS total.**
+One guard reached its *third* spelling — `typeof x !== "object"`, then prototype identity,
+then prototype identity plus `Array.isArray` — and each was defeated one shape over, the last
+by `new Proxy(target, {getPrototypeOf: () => Object.prototype})` and, more embarrassingly, by
+`{}`. **A `Proxy` must tell the truth about exactly one observable an inspector can ask for:
+the extensibility of its target.** Everything else — the prototype, `hasOwnProperty`, the
+value, the key list — is a trap it can forge or make throw. So a container test can refuse
+the shapes it *recognises* and can never decide the question, and the fix is the one
+`run/delivery.ts` already made: read each value through one total accessor and judge what
+came back. `reconstructGraph` deleted its predicate that way and gained `{}` and the
+`Proxy` for free; `redactAttributes` could not (there, "declared nothing" and "declarations
+unreachable" are the same observation), so it keeps a **named-shape refusal** whose docstring
+says what it cannot decide, plus a test that holds the limit executable. When a guard reaches
+its third iteration, the question is wrong.
+
+**"Make the READS total" is a claim about a SET of reads, so the next wave's job is to
+enumerate the set, not to re-argue the principle.** Both files that adopted it shipped with the
+principle right and the set short, and in both cases the survivor was a sibling of a read that
+had just been fixed — a few lines away, answering the same question, answering it differently.
+`attributeClass` wrapped two `Proxy`-trappable reads in a `try` and left the shape test that
+*decides whether they are safe to make* one line above it. `reconstructGraph` routed every claim
+through `readProp` and then walked the claim's CONTENTS with `for (const id of list)`, which
+`Array.isArray` does not protect — it is proxy-agnostic, and an ordinary array can carry an
+accessor at index 0 — so a bag whose "only remaining move is to ANSWER" could answer and then
+throw. The mechanical version of the habit: after fixing a read, grep the file for every other
+expression that touches the same value, and write the list into the claim. A claim that names
+its set can be checked; "both arguments are total" cannot.
+
+**And the two that followed are the same shape a THIRD and FOURTH time, both inside
+`telemetry/spans.ts`, and each one was the read the previous fix had been standing on.** The
+warning above did not prevent either, which is the point of recording them: the habit has to be
+*run*, not agreed with.
+
+- **The fix for the inner list left the OUTER one.** `reconstructGraph`'s claim loop was made
+  total by `length`-then-index through `readProp` — and the statement that hands it each span,
+  `for (const [i, s] of spans.entries())`, is the identical construction over the identical
+  kind of untrusted container, one level up in the same function. `.entries` is a property read
+  on the argument and the iterator does a `[[Get]]` per element; `Array.isArray` answered
+  `true` to a `Proxy` and to an array with an accessor at index 0 for both. Measured, node
+  v24.16.0: `Error: outer element getter`, `Error: outer get trap`, `Error: outer entries
+  trap`, each straight out of the verification function.
+- **The new guard's own next read was bare.** `isList` was added so `Array.isArray` could not
+  throw, and `conformsToGraph` then read `unreadableSpans.length` — one line below the guard
+  that had just accepted the value. `IsArray` unwraps a `Proxy` to its TARGET, so a `Proxy`
+  over `[]` whose every trap throws is *truthfully* a list and every read of it still throws.
+  Found by a 252-combination sweep rather than by reading, and it was the sweep's only
+  survivor. **A container test and the reads that follow it are two separate claims, and
+  answering the first one `true` licenses nothing.**
+
+**And `run/delivery.ts` is the third file, which makes the pattern the rule rather than a
+coincidence — three siblings, all in one prelude, each a few lines from the fix that named
+them.** `ownedRecipients` was given the total-read treatment under the sentence "the elements
+now go through `readProp` like every other read of a value from outside"; `ownedList`, 45
+lines up, kept `[...v]`, and a spread is a read of the elements — reproduced on a real array
+with an accessor at index 1, `deliver` exited with the caller's own `Error`, no delivery, no
+fallback, no journal row. `ownedWrites` was moved to shape-check its INPUT; `ownedBatch`,
+written in the same change 170 lines above it, kept the result check, so a `Map` batch
+rendered `{}` — the shape a gate in NO batch has — and `ownedDecision`'s `edit` arm, on the
+callback path, kept it too: a `Map` of a human's edits was journaled as
+`{"decision":"edit","writes":{}}` with the action behind the gate RUN.
+
+**And the question the sibling table never asked is "WHO READS THIS HELPER'S OUTPUT, AND DO
+THEY READ IT BARE?" — because a total producer feeding a bare consumer is still a bare
+read.** `ownedRecipients` was fixed twice under that table and kept feeding
+`formatRecipients`, which read the elements, `r.kind` and `r.id` bare and coerced both, four
+lines outside every try in `ConsoleChannel` — **the fallback, the channel whose docstring
+says it cannot fail so that "nobody was told" is never the outcome.** Reproduced end to end
+through `GateDispatcher`, with `recipients: [{kind: {toString(){throw}}, id: "sre", self:
+<cycle>}]` reaching it through `addressOnly`'s own unchecked copy: **`delivered: 0,
+failed: 2, fellBack: false`** — because the built-in fallback IS a `ConsoleChannel`, so it
+failed identically. The same function's OTHER caller is worse and no `owned*` helper stands
+in front of it: `HumanGateBroker` builds `gate.escalated{to}` from the compiled graph's own
+recipients array, and a throw there lands in `sweepTimeouts`' per-gate `catch` — measured,
+four sweeps over 3 000 s, `fired: 0` each time, gate frozen at tier 0 on its original
+deadline, **nothing on the journal saying why.** A silent permanent non-escalation, reached
+from a graph that compiles. The mechanical version: for every helper that makes a value
+total, list its READERS and ask what each one does to the value — `${x}` is a call,
+`x.map` is a call, and a marker only helps a reader that does not then coerce it.
+
+**And the third case of a taxonomy is a coin flip unless it is decided from the assertion.**
+`ownedList` and `ownedRecipients` got per-index degrades in one wave and answered an
+unreadable element two different ways — a marker and `{kind: undefined, id: undefined}`, an
+address of nobody indistinguishable from a recipient that declares neither field (measured:
+both came out of the dispatcher as `[{}]`). Neither answer is wrong in general; the split is
+decided by the ELEMENT TYPE. `ownedList` serves lists of STRINGS, so a bare marker is in
+shape. `recipients` is a list of RECORDS every reader indexes into, so the marker goes in the
+FIELD and the record survives. The question to ask of a new case is never "which existing
+function does this resemble?" but "what does this value ASSERT to its reader, and what must
+be true for that assertion to hold?"
+
+**The new platform fact, and it corrects the paragraph above: `Array.isArray` cannot be
+forged and it is not TOTAL.** `IsArray` follows a proxy to its target, which is why this
+codebase reaches for it — and on a REVOKED proxy it THROWS (`TypeError: Cannot perform
+'IsArray' on a proxy that has been revoked`, node v24.16.0), because the revoked handler is
+`null`. It was the last bare call in a prelude that sits outside every try, at four sites;
+every other accessor there already caught (`JSON.stringify`, `getOwnPropertyNames`,
+`getPrototypeOf`, a plain `[[Get]]` all throw on one too). Un-forgeable and safe-to-ask are
+different properties, and a sweep organised by the first will keep missing the second.
+
+**And the sweep that recorded it stopped at the file it was in.** `telemetry/spans.ts` named
+`Array.isArray` in `readProp`'s docstring as one of the two ways it reads an untrusted trace
+TOTALLY, while all three of its calls were bare — the argument guard in `reconstructGraph`,
+the claim-container test, and the one that ends in the verdict a CI job reads,
+`conformsToGraph`'s. Each threw on a revoked `Proxy` out of a function whose whole job is to
+answer `ok` or `not ok`. All three now go through `isList` (the call in a `try`, `false` on a
+throw, which is the fail-closed direction at each). **A platform fact written into one file's
+Traps entry is not a fix in the other files that call the same API: when one lands here, grep
+the tree for the API, not for the file.** The sweep is
+`grep -ran 'Array\.isArray' packages/core/src`, which finds it in **twenty files** — and this
+wave swept **three** of them, so what follows is a clearance for those three and an open
+question for the rest, not a tree-wide all-clear:
+
+- **`server/http.ts`** (twelve occurrences) and **`cli.ts`** (eight) — every one is over a
+  `JSON.parse` result (a request body, a graph file, an identity file, `--input` argv) or over
+  Node's own `req.headers` record. Neither source can produce a `Proxy`, so `Array.isArray`
+  cannot throw there. **CLEARED, by enumeration.**
+- **`server/console.ts`** — one, in `loadGates`, over a `fetch().json()` result. Same
+  argument. **CLEARED.**
+- **The other sixteen files are UNSWEPT** — `security/redact.ts`, `state/channels.ts`,
+  `graph/expr.ts`, `run/context.ts`, `run/engine.ts`, `run/delivery.ts` and the rest. The
+  question to ask of each is not "is this value a list" but **"can a caller outside this
+  process's own code put a revoked `Proxy` here?"** — which is the same question `readProp`
+  was written for, one API over.
+
+**`node:vm` is not a sandbox.** `resources/functions.ts` uses it for *scoping* — so a trusted
+`function` body cannot reach `process.env` by accident. Untrusted code goes through
+`sandbox/subprocess.ts`. The docstring says this; do not let it drift.
 
 **Cross-realm values look identical and are not.** Objects a `vm` body returns have a
-different `Object.prototype`. Worse: `Array.prototype.map` goes through
-`ArraySpeciesCreate` and uses the *array's own* constructor, so mapping a cross-realm array
-does nothing at all. `intoHostRealm` uses `Array.from`. `Array.isArray` is realm-agnostic
-and will pass either way — assert on the prototype.
+different `Object.prototype`. Worse: `Array.prototype.map` goes through `ArraySpeciesCreate`
+and uses the *array's own* constructor, so mapping a cross-realm array does nothing at all.
+`intoHostRealm` uses `Array.from`. `Array.isArray` is realm-agnostic and will pass either way
+— assert on the prototype.
 
 **Under reserve-worst-case, "80% consumed" is ambiguous.** Committed exposure peaks at the
 reservation and falls back when `settle` credits the real cost — a 40× swing with the mock
@@ -209,10 +1750,12 @@ every built-in tool had been unusable by any graph that had not guessed its inte
 
 ## The one habit worth keeping
 
-Every wave of this build found defects by running a *new shape* of thing, not by adding
-tests to an existing shape. A restart found the gate bug. A branch that recovers found the
-join bug. A router found three compiler over-approximations. Four minutes as a *user* —
-copying the binary into an empty directory and hand-writing a graph — found the tool
+Every wave of this build found defects by running a *new shape* of thing, not by adding tests
+to an existing shape. A restart found the gate bug. A branch that recovers found the join bug.
+A router found three compiler over-approximations. Two workers folding real journals found a
+reclaim path that was structurally unreachable. Reverting one guard condition at a time and
+counting the tests that go red found eight guards nothing was holding. Four minutes as a
+*user* — copying the binary into an empty directory and hand-writing a graph — found the tool
 channel bug that three test workflows structurally could not.
 
 When something feels covered, it is covered *for the shapes that exist*. Build a new one.
