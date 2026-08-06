@@ -181,11 +181,73 @@ test("LeasedScheduler SKIPS A TASK ANOTHER WORKER HOLDS", () => {
 });
 
 test("LeasedScheduler RECLAIMS AN EXPIRED LEASE — a dead worker must not strand a Task", () => {
+  // `ready` WITH a lease is the retry/gate shape: something returned the Task to the
+  // queue without clearing who last held it. See below for the shape that actually
+  // happens when a worker dies, which this test spent a while not covering.
   const p = projectionWith([{ nodeId: "a", state: "ready", lease: { workerId: "w2", at: 0, fencingToken: 1 } }]);
   const s = new LeasedScheduler({ leaseMs: 5000 });
 
   assert.equal(s.select(input({ projection: p, now: 4000, workerId: "w1" })).length, 0, "still held");
   assert.equal(s.select(input({ projection: p, now: 6000, workerId: "w1" })).length, 1, "expired, so reclaimable");
+});
+
+test("LeasedScheduler RECLAIMS A TASK STRANDED IN `leased`, which is what a dead worker leaves", () => {
+  // The state a Task is in when its holder never came back: `task.leased` folded, no
+  // terminal event after it. `eligible()` filters this out by design — it is this
+  // process's in-flight work when there is only one process — so reclaim cannot be a
+  // filter over it. Getting this wrong strands the Task for the life of the run.
+  const p = projectionWith([{ nodeId: "a", state: "leased", lease: { workerId: "w2", at: 0, fencingToken: 3 } }]);
+  const s = new LeasedScheduler({ leaseMs: 5000 });
+
+  assert.equal(s.select(input({ projection: p, now: 4000, workerId: "w1" })).length, 0, "w2 may still be alive");
+  const out = s.select(input({ projection: p, now: 6000, workerId: "w1" }));
+  assert.deepEqual(out.map((x) => x.task.nodeId), ["a"], "and once it cannot be, w1 takes over");
+});
+
+test("LeasedScheduler treats a lease expiring EXACTLY AT `now` as LIVE", () => {
+  // The two mistakes are not symmetric. Calling a live lease dead double-executes a Task
+  // that may already have sent the email; calling a dead one live costs one poll.
+  const s = new LeasedScheduler({ leaseMs: 5000 });
+  for (const state of ["ready", "leased"] as const) {
+    const p = projectionWith([{ nodeId: "a", state, lease: { workerId: "w2", at: 1000, fencingToken: 1 } }]);
+    assert.equal(s.select(input({ projection: p, now: 6000, workerId: "w1" })).length, 0, `${state}: at the deadline`);
+    assert.equal(s.select(input({ projection: p, now: 6001, workerId: "w1" })).length, 1, `${state}: one tick past it`);
+  }
+});
+
+test("LeasedScheduler does NOT reclaim its own LIVE lease, because that Task is running now", () => {
+  // A `ready` Task carrying this worker's lease is a resumption; a `leased` one is work
+  // in flight in this very process, and the projection cannot tell it apart from a
+  // crashed predecessor that reused the id. Expiry therefore applies to us too.
+  const p = projectionWith([{ nodeId: "a", state: "leased", lease: { workerId: "w1", at: 0, fencingToken: 1 } }]);
+  const s = new LeasedScheduler({ leaseMs: 5000 });
+
+  assert.equal(s.select(input({ projection: p, now: 4000, workerId: "w1" })).length, 0, "re-running it is the bug");
+  assert.equal(s.select(input({ projection: p, now: 6000, workerId: "w1" })).length, 1, "after a restart, resuming is right");
+});
+
+test("LeasedScheduler still respects a retry backoff on a Task it RECLAIMS", () => {
+  const p = projectionWith([
+    { nodeId: "a", state: "leased", retryAfter: 9000, lease: { workerId: "w2", at: 0, fencingToken: 1 } },
+  ]);
+  const s = new LeasedScheduler({ leaseMs: 5000 });
+  assert.equal(s.select(input({ projection: p, now: 6000, workerId: "w1" })).length, 0, "lease lapsed, backoff has not");
+  assert.equal(s.select(input({ projection: p, now: 9500, workerId: "w1" })).length, 1);
+});
+
+test("LeasedScheduler will not reclaim a `leased` Task with NO recorded lease", () => {
+  // A shape the fold cannot produce, so the only honest reading is "no deadline to
+  // reason from" — which resolves the same way the boundary does: still live.
+  const p = projectionWith([{ nodeId: "a", state: "leased" }]);
+  const s = new LeasedScheduler({ leaseMs: 1 });
+  assert.deepEqual(s.select(input({ projection: p, now: 1e9, workerId: "w1" })), []);
+});
+
+test("InProcessScheduler never reclaims, because a `leased` Task is its OWN work in flight", () => {
+  // The reclaim path must not leak into the single-worker default: there, a stale-looking
+  // lease is this process's current wave, and re-selecting it double-runs it.
+  const p = projectionWith([{ nodeId: "a", state: "leased", lease: { workerId: "w1", at: 0, fencingToken: 1 } }]);
+  assert.deepEqual(new InProcessScheduler().select(input({ projection: p, now: 1e9 })), []);
 });
 
 test("LeasedScheduler takes back its OWN lease without waiting", () => {

@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { EVOLUTION_ACTOR, PolicyEngine, type PolicyActor, type PolicyRequest } from "../../src/run/policy.ts";
-import type { NodeId, RunId } from "../../src/ids.ts";
+import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
 import type { IrreversibilityClass } from "../../src/vocab.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
@@ -318,6 +318,76 @@ test("rejecting fails the Task and takes no money", async () => {
   const p = await approve(r, runId, { kind: "reject", reason: "not this account" });
   assert.equal(p.status, "failed");
   assert.equal(r.charged(), 0);
+});
+
+// ── two gates open at once ───────────────────────────────────────────────────
+
+/** Two independent gates, with the irreversible action behind only one of them. */
+function twoGateSpec(): GraphSpec {
+  const base = chargeSpec();
+  return {
+    ...base,
+    nodes: [
+      { id: "ask" as NodeId, type: "human_gate", reads: ["amount"], humanGate: { ref: "oversight/ask@stable" } },
+      { id: "hold" as NodeId, type: "human_gate", reads: ["amount"], humanGate: { ref: "oversight/hold@stable" } },
+      ...base.nodes,
+    ],
+    edges: [{ id: "h" as EdgeId, from: "hold" as NodeId, to: "charge" as NodeId, kind: "seq" }],
+  };
+}
+
+test("ANSWERING ONE GATE DOES NOT ABANDON ANOTHER", async () => {
+  // `gate.decided` carries an unconditional `run.resumed`, so answering either of two open
+  // gates puts the whole run back to `running`. The work behind the answered one then ran,
+  // drained, and left `advance` with no ready Task — which it read as "nothing left to do"
+  // and finished on. The run reported a terminal status with a human still being asked, the
+  // console kept an open gate for a run that had already ended, and the action behind that
+  // gate never happened. "No ready Task" and "nothing left to do" are not the same claim.
+  const r = chargeRig();
+  const graph = compileOrThrow({
+    spec: twoGateSpec(),
+    resolver: resolver(),
+    tools: {
+      "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay:write"], irreversibility: "irreversible", idempotent: false },
+    },
+    tenantCapabilities: ["pay:write"],
+  });
+  const runId = await r.engine.submit({ graph, inputs: { amount: 10 } });
+  let p = await r.engine.advance(runId);
+
+  const open = Object.values(p.gates).filter((g) => g.state === "open");
+  assert.equal(open.length, 2, "both entry gates are raised in the same wave");
+  const ask = open.find((g) => g.nodeId === "ask")!;
+  const hold = open.find((g) => g.nodeId === "hold")!;
+
+  p = await r.engine.resolveGate(runId, {
+    gateId: ask.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "ask",
+  });
+
+  assert.equal(p.status, "awaiting_gate", "THE RUN IS STILL WAITING ON A HUMAN, and says so");
+  assert.equal(p.gates[hold.gateId]?.state, "open");
+  assert.equal(r.charged(), 0);
+
+  // …and the second answer still gets all the way through.
+  p = await r.engine.resolveGate(runId, {
+    gateId: hold.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "hold",
+  });
+  assert.equal(p.status, "awaiting_gate", "the charge's own posture gate is next");
+  const posture = Object.values(p.gates).find((g) => g.state === "open")!;
+  p = await r.engine.resolveGate(runId, {
+    gateId: posture.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "posture",
+  });
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(r.charged(), 1);
 });
 
 test("an edit SUBSTITUTES the human's outcome rather than running the action", async () => {

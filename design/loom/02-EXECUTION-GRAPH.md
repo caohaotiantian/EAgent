@@ -439,7 +439,7 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 | `GRAPH011` | Every node with irreversibility ≥ `irreversible` has an `error` edge or an explicit `unhandled: true` | warning | static |
 | `GRAPH012` | `compensation` edges only originate from nodes whose tool declares a compensation | error | tool manifest lookup |
 | `GRAPH013` | `last_write_wins_by_ts` used | warning | makes replay clock-dependent |
-| `GRAPH014` | **Oversight conformance**: no node declares a posture below the effective system/tenant floor for its irreversibility class | **error** (`E_OVERSIGHT_LOOSENED`) | posture lattice comparison |
+| `GRAPH014` | **Oversight conformance**: no node declares a posture below the effective system/tenant floor for its irreversibility class, and no `human_gate` declares an approval rule the runtime does not enforce | **error** (`E_OVERSIGHT_LOOSENED` for the posture case; `E_GRAPH_INVALID` for the rest) | posture lattice comparison, plus a structural check on `humanGate.approval` |
 | `GRAPH015` | Every resource ref resolves and is not `deprecated`/yanked | error | resource layer lookup |
 | `GRAPH016` | `subgraph` nesting depth ≤ `maxDepth`; no cyclic subgraph reference | error | traversal over pinned digests |
 | `GRAPH017` | Declared capabilities ⊆ tenant-granted capabilities | error | set containment |
@@ -454,6 +454,40 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 > no inbound edge **except a loop back-edge**, so a compensation target is not treated
 > as a start node; and an edge condition may reference its source node's
 > `reads ∪ writes`, because edge conditions evaluate on post-commit state.
+
+> **A code in this table is a *family*; the diagnostic carries the sub-code.** Every
+> `Diagnostic.code` is `GRAPHnnn_REASON`, and `test/docs-drift.test.ts` checks that each
+> `GRAPHnnn` family the compiler can emit appears here — the reason, not the family, is
+> what an author reads. `GRAPH014` currently emits six DISTINCT sub-codes from seven call
+> sites — count them with
+> `grep -aoE 'GRAPH014_[A-Z_]+' packages/core/src/graph/validate.ts | sort -u | wc -l`
+> rather than trusting this sentence, which has been wrong before. (`grep -c` counts LINES
+> and answers 7: `GRAPH014_DELIVERY_INVALID` is pushed from two places, once as an error and
+> once as a warning. A count is only as good as the command under it.)
+> `GRAPH014_OVERSIGHT_LOOSENED` (error, and the only one that surfaces as
+> `E_OVERSIGHT_LOOSENED` rather than `E_GRAPH_INVALID`), `GRAPH014_GATE_GATES_NOTHING`
+> (**warning** — a `human_gate` with no non-error outbound edge, so approving it does
+> nothing), `GRAPH014_APPROVAL_UNSUPPORTED` (error — `mode` other than `single`, a `k`,
+> `separationOfDuties`, or `delegation`; see the deviation note in **D7.2**),
+> `GRAPH014_APPROVER_INVALID` (error — an approver that is not a subject string),
+> `GRAPH014_SLA_INVALID` (error — a `humanGate.sla` the runtime would not run: a
+> `respondWithinMs` that is not a positive whole number of ms, an `onTimeout` a graph
+> cannot ask for, or `onTimeout: escalate` with no `delivery.escalation` chain behind it,
+> which expires at the first deadline and therefore reads as *escalate* and behaves as
+> *fail*), and `GRAPH014_DELIVERY_INVALID` (error, plus one warning — a `humanGate.delivery`
+> block naming no channels, a malformed `{kind, id}` recipient, a blank `redact` field, an
+> unknown `redactAs`, a non-positive tier `afterMs`, or a terminal `action: fail` tier
+> sitting anywhere but last, where every tier after it is unreachable).
+>
+> The unsupported-approval errors are deliberate: an oversight rule accepted and not
+> enforced looks supervised and is not. Two things `GRAPH014` deliberately does **not**
+> check, for the same reason inverted — a compiler asserting something the runtime does not
+> mean is its own kind of lie. **Channel NAMES** are not checked, because a `GateDispatcher`
+> is built by the deployment and there is no list to check against; an unknown name is
+> already `gate.delivery_failed` plus the console fallback at run time, and delivery failure
+> never auto-approves. **Escalation `afterMs` monotonicity** is not checked, because
+> `afterMs` is each tier's OWN window measured from the previous tier's breach, so a chain
+> that tightens as it climbs is a legitimate escalation.
 
 **Termination is bounded, not proved.** Loom does not attempt to prove a graph
 terminates; it makes non-termination *impossible by construction* via mandatory
@@ -593,7 +627,7 @@ indistinguishable — from the executor's point of view — from any other tool.
 | **Retries, backoff, circuit breaking** | Reliability policy, not workflow semantics. Putting it in the graph doubles every node | `retry:` block, journaled `task.retry_scheduled` |
 | **Resource resolution and caching** | Infrastructure. Its result — the resolution manifest — *is* in the RunGraph | pinning rule (**D8**) |
 | **Capability prompts and policy evaluation** | A cross-cutting concern that would otherwise appear as a gate node before every single node | `PolicyEngine`, journaled `policy.decided` |
-| **Context assembly and compaction** | A deterministic function of declared `contextProjection`s; making it a node would let it be reordered, which would break determinism | `ContextAssembler` (**D6**), emits `loom.context.assemble` |
+| **Context assembly and compaction** | A deterministic function of declared `contextProjection`s; making it a node would let it be reordered, which would break determinism | `ContextAssembler` (**D6**); the `loom.context.assemble` span is designed, not emitted — see the walkthrough note below |
 | **Telemetry, audit, cost accounting** | Observers. A graph that contains its own observers cannot be reasoned about | derived read models |
 | **Human *conversation*** (chat back-and-forth) | A gate is a *decision*, not a dialogue. Threading free-form chat through a graph makes termination unprovable | `human_gate` with `edit`/`redirect` decisions; free-form chat is a separate `single-agent` Run |
 
@@ -632,7 +666,7 @@ sequenceDiagram
   OT->>OT: start span loom.run (root)
 
   loop until no ready Tasks
-    SC->>SC: pick by weighted deficit round-robin (Run → Tenant)
+    SC->>SC: Scheduler.select — critical path, ONE run, slice to maxParallelism<br/>(the dwrr design is D6.2; this is what runs)
     SC-->>EX: Lease{taskId, fencingToken, attempt}
     EX->>OT: start span loom.task
     EX->>PE: decide(node, actor, irreversibility, budget)
@@ -679,20 +713,64 @@ sequenceDiagram
 | 4 | **Durable acknowledgement** | `loom.request` event `run.durable` | `run.id`, `seq` | `run.submitted`, `run.compiled` |
 | 5 | 202 returned to client | — | `http.status_code=202` | — |
 | 6 | Admission + tenant budget reservation | `loom.schedule.admit` | `tenant.id`, `queue.depth`, `concurrency.used/limit`, `admit.decision` | `budget.reserved` |
-| 7 | Run root span opened | `loom.run` | `run.id`, `workflow.name`, `graph.hash`, `oversight.posture`, `budget.cost_usd` | `run.started` |
-| 8 | Task selection (fair queue) | `loom.schedule.pick` | `sched.policy=dwrr`, `sched.deficit`, `task.class`, `wait_ms` | `task.leased` |
+| 7 | Run root span opened | `loom.run` | `run.id`, `workflow.name`, `graph.hash`, `idempotency.key`, `config.digest`, `graph.nodes`, `graph.edges`, `resources.pinned`, `oversight.posture` | `run.started` |
+| 8 | Task selection | `loom.schedule.pick` | `sched.policy=dwrr`, `sched.deficit`, `task.class`, `wait_ms` | `task.leased` |
 | 9 | Policy decision for the node | `loom.policy` | `policy.effect`, `policy.posture`, `policy.reasons[]`, `irreversibility.class` | `policy.decided` |
 | 10 | Context assembly (agent nodes) | `loom.context.assemble` | `ctx.sections[]`, `ctx.tokens.before/after`, `ctx.compaction.applied`, `ctx.projection.channels[]` | — |
-| 11 | Model call | `loom.model` | `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`, `loom.cost_usd`, `loom.effect.key`, `loom.replayed` | `effect.started`, `model.called`, `effect.completed` |
-| 12 | Tool call | `loom.tool` | `tool.name`, `tool.version`, `tool.irreversibility`, `tool.idempotent`, `tool.capability`, `tool.attempt`, `loom.effect.key` | `effect.started`, `tool.called`, `effect.completed` |
-| 13 | State reduction | `loom.state.reduce` | `channels[]`, `reducer[]`, `branch.count`, `state.hash.before/after` | `state.reduced` |
-| 14 | Task commit | `loom.task` (end) | `task.id`, `node.id`, `node.type`, `task.attempt`, `task.status`, `branch.path`, `edges.in[]`, `edges.taken[]` | `task.committed` |
+| 11 | Model call | `loom.model` | `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`, `loom.cost_usd`, `loom.effect.key`, `effect.kind`, `effect.outcome`, `loom.replayed` | `effect.started`, `model.called`, `effect.completed` |
+| 12 | Tool call | `loom.tool` | `tool.name`, `tool.version`, `tool.irreversibility`, `tool.idempotent`, `loom.effect.key`, `effect.kind`, `effect.outcome` | `effect.started`, `tool.called`, `effect.completed` |
+| 13 | State reduction | `loom.state.reduce` | `channels[]`, `branch.count`, `skipped`, `degraded`, `state.hash.before/after` | `state.reduced` |
+| 14 | Task commit | `loom.task` (end) | `task.id`, `node.id`, `task.attempt`, `worker.id`, `task.status`, `branch.path`, `branch.item_channel` (fan-out branches only), `edges.in[]`, `edges.taken[]` | `task.committed` |
 | 15 | Checkpoint (if declared) | `loom.checkpoint` | `checkpoint.seq`, `checkpoint.kind`, `open_tasks` | `checkpoint.created` |
-| 16 | Run completion | `loom.run` (end) | `run.status`, `usage.*`, `cost.total_usd`, `gates.count`, `tasks.total/failed/skipped` | `run.completed` |
+| 16 | Run completion | `loom.run` (end) | `run.status`, `usage.input_tokens`, `usage.output_tokens`, `cost.total_usd` | `run.completed` |
 
 > **Edges are span *links*, not spans.** Each `loom.task` span carries `edges.in[]` and a
 > link to each producer Task's span. This keeps span count `O(nodes)` while still letting
 > **D9** reconstruct the executed graph exactly.
+
+**The Span column of steps 1, 2, 3, 6, 8 and 10 is design, not inventory.** Spans are
+derived from journal events by `telemetry/spans.ts`, and `EVENT_TYPES` has no event for
+ingress, input validation, compilation, admission, task selection, or context assembly —
+so `DESIGNED-NOT-BUILT(loom.request)`, `DESIGNED-NOT-BUILT(loom.compile)`,
+`DESIGNED-NOT-BUILT(loom.schedule.admit)`, `DESIGNED-NOT-BUILT(loom.schedule.pick)`,
+`DESIGNED-NOT-BUILT(loom.context.assemble)`, and the step-11 attribute
+`DESIGNED-NOT-BUILT(loom.replayed)`, which `spans.ts` never sets.
+
+**The Journal event column names one event that nothing appends: step 6's
+`budget.reserved`.** `PolicyEngine.reserve` holds the reservation in memory and journals
+nothing, so a crashed worker's reservation cannot be recovered by folding — which is what
+**D6.5**'s three-level budget design assumes. Every other event this column names is real
+and is appended, and `test/docs-drift.test.ts` now checks that claim mechanically for the
+whole `EVENT_TYPES` vocabulary rather than leaving it as an assurance in this paragraph.
+
+**The Key attributes column of the built rows is inventory, and was not.** Rows 7, 9 and
+11–16 list what `telemetry/spans.ts` really sets on the step's success path, one name per
+attribute. Two things it deliberately does not list: attributes set only on a FAILURE —
+`error.code` on rows 11, 12, 14 **and 16**, `cancel.clean` on 14 and 16, and
+`cancel.unknown_effects` on 16 alone — and `loom.replayed` on row 11, which is marked above
+and is design rather than inventory. **D9.1**'s delta table is where the full accounting
+lives, and this sentence is now the same list it holds: the closing `loom.run` sets
+`error.code` from `run.failed` and both `cancel.*` from `run.cancelled`, while a cancelled
+Task gets `cancel.clean` and no unknown-effect count.
+
+The column used to credit `loom.task` with `node.type`, `loom.tool` with `tool.capability`
+and `tool.attempt`, `loom.state.reduce` with `reducer[]`, and the closing `loom.run` with
+`gates.count` and `tasks.total/failed/skipped` — six attributes an investigator would have
+gone looking for and not found, while D9.1's delta table documented that they were missing;
+row 11 then kept `effect.kind`/`effect.outcome` off a span that is opened and closed by the
+same two events as row 12, which lists them. A corpus that states both is worse than one
+that states neither, because the reader has no way to know which page is the stale one.
+**D9.1's taxonomy table remains the design and its delta table remains the accounting**;
+this one is the inventory, and no attribute check is mechanical yet —
+`test/docs-drift.test.ts` says at the bottom exactly why not and what would make it so.
+
+Step 8 is the one that misleads, so it is worth stating flatly. What runs is
+`Scheduler.select` in `run/scheduler.ts`:
+`orderByCriticalPath(eligible(input), graph).slice(0, maxParallelism)`, over **one run's**
+projection. There is no deficit counter, no task class, and no tenant at that seam, so
+`sched.policy=dwrr` names a policy that does not exist rather than one that is merely
+uninstrumented. **D6.2** carries the guarantee table and its implementation note, and
+`99-DOD.md` G3 carries the debt.
 
 ---
 
@@ -847,7 +925,13 @@ sequenceDiagram
   end
 ```
 
-**Timeout path.** `sweepTimeouts` fires on the scheduler tick. The gate's declared
+**Timeout path.** `sweepTimeouts` fires **when a caller sweeps**, and the caller is
+`Engine.sweepGates` — one externally-driven tick over every run in view, which the
+deployment calls on whatever interval it owns. `@loom/core` still starts no timer and reads
+no wall clock on its own; `now` is a parameter, so a test advances an injected clock and
+observes exactly one escalation. Everything below therefore describes what one sweep does,
+and a sweep that happens late is still correct: deadlines are absolute timestamps folded out
+of the journal, not in-memory timers. The gate's declared
 `onTimeout` is one of: `escalate` (next approver tier, SLA clock resets, journal
 `gate.escalated`), `default_action` (only permissible when the node's irreversibility is
 `read_only` or `reversible_write` — `GRAPH014` rejects a `default_action: approve` on an

@@ -94,38 +94,213 @@ trust:
   enabled: false                  # OFF by default — enabling it is a LOOSENING (D7.7)
 ```
 
+> **Implementation deviation — `approval`, `sla` and `delivery` ship INLINE on the node,
+> and most of `approval` is a compile error.** What is built is `HumanGateNode.approval`,
+> `HumanGateNode.sla` and `HumanGateNode.delivery` in `graph/spec.ts`, read by the executor
+> when it raises the gate and carried straight into `GateRequest`. None of them is resolved
+> from the `oversight` Resource this section declares, and they are smaller than this block
+> in the ways listed below.
+>
+> **It is on the node because nothing in `src/` can read a Resource's *content*.**
+> `ResourceResolver.resolve` returns `{ref, digest, channel}` — a pin, not a document — so
+> `humanGate.ref` proves a policy exists and pins its bytes without ever opening them. (The
+> one content hook is `subgraph(ref)`, which returns a nested `GraphSpec`; there is no
+> equivalent for `oversight`.) The field names here are used verbatim, so moving the block
+> onto the Resource later is a relocation rather than a redesign.
+>
+> **`approvers` is `readonly string[]`, not `{kind, id}`.** They are opaque subjects
+> compared exactly against a human `Actor.subject`. Roles and groups need an identity
+> resolver Loom does not have, and a role that expands to nobody is an approvers list that
+> authorizes *everybody* — "named nobody" is the permissive case. `GRAPH014_APPROVER_INVALID`
+> refuses an entry that is not a subject string. Widening to a union when the resolver
+> exists is additive.
+>
+> **Everything else in the block is refused at compile time, not silently ignored.** `mode`
+> other than `single`, any `k`, `separationOfDuties: true`, and `delegation.allowed: true`
+> are `GRAPH014_APPROVAL_UNSUPPORTED` errors (`graph/validate.ts`). Accepting the block and
+> enforcing only the implemented part would produce a graph that reads as "two of the SRE
+> leads must agree" and behaves as "any one of them", with nothing anywhere saying so —
+> D7.9's closing paragraph names that the worst available failure mode, because it *looks*
+> supervised and is not, so nobody goes looking. Support is added by deleting a check.
+>
+> **`sla` ships without `escalation` and without `defaultAction`, and both absences are
+> decisions.** `escalation` lives on `delivery`, because escalating means choosing new
+> recipients and new channels — `DeliverySpec.escalation` is where the runtime reads it and
+> a second home here would be a second thing to keep in step. `defaultAction` has no field
+> at all, and `HumanGateNode.sla.onTimeout` is therefore `escalate | fail` rather than
+> `GateRequest`'s three: a default action is a decision the author pre-authorizes, safe only
+> once a compiler has proved the action's irreversibility class permits one, and that proof
+> does not exist for a graph-declared gate. An embedder driving `HumanGateBroker.raise`
+> still supplies one; a graph cannot. `GRAPH014_SLA_INVALID` refuses the field for a graph
+> that arrived as JSON.
+>
+> **`delivery` is `run/delivery.ts`'s own `DeliverySpec`, verbatim** — `{channels,
+> recipients, redact, redactAs, escalation}` — rather than a restatement, so what the
+> compiler checks and what `GateDispatcher` reads are one type. `graph/spec.ts` imports it
+> `import type`, which `verbatimModuleSyntax` erases, so `graph/` still depends on nothing
+> under `run/` at run time. What `GRAPH014_DELIVERY_INVALID` checks and what it deliberately
+> does not — channel names, `afterMs` monotonicity — is in **02-EXECUTION-GRAPH.md** beside
+> the rule.
+>
+> **`reminders` SHIPS, AND IT SHIPS ON `sla` RATHER THAN ON `delivery` — the same rule that
+> moved `escalation` the other way, applied in the other direction.** The rule is *what does
+> this field decide?* Escalation decides new recipients and new channels, so it lives beside
+> them on `delivery` even though this schema draws it under `sla`; a reminder decides
+> neither — same tier, same recipients, same channels — so all it carries is an INSTANT, and
+> instants are what the `sla` block is. The two blocks are therefore each drawn here holding
+> the other's field, which is worth saying out loud rather than leaving as a discrepancy a
+> reader has to resolve twice.
+>
+> Putting it there buys a bound for free: `GateSlaSpec.reminders` cannot exist without
+> `respondWithinMs`, so a gate with no clock gets no nudges, and `checkSla` requires every
+> instant to fall strictly inside that SLA. **What a reminder is, stated as what it must not
+> do:** it does not reset the SLA, it does not burn or reset a tier, it decides nothing, and
+> it is not reported as a deadline firing (`SweepReport.fired` counts timeouts, not nudges).
+> It is journaled as `gate.reminded{gateId, tier, nth}` — an un-journaled nudge cannot be
+> audited, and *why did nobody answer?* is the question the delivery journal exists for —
+> and the fold counts those ROWS into `GateRecord.remindersSent`. That counter is the whole
+> mechanism: it is what makes the write change the condition that triggered it, so a nudge
+> is one event with no companion in its append, where a marker that folded to nothing would
+> fire on every tick forever. **Three bounds stop a storm** and all three are needed: the
+> schedule is a finite list consumed in order (at most `reminders.length` nudges per gate,
+> ever), each firing advances the journaled counter, and every instant must be inside the
+> SLA. **For a BATCH it is ONE nudge, not N** — the same answer D7.9 row 2 gives at tier 0
+> and at every escalation tier, keyed on "has a sibling already sent this one?" and sound
+> only because the schedule is part of the batch's journaled `deliveryDigest`, so a
+> suppressed nudge is one that would have said the same thing to the same people at the same
+> instant. The schedule itself stays in `EphemeralGate`, like the route: a process that did
+> not raise the gate sends no nudges until `rehydrate`, and it can never re-send one the log
+> says went out.
+>
+> **A `recipients` entry may carry more than `{kind, id}`, and the dispatcher passes it on.**
+> `checkRecipient` validates those two fields and accepts the rest, which makes vendor
+> routing metadata — a Slack channel id, a locale — a legal declaration; a `Recipient` is
+> *resolved by the channel*, so the channel is the one party that could use it.
+> `GateDispatcher.deliver` rebuilt each entry as `{kind, id}` and silently deleted the rest,
+> which is the compiler and the runtime disagreeing about what a graph may say. Resolved
+> toward the compiler: closing the shape instead would refuse a portable graph in the
+> deployment whose channel needs the field, which is the argument `checkDelivery` already
+> makes for not checking channel names.
+>
+> **Reverses when:** a resolver seam exists that hands a validated `OversightPolicy`
+> document to the compiler and the broker. Then these blocks move onto the Resource, the
+> unsupported-mode checks are deleted as each mode lands, and `approvers` widens to
+> `subject | role | group` — in that order, never the last one first.
+
 ---
 
 ## D7.3 — Gate lifecycle
 
+`GateRecord.state` in `run/projection.ts` has **four** values, and this is the machine
+they make. Delivery is *not* a state: `gate.delivered` and `gate.delivery_failed` are
+journaled beside an open gate and change nothing about it, which is the mechanical form of
+"delivery failure never auto-approves". **`Claimed` is not a state either, and that is the
+whole of how it was finally built** — see below the diagram.
+
 ```mermaid
 stateDiagram-v2
-  [*] --> Raised: gate.raised (DURABLE) · Run suspends
-  Raised --> Delivered: GateDelivery ok
-  Raised --> DeliveryFailed: all channels failed
-  DeliveryFailed --> Delivered: retry succeeded
-  DeliveryFailed --> Raised: fell back to console queue + alert
-  Delivered --> Claimed: an approver claims (soft lock, 5 min TTL)
-  Claimed --> Delivered: claim expired / released
-  Delivered --> PartiallyDecided: quorum mode, k-1 approvals so far
-  PartiallyDecided --> Decided: quorum reached
-  Delivered --> Decided: single-mode decision
-  Delivered --> Escalated: SLA breach → next tier, clock resets
-  Escalated --> Delivered
-  Escalated --> Expired: escalation chain exhausted, action=fail
-  Delivered --> Delegated: approver delegates (depth ≤ maxDepth)
-  Delegated --> Delivered
-  Decided --> [*]: gate.decided → Run resumes
-  Expired --> [*]: gate.timeout → Run fails
-  Raised --> Cancelled: run cancelled
+  [*] --> Open: gate.raised (DURABLE) · Run suspends
+  Open --> Open: gate.delivered · gate.delivery_failed — journaled, state unchanged
+  Open --> Open: gate.claimed — a soft lock, journaled, state unchanged
+  Open --> Open: gate.escalated — next tier, deadline reset, chain survives a deploy
+  Open --> Decided: gate.decided → Task returns to ready · Run resumes
+  Open --> Decided: gate.timeout{action:"default_action"} then the broker's own gate.decided
+  Open --> Expired: gate.timeout{action:"fail"} + run.failed(E_GATE_EXPIRED), in ONE append
+  Open --> Cancelled: gate.cancelled — the run ENDED with this gate unanswered
+  Decided --> [*]
+  Expired --> [*]
   Cancelled --> [*]
 
-  note right of Raised
+  note right of Open
     DELIVERY FAILURE NEVER AUTO-APPROVES.
-    The only paths out are a human decision
-    or the declared timeout policy.
+    The only ways out are a human decision or the
+    declared timeout policy. `default_action` is
+    rejected at COMPILE (GRAPH014) for irreversible
+    classes, so a timeout can never take one.
+    A CLAIM IS NOT A WAY OUT EITHER, AND NOT A
+    WAY IN: nothing on the decision path reads one.
   end note
 ```
+
+### `Claimed` — built, and built as a FIELD rather than as a state
+
+`HumanGateBroker.claim(log, {gateId, actor})` → `gate.claimed{gateId, until}` with the
+claiming human as the event's actor → `GateRecord.claimedBy` / `claimedUntil`. Five minutes
+(`CLAIM_TTL_MS`), as this section always specified. It is `run/gates.ts`'s `claim`,
+`claimHolder`, `liveClaim`; `test/run/gate-claim.test.ts` is the whole of what it promises.
+
+**It is a self-transition and not a fifth state, because a claim GRANTS NOTHING AND BLOCKS
+NOTHING.** A gate somebody is looking at is exactly as open, as answerable and as due as one
+nobody has touched, so a state that said otherwise would be a state no reader should branch
+on. Every rule follows from that one sentence:
+
+- **it is not authorization.** `resolve`, `resolveBatch` and `#fireTimeout` read no claim at
+  all. A legitimate approver decides a claimed gate as fast as an unclaimed one; the SLA
+  fires on the same instant; and one credential claiming every gate in a queue stalls
+  nothing, because there is no reader to stall. A soft lock that hardens is a way for one
+  person to hold up an urgent approval, and the way to keep it soft is for the decision path
+  to have no branch on it;
+- **the claim door is deliberately NARROWER than the decision door.** Only a *person* may
+  claim, whatever `GATE_SYSTEM_ACTORS` would admit to `resolve` — "the clock is reading this
+  gate" is not a fact, and it would silence the humans who are — and, when a gate names
+  approvers, only one of them. Every divergence between the two chains may only make
+  claiming harder, never deciding easier;
+- **a batch is one question, so it is claimed once** (`claimHolder`), the same rule that
+  pages it once, escalates it once per tier and nudges it once per reminder;
+- **contention is not an error.** `{claimed: false}` NAMES the holder, because a hint that
+  cannot say who coordinates nobody. Everything else — a gate that is gone, closed, on a
+  terminal run, or an actor who may not claim — throws, because a caller reads silence as
+  "I hold it".
+
+**The FOLD is the arbiter.** `claim` checks the holder, appends, and then reads its answer
+back out of `foldRun`, because two people claiming in the same instant is the case this
+exists for and a check taken before an append cannot see a row that has not landed. The
+`gate.claimed` arm in `run/projection.ts` keeps the first live claim, drops a second one by
+another subject, and lets the holder's own re-claim refresh it. It arbitrates at the
+ARRIVING EVENT'S OWN `ts` — the fold has no clock and must not acquire one, or the same
+journal folds two ways at two instants — so a holder whose claim had already run out when
+the second one was made loses it, and the answer is stable on every later re-fold.
+
+**There is no `gate.claim_expired` and no sweeper.** `until` is absolute, so a claim expires
+by being *ignored*: every reader compares its own clock against a number in the journal.
+There is no state to reap, and a row whose only content is that time passed would be a
+durable fact nobody could observe the absence of. The TTL is short because the two failures
+are not symmetrical — a claim that outlives its claimant is a queue that looks attended and
+is not, while one that expires early costs a second person opening the same gate and nothing
+else — so a client that wants to keep it re-claims, which is evidence the claimant is still
+there.
+
+An exhausted escalation chain expires the gate rather than returning it to waiting, and a
+`default_action` that did not survive the process that raised it degrades to `fail` — both
+because a gate parked open forever is a hang wearing a policy's clothes.
+
+**`Cancelled` is reached from every terminal transition, not only from `cancel`.** Every
+exit in `Engine.#finish` closes the run's still-open gates in the same append as the
+terminal event — the failure paths, and `run.completed` too, because the budget and fatal
+floors reach `#finish` without passing the check that re-suspends a run with an open gate.
+A succeeded run must not leave a live question in an approver's queue either. The reason
+string differs per path (`cancelOpenGates` in `run/engine.ts` is the single appender), so
+the journal distinguishes "an operator cancelled this" from "the run finished without
+you". One case still produces a terminal run with an `open` gate: a gate EXPIRY fails the
+run and deliberately leaves its siblings open, because the SLA sweep must stay total over
+that run's due gates. `HumanGateBroker.resolve` refuses on a terminal run whatever the gate
+row says, which is what covers that case and every journal an older build wrote.
+
+**Designed, not implemented — do not merge these states back into the diagram above.**
+`Claimed` was the third row here; it is built now, and it is above rather than in the
+diagram, because what it turned out to be is a field on an `Open` gate and not a state.
+
+| State | What it was for | Status |
+|---|---|---|
+| `PartiallyDecided` | quorum mode: `k-1` approvals recorded, waiting for the `k`th | **not built, and now contradicted** — a `human_gate` declaring quorum is a **compile error** (`GRAPH014_APPROVAL_UNSUPPORTED`), so the graph never reaches a runtime that could hold this state |
+| `Delegated` | an approver hands the decision on, bounded by `maxDepth` | **not built, and now contradicted** — same compile error. `DelegationSpec` exists in `graph/spec.ts` *only* so that a graph asking for delegation is rejected instead of silently run as if it had asked for nothing |
+
+The quorum row is the one worth pausing on: for a while the diagram modelled quorum as a
+live state while the compiler *rejected* graphs that asked for it. A design document that
+disagrees with the compiler about whether a feature exists is worse than one that omits
+the feature, because a reader trusts the document and the compiler only argues back after
+they have written the graph. D7.2's decision block explains why `approvers` is a subject
+list and nothing more, and names the resolver seam whose arrival reverses it.
 
 ---
 
@@ -151,10 +326,7 @@ sequenceDiagram
   SC->>J: fold journal → runs with open gates are NOT re-leased
   Note over SC: nothing to restore — the gate was never in memory to begin with.
 
-  loop scheduler tick (1s)
-    SC->>HB: sweepTimeouts(now)
-    HB->>J: gate.escalated / gate.timeout as due
-  end
+  Note over SC,HB: The deployment ticks Engine.sweepGates(now) here, on an interval it owns.<br/>Core starts no timer: `now` is a parameter, and a late sweep is still correct.
 
   participant H as Human
   H->>HB: resolve(gateId, decision, idempotencyKey)
@@ -167,6 +339,30 @@ sequenceDiagram
 **The design property that makes this work:** a suspended Run holds *no runtime
 resources*, so "how many gates can be open at once" is a database question, not a
 concurrency question. Ten thousand open gates cost ten thousand rows.
+
+**And the consequence of that, stated plainly.** A suspended run holding no runtime
+resources is exactly what makes it possible for one to hold *nothing at all*, including a
+clock — so the clock has to come from outside, and for the length of this build it came
+from nowhere. `grep -ran sweepTimeouts packages/core/src` used to find only the method's
+own definition; SLA deadlines never expired, tiers never fired, and `onTimeout: "fail"`
+waited forever.
+
+**`Engine.sweepGates(now?)` is that outside.** One tick, over every run the store's
+`listRuns` window returns, driven by whatever owns the process — `cli.ts`'s `serve`, a
+control plane, a cron. It is a METHOD and not a timer on purpose: a library that schedules
+work on import keeps its embedder's process alive and puts a wall clock inside the
+determinism boundary. Because deadlines are absolute timestamps folded out of the journal,
+a sweep that happens late is still correct, which is what makes an externally-driven tick
+sound rather than a concession — and it is why a test can advance an injected clock and
+observe exactly one escalation with no timer and no sleep.
+
+**What one tick costs, and the one thing it cannot see.** `GateSweeper` keeps a `RunFolder`
+per live run between ticks, so a tick is one `listRuns`, a read of the events since the last
+tick for each run whose head moved, and a full fold only for a run whose gate is actually
+due. A run nobody wrote to costs a number comparison. What it cannot see is a run outside the
+`limit` most recently created: `listRuns` orders by run id and there is no read model of open
+gates, so after a process restart a gate raised more than `limit` runs ago is invisible to the
+sweep. Closing that needs a store query the `StateStore` interface does not have.
 
 > This is the single largest departure from EAgent, where an approval was a `Promise`
 > held by a running turn (`UI.confirm`, `src/kernel/types.ts:300`). That promise could not
@@ -184,7 +380,7 @@ concurrency question. Ten thousand open gates cost ten thousand rows.
 | `resume` | re-admits | none | `operator.command` | no change (a resume is not a loosening) |
 | `steer{message}` | injected into the target agent's next model call via `AgentInstance.steer` | none | `operator.command` + `state.reduced{by:"human"}` | → `on` |
 | `redirect{take}` | forces the edge subset on the named Task; **must be a subset of that node's declared outgoing edges** | none | `operator.command` | → `in` |
-| `rollback{to, rewind}` | aborts everything after the checkpoint | **refused** if a committed irreversible effect lies after the target and no compensation is declared (`E_RESTORE_ILLEGAL`) | `checkpoint.restored` | → `in` |
+| `rollback{to, rewind}` | aborts everything after the checkpoint | **refused** (`E_RESTORE_ILLEGAL`) on any of **four**, counted in `Engine.rewind`: a **cancelled** run; a **rejected** gate at or after the target seq; a target seq that IS a `gate.decided` of any sign; a committed irreversible effect after the target with no declared compensation. See the note below | `checkpoint.restored` | → `in` |
 | `rollback{to, fork}` | leaves the original Run untouched | none — the fork re-executes | `checkpoint.restored` | → `in` |
 | `cancel{grace, compensate}` | `AbortSignal` chain, then compensation in reverse commit order | compensations run | `run.cancelled{clean, unknownEffects[]}` | n/a |
 | `kill` | immediate `SIGKILL`; **no grace, no compensation** | left as-is; recorded as dirty | `run.cancelled{clean:false, forced:true}` + alert | n/a |
@@ -193,6 +389,36 @@ concurrency question. Ten thousand open gates cost ten thousand rows.
 **Every intervention tightens.** Note the right-hand column: there is no operator command
 that lowers a posture. Loosening exists only as `PolicyEngine.deescalate`, which is a
 different verb with a different authority (**D7.7**).
+
+**A rewind may not undo a refusal, and the asymmetry is the point.** `Engine.rewind`
+refuses a `cancelled` run and refuses any rewind whose suppressed range contains a
+`gate.decided{decision:"reject"}` — undoing a failure is a retry, undoing a refusal
+overrules the person who made it, and both arrive at the same `failed` status when a human
+rejects a gate. Rewinding **past** an `approve` stays **allowed**, for a checkable reason:
+suppressing the decision re-*opens* the gate rather than carrying the approval forward, so
+the same person is asked the same question again before anything runs. `edit` and
+`redirect` go with `approve` — they modify a request, they do not refuse one. The way back
+from a cancel or a rejection is a new run, with a new id and a decision on the record.
+
+**"Past an approve" is not the same as "to an approve", and the fourth refusal is the
+difference.** `HumanGateBroker.resolve` writes `gate.decided` and `run.resumed` in ONE
+append, which is two seqs, and `suppressedRanges` is exclusive at both ends. A rewind whose
+target is *exactly* the decision's seq therefore keeps the decision and drops the resume:
+the run folds back to `awaiting_gate` with its only gate already `decided`, so there are zero
+open gates, nothing a human can answer, and `advance` returns immediately without looking for
+work. That is a wedge, not a rollback, and it applies to an `approve` just as much as to a
+`reject` — so `Engine.rewind` refuses the boundary itself for **any** decision, and names the
+two coherent readings in the message (`atSeq + 1` keeps the decision, `atSeq − 1` re-asks).
+The rule is therefore: rewinding to a seq *before* a decision undoes it and re-asks;
+rewinding to the decision's own seq is refused; and a `reject` anywhere at or after the target
+is refused outright.
+
+> **The same split exists one door over and is NOT refused.** `HumanGateBroker`'s `#expire`
+> writes `gate.timeout` + `run.failed` in one append, the identical two-seq shape, and the
+> boundary scan only looks at `gate.decided`. Rewinding to the `gate.timeout` seq produces
+> the same wedge — measured: `run=awaiting_gate gate=expired openGates=0`, `advance()` a
+> no-op. Recorded as `HANDOFF.md` **A10**; the refusal above is written against an event
+> type where it should be written against an append boundary.
 
 ---
 
@@ -251,7 +477,20 @@ in the one place a human was explicitly asked to look.
 `reject`, `edit`, and `redirect` all resolve the Task WITHOUT executing it — each is the
 human substituting their own outcome. `edit` carries channel writes, not tool arguments,
 so running the tool as well would both take the action and overwrite the evidence of it.
-| E11 | Model returned `refusal` or `content_filter` | `ModelAdapter` | `out → on` | run | `policy.escalated{rule:"model_refusal"}` | human |
+
+**Designed, not implemented — do not merge this row back into the table above.**
+
+| # | Trigger | Detected by | From → To | Scope | Journal | Status |
+|---|---|---|---|---|---|---|
+| E11 | Model returned `refusal` or `content_filter` | `ModelAdapter` | `out → on` | run | `policy.escalated{rule:"model_refusal"}` | **not built** — no such rule in `run/escalation.ts` |
+
+It had drifted into the middle of the prose above, where it read as an eleventh enforced
+rule and where `test/docs-drift.test.ts` could not see it: that test pins the decision
+table to `ESCALATION_RULES` by slicing the document *up to* "What approval means", so a row
+below the line is a row nothing checks. The rule itself is still worth building — a
+provider refusal is exactly the evidence a graph author could not have had — but today the
+only refusal handling is `providers/fallback.ts` refusing to retry a content-policy refusal
+against a second vendor, which is a different mechanism and changes no posture.
 
 ### De-escalation table (manual only — loosening)
 
@@ -326,13 +565,80 @@ export interface AuditRecord {
   delegationChain?: readonly string[];
   quorum?: { required: number; received: number; approvers: readonly string[] };
   classification: "internal" | "pii";
-  contentDigest: string;                   // sha256 of the payload SHOWN to the human
+  contentDigest: string;                   // sha256 of the payload AS RAISED — see below
 }
 ```
 
 `contentDigest` is the non-obvious field: it pins **what the approver actually saw**. A
 later "the approver was shown the wrong diff" dispute is otherwise unanswerable, and gate
 payloads are rendered server-side precisely so this digest is meaningful.
+
+**It is TWO digests once a gate declares `delivery.redact`, and the difference is not a
+subtlety.** The one journaled on `gate.raised` and `gate.decided` — the one this record
+carries — is `digest(req.payload)`: the real payload, unredacted, because the audit trail's
+job is to pin the question that was actually asked. The one a delivery channel is handed is
+the digest of the payload **as it was shown**, with every redacted position — leaf, object
+or whole array — flattened to one constant. They coincide when nothing was hidden and the
+payload is data the journal could carry, which is every payload a gate is raised with.
+Shipping the journaled digest to a channel that also holds the redacted rendering was an
+inversion oracle over every hidden field — splice a candidate into the hole and hash — and a
+five-digit id fell to it in 52 ms.
+
+**Three readers want three different things out of the delivered one, and naming them is
+what decides its construction.** An **auditor** settling the dispute above is *inside* the
+trust boundary and holds the journal, so what they need is a digest they can **re-derive**
+months later from the real payload plus the delivery spec. An **operator** correlating a
+re-delivery — tier 0 against tier 2, or the same gate after a restart — needs the same
+thing: stability across processes. A **channel deduplicating** (D7.9 row 3) wants "same
+digest ⇔ same question", and is the reader this deliberately fails.
+
+The first two are what rule out digesting the tokenised tree the channel actually receives:
+a `pii` token is keyed by a root the auditor does not hold and may not even be able to
+obtain — a deployment secret if one is configured, and otherwise a per-process random one
+that is deliberately unexportable — so a digest over tokens is a number *nobody* can be
+relied on to check again, the auditor least of all, and a rendering nobody can reproduce
+settles no dispute. (**Whichever root exists is the root every caller gets** — `tokenKey`
+reads `deploymentKey() ?? PROCESS_KEY`, so with `LOOM_PII_TOKEN_KEY` configured the delivery
+path is keyed by the deployment secret too, separated from a trace's tokens by *scope* and
+not by root. This clause used to say the delivery path takes the per-process root today,
+which stopped being true the moment that variable was read. What is `telemetry/spans.ts`-only
+is the REQUIREMENT: it alone refuses to mint a token when the deployment key is unset,
+because only a trace promises to be reproducible in another process. See **D9.6**.)
+Flattening instead makes the delivered
+digest key-independent, and therefore both re-derivable and restart-stable *whatever* the
+key is doing.
+
+**What the flattening buys is not that the channel can recompute the digest — it cannot, in
+general — but that no hidden value is an INPUT to it.** That is the property "not an oracle"
+has to mean; recomputability holds only for a non-null scalar leaf, and a design that rests
+on it is resting on the shape of its own example. Three inputs defeat it: a redacted object
+or array reaches the channel with its shape intact and this digest as a single constant; a
+redacted `null` reaches the channel unchanged, so nothing marks the position at all; and two
+*different* redact lists can produce a byte-identical delivered tree with two different
+digests, which makes recomputation not hard but undefined.
+
+**State the condition with it, because the unconditional version is the same overreach one
+step along.** "No hidden value is an input" was written here as holding *for every payload*,
+which is how the recomputability claim it replaced was written too — a property read off the
+inputs the pinning sweep used. It holds for a plain JSON value, at a depth the redactor still
+walks, that the payload does not also carry at a position the list did not name. Outside
+that, the redactor has two arms above the flattening one and each is a named position that
+is not the constant: a `SecretValue` renders its `ref`, so *which* secret sits there moves
+the delivered digest; and a position deeper than the walk's limit renders a depth marker.
+Neither is a new disclosure — the channel is handed the same rendering by the same arm — but
+both are inputs, and this is a claim about inputs.
+
+**And the delivered digest describes what was SENT even when nothing was hidden**, which is
+not the same as "the journal's digest, unchanged": the delivered payload is a copy, and a
+copy is taken with `JSON.stringify` while the journal's digest is taken with the canonical
+form, which reads own enumerable keys and ignores a prototype. For everything the journal can
+carry the two agree and this is invisible; for a payload whose class defines `toJSON` they do
+not, and the field's own definition — *what the approver actually saw* — decides which one
+wins.
+
+The cost of the split is stated where it is paid (`GateDispatcher.deliver`): two gates
+differing only inside the redact list carry the same **delivered** digest, so dedup (D7.9
+row 3) must read the journaled one, which is inside the boundary and tells them apart.
 
 ---
 
@@ -344,15 +650,246 @@ order:
 | # | Mechanism | Concretely | Reduces load by | Risk it introduces |
 |---|---|---|---|---|
 | 1 | **Class-based auto-approve** | `read_only` actions never gate. This is not a loosening — it is the default posture from **D7.6** | ~70 % of raw candidates | none; read-only cannot harm |
-| 2 | **Batching** | Gates matching `batching.key` within `windowMs` merge into one gate showing a manifest of N items; one decision applies to all. `maxBatch` caps the blast radius of a single click | 5–20× on wide fan-outs | a careless bulk approve — mitigated by rendering per-item diffs and requiring scroll-to-end for `maxBatch > 5` |
-| 3 | **Deduplication** | Identical `contentDigest` within the window collapses; the second occurrence inherits the first decision and journals `gate.deduped` | high on retry storms | none — identical payload, identical decision |
+| 2 | **Batching** · BUILT | Gates matching `batching.key` within `windowMs`, **and agreeing on every authorization fact and on the batch's own governance**, merge into one *decision*: a manifest of N items, one click, N `gate.decided` rows and one `gate.batch_decided` saying they were one decision. `maxBatch` caps the blast radius of a single click, and is **journaled on the batch** so the cap is the founder's for the batch's whole life | 5–20× on wide fan-outs, at tier 0 **and at every escalation tier** | a careless bulk approve — mitigated in the broker by refusing to merge gates whose authority or governance differs and by requiring the approver to echo back the manifest they read, and in the console by per-item diffs and scroll-to-end for `maxBatch > 5` |
+| 3 | **Deduplication** · BUILT | A gate whose journaled `contentDigest`, node, `policyRef`, approvers and `edit` allow-list all equal those of a gate **already decided** inside `windowMs` inherits that decision in the append that raises it, and journals `gate.deduped` naming the source | high on retry storms | none for an identical payload — but "identical" has to include the *authorization*, or inheriting is a bypass |
 | 4 | **Trust tiers** | Per `(tenant, tool, node)`: ≥ 50 consecutive approvals with 0 rejects and 0 edits ⇒ auto-approve within that exact scope, with **5 % random sampling still gated** and any single reject resetting the counter to 0 | the steady-state tail | drift — mitigated by sampling, by scope narrowness, and by the fact that enabling tiers at all is a human act (D3 in **D7.7**) |
-| 5 | **Priority + SLA ordering** | The queue sorts by `(sla_remaining, blast_radius, cost_at_risk)`, not arrival. A run burning \$40/min while suspended outranks a cosmetic change | perceived load | starvation of low-priority gates — bounded by an ageing term |
+| 5 | **Priority + SLA ordering** · BUILT | `HumanGateBroker.list` sorts by `(sla_remaining, blast_radius)` with an ageing term, not by arrival. `cost_at_risk` is deliberately absent — see the deviation below | perceived load | starvation of low-priority gates — bounded by the ageing term, and the bound is stated and driven |
 
 **Explicitly not used as a mitigation:** raising `onTimeout` to `default_action: approve`.
 `GRAPH014` rejects it for any action classified `irreversible` or `externally_visible`.
 Timeout-approval converts an overloaded queue into an *invisible* out-of-the-loop system,
 which is the worst possible failure mode — it looks supervised and is not.
+
+> **Implementation deviation — rows 2 and 3, as built.** Declared on the node as
+> `HumanGateNode.batching` and `HumanGateNode.dedupe` (`graph/spec.ts`), refused by
+> `checkSaturation` in `graph/validate.ts` when they are unusable, and applied in
+> `HumanGateBroker.raise`. Row 5 is built too and has its own block at the end of this
+> section. Rows 1 and 4 are unchanged: row 1 falls out of D7.6's default posture, row 4 is
+> not started (see `HANDOFF.md`).
+>
+> **N gates stay N gates.** Row 2 says they "merge into one gate"; one durable record
+> covering N Tasks is the shape this deliberately does not take. Every authorization fact is
+> folded per gate out of its own `gate.raised`, so a merged record either loses the
+> per-member facts or duplicates them; `gate.decided` returns exactly one Task to `ready`,
+> so a merged decision would need a second fold rule for "a Task becomes runnable" — a
+> second path to the thing invariant 6 keeps single; and the SLA sweep, replay and the trace
+> are all per gate. So the batch is how members are PRESENTED and DECIDED, not what they
+> are: `GateBatch` is derived from the fold on demand, and `HumanGateBroker.resolveBatch`
+> writes N `gate.decided` plus one `gate.batch_decided` plus one `run.resumed` in one
+> append. From the approver's side that is the merged gate row 2 asks for; from the
+> journal's side nothing was merged, which is the half that has to stay reconstructable.
+>
+> **"One decision applies to all" is exactly where the oversight semantics could change, so
+> the merge predicate is part of the mechanism.** Two gates may share a batch only if they
+> agree on `policyRef`, on `approvers`, and on the `edit` allow-list — with absent and `[]`
+> kept apart there, because absent means unconstrained — and neither may be a subgraph
+> mirror. A newcomer that disagrees does not throw and does not silently merge: it starts
+> its own batch, which is the "split" reading, visible as two manifests. That is a runtime
+> disagreement between two gates of one node, so a compiler could not have seen it.
+> Independently, `resolveBatch` runs **every** member through the same `#validate` chain a
+> single `resolve` uses, and all of them before anything is written — so a batch that
+> somehow holds a member this actor may not decide closes none of them rather than the ones
+> it reached first.
+>
+> **THE FOUNDING SPEC GOVERNS THE BATCH FOR ITS WHOLE LIFE, and that required journaling it.**
+> The predicate above is about authority; a batch also has a *policy* — its `key`, its
+> `maxBatch`, its `windowMs`, and the route it is announced on — and those four were
+> evaluated against the `BatchingSpec` of whichever gate happened to be joining. Three of
+> them therefore widened on contact with a newcomer: a batch founded under `maxBatch: 2` and
+> joined by nine gates declaring `maxBatch: 20` came back as **one batch of ten**, one click
+> at five times the authorised blast radius, with nothing recording that the cap had moved
+> because nothing carried it; a batch founded under a 1 s window admitted a gate that arrived
+> 100 s later because that gate declared an hour. `gate.raised.batch` now carries
+> `{windowMs, maxBatch, deliveryDigest}` beside `{id, key}` on **every** member, and
+> `batchGovernance` reads the policy off the batch's own rows, requires every member to agree
+> with it, and re-validates the numbers — a journal is authoritative, not well-formed, and
+> `members.length >= NaN` is `false`, which is a cap that silently is not one. A batch whose
+> governance the journal does not carry — one an older build founded — accepts nobody: the
+> newcomer starts its own batch rather than supplying the missing cap itself, which is the
+> reading that put the applicant in charge to begin with.
+>
+> **THE DELIVERY ROUTE IS PART OF THE MERGE PREDICATE, because suppressing a page is the
+> mechanism.** A gate that joins a batch is not delivered — that is where the load reduction
+> lands, and it is correct. But `sameAuthority` did not compare `delivery`, so two gates
+> whose channels, recipients and redact list differed entirely merged and exactly one
+> notification went out, on the founder's route: a silent substitution of one gate's delivery
+> policy for another's. The route cannot be compared out of process memory — `EphemeralGate`
+> is empty in any process that did not raise the gate, and a check whose input can be
+> silently empty is a check that passes by default — so what is journaled is a **digest** of
+> the spec. Equality is the only thing a merge needs and equality is all a digest discloses;
+> the recipients and the redact list stay out of the log, as they always have.
+>
+> **ONE PAGE PER BATCH PER TIER.** Batching cut the tier-0 page from N to 1 and the escalation
+> path had no notion of a batch at all, so one merged question paged the escalation tier **N
+> times** — the load reduction inverting exactly when the queue is worst, which is when an SLA
+> is breaching. Measured on a five-member batch: one page at tier 0 and five at tier 1, all to
+> the same escalation recipient about one manifest. The `gate.escalated` **rows** stay per
+> member and must — each burns that member's own tier and resets that member's own clock,
+> which is the state the next sweep folds — but the page is sent only by the first member to
+> reach a tier, decided from the journal (`siblingReachedTier`) rather than from anything a
+> process remembers, so it holds across a deploy mid-chain. It is keyed on "has a sibling
+> already reached this tier?" and **not** on the founder's id: a founder-keyed rule goes silent
+> the moment the founder is answered singly, and the remaining members would escalate and page
+> nobody.
+>
+> **AND THAT QUESTION IS ASKED AT THE SEQ THE WRITE SWAPS ON, WHICH IS THE HALF THAT WAS
+> WRONG.** It was read back from a fresh projection AFTER this member's own `gate.escalated`
+> had landed, so a sibling's row arriving in that window made this member believe the page
+> had gone out — and both members of a batch can reach that conclusion. Reproduced with two
+> brokers over one store, interleaved at exactly that read: both escalated to tier 1 and
+> **nobody was paged at all**, which is strictly worse than the N-times paging the rule
+> replaced, because a silent non-page is the failure the whole delivery subsystem is arranged
+> to prevent. A READ IS NOT A LOCK — the compare-and-swap is; deciding the page from the
+> projection at `atSeq` makes the sender exactly the writer that won the swap, so the first
+> member to reach a tier pages and no other does.
+>
+> **THE TIER-0 RULE NEEDS A THIRD CONJUNCT FOR THE SAME REASON, AND IT IS NOT THE SAME
+> ANSWER.** A joiner is silent because the manifest it was added to has already been sent to
+> exactly these people — an argument that holds only while somebody is still holding an
+> unanswered copy of it. Membership is decided over `"any"`, deliberately (a decided member
+> still counts against `maxBatch`, so a batch cannot be refilled), so a gate could join a
+> batch every member of which had already been ANSWERED and be suppressed against a message
+> that had been read, clicked and closed — a run suspended on a question nobody was ever told
+> about. `raise` now requires a still-open member. The two sites read a decided sibling in
+> OPPOSITE directions and that is correct: at tier 0 the question is *is an equivalent
+> question still outstanding?*, and at tier N it is *has this tier already been told?*, to
+> which a member that was paged and then answered is still a yes.
+>
+> **`contentDigest` asked of a batch is a digest of the MANIFEST**, which is the thing shown:
+> the batch id, the key, and the ordered `{gateId, nodeId, contentDigest}` of its open
+> members. Journaled fields only, so an auditor re-derives it from the log alone; each
+> member's own digest rather than any payload, so it discloses nothing a gate digest does
+> not; and it moves when membership moves but **not** when a member escalates — a tier
+> change resets a deadline, it does not change what is being asked. `resolveBatch` requires
+> the approver to echo it back as `expectManifest`, so a decision taken against a list that
+> has since gained or lost a member is refused rather than applied to a list nobody read.
+>
+> **`edit` and `redirect` are refused on a batch** for the reason a mirror refuses them:
+> their meaning is not the same for every member. Both remain available per gate.
+>
+> **The SLA: the EARLIEST member deadline governs the batch, and only its presentation.**
+> Each member keeps its own journaled clock and `GateSweeper` sweeps them one at a time,
+> exactly as before — batching changed nothing about *which* gates the sweep fires or what it
+> writes for them; the one thing it bounds is the escalation **page**, above. The earliest is what
+> `GateBatch.deadline` shows because it is the instant the batch stops being answerable as a
+> whole: the first member to breach leaves the batch, and every later reading of the
+> manifest differs from the one the approver was shown. Showing the latest would be showing
+> a deadline no member has.
+>
+> **Dedup reads the JOURNALED digest, never the delivered one** — D7.8 splits the two and
+> says why: two gates differing only inside their redact list carry the same *delivered*
+> digest and are not the same question. And it inherits **only from a `decided` gate**: row
+> 3 says the second occurrence inherits the first decision, which presumes one exists.
+> When the first is still open there is nothing to inherit, and making the second wait on it
+> would be a second suspension mechanism with no deadline of its own — two identical open
+> questions are what row 2 is for.
+>
+> **The inherited decision is not a second path to a decision.** `#inheritable` builds the
+> `ResolveInput` a caller would have built and runs it through the same `#validate`, then
+> the same `decidedEvent` builder `resolve` and the timeout's default action use. It is
+> journaled with the system actor `gate-broker:dedupe` rather than with the human who
+> decided the source — they never saw this gate — and `gate.deduped.ofGateId` is the one hop
+> to the row that does carry them. That component's entitlement is argued in
+> `GATE_SYSTEM_ACTORS`, on the same evidence `executor:subgraph` offers: the source gate's
+> approvers list is equal to this gate's by the predicate above, so the human who decided
+> was checked against this very list. When `#validate` refuses, there is no dedup and a
+> human is asked — silence that removes a shortcut rather than asserting an approval.
+>
+> **AND THE SOURCE MUST BE A GATE A HUMAN DECIDED, which that entitlement asserted and
+> nothing enforced.** `GateRecord.decision` cannot say who decided: `approve` reads
+> identically whether a person clicked it, the clock applied a pre-authorized default action,
+> or another duplicate inherited it — so the fold now carries `decidedBy`, the KIND of the
+> deciding actor (not the subject: a subject is a person's identifier and this record reaches
+> a browser), and `#inheritable` requires `"human"`. Both other sources were reachable and
+> both were measured. A gate that expired into an `approve` by `gate-broker:timeout` was
+> inherited by an identical gate declaring `onTimeout: fail` and no default action of its
+> own — the pre-authorization `GRAPH014` had proved safe belonged to the source, and
+> `sameQuestion` compares neither field. And a CHAIN: each duplicate is itself a `decided`
+> gate with a fresh `raisedAtTs`, so 20 duplicates 50 s apart carried one human click
+> **1000 s** past a declared 60 s window — a window measured from a source that can be
+> replaced is not a window, and "one hop to the human" was twenty. Requiring a human closes
+> both by construction rather than by two more comparisons.
+>
+> **And when the source's decision is in no vocabulary, there is nothing to inherit.**
+> `GateRecord.decision` is typed as the four-member union and a journal is not obliged to
+> honour that; a `decided` gate carrying `"APPROVE"` passes the state test and only
+> `decisionOf`'s `default:` arm refuses it. That arm is register entry **A19** one layer in:
+> A19 is an unreadable decision taking the permissive branch at the point of use, and here
+> the same value would be copied onto a *second* gate by a system actor in the append that
+> raises it — an approval nobody gave, on a question nobody was asked. `undefined` there
+> means "no decision to inherit", so a human is asked.
+>
+> **`dedupe` is a NEW declaration.** D7.2's block has `batching` and no `dedupe`: row 3 was
+> specified with a window and nowhere to declare it. Its window is its own, because
+> batching's governs how long a queue may accumulate and this one governs how long an answer
+> stays current.
+>
+> **`batching.key` is a literal, not an expression.** D7.2 writes `key: "node.id +
+> plan.namespace"`; nothing in `src/` evaluates an expression over a gate payload, and the
+> literal plus the `policyRef` equality above already groups the case row 2 names — a wide
+> fan-out over one node.
+>
+> **Reverses when:** a merged durable record becomes worth its cost — which needs a
+> per-member decision shape on `GateRecord` first, i.e. the same shape quorum's
+> `PartiallyDecided` needs, so do that one first and reconsider this on top of it.
+
+> **Implementation deviation — row 5, as built.** `HumanGateBroker.list` returns one run's
+> open gates most urgent first, through `gateQueueOrder` in `run/gates.ts`. It is
+> PRESENTATION AND NOTHING ELSE: the same set of gates, the same approvers, the same
+> deadlines, the same behaviour when nobody answers. `openGates`, `nextDeadline` and
+> `sweepTimeouts` all read the projection directly and none of them consults it. It is also
+> not `Scheduler.select` — that orders TASKS a worker will run, on the critical path; this
+> orders QUESTIONS a person will read.
+>
+> **The rank is a deadline pulled earlier by a bounded credit**, rather than the tuple row 5
+> writes:
+>
+> ```
+>   rank(g) = min(deadline(g), raisedAtTs(g) + AGEING_MS) − radiusCredit(g)
+> ```
+>
+> sorted ascending, ties broken by `raisedAtSeq`. A strict lexicographic `(sla_remaining,
+> …)` would make every later key DEAD — two gates never share a remaining time to the
+> millisecond — so row 5's own example could never once fire. A credit in milliseconds is
+> the same intent with a working spelling, and it is bounded so that a wide question outranks
+> a somewhat more urgent one and never a much more urgent one.
+>
+> **IT READS NO CLOCK, which is a deviation from the wording and a strengthening of the
+> property.** `remaining = deadline − now` is strictly increasing in `deadline`, so ordering
+> by the absolute deadline is the same order at every instant — and a queue that cannot
+> reshuffle between rendering a manifest and clicking it is worth more than one that tracks a
+> clock. `AGEING_MS` (one hour) is likewise an absolute instant derived from the journaled
+> raise.
+>
+> **`blast_radius` is the DECISION's, not the action's**, and the difference is what the
+> projection can answer: how many OPEN gates one click would close, which is row 2's own use
+> of the phrase and is per gate. The action's irreversibility class reads better and is not
+> available — `GateRecord` does not carry one and `policy.decided`'s `irreversibility` is
+> folded nowhere — and inventing a field to sort by would be worse than using a fact the
+> journal already holds. When the class does reach the gate record it belongs in the rank
+> ahead of the batch count.
+>
+> **`cost_at_risk` IS DELIBERATELY NOT IN THE RANK.** The projection carries it
+> (`usage.costUsd + reservedUsd` — both halves, since reserve-worst-case means the exposure
+> peaks at the reservation), but it is a RUN-level fact and this is a run-level queue:
+> `list` takes one `RunLog`, so the term would shift every rank equally and order nothing.
+> Shipping a term that reads as working and does nothing is the "declared and not enforced"
+> failure `checkApproval` refuses one field over. It needs a queue that spans runs first;
+> nothing in `src/` merges two today, and `server/http.ts` would be where that reaches an
+> operator.
+>
+> **Starvation is bounded, and the bound is stated rather than asserted.** Writing
+> `maxCredit` for `(RADIUS_CAP − 1)·PER_MEMBER_MS` — 19 minutes — every gate's rank is at
+> most `raisedAtTs + AGEING_MS`, and a gate whose own deadline is no earlier than its ageing
+> instant ranks at least `raisedAtTs + AGEING_MS − maxCredit`. So **nothing raised more than
+> `maxCredit` after a gate can ever displace it**: the set that can outrank it is closed at a
+> fixed instant and only shrinks. The one thing that jumps the queue is a real, soon
+> deadline, which is self-limiting — it arrives, and the gate escalates onto a later deadline
+> or expires. `maxCredit` is kept below `AGEING_MS` for exactly that reason; above it, a wide
+> batch with a distant deadline would outrank a singleton due in a minute and the queue would
+> stop being an SLA queue. *A QUEUE NOBODY CAN PUSH TO THE BACK FOREVER* in
+> `test/run/gate-saturation.test.ts` drives the whole argument against waves of
+> maximum-credit arrivals.
 
 ---
 

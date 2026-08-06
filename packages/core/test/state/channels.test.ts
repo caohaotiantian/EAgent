@@ -222,3 +222,27 @@ test("StateView unwraps last_write_wins_by_ts storage", () => {
   const view = makeStateView(specs, { note: stored }, ["note"]);
   assert.equal(view.get("note"), "hello", "readers see the value, not the {value,ts} wrapper");
 });
+
+test("A CHANNEL NAME THAT NAMES AN INHERITED PROPERTY IS NOT A CHANNEL", () => {
+  // `slice` is an ordinary object, so `slice["constructor"]` answers with the `Object`
+  // function and `slice["__proto__"]` with `Object.prototype`. The allow-list check in
+  // `get` is what stops a node body pulling a host function through a state read and into
+  // the determinism boundary — `view.get("toString")` is a legal call for any node, since
+  // `get` takes a string and `reads` are the node's own declaration.
+  //
+  // It looks redundant next to the slice, which is built from the allow-list and therefore
+  // "cannot" hold anything else. That is exactly why nothing tested it: reverting it left
+  // the whole suite green. The prototype chain is what makes it not redundant, and it is
+  // the same hazard `gateOf` was written for one layer up.
+  const view = makeStateView(SPECS, { findings: ["a"] }, ["findings"]);
+
+  for (const inherited of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    assert.equal(view.get(inherited), undefined, `get("${inherited}") reached through the prototype chain`);
+    assert.throws(
+      () => view.require(inherited),
+      (e: unknown) => (e as { code: string }).code === "E_CHANNEL_UNDECLARED",
+      `require("${inherited}") did not refuse`,
+    );
+  }
+  assert.deepEqual(view.visible, ["findings"], "and none of them is visible either");
+});

@@ -76,7 +76,7 @@ test("with nothing to go on, severity is zero and the verdict fails", () => {
 
 // ── the compile ──────────────────────────────────────────────────────────────
 
-test("the graph compiles under all 21 rules with no errors", () => {
+test("the graph compiles under all 22 rules with no errors", () => {
   const r = compile({
     spec: incidentTriageSpec(),
     resolver: resolver(),

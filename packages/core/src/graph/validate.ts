@@ -1117,7 +1117,426 @@ function rule014And019Oversight(
         at: { nodeId: n.id },
       });
     }
+    checkApproval(n, d);
+    checkSla(n, d);
+    checkDelivery(n, d);
+    checkSaturation(n, d);
   }
+}
+
+/**
+ * Refuse an approval rule the runtime does not actually apply.
+ *
+ * The alternative — accept the block and enforce the part we implement — produces a
+ * graph that reads as "two of the SRE leads must agree" and behaves as "any one of
+ * them", with nothing anywhere saying so. An unsupervised action that LOOKS supervised
+ * is worse than an unsupervised action, because nobody goes looking (D7.9). So the
+ * unimplemented half is an error, and it becomes supported by deleting a check here.
+ */
+function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
+  const a = n.humanGate?.approval;
+  if (a === undefined) return;
+  const at = { nodeId: n.id };
+  const unsupported = (what: string, fix: string): void => {
+    d.push({ severity: "error", code: "GRAPH014_APPROVAL_UNSUPPORTED", message: `human_gate "${n.id}" ${what}`, at, fix });
+  };
+
+  if (a.mode !== undefined && a.mode !== "single") {
+    unsupported(
+      `declares approval mode "${a.mode}", which the runtime does not implement`,
+      "use mode: single — quorum, all and tiered are not enforced yet, and a declaration that is not enforced is worse than none",
+    );
+  }
+  if (a.k !== undefined) unsupported("declares a quorum k, which only mode: quorum would use", "remove k");
+  if (a.separationOfDuties === true) {
+    unsupported("declares separationOfDuties, which is not enforced", "remove it, or keep the initiator out of `approvers` by hand");
+  }
+  if (a.delegation?.allowed === true) {
+    unsupported("declares delegation, which is not enforced", "remove it — a delegated approval would be recorded as the delegate's own");
+  }
+
+  // An approvers list that cannot match anything authorizes everyone, because "names
+  // nobody" is the permissive case. Better to refuse the graph than to ship a gate that
+  // reads as restricted and is not.
+  for (const who of a.approvers ?? []) {
+    if (typeof who !== "string" || who.trim() === "") {
+      d.push({
+        severity: "error",
+        code: "GRAPH014_APPROVER_INVALID",
+        message: `human_gate "${n.id}" lists an approver that is not a subject id`,
+        at,
+        fix: "approvers are opaque subject strings matched against a human actor's `subject`; roles and groups need an identity resolver that does not exist yet",
+      });
+    }
+  }
+}
+
+/**
+ * Refuse a clock the runtime would not actually run.
+ *
+ * The SLA is the half of a gate nobody watches: an approval that is answered promptly
+ * exercises none of this, so a misdeclared deadline is discovered at 3am on the one gate
+ * nobody answered. Everything checkable is therefore checked at compile time.
+ */
+function checkSla(n: NodeSpec, d: Diagnostic[]): void {
+  const sla = n.humanGate?.sla;
+  if (sla === undefined) return;
+  const at = { nodeId: n.id };
+  const bad = (what: string, fix: string): void => {
+    d.push({ severity: "error", code: "GRAPH014_SLA_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
+  };
+
+  if (!isPositiveMs(sla.respondWithinMs)) {
+    bad(
+      `declares respondWithinMs ${String(sla.respondWithinMs)}, which is not a positive whole number of milliseconds`,
+      "respondWithinMs is a duration from the journaled raise; omit the sla block for a gate that should wait indefinitely",
+    );
+  }
+
+  // `default_action` is unrepresentable in `GateSlaSpec.onTimeout`, so this arm is only
+  // reachable from a graph that arrived as JSON — which is the ordinary case, since the
+  // canonical on-disk form is JSON and nothing type-checks it on the way in. A gate that
+  // asked for a pre-authorized decision and got `fail` is the "declared and not enforced"
+  // shape `checkApproval` exists to refuse, one field over.
+  if (sla.onTimeout !== undefined && sla.onTimeout !== "escalate" && sla.onTimeout !== "fail") {
+    bad(
+      `declares onTimeout "${String(sla.onTimeout)}", which a graph cannot ask for`,
+      "use escalate or fail — a timeout default_action is a pre-authorized decision, and nothing here can prove the action's irreversibility class permits one",
+    );
+  }
+
+  // ESCALATE WITH NOWHERE TO ESCALATE TO IS `fail` WEARING ANOTHER WORD. `nextTier` finds
+  // no tier, `#fireTimeout` treats the chain as exhausted, and the gate expires at the
+  // first deadline — so the graph reads "the manager gets paged" and behaves as "the run
+  // dies", with nothing anywhere saying so.
+  //
+  // A chain whose FIRST tier is already `action: "fail"` is the same thing spelled longer:
+  // `nextTier` stops at the first terminal tier, so there is no tier 1 to reach. Checking
+  // "has a reachable tier" rather than "is non-empty" is what catches that spelling.
+  const chain = asArray<EscalationTierLike>(n.humanGate?.delivery?.escalation);
+  if (sla.onTimeout === "escalate" && (chain.length === 0 || chain[0]?.action === "fail")) {
+    bad(
+      "declares onTimeout: escalate with no reachable delivery.escalation tier, so it would expire at the first deadline instead",
+      "add a non-terminal delivery.escalation tier, or say onTimeout: fail and mean it",
+    );
+  }
+
+  checkReminders(n, sla, bad);
+}
+
+/**
+ * Refuse a nudge schedule the sweep would decline to run, or run forever.
+ *
+ * Every rule here is one of the three bounds `GateSlaSpec.reminders` names, made loud. The
+ * broker refuses the same shapes and falls back to NO reminders, which is the safe
+ * direction and has to be — a broker can be driven directly — but a silent fallback on the
+ * one field whose whole purpose is "tell somebody" is exactly the failure this block is
+ * about, so the loud half belongs at compile time.
+ *
+ * STRICTLY INCREASING, AND STRICTLY INSIDE THE SLA. Out of order, the sweep consumes the
+ * list in order and a later-but-smaller instant is already past when it is reached, so it
+ * fires immediately after its predecessor — two nudges in one tick, which reads as a bug in
+ * the nudger rather than in the schedule. Equal instants are the same thing with no gap at
+ * all. And an instant at or past `respondWithinMs` is a nudge for a deadline that has
+ * already fired: by then the gate has escalated (a different tier, different people) or
+ * expired (nobody left to nudge), so it is a schedule that outlives what it was written
+ * for.
+ */
+function checkReminders(n: NodeSpec, sla: GateSlaSpecLike, bad: (what: string, fix: string) => void): void {
+  const declared: unknown = sla.reminders;
+  if (declared === undefined) return;
+  if (!Array.isArray(declared)) {
+    bad(
+      "declares sla.reminders that is not a list",
+      "reminders is a list of {afterMs} measured from the raise; drop the field for a gate that should be asked once",
+    );
+    return;
+  }
+  if (declared.length > MAX_REMINDERS) {
+    bad(
+      `declares ${declared.length} reminders, more than the ${MAX_REMINDERS} one gate may send`,
+      "a nudge is a nudge; a schedule longer than this is an escalation chain wearing another name, and delivery.escalation is where that belongs",
+    );
+    return;
+  }
+  let previous = 0;
+  for (const entry of declared as readonly unknown[]) {
+    const afterMs: unknown = isPlainRecord(entry) ? entry["afterMs"] : undefined;
+    if (!isPositiveMs(afterMs)) {
+      bad(
+        `declares a reminder at ${String(afterMs)}, which is not a positive whole number of milliseconds`,
+        "each reminder is {afterMs}, measured from the journaled raise — a NaN or a string loses the comparison the sweep makes and never fires",
+      );
+      return;
+    }
+    if (afterMs <= previous) {
+      bad(
+        `declares a reminder at ${afterMs}ms that does not come after the one before it`,
+        "reminders are consumed in order, so the list must strictly increase — two at the same instant are one nudge and a wasted row",
+      );
+      return;
+    }
+    previous = afterMs;
+    if (isPositiveMs(sla.respondWithinMs) && afterMs >= sla.respondWithinMs) {
+      bad(
+        `declares a reminder at ${afterMs}ms, which is not inside its own SLA of ${sla.respondWithinMs}ms`,
+        "a nudge after the deadline reaches whoever the escalation moved the gate to, or nobody at all; put it before respondWithinMs, or escalate instead",
+      );
+      return;
+    }
+  }
+}
+
+/**
+ * How many nudges one gate may ever send.
+ *
+ * A bound rather than a taste: the list is the only thing that limits how many times a
+ * human is interrupted about one question, and `strictly increasing` plus `inside the SLA`
+ * bounds the instants without bounding the COUNT — an SLA of an hour has room for a
+ * thousand of them.
+ */
+const MAX_REMINDERS = 8;
+
+/** The `sla` block as a graph that arrived as JSON may really carry it. */
+interface GateSlaSpecLike {
+  readonly respondWithinMs?: unknown;
+  readonly onTimeout?: unknown;
+  readonly reminders?: unknown;
+}
+
+/**
+ * Refuse a saturation control the runtime would silently decline to apply — D7.9 rows 2
+ * and 3.
+ *
+ * These two are the only declarations in a `human_gate` block whose failure mode is
+ * QUIETER than doing nothing. A misdeclared SLA fires at the wrong time and somebody
+ * notices; a misdeclared `batching` merges nothing at all, and the graph reads as "these
+ * twenty approvals arrive as one" while twenty land in the queue. `HumanGateBroker`
+ * refuses each of these again at run time and falls back to no batching and no dedup —
+ * that is the safe direction and it has to be, because a broker can be driven directly —
+ * but the fallback is silent by construction, so the loud half belongs here.
+ *
+ * THE NUMBERS ARE CHECKED FOR WHAT THEY END AT, NOT FOR BEING NUMBERS. `windowMs` and
+ * `maxBatch` both end at a comparison, and `NaN` loses every comparison: a `maxBatch` of
+ * `NaN` is not a small cap, it is NO cap, and a `windowMs` of `NaN` is not a short window,
+ * it is one that never closes. Both are the wrong direction for a knob whose entire job is
+ * to bound a blast radius.
+ */
+function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  const batching: unknown = n.humanGate?.batching;
+  const dedupe: unknown = n.humanGate?.dedupe;
+
+  if (batching !== undefined) {
+    const bad = (what: string, fix: string): void => {
+      d.push({ severity: "error", code: "GRAPH014_BATCHING_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
+    };
+    if (!isPlainRecord(batching)) {
+      bad(
+        "declares a batching block that is not an object",
+        "batching is {enabled, key, windowMs, maxBatch}; an array, a Map or a Date has no fields the runtime can read and would merge nothing",
+      );
+    } else if (typeof batching["enabled"] !== "boolean") {
+      bad(
+        `declares batching.enabled ${String(batching["enabled"])}, which is not a boolean`,
+        "say enabled: true to merge sibling gates, or drop the block — an absent block is the same as enabled: false and says so",
+      );
+    } else if (batching["enabled"] === true) {
+      const key: unknown = batching["key"];
+      if (typeof key !== "string" || key.trim() === "") {
+        bad(
+          "declares batching without a key, so no two gates could ever be told to group",
+          "key is a literal label shared by the gates that should merge; it is not an expression over the payload",
+        );
+      }
+      if (!isPositiveMs(batching["windowMs"])) {
+        bad(
+          `declares batching.windowMs ${String(batching["windowMs"])}, which is not a positive whole number of milliseconds`,
+          "windowMs is measured from the batch's first member's journaled raise; a window that is not a number never closes, so the runtime declines to batch at all",
+        );
+      }
+      const maxBatch: unknown = batching["maxBatch"];
+      if (typeof maxBatch !== "number" || !Number.isSafeInteger(maxBatch) || maxBatch < 2) {
+        bad(
+          `declares batching.maxBatch ${String(maxBatch)}, which is not a whole number of gates that two could reach`,
+          "maxBatch caps how many gates one click closes and must be at least 2 — a cap of 1 declares a mechanism and gets none",
+        );
+      }
+    }
+  }
+
+  if (dedupe !== undefined) {
+    const bad = (what: string, fix: string): void => {
+      d.push({ severity: "error", code: "GRAPH014_DEDUPE_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
+    };
+    if (!isPlainRecord(dedupe)) {
+      bad(
+        "declares a dedupe block that is not an object",
+        "dedupe is {enabled, windowMs}; an array, a Map or a Date has no fields the runtime can read and would collapse nothing",
+      );
+    } else if (typeof dedupe["enabled"] !== "boolean") {
+      bad(
+        `declares dedupe.enabled ${String(dedupe["enabled"])}, which is not a boolean`,
+        "say enabled: true to let an identical answered question answer this one, or drop the block",
+      );
+    } else if (dedupe["enabled"] === true && !isPositiveMs(dedupe["windowMs"])) {
+      bad(
+        `declares dedupe.windowMs ${String(dedupe["windowMs"])}, which is not a positive whole number of milliseconds`,
+        "windowMs is the age of the answered question, measured from ITS journaled raise; a window that is not a number would inherit a decision of any age",
+      );
+    }
+  }
+}
+
+/**
+ * A bag of fields, and nothing that merely reports `typeof "object"`.
+ *
+ * `typeof v !== "object"` admits an array, a `Map`, a `Date` and a `RegExp` — three waves
+ * running, that reflex has been the bug — and `null` on top. This asks the one question a
+ * declaration block has to answer: is it a plain record whose named fields mean what the
+ * schema says? `Object.prototype.toString` rather than a prototype comparison because it
+ * is realm-agnostic, and a cross-realm object's prototype is not this realm's (see the
+ * `intoHostRealm` trap).
+ */
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return Object.prototype.toString.call(v) === "[object Object]";
+}
+
+/** The shape `checkDelivery` reads a tier as, before it has proved it is one. */
+interface EscalationTierLike {
+  readonly afterMs?: unknown;
+  readonly to?: unknown;
+  readonly channels?: unknown;
+  readonly action?: unknown;
+}
+
+/**
+ * Refuse a delivery block the runtime would misread — and check nothing it cannot know.
+ *
+ * THE CHANNEL NAMES ARE NOT CHECKED, on purpose. A dispatcher is built by the deployment,
+ * so the compiler has no channel list to check against, and inventing one would make a
+ * portable graph fail to compile in the environment that has the channel. An unknown name
+ * is already loud at run time — `gate.delivery_failed` plus the console fallback — and
+ * delivery failure never auto-approves, so the safe direction is the one it already takes.
+ *
+ * `afterMs` MONOTONICITY IS NOT CHECKED EITHER, and that is a decision rather than an
+ * omission. `nextTier` computes each tier's deadline as `now + afterMs` at the moment the
+ * PREVIOUS tier breached, so `afterMs` is that tier's OWN window and not an offset from the
+ * raise. A chain that tightens as it climbs — 15 minutes for the on-call, then 2 for the
+ * director — is therefore a legitimate escalation, and refusing or even warning about it
+ * would be the compiler asserting a semantic the runtime does not have.
+ */
+function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
+  const spec = n.humanGate?.delivery;
+  if (spec === undefined) return;
+  const at = { nodeId: n.id };
+  const bad = (what: string, fix: string): void => {
+    d.push({ severity: "error", code: "GRAPH014_DELIVERY_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
+  };
+
+  if (!isNameList(spec.channels)) {
+    bad(
+      "declares a delivery block whose channels are not a list of non-empty names",
+      "name at least one channel the deployment's GateDispatcher was built with, or drop the delivery block",
+    );
+  }
+  for (const r of asArray<{ kind?: unknown; id?: unknown }>(spec.recipients)) {
+    checkRecipient(r, "delivery.recipients", bad);
+  }
+  if (spec.redact !== undefined && !isNameList(spec.redact)) {
+    bad(
+      "declares a redact list that is not a list of non-empty field names",
+      "redact names payload FIELDS, matched recursively by key; an empty entry would match nothing",
+    );
+  }
+  if (spec.redactAs !== undefined && !Object.hasOwn(CLASSIFICATION_POSTURE_FLOOR, spec.redactAs)) {
+    bad(
+      `declares redactAs "${String(spec.redactAs)}", which is not a classification`,
+      `use one of ${Object.keys(CLASSIFICATION_POSTURE_FLOOR).join(", ")}`,
+    );
+  }
+
+  if (spec.escalation !== undefined && !Array.isArray(spec.escalation)) {
+    bad("declares a delivery.escalation that is not a list of tiers", "escalation is an ordered array of {afterMs, to?, channels?} tiers");
+  }
+  const chain = asArray<EscalationTierLike>(spec.escalation);
+  for (const [i, tier] of chain.entries()) {
+    const where = `delivery.escalation[${i}]`;
+    if (tier.action === "fail") {
+      // A TERMINAL TIER ENDS THE CHAIN WHEREVER IT SITS. `nextTier` returns `undefined` at
+      // the first `action: "fail"`, so every tier after it is unreachable — a graph naming
+      // a director who is never told, which is the "looks supervised" failure with the
+      // people listed right there in the source.
+      if (i !== chain.length - 1) {
+        bad(
+          `declares ${where} as a terminal action: fail, so the ${chain.length - i - 1} tier(s) after it can never be reached`,
+          "move the terminal tier to the end of the chain, or delete it — an exhausted chain expires the gate anyway",
+        );
+      }
+      if (tier.to !== undefined || tier.channels !== undefined) {
+        d.push({
+          severity: "warning",
+          code: "GRAPH014_DELIVERY_INVALID",
+          message: `human_gate "${n.id}" names recipients or channels on ${where}, which is a terminal action: fail — nobody is told`,
+          at,
+          fix: "a terminal tier expires the gate; put the last people you want to reach on the tier before it",
+        });
+      }
+      continue;
+    }
+    if (!isPositiveMs(tier.afterMs)) {
+      bad(
+        `declares ${where}.afterMs ${String(tier.afterMs)}, which is not a positive whole number of milliseconds`,
+        "afterMs is THIS tier's own window, measured from the moment the previous tier breached; zero or negative would walk the whole chain in one sweep",
+      );
+    }
+    for (const r of asArray<{ kind?: unknown; id?: unknown }>(tier.to)) {
+      checkRecipient(r, `${where}.to`, bad);
+    }
+    if (tier.channels !== undefined && !isNameList(tier.channels)) {
+      bad(`declares ${where}.channels that are not a list of non-empty names`, "omit channels to reuse the gate's own");
+    }
+  }
+}
+
+/** The three recipient kinds a channel can resolve. Anything else reaches nobody. */
+const RECIPIENT_KINDS: ReadonlySet<string> = new Set(["user", "role", "group"]);
+
+function checkRecipient(
+  r: { readonly kind?: unknown; readonly id?: unknown } | null | undefined,
+  where: string,
+  bad: (what: string, fix: string) => void,
+): void {
+  const kind: unknown = r?.kind;
+  const id: unknown = r?.id;
+  if (typeof kind !== "string" || !RECIPIENT_KINDS.has(kind) || typeof id !== "string" || id.trim() === "") {
+    bad(
+      `declares a ${where} entry that is not a {kind, id} recipient`,
+      `kind is one of ${[...RECIPIENT_KINDS].join(", ")} and id is a non-empty string the channel can resolve`,
+    );
+  }
+}
+
+/** A duration a deadline can be built from. `Infinity` and `1.5` are neither. */
+function isPositiveMs(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v > 0;
+}
+
+/** A list of names, where "" and a non-string are both "names nothing". */
+function isNameList(v: unknown): boolean {
+  return Array.isArray(v) && v.length > 0 && v.every((s) => typeof s === "string" && s.trim() !== "");
+}
+
+/**
+ * Whatever arrived, as something safe to iterate.
+ *
+ * The canonical on-disk `GraphSpec` is JSON and nothing type-checks it on the way in, so a
+ * `for…of` over a field the types promise is an array is a `TypeError` out of the compiler
+ * for a graph somebody hand-wrote. A diagnostic saying "this is not a list" is what an
+ * author can act on; a stack trace is not.
+ */
+function asArray<T>(v: unknown): readonly T[] {
+  return Array.isArray(v) ? (v as readonly T[]) : [];
 }
 
 // ── GRAPH015 ─────────────────────────────────────────────────────────────────

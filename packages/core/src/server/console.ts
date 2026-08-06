@@ -21,6 +21,24 @@
  * A React console can come later against the same API. This one exists so the
  * oversight model is usable on day one — an approval queue nobody can reach is an
  * oversight model that does not exist.
+ *
+ * Three things here are not cosmetic:
+ *
+ *   - **The oversight queue is read from `/runs/:id/gates`, not from the run summary.**
+ *     Those are two different orderings of the same set: `summarise` sends
+ *     `Object.values(p.gates)` — journal order — and only `/runs/:id/gates` carries D7.9
+ *     row 5's rank, most urgent first. This page rendered the first one for as long as the
+ *     rank existed, so the ordering was built, tested, and read by nobody. See `loadGates`
+ *     for why it corrects rather than replaces.
+ *   - **It carries a credential and claims no identity.** It used to post
+ *     `actor: "console"` with no token at all, which meant every gate that named an
+ *     approver answered the shipped UI with 403 while anyone hand-rolling the same POST
+ *     could name whoever they liked. The page now sends `Authorization` and lets the
+ *     server say who that is; `/whoami` is what it shows in the header.
+ *   - **The stream is `fetch`, not `EventSource`.** `EventSource` cannot set a header,
+ *     so the only way to authenticate it is a token in the query string — which lands in
+ *     every access log and proxy trace between here and the browser. Reading the SSE
+ *     framing by hand is thirty lines and keeps the credential in a header.
  */
 
 export const CONSOLE_HTML = String.raw`<!doctype html>
@@ -86,6 +104,8 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
   <h1>Loom</h1>
   <span class="pill" id="conn">connecting</span>
   <span class="sp"></span>
+  <input id="tok" type="password" placeholder="access token" autocomplete="off" style="width:190px">
+  <span class="pill" id="who">nobody</span>
   <span class="pill" id="stat"></span>
 </header>
 <main>
@@ -113,15 +133,44 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const api = (p, o) => fetch(p, o).then(async (r) => {
+
+// ── the credential ──────────────────────────────────────────────────────────
+// The ONE place identity enters. Nothing below ever puts a name in a request body:
+// the server reads the token and decides who that is, which is the only arrangement
+// in which "u:security-lead approved this" means anything.
+let token = localStorage.getItem("loom.token") || "";
+const auth = () => (token ? { authorization: "Bearer " + token } : {});
+
+const api = (p, o = {}) => fetch(p, { ...o, headers: { ...(o.headers || {}), ...auth() } }).then(async (r) => {
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body?.error?.message || r.statusText);
   return body;
 });
 
+async function whoami() {
+  try {
+    const me = await api("/whoami");
+    $("who").textContent = me.subject;
+    $("who").title = me.canApproveNamedGates
+      ? "gates that name approvers can be answered as " + me.subject
+      : "this credential identifies no person, so gates naming approvers are refused";
+  } catch (e) {
+    $("who").textContent = "nobody";
+    $("who").title = e.message;
+  }
+}
+
 let selected = null;
 let stream = null;
 let lastSeq = 0;
+/**
+ * Which selection a stream belongs to.
+ *
+ * A run id is not enough: re-selecting the SAME run — which signing in does — would
+ * otherwise leave the previous follower sleeping in its backoff, waking up, seeing its
+ * run still selected, and opening a second stream that applies every event twice.
+ */
+let epoch = 0;
 /** graphHash -> spec. Structure is fetched ONCE and cached; only deltas stream. */
 const graphCache = new Map();
 let current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "" };
@@ -137,8 +186,16 @@ function invalidate() {
 
 // ── run list ────────────────────────────────────────────────────────────────
 async function loadRuns() {
-  const { runs } = await api("/runs");
   const el = $("runs");
+  let runs;
+  try {
+    ({ runs } = await api("/runs"));
+  } catch (e) {
+    // A credentialed plane with no token entered is the FIRST thing a new operator
+    // sees. Saying so beats an empty list and a console error nobody opens.
+    el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    return;
+  }
   if (!runs.length) { el.innerHTML = '<div class="empty">none yet</div>'; return; }
   el.innerHTML = "";
   for (const r of runs) {
@@ -150,30 +207,120 @@ async function loadRuns() {
   }
 }
 
+/**
+ * The oversight queue, MOST URGENT FIRST — D7.9 row 5.
+ *
+ * GET /runs/:id carries the gates too, and in JOURNAL order: summarise() sends
+ * Object.values(p.gates) and knows nothing about rank. GET /runs/:id/gates is the ranked
+ * one, and it also carries each gate's rendered payload and deadline, which the run summary
+ * does not. So the panel a human reads top-down is read from there.
+ *
+ * IT CORRECTS, IT NEVER BLANKS. applySnapshot still seeds current.gates from the run
+ * summary, so a failure here degrades to the right SET in the wrong ORDER — which is what
+ * this page did before it asked at all. Blanking the queue when one request fails would be
+ * the "no pending decisions" lie, on the panel where that lie costs the most.
+ *
+ * mine is the same epoch guard follow() uses: a reply for a run the operator has already
+ * navigated away from must not repaint the one they are looking at.
+ *
+ * WHAT THE EPOCH DOES NOT ORDER, said rather than left to be assumed: two calls for the SAME
+ * selection can land out of order, and the loser overwrites with a list one gate stale. That
+ * is bounded and self-correcting — every gate frame issues another fetch, and both answers
+ * are ranked lists of the same run — so it is a limit and not a defect. If it ever needs to
+ * be exact, the fix is a per-call token, not a wider epoch.
+ */
+async function loadGates(runId, mine) {
+  try {
+    const { gates } = await api("/runs/" + runId + "/gates");
+    if (selected !== runId || epoch !== mine || !Array.isArray(gates)) return;
+    current.gates = gates;
+    invalidate();
+  } catch (e) { /* the seeded list stands */ }
+}
+
 async function select(runId) {
   selected = runId;
+  const mine = ++epoch;
   lastSeq = 0;
   current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "" };
-  if (stream) stream.close();
+  if (stream) stream.abort();
   await loadRuns();
 
   const run = await api("/runs/" + runId);
   applySnapshot(run);
   await ensureGraph(run.graphHash);
+  await loadGates(runId, mine);
 
+  lastSeq = run.seq;
+  invalidate();
   // Resume from the seq we already have — the server replays gap-free from there,
   // or hands back a snapshot if we are outside the hot window.
-  stream = new EventSource("/runs/" + runId + "/events?lastEventId=" + run.seq);
-  lastSeq = run.seq;
-  stream.onopen = () => ($("conn").textContent = "live");
-  stream.onerror = () => ($("conn").textContent = "reconnecting");
-  stream.addEventListener("snapshot", (e) => { applySnapshot(JSON.parse(e.data)); invalidate(); });
-  stream.addEventListener("event", (e) => {
-    lastSeq = Number(e.lastEventId || lastSeq);
-    applyEvent(JSON.parse(e.data));
-    invalidate();
-  });
+  void follow(runId, mine);
+}
+
+/**
+ * The event stream, over fetch so the credential can ride in a header.
+ *
+ * EventSource would be shorter and cannot carry one; the alternative is a token in the
+ * query string, which is a credential written into every log between here and the
+ * browser. This also gives us the reconnect that EventSource would have done for free —
+ * hence the loop, which resumes from lastSeq and therefore cannot silently skip events.
+ */
+async function follow(runId, mine) {
+  while (selected === runId && epoch === mine) {
+    const ctrl = new AbortController();
+    stream = ctrl;
+    try {
+      const res = await fetch("/runs/" + runId + "/events", {
+        headers: { accept: "text/event-stream", "last-event-id": String(lastSeq), ...auth() },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error("stream " + res.status);
+      $("conn").textContent = "live";
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let cut;
+        while ((cut = buf.indexOf("\n\n")) >= 0) {
+          onFrame(buf.slice(0, cut));
+          buf = buf.slice(cut + 2);
+        }
+      }
+    } catch (e) {
+      if (ctrl.signal.aborted) return;
+    }
+    if (selected !== runId || epoch !== mine) return;
+    $("conn").textContent = "reconnecting";
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/** One SSE frame: id / event / data lines. */
+function onFrame(raw) {
+  let id, name, data;
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("id: ")) id = Number(line.slice(4));
+    else if (line.startsWith("event: ")) name = line.slice(7);
+    else if (line.startsWith("data: ")) data = JSON.parse(line.slice(6));
+  }
+  if (data === undefined) return;
+  if (name === "snapshot") applySnapshot(data);
+  else {
+    if (id !== undefined) lastSeq = id;
+    applyEvent(data);
+  }
   invalidate();
+  // RE-RANK WHENEVER THE QUEUE'S MEMBERSHIP CAN HAVE CHANGED. applyEvent appends a new
+  // gate and removes a decided one, which keeps the SET right at 60 ms and cannot keep the
+  // ORDER right — rank is a function of deadlines and batch sizes, not of arrival. A
+  // snapshot replaces the whole list with the run summary's journal order and needs the same
+  // correction. Only on those frames: task deltas are the high-frequency ones and they do
+  // not touch the queue.
+  if (name === "snapshot" || data.type === "gate.raised" || data.type === "gate.decided") void loadGates(selected, epoch);
 }
 
 function applySnapshot(run) {
@@ -287,7 +434,10 @@ function drawGates() {
   for (const g of current.gates) {
     const d = document.createElement("div");
     d.className = "gate";
-    d.innerHTML = '<div><strong>' + esc(g.nodeId) + '</strong></div><div class="meta">' + esc(g.gateId) + '</div>';
+    // WHO MAY ANSWER, shown next to the buttons. A queue that hides the approvers list
+    // is a queue where "why was I refused?" is answered by a 403 and nothing else.
+    const named = (g.approvers || []).length ? " · needs " + esc((g.approvers || []).join(", ")) : "";
+    d.innerHTML = '<div><strong>' + esc(g.nodeId) + '</strong></div><div class="meta">' + esc(g.gateId) + named + '</div>';
     const actions = document.createElement("div");
     actions.className = "actions";
     const yes = document.createElement("button");
@@ -309,13 +459,18 @@ function drawGates() {
 
 async function decide(gateId, decision) {
   try {
+    // NO actor field. The server takes the decider's subject from the credential this
+    // request carries; a name typed here would be a claim it refuses, and rightly.
     const run = await api("/runs/" + selected + "/gates/" + gateId, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision, actor: "console" }),
+      body: JSON.stringify({ decision }),
     });
     applySnapshot(run);
     invalidate();
+    // The response is a run summary, so it reseeds the queue in journal order — the same
+    // correction the snapshot frame needs, for the same reason.
+    await loadGates(selected, epoch);
   } catch (e) { alert(e.message); }
 }
 
@@ -330,10 +485,25 @@ $("go").onclick = async () => {
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
+// Signing in is one field. It re-asks who we are, reloads what the credential can see,
+// and reconnects the stream — the token is only ever sent as a header.
+$("tok").value = token;
+$("tok").onchange = async () => {
+  token = $("tok").value.trim();
+  localStorage.setItem("loom.token", token);
+  await whoami();
+  await loadRuns();
+  if (selected) await select(selected);
+};
+
 api("/health").then((h) => {
   $("conn").textContent = h.auth === "open" ? "open" : "authorized";
   if (h.graphs?.length) $("wf").value = h.graphs[0];
+  // On the input rather than the identity pill, which whoami owns — two writers on one
+  // element is a race whose loser is whichever request was slower.
+  if (!h.identity) $("tok").placeholder = "no identity source";
 });
+whoami();
 loadRuns();
 setInterval(loadRuns, 4000);
 </script>

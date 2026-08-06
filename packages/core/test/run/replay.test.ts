@@ -10,6 +10,12 @@ import { ReplayEffects, replayRun } from "../../src/run/replay.ts";
 import { conformsToGraph, reconstructGraph, shouldExport, spansFrom } from "../../src/telemetry/spans.ts";
 import { DOCS, compileSkeleton, harness } from "./skeleton.ts";
 
+// A DEPLOYMENT TOKEN KEY, because the two span assertions below read `pii` attributes and
+// `redactAttributes` omits those entirely when none is configured — see `deploymentKey` in
+// `security/redact.ts`. Setting it here is also the honest statement of what a trace with
+// tokens in it REQUIRES: not a process, a deployment.
+process.env["LOOM_PII_TOKEN_KEY"] = "9d".repeat(32);
+
 async function eventsOf(store: MemoryStateStore, runId: RunId): Promise<JournalEvent[]> {
   const out: JournalEvent[] = [];
   for await (const e of store.read(runId, 1)) out.push(e);
@@ -238,15 +244,25 @@ test("model spans carry gen_ai semantic-convention attributes", async () => {
   assert.ok(typeof model.attributes["loom.cost_usd"] === "number");
 });
 
-test("the gate span records what the approver saw, and hashes who they were", async () => {
+test("the gate span records THAT the approver saw something, and neither who they were nor what it was", async () => {
+  // On a DRIVEN run, so the values under test are the ones the engine really journaled
+  // rather than a fixture's. Both used to leave the process raw: an unkeyed 48-bit prefix
+  // of the subject, and `digest(payload)` — a confirmation oracle for exactly the fields
+  // `DeliverySpec.redact` hides from a channel. A trace collector is the same kind of
+  // place as a channel, and usually somebody else's. See `test/telemetry/spans.test.ts`
+  // for the inversions themselves.
   const { h, runId } = await recorded();
   const spans = spansFrom(await eventsOf(h.store as MemoryStateStore, runId));
   const gate = spans.find((s) => s.name === "loom.gate");
   assert.ok(gate);
   assert.equal(gate.attributes["gate.decision"], "approve");
-  assert.match(String(gate.attributes["gate.content_digest"]), /^sha256:/);
-  assert.notEqual(gate.attributes["gate.approver"], "u:alice", "the approver identity is hashed");
-  assert.match(String(gate.attributes["gate.approver"]), /^[0-9a-f]{12}$/);
+  assert.equal(gate.attributes["gate.approver_kind"], "human", "…by a person, which is the oversight fact and is not personal data");
+  assert.match(String(gate.attributes["gate.content_digest"]), /^pii:[0-9a-f]{12}:string$/);
+  assert.notEqual(gate.attributes["gate.approver"], "u:alice");
+  assert.match(String(gate.attributes["gate.approver"]), /^pii:[0-9a-f]{12}:string$/);
+  // The gate id stays in the clear, and that is the whole answer to "how does an audit get
+  // the real values back": through the journal, inside the boundary, keyed by this.
+  assert.match(String(gate.attributes["gate.id"]), /^g/);
 });
 
 test("THE CONFORMANCE ASSERTION — reconstruct(trace) ⊆ declared(graph)", async () => {
@@ -289,9 +305,125 @@ test("an in-flight run still produces a readable trace", async () => {
 });
 
 test("spans are deterministic: the same journal yields identical spans", async () => {
+  // WITHIN ONE PROCESS, which is all this test can see and is the half that let a
+  // `randomBytes(32)` key sit under a file documented as a pure function of the journal for
+  // a whole wave: a per-process key satisfies this assertion exactly. The claim that
+  // actually matters — two PROCESSES, one journal, one deployment key, identical bytes — is
+  // in `test/telemetry/spans.test.ts` under "A TRACE IS A PURE FUNCTION OF THE JOURNAL AND
+  // THE DEPLOYMENT KEY", and it spawns a child to observe it. This one stays because it is
+  // the cheap regression guard over a real driven run rather than a fixture.
   const { h, runId } = await recorded();
   const events = await eventsOf(h.store as MemoryStateStore, runId);
   assert.equal(JSON.stringify(spansFrom(events)), JSON.stringify(spansFrom(events)));
+});
+
+test("A REPLAY DOES NOT TOUCH THE JOURNAL IT REPLAYS, so the original's trace is unchanged", async () => {
+  // This is what the test named "A REPLAY'S TRACE MATCHES THE ORIGINAL RUN'S, because both
+  // are folds of the same journal" was ACTUALLY asserting, and it is worth keeping under a
+  // name that says so: `replayRun` builds a shadow `MemoryStateStore`, so both sides of its
+  // comparison were the same journal read twice. The property its old name claimed is
+  // impossible by construction — the replay is a different run with a different `runId` —
+  // so it passed vacuously, on a determinism claim, which is precisely why nobody noticed
+  // the trace had stopped being a pure function of the journal. What replay determinism DOES
+  // guarantee is asserted in the test below this one.
+  const { h, runId } = await recorded();
+  const events = await eventsOf(h.store as MemoryStateStore, runId);
+  await replayRun({
+    store: h.store,
+    runId,
+    graph: compileSkeleton(),
+    engine: { tools: h.engine.tools, functions: h.engine.functions, models: h.engine.models, policy: { granted: ["fs:read", "fs:write"] } },
+  });
+  const after = await eventsOf(h.store as MemoryStateStore, runId);
+  assert.equal(after.length, events.length, "a replay appended to the journal it was reading");
+  assert.equal(JSON.stringify(spansFrom(after)), JSON.stringify(spansFrom(events)));
+});
+
+test("A REPLAY'S TRACE IS A DIFFERENT TRACE, and what it must agree with the original about is the GRAPH", async () => {
+  // Driven by hand rather than through `replayRun`, because `replayRun` keeps its shadow
+  // journal to itself — which is the mechanical reason no test could ever have asserted the
+  // claim the old one was named for.
+  //
+  // THREE THINGS DIFFER AND THEY ALL SHOULD. `traceId` and every `spanId` are `digestOf` the
+  // run id, and a replay is a different run; every `pii` token is scoped to the run id, for
+  // the cross-run oracle reason `tokenKey` states; and the approver is the replay component,
+  // not the human — a replay is not a second approval and must never read as one.
+  //
+  // WHAT AGREES IS THE ANSWER TO "DID IT EXECUTE THE SAME GRAPH?", which is the whole of
+  // what a deterministic replay claims: the same node instances, the same edges, the same
+  // graph hash, and the same shape of trace.
+  const { h, graph, runId } = await recorded();
+  const original = await eventsOf(h.store as MemoryStateStore, runId);
+
+  const shadow = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const engine = new Engine({
+    store: shadow,
+    tools: h.engine.tools,
+    functions: h.engine.functions,
+    models: h.engine.models,
+    replay: ReplayEffects.fromEvents(original),
+    policy: { granted: ["fs:read", "fs:write"] },
+  });
+  const replayRunId = await engine.submit({ graph, inputs: { paths: DOCS } });
+  let rp = await engine.advance(replayRunId);
+  for (let guard = 0; guard < 4 && rp.status === "awaiting_gate"; guard++) {
+    const open = Object.values(rp.gates).find((g) => g.state === "open");
+    if (open === undefined) break;
+    rp = await engine.resolveGate(replayRunId, {
+      gateId: open.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "system", component: "replay" },
+      idempotencyKey: `replay:${open.gateId}`,
+    });
+  }
+  assert.equal(rp.status, "succeeded", "the replay has to have run at all for anything below to mean something");
+
+  const a = spansFrom(original);
+  const b = spansFrom(await eventsOf(shadow, replayRunId));
+
+  // Not byte-identical, and the assertion is here rather than left implicit so that nobody
+  // "fixes" this test by asserting equality and re-derives the run scope out of `close`.
+  assert.notEqual(JSON.stringify(a), JSON.stringify(b));
+  assert.notEqual(a[0]!.traceId, b[0]!.traceId, "two runs are two traces");
+
+  const tally = (spans: readonly { name: string }[]): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const s of spans) out[s.name] = (out[s.name] ?? 0) + 1;
+    return out;
+  };
+  assert.equal(b.length, a.length, "the replay produced a different number of spans");
+  assert.deepEqual(tally(b), tally(a), "…or a different shape of trace");
+
+  const ra = reconstructGraph(a);
+  const rb = reconstructGraph(b);
+  assert.deepEqual(rb.nodes, ra.nodes);
+  assert.deepEqual(rb.edges, ra.edges);
+  assert.deepEqual(rb.instances, ra.instances, "TaskIds are DERIVED, so they survive a change of run id");
+  assert.equal(rb.graphHash, ra.graphHash);
+  assert.deepEqual(conformsToGraph(rb, graph.spec, graph.graphHash), {
+    ok: true,
+    unknownNodes: [],
+    unknownEdges: [],
+    hashMatches: true,
+    unreadableSpans: [],
+  });
+
+  // The gate is the one place the two traces disagree about a FACT rather than about an id,
+  // and it is the right disagreement: a human approved the original, the replay served that
+  // decision, and the trace says so.
+  const gateA = a.find((s) => s.name === "loom.gate")!;
+  const gateB = b.find((s) => s.name === "loom.gate")!;
+  assert.equal(gateA.attributes["gate.approver_kind"], "human");
+  assert.equal(gateB.attributes["gate.approver_kind"], "system");
+  assert.equal("gate.approver" in gateB.attributes, false, "a replay must not read as a second approval by that person");
+
+  // And the same question, asked twice, tokenises into two incomparable values — the run
+  // scope doing exactly its job. The journal keeps them equal, which is where the comparison
+  // belongs and is why nothing was lost.
+  const digestIn = (events: readonly JournalEvent[]): unknown =>
+    events.find((e) => e.type === "gate.raised")?.payload?.["contentDigest" as never];
+  assert.equal(digestIn(await eventsOf(shadow, replayRunId)), digestIn(original), "the replayed gate asked a different question");
+  assert.notEqual(gateB.attributes["gate.content_digest"], gateA.attributes["gate.content_digest"]);
 });
 
 // ── sampling ─────────────────────────────────────────────────────────────────

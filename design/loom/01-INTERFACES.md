@@ -77,6 +77,15 @@ load-bearing across layers):
 | `E_REPLAY_DIVERGENCE` | internal | `GraphExecutor` | Replay reached an effect key the journal does not contain |
 | `E_CANCELLED` | cancelled | any | The `AbortSignal` fired |
 
+> **The "Raised by" column is the design's intent, not an inventory of live throw sites.**
+> Five rows above name a raiser that does not raise — `E_GATE_REQUIRED`,
+> `E_ADMISSION_REJECTED` (there is no `AgentScheduler` at all; **D6.3**), `E_LEASE_LOST`
+> (the executor never arms the fence; `HANDOFF.md` **A2**), `E_TOOL_NOT_IDEMPOTENT`, and
+> `E_SECRET_UNAVAILABLE`. Each is declared in `errors.ts` and referenced by nothing else
+> in `src/`, so no `retry.onlyIf` list matching one of them will ever fire.
+> `test/docs-drift.test.ts` pins the whole never-raised set exactly, which means
+> implementing any of them fails the suite and sends its author back to this table.
+
 ### Universal method contract
 
 Every asynchronous method on every interface obeys these four rules. They are stated
@@ -119,10 +128,23 @@ journaled.
 
 > **The minimalism guard, corrected.** EAgent pinned a *line count* on the kernel
 > (`test/kernel-surface.test.ts`), which taxed correct primitives as much as incidental
-> ones — the ceiling was raised four times. Loom pins **this surface instead**: a test
-> snapshots the 24 interface names and every exported method signature. Adding a method
-> is a deliberate, reviewed act; adding 300 lines inside an existing implementation is
-> not policed, because it shouldn't be.
+> ones — the ceiling was raised four times. Loom pins **the exported name set instead**:
+> `scripts/check-surface.mjs` asks the TypeScript checker for every name reachable from
+> `dist/index.d.ts` and compares it to `scripts/surface.json`. **How many names that is,
+> is a command and not a number written here** —
+> `node -e "console.log(require('./scripts/surface.json').length)"` — because this
+> paragraph said 426 while the pin held 452, and the pin moves in every wave that exports
+> anything. Adding or removing a public export is a deliberate, reviewed act, and the diff
+> shows a reviewer exactly what grew; adding 300 lines inside an existing implementation
+> is not policed, because it shouldn't be.
+>
+> **What that guard does NOT do**, stated because this paragraph claimed both for a while:
+> it pins NAMES, not signatures, and it is a script under `npm run check` rather than a
+> test under `npm test`. Adding a method to an interface that is already exported changes
+> nothing it looks at. The check that compares a method name in a `ts` block here against
+> the code of the same name is `test/docs-drift.test.ts`, it reaches the 18 doc interfaces
+> that have a counterpart in `src/`, and it compares names and never parameter lists —
+> that file's closing section says why.
 
 ### Core value types
 
@@ -183,13 +205,18 @@ export interface GraphCompiler extends Versioned {
     signal?: AbortSignal;
   }): Promise<CompileResult>;
 
-  /** Validates a proposed runtime mutation against an already-running RunGraph (D5 §Dynamic mutation). */
-  compileMutation(input: {
-    base: RunGraph;
-    mutation: GraphMutation;
-    budget: ExpansionBudget;
-    signal?: AbortSignal;
-  }): Promise<CompileResult>;
+  // NOT A METHOD OF THIS INTERFACE. Runtime mutation is compiled by the free function
+  // `compileMutation(input: MutateInput): MutationResult` in `graph/mutate.ts`, which the
+  // executor calls directly; `GraphCompiler` has `compile` and `analyze` and nothing else.
+  // Kept here, commented, because the CAPABILITY is real and D5 §Dynamic mutation is
+  // written against it — it is the shape that is wrong, not the feature.
+  //
+  // compileMutation(input: {
+  //   base: RunGraph;
+  //   mutation: GraphMutation;
+  //   budget: ExpansionBudget;
+  //   signal?: AbortSignal;
+  // }): Promise<CompileResult>;
 
   /** Static analysis surfaced to the editor without compiling: reachability, unused channels, cost estimate. */
   analyze(spec: GraphSpec): Diagnostics;
@@ -310,7 +337,7 @@ export type TaskClass = "model" | "tool" | "function" | "gate" | "control";
 | Idempotency | `submit` is keyed; a duplicate key with an identical payload returns the original `runId` with `accepted:true` and creates nothing |
 | Cancellation | `lease` returns `null` promptly on abort. A worker dying without `release` is recovered by lease expiry — **the only liveness mechanism that needs no cleanup path** |
 | Streaming | `lease` is a long-poll, not a stream, so a worker's crash cannot strand an open stream |
-| Fairness | Ready Tasks are drawn by **weighted deficit round-robin over Runs, then over Tenants**, never FIFO. A 500-way fan-out therefore cannot starve a single-node run submitted a second later (**D6 §Fairness**) |
+| Fairness | **DESIGNED, NOT BUILT.** The intent is weighted deficit round-robin over Runs, then over Tenants, never FIFO, so a 500-way fan-out cannot starve a single-node run submitted a second later (**D6 §Fairness**). What ships is `Scheduler.select` in `src/run/scheduler.ts`: critical-path order with a branch-coordinate tie-break, **within one run** — `SelectInput` carries a single projection, so cross-run fairness is not merely absent, it is not expressible at this seam. Cross-worker fairness is `DEFERRED-v2` (G3) |
 
 ---
 
@@ -367,8 +394,10 @@ export interface ToolRegistry extends Versioned {
   register(tool: ToolDefinition, source: ToolSource): Disposable;   // later-wins shadow stack (from EAgent)
   get(name: string, at?: ResourceRef): ToolHandle | undefined;
   list(filter?: { capabilities?: string[]; source?: ToolSource["kind"]; healthy?: boolean }): readonly ToolHandle[];
-  /** Circuit-breaker state per source; unhealthy sources are withheld from model tool lists. */
-  health(): ReadonlyMap<string, SourceHealth>;
+  // DESIGNED, NOT BUILT — commented out so it stops reading as a promise.
+  // Circuit-breaker state per source; unhealthy sources would be withheld from model
+  // tool lists. See the note under the table.
+  // health(): ReadonlyMap<string, SourceHealth>;
 }
 
 export interface ToolDefinition {
@@ -392,6 +421,15 @@ export interface ToolDefinition {
 | Idempotency | `register` returns a `Disposable`; disposing restores the shadowed definition exactly (EAgent's `registry.ts` semantics, kept) |
 | Cancellation | n/a — synchronous |
 | Versioning | A `RunGraph`'s resolution manifest pins `name@version`; a mid-run re-registration cannot change what a running Task calls |
+
+**What `run/registry.ts` actually implements.** `register(tool)`, `get(name)` and `list()`
+— no `source`, no `at`, no filter — plus two methods this block does not mention:
+`require(name)`, the throwing `get` that raises `E_TOOL_NOT_FOUND`, and `manifests()`,
+which is what the compiler needs. Shadowing and `dispose` behave exactly as specified.
+There is **no circuit breaker**: nothing measures a source, nothing withholds one, and
+`SourceHealth` appears nowhere in `src/`, so `healthy` in the `list` filter above is design
+too. `test/docs-drift.test.ts` checks the method *names* in this block against the real
+class, which is why `health()` is a comment rather than a declaration.
 
 ---
 
@@ -485,8 +523,15 @@ export interface ModelAdapter extends Versioned {
   readonly models: ReadonlyMap<string, ModelCapabilities>;
 
   stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
-  countTokens(req: ModelRequest): Promise<number>;   // for compaction decisions, before the call
   priceOf(model: string, usage: Usage): number;      // from a PINNED price-table version
+  estimateOf(req: ModelRequest): number;             // WORST-CASE COST, for the D6.5 reservation
+
+  // NOT BUILT, and not the same thing as `estimateOf`. A token count before the call is
+  // what a compaction decision wants; `estimateOf` returns a worst-case *cost* for the
+  // budget reservation and is the only pre-call estimate any adapter implements. D6.4's
+  // compaction ladder is written as if this existed.
+  //
+  // countTokens(req: ModelRequest): Promise<number>;
 }
 
 export interface ModelCapabilities {
@@ -548,6 +593,7 @@ export interface EventBus extends Versioned {
   subscribe(filter: EventFilter, opts: {
     /** Bounded per-subscriber queue. A slow subscriber degrades ITSELF, never the executor. */
     queueSize: number;
+    /** `close` cuts the stream and the ITERATOR throws; the two `drop_*` keep delivering. */
     onOverflow: "drop_oldest" | "drop_newest" | "close";
   }): AsyncIterable<JournalEvent> & Disposable;
   /** Gap-free catch-up for a reconnecting UI: journal replay then live tail, deduped by seq. */
@@ -557,7 +603,7 @@ export interface EventBus extends Versioned {
 
 | Property | Contract |
 |---|---|
-| Errors | `publish` never throws. `subscribe` may end the iterable with `E_SUBSCRIBER_OVERFLOW` when `onOverflow:"close"` |
+| Errors | `publish` never throws — nor does `subscribe`. That half is unchanged and is what protects the executor. **The subscription's ITERATOR does throw**, on `onOverflow:"close"` and nowhere else: it drains what it still holds and then throws `SubscriberOverflowError`, carrying the seq of the last event it delivered. So "you fell behind and I cut you off" and "the run finished" are two different terminal outcomes of the one delivery path, and a subscriber that reads no counter cannot confuse them. **This row did not previously describe that gap.** In full, it read: "`publish` never throws. `subscribe` may end the iterable with `E_SUBSCRIBER_OVERFLOW` when `onOverflow:"close"`" — a promise of an error code `errors.ts` has never declared, made in the one row also carrying the marker that records its absence. So the change is not a signal replacing a weaker signal; it is a signal replacing a **promise nothing kept**, and the code stays undeclared on purpose: the thrown value is deliberately **not** a `LoomError` with a code, so `NOT-IN-CODE(E_SUBSCRIBER_OVERFLOW)` still holds, and no `retry.onlyIf` list, HTTP status map or boundary taxonomy ever sees it. `drop_oldest` and `drop_newest` still end cleanly — a subscriber that chose to tolerate loss is not interrupted about it, and `Subscription.dropped` remains its counter. Recovery is `replayThenTail(runId, lastSeq + 1)`: the journal kept what the bus dropped |
 | Ordering | Per-Run total order by `seq`, guaranteed. **No cross-run ordering guarantee** — and nothing may depend on one |
 | Delivery | At-most-once on the bus (it is derived). Exactly-once is available only via `replayThenTail`, which reads the journal |
 | Cancellation | `dispose()` or `.return()` unsubscribes synchronously |
@@ -579,9 +625,20 @@ export interface StateStore extends Versioned {
   read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent>;
   head(runId: RunId): Promise<Seq>;
 
-  /** Derived read models. Rebuildable from the journal at any time; never written directly. */
-  projection<T>(name: ProjectionName, key: string): Promise<T | undefined>;
-  query<T>(name: ProjectionName, filter: unknown, page: Page): Promise<Paged<T>>;
+  /** Newest first — `runId` is a ULID, so descending id is descending time. `limit` defaults to 100. */
+  listRuns(limit?: number): Promise<readonly RunSummary[]>;
+  close(): void;
+
+  // DERIVED READ MODELS ARE NOT A STORE CONCERN, and neither of these exists. A projection
+  // is produced by FOLDING (`run/projection.ts`), in the process that wants it — which is
+  // what "rebuildable at any time; never written directly" actually implies. There is no
+  // `ProjectionName`, no `Page`, and no query surface over derived state; a caller that
+  // wants one reads the journal and folds. Left here because D9.4's retention story and
+  // D12's console both assume a queryable read model, and that assumption should be
+  // visible rather than quietly true.
+  //
+  // projection<T>(name: ProjectionName, key: string): Promise<T | undefined>;
+  // query<T>(name: ProjectionName, filter: unknown, page: Page): Promise<Paged<T>>;
 }
 
 export interface JournalEvent {
@@ -596,22 +653,54 @@ export interface JournalEvent {
 }
 ```
 
-The closed `EventType` set (v1) — the whole system's vocabulary of durable facts:
+The closed `EventType` set (v1) — the whole system's vocabulary of durable facts. All 52,
+in `EVENT_TYPES` order, and `test/docs-drift.test.ts` now checks this block against that
+array in both directions:
 
 ```
 run.submitted  run.compiled  run.started  run.suspended  run.resumed
 run.completed  run.failed    run.cancelled
 task.ready     task.leased   task.started  task.progress
 task.committed task.failed   task.skipped  task.cancelled  task.retry_scheduled
+action.pending fanout.planned
 state.reduced  channel.written
 effect.started effect.completed effect.failed
 model.called   tool.called
-gate.raised    gate.delivered gate.decided  gate.timeout  gate.escalated
+gate.raised    gate.delivered gate.delivery_failed gate.callback_rejected
+gate.decided   gate.batch_decided  gate.deduped
+gate.timeout   gate.escalated gate.reminded  gate.claimed  gate.cancelled
 policy.decided policy.escalated policy.deescalated
 budget.reserved budget.settled budget.exhausted
-graph.mutated  checkpoint.created  checkpoint.restored
-operator.command
+graph.mutated  subgraph.started subgraph.completed
+checkpoint.created  checkpoint.restored
+operator.command  config.reloaded  hook.applied
 ```
+
+**This list was short by nine for as long as it existed** — `action.pending`,
+`fanout.planned`, `gate.delivery_failed`, `gate.callback_rejected`, `gate.cancelled`,
+`subgraph.started`, `subgraph.completed`, `config.reloaded` and `hook.applied` were all in
+`EVENT_TYPES` and not here, under a heading that calls the list *closed* and *the whole
+system's vocabulary*. `gate.cancelled` is the one that stings: its being declared, folded
+and never appended was the root cause of a severe authorization defect, and a reader
+auditing the vocabulary from this page would not have known it existed. **Eight** of the 52
+are still appended by nothing — `test/docs-drift.test.ts` pins which, and why, in
+`NEVER_APPENDED`.
+
+`gate.batch_decided` and `gate.deduped` arrived together with D7.9's batching and
+deduplication (**04-OVERSIGHT.md** D7.9). Both are RECEIPTS rather than transitions —
+neither is folded, because the `gate.decided` rows written in the same append do every state
+change — and both exist so that a reader can answer "what did this one decision cover?" and
+"where did this decision come from?" from the journal alone.
+
+`gate.claimed` is the newest, and it is D7.3's `Claimed` soft lock
+(**04-OVERSIGHT.md** D7.3). `{gateId, until}` with the claiming human as the event's actor —
+the subject is not in the payload, for the reason `gate.decided` keeps none either. Unlike
+the two receipts above it IS folded, into `GateRecord.claimedBy`/`claimedUntil`, and the fold
+is the ARBITER: it keeps the first live claim, drops a second one by another subject, and
+lets the holder's own re-claim refresh it, so two people claiming in the same instant get one
+answer rather than two locks. It grants nothing — no decision path reads a claim — and there
+is deliberately no `gate.claim_expired`: `until` is absolute, so a claim expires by being
+ignored and there is no state to reap.
 
 | Property | Contract |
 |---|---|
@@ -683,8 +772,12 @@ export interface PolicyEngine extends Versioned {
   /** The single authorization decision point. Called by ToolExecutor and by the executor per Task. */
   decide(req: PolicyRequest, signal?: AbortSignal): Promise<PolicyDecision>;
 
-  /** Resolve effective posture across all four config levels + runtime escalations. */
-  posture(scope: PolicyScope): Promise<Posture>;
+  /**
+   * Resolve effective posture across all four config levels + runtime escalations.
+   * Keyed on the REQUEST rather than on a scope, because the floor depends on the
+   * action's irreversibility and data classification as much as on where it runs.
+   */
+  effectivePosture(req: PolicyRequest): Posture;
 
   /** Tightening. May be called by the system, by rules, or by a human. */
   escalate(scope: PolicyScope, to: Posture, reason: EscalationReason, actor: Actor): Promise<void>;
@@ -714,28 +807,59 @@ export type PolicyDecision =
 | Auditability | Every decision journals its `reasons[]` — the exact rules that fired. An audit that cannot say *why* is not an audit |
 | Cancellation | Standard |
 
+**`run/policy.ts` is synchronous throughout.** `decide`, `escalate`, `deescalate`,
+`reserve` and `settle` all return values rather than promises and take no `signal`,
+because nothing in the built engine consults a remote policy service — the four config
+levels are resolved in-process. The `Promise` and `signal?` above are the contract for the
+day one of them is remote; until then, reading them as descriptions of the class is
+wrong. The class also carries `clearCeiling`, `ceilingFor` and `escalationsFor`, which are
+the ceiling machinery D7.7's asymmetry rule needs and which this block predates.
+
 ---
 
 ## D3.14 — `HumanGateBroker`
 
+This block is written against `run/gates.ts` — every method here is on the class. Each one
+takes the run's `RunLog` rather than the broker holding a store, which is what makes the
+broker stateless enough that a process which never raised a gate can still resolve it.
+
 ```ts
 export interface HumanGateBroker extends Versioned {
   /** Durable. Returns as soon as the gate is PERSISTED — it does not wait for the human. */
-  raise(req: GateRequest, signal?: AbortSignal): Promise<GateId>;
+  raise(log: RunLog, req: GateRequest): Promise<GateId>;
 
   /** Called from any channel: console, webhook, IM callback, CLI. Idempotent per (gate, approver). */
-  resolve(input: {
+  resolve(log: RunLog, input: {
     gateId: GateId;
     decision: GateDecision;
-    actor: HumanActor;
+    /** NOT `HumanActor`: `gate-broker:timeout`, `executor:subgraph` and `replay` answer too. */
+    actor: Actor;
     idempotencyKey: string;
-  }): Promise<{ resolved: boolean; awaiting?: readonly ApproverRef[] }>;
+  }): Promise<{ resolved: boolean }>;
 
-  claim(gateId: GateId, actor: HumanActor): Promise<void>;          // soft lock, prevents double work
-  delegate(gateId: GateId, to: ApproverRef, actor: HumanActor): Promise<void>;
-  list(filter: GateFilter, page: Page): Promise<Paged<GateSummary>>;
-  /** Driven by the scheduler tick (local) or a delay queue (distributed). */
-  sweepTimeouts(now: number): Promise<readonly GateId[]>;
+  /** Open gates for ONE run, joined with the rendered payload where this process has it. */
+  list(log: RunLog): Promise<readonly GateSummary[]>;
+
+  /**
+   * D7.3's soft lock. A HINT between approvers — it grants nothing and blocks nothing, and
+   * `resolve`/`resolveBatch`/`sweepTimeouts` read no claim at all. `claimed: false` is
+   * contention, not an error: it NAMES the holder. Refuses (never goes quiet) for a gate
+   * that is gone, closed, on a terminal run, or an actor that is not a person.
+   */
+  claim(log: RunLog, input: { gateId: GateId; actor: Actor }): Promise<{
+    claimed: boolean;
+    by: string;
+    until: number;
+  }>;
+
+  /** Re-attach a rendered payload after a restart. Cannot re-declare authorization. */
+  rehydrate(gateId: GateId, req: GateRequest): void;
+
+  /** The earliest deadline among a run's open gates, so a sweep can skip it cheaply. */
+  nextDeadline(p: RunProjection): number | undefined;
+
+  /** Fire due timeouts for ONE run. Driven by `GateSweeper` — see below. */
+  sweepTimeouts(log: RunLog, now?: number): Promise<readonly GateId[]>;
 }
 
 export type GateDecision =
@@ -747,11 +871,39 @@ export type GateDecision =
 
 | Property | Contract |
 |---|---|
-| Errors | `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_GATE_NOT_AUTHORIZED`, `E_GATE_EXPIRED` |
-| Idempotency | Keyed per `(gateId, approverId)`. A double-click, a webhook retry, and a Slack retry all collapse to one decision |
+| Errors | `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_GATE_NOT_AUTHORIZED` (also from `raise`, for a `defaultAction` the gate's own `allowEdit` forbids), `E_HUMAN_APPROVAL_REQUIRED` (a rejection with no reason). `E_GATE_EXPIRED` is not thrown — it is the code an expiry writes into `run.failed` |
+| Idempotency | Keyed per `(gateId, approverId, idempotencyKey)`. A double-click, a webhook retry, and a Slack retry all collapse to one decision |
 | Durability | `raise` persists before returning. **A gate outlives process restart, redeploy, and executor crash by construction** — it is a row plus a journal event, not a `Promise` (EAgent's `UI.confirm`, `src/kernel/types.ts:300`, could not do this) |
 | Cancellation | Cancelling the *run* cancels open gates (`gate.cancelled`); cancelling the `raise` call after persistence does not un-raise |
 | Streaming | None; gate state changes flow over `EventBus` |
+
+**`claim` and `delegate` were both here, both unbuilt, and both removed. `claim` is back
+because it now exists; `delegate` is not.** For a while this block declared
+`claim(gateId, actor)` and `delegate(gateId, to, actor)` while `run/gates.ts` had neither
+and **D7.3's state table already said so**, so the corpus asserted both — which is what the
+drift guard caught. `claim` is now built (D7.3, `gate.claimed`,
+`GateRecord.claimedBy`/`claimedUntil`), and the signature above is the one on the class:
+`(log, {gateId, actor})`, because every method here takes the run's log. Delegation stays
+out, and it is the more pointed of the two: a `human_gate` declaring it is a *compile error*
+(`GRAPH014_APPROVAL_UNSUPPORTED`), so the doc would be promising a method for a graph shape
+the compiler rejects. Paging (`list(filter, page)`) and `awaiting: ApproverRef[]` went the
+same way: `list` returns one run's open gates, and quorum — the only thing that could make
+a resolve *partial* — is the same compile error.
+
+**`sweepTimeouts` takes ONE run's log, and a deployment has many.** `GateSweeper`
+(`run/gates.ts`) is what walks them: it takes a `StateStore` and **the broker that raised
+the gates** — a fresh broker holds none of the ephemeral half, so it would find no
+`DeliverySpec`, conclude every escalation chain was exhausted, and expire gates that should
+have escalated. `Engine.sweepGates(now?)` is the seam a deployment reaches it through, and
+it is a METHOD rather than a timer: core starts no timer and reads no wall clock on its own,
+so `now` is a parameter and the interval belongs to whatever owns the process.
+
+For a long stretch of this build **nobody swept at all** — `grep -ran sweepTimeouts
+packages/core/src` found only the method's own definition, so in `bin/loom` a gate with
+`onTimeout: "fail"` waited forever. That is fixed, and the reason it is recorded here rather
+than deleted is the lesson: no document in this corpus should say "the scheduler tick fires
+it", because there is no scheduler tick, and saying so is how four documents came to draw a
+mechanism that did not exist. What the sweep still cannot see is `HANDOFF.md` **B7**.
 
 ---
 
@@ -837,8 +989,8 @@ must handle fifty handles none.
 /** ① Edge L1→L2. The ONLY externally reachable surface. */
 export interface ControlPlaneAPI extends Versioned {
   submitRun(req: SubmitRunRequest, auth: AuthContext, idempotencyKey: string): Promise<RunAccepted>;
-  getRun(runId: RunId, auth: AuthContext): Promise<RunProjection>;
-  listRuns(filter: RunFilter, auth: AuthContext, page: Page): Promise<Paged<RunSummary>>;
+  getRun(runId: RunId, auth: AuthContext): Promise<RunProjection>;              // auth ADMITS; it does not scope — see below
+  listRuns(filter: RunFilter, auth: AuthContext, page: Page): Promise<Paged<RunSummary>>;  // every run, not the caller's
   command(cmd: InterventionCommand, auth: AuthContext, idempotencyKey: string): Promise<CommandReceipt>;
   answerGate(gateId: GateId, decision: GateDecision, auth: AuthContext, idempotencyKey: string): Promise<void>;
   uploadArtifact(stream: ReadableStream, meta: ArtifactMeta, auth: AuthContext): Promise<ArtifactRef>;
@@ -851,8 +1003,22 @@ export interface RunEventStream extends Versioned {
   open(runId: RunId, lastEventId: Seq | null, auth: AuthContext): AsyncIterable<StreamFrame> & Disposable;
   openTenant(tenant: TenantId, auth: AuthContext): AsyncIterable<StreamFrame> & Disposable;  // tagged by runId
 }
-// Reconnect: lastEventId within the hot window ⇒ gap-free replay from seq+1.
-// Outside it ⇒ one `snapshot` frame then live tail. The client NEVER silently misses events.
+// Reconnect, three cases and not two — the third is where this promise was broken twice:
+//   a seq this run reached, within the hot window  ⇒ gap-free replay from seq+1, then live tail
+//   a seq this run reached, outside it             ⇒ one `snapshot` frame,   then live tail
+//   anything else (`1.5`, `0x58`, ahead of head)   ⇒ one `snapshot` frame,   then live tail
+// "Anything else" is a BASELINE the client can see it received, never a continuation of
+// nothing: an id that is not a seq used to become an OFFSET (`Last-Event-ID: 1.5` on an
+// 88-event run replayed 86 frames starting at seq 3, status 200, no marker), and an id ahead
+// of head used to take the replay branch and read nothing. Both were fixed by making the
+// branch `head`-aware — and the SECOND had a second half forty lines further down, where the
+// live tail skipped every event at or under the id the client ASKED with rather than the one
+// it was brought up to. That client got its snapshot and then silently received nothing for
+// the rest of the run. The live tail is now floored on the resumed seq, which is 0 whenever
+// the client was given a snapshot. The client NEVER silently misses events — with ONE window
+// where the implementation does not yet keep that promise, reproduced and recorded as
+// HANDOFF A20: `#streamEvents` takes its baseline and THEN subscribes, so an event appended
+// between the two reaches neither. `EventBus.replayThenTail` exists for exactly that ordering.
 
 /** ③ Edge L2→L3. */
 export interface RunLifecycle extends Versioned {
@@ -860,13 +1026,56 @@ export interface RunLifecycle extends Versioned {
   transition(runId: RunId, to: RunStatus, cause: TransitionCause): Promise<Seq>;  // rejects illegal transitions
 }
 
-/** ⑥ Edge L2→IM. */
+/**
+ * ⑥ Edge L2→IM. Shipped as `DeliveryChannel` in `src/run/delivery.ts`, with
+ * `GateDispatcher` (fan-out, redaction, escalation) and `GateCallbackRouter` (the return
+ * path) around it — one channel per destination, one of each of the other two over all
+ * of them.
+ */
 export interface GateDelivery extends Versioned {
-  deliver(gate: GateSummary, target: DeliveryTarget): Promise<DeliveryReceipt>;
-  /** Verifies signature + replay window, then maps a channel callback to a GateDecision. */
-  parseCallback(raw: unknown, target: DeliveryTarget): Promise<{ gateId: GateId; decision: GateDecision; actor: HumanActor }>;
+  readonly name: string;
+  /** Outbound. The gate travels INSIDE the target; the receipt is an id you can ask about later. */
+  deliver(target: DeliveryTarget, signal: AbortSignal): Promise<string>;
+
+  /**
+   * The return path — OPTIONAL, and its absence is the honest answer for most channels.
+   * `ConsoleChannel` has no inbound path, so `parseCallback !== undefined` is exactly the
+   * test for "can this channel be ANSWERED?". A channel forced to define the method and
+   * then throw on every call would answer that question with "maybe".
+   *
+   * It takes the REQUEST, not a `(raw, target)` pair. Both halves of the older signature
+   * were wrong, and building it is what showed why:
+   *
+   *  - there is no target at callback time. A `DeliveryTarget` carries a `GateSummary`,
+   *    and which gate a callback is about is something you learn BY parsing it.
+   *  - `raw: unknown` invites `JSON.parse` before verification. `JSON.parse` →
+   *    `JSON.stringify` does not round-trip byte-identically — key order, number
+   *    formatting and unicode escapes survive the first hop and not the second — so a
+   *    signature checked against a re-serialization is checked against a string the
+   *    sender never produced. It passes for the payloads a test happens to use and fails
+   *    in production, which is the worst available failure mode for an auth check.
+   */
+  parseCallback?(req: CallbackRequest): Promise<CallbackDecision>;
+}
+
+/** The request as BYTES, because the signature is over the bytes as sent. */
+export interface CallbackRequest {
+  readonly body: Uint8Array;                                        // never re-serialized
+  readonly headers: Readonly<Record<string, string | undefined>>;   // lower-cased
+  readonly now: number;                                             // injected clock; the replay window
+}
+
+export interface CallbackDecision {
+  readonly runId: RunId;            // from the SIGNED body; the route checks it against the address posted to
+  readonly gateId: GateId;
+  readonly decision: GateDecision;
+  readonly actor: HumanActor;       // the human the signature vouches for. NEVER {kind: "system"}
+  readonly idempotencyKey: string;  // derived from the request, so a channel retry collapses in `resolve`
 }
 // Delivery failure NEVER auto-approves. It falls back to the console queue and alerts.
+// parseCallback VERIFIES; it never authorizes. The approvers list, the gate's state and
+// idempotency belong to GateCallbackRouter and HumanGateBroker — a channel that could
+// decide those would be the second guard chain invariant 6 exists to forbid.
 
 /** ⑩ Edge L4→external. */
 export interface ToolTransport extends Versioned {
@@ -898,6 +1107,46 @@ export interface SecretProvider extends Versioned {
 // Journal, prompts, spans, and tool args record the REF; only the sandbox boundary sees the value.
 ```
 
+### What `auth` decides — and what, in v1, it does not
+
+Every method above takes an `AuthContext` so that it *can* scope what a caller reaches.
+**The shipped control plane uses it for admission and for one authorization decision, and
+for nothing else.** Written down here because the signature above implies more than the
+code does, and a contract that quietly over-promises is worse than one that admits a gap.
+
+What `auth` decides today:
+
+- **Admission.** No valid credential, no request: 401 before routing, so an
+  unauthenticated caller cannot even discover which routes exist.
+- **Who a gate decision is recorded as, and whether it is allowed at all.** `auth.subject`
+  is matched against a gate's `approvers`, `auth.kind` must be `human`, and a subject
+  claimed in the request body is refused rather than ignored. This is the one place a
+  principal's identity changes an outcome.
+- **Which idempotency slot a write lands in.** Run submission and gate resolution are
+  both namespaced by principal, so two callers cannot collide on a key either of them
+  chose.
+
+What it does **not** decide: **every valid credential is a full operator credential.** A
+run is not scoped to the principal that submitted it, so `getRun`, `listRuns`, the event
+stream and `command` (cancel, rewind, advance) reach every run in the journal for every
+principal. Gate payloads come with that — they are redacted against the *graph's* declared
+classification, never against the viewer — so "everyone sees everything" describes real
+data, not a placeholder.
+
+This is a v1 decision for a single-node deployment, taken over the alternative rather than
+in ignorance of it. Per-principal access needs a durable owner: the submitting principal
+recorded on `run.submitted`, folded into the `runs` read model so a restart does not
+forget it, `listRuns` filtered in the store rather than in the server, and a deliberate
+escape — an operator role, or an explicit grant — because a deployment whose on-call
+engineer cannot cancel someone else's runaway run has traded one outage for another. An
+in-process ownership map would be none of that while looking like all of it.
+
+Two things keep the gap from being silent. `ControlPlane` **warns at boot** whenever more
+than one principal is configured — because configuring per-subject identities is exactly
+what implies isolation to the person doing it — and a test drives one principal reading,
+listing and cancelling another's run, so closing the gap means deleting an assertion that
+states the limit in full.
+
 ### The boundary error taxonomy
 
 Every code below is from the one `LoomError` union (D3.0); the class drives retry and
@@ -911,8 +1160,9 @@ HTTP status. `cancel` describes what an `AbortSignal` does mid-call.
 | | `answerGate` | `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_GATE_NOT_AUTHORIZED`, `E_HUMAN_APPROVAL_REQUIRED` | the decision is not recorded; the gate stays open |
 | `RunEventStream` | `open` / `openTenant` | `E_RUN_NOT_FOUND`, `E_NOT_AUTHORIZED` | the iterator ends; the run is unaffected |
 | `RunLifecycle` | `transition` | `E_RUN_NOT_FOUND`, `E_ILLEGAL_TRANSITION`, `E_SEQ_CONFLICT` | the transition is not journaled |
-| `GateDelivery` | `deliver` | `E_GATE_DELIVERY_FAILED` **only** | delivery is abandoned; **the gate stays open and is never auto-approved** |
-| | `parseCallback` | `E_GATE_NOT_AUTHORIZED`, `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED` | no decision is recorded |
+| `GateDelivery` | `deliver` | `E_GATE_DELIVERY_FAILED` **only** | delivery is abandoned and raises this column's own code, E_CANCELLED — an operator's abort is not a channel that failed, and unlike a delivery failure it must never be retried; **the gate stays open and is never auto-approved** either way |
+| | `parseCallback` | `E_GATE_NOT_AUTHORIZED`, `E_PROVIDER_BAD_REQUEST` | no decision is recorded; the gate stays open |
+| | the callback route (`GateCallbackRouter`) | those two, plus `E_GATE_NOT_FOUND`, `E_GATE_ALREADY_RESOLVED`, `E_INTERNAL`, and whatever `resolveGate` itself raises | every refusal after admission is journaled as `gate.callback_rejected`; the gate stays open |
 | `ToolTransport` | `call` | `E_TOOL_NOT_FOUND`, `E_TOOL_TIMEOUT`, `E_CAP_DENIED`, `E_TOOL_SOURCE_UNAVAILABLE`, `E_TOOL_SCHEMA_INVALID` | `SIGTERM` → grace → `SIGKILL` on the process **group**; an effect whose outcome is unknown is reported as unknown, never as "did not happen" |
 | | `probe` | `E_TOOL_SOURCE_UNAVAILABLE` | probe abandoned; the breaker's state is unchanged |
 | `JournalReader` | `scan` | `E_RUN_NOT_FOUND` | the iterator ends |
@@ -921,7 +1171,7 @@ HTTP status. `cancel` describes what an `AbortSignal` does mid-call.
 | | `get` / `head` | `E_RESOURCE_NOT_FOUND` | stream closes |
 | `SecretProvider` | `resolve` | `E_SECRET_UNAVAILABLE`, `E_NOT_AUTHORIZED` | nothing is cached; a partially-resolved secret never exists |
 
-Three of these rows are load-bearing rather than descriptive:
+Four of these rows are load-bearing rather than descriptive:
 
 - **`GateDelivery.deliver` raises exactly one code.** Any other failure would tempt a
   caller into branching, and every branch out of "the notification failed" that is not
@@ -931,6 +1181,33 @@ Three of these rows are load-bearing rather than descriptive:
   system could tell.
 - **`BlobStore.put` is content-addressed, so a partial upload is not addressable.** There
   is no cleanup path because there is nothing to clean up.
+- **`parseCallback` refuses in two registers, and the split is the whole point.** A bad
+  signature and a stale timestamp collapse to the same code deliberately: telling a prober
+  which half it got wrong is telling it how to succeed. A request that VERIFIED and is
+  then nonsense — not JSON, an unknown decision kind, no approver named — gets
+  `E_PROVIDER_BAD_REQUEST` instead, because that is an integration bug in a service that
+  holds the signing key, and answering it 403 sends its author hunting for a key problem
+  they do not have.
+
+### Codes raised inside the engine, not at a boundary
+
+The table above is per boundary method, so it does not reach every code `errors.ts`
+declares. These are the rest. They surface to an operator the same way — in
+`run.failed{error.code}`, or in a 4xx/5xx body via `httpStatusFor` — so a code with no
+row anywhere is a code somebody has to guess at. `test/docs-drift.test.ts` asserts that
+every declared code is named by some design document, which is what keeps this list from
+falling behind `errors.ts`.
+
+| Code | Raised by | Means |
+|---|---|---|
+| `E_RESOURCE_INVALID` | `resources/functions.ts` | a resource's content is not what its kind requires — a `function` resource that will not evaluate, or that evaluates to a non-function |
+| `E_CONFIG_INVALID` | `journal/retention.ts`, `run/delivery.ts` | a component was constructed against configuration it cannot honour: an audit store on a non-`audit` tier, a signed channel with an empty callback secret |
+| `E_EXPR_INVALID` | `graph/expr.ts` | a `when` / `until` / router-case expression does not parse. Normally a compile-time fault via `checkExpr`; the code exists because `Engine` parses the same source again at runtime |
+| `E_AUDIT_IMMUTABLE` | `journal/retention.ts` | a WORM audit record was rewritten with different content. Never a retry; it means two writers disagree about a fact that is supposed to be settled |
+| `E_COHORT_INVALIDATED` | `evolution/score.ts` | a cohort was measured under different score weights and is being compared anyway — an improvement measured with a different ruler |
+| `E_SUBGRAPH_FAILED` | `run/engine.ts` | a child graph ended in a non-success state. The parent Task fails with the child's status and run id in `details` |
+| `E_OUTPUT_MISSING` | `run/engine.ts` | the run finished having written none of its declared outputs. A path was stranded and the run would otherwise report success |
+| `E_TASK_TIMEOUT` | **nothing yet** | declared for `NodeSpec.timeoutMs`, which the schema carries and no executor path enforces — a node with a timeout runs as long as it likes. Pinned in the never-raised list of `test/docs-drift.test.ts` |
 
 
 ---
@@ -944,9 +1221,9 @@ Three of these rows are load-bearing rather than descriptive:
 | `RunLifecycle` | L2→L3 | ③ | direct call | gRPC |
 | `PolicyEngine` | L2 | ④ | in-proc rules + SQLite | same + cached remote store |
 | `HumanGateBroker` | L2 | ⑤ | SQLite + in-proc bus | Postgres + delay queue |
-| `GateDelivery` | L2 | ⑥ | console only (v1) | Slack/Feishu/Teams/email adapters |
+| `GateDelivery` | L2 | ⑥ | injected channels: `WebhookChannel` and `SignedWebhookChannel` on global `fetch`, over a `ConsoleChannel` fallback that cannot fail; signed callbacks return through `POST /runs/:id/callbacks/:channel` | vendor payload shapes for Slack/Feishu/Teams/email (the signing scheme is already Slack's) |
 | `GraphCompiler` | L3 | — | pure TS | unchanged |
-| `AgentScheduler` | L3 | — | in-proc DRR queue | leased partitions + leader election |
+| `AgentScheduler` | L3 | — | `Scheduler` seam: `InProcessScheduler` / `LeasedScheduler`, critical-path order within a run (no DRR yet — see D3.3 Fairness) | leased partitions + leader election |
 | `GraphExecutor` | L3 | — | async worker pool | pod replicas |
 | `AgentFactory` | L3 | — | in-proc | unchanged |
 | `ToolExecutor` | L3 | ⑧ | subprocess sandbox | job pods / Firecracker |

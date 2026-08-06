@@ -354,7 +354,7 @@ sequenceDiagram
   P1->>K: exit within terminationGracePeriodSeconds
   K->>P2: start v2
   P2->>DB: lease partitions · fold journals · re-lease requeued Tasks
-  P2->>DB: sweepTimeouts resumes gate SLAs from persisted timestamps
+  Note over P2,DB: DESIGNED, NOT BUILT — sweepTimeouts would resume gate SLAs<br/>from the persisted timestamps here. Nothing calls it.
 ```
 
 Three properties make this boring, which is the goal:
@@ -362,7 +362,8 @@ Three properties make this boring, which is the goal:
 1. `terminationGracePeriodSeconds` only needs to exceed the *control-task* duration
    (milliseconds), because long Tasks are released rather than waited on.
 2. Gate SLA clocks are **absolute timestamps in the database**, not in-memory timers, so a
-   deploy neither resets nor skips an SLA.
+   deploy neither resets nor skips an SLA. *Nothing sweeps them*, though — see the note in
+   the diagram — so today a deploy neither resets nor advances one either.
 3. A gate raised by v1 and answered under v2 works because the gate payload is
    self-contained and the decision is applied by whichever executor re-leases the Task.
 
@@ -388,6 +389,20 @@ traffic moves.
 
 `ASSUMPTION: v1 targets ≤ 200 concurrent in-flight Tasks and ≤ 5k journal events/s on
 one node.` Beyond either number, DL-1 and DL-7's reversal conditions fire and the
-distributed path is opened. Both are measured continuously — `loom.scheduler.tick` and
-journal append latency are first-class dashboards from day one, so the decision to
-distribute is data-driven rather than anxiety-driven.
+distributed path is opened.
+
+**Neither number is measured continuously today, and the intended dashboard does not
+exist.** `DESIGNED-NOT-BUILT(loom.scheduler.tick)`: spans are derived from journal events
+(**D9.1**), no event covers a scheduler tick, and there is no tick loop to attach one to.
+Journal append latency is likewise uninstrumented. What is available needs no new span and
+should be wired before either reversal condition is trusted:
+
+| Wanted | Available from the journal today |
+|---|---|
+| scheduler tick p99 | `task.leased.ts − task.ready.ts` per Task — queue wait, journaled for every Task, so a p99 over a real run is a fold |
+| events/s | `seq` deltas over `ts` for a run, or `COUNT(*)` over the store's time window |
+| event-loop share of CPU-bound function nodes | **nothing.** This half needs instrumentation that does not exist |
+
+Until that is wired, "the decision to distribute is data-driven" describes an intention.
+A p99 taken over a span that is never emitted is a p99 over zero samples, and it reads as
+a check that passed.

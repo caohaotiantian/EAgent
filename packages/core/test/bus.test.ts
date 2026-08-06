@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { InProcessEventBus } from "../src/bus.ts";
+import { InProcessEventBus, SubscriberOverflowError } from "../src/bus.ts";
 import type { RunId } from "../src/ids.ts";
 import { SYSTEM_ACTOR, type JournalEvent } from "../src/journal/events.ts";
 import { MemoryStateStore } from "../src/journal/memory.ts";
@@ -81,15 +81,117 @@ test("drop_newest keeps the oldest", async () => {
   assert.deepEqual((await take(sub, 3)).map((e) => e.seq), [1, 2, 3]);
 });
 
-test("onOverflow: close ends the subscription instead of dropping silently", async () => {
+test("onOverflow: close drains what it has and then THROWS — it does not look like a clean end", async () => {
   const bus = new InProcessEventBus();
   const sub = bus.subscribe({}, { queueSize: 2, onOverflow: "close" });
   for (let i = 1; i <= 5; i++) bus.publish(ev(i));
 
   const all: number[] = [];
-  for await (const e of sub) all.push(e.seq);
-  assert.deepEqual(all, [1, 2], "buffered events still drain, then the iterator ends");
+  await assert.rejects(
+    async () => {
+      for await (const e of sub) all.push(e.seq);
+    },
+    (e: unknown) => {
+      assert.ok(e instanceof SubscriberOverflowError, `expected SubscriberOverflowError, got ${String(e)}`);
+      assert.equal(e.lastSeq, 2, "the resume point: everything after this was lost");
+      return true;
+    },
+  );
+  assert.deepEqual(all, [1, 2], "buffered events still drain first — the throw is terminal, not pre-emptive");
   assert.equal(bus.subscriberCount, 0, "and the subscription unregisters itself");
+});
+
+test("A DROPPED SUBSCRIBER AND A CLEAN END ARE DIFFERENT EVENTS, without anyone polling `dropped`", async () => {
+  // The register entry C5 in its entirety: a consumer that writes the obvious loop and
+  // reads no counter must not be able to mistake "I cut you off" for "the stream ended".
+  const bus = new InProcessEventBus();
+  const drain = async (sub: AsyncIterable<JournalEvent>): Promise<string> => {
+    try {
+      for await (const _ of sub) void _;
+      return "ended";
+    } catch (e) {
+      return e instanceof SubscriberOverflowError ? "overflowed" : `unexpected: ${String(e)}`;
+    }
+  };
+
+  const clean = bus.subscribe({}, { queueSize: 8, onOverflow: "close" });
+  const cut = bus.subscribe({}, { queueSize: 2, onOverflow: "close" });
+  const outcomes = Promise.all([drain(clean), drain(cut)]);
+
+  for (let i = 1; i <= 5; i++) bus.publish(ev(i));
+  await new Promise((r) => setImmediate(r));
+  clean.dispose(); // an orderly end: the consumer, or the run, is finished
+
+  assert.deepEqual(await outcomes, ["ended", "overflowed"]);
+});
+
+test("the loss-tolerant policies still end cleanly — only `close` promises no silent loss", async () => {
+  // `drop_oldest` and `drop_newest` are the policies a subscriber picks when loss is
+  // acceptable, so signalling it would be noise. `close` is the one picked by a
+  // subscriber that would rather be cut off than be quietly wrong, and it is the only
+  // one that changed.
+  const bus = new InProcessEventBus();
+  for (const onOverflow of ["drop_oldest", "drop_newest"] as const) {
+    const sub = bus.subscribe({}, { queueSize: 2, onOverflow });
+    for (let i = 1; i <= 5; i++) bus.publish(ev(i));
+    const seen: number[] = [];
+    const loop = (async () => {
+      for await (const e of sub) seen.push(e.seq);
+    })();
+    await new Promise((r) => setImmediate(r));
+    sub.dispose();
+    await loop; // no throw
+    assert.equal(sub.dropped, 3, `${onOverflow} still reports its loss through the counter`);
+  }
+});
+
+test("the loop that was running drains and names its resume point; a later one throws with none", async () => {
+  const bus = new InProcessEventBus();
+  const sub = bus.subscribe({}, { queueSize: 1, onOverflow: "close" });
+  bus.publish(ev(7));
+  bus.publish(ev(8)); // overflows immediately; seq 7 is still queued
+
+  const seen: number[] = [];
+  const thrown: (number | undefined)[] = [];
+  const catching = (e: unknown): true => {
+    assert.ok(e instanceof SubscriberOverflowError, `expected SubscriberOverflowError, got ${String(e)}`);
+    thrown.push(e.lastSeq);
+    return true;
+  };
+
+  await assert.rejects(async () => {
+    for await (const e of sub) seen.push(e.seq);
+  }, catching);
+  assert.deepEqual(seen, [7], "the queued event is delivered before the throw, not swallowed by it");
+
+  // Re-iterating a dead subscription must not read as a clean end either — and this
+  // second loop drained nothing, so it has no resume point to offer.
+  await assert.rejects(async () => {
+    for await (const e of sub) seen.push(e.seq);
+  }, catching);
+
+  assert.deepEqual(thrown, [7, undefined]);
+});
+
+test("replayThenTail propagates an overflow of its live tail instead of ending short", async () => {
+  const store = new MemoryStateStore({ now: () => 1000 });
+  const bus = new InProcessEventBus({ store });
+  await store.append({
+    runId: RUN,
+    expectedSeq: 0,
+    events: [{ type: "task.progress", payload: { chunk: "a" }, actor: SYSTEM_ACTOR("t") }],
+  });
+
+  const sub = bus.replayThenTail(RUN, 1, { queueSize: 2, onOverflow: "close" });
+  // Overflow the live channel before the consumer gets past the journal read.
+  for (let i = 2; i <= 6; i++) bus.publish(ev(i));
+
+  const seen: number[] = [];
+  await assert.rejects(async () => {
+    for await (const e of sub) seen.push(e.seq);
+  }, SubscriberOverflowError);
+  assert.deepEqual(seen, [1, 2, 3], "the journal event, then the two the live channel held");
+  assert.equal(bus.subscriberCount, 0);
 });
 
 test("one slow subscriber cannot stall a fast one", async () => {

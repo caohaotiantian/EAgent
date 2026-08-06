@@ -148,11 +148,24 @@ pick():
 **FIFO is explicitly rejected.** Under FIFO a single wide fan-out monopolises every
 worker until drained. That is precisely the production symptom this system exists to fix.
 
+> **Implementation note — the WITHIN-run row is built; the other three are not.**
+> What ships is `Scheduler.select` (`run/scheduler.ts`), which answers "which Tasks should
+> this worker run now?" for **one run's projection**, orders them by critical path with a
+> branch-coordinate tiebreak, and slices to a single `maxParallelism` (default 16). There
+> are no per-class pools and no token buckets, and the DWRR loop above cannot live at this
+> seam at all: cross-tenant and cross-run fairness need a scheduler that sees more than one
+> run, which is the coordinator G3 defers. `LeasedScheduler` adds lease-awareness and
+> reclaim for two workers and passes the same conformance suite, so the *swap* is exercised
+> — the *fairness* is not. Recorded honestly as G3's second debt in `99-DOD.md`; do not
+> read the guarantee table above as describing v1.
+
 ---
 
 ## D6.3 — Admission control and backpressure
 
-Three independent levels. Each **rejects or blocks**; none buffers unboundedly.
+Three independent levels. Each **rejects or blocks**; none buffers unboundedly — as
+designed. **One of the three is built.** Read the implementation note under the diagram
+before relying on any of this.
 
 | Level | Where | Trigger | Response |
 |---|---|---|---|
@@ -177,6 +190,45 @@ graph LR
 system". The 500 Tasks exist logically (branch coordinates are computed and journaled),
 but rows are created and leased in bounded waves, so memory and queue depth stay `O(maxParallelism)`
 rather than `O(maxWidth)`.
+
+> **Implementation note — level 2 is built; levels 1 and 3 are not.**
+> **Level 2** is real and is the load-bearing one: `Engine.#commit` appends
+> `fanout.planned` with the full planned width, then materialises only
+> `min(width, maxParallelism)` branch Tasks, and the join reads the planned width instead
+> of counting siblings — so a 500-way fan-out costs `O(maxParallelism)` rows in flight.
+> `maxWidth` is enforced twice: at compile (GRAPH007 rejects a fanout edge without one, or
+> with one over `expansion.maxFanout`) and again when the item list is sliced at runtime.
+>
+> **Level 1 does not exist.** There is no `AgentScheduler.submit`, no `queueDepth`, no
+> `concurrentRuns`, and nothing anywhere raises `E_ADMISSION_REJECTED` — the code is
+> declared in `errors.ts` and referenced by exactly one test, which checks that its class
+> maps to HTTP 429. `POST /runs` admits every request it can authenticate. A tenant that
+> submits ten thousand runs gets ten thousand runs.
+>
+> **Level 3 does not exist either.** There is no token bucket, no provider TPM/RPM
+> accounting, no tool `concurrencyKey`, and no `release(lease, "requeue", afterMs)` — the
+> word `requeue` appears nowhere in `src/`. A provider rate limit surfaces as
+> `E_PROVIDER_RATE_LIMIT` from the adapter and is handled by `retry`, which sleeps
+> *holding* the slot: precisely the behaviour this level was specified to replace.
+>
+> Both gaps are pure additions — neither changes an interface — but until they land, the
+> only backpressure in the system is per-run width. `test/docs-drift.test.ts` pins
+> `E_ADMISSION_REJECTED` in its never-raised list, so the day something throws it, this
+> note fails and has to be rewritten.
+
+**The `EventBus`'s bounded queue is NOT a fourth level, and reading it as one inverts the
+invariant.** These three levels reject or block a *producer*. The bus does the opposite by
+construction: it applies no back-pressure at all, so a slow subscriber loses events rather
+than slowing the executor down. That is the invariant — *telemetry may drop data; the
+journal may not; backpressure hits admission, never durability* — and it is why the bus is
+safe to make derived.
+
+Dropping is therefore legitimate. **Dropping silently is not**, and that is a separate
+claim: under `onOverflow: "close"` the subscription is cut and its iterator throws
+`SubscriberOverflowError` naming the last seq it delivered, so a subscriber can tell a cut
+from an orderly end without polling a counter and can resume from the journal, which kept
+what the bus dropped. `publish` still never throws — nothing here reaches back to a
+producer. See **D3.9**.
 
 ---
 
@@ -245,7 +297,14 @@ separate leak-reaper.
 the meeting point; a channel is the medium. This keeps every inter-agent interaction
 typed, journaled, replayable, and visible on the canvas.
 
-For the cases that genuinely need conversation, a **bounded mailbox** exists:
+For the cases that genuinely need conversation, a **bounded mailbox** is specified — and,
+to be plain about it, **not built**. There is no `Mailbox` in `src/`, no `send`/`recv`, and
+no `mailbox` edge kind — `EdgeKind` is the seven in D5, and nothing in the compiler or the
+executor would give an eighth any meaning. The one trace of the name in the code is an
+`effect.started{kind}` label, which is a taxonomy slot, not this feature. The code the
+block below names is unbuilt with it: `DESIGNED-NOT-BUILT(E_MAILBOX_UNDECLARED)` is not in
+`errors.ts`, because nothing can violate a rule about an edge kind that does not exist.
+Nothing in v1 needs any of it, because the default below carries every case so far:
 
 ```ts
 export interface Mailbox {
@@ -306,8 +365,12 @@ compaction ladder runs in order:
 | 4 | Hard-truncate with an explicit `[...truncated N tokens...]` marker | yes |
 | 5 | If still over: `E_CONTEXT_OVERFLOW` → the node's error edge | — |
 
-Every assembly emits `loom.context.assemble` with `tokens.before/after`,
-`sections[]`, and `compaction.rung`, so context growth is a *metric*, not a mystery.
+Every assembly was to emit `loom.context.assemble` with `tokens.before/after`,
+`sections[]`, and `compaction.rung`, so that context growth would be a *metric* rather
+than a mystery. It is a mystery: `DESIGNED-NOT-BUILT(loom.context.assemble)`. Spans are
+derived from journal events (**D9.1**) and `run/context.ts` appends none, so which rung
+fired on which Task is not recoverable from a trace or from the journal — only the
+`E_CONTEXT_OVERFLOW` at rung 5 leaves a mark, and only when the ladder fails outright.
 
 > EAgent handled this with two separate extensions (`prune`, `compact`) reacting to a
 > growing `#messages` array. Because context here is rebuilt per Task from declared

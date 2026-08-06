@@ -37,10 +37,58 @@ Read in order. Each file carries the `D<n>` headings from the brief verbatim.
 ## Conventions
 
 - `HANDOFF.md` — **start here.** What is left, what to read first, and what will bite you.
+  Its **Known issues** section is the register of what is currently wrong, unwired or
+  unverified, with the command that established each entry. Delete an entry when you fix it.
 - `ASSUMPTION:` — an underspecified point resolved by fiat. All collected in **D14**.
 - `DEFERRED-v2` — explicitly outside the 6–8 week v1, each with a one-line
   justification. All collected in **D13**.
+- `DESIGNED-NOT-BUILT(loom.scheduler.tick)` and `NOT-IN-CODE(E_SUBSCRIBER_OVERFLOW)` —
+  **an identifier this document names that does not exist in `src/`.** Enforced by
+  `packages/core/test/docs-drift.test.ts`, which reads both the markdown and the code and
+  fails when they disagree; a marker is the only way to name an absent identifier without
+  the suite going red. Which of the two words applies is a real distinction, and the test's
+  registry pins it per symbol so the softer one cannot become the cheaper one:
+  **DESIGNED-NOT-BUILT** is a debt — the design describes it and somebody is expected to
+  build it. **NOT-IN-CODE** is a statement of absence — the document names the identifier
+  only to say it is not there, because the contract says so or because it was removed, and
+  there is nothing to build. Five rules make either an admission rather than a mute button:
+  1. it names **one identifier** — `loom.*` for a span or a telemetry attribute, `E_*` for
+     an error code. Concepts that are not identifiers (a state in an FSM, a scheduling
+     policy, a method) get prose;
+  2. it is **file-scoped** — marking a span in D9 does not license an unqualified claim
+     about it in D12, because a reader of D12 has to be told there too;
+  3. the **test's registry must carry it, must list this file, and must agree on the
+     spelling** — each registry row pins the exact set of documents allowed to carry that
+     marker. So *marking* is two edits in two files, even for an identifier that is already
+     registered;
+  4. a **stale marker fails** — mark something that exists and the suite goes red, so the
+     caveat cannot outlive the gap and the day the span is emitted you are told to delete
+     the paragraph hedging it;
+  5. **an HTML comment does not count** — wrap a marker in `<!--` … `-->` and the guard
+     finds it and *rejects* it. Rule 2 exists so the reader of *this* file is told, and a
+     caveat that renders as nothing tells nobody.
+
+  Rule 3 is the cost of the *supported* escape, and not a claim that nothing else can
+  silence the guard. It was written here as if it were, which is the more dangerous kind of
+  error: a zero-width character inside an identifier used to hide a claim for one keystroke
+  with an identical rendered diff and no edit to the test at all. That one is closed (the
+  scanner strips format characters, inline HTML comments and emphasis, and closes up line
+  breaks). A **homoglyph** — Cyrillic `о` in `lооm.scheduler.tick` — is not, and cannot be
+  without a confusable table this package will not carry. Treat the guard as a tripwire for
+  drift, not as a proof.
+
+  `grep -rnE 'DESIGNED-NOT-BUILT|NOT-IN-CODE' design/loom/` is the inventory of what this
+  corpus names and the code does not have.
+- **Cite symbols, not line numbers**, for anything in a file under active edit.
+  `HumanGateBroker.raise`'s dispatcher branch survives a refactor; `gates.ts:191` was
+  wrong within a week and pointed a reader at an unrelated payload literal. Line numbers
+  are for a permalink, never for a design document.
 - **Decision blocks** carry four things: the choice, the rationale, the rejected
   alternative, and the observable condition that reverses the decision.
+- **Splitting built from unbuilt inside one artifact:** leave the built rows in the table
+  or the diagram, and move the unbuilt ones *below* it under a heading that says
+  **"Designed, not implemented — do not merge these back into the table above."** D7.7's
+  E11 row and D7.3's gate lifecycle both use this. A caveat merged back into the main
+  artifact reads as an enforced rule within one edit.
 - Types are **TypeScript**. Wire formats are **JSON Schema** or **YAML**. Diagrams are
   **Mermaid**. Prose exists only to explain *why*, never to restate a diagram.

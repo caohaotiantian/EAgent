@@ -36,16 +36,17 @@ import {
   taskId as makeTaskId,
   type BranchCoordinate,
   type EdgeId,
+  type GateId,
   type NodeId,
   type RunId,
   type Seq,
   type TaskId,
 } from "../ids.ts";
-import { SYSTEM_ACTOR, errorRecord, isEvent, type Actor, type NewEvent } from "../journal/events.ts";
+import { SYSTEM_ACTOR, errorRecord, isEvent, type Actor, type HumanActor, type NewEvent } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
-import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
+import type { BatchingSpec, DedupeSpec, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
 import { InProcessScheduler, type Scheduler } from "./scheduler.ts";
@@ -70,7 +71,19 @@ import {
   type Contribution,
 } from "../state/channels.ts";
 import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from "../vocab.ts";
-import { HumanGateBroker, type GateDecision, type GateSummary, type ResolveInput } from "./gates.ts";
+import type { DeliverySpec } from "./delivery.ts";
+import {
+  GateSweeper,
+  HumanGateBroker,
+  type GateBatch,
+  type GateDecision,
+  type GateSummary,
+  type GateSweeperOptions,
+  type ResolveBatchInput,
+  type ResolveInput,
+  type SweepReport,
+  type TimeoutAction,
+} from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
@@ -81,7 +94,9 @@ import {
   collectOutputs,
   RunFolder,
   foldRun,
+  gateOf,
   isTerminal,
+  openGates,
   scopeFor,
   tasksInState,
   viewFor,
@@ -125,6 +140,12 @@ export interface EngineOptions {
   /** E7's evidence. Absent ⇒ the rule never fires. */
   readonly baseline?: CohortBaseline;
   /**
+   * Tuning for the gate clock that `sweepGates` drives — how many runs one tick sees.
+   *
+   * The engine never starts a timer of its own, whatever is set here. See `sweepGates`.
+   */
+  readonly sweep?: Omit<GateSweeperOptions, "store" | "broker" | "bus" | "now">;
+  /**
    * Replay mode. When present, every effect is served from the journal and no tool
    * body or model adapter is ever reached. A missing key is E_REPLAY_DIVERGENCE —
    * a loud failure, never a silent live call.
@@ -163,13 +184,76 @@ interface Wave {
   readonly node: NodeSpec;
 }
 
+/**
+ * What a gate is allowed to do, carried by the outcome that raises it.
+ *
+ * It exists as a REQUIRED field rather than something `#commit` derives, because
+ * `#commit` used to derive it from `node.humanGate` — a block only a `human_gate` node
+ * can have (GRAPH020 refuses a second type block). Every other gate-raising path — a
+ * posture gate on a tool, a subgraph's mirror gate — therefore journaled no approvers
+ * and no `edit` allow-list, and an absent allow-list reads as "anything". Making the
+ * field required means a new gate-raising path cannot be written without answering the
+ * question; forgetting is a type error rather than a silent widening.
+ */
+interface GateAuthorization {
+  /** Subject ids permitted to decide. Empty = the gate named nobody, which is permissive. */
+  readonly approvers: readonly string[];
+  /** Channels an `edit` may write. Always concrete; `[]` means none. */
+  readonly allowEdit: readonly string[];
+}
+
+/**
+ * What a `human_gate` node declared about a gate's LIFECYCLE — when it expires, where it
+ * is sent, and whether it may merge with its siblings or inherit their answer.
+ *
+ * Kept out of `GateAuthorization` because NOT ONE FIELD HERE DECIDES WHO MAY ANSWER, and
+ * grouping them there would put a notification route inside the object whose whole purpose
+ * is that everything in it is checked against. That split is what the saturation controls
+ * had to be measured against before they could go anywhere: `batching` and `dedupe` change
+ * how many questions a human is asked, never which of them a given human may answer —
+ * whose gates may merge, and whose answer may be inherited, is decided in `run/gates.ts`
+ * from the JOURNALED authorization of the gates involved and never from these fields.
+ *
+ * Every field is passed through to `GateRequest` unchanged; this type exists to carry them
+ * from the node to `#commit`, not to reinterpret them.
+ */
+interface GateSchedule {
+  readonly slaMs?: number;
+  readonly onTimeout?: TimeoutAction;
+  readonly delivery?: DeliverySpec;
+  readonly batching?: BatchingSpec;
+  readonly dedupe?: DedupeSpec;
+  /** D7.2's reminders: nudges before the deadline, same tier, same recipients. */
+  readonly reminders?: readonly { readonly afterMs: number }[];
+}
+
 interface NodeOutcome {
   readonly status: "succeeded" | "failed" | "gate";
   readonly writes: Record<string, unknown>;
   readonly take?: readonly EdgeId[];
   readonly usage: UsageRecord;
   readonly error?: LoomError;
-  readonly gate?: { readonly payload: unknown; readonly policyRef: string };
+  readonly gate?: {
+    readonly payload: unknown;
+    readonly policyRef: string;
+    readonly auth: GateAuthorization;
+    /**
+     * The child-run gate this one stands in for. Set by `#runSubgraph` and by nothing
+     * else; its presence is what makes a gate a mirror, for the broker and for
+     * `#executeTask` alike.
+     */
+    readonly mirrorOf?: GateId;
+    /**
+     * The clock and the route the GRAPH declared, carried unchanged to `raise`.
+     *
+     * OPTIONAL, unlike `auth`, and the asymmetry is the point. An absent `auth` would
+     * mean "this gate restricts nobody", which is a decision somebody has to make on
+     * purpose; an absent schedule means "no deadline, no notification", which is what a
+     * gate raised by the POSTURE floor — a tool node with no `humanGate` block to declare
+     * anything on — honestly has.
+     */
+    readonly schedule?: GateSchedule;
+  };
   /** An agent node's proposed graph mutation, if it declared `canMutate`. */
   readonly mutation?: GraphMutation;
   /** Set by a join: the already-folded values, to emit as `state.reduced`. */
@@ -211,7 +295,24 @@ export class Engine {
   readonly tools: ToolRegistry;
   readonly functions: FunctionRegistry;
   readonly models: ModelRegistry;
-  readonly gates: HumanGateBroker;
+  /**
+   * PRIVATE, and that narrowing is structural rather than a convention.
+   *
+   * `resolveGate` refuses a non-human actor precisely so that no caller can present
+   * `executor:subgraph` and walk past an approvers list. While the broker itself was a
+   * public field, that guarded ONE of two doors onto the same object: any in-process
+   * caller — the exact threat the `resolveGate` docstring names — could reach
+   * `engine.gates.resolve(...)` directly with a system actor and approve a gate that
+   * declared approvers. A rule applied at one of two entry points is a convention, and
+   * this codebase has already paid twice for the difference.
+   *
+   * Nothing outside this class ever read it: `src/` and `test/` use `engine.openGates`
+   * and `engine.resolveGate`, which are the read surface and the guarded write. So the
+   * narrowing costs no caller anything. `EngineOptions.gates` still lets one INJECT a
+   * broker — a caller who constructs the object already holds it, which is a different
+   * thing from the Engine handing it out.
+   */
+  readonly #gates: HumanGateBroker;
   readonly #now: () => number;
   readonly #workerId: string;
   readonly #maxParallelism: number;
@@ -224,6 +325,9 @@ export class Engine {
   readonly #scheduler: Scheduler;
   readonly #sequences: SequenceIndex | undefined;
   readonly #baseline: CohortBaseline | undefined;
+  readonly #sweepOpts: Omit<GateSweeperOptions, "store" | "broker" | "bus" | "now">;
+  /** Built on first use and KEPT: its cursors are the whole point. See `sweepGates`. */
+  #sweeper: GateSweeper | undefined;
 
   readonly #runs = new Map<RunId, RunContext>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
@@ -237,7 +341,7 @@ export class Engine {
     this.functions = opts.functions ?? new FunctionRegistry();
     this.models = opts.models ?? new ModelRegistry();
     this.#now = opts.now ?? Date.now;
-    this.gates = opts.gates ?? new HumanGateBroker({ now: this.#now });
+    this.#gates = opts.gates ?? new HumanGateBroker({ now: this.#now });
     this.#workerId = opts.workerId ?? "worker-0";
     this.#maxParallelism = Math.max(1, opts.maxParallelism ?? 16);
     this.#policyOpts = opts.policy ?? { granted: ["*"] };
@@ -250,6 +354,62 @@ export class Engine {
     this.#scheduler = opts.scheduler ?? new InProcessScheduler();
     this.#sequences = opts.sequences;
     this.#baseline = opts.baseline;
+    this.#sweepOpts = opts.sweep ?? {};
+  }
+
+  /**
+   * ADVANCE THE GATE CLOCK ONCE. The deployment decides how often; the engine never does.
+   *
+   * Nothing used to call `HumanGateBroker.sweepTimeouts` at all —
+   * `grep -ran sweepTimeouts packages/core/src` found its own definition and nothing else
+   * — so in `bin/loom` an SLA deadline never expired, an escalation tier never fired, and a
+   * gate declaring `onTimeout: "fail"` waited forever. Four design documents were corrected
+   * to stop drawing a scheduler tick that does not exist. This method is the tick's other
+   * half: the thing that CAN be driven.
+   *
+   * IT IS A METHOD AND NOT A TIMER, and that is the whole design decision. A library that
+   * schedules work on import is hostile to its embedder — it keeps a process alive, it runs
+   * during a test that never asked for it, and it puts a wall clock inside the determinism
+   * boundary the rest of this file is built to keep out. `now` is a parameter for the same
+   * reason every other clock here is injected: a test advances it and observes exactly one
+   * escalation, with no timer and no sleep. The INTERVAL belongs to the deployment
+   * (`cli.ts`'s `serve`, or whatever owns the process), which is the layer that already
+   * owns a lifetime to hang it off.
+   *
+   * IT SWEEPS THIS ENGINE'S BROKER, not a broker the caller builds, and that is not an
+   * accident of encapsulation. The half of a gate that is not journaled — the rendered
+   * payload, the pre-authorized default action, and above all the `DeliverySpec` — lives in
+   * the broker that RAISED it. A sweeper over a freshly-constructed broker would find no
+   * delivery spec for any gate, conclude every escalation chain was exhausted, and expire
+   * gates that should have escalated. Silently. So the sweep is offered where the broker
+   * is, and `EngineOptions.gates` remains the way to supply your own.
+   *
+   * WHAT IT COSTS, per call, is in `GateSweeper`'s docstring, and so is the one thing it
+   * cannot see: runs outside the `limit` most recent.
+   *
+   * THE WHOLE DEPLOYMENT SIDE, so nobody has to guess at it:
+   *
+   * ```ts
+   * const tick = setInterval(() => void engine.sweepGates().catch(() => {}), 1_000);
+   * tick.unref();                       // a clock must not be why the process stays up
+   * // …and clearInterval(tick) on shutdown, before the store closes.
+   * ```
+   *
+   * The `catch` is not laziness: a tick that rejects on an unhandled promise takes the
+   * process down, and every failure this method can have is already counted in
+   * `SweepReport.failed` and retried on the next tick. One second is a guess — the sweep is
+   * correct at any interval, and the cost of a longer one is that a deadline fires late by
+   * up to that interval.
+   */
+  async sweepGates(now = this.#now()): Promise<SweepReport> {
+    this.#sweeper ??= new GateSweeper({
+      ...this.#sweepOpts,
+      store: this.#store,
+      broker: this.#gates,
+      now: this.#now,
+      ...(this.#bus === undefined ? {} : { bus: this.#bus }),
+    });
+    return this.#sweeper.sweep(now);
   }
 
   /**
@@ -349,6 +509,21 @@ export class Engine {
         // advance again once the clock has moved.
         const backingOff = tasksInState(p, "ready").some((t) => (t.retryAfter ?? 0) > this.#now());
         if (backingOff) return p;
+
+        // NEITHER IS A TASK WAITING ON A HUMAN. `gate.decided` carries an unconditional
+        // `run.resumed`, so answering one of several open gates puts the whole run back to
+        // `running`; the work behind that answer then ran, drained, and arrived here with
+        // another gate still open. Finishing would report a terminal run while a human was
+        // still being asked — and leave their queue holding a gate for a run that had
+        // already ended, with the action behind it never taken. Re-suspending says what is
+        // true, and the next decision resumes it again.
+        if (openGates(p).length > 0) {
+          await this.#serialize(() =>
+            ctx.log.append([{ type: "run.suspended", payload: { reason: "gate" }, actor: SYSTEM_ACTOR("scheduler") }]),
+          );
+          return (await this.#project(ctx))!;
+        }
+
         await this.#finish(ctx, p);
         const done = await this.#project(ctx);
         return done!;
@@ -413,12 +588,95 @@ export class Engine {
   async openGates(runId: RunId): Promise<readonly GateSummary[]> {
     const ctx = this.#runs.get(runId);
     if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
-    return this.gates.list(ctx.log);
+    return this.#gates.list(ctx.log);
   }
 
-  async resolveGate(runId: RunId, input: ResolveInput): Promise<RunProjection> {
+  /**
+   * THE PUBLIC DOOR TO A GATE, AND IT TAKES A HUMAN.
+   *
+   * It used to take any `Actor`. Three system components are on the broker's allow-list —
+   * `replay`, `executor:subgraph`, `gate-broker:timeout` — because each carries authority
+   * journaled somewhere else, and any in-process caller or any route added later could
+   * present one of those three names and walk past every approvers list. The narrowing in
+   * `isAuthorizedActor` was only ever as strong as every caller remembering to construct a
+   * human actor, which is the same shape of assumption that produced the subgraph bypass:
+   * a rule enforced by convention at each call site is not a rule.
+   *
+   * So the constraint is structural, in both directions. The parameter type refuses a
+   * non-human at compile time, and the check below refuses one at run time for the caller
+   * who casts. The single exception is `system:replay` on an engine that is IN replay mode
+   * — replay re-serves a decision already in the original journal and writes only to a
+   * shadow store, and the mode, not the name, is what entitles it. `executor:subgraph` is
+   * reachable through `#resolveGateAsSystem` and from nowhere outside this class;
+   * `gate-broker:timeout` never leaves the broker.
+   */
+  async resolveGate(
+    runId: RunId,
+    input: Omit<ResolveInput, "actor"> & {
+      readonly actor: HumanActor | { readonly kind: "system"; readonly component: "replay" };
+    },
+  ): Promise<RunProjection> {
+    if (input.actor.kind !== "human" && this.#replay === undefined) {
+      throw err.policy(
+        CODES.E_GATE_NOT_AUTHORIZED,
+        `gate "${input.gateId}" can only be answered by a human through this entry point`,
+        { details: { gateId: input.gateId, actor: input.actor } },
+      );
+    }
+    return this.#resolveGateAsSystem(runId, input);
+  }
+
+  /**
+   * The open gate BATCHES of a run, each with the manifest one decision would close.
+   *
+   * The console's half of D7.9 row 2 reads from here: `GateBatch.members` carries every
+   * member's own `payload` and `contentDigest`, which is what per-item diffs are rendered
+   * from, and `manifestDigest` is what a caller must echo back to decide the batch. A
+   * gate that is in no batch does not appear here at all — `openGates` is still the
+   * complete list — so a console can show batches above singletons without a second
+   * notion of what an open gate is.
+   */
+  async openGateBatches(runId: RunId): Promise<readonly GateBatch[]> {
+    const ctx = this.#runs.get(runId);
+    if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
+    return this.#gates.listBatches(ctx.log);
+  }
+
+  /**
+   * THE PUBLIC DOOR TO A BATCH, AND IT TAKES A HUMAN — for the same reasons `resolveGate`
+   * does, restated in no weaker a form because one call now closes N gates.
+   *
+   * There is no `#resolveGateBatchAsSystem`, and there should not be: the three system
+   * components on the broker's allow-list each carry authority for ONE gate — a mirror
+   * bound by `mirrorOf`, a `defaultAction` the compiler proved safe, a decision already in
+   * a replayed journal — and none of them has any notion of a batch to be entitled to.
+   * `replay` is not admitted either: a replayed run re-serves each recorded `gate.decided`
+   * per gate, which is the same set of decisions arrived at one at a time.
+   */
+  async resolveGateBatch(
+    runId: RunId,
+    input: Omit<ResolveBatchInput, "actor"> & { readonly actor: HumanActor },
+  ): Promise<RunProjection> {
+    if (input.actor.kind !== "human") {
+      throw err.policy(
+        CODES.E_GATE_NOT_AUTHORIZED,
+        `gate batch "${input.batchId}" can only be answered by a human`,
+        { details: { batchId: input.batchId, actor: input.actor } },
+      );
+    }
     const ctx = this.#require(runId);
-    await this.gates.resolve(ctx.log, input);
+    await this.#gates.resolveBatch(ctx.log, input);
+    return this.advance(runId);
+  }
+
+  /**
+   * The same resolution, for the components inside this class whose authority is
+   * journaled elsewhere. Private on purpose: it is the only way to present a system actor,
+   * and there is exactly one caller — the subgraph forward, bound to a mirror gate.
+   */
+  async #resolveGateAsSystem(runId: RunId, input: ResolveInput): Promise<RunProjection> {
+    const ctx = this.#require(runId);
+    await this.#gates.resolve(ctx.log, input);
     return this.advance(runId);
   }
 
@@ -443,36 +701,121 @@ export class Engine {
   }
 
   /**
-   * Cancel a run.
+   * Cancel a run AND EVERY RUN IT DELEGATED TO.
    *
    * Reports `clean: false` and lists `unknownEffects` when cancellation raced an
    * effect that started and never recorded an outcome. A framework that reports every
    * cancel as clean is lying to its operator.
+   *
+   * THE CASCADE IS THE POINT, and it is the same defect as the original resurrection one
+   * level of delegation down. This method used to close this run's gates and have no notion
+   * of a child run at all, so cancelling a parent that had delegated closed the parent's
+   * MIRROR — a copy of the question, raised so a human can be asked in one place — and left
+   * the CHILD `awaiting_gate` with the original still open in its own queue, carrying the
+   * child's own approvers. Every authorization check on it passed; answering it executed
+   * the delegated irreversible action the operator had just cancelled. Closing the copy and
+   * leaving the original is worse than closing neither, because the parent's console then
+   * shows nothing outstanding.
+   *
+   * Three properties, stated because they are what makes this more than a loop:
+   *
+   *   - **Transitive.** A child that itself delegated is reached, by recursion over each
+   *     run's own `subgraph.started` — which is the only link between two journals.
+   *   - **Idempotent.** A run that has already ended is left exactly as it is, before any
+   *     append: cancelling a cancelled tree writes nothing, at any level.
+   *   - **Ordered, which is the most atomicity two journals can offer.** There is no
+   *     transaction across runs, so the guarantee is the ORDER: every descendant is ended
+   *     before this run's own `run.cancelled` lands. "The parent is cancelled" is therefore
+   *     evidence that everything below it is. A crash mid-cascade leaves the parent
+   *     non-terminal with its `operator.command` on the record and some children already
+   *     closed — a state that re-running `cancel` finishes, rather than a half-cancelled
+   *     tree that looks finished.
    */
   async cancel(runId: RunId, reason = "operator"): Promise<RunProjection> {
     const ctx = this.#require(runId);
+    await this.#cancelTree(runId, reason, new Set());
+    return (await this.#project(ctx))!;
+  }
+
+  /**
+   * One run's cancellation, then its children's, then its own terminal event.
+   *
+   * `seen` is a cycle guard rather than an optimisation. Child ids are derived
+   * (`parent~taskId`), so a cycle cannot arise from anything this engine writes — but this
+   * walks a journal, and a journal is an input.
+   */
+  async #cancelTree(runId: RunId, reason: string, seen: Set<RunId>): Promise<void> {
+    if (seen.has(runId)) return;
+    seen.add(runId);
+
+    // A CHILD NEED NOT BE ATTACHED. After a restart the operator holds the parent's graph
+    // and nothing else; the child's graph is resolved lazily by the node that delegated.
+    // Cancelling needs no graph — it is a projection and two appends — so a detached run
+    // gets a log and no context, and only the in-flight abort is skipped, because in a
+    // process that never attached it there is nothing in flight to abort.
+    const ctx = this.#runs.get(runId);
+    const log = ctx?.log ?? this.#logFor(runId);
+
+    // IDEMPOTENT, and the check comes before the first append rather than after it. A run
+    // that has ended is not re-ended: a second `gate.cancelled` on a gate with one closure
+    // is indistinguishable, to anyone reading the log, from a second decision.
+    //
+    // NO JOURNAL is not the same as ended, and it proceeds: that is a child whose reference
+    // the parent journaled and whose `submit` never landed, and the honest close is a
+    // tombstone saying it was cancelled before it began, rather than a gap the next restart
+    // reads as "not started yet, run it".
+    const before = await this.projection(runId);
+    if (before !== undefined && isTerminal(before.status)) return;
+
     // Journal the command BEFORE dispatching it, so a crash here re-drives the cancel
-    // on restart rather than losing it.
+    // on restart rather than losing it. The reason travels down the tree, so a child's own
+    // log says why it stopped and names what stopped it.
     await this.#serialize(() =>
-      ctx.log.append([
+      log.append([
         { type: "operator.command", payload: { kind: "cancel", args: { reason } }, actor: SYSTEM_ACTOR("operator") },
       ]),
     );
-    ctx.abort.abort();
+    ctx?.abort.abort();
 
-    const p = (await this.#project(ctx))!;
-    if (isTerminal(p.status)) return p;
+    for (const child of await childRunsOf(log)) {
+      await this.#cancelTree(child, `the run that delegated to it was cancelled: ${reason}`, seen);
+    }
+
+    // Re-projected AFTER the children, because ending them can end this run too: a child
+    // that reaches a terminal state resolves the parent's Task, and an `advance` still in
+    // flight may have finished the parent while the cascade ran.
+    const p = await this.projection(runId);
+    if (p !== undefined && isTerminal(p.status)) return;
 
     await this.#serialize(() =>
-      ctx.log.append([
+      log.append([
+        // THE GATES GO WITH IT. `ctx.abort` reaches every in-flight effect and reaches no
+        // gate at all — an open gate has no work to interrupt; it is a row and a queue
+        // entry — so cancelling the run used to stop the executor and leave the question
+        // standing. Answering it afterwards resurrected the run and drove the action the
+        // cancel existed to prevent. D6.4 rule 4 says it plainly: gates are cancelled by
+        // command, not by signal.
+        ...(p === undefined ? [] : cancelOpenGates(p, `the run was cancelled: ${reason}`, SYSTEM_ACTOR("operator"))),
         {
           type: "run.cancelled",
-          payload: { clean: p.unknownEffects.length === 0, unknownEffects: p.unknownEffects, forced: false },
+          payload: {
+            clean: (p?.unknownEffects ?? []).length === 0,
+            unknownEffects: p?.unknownEffects ?? [],
+            forced: false,
+          },
           actor: SYSTEM_ACTOR("operator"),
         },
       ]),
     );
-    return (await this.#project(ctx))!;
+  }
+
+  /** A writer for a run this engine holds no context for. */
+  #logFor(runId: RunId): RunLog {
+    return new RunLog(runId, {
+      store: this.#store,
+      now: this.#now,
+      ...(this.#bus === undefined ? {} : { bus: this.#bus }),
+    });
   }
 
   /**
@@ -483,7 +826,155 @@ export class Engine {
    */
   async rewind(runId: RunId, atSeq: Seq, reason: string): Promise<RunProjection> {
     const ctx = this.#require(runId);
+
+    // A BOUNDARY BELOW THE RUN'S FIRST EVENT ERASES THE RUN, AND NOTHING BRINGS IT BACK.
+    //
+    // The three refusals below are all about what a rewind would UNDO. This one is about
+    // what it would undo the run INTO. `suppressedRanges` hides `(atSeq, marker)` exclusive
+    // at both ends, so `atSeq: 0` hides every event there has ever been — `run.submitted`
+    // included. Measured on the skeleton graph, parked on its gate at seq 88:
+    // `rewind(runId, 0)` was ACCEPTED and folded to `status: "queued"`, `graphHash: ""`,
+    // **zero tasks, zero gates, and zero channels** — the run's own inputs gone with the
+    // event that carried them. `advance()` then found no work, no open gate and nothing
+    // terminal, walked straight to `#finish`, and appended
+    // `run.failed{E_OUTPUT_MISSING}: run finished without writing any of its declared
+    // outputs (written)`. A run that had done everything asked of it and was waiting on a
+    // human reports as having produced nothing.
+    //
+    // AND IT IS THE ONE WEDGE WITH NO WAY OUT. Every other refusal here names a recovery
+    // that suppresses MORE — the `gate.decided` arm's message says "rewind to `atSeq - 1`
+    // to ask again", and that works because a lower boundary hides the half-append that
+    // wedged it. There is no seq below 0. Measured: after `rewind(runId, 0)`, rewinding to
+    // 1, 2, 50, 88 and 89 in turn each folded back to `queued` with zero tasks and zero
+    // channels, because the first range still hides everything a later one would have kept.
+    // Refusing is the whole fix; there is nothing to repair afterwards.
+    //
+    // It does NOT make every boundary safe, and saying otherwise would be the more
+    // dangerous half-truth. Boundaries of 1, 2 and 3 leave a run with its graph hash and
+    // inputs intact but no runnable Task, and one landing inside a Task's own append leaves
+    // it `leased` with no holder; all of those fail with `E_OUTPUT_MISSING` too. What
+    // separates 0 is that the run stops being ITSELF — no graph, no inputs, no identity to
+    // rewind — and that no lower seq exists to answer it with.
+    if (atSeq < 1) {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `seq ${atSeq} is below run ${runId}'s first event, so rewinding there would suppress \`run.submitted\` itself — leaving a run with no graph, no inputs and no lower seq to recover through. Rewind to 1 or higher, or submit a new run`,
+        { details: { runId, atSeq } },
+      );
+    }
+
     const p = (await this.#project(ctx))!;
+
+    // A CANCEL IS NOT UNDOABLE, and this is the widest door back into a cancelled run.
+    // Suppressing `run.cancelled` suppresses the `gate.cancelled` events appended beside
+    // it, so the gates reopen with the run and every path the layers above just closed
+    // opens again at once — one call, no approvers checked.
+    //
+    // Rewinding a `failed` or `succeeded` run undoes an OUTCOME, which is a retry. A cancel
+    // is a person's refusal, and undoing it silently overrules them. The way back is a new
+    // run — a new id, a new journal, and a decision somebody has to make on the record.
+    if (p.status === "cancelled") {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `run ${runId} was cancelled; a cancel is not undone by rewinding past it — submit a new run`,
+        { details: { runId, atSeq } },
+      );
+    }
+
+    // A REJECTION IS A REFUSAL TOO, so the same rule reaches it.
+    //
+    // The status check above is not enough: a run that a human REJECTED ends `failed`, and
+    // "failed" was read as "an outcome, therefore a retry". It is not — the failure IS the
+    // refusal, and suppressing the `gate.decided` that carries it returns the gate to `open`
+    // and puts the refused action back on the table for whoever answers next. One call, and
+    // the "no" is gone from every read model while the journal still records it.
+    //
+    // AND THE OPPOSITE SIGN RESOLVES THE OTHER WAY, deliberately: rewinding past an
+    // `approve` is allowed, because suppressing the decision re-OPENS the gate rather than
+    // carrying the approval forward — the same person is asked the same question again
+    // before anything runs. Re-asking someone who said yes costs a click; re-asking someone
+    // who said no is an appeal against a decision already made. `edit` and `redirect` go
+    // with `approve`: they modify a request, they do not refuse it.
+    //
+    // Scoped to the range this rewind would SUPPRESS, PLUS THE BOUNDARY ITSELF.
+    //
+    // A rejection earlier in the run's history is not being undone, and refusing on it
+    // would make a run unrewindable forever because a human once said no to something else.
+    // But the scan started at `atSeq + 1`, and `atSeq` is precisely the seq this rewind
+    // cannot afford not to look at: `suppressedRanges` is exclusive at both ends, so
+    // rewinding to a `gate.decided{reject}`'s own seq KEEPS the decision and DROPS the
+    // `run.resumed` that shipped in the same append. The fold then reports a run
+    // `awaiting_gate` whose only gate is already decided — zero open gates, nothing a human
+    // can answer, nothing the scheduler will pick up, and (the status is not `cancelled`)
+    // no second rewind that would refuse to make it worse. A permanent wedge, reachable by
+    // asking for a seq one lower than the one that is refused.
+    for await (const ev of ctx.log.read(Math.max(1, atSeq) as Seq)) {
+      // A BATCH DECISION'S RECEIPT IS THE SAME BOUNDARY, AND IT IS NOT A `gate.decided`.
+      //
+      // `HumanGateBroker.resolveBatch` writes N `gate.decided`, then `gate.batch_decided`,
+      // then `run.resumed` — one append, N + 2 seqs. Every seq but one is refused by the
+      // arm below; the receipt is neither a decision nor the resume, so the scan walked
+      // past it. Reproduced on a three-branch fan-out before this line existed:
+      // `24,25,26:gate.decided 27:gate.batch_decided 28:run.resumed`, `rewind(runId, 27)`
+      // ACCEPTED, the run folded to `awaiting_gate` with ZERO open gates, and `advance()`
+      // was a no-op with zero writes. Three approvals kept, the resume dropped, nothing
+      // left for a human to answer and nothing for the scheduler to lease.
+      //
+      // THIS IS REGISTER ENTRY A10, REACHED THROUGH A NEW EVENT TYPE, and the narrowness
+      // of the fix is the evidence for A10's own prescription: the property that matters is
+      // "this boundary splits an append whose tail carries the run's status transition",
+      // and it is written here as "this event is one of two named types". Every row a
+      // future change adds to a decision's or a terminal's append has to be added here too,
+      // or it reopens the hole — which is why A10 asks for the refusal to become a property
+      // of the APPEND rather than of the type. It is not fixed here because doing it
+      // properly needs an append boundary the journal does not currently record, and half
+      // of that is worse than this.
+      if (isEvent(ev, "gate.batch_decided") && ev.seq === atSeq) {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `seq ${atSeq} is the receipt for the one decision that closed gate batch "${ev.payload.batchId}" (${ev.payload.gateIds.length} gates), and the \`run.resumed\` it was appended with is at seq ${atSeq + 1}; rewinding to it would keep every decision and drop the resume, leaving run ${runId} suspended on gates that are already answered — rewind to ${atSeq + 1} to keep the decision, or below seq ${ev.payload.gateIds.length === 0 ? atSeq : atSeq - ev.payload.gateIds.length} to ask again`,
+          { details: { runId, atSeq, batchId: ev.payload.batchId, gateIds: ev.payload.gateIds } },
+        );
+      }
+      if (!isEvent(ev, "gate.decided")) continue;
+      if (ev.payload.decision === "reject") {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `run ${runId} has a gate a human rejected at seq ${ev.seq}; rewinding past a refusal overrules the person who made it — submit a new run`,
+          { details: { runId, atSeq, gateId: ev.payload.gateId, decidedAtSeq: ev.seq } },
+        );
+      }
+      // AND THE SAME BOUNDARY SPLITS AN APPROVAL TOO — the wedge above with the sign
+      // flipped, and the reason it is a SEPARATE refusal rather than a wider version of the
+      // one above.
+      //
+      // `resolve` writes `gate.decided` and `run.resumed` in ONE append, which is two seqs.
+      // A rewind boundary of exactly the decision's seq keeps the first and drops the second,
+      // so the run folds back to `awaiting_gate` with its only gate already `decided`: zero
+      // open gates, and `advance` returns immediately on `awaiting_gate` without looking for
+      // work. Measured, not reasoned: status `awaiting_gate`, 0 open gates, `advance` a
+      // no-op, no task ever re-leased.
+      //
+      // It differs from the rejection in ONE way, which is why the message differs rather
+      // than the rule: this state is recoverable. A second rewind to `atSeq - 1` suppresses
+      // the decision as well and the gate comes back open, because the run is not
+      // `cancelled` and there is no refusal in range to refuse on. That makes it a wedge an
+      // operator can get out of, and refusing here is what keeps them from having to — with
+      // the two seqs that DO mean something named in the message, since "rewind to N" and
+      // "rewind to N+1" are the two coherent readings of what they asked for.
+      //
+      // Refusing rather than repairing is deliberate, and it is the same call the arm above
+      // makes: the fold cannot re-derive a run's status from its gates — `run.suspended` and
+      // `run.resumed` are the only things that carry it — so a projection that healed this
+      // would be inventing a transition nobody journaled.
+      if (ev.seq === atSeq) {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `seq ${atSeq} is the \`${ev.payload.decision}\` on gate "${ev.payload.gateId}", and the \`run.resumed\` it was appended with is at seq ${atSeq + 1}; rewinding to it would keep the decision and drop the resume, leaving run ${runId} suspended on a gate that is already answered — rewind to ${atSeq + 1} to keep the decision, or to ${atSeq - 1} to ask again`,
+          { details: { runId, atSeq, gateId: ev.payload.gateId, decision: ev.payload.decision } },
+        );
+      }
+    }
 
     // Refuse to rewind past a committed irreversible effect with no compensation —
     // the store must not offer a silently-unsafe undo.
@@ -613,17 +1104,33 @@ export class Engine {
    * folder keeps the mutable state and consumes only the tail.
    */
   async #project(ctx: RunContext): Promise<RunProjection | undefined> {
-    if (ctx.folder.stale) ctx.folder = new RunFolder();
     const events = [];
     for await (const e of ctx.log.read(ctx.folder.lastSeq + 1)) events.push(e);
     ctx.folder.push(events);
-    // A rewind invalidates everything already folded, so start over from seq 1. Rare by
-    // construction, and correctness beats cleverness here.
-    if (ctx.folder.stale) {
-      ctx.folder = new RunFolder();
+    // A rewind invalidates everything already folded, so the fold starts over from seq 1 —
+    // through `restart()`, which keeps what the marker declared. Replacing the folder
+    // instead threw that away, so the next call met the same marker and re-read the whole
+    // journal again: correct, because it fell back to `foldRun`, and permanent, because the
+    // cursor never got past the marker. Rare by construction; now rare in cost too.
+    //
+    // `reached` is the same livelock refusal `GateSweeper.#catchUp` carries, for the same
+    // reason: each pass stops at the first marker it has not been told about, so each pass
+    // must get strictly further, and a loop that assumes that rather than checking it spins
+    // forever the day it stops being true.
+    let reached = -1;
+    while (ctx.folder.stale) {
+      if (ctx.folder.lastSeq <= reached) {
+        throw err.internal(
+          CODES.E_TRACE_INCONSISTENT,
+          `run ${ctx.runId} did not fold past its rewind marker at seq ${ctx.folder.lastSeq + 1} on a second pass`,
+          { details: { runId: ctx.runId, lastSeq: ctx.folder.lastSeq } },
+        );
+      }
+      reached = ctx.folder.lastSeq;
+      ctx.folder.restart();
       const all = [];
       for await (const e of ctx.log.read(1)) all.push(e);
-      return foldRun(all);
+      ctx.folder.push(all);
     }
     return ctx.folder.projection();
   }
@@ -686,8 +1193,16 @@ export class Engine {
     // A gate already decided for THIS Task short-circuits policy: re-gating an
     // approved Task would loop forever, and re-asking a human who already answered
     // is the fastest way to make in-the-loop unusable.
-    const settled = Object.values(p.gates).find((g) => g.taskId === task.taskId && g.state === "decided");
+    const settled = lastDecidedGate(p, task.taskId);
     if (settled !== undefined) {
+      // A MIRROR'S DECISION IS NOT THE PARENT'S TO APPLY ALONE — it answers a gate in
+      // another run, and that run is still suspended waiting for it. Dispatching for
+      // every decision, not only `approve`, is what makes the forward reachable; the
+      // short-circuit below is why `#forwardGateDecision`'s rejection branch was dead
+      // code and why every rejected delegation leaked a suspended child. `#runSubgraph`
+      // forwards first and then produces the parent's outcome from what the child did.
+      if (settled.mirrorOf !== undefined) return this.#dispatch(ctx, p, w);
+
       // APPROVE ON A WORK NODE MEANS "GO AHEAD", NOT "CONSIDER IT DONE". A `human_gate`
       // node is its own approval, so approving completes it; every other node type has
       // work behind the gate, and treating approval as completion would report success
@@ -695,7 +1210,7 @@ export class Engine {
       // exists for. `reject`, `edit`, and `redirect` all resolve WITHOUT executing:
       // each is the human substituting their own outcome for the node's.
       if (node.type === "human_gate" || settled.decision !== "approve") {
-        return this.#applyGateDecision(settled, node);
+        return this.#applyGateDecision(settled, node, ctx.graph.plans[node.id]?.outboundEdges ?? []);
       }
       return this.#dispatch(ctx, p, w);
     }
@@ -781,6 +1296,8 @@ export class Engine {
         gate: {
           policyRef: node.humanGate?.ref ?? `policy:${node.id}`,
           payload: this.#gatePayload(ctx, p, node, task),
+          auth: gateAuthorizationOf(node),
+          schedule: scheduleOf(node),
         },
       };
     }
@@ -811,7 +1328,12 @@ export class Engine {
           status: "gate",
           writes: {},
           usage: { ...ZERO_USAGE },
-          gate: { policyRef: w.node.humanGate?.ref ?? "", payload: this.#gatePayload(ctx, p, w.node, w.task) },
+          gate: {
+            policyRef: w.node.humanGate?.ref ?? "",
+            payload: this.#gatePayload(ctx, p, w.node, w.task),
+            auth: gateAuthorizationOf(w.node),
+            schedule: scheduleOf(w.node),
+          },
         };
       case "subgraph":
         return this.#runSubgraph(ctx, p, w);
@@ -819,7 +1341,7 @@ export class Engine {
   }
 
   /** Turn a resolved gate into the Task's outcome. */
-  #applyGateDecision(gate: GateRecord, node: NodeSpec): NodeOutcome {
+  #applyGateDecision(gate: GateRecord, node: NodeSpec, outbound: readonly EdgeId[]): NodeOutcome {
     if (gate.decision === "reject") {
       return {
         status: "failed",
@@ -832,12 +1354,29 @@ export class Engine {
         ),
       };
     }
+    // A `redirect` must be a subset of the node's DECLARED outgoing edges — a human
+    // cannot invent a target any more than a model can. This was a comment and nothing
+    // else: `#activate` looks every id up in the whole graph's edge table, so a redirect
+    // naming an edge belonging to some OTHER node activated that node's target, jumping
+    // whatever sat between here and there.
+    const invented = (gate.take ?? []).filter((id) => !outbound.includes(id as EdgeId));
+    if (invented.length > 0) {
+      return {
+        status: "failed",
+        writes: {},
+        usage: { ...ZERO_USAGE },
+        error: err.policy(
+          CODES.E_ROUTE_INVALID,
+          `node "${node.id}" has no outgoing edge ${invented.map((i) => `"${i}"`).join(", ")}`,
+          { details: { gateId: gate.gateId, take: gate.take, declared: outbound } },
+        ),
+      };
+    }
+
     return {
       status: "succeeded",
       writes: { ...(gate.writes ?? {}) },
       usage: { ...ZERO_USAGE },
-      // A `redirect` must be a subset of the node's DECLARED outgoing edges — a human
-      // cannot invent a target any more than a model can.
       ...(gate.take === undefined ? {} : { take: gate.take as readonly EdgeId[] }),
     };
   }
@@ -1271,13 +1810,14 @@ export class Engine {
 
     const existing = await this.projection(childRunId);
     if (existing === undefined) {
-      await this.submit({
-        graph: childGraph,
-        inputs,
-        runId: childRunId,
-        workflow: sub.ref,
-        ...(slice === undefined ? {} : { budgetUsd: slice }),
-      });
+      // THE REFERENCE IS JOURNALED FIRST, and the order matters more than it looks.
+      // `subgraph.started` is the only thing that tells a later `cancel` this child exists,
+      // and appending it after `submit` left a permanent hole: a crash between the two
+      // produced a live child run the parent had no record of, and the retry takes the
+      // `existing !== undefined` branch below, which never writes the event. One lost
+      // reference, forever, for a run that is still answerable. Writing it first inverts the
+      // failure — a reference to a child that does not exist yet, which the cascade skips
+      // and the retry re-states.
       await this.#serialize(() =>
         ctx.log.append(
           [
@@ -1291,18 +1831,51 @@ export class Engine {
           { taskId: w.task.taskId },
         ),
       );
+      await this.submit({
+        graph: childGraph,
+        inputs,
+        runId: childRunId,
+        workflow: sub.ref,
+        ...(slice === undefined ? {} : { budgetUsd: slice }),
+      });
     } else {
       this.attach(childRunId, childGraph);
       // ONE HUMAN DECISION, not two. If the parent's gate was answered, that answer was
       // about the child's question — forward it rather than asking again in the child's
       // own console.
-      await this.#forwardGateDecision(ctx, p, w, childRunId);
+      const forwarded = await this.#forwardGateDecision(p, w, childRunId);
+      if (forwarded !== undefined) {
+        // A REJECTION IS THE PARENT'S OUTCOME TOO, and it is the same outcome the
+        // short-circuit in `#executeTask` used to produce before a mirror's decision had
+        // to travel: E_HUMAN_APPROVAL_REQUIRED, carrying the human's own reason. The
+        // difference is that the child has now been told — either rejected through its own
+        // gate, or cancelled when that gate was already answered elsewhere. Nothing is
+        // left suspended behind a refusal.
+        await this.#endChildRun(childRunId, `the parent rejected this delegation: ${forwarded.justification ?? "no reason given"}`);
+        return this.#applyGateDecision(forwarded, w.node, ctx.graph.plans[w.node.id]?.outboundEdges ?? []);
+      }
     }
 
     const childP = await this.advance(childRunId);
 
     if (childP.status === "awaiting_gate") {
-      const open = Object.values(childP.gates).find((g) => g.state === "open");
+      // DETERMINISTIC, by the journal's own order rather than by however the projection
+      // happens to enumerate its map — the same rule `lastDecidedGate` uses. Which gate a
+      // mirror stands in for is now durable, so the arbitrariness no longer creates a
+      // hole; it would still make a replay depend on map iteration order.
+      const open = oldestOpenGate(childP);
+      if (open === undefined) {
+        // Suspended on a gate, with no gate. Nothing to mirror and nothing a human could
+        // answer, so say so rather than raising a mirror bound to nothing.
+        return {
+          status: "failed",
+          writes: {},
+          usage: { ...ZERO_USAGE },
+          error: err.internal(CODES.E_SUBGRAPH_FAILED, `subgraph "${sub.ref}" is awaiting a gate it does not have`, {
+            details: { childRunId },
+          }),
+        };
+      }
       return {
         status: "gate",
         writes: {},
@@ -1312,10 +1885,18 @@ export class Engine {
           payload: {
             subgraph: sub.ref,
             childRunId,
-            childNode: open?.nodeId,
-            childGateId: open?.gateId,
+            childNode: open.nodeId,
+            childGateId: open.gateId,
             channels: childP.channels,
           },
+          // THE MIRROR IS THE GATE A HUMAN ACTUALLY ANSWERS, so it must be bound by the
+          // list the child declared — and bound to the gate that declared it. Without the
+          // first, the child's approvers were consulted by nobody. Without the second, the
+          // inheritance was still defeated by any second child gate: the forward re-picked
+          // its target later and could land on a gate whose list nobody had been checked
+          // against.
+          auth: mirrorAuthorizationOf(open),
+          mirrorOf: open.gateId,
         },
       };
     }
@@ -1366,25 +1947,67 @@ export class Engine {
     return { status: "succeeded", writes, usage };
   }
 
-  /** Answer the child's open gate with the decision the human gave on the parent. */
-  async #forwardGateDecision(ctx: RunContext, p: RunProjection, w: Wave, childRunId: RunId): Promise<void> {
-    const settled = Object.values(p.gates).find((g) => g.taskId === w.task.taskId && g.state === "decided");
-    if (settled === undefined) return;
+  /**
+   * Answer THE child gate this mirror was raised for, with the decision the human gave.
+   *
+   * "The" is the whole fix. This used to re-derive its target as "the first open gate in
+   * the child", independently of the identical guess `#runSubgraph` made when it raised
+   * the mirror and inherited approvers. Two unbound picks: answer any unrestricted child
+   * gate between them — which is ordinary queue work, not an attack — and the restricted
+   * gate slid under a mirror that had inherited nothing, so `executor:subgraph` approved,
+   * as itself, a charge the same person had just been refused at.
+   *
+   * Now it resolves `settled.mirrorOf` or nothing. A target that is no longer open means
+   * somebody answered it in the child's own console, or this forward already happened;
+   * either way the human's answer has no question left, and the caller re-raises a fresh
+   * mirror bound to whatever the child is actually waiting on, inheriting THAT gate's
+   * approvers. Skipping is journaled by absence, which is legible: the child's log shows
+   * its own `gate.decided` and no `executor:subgraph` entry beside it.
+   *
+   * Returns the parent-side gate record when it carried a REJECTION, because that is the
+   * parent's outcome too and the caller has to produce it. Only a literal `reject` is
+   * returned: an `edit` or `redirect` is refused at the door for a mirror, so one can only
+   * reach here out of a journal written before that rule — it is carried to the child as a
+   * refusal like anything that is not `approve`, and the parent then fails on the child's
+   * own status rather than applying writes the child never saw.
+   */
+  async #forwardGateDecision(p: RunProjection, w: Wave, childRunId: RunId): Promise<GateRecord | undefined> {
+    const settled = lastDecidedGate(p, w.task.taskId);
+    if (settled?.mirrorOf === undefined) return undefined;
+
+    // APPROVE IS THE ONLY DECISION THAT MEANS "GO AHEAD". `#authorize` refuses `edit` and
+    // `redirect` on a mirror outright, so nothing else should reach here — and if a
+    // journal written before that rule did, carrying it as a refusal is the safe reading.
+    const rejected = settled.decision !== "approve";
+    const decision: GateDecision = rejected
+      ? { kind: "reject", reason: settled.justification ?? "rejected on the parent graph" }
+      : { kind: "approve" };
+
     const childP = await this.projection(childRunId);
-    const open = Object.values(childP?.gates ?? {}).find((g) => g.state === "open");
-    if (open === undefined) return;
+    const target = childP === undefined ? undefined : gateOf(childP, settled.mirrorOf);
+    if (target?.state === "open") {
+      await this.#resolveGateAsSystem(childRunId, {
+        gateId: target.gateId,
+        decision,
+        actor: SYSTEM_ACTOR("executor:subgraph"),
+        idempotencyKey: `parent:${w.task.taskId}`,
+      });
+    }
+    return settled.decision === "reject" ? settled : undefined;
+  }
 
-    const decision: GateDecision =
-      settled.decision === "reject"
-        ? { kind: "reject", reason: settled.justification ?? "rejected on the parent graph" }
-        : { kind: "approve" };
-
-    await this.resolveGate(childRunId, {
-      gateId: open.gateId,
-      decision,
-      actor: SYSTEM_ACTOR("executor:subgraph"),
-      idempotencyKey: `parent:${w.task.taskId}`,
-    });
+  /**
+   * Stop a child run the parent has finished with, if it is still going.
+   *
+   * A rejected delegation used to leave the child suspended on an open gate with nobody
+   * left who would answer it — one leaked run, and one leaked journal, per refusal. The
+   * forward above closes the common case by rejecting the child's own gate; this covers
+   * the rest, including a gate that was answered elsewhere while the parent deliberated.
+   */
+  async #endChildRun(childRunId: RunId, reason: string): Promise<void> {
+    const p = await this.projection(childRunId);
+    if (p === undefined || isTerminal(p.status)) return;
+    await this.cancel(childRunId, reason);
   }
 
   /** Compile a child graph once per ref. The tree is fixed, so the cache never stales. */
@@ -1568,13 +2191,58 @@ export class Engine {
     const p = (await this.#project(ctx))!;
 
     if (outcome.status === "gate") {
-      await this.gates.raise(ctx.log, {
+      // THE RUN MAY HAVE ENDED WHILE THIS TASK WAS IN FLIGHT.
+      //
+      // `cancel` closes the gates that are open when it runs and cannot close one that does
+      // not exist yet, so a Task that reaches its gate after the cancel used to raise a live
+      // question on a dead run — and the `run.suspended` riding with it carried the status
+      // back out of `cancelled`. `raise` refuses this too, and that refusal is the real
+      // guard: it holds for every caller, and it commits against the projection it checked.
+      // This check is here so the ordinary case — an operator cancels a run that is mid-wave
+      // — is a quiet no-op rather than an exception out of `advance`, which is not an error
+      // the caller can do anything about.
+      if (isTerminal(p.status)) return;
+
+      // Authorization travels with the raise, which is what puts it in `gate.raised` and
+      // therefore in the projection every entry point checks against. `#commit` does not
+      // compute it: it used to, from a block only one node type can carry, so every other
+      // gate-raising path journaled nothing. The outcome answers for itself now.
+      //
+      // An empty approvers list is dropped rather than journaled as `[]` — "named nobody"
+      // and "named an empty list" mean the same thing and should read the same way. An
+      // empty `allowEdit` is NOT dropped, because there the two differ: absent means
+      // unconstrained.
+      const auth = outcome.gate!.auth;
+      // THE SCHEDULE TRAVELS WITH THE RAISE TOO, and until it did the entire delivery
+      // subsystem was unreachable from a graph: this call passed no `DeliverySpec`, so
+      // `raise`'s `dispatcher !== undefined && delivery !== undefined` branch could only
+      // ever be taken by an embedder driving the broker by hand — and no gate a graph
+      // raised had a deadline for the sweep to find either. Spread rather than assigned,
+      // because `exactOptionalPropertyTypes` makes an explicit `undefined` a different
+      // thing from an absent field, and `raise` reads absence as "no clock".
+      const sched = outcome.gate!.schedule ?? {};
+      await this.#gates.raise(ctx.log, {
         runId: ctx.runId,
         taskId: w.task.taskId,
         nodeId: w.node.id,
         policyRef: outcome.gate!.policyRef,
         payload: outcome.gate!.payload,
-        ...(w.node.humanGate === undefined ? {} : { allowEdit: w.node.writes ?? [] }),
+        allowEdit: auth.allowEdit,
+        ...(auth.approvers.length === 0 ? {} : { approvers: auth.approvers }),
+        ...(sched.slaMs === undefined ? {} : { slaMs: sched.slaMs }),
+        ...(sched.onTimeout === undefined ? {} : { onTimeout: sched.onTimeout }),
+        ...(sched.delivery === undefined ? {} : { delivery: sched.delivery }),
+        ...(sched.reminders === undefined ? {} : { reminders: sched.reminders }),
+        // D7.9's saturation controls. They reach `raise` and nowhere else: whether this
+        // gate merges with a sibling or inherits a sibling's answer is decided there,
+        // against the JOURNAL, so a node cannot declare its way past an approvers list.
+        ...(sched.batching === undefined ? {} : { batching: sched.batching }),
+        ...(sched.dedupe === undefined ? {} : { dedupe: sched.dedupe }),
+        // Which gate in which other run this one stands in for, if any. Durable for the
+        // same reason the approvers are: the process that forwards the decision is not
+        // necessarily the process that raised the mirror, and a binding only one of them
+        // can see is a binding that a restart quietly removes.
+        ...(outcome.gate!.mirrorOf === undefined ? {} : { mirrorOf: outcome.gate!.mirrorOf }),
       });
       return;
     }
@@ -2228,6 +2896,27 @@ export class Engine {
 
   // ── run completion ────────────────────────────────────────────────────────
 
+  /**
+   * End the run.
+   *
+   * EVERY path below closes the run's open gates in the same append, for the reason
+   * `cancel` does: a gate that outlives its run is a question in somebody's queue with
+   * nowhere left to land, and — until `resolve` learned to look at the run — was a way back
+   * into one.
+   *
+   * The success path used to be exempt, on the grounds that `advance` re-suspends rather
+   * than finishing while a gate is open. That is FALSE, and the counterexample is the same
+   * one the failure paths already relied on: the budget/fatal floor at the top of `advance`
+   * reaches `#finish` without passing the re-suspend check, and `#finish` completes a run
+   * whose declared outputs are already written. So a SUCCEEDED run left a live gate behind
+   * it. An exemption justified by a claim about a different function is an exemption that
+   * survives exactly until that function changes.
+   *
+   * The reason strings differ per path and that is part of the audit record, not decoration:
+   * "the run finished without you" and "an operator cancelled this" are different facts
+   * about why a question left somebody's queue, and only one of them means a person decided
+   * something.
+   */
   async #finish(ctx: RunContext, p: RunProjection): Promise<void> {
     if (isTerminal(p.status)) return;
     this.#checkAnomaly(ctx, p);
@@ -2243,6 +2932,7 @@ export class Engine {
       if (started < plan.width) {
         await this.#serialize(() =>
           ctx.log.append([
+            ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor")),
             {
               type: "run.failed",
               payload: {
@@ -2271,6 +2961,7 @@ export class Engine {
       const first = failed[0]!;
       await this.#serialize(() =>
         ctx.log.append([
+          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor")),
           {
             type: "run.failed",
             payload: {
@@ -2298,6 +2989,7 @@ export class Engine {
     if (declared.length > 0 && Object.keys(outputs).length === 0) {
       await this.#serialize(() =>
         ctx.log.append([
+          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor")),
           {
             type: "run.failed",
             payload: {
@@ -2317,6 +3009,7 @@ export class Engine {
 
     await this.#serialize(() =>
       ctx.log.append([
+        ...cancelOpenGates(p, "the run completed before this gate was answered", SYSTEM_ACTOR("executor")),
         {
           type: "run.completed",
           payload: { outputs, usage: p.usage },
@@ -2539,6 +3232,167 @@ function mapToolWrites(node: NodeSpec, writes: Readonly<Record<string, unknown>>
 
 function firstWrite(node: NodeSpec): string | undefined {
   return (node.writes ?? [])[0];
+}
+
+/**
+ * Every run this one delegated to, from its own journal.
+ *
+ * `subgraph.started` is the ONLY link between two journals — the child's id is derived from
+ * the parent's, but derivation is a convention and the event is the record. Reading it here
+ * is what makes a cancel reach work the operator never named.
+ *
+ * DEDUPED, because the parent journals its intent before the child exists (see
+ * `#runSubgraph`): a crash between those two appends leaves the reference standing, and the
+ * retry writes it again. Two rows, one child.
+ */
+async function childRunsOf(log: RunLog): Promise<readonly RunId[]> {
+  const out = new Set<RunId>();
+  for await (const ev of log.read(1)) {
+    if (isEvent(ev, "subgraph.started")) out.add(ev.payload.childRunId);
+  }
+  return [...out];
+}
+
+/**
+ * The `gate.cancelled` events that close a run's open gates, for the append that ends it.
+ *
+ * THE WRITE SIDE THAT WAS NEVER BUILT. D7.3's lifecycle FSM has specified
+ * `Open --> Cancelled: gate.cancelled` since it was drawn, D6.4 rule 4 spells out why
+ * (`ctx.abort` reaches every in-flight effect and cannot reach a gate — there is no work
+ * to interrupt), the event type has been in `EVENT_TYPES` and folded by `projection.ts`
+ * for as long, and nothing in `src/` ever appended one. A read model with no writer looks
+ * exactly like a finished feature right up until somebody answers the gate.
+ *
+ * Emitted in the SAME append as the terminal event, never as a follow-up: a crash between
+ * the two would leave a stopped run with a live gate, which is precisely the state that
+ * made the run answerable again.
+ */
+function cancelOpenGates(p: RunProjection, reason: string, actor: Actor): readonly NewEvent[] {
+  return openGates(p).map((g): NewEvent => ({
+    type: "gate.cancelled",
+    payload: { gateId: g.gateId, reason },
+    actor,
+    // A gate raised by an event carrying no `taskId` folds to `""`; attributing the
+    // closure to a Task that does not exist is worse than attributing it to none.
+    ...(g.taskId === ("" as TaskId) ? {} : { taskId: g.taskId }),
+  }));
+}
+
+/**
+ * The MOST RECENT decision on this Task, not the first one recorded.
+ *
+ * A Task raises more than one gate whenever the work behind it suspends more than once —
+ * a subgraph node raises a mirror per child gate. Reading the first decided gate meant a
+ * rejection of the second question was answered by the approval given to the first: the
+ * executor re-forwarded the stale `approve` and the action the human had just refused
+ * went through. Ordering is by `raisedAtSeq`, the journal's own order, so it does not
+ * depend on how a projection happens to enumerate its map.
+ */
+function lastDecidedGate(p: RunProjection, taskId: TaskId): GateRecord | undefined {
+  let latest: GateRecord | undefined;
+  for (const g of Object.values(p.gates)) {
+    if (g.taskId !== taskId || g.state !== "decided") continue;
+    if (latest === undefined || g.raisedAtSeq > latest.raisedAtSeq) latest = g;
+  }
+  return latest;
+}
+
+/**
+ * The open gate a run has been waiting on longest, by JOURNAL order.
+ *
+ * `Object.values(gates).find(open)` gave the same answer in practice and depended on map
+ * insertion order to do it — which is not a rule anything states, and which two separate
+ * call sites were quietly relying on to agree with each other. `raisedAtSeq` is the
+ * journal's own total order, so this is stable across a rebuild of the projection.
+ */
+function oldestOpenGate(p: RunProjection): GateRecord | undefined {
+  let oldest: GateRecord | undefined;
+  for (const g of Object.values(p.gates)) {
+    if (g.state !== "open") continue;
+    if (oldest === undefined || g.raisedAtSeq < oldest.raisedAtSeq) oldest = g;
+  }
+  return oldest;
+}
+
+/**
+ * The one place a gate's authorization is computed, for every node type.
+ *
+ * `allowEdit` is the node's DECLARED WRITES and never anything wider. An `edit` decision
+ * lands as this Task's writes in THIS run, so a node that may write one channel may have
+ * one channel edited, and a node that declares none may have none — `[]`, not "absent",
+ * which the broker reads as unconstrained.
+ *
+ * A mirror gate does NOT come through here — see `mirrorAuthorizationOf`. It used to,
+ * with the child's approvers passed as an optional argument, and an optional argument is
+ * the wrong shape for the question: a child gate that names nobody supplies `undefined`,
+ * which is indistinguishable from "not a mirror at all", and the mirror silently fell
+ * back to this node's own rules.
+ */
+function gateAuthorizationOf(node: NodeSpec): GateAuthorization {
+  return {
+    approvers: node.humanGate?.approval?.approvers ?? [],
+    allowEdit: node.writes ?? [],
+  };
+}
+
+/**
+ * The one place a gate's CLOCK and ROUTE are read off the node, for every node type.
+ *
+ * It returns a spreadable object rather than an optional value so that a node declaring
+ * nothing contributes no keys at all — `exactOptionalPropertyTypes` makes
+ * `{schedule: undefined}` a different thing from `{}`, and `GateRequest` reads an absent
+ * `slaMs` as "this gate has no deadline" while an explicit `undefined` would not typecheck.
+ *
+ * ONLY A `human_gate` NODE CAN DECLARE ANY OF THIS, because `humanGate` is the only block
+ * carrying it and `GRAPH020_EXTRA_BLOCK` refuses a second type block. So a gate raised by
+ * the posture floor on a tool node gets no deadline and no delivery, which is the honest
+ * answer: nobody wrote one down. Give that gate an SLA by putting the action behind an
+ * explicit `human_gate` node.
+ *
+ * A MIRROR GATE GETS NOTHING FROM HERE EITHER — `#runSubgraph` builds its own outcome, and
+ * a `subgraph` node has no `humanGate` block to declare a route on. That is a real gap:
+ * the mirror is the gate a human answers, and today it is queued rather than sent. It is
+ * left rather than guessed at, because the natural fix is to inherit the CHILD gate's
+ * delivery spec, and the child's spec names channels and recipients resolved in the
+ * child's deployment — the same namespace mistake `mirrorAuthorizationOf` documents having
+ * made twice with `allowEdit`.
+ */
+function scheduleOf(node: NodeSpec): GateSchedule {
+  const sla = node.humanGate?.sla;
+  const delivery = node.humanGate?.delivery;
+  const batching = node.humanGate?.batching;
+  const dedupe = node.humanGate?.dedupe;
+  return {
+    ...(sla?.respondWithinMs === undefined ? {} : { slaMs: sla.respondWithinMs }),
+    ...(sla?.onTimeout === undefined ? {} : { onTimeout: sla.onTimeout }),
+    // On `sla` rather than on `delivery`, because a reminder chooses no new recipients and
+    // no new channels — see `GateSlaSpec.reminders`. It travels with the clock it is
+    // measured against, and a node with no `sla` block contributes neither.
+    ...(sla?.reminders === undefined ? {} : { reminders: sla.reminders }),
+    ...(delivery === undefined ? {} : { delivery }),
+    ...(batching === undefined ? {} : { batching }),
+    ...(dedupe === undefined ? {} : { dedupe }),
+  };
+}
+
+/**
+ * A mirror gate's authorization: the child's approvers, and no editable channel at all.
+ *
+ * THE APPROVERS ARE THE CHILD'S because the mirror is the gate a human actually answers,
+ * and the declaration is one run away from the action it guards.
+ *
+ * `allowEdit` is `[]`, which took two tries to get right. The first attempt gave the
+ * mirror the child's own allow-list, naming channels in another graph's namespace. The
+ * correction gave it `node.writes` — right about namespaces, wrong about everything else,
+ * because for a subgraph node `node.writes` is exactly the channels the child's result
+ * maps INTO. An `edit` there let a human hand the parent a result the child never
+ * produced, report success with no `subgraph.completed`, and leave the child suspended on
+ * an open gate forever. A mirror asks "does this delegated action go ahead?"; yes and no
+ * are the whole answer it can carry, `#authorize` refuses the other two decisions
+ * outright, and `[]` is how that reads back out of the journal.
+ */
+function mirrorAuthorizationOf(childGate: GateRecord): GateAuthorization {
+  return { approvers: childGate.approvers ?? [], allowEdit: [] };
 }
 
 type ParseResult = { ok: true; value: unknown } | { ok: false; errors: readonly string[] };

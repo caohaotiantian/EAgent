@@ -22,6 +22,13 @@
 
 import type { Digest } from "../canonical.ts";
 import type { EdgeId, NodeId } from "../ids.ts";
+// TYPE-ONLY, and it has to stay that way. `run/projection.ts` already imports this file,
+// so a VALUE import of anything under `run/` here would close a real module cycle;
+// `verbatimModuleSyntax` erases this line entirely, so at run time `graph/` still depends
+// on nothing under `run/`. The alternative — restating the delivery shape here — is worse:
+// two declarations of one wire format, and the one that drifts is whichever the compiler
+// checks and the broker does not.
+import type { DeliverySpec } from "../run/delivery.ts";
 import type { ChannelSpec } from "../state/channels.ts";
 import type { Posture } from "../vocab.ts";
 
@@ -135,8 +142,227 @@ export interface EvaluatorNode {
   readonly threshold: number;
 }
 
+/**
+ * A delegation chain, declared but not yet implemented.
+ *
+ * Present so that a graph asking for delegation is REJECTED rather than run as if it
+ * had asked for nothing (GRAPH014_APPROVAL_UNSUPPORTED).
+ */
+export interface DelegationSpec {
+  readonly allowed: boolean;
+  readonly maxDepth?: number;
+  readonly mustStayInGroup?: boolean;
+}
+
+/**
+ * WHO may answer this gate.
+ *
+ * D7.2 puts this block on the `oversight/<name>@<version>` Resource, and that is still
+ * where it belongs. It is inline here because nothing in `src/` resolves a Resource's
+ * CONTENT: `ResourceResolver.resolve` returns `{ref, digest, channel}` — a pin, not a
+ * document — so `humanGate.ref` today proves a policy EXISTS and pins its bytes without
+ * ever reading them. Building that seam is a larger change than the durability defect
+ * this block was added to fix, so the field names are D7.2's verbatim and moving the
+ * block into the Resource later is a relocation rather than a redesign.
+ *
+ * Only `approvers` is enforced. Everything else is declared here precisely so that it
+ * can be REFUSED at compile time: a graph that says `mode: quorum` and silently gets
+ * one-approver behaviour is the "looks supervised, is not" failure D7.9 calls the worst
+ * one available, and it would be invisible in exactly the place oversight exists for.
+ */
+export interface ApprovalSpec {
+  /** Only `single` is implemented. The others compile-error until a wave lands them. */
+  readonly mode?: "single" | "quorum" | "all" | "tiered";
+  /** `quorum` only. */
+  readonly k?: number;
+  /**
+   * Subject identifiers, compared EXACTLY against a human actor's `subject`.
+   *
+   * Opaque strings, not D7.2's `{kind, id}` records, because roles and groups need an
+   * identity resolver Loom does not have — and a role that expands to nobody is an
+   * approvers list that authorizes everybody. When that resolver exists this widens to
+   * a union, which is additive.
+   */
+  readonly approvers?: readonly string[];
+  /** An approver may not be the run's initiator. Not implemented. */
+  readonly separationOfDuties?: boolean;
+  readonly delegation?: DelegationSpec;
+}
+
+/**
+ * HOW LONG the gate waits, and what happens when nobody answers.
+ *
+ * D7.2 calls this block `sla` and puts it on the `oversight` Resource, next to `approval`.
+ * It is inline here for the same reason `ApprovalSpec` is — nothing in `src/` reads a
+ * Resource's content — and its two field names are D7.2's verbatim, so moving the block
+ * later is a relocation.
+ *
+ * WITHOUT IT A GATE HAS NO CLOCK AT ALL. `HumanGateBroker.#deadlineOf` derives the
+ * deadline from the journal, and the journal only carries one if `raise` was given an
+ * `slaMs` — so before this field existed, every gate a *graph* raised waited forever and
+ * the whole timeout path was reachable only by an embedder driving the broker by hand.
+ * Absent still means exactly that, and it is a legitimate configuration: a gate that must
+ * be answered by a person, with no deadline, is what most approvals are.
+ *
+ * AND ONE OF D7.2'S `delivery` FIELDS HAS MOVED HERE: `reminders`, BY THE SAME RULE THAT
+ * MOVED `escalation` THE OTHER WAY. The rule is *what does this field decide?* Escalation
+ * decides new recipients and new channels, so it belongs beside them; a reminder decides
+ * neither — it is the same tier, the same recipients, the same channels, nudged again — so
+ * all it carries is an INSTANT, and instants are what this block is. Putting it here also
+ * buys a bound for free: a gate with no `sla` can declare no reminders, and a nudge before
+ * a deadline that does not exist is not a nudge.
+ *
+ * TWO OF D7.2'S FOUR SLA FIELDS ARE DELIBERATELY MISSING.
+ *
+ *   - `escalation` lives on `delivery`, because escalating is choosing new RECIPIENTS and
+ *     new CHANNELS; `DeliverySpec.escalation` is where the runtime reads it from and a
+ *     second home for it here would be a second thing to keep in step.
+ *   - `defaultAction` is absent BY CONSTRUCTION, not by omission. It is a decision the
+ *     author pre-authorizes, so it is only safe once the compiler has proved the action's
+ *     irreversibility class permits one (D7.2's `GRAPH014` note). That proof does not exist
+ *     here, and a field that lets a graph say "approve it if nobody looks" without it is
+ *     the exact failure the gate exists to prevent. `onTimeout` therefore cannot name
+ *     `default_action` either — the type refuses it, and `checkSla` refuses it again for a
+ *     graph that arrived as JSON.
+ */
+export interface GateSlaSpec {
+  /** How long the first tier has, in ms, measured from the journaled raise. */
+  readonly respondWithinMs: number;
+  /**
+   * What the sweep does at the deadline. Default `fail`, matching `GateRequest.onTimeout`.
+   *
+   * `escalate` REQUIRES a `delivery.escalation` chain: with none, the broker treats the
+   * chain as exhausted and expires the gate immediately, which reads as "someone else gets
+   * paged" and behaves as `fail`. `checkSla` refuses that combination rather than shipping
+   * it.
+   */
+  readonly onTimeout?: "escalate" | "fail";
+  /**
+   * NUDGES BEFORE THE DEADLINE — D7.2's `delivery.reminders`, on the clock block.
+   *
+   * Each `afterMs` is measured from the JOURNALED raise, like `respondWithinMs` and for the
+   * same reason: a schedule re-supplied on a later deploy must produce the same instants,
+   * and `now + afterMs` would hand every gate a fresh set of nudges every restart.
+   *
+   * A REMINDER IS NOT AN ESCALATION AND MUST NOT BECOME ONE. It resets nothing — not the
+   * SLA, not the tier, not the tier's own clock — and it tells the people who already have
+   * the question that it is still open. `gate.escalated` is the event that moves a
+   * deadline; `gate.reminded` is folded into a COUNTER and nothing else.
+   *
+   * WHAT STOPS A NUDGE STORM, since the sweep runs on whatever interval a deployment
+   * chooses and every tick re-asks the same question. Three bounds, and all three are
+   * needed: the schedule is a finite list consumed IN ORDER, so a gate can be nudged at
+   * most `reminders.length` times in its whole life; each nudge is journaled, and the fold
+   * advances the counter, so the write changes the very condition that triggered it (the
+   * rule `HumanGateBroker.#commitForOpenGate` states as a table); and every instant must
+   * fall strictly inside `respondWithinMs`, so a schedule cannot outlive the tier it was
+   * written for. `checkSla` refuses a list that breaks any of those, and
+   * `usableReminders` in `run/gates.ts` refuses it again for a broker driven directly.
+   */
+  readonly reminders?: readonly { readonly afterMs: number }[];
+}
+
+/**
+ * MERGE SIBLING GATES INTO ONE QUESTION — D7.9 row 2.
+ *
+ * A fan-out over a `human_gate` node raises one gate per branch, and twenty gates asking
+ * the same question of the same person is the queue saturation D7.9 exists to survive.
+ * Gates declaring the same `key`, raised inside `windowMs` of the batch's first member,
+ * are grouped; `HumanGateBroker.resolveBatch` closes every member with one decision.
+ *
+ * WHAT IT DOES NOT DO, because "pure UX, no oversight semantics change" is only true if
+ * it is made true: a batch never merges two gates whose authorization differs. Membership
+ * is refused — the newcomer starts its own batch — unless the two agree on `policyRef`,
+ * on `approvers`, and on the `edit` allow-list, and neither is a subgraph mirror. See
+ * `sameAuthority` in `run/gates.ts`, which is where that predicate lives and is checked
+ * against the JOURNAL rather than against a broker's memory.
+ *
+ * AND NOR DOES IT MERGE TWO GATES WHOSE *GOVERNANCE* DIFFERS. Everything on this interface
+ * is the policy of the batch a gate FOUNDS, not a request it makes of a batch it joins:
+ * the founding spec governs the batch for its whole life, and a gate declaring a different
+ * `key`, `windowMs`, `maxBatch` or delivery route starts its own batch instead. That is not
+ * pedantry about equality — every one of those fields was read off the JOINING gate once,
+ * so a batch founded under `maxBatch: 2` grew to ten the moment gates declaring
+ * `maxBatch: 20` arrived. The batch's own policy is journaled on `gate.raised.batch` and
+ * read back by `batchGovernance`; see D7.9 rows 2-3.
+ *
+ * `key` IS A LITERAL, NOT AN EXPRESSION. D7.2 writes `key: "node.id + plan.namespace"`,
+ * which is an expression over the gate's payload; nothing here evaluates one, and giving
+ * the payload a second reader is a larger change than this. A literal key plus the
+ * `policyRef` equality above already groups exactly the case row 2 names — a wide fan-out
+ * over one node — because every branch of one node carries the same key and the same
+ * policy.
+ */
+export interface BatchingSpec {
+  readonly enabled: boolean;
+  /** The grouping label. Gates sharing it, and their authority, may merge. */
+  readonly key: string;
+  /**
+   * Measured from the batch's FIRST member's journaled raise, never from `now` — and it is
+   * the FOUNDER's window that is measured, never the applicant's.
+   */
+  readonly windowMs: number;
+  /**
+   * How many gates one click may ever close. `maxBatch` counts EVERY gate that has
+   * joined the batch, not the open ones, so a batch cannot be refilled after its members
+   * are decided one at a time — and it is the FOUNDER's cap, journaled on the batch, so a
+   * newcomer declaring a larger one starts its own batch rather than raising this bound.
+   */
+  readonly maxBatch: number;
+}
+
+/**
+ * COLLAPSE A REPEATED QUESTION ONTO THE ANSWER IT ALREADY HAS — D7.9 row 3.
+ *
+ * A retry storm re-raises byte-identical gates. When one of them has already been
+ * DECIDED, a new gate with the same journaled `contentDigest` inherits that decision in
+ * the same append that raises it, and journals `gate.deduped` naming the gate it
+ * inherited from.
+ *
+ * ONLY FROM A DECIDED GATE. D7.9 says "the second occurrence inherits the first
+ * decision", which presumes one exists; when the first is still open there is nothing to
+ * inherit, and making the second WAIT on the first would be a second suspension mechanism
+ * with no deadline of its own. Two identical open questions are what `batching` is for.
+ *
+ * D7.2 has no `dedupe` block — row 3 was specified with a window and nowhere to declare
+ * it. This is that declaration; the window is its own, because the batching window
+ * governs how long a queue may accumulate and this one governs how long an answer stays
+ * current, and they are not the same duration.
+ */
+export interface DedupeSpec {
+  readonly enabled: boolean;
+  /** Measured from the SOURCE gate's journaled raise — the age of the question. */
+  readonly windowMs: number;
+}
+
 export interface HumanGateNode {
   readonly ref: ResourceRef;
+  readonly approval?: ApprovalSpec;
+  readonly sla?: GateSlaSpec;
+  /** D7.9 row 2. Absent means every gate is its own question. */
+  readonly batching?: BatchingSpec;
+  /** D7.9 row 3. Absent means an identical question is asked again. */
+  readonly dedupe?: DedupeSpec;
+  /**
+   * WHERE this gate goes, and who it escalates to — D7.2's `delivery` block.
+   *
+   * Inline for the same reason as `approval`, and reusing `run/delivery.ts`'s own
+   * `DeliverySpec` rather than restating it, so what the compiler checks and what
+   * `GateDispatcher` reads are one type.
+   *
+   * Absent is the default and means the gate is durable and queued and nothing is SENT:
+   * the console and the HTTP API surface it, and nobody is told. That is a usable mode —
+   * it is what every gate in this codebase did before this field existed — but it is the
+   * mode in which "an SLA fired and nobody knew" is possible, so declare a channel for any
+   * gate whose deadline matters.
+   *
+   * A DECLARED CHANNEL NAME IS NOT COMPILE-CHECKABLE, and deliberately not faked: the
+   * compiler cannot know which channels a deployment's dispatcher was built with. An
+   * unknown name produces `gate.delivery_failed` plus the console fallback at run time, and
+   * delivery failure never auto-approves — so the failure is loud, recorded, and safe.
+   * `checkDelivery` therefore checks the SHAPE and says nothing about the names.
+   */
+  readonly delivery?: DeliverySpec;
 }
 
 export interface SubgraphNode {

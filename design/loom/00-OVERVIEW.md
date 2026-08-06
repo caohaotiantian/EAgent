@@ -70,8 +70,11 @@ would make us change our minds.
 
 ### DL-1 · Language and process model
 
-- **Choice:** TypeScript end-to-end on Node 22+, shipped as one SEA binary. Core, control
-  plane, executor, and node bodies are all TS in one process for v1.
+- **Choice:** TypeScript end-to-end on Node ≥ 24 (`engines.node` is `>=24.0.0`), shipped
+  as one SEA binary. Core, control plane, executor, and node bodies are all TS in one
+  process for v1. The 24 is a **choice, not a forced floor**: native type stripping runs
+  unflagged from v22.18.0 and `node:sqlite` from v22.13.0, so the strict floor those imply
+  is 22.18. 24 is the LTS line this is developed and tested on. See `08-PLAN.md` A2.
 - **Rationale:** the team already ships a zero-dep TS engine and an SEA binary; a
   6–8 week v1 cannot absorb two toolchains, two type systems, and an IPC boundary.
 - **Rejected:** Go/Rust orchestration core + Python agent workers over gRPC — the
@@ -79,8 +82,11 @@ would make us change our minds.
   and costs a serialization boundary, duplicated domain types, and two release trains.
 - **Reverses when:** measured p99 scheduler tick latency exceeds 50 ms with ≥200
   concurrent in-flight Tasks, *or* CPU-bound function nodes (parsing, embedding,
-  diffing) exceed 30 % of event-loop time. Both are observable from day one because
-  the scheduler emits `loom.scheduler.tick` spans. The migration is bounded: only
+  diffing) exceed 30 % of event-loop time. **Neither is observable from a span today** —
+  `DESIGNED-NOT-BUILT(loom.scheduler.tick)`, and claiming there was one is how this
+  condition sat unmeasured. The first half is measurable from the journal without one:
+  `task.leased.ts − task.ready.ts` is the queue wait, recorded per Task. The second half
+  needs instrumentation that does not exist. The migration is bounded: only
   `GraphExecutor` + `AgentScheduler` move; every other interface is I/O-bound and
   stays.
 
@@ -220,7 +226,7 @@ erDiagram
 | **GraphSpec** | The **single source artifact**: an immutable, content-addressed declaration of nodes, edges, channels, policy, and budgets. `sha256(canonical(spec))` is its identity. | Workflow 1:N (versions) | `resources` (kind `graph`) | **no** |
 | **RunGraph** | The *compiled, validated* plan for one Run: the GraphSpec plus the resolution manifest (every resource ref pinned to a content hash), the layout hint, and the derived schedule metadata. | Run 1:1 | `run_graphs` | **no** |
 | **Node** | A static vertex declared in a GraphSpec. Design-time. Has a type (`agent`,`function`,`router`,`join`,`tool`,`evaluator`,`human_gate`,`subgraph`). | GraphSpec 1:N | inside GraphSpec | **no** |
-| **Edge** | A static directed connection declaring a *permitted* transition, with its kind (`seq`,`conditional`,`fanout`,`join`,`error`,`loop`). | GraphSpec 1:N | inside GraphSpec | **no** |
+| **Edge** | A static directed connection declaring a *permitted* transition, with its kind (`seq`,`conditional`,`fanout`,`join`,`error`,`compensation`,`loop` — seven, and D5 is the authoritative list). | GraphSpec 1:N | inside GraphSpec | **no** |
 | **Channel** | A named, typed slot of Run state with a declared reducer. The only way data moves between Nodes. | GraphSpec 1:N | inside GraphSpec (schema); values in journal | schema no / value yes |
 | **Run** | One execution of one RunGraph. The unit of lifecycle commands, budget, tenancy, and trace root. | Workflow 1:N | `runs` (derived) + journal (authoritative) | status derived |
 | **Task** | One *scheduled instance* of a Node in a Run at a specific **branch coordinate** (`nodeId@branchPath#iteration`). The unit the scheduler leases, retries, checkpoints, and cancels. **A Node with a fan-out of 50 produces 50 Tasks.** | Node 1:N | journal | status derived |
@@ -339,7 +345,7 @@ request/response, `A` = asynchronous/streaming.
 | ③ | Control Plane → Executor | `RunLifecycle` | in-process call → gRPC | S | executor busy, run not found, illegal transition | Commands are journaled *before* dispatch, so a lost command is re-driven on restart; illegal transitions are rejected, never queued |
 | ④ | Control Plane → Executor | `PolicyEngine` | in-process → gRPC (with local cache + TTL) | S | policy store unreachable | **Fail closed**: unknown → deny, and posture defaults to `in`. Never fail open |
 | ⑤ | Control Plane ↔ Executor | `HumanGateBroker` | in-process → gRPC + journal | A | broker down while a gate is open | Gate is already durable in `human_gates`; the run stays suspended, consuming no worker slot. Nothing is lost, only delayed |
-| ⑥ | Control Plane → IM/email | `GateDelivery` | HTTPS webhook | A | delivery failure | Retry with backoff; after `maxAttempts` fall back to the in-console queue and raise `gate.delivery_failed`. **Delivery failure never auto-approves** |
+| ⑥ | Control Plane → IM/email | `GateDelivery` | HTTPS webhook | A | delivery failure | Channels are tried **once, in parallel**; each failure appends `gate.delivery_failed`, and if *no* channel succeeded the gate falls back to the console queue in the same call. There is no per-channel retry or `maxAttempts` — the retry unit is the SLA escalation tier, whose clock resets. **Delivery failure never auto-approves** |
 | ⑦ | Executor → Resources | `ResourceFetcher` | in-process + LRU → HTTP + LRU | S | resource missing / version yanked | Compile-time: run is rejected before it starts. Run-time: impossible — every ref is pinned in the resolution manifest at compile |
 | ⑧ | Executor → Tools | `ToolRegistry`, `ToolExecutor` | in-process → in-process (registry) + subprocess/gRPC (exec) | S+A | tool timeout, crash, non-zero exit, schema violation | Typed `ToolError`; retry policy applies only if `idempotent: true`; otherwise surfaces to the node's error edge |
 | ⑨ | Executor → LLM | `ModelAdapter` | HTTPS + SSE | A | rate limit, context overflow, content filter, provider down | Normalized error taxonomy drives the declared fallback chain (**D3 §ModelAdapter**) |

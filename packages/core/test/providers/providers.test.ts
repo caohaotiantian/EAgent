@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { CODES, err } from "../../src/errors.ts";
+import { CODES, err, isLoomError } from "../../src/errors.ts";
 import { AnthropicAdapter } from "../../src/providers/anthropic.ts";
 import { OpenAIAdapter } from "../../src/providers/openai.ts";
 import {
@@ -18,7 +18,7 @@ import {
   ReplayingAdapter,
   requestKey,
 } from "../../src/providers/fallback.ts";
-import { normalizeError, sse } from "../../src/providers/http.ts";
+import { normalizeError, postJson, sse } from "../../src/providers/http.ts";
 import type { ModelAdapter, ModelEvent, ModelRequest } from "../../src/run/registry.ts";
 
 const REQ: ModelRequest = {
@@ -121,6 +121,168 @@ test("retry-after is honoured, in both formats", () => {
   assert.equal(seconds.retryAfterMs, 30_000);
   const dated = normalizeError(429, "{}", new Headers({ "retry-after": new Date(Date.now() + 5000).toUTCString() }));
   assert.ok((dated.retryAfterMs ?? 0) > 3000);
+});
+
+// ── the provider's own advice is UNTRUSTED INPUT ──────────────────────────────
+
+/** Drive `postJson` against a fixed status, recording every delay it asks to sleep. */
+async function backoffs(
+  respond: () => Response | Promise<Response>,
+  opts: { readonly maxAttempts?: number; readonly baseDelayMs?: number; readonly maxDelayMs?: number } = {},
+  signal: AbortSignal = ac(),
+): Promise<number[]> {
+  const slept: number[] = [];
+  await postJson(
+    "https://provider.example.com/v1",
+    { headers: {}, body: {}, signal },
+    { fetch: async () => respond(), sleep: async (ms) => void slept.push(ms), maxAttempts: 3, ...opts },
+  ).catch(() => undefined);
+  return slept;
+}
+
+const rateLimited = (retryAfter: string) => (): Response => new Response("{}", { status: 429, headers: { "retry-after": retryAfter } });
+
+test("A HOSTILE `Retry-After` CANNOT PARK A WORKER OR SPIN ONE — the header is bounded at both ends", async () => {
+  // `retryAfterMs` is the only number in this file that a REMOTE PARTY chooses, and it
+  // used to reach `setTimeout` with no bound and no clamp at all
+  // (`sleep(last.retryAfterMs ?? Math.min(base * 2 ** n, max))` — the `??` skipped the
+  // `max` entirely). Measured against that expression, one row per header:
+  //
+  //     Retry-After: 86400     → slept 86_400_000 ms. One compromised or merely
+  //                              conservative provider parks a worker for a DAY, legally,
+  //                              under the ceiling, with no warning printed anywhere.
+  //     Retry-After: 2147484   → slept 2_147_484_000, which `setTimeout` truncates to
+  //                              ONE MILLISECOND: a hot retry loop aimed at the provider,
+  //                              which is also how a budget is burned.
+  //     Retry-After: ""        → `Number("")` is 0 → slept 0. Same hot loop, reached by a
+  //     Retry-After: "  "        header that is not a duration at all.
+  //     Retry-After: -5        → `Math.max(0, -5000)` = 0 → same.
+  //     Retry-After: 1e12      → 1e15 ms → truncated to 1 ms → same.
+  //     Retry-After: <far date> → ~3.07e12 ms → truncated to 1 ms → same.
+  //
+  // The rule now: the header may move the delay WITHIN `[own curve, maxDelayMs]` and
+  // nowhere else. It can ask for more patience, never for less, and never for more than
+  // the operator agreed to wait.
+  const base = 250;
+  const max = 8_000;
+
+  // Advice that fits is still honoured — this is what the bound must not break.
+  assert.deepEqual(await backoffs(rateLimited("30"), { maxDelayMs: 60_000 }), [30_000, 30_000], "30s of advice, taken");
+
+  // Advice ABOVE the operator's ceiling is capped at the ceiling, not obeyed.
+  assert.deepEqual(await backoffs(rateLimited("86400")), [max, max], "a day of advice is capped at maxDelayMs");
+
+  // Advice BELOW our own curve is floored at our own curve, not obeyed — `Retry-After: 0`
+  // is legal, means "retry now", and is the cheapest way to aim a hot loop at a provider.
+  assert.deepEqual(await backoffs(rateLimited("0")), [base, base * 2], "Retry-After: 0 must not undercut the local curve");
+  assert.deepEqual(
+    await backoffs(rateLimited("1"), { baseDelayMs: 4_000 }),
+    [4_000, 8_000],
+    "one second of advice under a four-second curve is floored, not obeyed",
+  );
+  // …and one second of advice ABOVE the curve is simply taken, which is the ordinary case
+  // the floor must not break.
+  assert.deepEqual(await backoffs(rateLimited("1"), { baseDelayMs: 100, maxDelayMs: 8_000 }), [1_000, 1_000], "advice above the curve wins");
+
+  // A header that is not `delay-seconds` and not an HTTP-date is NO ADVICE — which is a
+  // different thing from advice of zero, and `Number()` used to conflate them.
+  //
+  // `"-5"` is in this list for a second reason worth keeping: it survives the digit check
+  // and `Date.parse("-5")` is **988646400000** — V8's lenient fallback reads it as
+  // 2001-04-30 — so tightening the numeric parse alone moved the conflation into the date
+  // parse instead of removing it. Legal HTTP-dates all begin with a weekday; this does not.
+  for (const header of ["", "   ", "-5", "0x10", "1e12", "abc", "Sat, 01 Jan 2124 00:00:00 GMT", "2147484"]) {
+    assert.equal(
+      normalizeError(429, "{}", new Headers({ "retry-after": header })).retryAfterMs,
+      undefined,
+      `Retry-After: ${JSON.stringify(header)} is not usable advice, so it must not reach the error either`,
+    );
+    assert.deepEqual(await backoffs(rateLimited(header)), [base, base * 2], `Retry-After: ${JSON.stringify(header)} falls back to the local curve`);
+  }
+});
+
+test("`retryAfterMs` RECORDS THE ADVICE; it does not bound it — and the docstring used to claim it did", async () => {
+  // `parseRetryAfter`'s docstring stated an invariant one line wider than the code holds:
+  // that a value is dropped rather than clamped "so that the absurd number never reaches
+  // `LoomError.retryAfterMs` either". Only the platform half holds. Measured through
+  // `toJSON`, which is the shape the journal and an HTTP 429 body actually carry:
+  const parked = normalizeError(429, "{}", new Headers({ "retry-after": "86400" }));
+  assert.equal(parked.retryAfterMs, 86_400_000, "a legal day of advice reaches the error intact");
+  assert.equal((parked.toJSON() as Record<string, unknown>)["retryAfterMs"], 86_400_000, "…and is journaled intact");
+  assert.equal(
+    normalizeError(429, "{}", new Headers({ "retry-after": "2147484" })).retryAfterMs,
+    undefined,
+    "only what no timer can hold is dropped",
+  );
+
+  // Which is correct, and is the whole reason the bound lives one layer out: the FIELD is
+  // a faithful record of what the provider asked for, and the DELAY is what this
+  // deployment agreed to. The same header, the same call, two different numbers.
+  assert.deepEqual(await backoffs(rateLimited("86400"), { maxDelayMs: 8_000 }), [8_000, 8_000], "the delay obeys maxDelayMs, not the header");
+
+  // The residual duty this pins, because it is the one a reader will get wrong: any OTHER
+  // consumer of `retryAfterMs` — an HTTP 429 handler, a scheduler requeue — is holding a
+  // number a remote party chose, bounded only by the platform, and owes it a ceiling of
+  // its own. `normalizeError` cannot apply one: it never sees `HttpOptions`.
+  assert.ok(parked.retryAfterMs !== undefined && parked.retryAfterMs > 8_000, "the record deliberately exceeds any one caller's ceiling");
+});
+
+test("the operator's half of the backoff is bounded by the same ceiling as every other duration", async () => {
+  // `HttpOptions.baseDelayMs` and `.maxDelayMs` are pinned public knobs that reach the
+  // same `setTimeout`. `baseDelayMs: 2 ** 31` used to mean a 24.8-day first retry and
+  // installed a ONE MILLISECOND one, so a deliberately patient operator got the most
+  // aggressive retry the code can emit.
+  for (const bad of [{ baseDelayMs: 2 ** 31 }, { maxDelayMs: 2 ** 31 }, { baseDelayMs: 86_400_000_000 }, { baseDelayMs: -1 }, { maxDelayMs: 1.5 }]) {
+    await assert.rejects(
+      () => postJson("https://x", { headers: {}, body: {}, signal: ac() }, { fetch: async () => new Response("{}"), ...bad }),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
+      JSON.stringify(bad),
+    );
+  }
+  // `maxAttempts: Infinity` is not a timer, it is a LOOP BOUND, and `attempt <= Infinity`
+  // never ends. Same class, same refusal.
+  await assert.rejects(
+    () => postJson("https://x", { headers: {}, body: {}, signal: ac() }, { fetch: async () => new Response("{}", { status: 503 }), maxAttempts: Infinity, sleep: async () => undefined }),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
+  );
+  // The largest delay a timer CAN hold stays legal, so the refusal is a ceiling and not
+  // an off-by-one that refuses a working configuration.
+  assert.deepEqual(
+    await backoffs(rateLimited("1"), { baseDelayMs: 2 ** 31 - 1, maxDelayMs: 2 ** 31 - 1 }),
+    [2 ** 31 - 1, 2 ** 31 - 1],
+    "the ceiling itself is a legal delay",
+  );
+});
+
+test("an abort ends the backoff hold instead of waiting the provider's delay out", async () => {
+  // The run's own cancellation is the only deadline visible at this seam, and the hold
+  // used to ignore it: `sleep` was awaited to completion and only THEN did the loop check
+  // `signal.aborted`. So a cancelled run still sat out whatever delay the provider asked
+  // for — up to `maxDelayMs`, which an operator may legitimately set to days.
+  const controller = new AbortController();
+  const p = postJson(
+    "https://provider.example.com/v1",
+    { headers: {}, body: {}, signal: controller.signal },
+    {
+      fetch: async () => new Response("{}", { status: 429, headers: { "retry-after": "30" } }),
+      maxAttempts: 3,
+      maxDelayMs: 60_000,
+      // A sleep that NEVER resolves. Only the abort can end the hold.
+      sleep: () => new Promise<void>(() => undefined),
+    },
+  );
+  const settled = p.then(
+    () => "resolved",
+    (e: unknown) => (isLoomError(e) ? e.code : "other"),
+  );
+  // A FAILURE DEADLINE, not a timing assertion: without it the unfixed code makes this
+  // test HANG rather than fail, which is the one shape a red test must not have.
+  const deadline = new Promise<string>((resolve) => {
+    setTimeout(() => resolve("still holding — the abort did not end the backoff"), 2_000).unref();
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  controller.abort();
+  assert.equal(await Promise.race([settled, deadline]), CODES.E_CANCELLED, "the hold must end on abort, not on the provider's schedule");
 });
 
 // ── Anthropic ────────────────────────────────────────────────────────────────

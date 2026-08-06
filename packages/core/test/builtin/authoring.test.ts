@@ -69,7 +69,7 @@ const compileAuthoring = () =>
 
 // ── the graph itself ─────────────────────────────────────────────────────────
 
-test("the authoring graph compiles under the same 21 rules as any other", () => {
+test("the authoring graph compiles under the same 22 rules as any other", () => {
   const g = compileAuthoring();
   assert.equal(g.entryNodes.length, 1);
   assert.equal(g.entryNodes[0], "propose");

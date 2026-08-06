@@ -8,7 +8,7 @@
  *
  * Three properties fall out of making the author a graph rather than a special mode:
  *
- *   1. **The compiler's 21 rules are the critic.** Each diagnostic already carries a
+ *   1. **The compiler's 22 rules are the critic.** Each diagnostic already carries a
  *      `fix` string written for exactly this — `add "signal" to node "investigate".reads`.
  *      The model is not guessing at correctness; it is being told precisely what is
  *      wrong by the same rules that gate production.

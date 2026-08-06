@@ -118,7 +118,7 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   // rejects an entry that is not an EventType. This catches the other direction: a
   // payload added to the map but forgotten in the runtime list.
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
-  assert.equal(EVENT_TYPES.length, 47, "update this count when the vocabulary grows, deliberately");
+  assert.equal(EVENT_TYPES.length, 52, "update this count when the vocabulary grows, deliberately");
 });
 
 test("SQLITE EMITS NO EXPERIMENTAL WARNING (open thread T3)", () => {

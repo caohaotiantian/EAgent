@@ -38,6 +38,15 @@ export type Actor =
     }
   | { readonly kind: "evolution"; readonly engineVersion: string; readonly candidate: string };
 
+/**
+ * The human arm of `Actor`, named because several boundaries accept ONLY a human.
+ *
+ * `deescalate` and an inbound gate callback both refuse anything else: an oversight
+ * record that says `system` answers "who decided?" with "the software did", which is
+ * the one answer an audit trail exists to make impossible.
+ */
+export type HumanActor = Extract<Actor, { readonly kind: "human" }>;
+
 export const SYSTEM_ACTOR = (component: string): Actor => ({ kind: "system", component });
 
 export type TaskStatus = "succeeded" | "failed" | "skipped" | "cancelled";
@@ -201,7 +210,105 @@ export interface EventPayloads {
   };
 
   // ── oversight ────────────────────────────────────────────────────────────
-  "gate.raised": { readonly gateId: GateId; readonly nodeId: NodeId; readonly policyRef: string; readonly contentDigest: string };
+  /**
+   * A gate exists, and the run behind it is suspended.
+   *
+   * Carries the AUTHORIZATION metadata, not merely the gate's identity. Who may decide,
+   * which channels an `edit` may write, and when the SLA runs out are the facts a
+   * decision is checked against — so they have to outlive the process that raised the
+   * gate. A broker that keeps its approvers in a `Map` enforces nothing after a
+   * restart, and the failure is silent in the worst way: an empty list that was
+   * FORGOTTEN is indistinguishable from a gate that deliberately named nobody, so the
+   * check reads as "unrestricted" and waves the stranger through.
+   *
+   * The rendered `payload` deliberately stays out. It is large, it is re-derivable from
+   * the pinned prompt and the projection, and `contentDigest` already pins what the
+   * approver was shown — which is the part an audit needs.
+   */
+  "gate.raised": {
+    readonly gateId: GateId;
+    readonly nodeId: NodeId;
+    readonly policyRef: string;
+    readonly contentDigest: string;
+    /**
+     * WHO may decide, as opaque subject ids compared exactly against a human actor's
+     * `subject`. ABSENT means the gate named nobody, which stays permissive; an empty
+     * list means the same. The distinction that matters is absent-because-nobody-was
+     * -named versus absent-because-the-record-could-not-be-read, and the second is not
+     * expressible here: a gate whose `gate.raised` cannot be folded has no record at
+     * all, so every reader refuses it as unknown rather than as unrestricted.
+     */
+    readonly approvers?: readonly string[];
+    /** Channels an `edit` may write. Absent = unconstrained; `[]` = none at all. */
+    readonly allowEdit?: readonly string[];
+    /**
+     * An ABSOLUTE timestamp, not a duration from whenever a process happened to
+     * restart. Recomputing `now() + slaMs` on rehydrate silently grants an extension
+     * every deploy, which is how an SLA becomes decorative.
+     */
+    readonly deadline?: number;
+    readonly slaMs?: number;
+    readonly onTimeout?: "escalate" | "default_action" | "fail";
+    /**
+     * THE GATE IN ANOTHER RUN THIS ONE STANDS IN FOR, when it is a subgraph's mirror.
+     *
+     * A subgraph node asks the parent's approvers a question that belongs to the child,
+     * so it inherits that child gate's approvers and later forwards the answer back. Both
+     * halves used to re-derive their target as "the first open gate in the child", from
+     * two independent lookups — so answering ANY unrestricted child gate in between moved
+     * a restricted one under a mirror that had inherited nothing, and the executor
+     * approved it as a system actor. Nothing in memory can bind them: the process that
+     * raised the mirror is not necessarily the process that forwards it.
+     *
+     * Absent for every gate that is not a mirror, which is nearly all of them. The child
+     * RUN is not repeated here — it is derived from the Task and journaled once by
+     * `subgraph.started` on the same `taskId`; only WHICH GATE was ever ambiguous.
+     */
+    readonly mirrorOf?: GateId;
+    /**
+     * THE BATCH THIS GATE JOINED, when its node declared `batching` (D7.9 row 2).
+     *
+     * Journaled rather than remembered for the reason `approvers` is: one decision on a
+     * batch closes every member, so "which gates would this click close?" is an
+     * authorization question, and a grouping held in a broker's memory is empty in the
+     * process that answers the gate. `id` is the gateId of the batch's FIRST member,
+     * which is derived rather than minted — a batch is not a thing with its own identity,
+     * it is the gate the others merged into.
+     *
+     * Absent for every gate that declared no batching, and for one that declared it and
+     * could not merge: membership is refused unless the newcomer and every existing
+     * member agree on `policyRef`, `approvers` and `allowEdit`, so a gate that disagrees
+     * starts its own batch and carries `{id: itsOwnGateId}`.
+     *
+     * THE GOVERNANCE FIELDS BELOW ARE THE BATCH'S OWN POLICY, AND THEY ARE HERE FOR THE
+     * SAME REASON `approvers` IS. `maxBatch` is the cap on how many questions one click
+     * closes — D7.9 row 2's whole safety argument — and it used to be read off the
+     * BatchingSpec of whichever gate was joining, which is a bound a newcomer could raise.
+     * A batch founded under `maxBatch: 2` grew to ten members the moment a gate declaring
+     * `maxBatch: 20` arrived; the same held for `windowMs`, where a joiner's longer window
+     * kept a batch open a hundred times past the one it was founded under. Neither move was
+     * recorded anywhere, because nothing but the joining request ever carried the numbers.
+     * They are journaled per member so a batch's governance is a fact in the log, readable
+     * by any process, and so that "may this gate join?" is answered against the BATCH
+     * rather than against the applicant.
+     *
+     * `deliveryDigest` is the digest of the founder's `DeliverySpec`, absent when it
+     * declared none. A digest rather than the route itself: what a merge needs is
+     * EQUALITY, and equality is all a digest discloses — the recipients and the redact
+     * list stay out of the log, as they always have.
+     *
+     * All three are optional because a journal written before they existed does not carry
+     * them, and the fail-closed reading of a batch with no journaled governance is that
+     * nothing may join it. See `batchGovernance` in `run/gates.ts`.
+     */
+    readonly batch?: {
+      readonly id: GateId;
+      readonly key: string;
+      readonly windowMs?: number;
+      readonly maxBatch?: number;
+      readonly deliveryDigest?: string;
+    };
+  };
   "gate.delivered": { readonly gateId: GateId; readonly channel: string; readonly receipt: string };
   /**
    * A channel failed.
@@ -226,8 +333,136 @@ export interface EventPayloads {
     readonly justification?: string;
     readonly latencyMs: number;
   };
+  /**
+   * An inbound channel callback was REFUSED, and the gate stayed open.
+   *
+   * The endpoint that receives one is unauthenticated by construction — a Slack button
+   * click carries no bearer token, so the signature is the whole of its authentication.
+   * Without this event a forged approval attempt leaves no trace anywhere: the gate is
+   * still open, which looks exactly like nobody having clicked yet.
+   *
+   * `reason` is a FIXED TOKEN, never bytes the caller sent. An audit row an attacker
+   * can write prose into is a log-injection primitive, not evidence — and this row is
+   * reachable without credentials, so it is the one payload in the vocabulary that an
+   * unauthenticated stranger can cause. `gateId` is absent whenever the callback was
+   * refused before its body was trusted enough to parse, which is most of the time.
+   */
+  "gate.callback_rejected": {
+    readonly channel: string;
+    readonly reason: string;
+    readonly gateId?: GateId;
+  };
+  /**
+   * ONE DECISION CLOSED THESE GATES — the audit record for D7.9 row 2.
+   *
+   * Written in the SAME append as the `gate.decided` rows it accounts for, and it exists
+   * because those rows alone do not say what the approver was answering. "Approved"
+   * without "approved WHAT" is the failure the oversight layer exists to prevent, and a
+   * batch is exactly where it would appear: twenty identical-looking decisions, one
+   * click, and nothing anywhere recording that they were one click.
+   *
+   * `gateIds` is the complete member list in journal order, so a reader reconstructs
+   * precisely which gates one decision closed without inferring it from a seq range.
+   * `manifestDigest` is the D7.3 `contentDigest` question asked of a batch — what did the
+   * approver actually SEE? — and the answer is the manifest, so it digests the ordered
+   * `{gateId, nodeId, contentDigest}` list rather than any one payload. It is over
+   * JOURNALED fields only, so an auditor re-derives it months later from the log alone.
+   *
+   * It changes no state and is folded by nothing: the `gate.decided` rows beside it do
+   * all of that, exactly as `gate.delivered` is a receipt rather than a transition.
+   */
+  "gate.batch_decided": {
+    readonly batchId: GateId;
+    readonly key: string;
+    readonly gateIds: readonly GateId[];
+    readonly manifestDigest: string;
+    readonly decision: "approve" | "reject";
+  };
+  /**
+   * A GATE INHERITED A DECISION ALREADY GIVEN TO AN IDENTICAL ONE — D7.9 row 3.
+   *
+   * Written in the same append as the `gate.raised` it explains and the `gate.decided` it
+   * licenses. Without it the journal would show a gate raised and decided in one instant
+   * by a system actor, with nothing saying WHERE the decision came from — which is the
+   * shape of a bypass, whether or not it is one.
+   *
+   * `ofGateId` is the whole audit trail: follow it to that gate's own `gate.decided` and
+   * the actor who made the decision is right there, checked at the time against an
+   * approvers list this gate is required to match exactly. Repeating the human here would
+   * be a second copy of a fact the journal already holds, and the copy is the one that
+   * would drift.
+   */
+  "gate.deduped": {
+    readonly gateId: GateId;
+    readonly ofGateId: GateId;
+    /** The journaled digest both gates carry. Equal by construction; recorded so a reader need not join two rows to see why. */
+    readonly contentDigest: string;
+    readonly decision: "approve" | "reject" | "edit" | "redirect";
+  };
   "gate.timeout": { readonly gateId: GateId; readonly action: "escalate" | "default_action" | "fail" };
-  "gate.escalated": { readonly gateId: GateId; readonly tier: number; readonly to: string };
+  /**
+   * The SLA lapsed and the gate moved to the next tier.
+   *
+   * `deadline` is the RESET clock, absolute, for the same reason `gate.raised` carries
+   * one: an escalation that only exists in memory means a restart mid-chain either
+   * loses the tier or re-runs it from zero.
+   */
+  "gate.escalated": { readonly gateId: GateId; readonly tier: number; readonly to: string; readonly deadline?: number };
+  /**
+   * SOMEBODY WAS NUDGED, AND NOTHING ELSE HAPPENED — D7.2's `reminders`.
+   *
+   * It is durable for the reason `gate.delivered` is, plus one this event has to itself.
+   * The receipt half is the same: "why did nobody answer?" is the question the delivery
+   * journal exists for, and an un-journaled nudge means the answer stops at "they were
+   * told once", which is a different story from "they were told three times".
+   *
+   * The half that is this event's own is that the FOLD READS IT. It is the only record of
+   * how many of the declared reminders have gone out, and without it the sweep re-asks
+   * "is the first reminder due?" on every tick forever — the schedule lives in a broker's
+   * memory, which is empty in the process that restarts, so a counter held there would
+   * reset a whole schedule on every deploy. `remindersSent` is folded from these rows, one
+   * per row, so it is a COUNT of what the log says was sent rather than of what a process
+   * remembers doing.
+   *
+   * IT MOVES NO CLOCK. `gate.escalated` resets a deadline and burns a tier; this resets
+   * nothing, which is the whole difference between a reminder and an escalation. `tier` is
+   * recorded because it says WHO was nudged — the recipients of the tier the gate was on —
+   * not because anything folds it. `nth` is which entry of the declared schedule fired, so
+   * an auditor can line the rows up against the graph without counting them.
+   */
+  "gate.reminded": { readonly gateId: GateId; readonly tier: number; readonly nth: number };
+  /**
+   * AN APPROVER IS LOOKING AT THIS GATE, AND NOTHING ELSE IS TRUE — D7.3's `Claimed`.
+   *
+   * A coordination hint between approvers, journaled so that it is a fact about the LOG
+   * rather than about whichever process happens to be holding a console: two approvers on
+   * two replicas read the same claim, and a broker that restarts has not forgotten it. A
+   * lock held in memory is no lock at all in the process that did not take it, which is the
+   * same argument `gate.reminded` makes about a counter.
+   *
+   * IT GRANTS NOTHING AND IT BLOCKS NOTHING. Nothing on the decision path reads it —
+   * `resolve`, `resolveBatch` and `#fireTimeout` never mention a claim — so this row cannot
+   * delay, block or authorize a decision. See `HumanGateBroker.claim`, which states the
+   * whole contract; the fold keeps `GateRecord.claimedBy`/`claimedUntil` and the only
+   * readers of those are `liveClaim` and `claimHolder`, both serving `claim` itself.
+   *
+   * `until` is ABSOLUTE, for the reason `gate.raised.deadline` and `gate.escalated.deadline`
+   * are: a duration would be re-based on `now()` by every process that rehydrated it, which
+   * silently extends the exact thing the TTL exists to bound.
+   *
+   * WHO IS THE EVENT'S ACTOR, and there is no subject in this payload. Attribution is a
+   * property of the append, checked at the door that wrote it — the same rule
+   * `GateRecord.decidedBy` states for `gate.decided` — and a second copy inside the payload
+   * is a second thing to keep in step. The fold reads `actor.subject`, and only from a
+   * `human` actor: `claim` admits no other kind, because "the clock is reading this gate" is
+   * not a fact and would tell the people who must look that they need not.
+   *
+   * THERE IS NO `gate.claim_expired`, AND THERE MUST NOT BE. A claim expires by being
+   * IGNORED — every reader compares its own clock against this absolute instant — so there
+   * is no state to reap and no sweeper to run. A row whose only content is that time passed
+   * would be a durable fact nobody could observe the absence of.
+   */
+  "gate.claimed": { readonly gateId: GateId; readonly until: number };
   "gate.cancelled": { readonly gateId: GateId; readonly reason: string };
 
   // ── policy ───────────────────────────────────────────────────────────────
@@ -317,7 +552,9 @@ export const EVENT_TYPES = [
   "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending", "fanout.planned",
   "state.reduced", "channel.written",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
-  "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.decided", "gate.timeout", "gate.escalated", "gate.cancelled",
+  "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.callback_rejected",
+  "gate.decided", "gate.batch_decided", "gate.deduped", "gate.timeout", "gate.escalated", "gate.reminded",
+  "gate.claimed", "gate.cancelled",
   "policy.decided", "policy.escalated", "policy.deescalated",
   "budget.reserved", "budget.settled", "budget.exhausted",
   "graph.mutated", "subgraph.started", "subgraph.completed", "checkpoint.created", "checkpoint.restored",

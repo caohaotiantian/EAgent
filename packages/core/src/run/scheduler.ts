@@ -29,6 +29,14 @@
  * `LeasedScheduler` below implements the first two against the same journal the local one
  * reads, so the behaviour is exercised in v1 rather than asserted about v2.
  *
+ * (2) took two goes. The first version filtered `eligible`, and `eligible` returns only
+ * `ready` Tasks — which is exactly right for one worker and silently empty for the case
+ * reclaim exists to handle, since a Task whose holder died stays `leased` forever. The
+ * bug survived a passing conformance suite because the suite built its projections by
+ * hand and gave the stranded Task a state the real fold never assigns it. Reclaim is now
+ * a second candidate source rather than a filter; see `test/run/contention.test.ts`,
+ * which folds real journals for two workers instead.
+ *
  * `DEFERRED-v2: partition assignment and cross-worker fairness (G3).` The genuinely risky
  * part is not selection but *who runs which run* — that needs a coordinator, and shipping
  * a half one is worse than shipping none.
@@ -95,6 +103,47 @@ export function eligible(input: SelectInput): Runnable[] {
   return out;
 }
 
+/**
+ * Is a lease taken at `at` still live at `now`?
+ *
+ * The boundary is a decision, not an accident. A lease whose deadline is EXACTLY `now`
+ * is LIVE. Both answers are defensible and they are not symmetric: calling a live lease
+ * dead double-executes a Task that may already have sent the email, while calling a dead
+ * one live costs one poll interval. Ambiguity resolves toward the cheaper mistake.
+ */
+function leaseLive(at: number, now: number, leaseMs: number): boolean {
+  return now <= at + leaseMs;
+}
+
+/**
+ * Tasks whose holder is gone.
+ *
+ * `eligible` returns only `ready` Tasks, and for ONE worker that is complete: a `leased`
+ * Task is this process's own work, in flight. With two it is not, and the gap is not a
+ * corner — a worker that dies mid-Task leaves it in `leased` forever, because the state
+ * only advances when its holder commits. So reclaim cannot be a filter over `eligible`;
+ * the stranded Tasks are precisely the ones `eligible` excludes.
+ *
+ * A `leased` Task this worker itself holds is NOT reclaimed early. In-process it is
+ * running right now, and the projection cannot distinguish that from a crashed predecessor
+ * sharing the worker id — so the expiry applies to everyone, including us.
+ */
+function reclaimable(input: SelectInput, leaseMs: number): Runnable[] {
+  const out: Runnable[] = [];
+  for (const task of Object.values(input.projection.tasks)) {
+    if (task.state !== "leased") continue;
+    // Leased with no recorded lease is a shape the fold cannot produce. If it ever
+    // appears there is no deadline to reason from, and "no deadline" must read as
+    // "still live" for the same reason the boundary does.
+    if (task.lease === undefined) continue;
+    if (leaseLive(task.lease.at, input.now, leaseMs)) continue;
+    if (task.retryAfter !== undefined && task.retryAfter > input.now) continue;
+    const node = input.nodes.get(task.nodeId);
+    if (node !== undefined) out.push({ task, node });
+  }
+  return out;
+}
+
 /** The v1 default: one worker, so every eligible Task is this worker's to take. */
 export class InProcessScheduler implements Scheduler {
   readonly kind = "in-process";
@@ -135,15 +184,20 @@ export class LeasedScheduler implements Scheduler {
   }
 
   select(input: SelectInput): readonly Runnable[] {
-    const candidates = eligible(input).filter(({ task }) => {
+    // A `ready` Task can still carry a lease: a retry and a resolved gate both return one
+    // to `ready` without clearing who last held it, which is deliberate — releasing it
+    // would let two workers race the retry the instant the backoff lapses.
+    const free = eligible(input).filter(({ task }) => {
       const held = heldBy(input.projection, task.taskId);
       if (held === undefined) return true;
       // Somebody else's live lease is somebody else's work. Taking it anyway is the
       // double execution the fencing token catches AFTER the fact — and "after the fact"
       // is too late for a tool that already sent an email.
       if (held.workerId === input.workerId) return true;
-      return input.now - held.at >= this.#leaseMs;
+      return !leaseLive(held.at, input.now, this.#leaseMs);
     });
+    // … and the stranded ones, which by construction are never `ready` at all.
+    const candidates = [...free, ...reclaimable(input, this.#leaseMs)];
     return orderByCriticalPath(candidates, input.graph).slice(0, input.maxParallelism);
   }
 }

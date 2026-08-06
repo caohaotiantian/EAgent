@@ -2,12 +2,19 @@
  * The offline evaluation gate.
  *
  * D10's most important rule lives here: **no candidate reaches traffic without passing
- * this**, and the suite is authored by humans, never by the evolution engine. An
- * optimiser that writes its own exam will pass it.
+ * this**. An optimiser that writes its own exam will pass it — which is the hazard, and
+ * the answer is NOT "the suite is authored by humans, never by the evolution engine".
+ * That was the original rule and it does not scale; M9 replaced it with two checks that
+ * are mechanically decidable instead of aspirational, and both are in `gateCandidate`:
+ * `9-suite-predates-candidate` (`suite.frozenAt < candidate.proposedAt` — it does not
+ * matter who wrote the exam if it existed before the student) and `10-separate-lineage`
+ * (`suiteGeneratedBy !== proposedBy`). An AI-authored suite is allowed and those two are
+ * why. Do not re-derive "human-authored" from this file; see 06-EVOLUTION.md, "The suite
+ * may be AI-authored — under two mechanical rules".
  *
  * The gate is built on replay, so it costs no live model calls for recorded steps and
  * produces no side effects. That is what makes it cheap enough to run on every
- * human-authored prompt change too — which is why it ships in v1 even though
+ * hand-written prompt change too — which is why it ships in v1 even though
  * synthesis and canary rollout are DEFERRED-v2. The eval harness is immediately
  * useful for people; the generator is not useful until a corpus exists.
  *
@@ -228,7 +235,14 @@ export function validateSuite(suite: EvalSuite): { suiteValid: boolean; suiteIss
 export interface PromotionCriteria {
   /** Non-inferiority margin on the aggregate pass rate. Default 0.01. */
   readonly margin?: number;
-  /** Candidate median cost must be ≤ this multiple of baseline. Default 1.10. */
+  /**
+   * Cost ceiling as a multiple of baseline. Default 1.10.
+   *
+   * A ratio of SUITE TOTALS — `candidate.totalCostUsd / baseline.totalCostUsd` — and not
+   * of medians, whatever D10.d used to say. `EvalReport` carries no median, so one
+   * pathological case can carry the ratio. Closing that means a `medianCostUsd` computed
+   * where `p95WallMs` already is; until then the arithmetic here is what the gate does.
+   */
   readonly maxCostRatio?: number;
   /** Candidate p95 latency must be ≤ this multiple of baseline. Default 1.20. */
   readonly maxLatencyRatio?: number;
@@ -255,12 +269,39 @@ export interface PromotionInput {
 
 export interface PromotionVerdict {
   readonly promote: boolean;
-  /** One entry per criterion, in the order of D10.d's table. */
+  /**
+   * One entry per criterion. The ids carry D10.d's numbering; the ARRAY ORDER does not —
+   * `0-suite` is pushed ninth, after `1-must-pass` … `8-determinism`, because it gates the
+   * exam rather than the student and reads better last in a failure report. Sort by id if
+   * you need the table's order; do not assume index 0 is criterion 0.
+   */
   readonly checks: readonly { readonly id: string; readonly pass: boolean; readonly detail: string }[];
 }
 
 /**
- * The eight criteria from D10.d, all of which must hold.
+ * ELEVEN checks, all of which must hold. Count the entries of the `checks` array this
+ * function returns, not this sentence: it said "eight" for three waves while the body
+ * pushed eleven, until `99-DOD.md` row 8 had to name the discrepancy as a defect. No grep
+ * is offered here on purpose — every pattern that finds the pushes also finds itself.
+ *
+ * They are D10.d's eight (`1-must-pass` … `8-determinism`), plus `0-suite`, which gates
+ * the exam rather than the student, plus the two suite-provenance rules that replaced
+ * "human-authored" in M9 (`9-suite-predates-candidate`, `10-separate-lineage`). The ids
+ * carry the numbering; the push order does not.
+ *
+ * THREE OF THE EIGHT ARE WEAKER THAN D10.d ONCE READ AS ENGLISH, and the table in
+ * 06-EVOLUTION.md now says so rather than this file quietly disagreeing with it.
+ * `2-non-inferior` is a bare point-estimate comparison (`Δ passRate ≥ −margin`) and not
+ * McNemar's paired test with a 95 % lower bound. `3-cost` divides `totalCostUsd` by
+ * `totalCostUsd` — a ratio of TOTALS, where D10.d says median; `PromotionInput` carries no
+ * median-cost field, so the stricter reading is not merely unimplemented but unexpressible.
+ * `7-safety` filters case reasons for the substring `irreversible` and has no notion of an
+ * injection-resistance case at all, because `EvalCase.expect` has no field in which a suite
+ * could declare one.
+ *
+ * The count in that first sentence has now been wrong twice, in both directions. If you
+ * change a criterion, recount by reading the three named ids above against D10.d's table —
+ * and if a fourth joins them, this sentence is the thing that goes stale.
  *
  * Deliberately a pure function of two reports: it takes no store, no clock, and no
  * network, so a promotion decision can be recomputed and argued about after the fact.
