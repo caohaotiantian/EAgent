@@ -16,9 +16,19 @@ confirmed ones are closed: **A19, A7, A6, A10, A14, A12's residue, A1, A16** and
 quiet reads of **A18**. Each fix was then reviewed by two fresh readers of the diff who filed
 30 findings, of which **27 did not survive adversarial verification** — the three that did
 are closed too, and one of them (the READ side of A19) was a hole the original fix left open.
-**Every guard added was watched failing**: 35 mutations, one per new condition, each reverted
-against the suite. Two were rewritten because they were caught only as a hang, and three are
-recorded as SURVIVING with the reason, rather than being quietly dropped.
+**Every guard added was watched failing**: one mutation per new condition, each reverted
+against the suite named for it. Two were rewritten because the first version was caught only
+as a HANG rather than as a failure, and three are recorded as SURVIVING with the reason
+rather than quietly dropped — a cost-only bound, a redundant pair, and one whose disproof is
+a redesign rather than a flip.
+
+> **THE COUNT USED TO BE HERE AND IT WAS WRONG, WHICH IS THIS FILE'S OWN MOST-REPEATED
+> LESSON ARRIVING ONCE MORE — IN THE PARAGRAPH CLAIMING RIGOUR.** It said "35 mutations",
+> which was an estimate written from memory across six sweeps, not a derivation; the sweeps
+> were separate scripts and nothing counts them. A reviewer caught it. The rule the register
+> states four separate times — *write the DERIVATION, never the total* — is not harder to
+> follow in a summary than in a table, and a number that sounds like evidence is exactly the
+> kind that never gets re-derived. **The method is the claim; the count was decoration.**
 
 **THE ONE PATTERN THIS WAVE FOUND FOUR TIMES, and the reason to read it before starting
 anything.** Every fix was correct and applied to too small a SET. **A19** guarded the write
