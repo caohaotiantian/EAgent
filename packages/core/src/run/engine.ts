@@ -1739,6 +1739,10 @@ export class Engine {
     // human said yes to.
     const nodeApproved = lastDecidedGate(p, w.task.taskId)?.decision === "approve";
 
+    // Tool calls completed in earlier turns of THIS task. Effect keys must be unique
+    // across the whole task, not within a turn.
+    let callsSoFar = 0;
+
     const allowed = new Set(agent?.tools ?? []);
     // Structural containment (D6.8 §2): the tool set is computed from the NODE SPEC
     // before the turn. Nothing in the model's context can widen it, so an injection
@@ -1921,10 +1925,17 @@ export class Engine {
       if (calls.length === 0) break;
 
       messages.push(assistant!);
-      for (const call of calls) {
-        const result = await this.#runAgentToolCall(ctx, w, call, allowed, nodeApproved);
+      // DERIVED FROM POSITION, NOT FROM DISPATCH. The ordinal is this call's index in the
+      // model's returned array, offset by the calls of every earlier turn — so it is a
+      // function of the transcript, which replay has, rather than of the order bodies
+      // happened to start. A counter incremented at dispatch gives the same answers today
+      // and becomes arrival-ordered the moment intra-turn calls run in parallel, which is
+      // invariant 7's failure mode wearing a different hat.
+      for (const [i, call] of calls.entries()) {
+        const result = await this.#runAgentToolCall(ctx, w, call, allowed, nodeApproved, callsSoFar + i);
         messages.push({ role: "tool", content: result.content, toolCallId: call.id });
       }
+      callsSoFar += calls.length;
     }
 
     const schema = schemaOverride ?? (agent?.outputSchema as JSONSchema | undefined);
@@ -2249,6 +2260,7 @@ export class Engine {
     call: ModelToolCall,
     allowed: ReadonlySet<string>,
     nodeApproved: boolean,
+    ordinal: number,
   ): Promise<ToolResult> {
     if (!allowed.has(call.name)) {
       // The injection-containment path: the model asked for something the node never
@@ -2257,7 +2269,7 @@ export class Engine {
     }
     const tool = this.tools.get(call.name);
     if (tool === undefined) return { content: `unknown tool "${call.name}"`, isError: true };
-    return this.#invokeTool(ctx, w.task, tool, call.arguments, 0, nodeApproved);
+    return this.#invokeTool(ctx, w.task, tool, call.arguments, ordinal, nodeApproved);
   }
 
   // ── THE single tool dispatch path ─────────────────────────────────────────
