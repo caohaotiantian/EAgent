@@ -77,23 +77,11 @@ import {
   maxPosture,
   type GateDecision,
   type IrreversibilityClass,
+  postureRank,
+  CLASS_DEFAULT_POSTURE,
   type Posture,
   type UsageRecord,
 } from "../vocab.ts";
-
-/**
- * How much worse one irreversibility class is than another.
- *
- * Local because it is an ordering for a `max`, not a vocabulary term: every branch in the
- * engine treats `irreversible` and `externally_visible` as the same disjunction, so they
- * rank equal and the first one found wins.
- */
-const CLASS_RANK: Readonly<Record<IrreversibilityClass, number>> = {
-  read_only: 0,
-  reversible_write: 1,
-  irreversible: 2,
-  externally_visible: 2,
-};
 import type { DeliverySpec } from "./delivery.ts";
 import {
   GateSweeper,
@@ -1039,23 +1027,26 @@ export class Engine {
 
     // Refuse to rewind past a committed irreversible effect with no compensation —
     // the store must not offer a silently-unsafe undo.
-    // Every tool the node could REACH, not the one it named — an agent node names none,
-    // so scanning `node.tool` let a model's irreversible action be rewound past silently.
-    for (const t of Object.values(p.tasks)) {
-      if (t.state !== "succeeded") continue;
-      const node = ctx.index.byId.get(t.nodeId);
-      if (node === undefined) continue;
-      for (const name of reachableToolNames(node)) {
-        const tool = this.tools.get(name);
-        if (tool === undefined) continue;
-        const irreversible = tool.irreversibility === "irreversible" || tool.irreversibility === "externally_visible";
-        if (irreversible && tool.compensation === undefined) {
-          throw err.conflict(
-            CODES.E_RESTORE_ILLEGAL,
-            `cannot rewind past "${t.nodeId}": ${tool.name} is ${tool.irreversibility} and declares no compensation`,
-            { details: { taskId: t.taskId, tool: tool.name } },
-          );
-        }
+    // WHAT WAS CALLED, in the range being suppressed — not what a node declared.
+    //
+    // `tool.called` is appended after the body returned, so it is the record that an
+    // action really happened, and it carries the class the call ran under. Scanning
+    // declared tools instead answers a different question: an `agent` node that merely
+    // lists an irreversible tool has not necessarily invoked it, and refusing on the
+    // declaration made such a run permanently un-rewindable at every boundary. Scoping to
+    // `atSeq` matters for the same reason — only effects the rewind would actually
+    // suppress can stand in its way.
+    for await (const ev of ctx.log.read((atSeq + 1) as Seq)) {
+      if (ev.type !== "tool.called") continue;
+      const called = ev.payload;
+      if (called.irreversibility !== "irreversible" && called.irreversibility !== "externally_visible") continue;
+      // Fail closed: a tool the registry no longer carries cannot be shown to compensate.
+      if (this.tools.get(called.name)?.compensation === undefined) {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `cannot rewind to ${atSeq}: "${called.name}" ran at seq ${ev.seq}, is ${called.irreversibility}, and declares no compensation`,
+          { details: { runId, atSeq, seq: ev.seq, tool: called.name } },
+        );
       }
     }
 
@@ -1655,6 +1646,14 @@ export class Engine {
     const adapter = this.#replay === undefined ? this.models.require() : undefined;
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
 
+    // WHAT A HUMAN APPROVED WHEN THEY APPROVED THIS NODE. An agent node whose reachable
+    // set contains a hard-to-undo tool now floors at `in` and gates BEFORE the model
+    // runs, so the approval is an approval of this node acting — including with the tools
+    // it declares. Without carrying it here the gate authorizes nothing: the model asks,
+    // `#invokeTool` refuses, and the run reports success having done none of the work the
+    // human said yes to.
+    const nodeApproved = lastDecidedGate(p, w.task.taskId)?.decision === "approve";
+
     const allowed = new Set(agent?.tools ?? []);
     // Structural containment (D6.8 §2): the tool set is computed from the NODE SPEC
     // before the turn. Nothing in the model's context can widen it, so an injection
@@ -1838,7 +1837,7 @@ export class Engine {
 
       messages.push(assistant!);
       for (const call of calls) {
-        const result = await this.#runAgentToolCall(ctx, w, call, allowed);
+        const result = await this.#runAgentToolCall(ctx, w, call, allowed, nodeApproved);
         messages.push({ role: "tool", content: result.content, toolCallId: call.id });
       }
     }
@@ -2164,6 +2163,7 @@ export class Engine {
     w: Wave,
     call: ModelToolCall,
     allowed: ReadonlySet<string>,
+    nodeApproved: boolean,
   ): Promise<ToolResult> {
     if (!allowed.has(call.name)) {
       // The injection-containment path: the model asked for something the node never
@@ -2172,7 +2172,7 @@ export class Engine {
     }
     const tool = this.tools.get(call.name);
     if (tool === undefined) return { content: `unknown tool "${call.name}"`, isError: true };
-    return this.#invokeTool(ctx, w.task, tool, call.arguments, 0);
+    return this.#invokeTool(ctx, w.task, tool, call.arguments, 0, nodeApproved);
   }
 
   // ── THE single tool dispatch path ─────────────────────────────────────────
@@ -2224,13 +2224,34 @@ export class Engine {
     // the very action that approval authorized.
     if (decision.effect === "gate") {
       if (!nodeApproved) {
+        // JOURNAL THE REFUSAL. Returning only an error string tells the model and nobody
+        // else, and a refused irreversible action is exactly what an operator reading the
+        // trace afterwards needs to see.
+        await this.#serialize(() =>
+          ctx.log.append(
+            [
+              {
+                type: "policy.decided",
+                payload: {
+                  effect: "deny",
+                  posture: "in",
+                  irreversibility: tool.irreversibility,
+                  reasons: [...decision.reasons, `"${tool.name}" needs a human, and an agent turn cannot raise a gate`],
+                },
+                actor: SYSTEM_ACTOR("policy"),
+                taskId: task.taskId,
+              },
+            ],
+            { taskId: task.taskId },
+          ),
+        );
         return {
-          content: `"${tool.name}" is ${tool.irreversibility} and requires human approval, which an agent turn cannot request; call it from a tool node instead`,
+          content: `"${tool.name}" is ${tool.irreversibility} and requires human approval this turn cannot request; put it on a tool node, which can suspend`,
           isError: true,
         };
       }
       // Approved at the node. Fall through and run it.
-    } else if (decision.holdMs > 0 && !nodeApproved) {
+    } else if (decision.holdMs > 0 && !nodeApproved && this.#replay === undefined) {
       // The pre-irreversible hold (D4 deviation 5), on the model's path as well as the
       // node's. Without it "the supervisor may interrupt" is a promise the system keeps
       // only for tools a graph author named — never for the ones a model chose. A tool
@@ -2555,11 +2576,17 @@ export class Engine {
     if (RUN_FATAL_CODES.has(error.code)) return undefined;
     if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
 
-    const tool = w.node.tool === undefined ? undefined : this.tools.get(w.node.tool.name);
+    // Reachable, not named — the seventh site of the same question. An agent node names
+    // no tool, so this refusal used to skip every model-invoked call and re-run the whole
+    // turn, sending the same non-idempotent action again.
+    const nonIdempotentReachable = reachableToolNames(w.node).some((name) => {
+      const t = this.tools.get(name);
+      return t !== undefined && !t.idempotent;
+    });
     // Only refuse once the call REACHED the sandbox. A failure before that (schema
     // validation, a policy deny) touched nothing, so retrying it is safe even for a
     // non-idempotent tool.
-    if (tool !== undefined && !tool.idempotent && this.#effectStarted(p, w.task.taskId)) return undefined;
+    if (nonIdempotentReachable && this.#effectStarted(p, w.task.taskId)) return undefined;
 
     const initial = policy.initialMs ?? 500;
     const max = policy.maxMs ?? 30_000;
@@ -3199,7 +3226,11 @@ export class Engine {
     let worst: IrreversibilityClass = "read_only";
     for (const name of names) {
       const cls = this.tools.get(name)?.irreversibility ?? "irreversible";
-      if (CLASS_RANK[cls] > CLASS_RANK[worst]) worst = cls;
+      // Ranked by the posture each class asserts, so there is ONE ordering of these
+      // classes in the tree rather than a second copy here that can drift from it.
+      // `irreversible` and `externally_visible` both assert `in` and so rank equal —
+      // every branch in the engine treats them as one disjunction anyway.
+      if (postureRank(CLASS_DEFAULT_POSTURE[cls]) > postureRank(CLASS_DEFAULT_POSTURE[worst])) worst = cls;
     }
     return worst;
   }

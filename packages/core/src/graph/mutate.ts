@@ -21,6 +21,7 @@
 import { CODES, err, type LoomError } from "../errors.ts";
 import type { NodeId, TaskId } from "../ids.ts";
 import { compile, type CompileInput } from "./compile.ts";
+import { reachableToolNames } from "./spec.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
 import { indexGraph, type Diagnostic } from "./validate.ts";
 
@@ -190,13 +191,18 @@ export function compileMutation(input: MutateInput): MutationResult {
   // whatever the run's posture — a graph that grew a new irreversible step at runtime
   // is exactly the case where "somebody should look" is not negotiable.
   const gatedNodes = mutation.addNodes
-    .filter((n) => {
-      const manifest = n.tool === undefined ? undefined : input.tools[n.tool.name];
-      return (
-        manifest !== undefined &&
-        (manifest.irreversibility === "irreversible" || manifest.irreversibility === "externally_visible")
-      );
-    })
+    .filter((n) =>
+      // Reachable, not named. A proposed `agent` node names no tool, so keying on
+      // `n.tool` let a mutation that hands a model an irreversible tool through with
+      // `requiresGate: false` — the one case this rule calls non-negotiable.
+      reachableToolNames(n).some((name) => {
+        const manifest = input.tools[name];
+        return (
+          manifest !== undefined &&
+          (manifest.irreversibility === "irreversible" || manifest.irreversibility === "externally_visible")
+        );
+      }),
+    )
     .map((n) => n.id);
 
   return {

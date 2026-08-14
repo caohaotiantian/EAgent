@@ -15,11 +15,12 @@ import test from "node:test";
 
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
-import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
+import type { NodeId, RunId } from "../../src/ids.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { Engine } from "../../src/run/engine.ts";
+import type { RunProjection } from "../../src/run/projection.ts";
 import {
   FunctionRegistry,
   MockModelAdapter,
@@ -31,7 +32,6 @@ import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validat
 import { resolver } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
-const e = (id: string): EdgeId => id as EdgeId;
 
 /** Irreversible, and — deliberately — declaring no compensation. */
 const DANGER: ToolManifestLite = {
@@ -88,7 +88,8 @@ interface Rig {
   readonly deletions: string[];
 }
 
-function rig(): Rig {
+function rig(opts: { callTool?: boolean } = {}): Rig {
+  const callTool = opts.callTool ?? true;
   const clock = { t: 1_700_000_000_000 };
   const now = (): number => clock.t;
   const store = new MemoryStateStore({ now });
@@ -110,7 +111,7 @@ function rig(): Rig {
   models.register(
     new MockModelAdapter({
       script: (_req, turn) =>
-        turn === 0
+        turn === 0 && callTool
           ? { toolCalls: [{ id: "c0", name: "danger.delete", arguments: { target: "prod-db" } }], finishReason: "tool_use" }
           : { text: JSON.stringify({ done: true }), finishReason: "stop" },
       pricePerMTok: 1,
@@ -176,18 +177,69 @@ test("an irreversible tool called BY A MODEL is gated, not silently executed", a
   );
 });
 
-test("rewind refuses to cross an irreversible tool an AGENT invoked", async () => {
+/** Approve whatever gate is open, as a human, and drain the run. */
+async function approveAndDrain(r: Rig, runId: RunId): Promise<RunProjection> {
+  let p = await r.engine.advance(runId);
+  for (let i = 0; i < 4 && p.status === "awaiting_gate"; i++) {
+    const gate = Object.values(p.gates).find((g) => g.state === "open");
+    if (gate === undefined) break;
+    p = await r.engine.resolveGate(runId, {
+      gateId: gate.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: `k${String(i)}`,
+    });
+    p = await r.engine.advance(runId);
+  }
+  return p;
+}
+
+test("APPROVING THE GATE AUTHORIZES THE WORK — the model's tool then actually runs", async () => {
   const r = rig();
   const runId = await r.engine.submit({ graph: compiled(), inputs: { seed: "go" } });
-  await r.engine.advance(runId);
+  await approveAndDrain(r, runId);
 
-  // Whatever the run did, a rewind to the very beginning must not silently succeed once
-  // an uncompensated irreversible action has been committed.
-  if (r.deletions.length === 0) return; // the gate arm above already holds the line
+  assert.deepEqual(
+    r.deletions,
+    ["prod-db"],
+    "a human said yes to this node acting; the action it authorized must happen",
+  );
+});
+
+test("rewind refuses to cross an irreversible tool an AGENT actually invoked", async () => {
+  const r = rig();
+  const runId = await r.engine.submit({ graph: compiled(), inputs: { seed: "go" } });
+  await approveAndDrain(r, runId);
+  assert.deepEqual(r.deletions, ["prod-db"], "precondition: the action ran");
 
   await assert.rejects(
     () => r.engine.rewind(runId, 1 as never, "operator asked to undo"),
     /irreversible|compensation/i,
     "rewind must refuse to cross an uncompensated irreversible effect, whoever invoked it",
+  );
+});
+
+test("rewind is NOT blocked by a tool the agent only declared", async () => {
+  const r = rig({ callTool: false });
+  const runId = await r.engine.submit({ graph: compiled(), inputs: { seed: "go" } });
+  const p = await approveAndDrain(r, runId);
+  assert.equal(p.status, "succeeded");
+  assert.deepEqual(r.deletions, [], "precondition: nothing irreversible was called");
+
+  // Declaring a dangerous tool and never reaching for it must not make the run
+  // permanently un-rewindable — the scan is over what happened, not over what was listed.
+  await r.engine.rewind(runId, 1 as never, "operator asked to undo");
+});
+
+test("an UNAPPROVED agent turn is refused, and the refusal is journaled", async () => {
+  const r = rig();
+  const runId = await r.engine.submit({ graph: compiled(), inputs: { seed: "go" } });
+  await r.engine.advance(runId); // stops at the gate; nobody answers it
+
+  const log = await events(r.store, runId);
+  assert.deepEqual(r.deletions, [], "no approval, no action");
+  assert.ok(
+    log.some((ev) => ev.type === "gate.raised"),
+    "the node must ask before a model may use an irreversible tool",
   );
 });

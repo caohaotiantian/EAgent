@@ -1009,7 +1009,15 @@ function rule011And012ErrorPaths(
       continue;
     }
     const source = idx.byId.get(e.compensates);
-    const manifest = source?.tool === undefined ? undefined : tools[source.tool.name];
+    // Reachable, not named — GRAPH011 already warns that an agent node reaching an
+    // irreversible tool needs an error edge, so refusing to let a compensation edge
+    // target that same node would leave the two rules disagreeing about what an agent is.
+    const manifest =
+      source === undefined
+        ? undefined
+        : reachableToolNames(source)
+            .map((name) => tools[name])
+            .find((m) => m !== undefined);
     if (manifest === undefined) {
       d.push({
         severity: "error",
