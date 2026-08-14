@@ -22,6 +22,7 @@ import type { NodeId } from "../ids.ts";
 import { CLASSIFICATION_POSTURE_FLOOR, CLASS_DEFAULT_POSTURE, maxPosture, type Posture } from "../vocab.ts";
 import {
   DEFAULT_EXPANSION,
+  reachableToolNames,
   type ExpansionBudget,
   type GraphSpec,
   type NodePlan,
@@ -82,13 +83,23 @@ export function compile(input: CompileInput): CompileResult {
   const layoutRanks = computeLayoutRanks(spec, idx);
 
   for (const n of spec.nodes) {
-    const manifestEntry = n.tool === undefined ? undefined : input.tools[n.tool.name];
+    // `max` over every tool the node can reach. An agent node names no tool, so keying
+    // this on `n.tool` alone floored every agent at `out` no matter what its model could
+    // call — the compile-time half of the same blind spot the engine had at dispatch.
     const classFloor: Posture =
       n.type === "human_gate"
         ? "in"
-        : manifestEntry !== undefined
-          ? CLASS_DEFAULT_POSTURE[manifestEntry.irreversibility]
-          : "out";
+        : maxPosture(
+            "out",
+            // An unknown name contributes nothing, exactly as before: whether a tool the
+            // compiler cannot see should floor the node is a separate question from which
+            // tools the node can reach, and answering it here would gate every graph
+            // compiled against a partial manifest map.
+            ...reachableToolNames(n).flatMap((name) => {
+              const entry = input.tools[name];
+              return entry === undefined ? [] : [CLASS_DEFAULT_POSTURE[entry.irreversibility]];
+            }),
+          );
     const dataFloor = maxPosture(
       ...[...(n.reads ?? []), ...(n.writes ?? [])].map((c) => {
         const cls = spec.channels[c]?.classification;

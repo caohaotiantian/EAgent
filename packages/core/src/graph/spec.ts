@@ -514,3 +514,19 @@ export const CAN_SUSPEND: ReadonlySet<NodeType> = new Set<NodeType>(["agent", "t
 
 /** Node types the scheduler may run inline on the committing worker. */
 export const CONTROL_TYPES: ReadonlySet<NodeType> = new Set<NodeType>(["router", "join", "function"]);
+
+/**
+ * Every tool this node can reach — not the one it names.
+ *
+ * A `tool` node names its tool in `node.tool`; an `agent` node never does, because the
+ * model picks from `agent.tools` at run time. Asking `node.tool` alone therefore answers
+ * `read_only` for every agent, and the `max` fold that computes a posture never sees the
+ * term that would raise it. Oversight, capability accounting and the rewind refusal all
+ * need the reachable set, so they all read it from here.
+ */
+export function reachableToolNames(node: NodeSpec): readonly string[] {
+  const names: string[] = [];
+  if (node.tool !== undefined) names.push(node.tool.name);
+  for (const t of node.agent?.tools ?? []) if (!names.includes(t)) names.push(t);
+  return names;
+}

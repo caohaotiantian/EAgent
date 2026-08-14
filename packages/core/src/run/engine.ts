@@ -46,6 +46,7 @@ import { SYSTEM_ACTOR, errorRecord, isEvent, type Actor, type HumanActor, type N
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
+import { reachableToolNames } from "../graph/spec.ts";
 import type { BatchingSpec, DedupeSpec, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
@@ -70,7 +71,29 @@ import {
   type ChannelSpec,
   type Contribution,
 } from "../state/channels.ts";
-import { ZERO_USAGE, addUsage, maxPosture, type GateDecision, type Posture, type UsageRecord } from "../vocab.ts";
+import {
+  ZERO_USAGE,
+  addUsage,
+  maxPosture,
+  type GateDecision,
+  type IrreversibilityClass,
+  type Posture,
+  type UsageRecord,
+} from "../vocab.ts";
+
+/**
+ * How much worse one irreversibility class is than another.
+ *
+ * Local because it is an ordering for a `max`, not a vocabulary term: every branch in the
+ * engine treats `irreversible` and `externally_visible` as the same disjunction, so they
+ * rank equal and the first one found wins.
+ */
+const CLASS_RANK: Readonly<Record<IrreversibilityClass, number>> = {
+  read_only: 0,
+  reversible_write: 1,
+  irreversible: 2,
+  externally_visible: 2,
+};
 import type { DeliverySpec } from "./delivery.ts";
 import {
   GateSweeper,
@@ -1016,17 +1039,23 @@ export class Engine {
 
     // Refuse to rewind past a committed irreversible effect with no compensation —
     // the store must not offer a silently-unsafe undo.
+    // Every tool the node could REACH, not the one it named — an agent node names none,
+    // so scanning `node.tool` let a model's irreversible action be rewound past silently.
     for (const t of Object.values(p.tasks)) {
+      if (t.state !== "succeeded") continue;
       const node = ctx.index.byId.get(t.nodeId);
-      const tool = node?.tool === undefined ? undefined : this.tools.get(node.tool.name);
-      if (tool === undefined || t.state !== "succeeded") continue;
-      const irreversible = tool.irreversibility === "irreversible" || tool.irreversibility === "externally_visible";
-      if (irreversible && tool.compensation === undefined) {
-        throw err.conflict(
-          CODES.E_RESTORE_ILLEGAL,
-          `cannot rewind past "${t.nodeId}": ${tool.name} is ${tool.irreversibility} and declares no compensation`,
-          { details: { taskId: t.taskId, tool: tool.name } },
-        );
+      if (node === undefined) continue;
+      for (const name of reachableToolNames(node)) {
+        const tool = this.tools.get(name);
+        if (tool === undefined) continue;
+        const irreversible = tool.irreversibility === "irreversible" || tool.irreversibility === "externally_visible";
+        if (irreversible && tool.compensation === undefined) {
+          throw err.conflict(
+            CODES.E_RESTORE_ILLEGAL,
+            `cannot rewind past "${t.nodeId}": ${tool.name} is ${tool.irreversibility} and declares no compensation`,
+            { details: { taskId: t.taskId, tool: tool.name } },
+          );
+        }
       }
     }
 
@@ -1550,7 +1579,8 @@ export class Engine {
     const scope = scopeFor(p, ctx.graph.spec.channels, w.task.branch);
     const args = resolveArgs(spec.args ?? {}, scope);
 
-    const result = await this.#invokeTool(ctx, w.task, tool, args, 0);
+    // `true`: this node already ran the full guard chain in `#executeTask`.
+    const result = await this.#invokeTool(ctx, w.task, tool, args, 0, true);
     if (result.isError === true) {
       return {
         status: "failed",
@@ -2159,6 +2189,10 @@ export class Engine {
     tool: ToolDefinition,
     rawArgs: unknown,
     ordinal: number,
+    /** True when `#executeTask` already ran the full chain for this node and a human, if
+     *  asked, said yes. Only a `tool` node can claim it; an agent's tool choice was never
+     *  seen by that chain. */
+    nodeApproved = false,
   ): Promise<ToolResult> {
     const key = effectKey(task.taskId, "tool", ordinal);
 
@@ -2177,6 +2211,53 @@ export class Engine {
       declaredPosture: ctx.graph.plans[task.nodeId]?.posture ?? "out",
     });
     if (decision.effect === "deny") return { content: decision.error.message, isError: true };
+
+    // A `gate` decision here is a REFUSAL, not a suspension. Suspending mid-turn would
+    // need turn-level durability the engine does not have: the model's transcript for
+    // this turn lives in memory, so a gate raised here could not be answered after a
+    // restart. Refusing is the honest arm — the model is told, and a graph that needs a
+    // human before this action expresses it as a `tool` node, which CAN suspend.
+    //
+    // `nodeApproved` is what keeps this ONE chain rather than a second one. A tool node
+    // reaches here having already run the full chain in `#executeTask` — deny, hold, gate
+    // — and, if it gated, having been approved by a human. Re-deciding there would refuse
+    // the very action that approval authorized.
+    if (decision.effect === "gate") {
+      if (!nodeApproved) {
+        return {
+          content: `"${tool.name}" is ${tool.irreversibility} and requires human approval, which an agent turn cannot request; call it from a tool node instead`,
+          isError: true,
+        };
+      }
+      // Approved at the node. Fall through and run it.
+    } else if (decision.holdMs > 0 && !nodeApproved) {
+      // The pre-irreversible hold (D4 deviation 5), on the model's path as well as the
+      // node's. Without it "the supervisor may interrupt" is a promise the system keeps
+      // only for tools a graph author named — never for the ones a model chose. A tool
+      // node already served its window in `#executeTask`; a second would double it.
+      await this.#serialize(() =>
+        ctx.log.append(
+          [
+            {
+              type: "action.pending",
+              payload: {
+                nodeId: task.nodeId,
+                irreversibility: tool.irreversibility,
+                windowMs: decision.holdMs,
+                toolName: tool.name,
+              },
+              actor: SYSTEM_ACTOR("policy"),
+              taskId: task.taskId,
+            },
+          ],
+          { taskId: task.taskId },
+        ),
+      );
+      await this.#sleep(decision.holdMs, ctx.abort.signal);
+      if (ctx.abort.signal.aborted) {
+        return { content: `"${tool.name}" was interrupted during the intervention window`, isError: true };
+      }
+    }
 
     // 3 — re-validate after any rewrite, then execute
     const final = validate(tool.parameters, first.value);
@@ -3105,15 +3186,30 @@ export class Engine {
     return e;
   }
 
-  #irreversibilityOf(node: NodeSpec) {
-    if (node.tool === undefined) return "read_only" as const;
-    return this.tools.get(node.tool.name)?.irreversibility ?? "irreversible";
+  /**
+   * The worst irreversibility any tool this node can reach declares.
+   *
+   * `max` over the reachable set, not a lookup on `node.tool` — an agent node names no
+   * tool, so the old lookup answered `read_only` and let a model choose an irreversible
+   * action at the weakest posture. An unregistered name still fails closed.
+   */
+  #irreversibilityOf(node: NodeSpec): IrreversibilityClass {
+    const names = reachableToolNames(node);
+    if (names.length === 0) return "read_only";
+    let worst: IrreversibilityClass = "read_only";
+    for (const name of names) {
+      const cls = this.tools.get(name)?.irreversibility ?? "irreversible";
+      if (CLASS_RANK[cls] > CLASS_RANK[worst]) worst = cls;
+    }
+    return worst;
   }
 
   #capabilitiesOf(node: NodeSpec): readonly string[] {
-    const own = node.policy?.capabilities ?? [];
-    if (node.tool === undefined) return own;
-    return [...own, ...(this.tools.get(node.tool.name)?.capabilities ?? [])];
+    const own = [...(node.policy?.capabilities ?? [])];
+    for (const name of reachableToolNames(node)) {
+      for (const cap of this.tools.get(name)?.capabilities ?? []) if (!own.includes(cap)) own.push(cap);
+    }
+    return own;
   }
 
   /**

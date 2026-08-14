@@ -29,6 +29,7 @@ import {
   DEFAULT_EXPANSION,
   GRAPH_API_VERSION,
   REQUIRED_BLOCK,
+  reachableToolNames,
   type EdgeSpec,
   type ExpansionBudget,
   type GraphSpec,
@@ -977,11 +978,12 @@ function rule011And012ErrorPaths(
   d: Diagnostic[],
 ): void {
   for (const n of spec.nodes) {
-    const manifest = n.tool === undefined ? undefined : tools[n.tool.name];
-    const irreversible =
-      manifest !== undefined &&
-      (manifest.irreversibility === "irreversible" || manifest.irreversibility === "externally_visible");
-    if (!irreversible || n.unhandled === true) continue;
+    // Reachable, not named: an agent whose model may call an irreversible tool needs an
+    // error edge just as much as a tool node that names one.
+    const manifest = reachableToolNames(n)
+      .map((name) => tools[name])
+      .find((m) => m !== undefined && (m.irreversibility === "irreversible" || m.irreversibility === "externally_visible"));
+    if (manifest === undefined || n.unhandled === true) continue;
 
     const hasErrorEdge = (idx.outbound.get(n.id) ?? []).some((e) => e.kind === "error");
     if (!hasErrorEdge) {
@@ -1059,14 +1061,21 @@ function rule014And019Oversight(
   for (const n of spec.nodes) {
     const declared = n.policy?.posture;
 
-    // The floor a node's own nature asserts, before any declaration.
-    const manifest = n.tool === undefined ? undefined : ctx.tools[n.tool.name];
+    // The floor a node's own nature asserts, before any declaration. `max` over every
+    // tool the node can REACH: an agent node names none, so keying on `n.tool` floored
+    // every agent at `out` regardless of what its model could call.
     const classFloor: Posture =
       n.type === "human_gate"
         ? "in"
-        : manifest !== undefined
-          ? CLASS_DEFAULT_POSTURE[manifest.irreversibility]
-          : "out";
+        : maxPosture(
+            "out",
+            // An unknown name contributes nothing, exactly as before — see the matching
+            // comment in `compile.ts`.
+            ...reachableToolNames(n).flatMap((name) => {
+              const m = ctx.tools[name];
+              return m === undefined ? [] : [CLASS_DEFAULT_POSTURE[m.irreversibility]];
+            }),
+          );
 
     const dataFloor = maxPosture(
       ...[...(n.reads ?? []), ...(n.writes ?? [])].map((c) => {
@@ -1720,8 +1729,11 @@ function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, d: Diagnos
   for (const n of spec.nodes) {
     check(n.policy?.capabilities, { nodeId: n.id }, `node "${n.id}"`);
     // A tool's own required capabilities must also be within the tenant's grant —
-    // capability is delegated downward and can never be manufactured.
-    const manifest = n.tool === undefined ? undefined : ctx.tools[n.tool.name];
-    check(manifest?.capabilities, { nodeId: n.id }, `tool "${n.tool?.name}" used by node "${n.id}"`);
+    // capability is delegated downward and can never be manufactured. Every reachable
+    // tool counts: an agent whose model may call it needs the grant just as a tool node
+    // naming it does.
+    for (const name of reachableToolNames(n)) {
+      check(ctx.tools[name]?.capabilities, { nodeId: n.id }, `tool "${name}" used by node "${n.id}"`);
+    }
   }
 }
