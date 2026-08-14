@@ -489,6 +489,22 @@ test("an assertion evaluator yields S1; a rubric evaluator yields S4", async () 
   assert.ok(Math.abs(outcomeOf(readSignals(t)) - (1 + 0.3 * 0.2) / 1.3) < 1e-9);
 });
 
+test("THE CANONICALISER ORDERS BY CODE UNIT, NOT BY THE MACHINE'S COLLATION", () => {
+  // `localeCompare` is locale- and ICU-dependent — `"apple".localeCompare("Zebra")` is
+  // negative while code-unit order puts `Z` (0x5A) before `a` (0x61). A canonicaliser
+  // that reads it folds the same journal two ways on two machines, so the same run lands
+  // in two cohorts and gets two `isGolden` verdicts.
+  const t = foldTrajectory(
+    journal([
+      ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+      ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: ZERO, attempt: 1 }, "apple@root#0"),
+      ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: ZERO, attempt: 1 }, "Zebra@root#0"),
+      ev("run.completed", { outputs: {}, usage: ZERO }),
+    ]),
+  );
+  assert.deepEqual(t.steps.map((s) => s.nodeId), ["Zebra", "apple"]);
+});
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 let seq = 0;

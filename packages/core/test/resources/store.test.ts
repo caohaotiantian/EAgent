@@ -126,6 +126,41 @@ test("rollback is a pointer move — instantaneous and content-free", () => {
   assert.deepEqual(s.fetch(v2.digest).content, { text: "v2" }, "the rolled-back version still exists");
 });
 
+test("ROLLBACK MOVES @stable, so the evolution engine may not do it either", () => {
+  // Rollback writes the same selector `promote` guards with a human check and a
+  // deny-list. Without the same guard it is the way round them.
+  const s = store();
+  const v1 = s.publish({ kind: "prompt", name: "p", content: { text: "v1" }, actor: HUMAN });
+  s.promote(v1, "canary", HUMAN);
+  s.promote(v1, "stable", HUMAN);
+  const v2 = s.publish({ kind: "prompt", name: "p", content: { text: "v2" }, actor: HUMAN });
+  s.promote(v2, "canary", HUMAN);
+  s.promote(v2, "stable", HUMAN);
+
+  assert.throws(
+    () => s.rollback("prompt", "p", 1, EVOLUTION_ACTOR),
+    (e: unknown) => (e as { code: string }).code === "E_HUMAN_APPROVAL_REQUIRED",
+  );
+  const disguised: PolicyActor = { ...EVOLUTION_ACTOR, kind: "human" };
+  assert.throws(
+    () => s.rollback("prompt", "p", 1, disguised),
+    (e: unknown) => (e as { code: string }).code === "E_OVERSIGHT_LOOSEN_FORBIDDEN",
+  );
+  assert.equal(s.resolve("prompt/p@stable")?.digest, v2.digest, "the selector did not move");
+});
+
+test("listing is ordered by code unit, not by the machine's collation", () => {
+  // `localeCompare` is locale- and ICU-dependent: two machines would page a resource
+  // list in different orders, and a cursor over that list would skip or repeat rows.
+  const s = store();
+  s.publish({ kind: "prompt", name: "Zebra", content: { text: "z" }, actor: HUMAN });
+  s.publish({ kind: "prompt", name: "apple", content: { text: "a" }, actor: HUMAN });
+  assert.deepEqual(
+    s.list({ kind: "prompt" }).map((v) => v.name),
+    ["Zebra", "apple"],
+  );
+});
+
 // ── resolution and the runtime split ─────────────────────────────────────────
 
 test("resolve accepts versions, digests, and floating channels", () => {

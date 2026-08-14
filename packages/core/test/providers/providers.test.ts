@@ -339,6 +339,11 @@ test("malformed tool JSON does not crash the stream", async () => {
     `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"x"}}`,
     `data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{not json"}}`,
     `data: {"type":"content_block_stop","index":0}`,
+    // The subject here is malformed tool JSON, not truncation. This fixture used to omit
+    // any terminal frame, which is indistinguishable from a cut connection — the stream
+    // now says so, so the fixture has to be a complete message to keep asking its own
+    // question.
+    `data: {"type":"message_stop"}`,
   ];
   const a = new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(frames).fetch });
   const done = (await collect(a.stream(REQ, ac()))).at(-1)!;

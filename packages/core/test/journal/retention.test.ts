@@ -109,12 +109,17 @@ test("tiering is by AGE and by nothing else", () => {
 });
 
 test("the audit window is INDEPENDENT of the cold window", () => {
-  assert.equal(DEFAULT_RETENTION.cold.retentionMs, 365 * DAY);
   assert.equal(
     DEFAULT_RETENTION.audit.retentionMs,
     Infinity,
     "coupling them lets a cost-cutting change shorten the approval record as a side effect",
   );
+  // The two are infinite for unrelated reasons — audit because no mandate applies, cold
+  // because cold IS the journal — so agreeing here proves nothing about independence.
+  // The test that would catch a coupled `audit` is the one that shortens cold below.
+  assert.equal(DEFAULT_RETENTION.cold.retentionMs, Infinity);
+  assert.equal(DEFAULT_RETENTION.hot.retentionMs, 7 * DAY, "telemetry tiers keep real numbers");
+  assert.equal(DEFAULT_RETENTION.warm.retentionMs, 30 * DAY);
 });
 
 // ── the audit record ─────────────────────────────────────────────────────────
@@ -275,14 +280,55 @@ test("a TierManager refuses to start with a non-audit store in the audit slot", 
 
 // ── the sweep ────────────────────────────────────────────────────────────────
 
+test("THE SHIPPED DEFAULT NEVER DELETES THE JOURNAL — cold is where it rests, not a cache of it", async () => {
+  // `archive` writes exactly one thing to cold: the whole event array under
+  // `journal/<runId>`. So `policy.cold` is not a telemetry knob, it is the journal's
+  // deletion window — and nothing exists below cold to tier to, so expiring it is
+  // deletion rather than tiering. A finite default therefore inverts both rule 1 and the
+  // journal's authority: the derived audit record, kept forever, would outlive the log it
+  // was derived from. Today only a redundant copy is at stake, because nothing removes a
+  // run from the hot store; the default is the part that must not be waiting for that.
+  const m = manager();
+  const events = journal();
+  await m.archive(RUN, events);
+
+  const swept = await m.sweep(1000 * 365 * DAY);
+  assert.deepEqual(swept["cold"], [], "a thousand years on, the journal is still there");
+  assert.deepEqual(await m.restore(RUN), events, "…and still replays, which is what rule 1 means");
+});
+
+test("deleting journals has to be SAID — it is not reachable by omission", async () => {
+  const finite: RetentionPolicy = { ...DEFAULT_RETENTION, cold: { retentionMs: DAY } };
+  assert.throws(
+    () =>
+      new TierManager({ cold: new MemoryTierStore("cold"), audit: new MemoryTierStore("audit"), policy: finite }),
+    (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID",
+    "a finite cold window prunes the journal; half-saying it must not start",
+  );
+
+  // Saying it is allowed. An operator under a real erasure mandate is not blocked, only
+  // made to state the intent somewhere a reviewer reads it.
+  const m = new TierManager({
+    cold: new MemoryTierStore("cold"),
+    audit: new MemoryTierStore("audit"),
+    policy: finite,
+    pruneJournal: true,
+    now: () => 0,
+  });
+  await m.archive(RUN, journal());
+  assert.deepEqual((await m.sweep(30 * DAY))["cold"], [`journal/${RUN}`]);
+});
+
 test("SHORTENING COLD RETENTION DOES NOT TOUCH THE AUDIT RECORD", async () => {
-  // The whole reason the two policies are separate. Someone cuts cold to a day to save
-  // money; the record of who approved what is unaffected.
+  // The whole reason the two policies are separate. Someone cuts cold to a day — with
+  // `pruneJournal`, because after that is what cutting cold means — and the record of who
+  // approved what is unaffected.
   const now = { t: 0 };
   const m = new TierManager({
     cold: new MemoryTierStore("cold"),
     audit: new MemoryTierStore("audit"),
     policy: { ...DEFAULT_RETENTION, cold: { retentionMs: DAY } },
+    pruneJournal: true,
     now: () => now.t,
   });
   await m.archive(RUN, journal());

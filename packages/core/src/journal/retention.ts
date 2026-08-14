@@ -6,7 +6,11 @@
  * 1. **The journal is never pruned, only tiered.** Moving a run to cold storage changes
  *    where its events live and how fast they can be read; it never changes whether they
  *    exist. A retention policy that deletes journal events would make replay, the
- *    evaluation gate, and every trajectory a lie about the past.
+ *    evaluation gate, and every trajectory a lie about the past. Cold is the resting
+ *    place, not a cache: there is no tier beneath it, so a finite cold window is a delete
+ *    however it is spelled — which is why the default is infinite and why a finite one
+ *    will not construct without `pruneJournal`. A deployment under an erasure mandate can
+ *    still have it; it just cannot arrive there by leaving a field alone.
  *
  * 2. **Audit records are DUPLICATED into their own store.** They are derived from the
  *    journal, but a copy lives under a separate policy, because otherwise a retention
@@ -60,13 +64,25 @@ const DAY = 86_400_000;
  *
  * `audit` is `Infinity` because no external mandate applies (the operator confirmed GDPR
  * is out of scope), and because "keep the approval record forever unless someone
- * deliberately says otherwise" fails in the safe direction. Everything else has a real
- * number, since telemetry genuinely does cost money.
+ * deliberately says otherwise" fails in the safe direction.
+ *
+ * `cold` IS INFINITE FOR A DIFFERENT AND STRONGER REASON, and this is a deliberate
+ * divergence from D9.4's table, which still gives cold "1 y (configurable)". Cold is not
+ * a cache of the journal, it is where the journal comes to rest: `archive` writes the
+ * complete event array there and there is no tier below it, so applying a finite window is
+ * deletion rather than tiering — rule 1 above, inverted, with the derived audit record
+ * outliving the log it was derived from. A finite cold window remains available to a
+ * deployment that genuinely must erase, but only together with `pruneJournal`, because a
+ * policy that destroys the source of truth should not be reachable by leaving a field at
+ * its default.
+ *
+ * `hot` and `warm` keep real numbers: they hold spans and metrics, which telemetry may
+ * drop and which genuinely cost money.
  */
 export const DEFAULT_RETENTION: RetentionPolicy = {
   hot: { retentionMs: 7 * DAY },
   warm: { retentionMs: 30 * DAY },
-  cold: { retentionMs: 365 * DAY },
+  cold: { retentionMs: Infinity },
   audit: { retentionMs: Infinity },
   artifacts: { retentionMs: 30 * DAY },
 };
@@ -316,6 +332,16 @@ export interface TierManagerOptions {
   readonly cold: TierStore;
   readonly audit: TierStore;
   readonly now?: () => number;
+  /**
+   * Say YES to `sweep` deleting journals. Required whenever `policy.cold` is finite.
+   *
+   * Two fields have to agree before the source of truth can be destroyed, and they are
+   * deliberately not one field: the window is a number an operator tunes for cost, the
+   * consent is a claim about what this deployment is allowed to erase. Collapsing them
+   * is how a cost decision quietly becomes a retention decision — the same failure the
+   * separate `audit` window exists to prevent, one level up.
+   */
+  readonly pruneJournal?: boolean;
 }
 
 export interface ArchiveResult {
@@ -348,6 +374,17 @@ export class TierManager {
       // A misconfigured audit store is the one thing here that must not start. Failing at
       // construction beats discovering it when someone asks who approved the outage.
       throw err.validation(CODES.E_CONFIG_INVALID, `the audit store must be tier "audit", not "${this.#audit.tier}"`);
+    }
+    if (Number.isFinite(this.#policy.cold.retentionMs) && opts.pruneJournal !== true) {
+      // The second refusal, for the same reason and at the same moment. Cold holds the
+      // journal itself, so a finite window here is a delete — and one that would land a
+      // year after the misconfiguration, on the run somebody needs. Refusing at
+      // construction is the only place the operator is still looking.
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `cold retention of ${this.#policy.cold.retentionMs}ms deletes archived journals; ` +
+          "set cold.retentionMs to Infinity, or pass pruneJournal: true to say that is intended",
+      );
     }
   }
 
@@ -387,6 +424,11 @@ export class TierManager {
    * The audit tier is swept with ITS OWN window, never with cold's. That is the whole
    * point of the separate policy, and it is a one-line difference that a future
    * "simplification" would erase — hence the test that pins it.
+   *
+   * Cold's window reaches a `TierStore.expire` that DELETES, and cold holds the journal,
+   * so this line can prune the source of truth. It is safe by construction rather than by
+   * a check here: the constructor has already refused any finite cold window that was not
+   * consented to, and an infinite one expires nothing.
    */
   async sweep(now = this.#now()): Promise<Readonly<Record<string, readonly string[]>>> {
     return {

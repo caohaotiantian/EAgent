@@ -14,7 +14,7 @@
  * See design/loom/01-INTERFACES.md D3.8.
  */
 
-import { CODES, err, type LoomError } from "../errors.ts";
+import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -135,10 +135,53 @@ export function normalizeError(status: number, body: string, headers?: Headers):
   });
 }
 
-/** A network-level failure, before any HTTP status existed. */
+/**
+ * A network-level failure, before any HTTP status existed.
+ *
+ * TWO THINGS IT DOES ARE NOT ABOUT THE NETWORK.
+ *
+ * **A value that already has a class is not re-classified.** `sse` throws `err.cancelled()`
+ * the moment the run's signal is aborted, and this function used to hand it straight to
+ * `err.unavailable` — so a human pressing stop arrived at the caller as a RETRYABLE
+ * infrastructure failure, which is a licence for the retry ladder to re-run the work they
+ * stopped. The same flattening cost a content refusal its `policy` class one layer down.
+ * `toLoomError` rather than a bare `return e`, because `instanceof` proves a prototype and
+ * not provenance, and the value is on its way to `errorRecord`.
+ *
+ * **The message is somebody else's string, and it can carry a credential.** undici names the
+ * whole URL when it refuses one: `Request cannot be constructed from a URL that includes
+ * credentials: https://svc:hunter2@api.example.com/…`. That message becomes
+ * `LoomError.message`, and `toJSON` puts it in the journal, which is append-only — so the
+ * redaction has to happen where the message is BUILT, not where it is read.
+ *
+ * `security/redact.ts`'s `maskLiterals` is the mechanism for masking a value THIS PROCESS
+ * HOLDS out of text somebody else wrote, and it is deliberately not what runs here: it needs
+ * the literal, this seam is handed an error and nothing else, and its `MIN_MASKABLE` floor of
+ * 6 characters would pass a short password through untouched. The userinfo component of a URL
+ * needs no literal to recognise — it is a grammatical position, not a pattern to guess at —
+ * which makes this mechanism 1 (a structural fact) rather than the detector sweep's guess.
+ */
 export function normalizeTransport(e: unknown): LoomError {
+  if (isLoomError(e)) return toLoomError(e);
   if (e instanceof Error && e.name === "AbortError") return err.cancelled("model call aborted", { cause: e });
-  return err.unavailable(CODES.E_PROVIDER_TRANSPORT, e instanceof Error ? e.message : String(e), { cause: e });
+  return err.unavailable(CODES.E_PROVIDER_TRANSPORT, redactUrlCredentials(e instanceof Error ? e.message : String(e)), {
+    cause: e,
+  });
+}
+
+/**
+ * `scheme://userinfo@host` — the one place a URL is allowed to carry a secret.
+ *
+ * The userinfo run stops at the authority's first `/`, `?`, `#`, whitespace or second `@`, so
+ * a path that merely contains an address (`/v1/mail/a@b.example`) and a bare `mailto:` are
+ * both left alone. That matters as much as the masking does: a redactor that shreds ordinary
+ * diagnostics is one an operator turns off.
+ */
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*):\/\/[^/?#\s@]*@/gi;
+
+/** The host survives, the credential does not — see `normalizeTransport`. */
+function redactUrlCredentials(text: string): string {
+  return text.replace(URL_USERINFO, "$1://[redacted]@");
 }
 
 /**

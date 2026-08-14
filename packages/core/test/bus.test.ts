@@ -21,6 +21,9 @@ function ev(seq: number, runId: RunId = RUN, type: JournalEvent["type"] = "task.
   } as JournalEvent;
 }
 
+/** One macrotask tick: past everything a microtask-only consumer can still reach. */
+const settled = () => new Promise((r) => setImmediate(r));
+
 /** Take n events then dispose, so a test never hangs on an open subscription. */
 async function take(sub: AsyncIterable<JournalEvent>, n: number): Promise<JournalEvent[]> {
   const out: JournalEvent[] = [];
@@ -265,6 +268,98 @@ test("replayThenTail is gap-free across the journal/live boundary", async () => 
   bus.publish(ev(4));
 
   assert.deepEqual((await collected).map((e) => e.seq), [1, 2, 3, 4]);
+});
+
+test("replayThenTail's DEFAULT overflow policy cuts at the new end, never at the seam", async () => {
+  // `queueSize` is given and `onOverflow` is not, so this pins the default and nothing
+  // else. `drop_oldest` discards from the OLD end of the queue — which, on this path, is
+  // the run of events immediately after the journal head, because the live channel is
+  // subscribed before the journal read and nobody is attached to it during the read. The
+  // `seq <= lastSeq` dedupe filters duplicates; it cannot see a gap.
+  const store = new MemoryStateStore({ now: () => 1000 });
+  const bus = new InProcessEventBus({ store });
+  await store.append({
+    runId: RUN,
+    expectedSeq: 0,
+    events: [{ type: "task.progress", payload: { chunk: "a" }, actor: SYSTEM_ACTOR("t") }],
+  });
+
+  const sub = bus.replayThenTail(RUN, 1, { queueSize: 2 });
+  for (let i = 2; i <= 6; i++) bus.publish(ev(i));
+
+  const seen: number[] = [];
+  let thrown: unknown;
+  const consumer = (async () => {
+    try {
+      for await (const e of sub) seen.push(e.seq);
+    } catch (e) {
+      thrown = e;
+    }
+  })();
+  // The consumer runs entirely in microtasks, so one macrotask tick is past every
+  // outcome it can reach on its own. Disposing after that turns a silent tail — the
+  // failure this test is about — into a failed assertion instead of a hung suite.
+  await settled();
+  sub.dispose();
+  await consumer;
+
+  assert.deepEqual(seen, [1, 2, 3], "the journal event, then the two the live channel still held");
+  assert.ok(thrown instanceof SubscriberOverflowError, `the cut must be reported, not inferred; got ${String(thrown)}`);
+  assert.equal((thrown as SubscriberOverflowError).lastSeq, 3, "…naming the resume point");
+  assert.equal(bus.subscriberCount, 0);
+});
+
+test("replayThenTail delivers a contiguous prefix under load, or says where it stopped", async () => {
+  // The reconnecting-UI race at scale, with no timers: the journal read is longer than
+  // the burst, so the consumer is provably still inside it when the last event is
+  // published — `for await` over an async generator costs at least one microtask per
+  // event, and the publisher hands out exactly one per event.
+  const JOURNALED = 2000;
+  const LIVE = 1500; // more than the default 1024-slot queue, so the seam must overflow
+  const store = new MemoryStateStore({ now: () => 1000 });
+  const bus = new InProcessEventBus({ store });
+  await store.append({
+    runId: RUN,
+    expectedSeq: 0,
+    events: Array.from({ length: JOURNALED }, (_, i) => ({
+      type: "task.progress" as const,
+      payload: { chunk: `j${i}` },
+      actor: SYSTEM_ACTOR("t"),
+    })),
+  });
+
+  const sub = bus.replayThenTail(RUN, 1);
+  const seen: number[] = [];
+  let thrown: unknown;
+  const consumer = (async () => {
+    try {
+      for await (const e of sub) {
+        seen.push(e.seq);
+        if (e.seq === JOURNALED + LIVE) break;
+      }
+    } catch (e) {
+      thrown = e;
+    }
+  })();
+
+  for (let s = JOURNALED + 1; s <= JOURNALED + LIVE; s++) {
+    bus.publish(ev(s));
+    await null;
+  }
+  await settled();
+  sub.dispose();
+  await consumer;
+
+  const gaps = seen.filter((s, i) => i > 0 && s !== seen[i - 1]! + 1);
+  assert.deepEqual(gaps, [], "a hole inside the one path that promises there are none");
+  assert.equal(seen[0], 1);
+  assert.ok(seen.length > JOURNALED, "the live tail was reached, so the seam was actually crossed");
+  assert.ok(thrown instanceof SubscriberOverflowError, `the cut must be reported, not inferred; got ${String(thrown)}`);
+  assert.equal(
+    (thrown as SubscriberOverflowError).lastSeq,
+    seen[seen.length - 1],
+    "resume is lastSeq + 1, so the journal can supply everything the bus did not",
+  );
 });
 
 test("replayThenTail dedupes an event that is both journaled and republished", async () => {

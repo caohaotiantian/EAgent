@@ -331,7 +331,7 @@ export function foldTrajectory(
 
   const raw = [...steps.values()].sort(
     (a, b) =>
-      compareBranch(decodeBranch(a.branchPath), decodeBranch(b.branchPath)) || a.taskId.localeCompare(b.taskId),
+      compareBranch(decodeBranch(a.branchPath), decodeBranch(b.branchPath)) || byCodeUnit(a.taskId, b.taskId),
   );
   const canonical = canonicalizeBranches(raw);
 
@@ -408,7 +408,7 @@ function canonicalizeBranches(steps: readonly RawStep[]): RawStep[] {
       const ranked = [...members]
         .map((prefix) => ({ prefix, d: branchDigest(current, prefix) }))
         // Ties broken on the original path so the order is total, never arbitrary.
-        .sort((a, b) => (a.d === b.d ? a.prefix.localeCompare(b.prefix) : a.d < b.d ? -1 : 1));
+        .sort((a, b) => (a.d === b.d ? byCodeUnit(a.prefix, b.prefix) : a.d < b.d ? -1 : 1));
       ranked.forEach(({ prefix }, i) => {
         const parentSegs = parent === "root" ? [] : decodeBranch(parent).segments;
         rename.set(prefix, encodeBranch({ segments: [...parentSegs, { edgeId, index: i }] }));
@@ -425,8 +425,23 @@ function canonicalizeBranches(steps: readonly RawStep[]): RawStep[] {
 
   return current.sort(
     (a, b) =>
-      compareBranch(decodeBranch(a.branchPath), decodeBranch(b.branchPath)) || a.nodeId.localeCompare(b.nodeId),
+      compareBranch(decodeBranch(a.branchPath), decodeBranch(b.branchPath)) || byCodeUnit(a.nodeId, b.nodeId),
   );
+}
+
+/**
+ * UTF-16 code-unit order — the house rule `canonical.ts` states, applied to every tie
+ * broken in this file.
+ *
+ * `localeCompare` is locale- and ICU-dependent (`"apple".localeCompare("Zebra")` is
+ * negative; code-unit order puts `Z` at 0x5A before `a` at 0x61, and `["ä","z","a"]`
+ * sorts differently under `en` and `sv`). Reading it inside a CANONICALISER is
+ * nondeterminism that never passes through `ctx.effect`: two machines with different ICU
+ * builds re-index the same fan-out to different branch indices, which means different
+ * cohort membership and a different `isGolden` verdict for one unchanged journal.
+ */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** What a branch DID — node ids and actions, never values or ids that carry order. */
@@ -434,7 +449,7 @@ function branchDigest(steps: readonly RawStep[], prefix: string): Digest {
   const inBranch = steps
     .filter((s) => s.branchPath === prefix || s.branchPath.startsWith(`${prefix}/`))
     .map((s) => [s.nodeId, s.actions.map(actionKey)] as const)
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    .sort((a, b) => byCodeUnit(a[0], b[0]));
   return digest(inBranch);
 }
 

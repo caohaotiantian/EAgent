@@ -11,6 +11,13 @@
  *      node's context is rebuilt from declared projections rather than accumulated,
  *      that prefix really is stable across a run's turns, so the cache hit rate is a
  *      property of the architecture rather than of prompt discipline.
+ *
+ *   3. **A message is finished only when the PROVIDER says so.** The frame is
+ *      `message_start` … `message_delta` (which carries `stop_reason`) … `message_stop`,
+ *      and a body that ends without a terminal frame was CUT. Nothing in the bytes of a
+ *      severed connection distinguishes it from a model that stopped talking, so the
+ *      terminal frame has to be tracked: reporting `finishReason: "stop"` for a cut
+ *      journals half an answer as a whole one, and replay then serves the half forever.
  */
 
 import { CODES, err } from "../errors.ts";
@@ -75,13 +82,14 @@ export class AnthropicAdapter implements ModelAdapter {
     let outputTokens = 0;
     let cacheReadTokens: number | undefined;
     let cacheWriteTokens: number | undefined;
-    let committed = false;
+    // The provider's own statement that this message is over. See the docstring's third
+    // point: without it, "the model stopped" and "the socket did" are the same bytes.
+    let closed = false;
 
     try {
       for await (const frame of sse(res, signal)) {
         if (frame.data === "" || frame.data === "[DONE]") continue;
         const ev = JSON.parse(frame.data) as AnthropicEvent;
-        committed = true;
 
         switch (ev.type) {
           case "message_start": {
@@ -120,8 +128,18 @@ export class AnthropicAdapter implements ModelAdapter {
             break;
           }
           case "message_delta": {
-            if (ev.delta?.stop_reason !== undefined) finishReason = mapStop(ev.delta.stop_reason);
+            // A stop reason is the model saying why it stopped, which closes the message on
+            // its own: `message_stop` is a separate frame and a proxy that trims the tail
+            // would otherwise turn every complete answer into a truncation.
+            if (ev.delta?.stop_reason !== undefined) {
+              finishReason = mapStop(ev.delta.stop_reason);
+              closed = true;
+            }
             if (ev.usage?.output_tokens !== undefined) outputTokens = ev.usage.output_tokens;
+            break;
+          }
+          case "message_stop": {
+            closed = true;
             break;
           }
           case "error": {
@@ -132,9 +150,21 @@ export class AnthropicAdapter implements ModelAdapter {
         }
       }
     } catch (e) {
-      // Past the first event, the caller has already seen deltas. Re-streaming would
-      // double-emit, so this always propagates rather than retrying.
-      throw committed ? normalizeTransport(e) : normalizeTransport(e);
+      // The caller may already have seen deltas, so re-streaming would double-emit and
+      // double-count: this propagates rather than retrying, whatever it caught.
+      // `normalizeTransport` keeps a class the inner layer already decided — a cancel out of
+      // `sse` stays `cancelled` rather than becoming a retryable transport failure.
+      throw normalizeTransport(e);
+    }
+
+    if (!closed) {
+      // Incomplete, and the two ways to be incomplete are not the same fact. A cancelled run
+      // tears down its own socket, so the body reads as simply ended — calling that
+      // `unavailable` hands the retry ladder a licence to re-run what a person stopped.
+      if (signal.aborted) throw err.cancelled("model stream cancelled before the message ended");
+      throw err.unavailable(CODES.E_PROVIDER_TRANSPORT, "provider stream ended without a terminal frame — the response was cut", {
+        details: { textChars: text.length, toolCalls: toolCalls.length },
+      });
     }
 
     const usage: UsageRecord = {

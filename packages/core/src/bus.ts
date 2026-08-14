@@ -120,7 +120,14 @@ export interface EventBus {
   publish(event: JournalEvent): void;
   /** One consumer's channel — see `Subscription`. Two readers want two subscriptions. */
   subscribe(filter: EventFilter, opts: SubscribeOptions): Subscription;
-  /** Gap-free catch-up then live tail, deduped by seq. The UI's reconnect path. Also one consumer's. */
+  /**
+   * Catch-up then live tail, deduped by seq. The UI's reconnect path. Also one consumer's.
+   *
+   * Gap-free OR IT THROWS — the unqualified promise was never keepable, because a
+   * consumer can always fall further behind than any bounded queue. What this path
+   * guarantees is that it never hands over a stream with a hole in it: it delivers a
+   * contiguous prefix and then reports the cut. Overriding `onOverflow` gives that up.
+   */
   replayThenTail(runId: RunId, fromSeq: Seq, opts?: Partial<SubscribeOptions>): Subscription;
   readonly subscriberCount: number;
 }
@@ -281,6 +288,12 @@ export class InProcessEventBus implements EventBus {
    *
    * Order matters: subscribing after the read would drop anything appended during it.
    * The overlap is why the dedupe exists — it is a guarantee, not a nicety.
+   *
+   * That same ordering is why the default overflow policy differs from `subscribe`'s.
+   * Nothing consumes the live channel for the whole duration of the journal read, so its
+   * queue is at its fullest exactly at the seam; a policy that drops from the old end
+   * therefore eats the seam first, and the dedupe cannot notice. Hence `close`: the
+   * delivered stream is a contiguous prefix or the iterator says where it stopped.
    */
   replayThenTail(runId: RunId, fromSeq: Seq, opts: Partial<SubscribeOptions> = {}): Subscription {
     const store = this.#store;
@@ -288,8 +301,15 @@ export class InProcessEventBus implements EventBus {
       throw new Error("replayThenTail requires a StateStore; construct the bus with { store }");
     }
     const live = this.subscribe({ runId }, {
+      // DELIBERATELY NOT `subscribe`'s usual `drop_oldest`. That asymmetry is the whole
+      // point of this path: `drop_oldest` discards from the OLD end of the queue, which
+      // here is the run of events immediately after the journal head — the seam this
+      // method exists to cover — and the `seq <= lastSeq` dedupe below filters duplicates,
+      // never gaps, so the hole would leave no trace in the delivered stream. `close` cuts
+      // at the NEW end instead, so what was delivered is always a contiguous prefix and
+      // `SubscriberOverflowError.lastSeq` is a resume point the journal can satisfy.
       queueSize: opts.queueSize ?? 1024,
-      onOverflow: opts.onOverflow ?? "drop_oldest",
+      onOverflow: opts.onOverflow ?? "close",
     });
 
     const merged: Subscription = {

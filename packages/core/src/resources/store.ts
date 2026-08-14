@@ -186,11 +186,36 @@ export class ResourceStore implements ResourceResolver {
     return { ref: `${key}@${record.version}`, digest: resolved.digest, channel: to };
   }
 
-  /** Instantaneous and always safe: it moves a pointer, and in-flight runs hold digests. */
+  /**
+   * Instantaneous and always safe as an OPERATION: it moves a pointer, and in-flight runs
+   * hold digests. Not unauthorized, though — it writes `@stable`.
+   *
+   * SAME DOOR AS `promote(…, "stable")`, and for the reason that method gives. Rollback
+   * sets exactly the selector that promotion guards with a human check and a deny-list, so
+   * an unguarded rollback is not a weaker lever, it is the way around the stronger one:
+   * the evolution engine could point `@stable` at a draft of its own that no eval suite
+   * ever saw, and it could do it without passing through a single promotion criterion.
+   *
+   * It does NOT walk the `TRANSITIONS` ladder. Restoring a superseded version is
+   * `stable → stable`, and `#channelOf` reports a version the selector has moved off as
+   * `draft`, so checking the ladder here would refuse every real rollback. Which version
+   * is safe to go back to is a human's judgement; that a human made it is what this
+   * enforces.
+   */
   rollback(kind: ResourceKind, name: string, toVersion: number, actor: PolicyActor): ResolvedRef {
     const record = (this.#versions.get(`${kind}/${name}`) ?? []).find((v) => v.version === toVersion);
     if (record === undefined) {
       throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `${kind}/${name}@${toVersion} does not exist`);
+    }
+    if (actor.kind !== "human") {
+      throw err.policy(
+        CODES.E_HUMAN_APPROVAL_REQUIRED,
+        `rolling back moves @stable and requires a human actor; got "${actor.kind}"`,
+        { details: { actor: actor.id } },
+      );
+    }
+    if ((actor.denied ?? []).includes("resource:promote(stable)")) {
+      throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `actor "${actor.id}" is deny-listed for stable promotion`);
     }
     this.#selectors.set(`${kind}/${name}@stable`, record.digest);
     return { ref: `${kind}/${name}@${toVersion}`, digest: record.digest, channel: "stable" };
@@ -290,7 +315,14 @@ export class ResourceStore implements ResourceResolver {
         out.push(v);
       }
     }
-    return out.sort((a, b) => (a.kind + a.name).localeCompare(b.kind + b.name) || a.version - b.version);
+    // Code-unit order, the house rule `canonical.ts` states: `localeCompare` is locale-
+    // and ICU-dependent, so two machines would page this list in different orders and a
+    // cursor over it would skip or repeat rows.
+    return out.sort((a, b) => {
+      const l = a.kind + a.name;
+      const r = b.kind + b.name;
+      return l < r ? -1 : l > r ? 1 : a.version - b.version;
+    });
   }
 
   versions(kind: ResourceKind, name: string): readonly ResourceVersion[] {

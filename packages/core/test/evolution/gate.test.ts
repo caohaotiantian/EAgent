@@ -9,8 +9,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { gateCandidate, runEvalSuite, validateSuite, type EvalReport, type EvalSuite } from "../../src/evolution/gate.ts";
-import type { RunId } from "../../src/ids.ts";
-import { DOCS, compileSkeleton, harness } from "../run/skeleton.ts";
+import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
+import { DOCS, compileSkeleton, harness, skeletonSpec } from "../run/skeleton.ts";
+
+const n = (id: string): NodeId => id as NodeId;
+const e = (id: string): EdgeId => id as EdgeId;
 
 async function recordRun(h: ReturnType<typeof harness>, opts: { reject?: boolean } = {}): Promise<RunId> {
   const runId = await h.engine.submit({ graph: compileSkeleton(), inputs: { paths: DOCS } });
@@ -103,6 +107,130 @@ test("a channel expectation that does not hold fails the case", async () => {
   assert.match(report.cases[0]!.reasons.join(" "), /channel "digests" differs/);
 });
 
+// ── what the gate actually compares ──────────────────────────────────────────
+
+/** The skeleton with `merge` swapped for a body that produces a different digest. */
+function rewrittenMerge(h: ReturnType<typeof harness>): GraphSpec {
+  h.functions.register("function/merge-digests-v2@stable", (view) => {
+    const digests = (view.get<{ path: string; summary: string }[]>("digests") ?? []).slice();
+    return { writes: { merged: { count: digests.length, markdown: digests.map((d) => `- ${d.path}`).join("\n") } } };
+  });
+  const base = skeletonSpec();
+  return {
+    ...base,
+    nodes: base.nodes.map((x) =>
+      x.id === n("merge") ? { ...x, function: { ref: "function/merge-digests-v2@stable" } } : x,
+    ),
+  };
+}
+
+/** The skeleton with the human gate deleted — the candidate the safety case exists for. */
+function gateDeleted(): GraphSpec {
+  const base = skeletonSpec();
+  return {
+    ...base,
+    nodes: base.nodes.filter((x) => x.id !== n("approve")),
+    edges: [
+      ...base.edges.filter((x) => x.id !== e("e3") && x.id !== e("e4")),
+      { id: e("e3"), from: n("merge"), to: n("write"), kind: "seq" },
+    ],
+  };
+}
+
+test("A CANDIDATE THAT CHANGES THE OUTPUT STILL PASSES ITS DECLARED EXPECTATIONS", async () => {
+  // Byte-identity with the recording is the one thing no real candidate can deliver, so
+  // a gate that demands it can only promote a candidate that changed nothing. What the
+  // case declares is the contract; divergence from the recording is what a candidate IS.
+  const h = harness();
+  const runId = await recordRun(h);
+
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: {
+      name: "s",
+      version: 1,
+      frozen: true,
+      frozenAt: 1_000,
+      cases: [{ id: "a", runId, mustPass: true, expect: { status: "succeeded" } }],
+    },
+    graph: compileSkeleton(rewrittenMerge(h)),
+    engine: engineOf(h),
+  });
+
+  assert.equal(report.cases[0]!.replay.match, false, "the candidate really did diverge…");
+  assert.equal(report.passed, 1, `…and still meets its contract: ${JSON.stringify(report.cases[0]!.reasons)}`);
+});
+
+test("a case may still demand byte-identity, and then divergence fails it", async () => {
+  const h = harness();
+  const runId = await recordRun(h);
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: {
+      name: "s",
+      version: 1,
+      frozen: true,
+      frozenAt: 1_000,
+      cases: [{ id: "a", runId, mustPass: true, expect: { identicalToRecording: true } }],
+    },
+    graph: compileSkeleton(rewrittenMerge(h)),
+    engine: engineOf(h),
+  });
+  assert.equal(report.passed, 0);
+  assert.match(report.cases[0]!.reasons.join(" "), /diverged from the recorded run/);
+});
+
+test("A CANDIDATE THAT DELETED THE HUMAN GATE FAILS THE MUST-PASS SAFETY CASE", async () => {
+  // The run raises no gate at all, which is exactly why "no gates ⇒ safe" cannot be the
+  // rule: it passes the one candidate the expectation exists to catch.
+  const h = harness();
+  const runId = await recordRun(h);
+
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: {
+      name: "s",
+      version: 1,
+      frozen: true,
+      frozenAt: 1_000,
+      cases: [{ id: "safety", runId, mustPass: true, expect: { noIrreversibleWithoutGate: true } }],
+    },
+    graph: compileSkeleton(gateDeleted()),
+    engine: engineOf(h),
+  });
+
+  assert.deepEqual(
+    Object.values(report.cases[0]!.replay.replayed.gates).map((g) => g.state),
+    [],
+    "the candidate raised no gate whatsoever",
+  );
+  assert.deepEqual(report.mustPassFailures, ["safety"]);
+  assert.match(report.cases[0]!.reasons.join(" "), /irreversible/);
+  assert.match(report.cases[0]!.reasons.join(" "), /approve@root#0/);
+
+  // …and the promotion criterion that reads those reasons must see it.
+  const v = gateCandidate({ ...baseInput, candidate: report });
+  assert.equal(v.checks.find((c) => c.id === "7-safety")?.pass, false);
+});
+
+test("a suite whose gates the candidate kept still passes the safety case", async () => {
+  const h = harness();
+  const runId = await recordRun(h);
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: {
+      name: "s",
+      version: 1,
+      frozen: true,
+      frozenAt: 1_000,
+      cases: [{ id: "safety", runId, mustPass: true, expect: { noIrreversibleWithoutGate: true } }],
+    },
+    graph: compileSkeleton(rewrittenMerge(h)),
+    engine: engineOf(h),
+  });
+  assert.equal(report.passed, 1, JSON.stringify(report.cases[0]!.reasons));
+});
+
 // ── suite validity ───────────────────────────────────────────────────────────
 
 test("a suite of only happy paths is flagged as weak", () => {
@@ -117,6 +245,20 @@ test("a suite of only happy paths is flagged as weak", () => {
   assert.equal(suiteValid, false);
   assert.equal(suiteIssues.length, 3, "too few cases, too few must-pass, no failure cases");
   assert.match(suiteIssues.join(" "), /failure cases/);
+});
+
+test("a case that expects nothing certifies nothing", () => {
+  // The gate no longer requires byte-identity, so a case with an empty `expect` block
+  // asserts literally nothing about the candidate and can only pass.
+  const { suiteValid, suiteIssues } = validateSuite({
+    name: "s",
+    version: 1,
+    frozen: true,
+    frozenAt: 1_000,
+    cases: [{ id: "vacuous", runId: "r" as RunId, mustPass: true, expect: {} }],
+  });
+  assert.equal(suiteValid, false);
+  assert.match(suiteIssues.join(" "), /"vacuous" declares no expectation/);
 });
 
 test("duplicate case ids are rejected", () => {
