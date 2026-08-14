@@ -29,6 +29,9 @@ export class CanonicalizationError extends Error {
  *   - properties whose value is `undefined` are omitted
  *   - `-0` normalized to `0`
  *   - NaN, Infinity, undefined-in-array, bigint, symbol, function: REJECTED
+ *   - Date, Map, Set: REJECTED
+ *   - typed arrays, ArrayBuffer, DataView, RegExp: REJECTED — `Object.keys` describes
+ *     something other than their content, so they collided with plain objects
  *   - cycles: REJECTED
  *
  * Numbers use JSON.stringify's shortest round-trip representation, which is
@@ -94,6 +97,39 @@ function write(value: unknown, path: string, seen: Set<object>, out: string[]): 
   if (obj instanceof Date) throw new CanonicalizationError("Date is not representable; use epoch millis", path);
   if (obj instanceof Map || obj instanceof Set) {
     throw new CanonicalizationError(`${obj.constructor.name} is not representable; use a plain object/array`, path);
+  }
+
+  // OBJECTS WHOSE CONTENT `Object.keys` CANNOT SEE. The fallthrough below is a fold over
+  // own enumerable string keys, which for these types describes something other than the
+  // value — so two values a reader would never call equal produced identical bytes, in the
+  // one function `graph.hash`, `state.hash`, every resource digest and every recorded
+  // effect digest are built on. Three collisions, all live before this guard:
+  //
+  //   `new Uint8Array([1,2,3])`      → {"0":1,"1":2,"2":3}   — a typed array's keys are its
+  //   `{0:1, 1:2, 2:3}`              → {"0":1,"1":2,"2":3}     INDICES, so it is
+  //   `new Float64Array([1,2,3])`    → {"0":1,"1":2,"2":3}     indistinguishable from a
+  //                                                            plain index-keyed object,
+  //                                                            and from a typed array of
+  //                                                            eight times the width.
+  //
+  //   `new ArrayBuffer(8)`           → {}   — no own enumerable keys AT ALL, so every
+  //   `new DataView(buf)`            → {}     buffer of every length and content shared
+  //   `/abc/g`                       → {}     one content address with the empty object.
+  //
+  // Rejected rather than encoded, on the rule this file opens with: anything ambiguous is
+  // refused loudly. Encoding them would also be a choice about representation (base64? an
+  // array of byte values?) that the caller is better placed to make and that the journal
+  // would then be stuck with. `ArrayBuffer.isView` and the string tag are used instead of
+  // `instanceof` so a value from another realm — a `vm` context, a worker — is caught too.
+  const tag = Object.prototype.toString.call(obj);
+  if (ArrayBuffer.isView(obj) || tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]") {
+    throw new CanonicalizationError(
+      `${tag.slice(8, -1)} is not representable; use an array of numbers or a base64 string`,
+      path,
+    );
+  }
+  if (tag === "[object RegExp]") {
+    throw new CanonicalizationError("RegExp is not representable; use its source as a string", path);
   }
 
   const record = obj as Record<string, unknown>;

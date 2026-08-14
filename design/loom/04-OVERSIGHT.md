@@ -382,7 +382,7 @@ sweep. Closing that needs a store query the `StateStore` interface does not have
 | `redirect{take}` | forces the edge subset on the named Task; **must be a subset of that node's declared outgoing edges** | none | `operator.command` | → `in` |
 | `rollback{to, rewind}` | aborts everything after the checkpoint | **refused** (`E_RESTORE_ILLEGAL`) on any of **four**, counted in `Engine.rewind`: a **cancelled** run; a **rejected** gate at or after the target seq; a target seq that IS a `gate.decided` of any sign; a committed irreversible effect after the target with no declared compensation. See the note below | `checkpoint.restored` | → `in` |
 | `rollback{to, fork}` | leaves the original Run untouched | none — the fork re-executes | `checkpoint.restored` | → `in` |
-| `cancel{grace, compensate}` | `AbortSignal` chain, then compensation in reverse commit order | compensations run | `run.cancelled{clean, unknownEffects[]}` | n/a |
+| `cancel{grace, compensate}` | **DESIGN.** `Engine.cancel(runId, reason)` takes neither parameter, and no code path executes a compensation — see D5.2. What is real: the `AbortSignal` chain, and the `SIGTERM`→grace→`SIGKILL` ladder at the sandbox boundary | **no compensation runs** | `run.cancelled{clean, unknownEffects[]}` | n/a |
 | `kill` | immediate `SIGKILL`; **no grace, no compensation** | left as-is; recorded as dirty | `run.cancelled{clean:false, forced:true}` + alert | n/a |
 | `escalate{scope,to}` | applies to future decisions in scope; already-running effects are unaffected | none | `policy.escalated` | explicit |
 

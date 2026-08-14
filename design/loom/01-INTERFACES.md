@@ -484,6 +484,35 @@ graph LR
 | Cancellation | `SIGTERM` → `gracePeriodMs` → `SIGKILL` for subprocesses; `AbortSignal` for HTTP. An `EffectStarted` entry is journaled *before* the call, so a cancellation during an irreversible effect is **recorded as unknown-outcome**, never as "did not happen" |
 | Streaming | Yes. `progress` chunks reach the UI live; they never enter the model's context (EAgent's `tool_progress` semantics, preserved) |
 
+**What `run/engine.ts` actually implements.** There is no `ToolExecutor` in `src/` — the
+name appears nowhere in `packages/`. The single dispatch path is the **private**
+`Engine.#invokeTool`, and the invariant this section exists to state **is held**:
+`grep -ran '\.execute(' packages/core/src/` returns exactly one line, in `run/engine.ts`,
+reached only from `#runToolNode` and `#runAgentToolCall`. It is the seam that is missing,
+not the guarantee.
+
+Three specifics, because "not built" is not the same as "not true":
+
+- `invoke`'s `AsyncIterable<ToolExecEvent>` is design. The method returns
+  `Promise<ToolResult>`; `progress` streams through `ToolContext.progress` into
+  `task.progress` instead; `policy` has no event because the decision is a direct
+  `ctx.policy.decide` call.
+- **`gate` is not "the caller suspends" — it is a REFUSAL.** A `gate` decision inside an
+  agent turn cannot suspend the Task: the turn's conversation lives in memory, so a gate
+  raised there could not be answered after a restart. `#invokeTool` returns an error
+  result naming the tool that needs a human. A `tool` NODE still gates properly, because
+  `#executeTask` runs the same chain before dispatch and suspends there; an agent node
+  whose reachable tool set contains one of those floors at posture `in` and gates
+  **before the model runs**, and `nodeApproved` carries that approval into the turn so
+  the one dispatch path does not have to become two.
+- Because `#invokeTool` is private and unexported, **D12.2's `ToolExecutor` swap row is
+  an intention, not a seam anything can be plugged into today.** Making it true means
+  extracting this method when a tool must run out of process — not before.
+
+`test/docs-drift.test.ts` cannot catch any of the above: `ToolExecutor` is one of the
+thirty-one doc interfaces with no `src/` counterpart, and its method-name check skips
+those by design. This paragraph is the disclosure that stands in for it.
+
 ---
 
 ## D3.7 — `ResourceFetcher`
@@ -596,8 +625,16 @@ export interface EventBus extends Versioned {
     /** `close` cuts the stream and the ITERATOR throws; the two `drop_*` keep delivering. */
     onOverflow: "drop_oldest" | "drop_newest" | "close";
   }): AsyncIterable<JournalEvent> & Disposable;
-  /** Gap-free catch-up for a reconnecting UI: journal replay then live tail, deduped by seq. */
-  replayThenTail(runId: RunId, fromSeq: Seq): AsyncIterable<JournalEvent> & Disposable;
+  /**
+   * Catch-up then live tail for a reconnecting UI: journal replay, then the live channel,
+   * deduped by seq. GAP-FREE **OR IT THROWS** — see the Errors row; the two are one claim.
+   * `opts` defaults to `{queueSize: 1024, onOverflow: "close"}`, and `close` is deliberately
+   * NOT `subscribe`'s `drop_oldest`: nothing consumes the live channel while the journal is
+   * being read, so its queue is fullest exactly at the seam, and a policy that drops from
+   * the OLD end eats the seam — which the `seq <= lastSeq` dedupe cannot see, because it
+   * filters duplicates and never gaps. Overriding `onOverflow` gives up the guarantee.
+   */
+  replayThenTail(runId: RunId, fromSeq: Seq, opts?: Partial<SubscribeOptions>): AsyncIterable<JournalEvent> & Disposable;
 }
 ```
 
@@ -605,8 +642,9 @@ export interface EventBus extends Versioned {
 |---|---|
 | Errors | `publish` never throws — nor does `subscribe`. That half is unchanged and is what protects the executor. **The subscription's ITERATOR does throw**, on `onOverflow:"close"` and nowhere else: it drains what it still holds and then throws `SubscriberOverflowError`, carrying the seq of the last event it delivered. So "you fell behind and I cut you off" and "the run finished" are two different terminal outcomes of the one delivery path, and a subscriber that reads no counter cannot confuse them. **This row did not previously describe that gap.** In full, it read: "`publish` never throws. `subscribe` may end the iterable with `E_SUBSCRIBER_OVERFLOW` when `onOverflow:"close"`" — a promise of an error code `errors.ts` has never declared, made in the one row also carrying the marker that records its absence. So the change is not a signal replacing a weaker signal; it is a signal replacing a **promise nothing kept**, and the code stays undeclared on purpose: the thrown value is deliberately **not** a `LoomError` with a code, so `NOT-IN-CODE(E_SUBSCRIBER_OVERFLOW)` still holds, and no `retry.onlyIf` list, HTTP status map or boundary taxonomy ever sees it. `drop_oldest` and `drop_newest` still end cleanly — a subscriber that chose to tolerate loss is not interrupted about it, and `Subscription.dropped` remains its counter. Recovery is `replayThenTail(runId, lastSeq + 1)`: the journal kept what the bus dropped |
 | Ordering | Per-Run total order by `seq`, guaranteed. **No cross-run ordering guarantee** — and nothing may depend on one |
-| Delivery | At-most-once on the bus (it is derived). Exactly-once is available only via `replayThenTail`, which reads the journal |
-| Cancellation | `dispose()` or `.return()` unsubscribes synchronously |
+| Delivery | At-most-once on the bus (it is derived). Exactly-once is available only via `replayThenTail`, which reads the journal — **and only at its defaults**. Its gap-free claim is not a property of merging two sources; it holds *because* the live half is opened `onOverflow: "close"`, so the merged stream is a contiguous prefix and then a throw carrying a resume seq. Pass `opts` that widen the queue and it still holds; pass one that sets `drop_oldest`/`drop_newest` and it does not, silently, because the dedupe filters duplicates and never gaps. A caller that overrides the policy has chosen at-most-once and must track its own watermark |
+| Cancellation | `dispose()` or `.return()` unsubscribes synchronously. The merged iterator disposes the live subscription in a `finally`, so a `break` out of the `for await` releases it too |
+| Reader count | **One consumer per subscription**, both here and on `subscribe`. Two concurrent `for await` loops over one `Subscription` SPLIT the stream — each event goes to exactly one of them, neither throws, and no `dropped` counter moves — and the first loop to end disposes it for both. A second reader wants a second subscription |
 
 ---
 
@@ -923,6 +961,9 @@ export interface OversightController extends Versioned {
 export type InterventionCommand =
   | { kind: "pause";     runId: RunId; drain: boolean }   // drain=false stops admitting new Tasks immediately
   | { kind: "resume";    runId: RunId }
+  // DESIGN. `Engine.cancel(runId, reason)` takes neither field, and nothing executes a
+  // compensation — see 02-EXECUTION-GRAPH.md D5.2. There is no `InterventionCommand` type
+  // in `src/` at all; the shipped surface is `Engine`'s own methods plus the HTTP routes.
   | { kind: "cancel";    runId: RunId; gracePeriodMs: number; compensate: boolean }
   | { kind: "steer";     runId: RunId; taskId?: TaskId; message: string }
   | { kind: "redirect";  runId: RunId; taskId: TaskId; take: readonly string[] }

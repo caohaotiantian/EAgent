@@ -26,8 +26,6 @@ stateDiagram-v2
   Rewound --> Running
 
   Running --> Cancelling: operator cancel
-  Cancelling --> Compensating: compensate=true and committed irreversible effects exist
-  Compensating --> Cancelled
   Cancelling --> Cancelled
 
   Running --> Succeeded: all terminal paths reached outputs
@@ -44,6 +42,15 @@ stateDiagram-v2
     plus a journal event, not a Promise.
   end note
 ```
+
+**Which of those states a projection can actually report.** `RunStatus` in `run/projection.ts`
+has seven members — `queued`, `running`, `awaiting_gate`, `interrupted`, `succeeded`,
+`failed`, `cancelled`. The rest of the diagram is the LIFECYCLE, not the read model:
+`Submitted`, `Compiling` and `Rejected` all happen before or instead of the first fold, so a
+run in one of them has no projection to report; `Cancelling` and `Rewound` are transitions
+that complete inside one call. **`Compensating` was in this diagram and is gone**, because
+nothing executes a compensation and a state nothing can enter is not a transition that
+completes quickly — it is a promise. See D5.2.
 
 ### Task
 
@@ -64,13 +71,19 @@ stateDiagram-v2
   Running --> Cancelled: run cancelled or join short-circuit
   Leased --> Ready: lease expired (worker died) — re-lease at attempt+1
   Pending --> Skipped: an upstream branch failed with onBranchError=skip
-  Failed --> Compensating: a compensation edge exists
-  Compensating --> Failed
   Succeeded --> [*]
   Failed --> [*]
   Cancelled --> [*]
   Skipped --> [*]
 ```
+
+**And which of those a `TaskRecord` can report.** `TaskState` has nine members — `pending`,
+`ready`, `leased`, `awaiting_gate`, `retrying`, `succeeded`, `failed`, `skipped`,
+`cancelled`. `Running` and `Committing` are phases inside one `executeTask` call and never
+survive a commit, so nothing folds them; **`Compensating` is gone for the same reason as on
+the Run FSM.** Two of the nine are reachable only in principle: `task.cancelled` and
+`task.skipped` are declared event types that nothing appends (register **C1**), so `skipped`
+and `cancelled` are states the fold can express and no run currently reaches.
 
 ### Step
 
@@ -287,7 +300,7 @@ separate leak-reaper.
 | 1 · warn | at 80 % — emit `budget.warning`, surface in UI | `budget.reserved{warn:true}` |
 | 2 · degrade | switch to the fallback chain's `degrade: true` entry; reduce `maxTurns` | `policy.decided{degraded:true}` |
 | 3 · gate | suspend and ask a human to raise the ceiling or approve continuation | `gate.raised{kind:"budget"}` |
-| 4 · fail | `E_BUDGET_EXHAUSTED`; the Run fails, compensations run | `budget.exhausted` |
+| 4 · fail | `E_BUDGET_EXHAUSTED`; the Run fails. **No compensation runs** — nothing executes one; see D5.2 | `budget.exhausted` |
 
 ---
 

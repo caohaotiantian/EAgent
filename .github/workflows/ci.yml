@@ -16,8 +16,15 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # Order matters: typecheck emits dist/, which the surface guard reads.
+      # Order matters: typecheck emits dist/, which the surface guard reads. It builds with
+      # `tsc -b --force`, so the .d.ts the surface guard diffs is always this commit's.
+      # A fresh checkout has no dist/ and would build anyway; the flag is for every other
+      # machine, and CI is where its cost is paid rather than where its value is.
       - run: npm run typecheck
       - run: npm test
+      # The only automatic enforcement of invariant 1. `build:binary`'s esbuild metafile
+      # backstop is NOT run here — it needs the SEA toolchain and ~115 MB of output — so
+      # this script is on its own, which is why it grew a third check for the loads a
+      # parser cannot read (createRequire, computed import(), require).
       - run: node scripts/check-zero-dep.mjs
       - run: node scripts/check-surface.mjs

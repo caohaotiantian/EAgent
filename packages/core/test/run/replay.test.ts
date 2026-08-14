@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES } from "../../src/errors.ts";
+import { runEvalSuite } from "../../src/evolution/gate.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
-import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
@@ -11,7 +13,7 @@ import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry } from "../../src/run/registry.ts";
 import { ReplayEffects, replayRun } from "../../src/run/replay.ts";
 import { conformsToGraph, reconstructGraph, shouldExport, spansFrom } from "../../src/telemetry/spans.ts";
-import { DOCS, compileSkeleton, harness, resolver } from "./skeleton.ts";
+import { DOCS, SKELETON_TENANT_CAPS, SKELETON_TOOLS, compileSkeleton, harness, resolver, skeletonSpec } from "./skeleton.ts";
 
 // A DEPLOYMENT TOKEN KEY, because the two span assertions below read `pii` attributes and
 // `redactAttributes` omits those entirely when none is configured — see `deploymentKey` in
@@ -560,4 +562,186 @@ test("A GATE INSIDE A LOOP IS REPLAYED PER ITERATION, not per node", async () =>
     .sort((a, b) => a.raisedAtSeq - b.raisedAtSeq)
     .map((g) => `${g.taskId}:${g.decision}`);
   assert.deepEqual(decisions, ["gate@root#0:approve", "gate@root#1:reject"], "each iteration got its own answer back");
+});
+
+// ── what a recorded result is bound to ───────────────────────────────────────
+//
+// Invariant 4 says replay serves recorded results. It does not say "serves them to
+// whatever asks". These tests hold the two bindings that make the difference: the
+// GRAPH the results came out of, and the CALL each individual result answered.
+
+const REPLAY_ENGINE = (h: ReturnType<typeof harness>) => ({
+  tools: h.engine.tools,
+  functions: h.engine.functions,
+  models: h.engine.models,
+  policy: { granted: ["fs:read", "fs:write"] },
+});
+
+/**
+ * The skeleton with ONE tool argument VALUE changed — a graph that writes somewhere else.
+ *
+ * Chosen because it is the hardest case for everything except the graph hash: same nodes,
+ * same edges, same effect keys, same argument SHAPE, same recorded results. Nothing about
+ * the run observably differs, which is exactly why the recorded run's identity has to be
+ * carried by something other than the shape of what it did.
+ */
+function writesElsewhere(): RunGraph {
+  const base = skeletonSpec();
+  return compileSkeleton(
+    skeletonSpec({
+      nodes: base.nodes.map((x) =>
+        x.id === ("write" as NodeId)
+          ? { ...x, tool: { name: "fs.write", version: "1.0", args: { path: "out/OWNED.md", body: "${merged.markdown}" } } }
+          : x,
+      ),
+    }),
+  );
+}
+
+test("A MODIFIED GRAPH DOES NOT REPLAY GREEN — the recorded results belong to one graph", async () => {
+  const { h, graph, runId } = await recorded();
+  const tampered = writesElsewhere();
+  assert.notEqual(tampered.graphHash, graph.graphHash, "the fixture has to actually be a different graph");
+
+  const report = await replayRun({ store: h.store, runId, graph: tampered, engine: REPLAY_ENGINE(h) });
+
+  // Everything that used to be the whole verdict still says "fine": every recorded effect
+  // was consumed, every outcome was known, and every task and channel matched.
+  assert.deepEqual(report.unservedEffects, [], "the changed graph consumed the same effect keys");
+  assert.equal(report.hermetic, true);
+
+  assert.equal(report.match, false, "a replay against a graph that did not produce these results is a divergence");
+  assert.equal(report.graph.recorded, graph.graphHash);
+  assert.equal(report.graph.replayed, tampered.graphHash);
+  assert.equal(report.graph.match, false);
+
+  const frame = report.frames.find((f) => f.kind === "graph.bound");
+  assert.ok(frame, "the divergence is a frame, so `loom replay` prints it and exits non-zero");
+  assert.equal(frame.expected, graph.graphHash);
+  assert.equal(frame.actual, tampered.graphHash);
+});
+
+test("the same graph still binds, so the check is not vacuous", async () => {
+  const { h, graph, runId } = await recorded();
+  const report = await replayRun({ store: h.store, runId, graph, engine: REPLAY_ENGINE(h) });
+  assert.equal(report.graph.match, true);
+  assert.equal(report.graph.recorded, graph.graphHash);
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match), null, 1));
+});
+
+test("`onGraphChange: \"throw\"` refuses to serve anything at all", async () => {
+  const { h, graph, runId } = await recorded();
+  const before = h.writes.length;
+
+  await assert.rejects(
+    () => replayRun({ store: h.store, runId, graph: writesElsewhere(), engine: REPLAY_ENGINE(h), onGraphChange: "throw" }),
+    (e: unknown): true => {
+      const le = e as { code?: string; details?: { recorded?: string } };
+      assert.equal(le.code, CODES.E_REPLAY_DIVERGENCE);
+      assert.equal(le.details?.recorded, graph.graphHash, "the error names the graph the journal belongs to");
+      return true;
+    },
+  );
+  assert.equal(h.writes.length, before);
+});
+
+test("`onGraphChange: \"allow\"` is the named opt-out the eval gate needs", async () => {
+  const { h, graph, runId } = await recorded();
+  const tampered = writesElsewhere();
+
+  const report = await replayRun({ store: h.store, runId, graph: tampered, engine: REPLAY_ENGINE(h), onGraphChange: "allow" });
+
+  assert.equal(report.match, true, "opting out is what lets a candidate be judged on its own expectations");
+  // The FACT is still reported. Opting out changes the verdict, never the record.
+  assert.equal(report.graph.match, false);
+  assert.equal(report.graph.recorded, graph.graphHash);
+  assert.equal(report.frames.some((f) => f.kind === "graph.bound"), false, "…and no frame, so `match` is clean");
+});
+
+test("THE EVAL GATE STILL REPLAYS A CANDIDATE GRAPH — the check did not make `runEvalSuite` unreachable", async () => {
+  // `runEvalSuite`'s entire job is replaying a recording against a DIFFERENT graph, and it
+  // calls `replayRun` with no opt-out. This is the test that says the default check left
+  // that call site working: a candidate still gets judged on the case's `expect` block.
+  const { h, runId } = await recorded();
+
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: {
+      name: "s",
+      version: 1,
+      frozen: true,
+      frozenAt: 1_000,
+      cases: [{ id: "a", runId, mustPass: true, expect: { status: "succeeded" } }],
+    },
+    graph: writesElsewhere(),
+    engine: REPLAY_ENGINE(h),
+  });
+
+  assert.equal(report.passed, 1, JSON.stringify(report.cases[0]?.reasons));
+  assert.equal(report.cases[0]?.replay.graph.match, false, "…and the gate can see that the graph changed");
+});
+
+// ── the CALL a recorded result answered ──────────────────────────────────────
+
+const FS_APPEND = {
+  name: "fs.append",
+  version: "1.0",
+  capabilities: ["fs:write"],
+  irreversibility: "reversible_write" as const,
+  idempotent: false,
+};
+
+/**
+ * A candidate that calls a DIFFERENT TOOL at the same effect key.
+ *
+ * Effect keys are `taskId:kind:ordinal` and carry no fact about the call itself, so
+ * `write@root#0:tool:0` names the same slot whichever tool the node points at. The
+ * recorded `fs.write` result is therefore served to an `fs.append` call, and the graph
+ * hash is the only thing that used to notice — which is no help to the one caller that
+ * legitimately replays against a different graph.
+ */
+function appendsInstead(): RunGraph {
+  const base = skeletonSpec();
+  return compileOrThrow({
+    spec: skeletonSpec({
+      nodes: base.nodes.map((x) =>
+        x.id === ("write" as NodeId)
+          ? { ...x, tool: { name: "fs.append", version: "1.0", args: { path: "out/summary.md", body: "${merged.markdown}" } } }
+          : x,
+      ),
+    }),
+    resolver: resolver(),
+    tools: { ...SKELETON_TOOLS, "fs.append": FS_APPEND },
+    tenantCapabilities: SKELETON_TENANT_CAPS,
+  });
+}
+
+test("A RECORDED RESULT IS NOT SILENTLY SERVED TO A DIFFERENT CALL", async () => {
+  const { h, runId } = await recorded();
+  h.tools.register({
+    ...FS_APPEND,
+    description: "Append to a file.",
+    parameters: { type: "object", properties: { path: { type: "string" }, body: { type: "string" } }, required: ["path", "body"] },
+    execute: () => {
+      throw new Error("a tool body ran during a replay");
+    },
+  });
+
+  // Opted out of the graph-hash check ON PURPOSE: this is the case the audit called the
+  // load-bearing half — the one that still works when the hash legitimately changed.
+  const report = await replayRun({ store: h.store, runId, graph: appendsInstead(), engine: REPLAY_ENGINE(h), onGraphChange: "allow" });
+
+  assert.deepEqual(report.unservedEffects, [], "the same keys were consumed, which is the whole problem");
+  assert.equal(report.match, false, "serving one call's result to another call is a divergence");
+  assert.ok(report.frames.some((f) => f.kind === "effect.rebound" && !f.match));
+  assert.deepEqual(
+    report.reboundEffects.map((r) => [r.key, r.recorded, r.replayed]),
+    [["write@root#0:tool:0", "fs.write@1.0({body:string,path:string})", "fs.append@1.0({body:string,path:string})"]],
+  );
+});
+
+test("an unchanged run rebinds nothing", async () => {
+  const { h, graph, runId } = await recorded();
+  const report = await replayRun({ store: h.store, runId, graph, engine: REPLAY_ENGINE(h) });
+  assert.deepEqual(report.reboundEffects, []);
 });

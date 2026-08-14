@@ -8,15 +8,19 @@
  * Deliberately narrow. Only facts a machine can verify are pinned here; prose stays
  * prose, and the JOURNAL is a record of what happened and is never rewritten to match.
  *
- * Three registries carry the exceptions, all of the same shape — an exact set, each row
+ * Four registries carry the exceptions, all of the same shape — an exact set, each row
  * with a reason, so that closing a gap fails the suite and sends its author to the
  * paragraph that has been promising it:
  *
  *   - `DESIGNED_NOT_BUILT` — identifiers the corpus names that `src/` does not have.
  *   - `NEVER_RAISED` — error codes that exist and that nothing throws.
- *   - `NEVER_APPENDED` — event types that exist and that nothing writes. Newest, and added
- *     because a declared-folded-never-appended event was the root cause of a severe
- *     authorization defect; see its docstring.
+ *   - `NEVER_APPENDED` — event types that exist and that nothing writes. Added because a
+ *     declared-folded-never-appended event was the root cause of a severe authorization
+ *     defect; see its docstring.
+ *   - `ABSENT_CONTEXT_METHODS` — methods the corpus tells an author to call on a node
+ *     body's `ctx` and that no node body has. Newest, and the only one about an
+ *     INSTRUCTION rather than a description: `ctx.effect(key, fn)` was the sanctioned way
+ *     to do the thing invariant 4 requires, in five places, and has never existed.
  *
  * ## THE ABSENCE MARKERS — read this before silencing anything
  *
@@ -49,8 +53,13 @@
  *     silence one: a rule the compiler cannot emit is an author writing graphs against a
  *     diagnostic that will never arrive, and there is no version of that worth a caveat.)
  *     Anything else fails, so the marker cannot decay into a general-purpose "ignore me".
- *     Concepts that are not identifiers (a state in an FSM, a scheduling policy, a
- *     method) get prose, not a marker.
+ *     Concepts that are not identifiers (a state in an FSM, a scheduling policy) get
+ *     prose, not a marker. **A METHOD is the one that has since grown a mechanism**, in
+ *     two shapes, because "get prose" turned out to mean "and nobody will ever check it":
+ *     a method on a doc `export interface` is commented out INSIDE the fenced block, where
+ *     it still renders for a reader and stops being a declaration (see D3.5's `health()`);
+ *     a method the corpus tells an author to CALL on a node body's `ctx` goes in
+ *     `ABSENT_CONTEXT_METHODS` with the files allowed to name it. Neither is a marker.
  *  2. **It is file-scoped.** A marker covers the identifier only in the file that carries
  *     it. Marking `loom.scheduler.tick` in D9 does not license an unqualified claim about
  *     it in D12 — a reader of D12 has to be told there too.
@@ -65,6 +74,14 @@
  *     from `src/`. Mark something that exists and the suite goes red, so markers cannot
  *     be sprayed defensively and cannot outlive the gap they describe: the day the span
  *     is emitted, this test tells you to delete the caveat.
+ *
+ *     "ABSENT FROM `src/`" MEANS ALL OF `src/`, AND FOR THREE WAVES IT DID NOT. The check
+ *     answered from `telemetry/spans.ts` alone, so the same line — `({ name:
+ *     "loom.scheduler.tick" })` — was caught in `spans.ts` and INVISIBLE in a new file one
+ *     directory away, with five documents still hedging the name as unbuilt. Both halves
+ *     are now read: the tracer's own names, and any other `loom.*` literal anywhere under
+ *     `src/`. See `loomLiteralsInSrc`, and the separate test that pins the premise the
+ *     cheaper reads still rest on.
  *  5. **A marker inside an HTML comment silences nothing.** `<!-- DESIGNED-NOT-BUILT(x) -->`
  *     is found by the guard and rejected by it. Rule 2's entire rationale is that the
  *     reader of *this* document has to be told, and a caveat that renders as nothing
@@ -143,7 +160,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -572,8 +589,43 @@ const attrNames = new Set(matches(SPANS_TS, LOOM_ATTR_KEY));
 /** Everything in the `loom.*` namespace the code really produces, of either kind. */
 const builtTelemetry = new Set([...spanNames, ...attrNames]);
 
-/** `loom.*` tokens that were never telemetry: an apiVersion and a config filename. */
-const NON_TELEMETRY = new Set(["loom.dev", "loom.yaml"]);
+/**
+ * `loom.*` tokens that were never telemetry — an apiVersion, a config filename, a
+ * localStorage key, an example hostname in an error message.
+ *
+ * A NAMED allow-list, and it has to be named: "assert no file outside `spans.ts` contains a
+ * `loom.*` literal" fails on day one against `"loom.token"`, and a guard that fails on
+ * correct code on the day it lands is a guard that gets deleted on the day it lands.
+ */
+const NON_TELEMETRY = new Set(["loom.dev", "loom.yaml", "loom.token", "loom.internal"]);
+
+/**
+ * Every `loom.*` string literal ANYWHERE under `src/`, not just in `telemetry/spans.ts`.
+ *
+ * Rule 4 — "a stale marker fails" — and `design/loom/README.md` both promised that a marker
+ * is checked against the CODE. `absentFromCode` answered from `builtTelemetry`, which is
+ * built from one file. Reproduced in a full tree copy, both directions:
+ *
+ *   - a NEW file `src/telemetry/_probe.ts` containing `({ name: "loom.scheduler.tick" })`
+ *     → **36/36 green**, with a ninth `loom.*` name live in `src/` and five design documents
+ *     still hedging it as unbuilt;
+ *   - the IDENTICAL line appended to `telemetry/spans.ts` instead → **34 pass / 2 fail**.
+ *
+ * Byte-identical code, one directory apart. The realistic trigger is not somebody building
+ * the scheduler — spans are a fold, so that name would land in `spans.ts`, where the guard
+ * already catches it. It is a refactor hoisting the literals into a constants module
+ * (`const ATTR = { REPLAYED: "loom.replayed" }`), which blinds `absentFromCode`, the
+ * eight-span count and the doc-side check at once. `spans.ts` is already ~1400 lines.
+ *
+ * Used ONLY by `absentFromCode`. `spanNames`, `attrNames` and `builtTelemetry` stay exactly
+ * what they were, so the eight-span count and the doc-side checks keep meaning "what
+ * `spans.ts` produces" — which is the question those ask. The premise that makes the two the
+ * same set is pinned separately, below, rather than assumed.
+ */
+const loomLiteralsInSrc = new Set<string>();
+for (const file of sourceFiles()) {
+  for (const m of stripTsComments(readFileSync(file, "utf8")).matchAll(LOOM_LITERAL)) loomLiteralsInSrc.add(m[1]!);
+}
 
 const declaredCodes = new Set(Object.keys(CODES));
 
@@ -679,9 +731,14 @@ const DESIGNED_NOT_BUILT: ReadonlyArray<{
   },
 ];
 
-/** Is this identifier absent from the code — the thing a marker asserts? */
+/**
+ * Is this identifier absent from the code — the thing a marker asserts?
+ *
+ * "The code" is all of `src/`, not `telemetry/spans.ts`. See `loomLiteralsInSrc` for the
+ * reproduction of what the one-file version missed.
+ */
 function absentFromCode(symbol: string): boolean {
-  if (symbol.startsWith("loom.")) return !builtTelemetry.has(symbol);
+  if (symbol.startsWith("loom.")) return !builtTelemetry.has(symbol) && !loomLiteralsInSrc.has(symbol);
   if (symbol.startsWith("E_")) return !declaredCodes.has(symbol);
   return false;
 }
@@ -855,6 +912,27 @@ test("every quoted loom.* literal in spans.ts is either a span NAME or an attrib
   // classified.
   const unclassified = [...new Set(matches(SPANS_TS, LOOM_LITERAL))].filter((s) => !spanNames.has(s) && !attrNames.has(s)).sort();
   assert.deepEqual(unclassified, [], "teach this guard which of the two it is before the counts below can be trusted");
+});
+
+test("SPANS.TS IS THE ONLY FILE THAT NAMES A loom.* SPAN OR ATTRIBUTE", () => {
+  // The premise three checks above rest on, pinned instead of believed. `spanNames`, the
+  // eight-count, and the doc-side "is this name real?" check all read ONE file, and the
+  // argument for that has always been a design fact — spans are a pure fold of journal
+  // events, so the fold lives in one place. Nothing enforced it. A constants module, or a
+  // second tracer, and all three go quietly blind together.
+  //
+  // `absentFromCode` no longer depends on this premise (it reads every file), so this test
+  // is not load-bearing for rule 4 — it is the tripwire that says the CHEAP reads above
+  // have stopped being complete, and names the two choices: move the literal back, or teach
+  // those three checks about a second source.
+  const strays: string[] = [];
+  for (const file of sourceFiles()) {
+    if (file.endsWith("/telemetry/spans.ts")) continue;
+    for (const m of stripTsComments(readFileSync(file, "utf8")).matchAll(LOOM_LITERAL)) {
+      if (!NON_TELEMETRY.has(m[1]!)) strays.push(`${file.slice(SRC_DIR.length)}: ${m[1]}`);
+    }
+  }
+  assert.deepEqual(strays, [], "a loom.* name outside the tracer — move it back, or widen builtTelemetry and this allow-list deliberately");
 });
 
 test("spans.ts emits exactly the eight the design says it does", () => {
@@ -1313,6 +1391,109 @@ test("A DOC INTERFACE DECLARES ONLY METHODS THE CODE OF THAT NAME REALLY HAS", a
   assert.deepEqual(drift, [], "build it, or comment it out inside the `ts` block and say in prose that it is not built");
 });
 
+// ── Prose method calls on a node body's context ──────────────────────────────
+
+/**
+ * The `src/` interfaces a document means when it writes `ctx`.
+ *
+ * A `function` body is handed a `FunctionContext`; a tool's `execute` is handed a
+ * `ToolContext`. The union is what "`ctx`" can be, so a prose `ctx.x(…)` is checked against
+ * both — a method on either is a real instruction to somebody.
+ */
+const CONTEXT_INTERFACES = ["ToolContext", "FunctionContext"] as const;
+
+/** A backticked or bare prose call on `ctx`. Anchored so `x.ctx.y(` is not read as `ctx.y(`. */
+const CTX_CALL = /(?<![A-Za-z0-9_.])ctx\.([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
+/**
+ * Context methods the corpus names that NO node body has.
+ *
+ * Same shape and same discipline as `DESIGNED_NOT_BUILT`, and it exists for the same reason:
+ * CLAUDE.md's invariant 4 and four design documents instructed authors to route all
+ * nondeterminism through `ctx.effect(key, fn)`, and `ctx.effect` has never existed anywhere
+ * in this repo. Reproduced: a `function` resource written exactly as the documents said,
+ * invoked with the verbatim context `Engine.#runFunction` builds, throws
+ * `TypeError: ctx.effect is not a function` — and there is NO typecheck between author and
+ * runtime, because a function resource's body is source text compiled by `vm.runInContext`.
+ * The documented call reaches the runtime unchecked.
+ *
+ * Every check in this file was structurally blind to it: `MARKER_RE` admits only `loom.*`
+ * and `E_*`; rule 1 says a method gets prose rather than a marker; and the method-name check
+ * iterates doc `export interface` blocks, of which there is none for any context type.
+ *
+ * `namedIn` is an equality, exactly as `markedIn` is. Delete a row when the last document
+ * naming it is fixed — the test will tell you.
+ */
+const ABSENT_CONTEXT_METHODS: ReadonlyArray<{
+  readonly method: string;
+  readonly why: string;
+  readonly namedIn: readonly string[];
+}> = [
+  {
+    method: "effect",
+    why:
+      "the effect boundary is INSIDE `Engine` — `effectKey(taskId, kind, ordinal)` from ids.ts, with kinds " +
+      "model/tool/subgraph/summarize — and is not reachable from a node body at all. 00-OVERVIEW and 08-PLAN " +
+      "still INSTRUCT authors to call it, which is the defect rather than a caveat: fix those two sentences, " +
+      "then this row is down to HANDOFF D11, which names it only to record the gap",
+    namedIn: ["00-OVERVIEW.md", "08-PLAN.md", "HANDOFF.md"],
+  },
+  {
+    method: "random",
+    why:
+      "no seeded PRNG exists. `effect.started` declares a `random` kind nothing appends, and `SAFE_GLOBALS` " +
+      "passes `Math` through whole, so `Math.random()` runs unrecorded inside a function resource while the " +
+      "sanctioned alternative does not exist. D9.5 row 5 and HANDOFF D11 name it to say so; 08-PLAN R4 still " +
+      "names it as a mitigation, which is the half to fix",
+    namedIn: ["05-RESOURCES-OBSERVABILITY.md", "08-PLAN.md", "HANDOFF.md"],
+  },
+];
+
+test("A PROSE `ctx.x(…)` NAMES A METHOD A NODE BODY REALLY HAS", () => {
+  const interfaces = exportedInterfaces();
+  const have = new Set<string>();
+  for (const name of CONTEXT_INTERFACES) {
+    const iface = interfaces.get(name);
+    assert.ok(iface, `${name} is no longer an \`export interface\` in src/ — re-point this check`);
+    for (const method of iface.methods) have.add(method);
+  }
+  // Not a floor: if these two ever declare nothing, the check below passes vacuously and
+  // would report every real call as absent, which is the crying-wolf failure.
+  assert.ok(have.size >= 2, `only ${have.size} context methods found — the parse broke, not the docs`);
+
+  const registered = new Map(ABSENT_CONTEXT_METHODS.map((e) => [e.method, new Set(e.namedIn)] as const));
+  const actual = new Map<string, Set<string>>();
+  const drift: string[] = [];
+
+  for (const [file, doc] of DOCS) {
+    for (const h of hits(doc.scan, CTX_CALL)) {
+      if (have.has(h.name)) continue;
+      const allowed = registered.get(h.name);
+      if (allowed === undefined) {
+        drift.push(`${file}:${h.line} instructs the reader to call ctx.${h.name}(), which no node body has`);
+        continue;
+      }
+      (actual.get(h.name) ?? actual.set(h.name, new Set()).get(h.name)!).add(file);
+      if (!allowed.has(file)) drift.push(`${file}:${h.line} names ctx.${h.name}(), and the registry does not list this file`);
+    }
+  }
+  assert.deepEqual(drift, [], "build it, reword the sentence, or add a row to ABSENT_CONTEXT_METHODS deliberately");
+
+  const stale: string[] = [];
+  for (const entry of ABSENT_CONTEXT_METHODS) {
+    if (have.has(entry.method)) {
+      stale.push(`ctx.${entry.method}() EXISTS now — delete the row and the caveats around it`);
+      continue;
+    }
+    const files = [...(actual.get(entry.method) ?? [])].sort();
+    if (files.length === 0) stale.push(`ctx.${entry.method}(): in the registry, named by no document`);
+    else if (files.join(",") !== [...entry.namedIn].sort().join(",")) {
+      stale.push(`ctx.${entry.method}(): named in [${files.join(", ")}], registry says [${[...entry.namedIn].sort().join(", ")}]`);
+    }
+  }
+  assert.deepEqual(stale, [], "update `namedIn` in the same change that moves the sentence");
+});
+
 // ── D3.17–D3.24: the boundary error taxonomy (gap G1) ────────────────────────
 
 test("EVERY ERROR CODE THE INTERFACE DOC NAMES ACTUALLY EXISTS", () => {
@@ -1408,6 +1589,25 @@ test("the DoD does not claim anything is PROVEN without naming its evidence", ()
     const evidence = cells[cells.length - 2] ?? "";
     assert.ok(evidence.length > 25, `a PROVEN row with no evidence:\n  ${line}`);
   }
+});
+
+test("EVERY TEST FILE THE DoD CITES AS EVIDENCE EXISTS", () => {
+  // The floor above counts characters, which a row can satisfy by being wordy. This asks the
+  // one question that has an answer: the row says a test proves it — is that test there?
+  //
+  // Written because row 3.1 said "`kill -9` with a gate open, resumed from a new process"
+  // and no such test existed anywhere in the tree. That particular row named no PATH, so
+  // this check would not have caught it and the honest claim is narrower: what this closes
+  // is the rename. A row citing `test/run/delivery.test.ts` goes stale the day that file
+  // moves, and nothing else in this suite would notice.
+  //
+  // Passes on the tree it was written in — all ten cited paths resolve. A tightening, not a
+  // correction.
+  const doc = design("99-DOD.md");
+  const missing = [...new Set([...doc.matchAll(/(?<![A-Za-z0-9_/.])(test\/[A-Za-z0-9_./-]+\.ts)/g)].map((m) => m[1]!))]
+    .filter((p) => !existsSync(join(SRC_DIR, "..", p)))
+    .sort();
+  assert.deepEqual(missing, [], "the DoD cites a test file that is not in packages/core/ — a rename left the evidence dangling");
 });
 
 // ── D5: the node and edge taxonomy ───────────────────────────────────────────

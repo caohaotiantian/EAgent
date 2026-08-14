@@ -25,13 +25,31 @@ graph LR
 | Type | Guarantees | Reads/writes state | Model? | Tools? | Deterministic | Default posture | Can suspend |
 |---|---|---|---|---|---|---|---|
 | `function` | Pure TS/JS over declared channels. Same input hash ⇒ same output. Runs in a worker thread if `cpuBound: true` | yes / yes | no | no | **yes** | inherits | no |
-| `agent` | A bounded ReAct loop from a pinned `AgentProfile`. Bounded by `maxTurns` **and** node budget, whichever binds first. Returns a value matching `outputSchema` or fails | yes / yes | yes | yes | no (recorded) | inherits | yes (tool gate) |
+| `agent` | A bounded ReAct loop from a pinned `AgentProfile`. Bounded by `maxTurns` **and** node budget, whichever binds first. Returns a value matching `outputSchema` or fails | yes / yes | yes | yes | no (recorded) | **`max` over every tool it can REACH** | yes — **before the first turn, never inside one** |
 | `tool` | Exactly one `ToolExecutor.invoke`. No model call. The only node type whose irreversibility class is known statically | yes / yes | no | one | no (recorded) | **from tool's irreversibility class** | yes (policy gate) |
 | `router` | Selects a subset of its declared outgoing edges. **Cannot write state.** Two modes: `expression` (deterministic) or `model` (an agent picks from the *closed set* of declared edge ids) | yes / **no** | mode-dependent | no | expression: yes | inherits | no |
-| `join` | A barrier over named incoming branches. Applies channel reducers in branch-coordinate order. Declares `mode`, `onBranchError`, `timeoutMs` | yes / yes | no | no | **yes** | inherits | no |
+| `join` | A barrier over named incoming branches. Applies channel reducers in branch-coordinate order. Declares `mode` and `onBranchError`; `timeoutMs` is optional and **enforced by nothing — there is no join deadline** | yes / yes | no | no | **yes** | inherits | no |
 | `evaluator` | Produces a typed `Verdict {pass, score 0..1, reasons[], evidence[]}`. May be a function (assertions) or an agent (rubric judge). **Its output is the primary non-human signal for the evolution loop** | yes / yes | optional | optional | function: yes | inherits | no |
 | `human_gate` | Raises a durable `HumanGate` and suspends the Run. Resumes on `gate.decided`. Its decision may write channels (`edit`) or select edges (`redirect`) | yes / yes | no | no | **no** (human input is an Effect) | **`in` by definition** | **yes, always** |
 | `subgraph` | Executes a pinned child `GraphSpec` with an explicit channel mapping in/out. Its own budget slice is carved from the parent's. Depth-limited | mapped | — | — | inherits | inherits (`max` with child's) | yes |
+
+**Reading the last two columns.** "Inherits" is shorthand for the `max` fold in
+`graph/compile.ts`: the system floor, the graph's `policy.posture`, a class floor from
+every tool the node can REACH, and a data floor from the classification of every channel
+it reads or writes. The `agent` row is called out because it used to say "inherits" and
+was wrong in a way that mattered: an agent node names no tool — its model picks from
+`agent.tools` at run time — so keying the class floor on `node.tool` answered `read_only`
+for every agent, and an agent that could reach a destructive tool floored at `out`.
+`reachableToolNames` in `graph/spec.ts` is now the one place that answers "which tools",
+and oversight, capability accounting and the rewind refusal all read it.
+
+An agent's suspension is likewise narrower than "yes". It suspends at TASK granularity,
+**before** the first turn, when that floor makes `PolicyEngine.decide` return `gate`.
+Inside a turn there is no suspension available: a `gate` decision reaching
+`Engine.#invokeTool` is a **refusal** — the conversation of a turn lives in memory, so a
+gate raised there could not be answered after a restart. The approval of the node is
+carried into the turn as `nodeApproved`, which is what stops the refusal from turning a
+human's "yes" into a run that succeeds having done none of the work. See D3.6.
 
 **Three invariants that make the taxonomy load-bearing rather than decorative:**
 
@@ -43,10 +61,11 @@ graph LR
    `E_ROUTE_INVALID`, which takes the node's declared `fallbackEdge` or fails the Task.
    This is the concrete mechanism behind "the graph, not the model's context, decides
    what may happen next."
-3. **Only `human_gate`, `agent`, `tool`, and `subgraph` can suspend.** `function`,
-   `router`, and `join` are guaranteed to terminate without external input, which is
-   what lets the scheduler treat them as cheap and run them inline on the committing
-   worker rather than re-queueing.
+3. **Only `human_gate`, `agent`, `tool`, and `subgraph` can suspend** — and all four
+   suspend *between* Tasks, never inside a node body. `function`, `router`, and `join`
+   are guaranteed to terminate without external input, which is what lets the scheduler
+   treat them as cheap and run them inline on the committing worker rather than
+   re-queueing.
 
 ---
 
@@ -57,9 +76,9 @@ graph LR
 | `seq` | Unconditional transition | `from`, `to` | — |
 | `conditional` | Taken iff `when` evaluates true, or iff the source router selected this edge id | `when` **xor** source is a `router` | An expression may reference only declared channels; unknown ref ⇒ `GRAPH004` |
 | `fanout` | Instantiates `to` once per element of `over`, each in its own branch coordinate | `over` (channel path), `as` (item channel), `maxWidth` | `maxWidth` mandatory and ≤ `policy.expansion.maxFanout` (`GRAPH007`) |
-| `join` | Barrier. Named branches converge; reducers fold in branch-coordinate order | `branches[]`, `mode`, `onBranchError`, `timeoutMs` | Every branch id must be reachable from a matching `fanout`/split (`GRAPH008`) |
+| `join` | Barrier. Named branches converge; reducers fold in branch-coordinate order | `branches[]`, `mode`, `onBranchError`; `timeoutMs` optional and unenforced | Every branch id must be reachable from a matching `fanout`/split (`GRAPH008`) |
 | `error` | Taken when the source Task terminates with `status:"error"` after retries are exhausted | `from`, `to`, optional `codes[]` | A node whose error is unhandled propagates to the Run — allowed, but warned (`GRAPH011`) |
-| `compensation` | Saga rollback: run `to` to undo `from`'s committed effects. Executed in reverse commit order | `compensates` | Only valid from a node whose tool declares `compensation` (`GRAPH012`) |
+| `compensation` | **A declaration, not a runtime path — see below.** Says that `to` is what would undo `from`'s committed effects | `compensates` | Only valid from a node whose tool declares a `compensation` naming a REGISTERED tool (`GRAPH012`); a compensation that is itself irreversible or externally visible warns |
 | `loop` | Back-edge. Re-instantiates the target with `iteration+1` | `until` (expression), `maxIterations`, optional `budget` | The cycle must contain a node that writes a channel referenced by `until`, and `maxIterations` is mandatory (`GRAPH006`) |
 
 ```mermaid
@@ -88,11 +107,40 @@ graph TB
 |---|---|---|
 | `all` | every branch reaches it | — (waits, then `timeoutMs`) |
 | `any` | the first branch arrives | cancelled with `task.cancelled(reason: join_short_circuit)` |
-| `quorum(k)` | `k` branches arrive (`k` integer or fraction of width) | cancelled after quorum, unless `drain: true` |
+| `quorum(k)` | `k` branches arrive (`k` integer or fraction of width) | cancelled after quorum. **There is no `drain` field**: the runtime always behaves as `drain: false`, so the value that lied was the default, and a field every author had to set to the only thing it could be is worse than no field |
 | `firstSuccess` | first branch with `status:"ok"` | cancelled |
 
-`onBranchError`: `fail` (whole join fails), `skip` (branch contributes nothing; recorded),
-`compensate` (run the branch's compensation chain, then skip).
+`onBranchError`: `fail` (whole join fails), `skip` (branch contributes nothing; recorded).
+**`compensate` is REFUSED at compile time.** It is still in the type — `NodeSpec` is pinned
+public surface — and it used to be accepted and then treated as an exact synonym for `skip`,
+so an author who asked for a failed branch to be rolled back got it silently discarded and
+the graph read as though somebody had thought about the failure. A word that means something
+weaker than it says is worse than not offering the word, so it is a compile error until
+there is a runtime under it, and `#absorbedByJoin` no longer aliases it either.
+
+### Compensation is a compile-time proof and a rewind refusal. Nothing executes one.
+
+This is the single place the corpus says so, and everywhere else that names compensation
+points here. **No code path can take a compensation edge.** `#edgesToTake` breaks on
+`compensation`, and the only other arm — `#errorEdges`, the failure path, which is the one
+path that *could* take one — filters `kind === "error"` alone. `Engine.cancel(runId, reason)`
+has no `compensate` and no `gracePeriodMs`. Reproduced on the incident-triage graph with a
+throwing `k8s.restart` and a recording `k8s.rollback`: the rollback node never got a Task, and
+the run ended **`succeeded`** — an irreversible restart attempted, failed, and not compensated.
+
+What a declared compensation **does** buy, which is real and load-bearing:
+
+- **`Engine.rewind` refuses to cross it.** A committed irreversible effect whose tool declares
+  no compensation makes a rewind past it `E_RESTORE_ILLEGAL`. That refusal reads the field's
+  PRESENCE, which is why `GRAPH012` now requires the name to resolve to a registered tool: a
+  typo, or `compensation: {tool: "noop"}`, bought a legal rewind that undid nothing.
+- **A compensation target is not an entry node.** The edge is excluded from the DAG (it is not
+  forward flow, and including it makes almost every graph look cyclic) but it still counts as
+  an inbound edge, so a rollback node is never scheduled at run start.
+
+Building the executing saga means reverse-commit-order tracking, a `Compensating` run state,
+and `cancel{grace, compensate}` — a feature, not a fix. Until then this section is the
+contract, and `test/graph/compensation-honesty.test.ts` is what keeps it honest.
 
 ---
 
@@ -203,7 +251,8 @@ nodes:
     tool:     { name: string, version: string, args: {} }        # args templated from `reads`
     router:   { mode: expression|model, cases: [{when, take}], fallbackEdge: string, profile?: ResourceRef }
     join:     { branches: [string], mode: all|any|quorum|firstSuccess, k?: number,
-                onBranchError: fail|skip|compensate, timeoutMs: integer, drain: bool }
+                onBranchError: fail|skip,          # `compensate` is in the type and REFUSED
+                timeoutMs?: integer }              # optional, and there is no join deadline
     evaluator:{ kind: assertion|rubric, ref: ResourceRef, threshold: number }
     humanGate:{ ref: ResourceRef }                                # → the OversightPolicy in D7
     subgraph: { ref: ResourceRef, inputs: {child: parent}, outputs: {parent: child}, budgetShare: number }
@@ -786,7 +835,7 @@ sequenceDiagram
   participant EX as Executor (n in-flight Tasks)
   participant TE as ToolExecutor
 
-  OP->>CP: cancel{runId, gracePeriodMs: 15000, compensate: true}
+  OP->>CP: cancel{runId, reason} %% DESIGN: `gracePeriodMs` and `compensate` are not parameters
   CP->>J: append operator.command   %% JOURNALED BEFORE DISPATCH — survives a crash here
   CP->>SC: suspend(runId, "operator") — stop admitting new Tasks
   SC->>EX: abort() on every lease's AbortSignal
@@ -803,7 +852,7 @@ sequenceDiagram
       EX->>J: effect.completed{outcome: "unknown"} · task.cancelled{clean: FALSE}
     end
   end
-  opt compensate: true
+  opt DESIGNED, NOT BUILT — no code path can reach this block
     EX->>EX: walk committed irreversible effects in REVERSE order
     EX->>TE: invoke each declared compensation tool
     EX->>J: task.committed(compensation) ×k
@@ -811,6 +860,12 @@ sequenceDiagram
   SC->>J: run.cancelled{clean: <all tasks clean>, unknownEffects: [...]}
   CP-->>OP: receipt{seq, clean, unknownEffects[]}
 ```
+
+**Two things in that diagram do not exist**, and they are marked in it rather than left for a
+reader to discover: `Engine.cancel` takes `(runId, reason)` — no grace period, no compensate
+flag — and nothing executes a compensation. See "Compensation is a compile-time proof and a
+rewind refusal" under D5.2. The grace/`SIGKILL` ladder *does* exist, at the sandbox boundary,
+which is why the `par` block above is description rather than design.
 
 **The honest part:** `run.cancelled` carries `clean: false` and an explicit
 `unknownEffects[]` list when cancellation raced an irreversible effect. The UI shows this
@@ -972,7 +1027,7 @@ sequenceDiagram
   else the window closes first
     EX->>J: effect.started{k8s.apply}
     OC-->>OP: E_TOO_LATE{closedAtSeq}
-    Note over OP: the only remaining lever is `compensation`,<br/>not `cancel` — and the UI says exactly that.
+    Note over OP: the only remaining lever is `compensation`,<br/>not `cancel` — DESIGNED; today the lever is a rewind REFUSAL, not a rollback.
   end
 ```
 

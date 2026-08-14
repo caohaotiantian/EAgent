@@ -2588,3 +2588,275 @@ the fields that spoke are carried across.
 documented and pinned rather than enforced, and no one-line mutation can express fan-out —
 so the day that changes, `A SUBSCRIPTION IS ONE CONSUMER'S CHANNEL` is the test to change
 deliberately rather than a test to notice failing.
+
+## 2026-08-15 — Close-the-audit — A tool gate inside an agent turn is a refusal, not a suspension
+
+**Context.** `PolicyEngine.decide` returns three effects, and the executor had one place to
+put each: deny, hold, gate. `gate` meant "suspend the Task and raise a `HumanGate`", which is
+exactly right on the path that reaches it from `#executeTask` — the Task boundary is a commit
+boundary, so what has to survive until the human answers is journaled. It is not right on the
+path from inside an agent turn. **A turn's transcript lives in memory.** Suspending there
+would mean a gate raised mid-turn could be answered after a restart onto a conversation that
+no longer exists, and either the turn is silently restarted (the model is asked twice, the
+tool may run twice) or the approval is honoured against a context nobody can reconstruct.
+
+**Decision.** `Engine.#invokeTool` REFUSES on `gate` when the node was not already approved:
+it appends `policy.decided{effect:"deny"}` naming the tool and the reason, and returns an
+error result telling the model that this action needs a human and belongs on a `tool` node,
+which can suspend. The refusal is journaled rather than only returned, because an
+irreversible action that was refused is precisely what an operator reading the trace
+afterwards needs to see, and a string that only the model ever reads is not a durable fact.
+
+**Rejected.** Turn-level durability — journaling the transcript so a mid-turn gate can be
+resumed. It is buildable and it is a different system: it makes the model's context a durable
+entity with its own vocabulary, its own redaction rules and its own replay semantics, to buy
+a suspension that a one-line graph change (put the tool on its own node) already buys.
+
+**Reverses when.** An agent turn becomes durable — a journaled transcript with a resumable
+cursor. At that point `gate` at this call site can raise a real gate, and the sentence in
+D3.6 that calls this a refusal is the one to delete.
+
+## 2026-08-15 — Close-the-audit — `nodeApproved` is a trust assertion, and it is what makes one dispatch path survivable
+
+**Context.** Two changes met. A node's posture became the `max` over every tool it can REACH
+rather than the one it names, so an agent node that can call a destructive tool now floors at
+`in` and gates BEFORE the model runs. And the entry above makes a `gate` decision inside a
+turn a refusal. Composed naively those two are a deadlock that reports success: the human
+approves the node, the model asks for the tool, `#invokeTool` re-decides, gets `gate` again,
+refuses — and the run ends `succeeded` having done none of the work the human said yes to.
+
+**Decision.** `#invokeTool` takes `nodeApproved`, set when `#executeTask` already ran the
+full chain for this node and a human, if asked, said yes. It is a **trust assertion carried
+across a call boundary**, not a second guard chain: the decision is still made in one place
+and the flag says only *that decision has already been made and answered for this Task*.
+`lastDecidedGate(p, taskId)?.decision === "approve"` is where it comes from — the journal,
+not a field the caller could invent. It also suppresses the second pre-irreversible hold, so
+an approved node does not serve its intervention window twice.
+
+**What this deliberately does NOT become.** A capability. `nodeApproved` authorizes the tools
+the NODE declares, because the posture floor that raised the gate was computed from exactly
+that reachable set — so approving the node is approving it to act with the tools it declares.
+It cannot widen the set: the allowlist handed to the model is still computed from the node
+spec before the turn, and a tool name the model invents is refused before dispatch.
+
+**Rejected.** Passing the gate decision itself down and re-deriving trust inside
+`#invokeTool`. It reads as less of a shortcut and is more of one — it puts a second reading
+of the journal on the dispatch path, which is the second guard chain invariant 6 exists to
+forbid, wearing a different hat.
+
+**Reverses when.** Per-call approval exists — a human answering "yes to THIS tool with THESE
+arguments" rather than "yes to this node acting". Then the flag becomes a decision id and the
+chain re-reads it. Until then, widening `nodeApproved` past the node's declared tool set is
+the mutation that turns an approval into a blank cheque, and
+`test/run/agent-tool-oversight.test.ts` is where that has to fail.
+
+## 2026-08-15 — Close-the-audit — `replayThenTail` defaults to `close`, and that is what "gap-free" means
+
+**Context.** D3.9 promised a gap-free reconnect path and the bus promised at-most-once
+delivery, and both were true in isolation. `replayThenTail` reads the journal and then merges
+a live subscription, deduping by seq. The unqualified word "gap-free" is not keepable by
+merging: a consumer can always fall further behind than any bounded queue.
+
+**Decision.** The live half is opened `onOverflow: "close"` by default — deliberately NOT
+`subscribe`'s `drop_oldest` — and the iterator throws `SubscriberOverflowError` carrying a
+resume seq. Nothing consumes the live channel while the journal is being read, so its queue
+is fullest exactly at the seam; `drop_oldest` discards from the OLD end, which is the seam
+itself, and the `seq <= lastSeq` dedupe filters duplicates and never gaps, so the hole would
+leave no trace in the delivered stream. `close` cuts at the new end instead, so what was
+delivered is always a contiguous prefix. **The guarantee is therefore "a contiguous prefix,
+then a throw", and the throw is what makes the first half true.**
+
+`opts` is accepted so a caller can raise `queueSize`. A caller that overrides `onOverflow`
+has chosen at-most-once and must track its own watermark; D3.9's Delivery row now says so.
+
+**Rejected.** `E_SUBSCRIBER_OVERFLOW`. The thrown value is a plain `Error`, not a `LoomError`
+with a `Code`, because it never crosses a process edge — declaring a code would promote a
+local control-flow fact into boundary vocabulary that a `retry.onlyIf` list or an HTTP status
+map could then name. `NOT-IN-CODE(E_SUBSCRIBER_OVERFLOW)` records that, and the drift guard
+pins which of the two marker spellings it may carry so the softer word cannot become the
+cheaper one.
+
+**Reverses when.** The bus grows per-consumer cursors backed by the journal, at which point
+overflow stops being terminal and the throw becomes a resumption rather than a cut.
+
+## 2026-08-15 — Close-the-audit — Cold retention is infinite, because cold is not a cache
+
+**Context.** D9.4's table gave the cold tier "1 y (configurable)", inherited from the shape of
+the hot and warm tiers, which hold spans and metrics.
+
+**Decision.** `DEFAULT_RETENTION.cold` is `Infinity`, and `journal/retention.ts` refuses to
+construct a policy with a finite `cold.retentionMs` unless the caller also passes
+`pruneJournal: true`. The reason is not conservatism about disk. **Cold is where the journal
+comes to rest — `archive` writes the complete event array there and there is no tier beneath
+it — so a finite cold window is a delete however it is spelled.** It would break invariant 2
+(the journal is the only authoritative durable state) and leave the derived audit record
+outliving the log it was derived from, which is the exact coupling the separate audit tier
+exists to prevent, running backwards.
+
+A deployment under an erasure mandate can still have a finite window. It just cannot arrive
+there by leaving a field alone, and the flag it must pass is named for what it does.
+
+**Rejected.** Deriving `cold` from `audit`, or making `pruneJournal` a per-run decision. The
+first re-couples the two windows this design separates on purpose; the second makes replay
+availability a property of a run rather than of the deployment, so "can this run be replayed"
+stops having an answer you can give in advance.
+
+**Reverses when.** A tier is added beneath cold — an offline export whose existence is itself
+journaled. Then a finite cold window is tiering again rather than deletion, and the refusal
+should move down one level rather than being removed.
+
+## 2026-08-15 — Close-the-audit — `realpathSync.native`, because a resolved path is still a string
+
+**Context.** The sandbox jail answers "is this path inside the root?" for paths that do not
+exist yet, so it resolves the deepest existing ancestor and re-appends the missing
+components. The JS `realpathSync` resolves symlinks and **preserves the spelling the caller
+used**.
+
+**Decision.** `realpathSync.native`. On a case-insensitive filesystem — which is the default
+on macOS and common on Windows — two different strings name one file, so a containment or
+deny check compared case-sensitively is walked past by `.LOOM/journal.db`. The native binding
+asks the filesystem and returns the name it actually stores, so the comparison is against one
+canonical spelling rather than against whichever one the caller typed. This is the same error
+as the one a level up, arriving in the resolver instead of in the comparison.
+
+Two neighbouring rules stay as they are and belong to the same claim: a **dangling symlink is
+refused rather than treated as absent** (`lstat` is what tells "link to nothing" from "name
+that was never created"; without it `ws/evil -> /etc/nope` resolves ENOENT like an absent
+name and `open(…, O_CREAT)` then creates `/etc/nope`), and every other resolution failure —
+ELOOP, EACCES, ENAMETOOLONG — is denied, because there is no answer to "is this inside the
+jail?" that a caller can act on when the filesystem will not say where the path leads.
+
+**Rejected.** Case-folding the comparison instead. It needs the guard to know the filesystem's
+collation, which is per-mount and not observable from Node, and it answers the wrong question:
+the jail wants the name the filesystem stores, not a normalization of the name it was given.
+
+**Reverses when.** Node exposes a resolver that reports the mount's case sensitivity, or the
+jail moves to inode identity (`stat` the resolved root once, compare `dev`/`ino` up the
+chain), which is stronger and does not depend on strings at all — that is the direction to go
+if this is ever revisited, not a return to the JS binding.
+
+## 2026-08-15 — Close-the-audit — Egress is checked per hop, not per request
+
+**Context.** The built-in `net.fetch` tool takes an operator's allowlist. `fetch` defaults to
+`redirect: "follow"`, so one check before the call authorized the FIRST url and nothing else:
+any host on the allowlist could redirect the request anywhere, and the allowlist became a
+statement about who you ask rather than about where the bytes come from.
+
+**Decision.** `redirect: "manual"`, and `assertEgressAllowed` runs again on every `Location`,
+with the hop number in the refusal's details. A refusal THROWS rather than returning an error
+result, on every hop for the same reason it does on the first: an egress refusal is a
+capability denial, and the run's error taxonomy is where a denial belongs — collapsing hop 2
+into a `content` string would make a policy violation look like a bad web page.
+
+**Rejected.** Checking only the final url. It is one line shorter and it authorizes every
+intermediate host implicitly, including the one that saw the request headers.
+
+**Reverses when.** The tool grows a proper HTTP client with its own policy hooks, at which
+point the check belongs in the client rather than in the loop — but "the host the bytes came
+from is one the operator named" is the property to keep, not the loop that implements it.
+
+## 2026-08-15 — Close-the-audit — The gate could pass on a tree that does not build
+
+**Context.** `npm run check` is THE gate, and its first arm is `tsc -b`. `tsc -b` is
+incremental, and its up-to-date test is a **timestamp comparison**, not a read of the inputs.
+
+**The reproduction, in a replica of this repo's tsconfig layout.** Source edited, its mtime
+moved behind `dist/`: `tsc -b .` exits 0 having compiled nothing; `node --test` strips types
+rather than checking them; and `node scripts/check-surface.mjs` — the last arm of `check` —
+reads `packages/core/dist/index.d.ts`, which is exactly the file that was not re-emitted, and
+prints `surface guard ok: 1 public exports, unchanged` while `export const
+BRAND_NEW_PUBLIC_EXPORT` sits in `src/index.ts`. Forcing the build turns the same tree into
+`surface guard FAILED … added: BRAND_NEW_PUBLIC_EXPORT`.
+
+**Decision.** `typecheck` and `build` both run `tsc -b --force`. `typecheck:clean` is gone
+(`--force` subsumes it) and `typecheck:fast` is the incremental one, documented in CLAUDE.md
+as an inner-loop command and not a gate. The cost is a full compile of 49 files; the thing
+bought is that "the gate is green" and "the tree builds" are the same statement again.
+
+**What this does NOT fix, said plainly.** The second arm
+(`tsc -p packages/core/tsconfig.test.json`) is not incremental and does include `src/**/*.ts`,
+so an ordinary type error was still caught by it even when the first arm skipped — checked,
+not assumed. What the skip lost was the EMIT, and the emit is what the surface guard reads.
+So the demonstrated failure is a stale public contract rather than a stale type check.
+
+**Rejected.** Forcing only in CI. CI does a fresh checkout and was never exposed; the machine
+that needs the honest answer is the one with a `dist/` already on it.
+
+**Reverses when.** `tsc -b` learns a content-hash up-to-date check, or the build gets big
+enough that a forced compile is felt. `packages/core/test/toolchain-gate.test.ts` reads the
+flags out of `package.json` and hands them to the real compiler, so dropping `--force` fails
+on what the compiler did, not on what the script says.
+
+## 2026-08-15 — Close-the-audit — The zero-dep guard now covers the routes a parser cannot read
+
+**Context.** Invariant 1 has exactly one automatic enforcer. `build:binary`'s esbuild metafile
+backstop — added precisely because the source guard "would NOT catch a transitive import
+introduced through a path it does not scan" — is **not in `ci.yml`**, so nothing runs it
+unattended; and esbuild leaves a runtime `require` as a runtime call, so for the shapes below
+both layers were blind at once.
+
+**What passed the guard before this change**, each reproduced against a fixture tree:
+`createRequire(import.meta.url)("lodash")`, a bare `require("lodash")`, a computed
+`import(NAME)`, a template-literal ``import(`lodash`)``, an `.mjs`/`.mts` file under `src/`
+importing anything at all, `optionalDependencies` (which npm installs by default), and
+`bundleDependencies`. Twelve of the new test file's twenty cases were watched passing.
+
+**Decision.** Three checks instead of two, and the first two are widened rather than patched.
+Check 1 is now an **allowlist** over `/ependencies$/i` — exactly one field, `devDependencies`,
+may be non-empty — which is total against dependency fields npm has not invented yet, where a
+denylist of two names never could be. Check 2 walks every file `ts.createSourceFile` can
+parse and **fails on one it cannot**, so "the guard read nothing here" and "the guard found
+nothing here" stop printing the same thing. Check 3 is new: no file may load a module by a
+route the parser cannot read.
+
+**The trap, paid for once and pinned as a test.** `require` is a legitimate METHOD name here —
+`ToolRegistry.require`, `FunctionRegistry.require`, `ReplayCursor.require`, `Engine.#require`,
+about fifteen call sites — so a rule keyed to the callee's NAME fails the whole build. The
+rule is keyed to its SHAPE: a bare identifier callee, never a property access, never a private
+name. Both directions are rows in `test/check-zero-dep.test.ts`.
+
+**Rejected.** Two things. Validating `node:` specifiers against `builtinModules` — that was
+raised and refuted: `node:` is a reserved scheme never resolved against `node_modules`, so a
+misspelled builtin is a typo rather than a dependency, and it is already `TS2307` under this
+repo's `nodenext` config in every import form. And changing `build-binary.mjs`: esbuild
+genuinely cannot resolve these forms, so the source guard is the right and only place.
+
+**Reverses when.** `src/` legitimately needs a dynamic import — a lazily loaded optional
+backend, say. The rule then needs an allowlist of specifiers rather than a ban, and the
+allowlist has to be checked the same way check 2 checks a static one.
+
+## 2026-08-15 — Close-the-audit — The drift guard's "absent from src/" meant one file
+
+**Context.** Rule 4 of `docs-drift.test.ts` — a stale marker fails — and `design/loom/README.md`
+both promised that a marker is checked against the code. `absentFromCode` answered from
+`builtTelemetry`, which is built from `telemetry/spans.ts` alone.
+
+**Reproduced in a full tree copy, both directions.** A new file `src/telemetry/_probe.ts`
+containing `({ name: "loom.scheduler.tick" })` → **36/36 green**, with a ninth `loom.*` name
+live in `src/` and five documents still hedging it as unbuilt. The identical line appended to
+`spans.ts` instead → **34 pass / 2 fail**. Byte-identical code, one directory apart.
+
+**Decision.** `absentFromCode` reads every `loom.*` literal under `src/`, comment-stripped.
+`spanNames`, `attrNames` and `builtTelemetry` are untouched, so the eight-span count and the
+doc-side checks keep meaning "what `spans.ts` produces" — which is the question those ask.
+The premise that makes the two the same set is pinned by its own test with a **named**
+allow-list (`loom.token`, `loom.internal`, plus the apiVersion and config filename that were
+already there); the obvious version — "no `loom.*` literal outside the tracer" — fails on day
+one against a localStorage key, and a guard that fails on correct code on the day it lands is
+a guard that gets deleted on the day it lands.
+
+Two more checks landed with it. `ABSENT_CONTEXT_METHODS` is a fourth registry, and the only
+one about an INSTRUCTION rather than a description: five places told an author to route
+nondeterminism through `ctx.effect(key, fn)`, which has never existed, and a `function`
+resource's body is source text compiled by `vm.runInContext` — so there is no typecheck
+between the author and the `TypeError`. And any test file the DoD cites as evidence must
+exist, which closes the rename and not the row that names no path at all.
+
+**Rejected.** Widening `DESIGN_DIR` to cover `CLAUDE.md`. It is a separate deliberate change
+with its own reversal condition — the guard already couples `design/loom/*.md` to `src/`
+tightly enough that a code-only commit is red by design, and adding a second normative file
+to that coupling doubles it.
+
+**Reverses when.** The `loom.*` literals move out of `spans.ts` on purpose — into a constants
+module, or a second tracer. The premise test is the one that fails first, and it names the two
+choices rather than a fix, because either is defensible.

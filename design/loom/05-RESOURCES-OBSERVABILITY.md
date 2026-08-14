@@ -624,14 +624,25 @@ configuration warning in this layer.
 |---|---|---|---|---|
 | **Hot** | last 7 d of spans, metrics, run/task read models | SQLite + DuckDB → ClickHouse | 7 d | < 100 ms |
 | **Warm** | 30 d of spans as Parquet, aggregated metrics | local fs → S3 + Athena/ClickHouse | 30 d | seconds |
-| **Cold** | **the full journal**, compressed, per run | local fs → S3 Glacier IR | 1 y (configurable) | minutes |
-| **Audit** | `AuditRecord`s only | separate append-only store, WORM where available | operator's choice; no external mandate applies | seconds |
+| **Cold** | **the full journal**, compressed, per run | local fs → S3 Glacier IR | **infinite**; a finite window needs `pruneJournal: true` | minutes |
+| **Audit** | `AuditRecord`s only | separate append-only store, WORM where available | infinite; operator's choice, no external mandate applies | seconds |
 | **Artifacts** | blobs by digest | local CAS → S3 | referenced-count GC, min 30 d | ms |
 
 The journal sits in **cold** rather than hot because it is large and rarely read — but it
 is never *pruned*, only tiered. Audit records are duplicated into their own store so a
 retention change made for telemetry cost reasons cannot silently shorten the record of
 who approved what.
+
+**Cold's window is infinite, and this table used to say "1 y (configurable)".** The
+correction is not a number change; it is the difference between tiering and deletion.
+Cold is where the journal comes to rest — `archive` writes the complete event array there
+and there is **no tier beneath it** — so a finite cold window is a delete however it is
+spelled, and it would leave the derived audit record outliving the log it was derived
+from. `DEFAULT_RETENTION.cold` is therefore `Infinity`, and `journal/retention.ts`
+**refuses to construct** a policy with a finite `cold.retentionMs` unless the caller also
+passes `pruneJournal: true`. A deployment under an erasure mandate can still have one; it
+just cannot arrive there by leaving a field alone. `hot` and `warm` keep real numbers,
+because they hold spans and metrics — the tiers invariant 8 says may drop data.
 
 ## D9.5 — Deterministic replay
 
@@ -676,7 +687,7 @@ Stated plainly, because a design that claims perfect replay is wrong.
 | 2 | **Redacted fields** | PII is redacted at write time per classification | Serves the redaction token. Any node whose logic depends on the redacted value diverges; the frame is marked `lossy: true` |
 | 3 | **Forked runs with modified inputs** | A fork *re-executes* rather than replaying | Live effects run. `CheckpointStore.restore(fork)` therefore refuses to auto-run past a committed `irreversible ∧ ¬idempotent` effect without an explicit human override |
 | 4 | **Effects with `outcome: unknown`** | The crash happened between `effect.started` and any terminal record | Surfaces the gap explicitly and stops, rather than guessing |
-| 5 | **Wall-clock-dependent *logic*** | `Date.now()` inside a node body is not an effect unless it goes through `ctx.now()` | The compiler bans direct `Date.now()`/`Math.random()` in `function` resources (lint rule at publish); `ctx.now()`/`ctx.random()` are recorded effects |
+| 5 | **Wall-clock- and randomness-dependent *logic*** | **Neither is journaled today, and there is no `ctx.now()`/`ctx.random()` to route them through** — this row promised both. A `function` body is handed `{taskId, signal, now}`, where `now` is the engine's injected clock passed straight through: calling it appends nothing, so a replay re-reads the wall clock. `effect.started` declares `clock` and `random` kinds that nothing in `src/` appends | Partly bans, does not record. `resources/functions.ts` sets `Date: undefined` in the sandbox globals, so `Date.now()` inside a `function` resource throws — but `Math` is passed through **whole**, so `Math.random()` runs, unrecorded, inside the one place the ban was supposed to be total. There is no publish-time lint rule. What replay does with such a node is diverge, without marking the frame. Closing it means a recorded clock effect and a seeded PRNG in the sandbox; until then this is a known lossy case, HANDOFF D11 |
 | 6 | **External system drift on fork** | The world moved on | Only affects `fork`, never `replay` — replay makes no external calls at all |
 
 ## D9.6 — Redaction

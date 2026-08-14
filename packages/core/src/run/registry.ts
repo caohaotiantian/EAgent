@@ -43,11 +43,78 @@ export interface ToolDefinition extends ToolManifestLite {
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> | ToolResult;
 }
 
+/**
+ * The tool set, and the policy on who may change it once a run is under way.
+ *
+ * THE HAZARD. Anything holding this registry can `register()` at any time, and a later
+ * registration shadows an earlier one. That is not a privilege bug — whoever can call
+ * `register()` already executes code in this process — it is an AUDIT bug: a human
+ * approved a gate whose posture was computed from the manifest of definition A, and
+ * definition B is what ran. Nothing in the journal shows the swap, because registration is
+ * process-local and journal-invisible.
+ *
+ * THE KNOB (`registerAfterSeal`). `"allow"` is the default and the status quo: the agent
+ * may register tools during its own lifecycle. `"deny"` refuses any registration made
+ * after `seal()`.
+ *
+ * WHY A SEAL AND NOT A PLAIN BOOLEAN. The knob has to separate two registrations that look
+ * identical from inside `register()`. The embedder's own wiring happens AFTER construction
+ * — `cli.ts` builds the registry and then loops `builtinTools()` into it — so a boolean
+ * fixed at construction time either forbids that loop or forbids nothing. What the
+ * operator wants to deny is registration *during the agent's lifecycle*, and "the
+ * lifecycle has started" is a moment, not a configuration value. `seal()` names the
+ * moment; the option says what crossing it means. The two stay orthogonal on purpose: the
+ * embedder decides WHEN wiring ends, the operator decides WHETHER that boundary bites, and
+ * neither needs the other's answer.
+ *
+ * There is no `unseal()`. A seal the sealed party can lift is not a seal — the same
+ * reasoning that lets nothing but an explicit human `deescalate` lower a posture (R5).
+ *
+ * WHAT THIS DELIBERATELY DOES NOT COVER. `dispose()` still works after the seal. Removing
+ * a shadow moves the registry back toward the manifest that was wired, and gating teardown
+ * would break `combineDisposables` on shutdown. A caller that disposes a BASE registration
+ * post-seal can still change what `get()` answers; closing that needs the registration to
+ * become a journal fact, which is a much larger change than a constructor option.
+ */
 export class ToolRegistry {
   /** Stack per name so `dispose` restores the shadowed definition exactly. */
   readonly #stacks = new Map<string, ToolDefinition[]>();
+  readonly #afterSeal: "allow" | "deny";
+  #sealed = false;
+
+  /**
+   * The option type is inline rather than an exported `ToolRegistryOptions` because
+   * `index.ts` re-exports this module with `export *`, so every exported name lands in the
+   * pinned public surface. One optional field does not earn a pinned name.
+   */
+  constructor(opts: { readonly registerAfterSeal?: "allow" | "deny" } = {}) {
+    this.#afterSeal = opts.registerAfterSeal ?? "allow";
+  }
+
+  /** Wiring is over. Idempotent, and one-way. */
+  seal(): void {
+    this.#sealed = true;
+  }
+
+  get sealed(): boolean {
+    return this.#sealed;
+  }
 
   register(tool: ToolDefinition): LoomDisposable {
+    // THROW, never no-op. A silent refusal leaves the caller believing its definition is
+    // the live one, and the discrepancy surfaces later as the WRONG tool running with no
+    // trace of the decision that caused it — which is the audit failure this knob exists
+    // to prevent, arrived at by another road.
+    if (this.#sealed && this.#afterSeal === "deny") {
+      throw err.policy(
+        CODES.E_NOT_AUTHORIZED,
+        `tool registration is closed: "${tool.name}" was NOT registered. This registry was ` +
+          `constructed with { registerAfterSeal: "deny" } and seal() has been called, so tools may ` +
+          `only be registered while the host is wiring up. Register it before seal(), or construct ` +
+          `the registry with { registerAfterSeal: "allow" } (the default) to permit registration ` +
+          `during a run.`,
+      );
+    }
     const stack = this.#stacks.get(tool.name) ?? [];
     stack.push(tool);
     this.#stacks.set(tool.name, stack);
@@ -95,7 +162,17 @@ export class ToolRegistry {
 export interface FunctionContext {
   readonly taskId: TaskId;
   readonly signal: AbortSignal;
-  /** Recorded clock. A function MUST NOT call Date.now() directly (R4). */
+  /**
+   * The engine's INJECTED clock — `Engine`'s own `now`, which defaults to `Date.now`.
+   *
+   * It is NOT a recorded effect, whatever R4 says a nondeterminism seam ought to be.
+   * Nothing appends `effect.started{kind:"clock"}` anywhere in the tree, and
+   * `#runFunction` has no replay branch, so a body that reads this executes live on replay
+   * and gets a different answer than the run being replayed. Still prefer it to calling
+   * `Date.now()` yourself: a host that injects a fixed clock controls this one, and the day
+   * the engine journals a clock read this is the seam that will serve the journaled value.
+   * Until then, a body that must be replayable takes its timestamp from a channel it reads.
+   */
   now(): number;
 }
 
@@ -119,7 +196,14 @@ export interface FunctionRegistryOptions {
 }
 
 export class FunctionRegistry {
-  readonly #byRef = new Map<string, FunctionBody>();
+  /**
+   * Stack per ref, for the same reason `ToolRegistry` has one: `Disposable`'s contract is
+   * that disposing a registration restores what it shadowed. A plain `Map` cannot honour
+   * that. It destroyed the shadowed body outright, and — because `delete(ref)` matches a
+   * KEY rather than the body that was registered — a stale handle disposed after a
+   * re-registration deleted the NEW body instead of nothing at all.
+   */
+  readonly #stacks = new Map<string, FunctionBody[]>();
   readonly #loader: FunctionRegistryOptions["loader"];
 
   constructor(opts: FunctionRegistryOptions = {}) {
@@ -127,18 +211,36 @@ export class FunctionRegistry {
   }
 
   register(ref: string, body: FunctionBody): LoomDisposable {
-    this.#byRef.set(ref, body);
-    return { dispose: () => this.#byRef.delete(ref) };
+    const stack = this.#stacks.get(ref) ?? [];
+    stack.push(body);
+    this.#stacks.set(ref, stack);
+    let disposed = false;
+    return {
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        const s = this.#stacks.get(ref);
+        if (s === undefined) return;
+        const i = s.lastIndexOf(body);
+        if (i >= 0) s.splice(i, 1);
+        if (s.length === 0) this.#stacks.delete(ref);
+      },
+    };
   }
 
   get(ref: string): FunctionBody | undefined {
-    const hit = this.#byRef.get(ref);
+    const stack = this.#stacks.get(ref);
+    const hit = stack === undefined ? undefined : stack[stack.length - 1];
     if (hit !== undefined) return hit;
     // A hand-registered body WINS over a loaded one: a test or an embedder overriding a
     // resource is doing so deliberately, and silently preferring the stored version would
     // make that override look like it worked while doing nothing.
+    //
+    // The loaded body is cached at the BOTTOM of the stack — reachable only because the
+    // stack is empty right now — so a later hand registration shadows it and disposing
+    // that override falls back to the cached body without re-entering the loader.
     const loaded = this.#loader?.(ref);
-    if (loaded !== undefined) this.#byRef.set(ref, loaded);
+    if (loaded !== undefined) this.#stacks.set(ref, [loaded]);
     return loaded;
   }
 
@@ -149,7 +251,11 @@ export class FunctionRegistry {
   }
 
   has(ref: string): boolean {
-    return this.#byRef.has(ref);
+    // Unchanged in meaning: true iff a body is resident, loader cache included. `has` has
+    // never consulted the loader and still does not — it answers "is one here", not "could
+    // one be found".
+    const stack = this.#stacks.get(ref);
+    return stack !== undefined && stack.length > 0;
   }
 }
 
@@ -198,18 +304,75 @@ export interface ModelAdapter {
   estimateOf(req: ModelRequest): number;
 }
 
+/**
+ * Adapters by provider, with a default — under `ToolRegistry`'s disposal discipline.
+ *
+ * A single `Map<string, ModelAdapter>` plus a `#default: string` had three defects, and
+ * the third one broke every agent node in the process: `#default` kept naming a provider
+ * whose adapter had been disposed, so `require()` — called with no argument by `#runAgent`
+ * and by the context summariser — threw `no model adapter registered for "(default)"`
+ * forever, while a perfectly good replacement sat reachable by name in the same map.
+ *
+ * THE DEFAULT IS A STACK OF CLAIMS, not a field. Each registration that claims the default
+ * (explicitly, or implicitly because there was none) pushes a claim token; disposing that
+ * registration removes ITS token, not whichever token happens to name the same provider.
+ * The effective default is the newest claim whose provider still has an adapter, so
+ * disposing a temporary default restores the previous one exactly the way disposing a
+ * shadowed tool restores the definition underneath.
+ *
+ * WHEN NO CLAIM SURVIVES THERE IS NO DEFAULT, even if other providers are registered. The
+ * alternative — promoting an arbitrary survivor — would silently redirect every agent node
+ * to a provider nobody nominated, with different weights, different prices and a different
+ * data path. A shadowed tool has a stack that says what to restore; "some other provider"
+ * is not a statement anyone made. Having no default fails loudly at `require()` AND lets
+ * the next registration claim it, which is what the reported hot-swap needed.
+ */
 export class ModelRegistry {
-  readonly #byProvider = new Map<string, ModelAdapter>();
-  #default: string | undefined;
+  readonly #stacks = new Map<string, ModelAdapter[]>();
+  /** Default claims, oldest first. Object identity is what a disposer removes. */
+  readonly #claims: { readonly provider: string }[] = [];
 
   register(adapter: ModelAdapter, asDefault = false): LoomDisposable {
-    this.#byProvider.set(adapter.provider, adapter);
-    if (asDefault || this.#default === undefined) this.#default = adapter.provider;
-    return { dispose: () => this.#byProvider.delete(adapter.provider) };
+    const claim = asDefault || this.#defaultProvider() === undefined ? { provider: adapter.provider } : undefined;
+    const stack = this.#stacks.get(adapter.provider) ?? [];
+    stack.push(adapter);
+    this.#stacks.set(adapter.provider, stack);
+    if (claim !== undefined) this.#claims.push(claim);
+
+    let disposed = false;
+    return {
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        const s = this.#stacks.get(adapter.provider);
+        if (s !== undefined) {
+          // BY IDENTITY. Deleting by provider name would take out whatever holds the name
+          // now — including a live replacement this handle never registered.
+          const i = s.lastIndexOf(adapter);
+          if (i >= 0) s.splice(i, 1);
+          if (s.length === 0) this.#stacks.delete(adapter.provider);
+        }
+        if (claim !== undefined) {
+          const j = this.#claims.indexOf(claim);
+          if (j >= 0) this.#claims.splice(j, 1);
+        }
+      },
+    };
+  }
+
+  #defaultProvider(): string | undefined {
+    for (let i = this.#claims.length - 1; i >= 0; i--) {
+      const p = this.#claims[i]!.provider;
+      if (this.#stacks.has(p)) return p;
+    }
+    return undefined;
   }
 
   get(provider?: string): ModelAdapter | undefined {
-    return this.#byProvider.get(provider ?? this.#default ?? "");
+    const key = provider ?? this.#defaultProvider();
+    if (key === undefined) return undefined;
+    const stack = this.#stacks.get(key);
+    return stack === undefined ? undefined : stack[stack.length - 1];
   }
 
   require(provider?: string): ModelAdapter {

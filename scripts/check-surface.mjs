@@ -10,6 +10,23 @@
  * Update `surface.json` in the same commit that adds an export, and the diff will
  * show a reviewer exactly what grew.
  *
+ * WHAT THIS PINS IS THE NAME SET, AND NOTHING ELSE. Not signatures, not arity, not the
+ * members of an exported union or tuple, not whether a name is a value or a type — the
+ * mapping is `symbol.getName()`, so `export declare const VERSION` and `export type VERSION`
+ * produce identical output. The failure text below says "(REMOVAL IS BREAKING)", which is
+ * true of a removed NAME and says nothing about a narrowed one. That is a deliberate
+ * boundary rather than a hole to close here: the two `tsc` projects in `npm run typecheck`
+ * are the first `&&` arm of `npm run check` and catch shape changes by using them — 35 of
+ * the 38 exported classes are constructed in `test/`, the other three inside `src/` — so a
+ * demotion fails the gate before this script runs. 01-INTERFACES.md states the same
+ * boundary for readers of the design.
+ *
+ * IT READS `dist/`, SO IT IS ONLY AS FRESH AS THE BUILD. `npm run typecheck` therefore
+ * builds with `--force`: `tsc -b` decides by comparing timestamps, and a skipped build left
+ * this script diffing the pin against a `.d.ts` that no longer described `src/` — reproduced
+ * as `surface guard ok: … unchanged` with an unpinned public export sitting in the tree.
+ * `packages/core/test/toolchain-gate.test.ts` is that reproduction, kept.
+ *
  * See design/loom/01-INTERFACES.md, "The minimalism guard, corrected".
  */
 

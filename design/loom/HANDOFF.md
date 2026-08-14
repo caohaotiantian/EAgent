@@ -1,17 +1,37 @@
 # Handoff
 
-State as of **2026-08-06**, branch `loom`, working tree **clean**. The ten hardening waves
-that used to sit uncommitted on top of `5f06c40` are committed (`5451bb2`, `e6cd569`), and a
-fail-open correctness wave sits on top of them. How many waves is not a number worth writing
-down twice; the entries are countable:
+State as of **2026-08-15**, branch `loom`, mid-wave — `src/` is being edited by other
+builders as this is written, so the numbers under *Where things stand* are measurements and
+the commands beside them are the fact. The ten hardening waves that used to sit uncommitted
+on top of `5f06c40` are committed (`5451bb2`, `e6cd569`), a fail-open correctness wave sits
+on top of them, and a self-audit close-out wave sits on top of that. How many waves is not a
+number worth writing down twice; the entries are countable:
 `grep -ac '^## 2026-08-05 — Hardening —' design/loom/JOURNAL.md` → **10** at the time of
 writing. (It read "seven waves … the nine entries at the end" a day ago. Two numbers for one
 thing is one number too many.)
 
+**The close-out wave, and what it changed about this file.** The register was worked rather
+than re-audited: **A20 is closed** (the SSE handler now subscribes before it reads its
+baseline), **D3 is no longer UNCONFIRMED** — two `99-DOD.md` PROVEN rows were audited and
+both were overstated, which is a rate worth knowing about the other thirty — and three
+entries were added: **B9** (compensation compiles and never runs), **D11** (`ctx.effect`, the
+sanctioned way to satisfy invariant 4, has never existed), **D12** (no test kills a process).
+Three guard changes landed with them, each watched failing first: `npm run typecheck` builds
+with `--force`, because `tsc -b` skipping a stale project let the whole gate pass on a tree
+whose public contract had changed; the zero-dep guard grew a third check and an allowlisted
+manifest read, closing seven shapes that used to pass; and the drift guard's "absent from
+`src/`" now means all of `src/` rather than one file.
+
 **The fail-open wave, in one paragraph, because it changed what this file says about
 itself.** Every open entry in the register below was reproduced or refuted against the tree
-before anything was touched: 18 checked, **14 confirmed OPEN and 4 refuted** (A11, A17, A20,
-A21 — each now carries the refutation in place rather than being deleted). Nine of the
+before anything was touched: 18 checked, **14 confirmed OPEN and 3 refuted** (A11, A17, A21 —
+each now carries the refutation in place rather than being deleted). **This sentence listed
+A20 as a fourth refutation and A20's own entry, forty lines down, read "NEW, reproduced, NOT
+fixed".** One of the two had to be false and it was this one: A20 was reproduced, then
+DOWNGRADED to a latent hazard — a different word, one paragraph long, which is how it became
+"refuted" in a summary. It has since been fixed outright (2026-08-14); its entry says so. The
+lesson is the file's own: **a summary that re-states a status word instead of pointing at the
+entry will eventually disagree with it.** Nine of the
 confirmed ones are closed: **A19, A7, A6, A10, A14, A12's residue, A1, A16** and the three
 quiet reads of **A18**. Each fix was then reviewed by two fresh readers of the diff who filed
 30 findings, of which **27 did not survive adversarial verification** — the three that did
@@ -67,19 +87,26 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured 2026-08-05, at the end of the verification pass described under *Known issues*.
+Measured 2026-08-15, mid-wave, with `src/` being edited by other builders around it.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1332 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| Test files | 48 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **1463 pass, 0 fail at `5c699c0`** — the last full gate, and already stale: three test files landed after it | `node --test "packages/*/test/**/*.test.ts"` |
+| Test files | 62 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 49 | `node scripts/check-zero-dep.mjs` (it prints the count) |
-| Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:` |
-| Public exports, pinned | 463 | `node -e "console.log(require('./scripts/surface.json').length)"` |
-| Public exports, built | 463 | `node scripts/check-surface.mjs` (reads `dist/`, so it is only as fresh as your last build) |
+| Runtime dependencies | **0** | same command — it now fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
+| Public exports, pinned | 466 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, built | re-run it | `npm run typecheck && node scripts/check-surface.mjs` — it reads `dist/`, and the build is now `--force`d precisely so this answer cannot come from a stale one |
 | Event types | 52 | `node --test packages/core/test/journal/store.test.ts` (its count is deliberate) |
 | Typecheck | clean | `npx tsc -p packages/core/tsconfig.test.json` |
+
+**Three of these were wrong when this table was re-read** — 1332 tests, 48 test files, 463
+pinned exports — after ten days in which nothing about the table looked out of date, because
+a number that was true once looks exactly like a number that is true. The row that survived
+contact is `Source files`, and it survived because its "command" is a guard that runs in CI:
+if it disagrees with the tree, the build stops. **That is the difference between a command
+column and a gate**, and it is worth more than the paragraph below.
 
 **The suite total moved four times while this file was being written** — 984 at the start of
 the closing pass, then 998, then 1002, then 1003 — because `src/` and `test/` were still
@@ -1215,9 +1242,25 @@ agree today because one was written from the other, which is exactly the arrange
 drifts.
 
 **A20 · `#streamEvents` reads its baseline and THEN subscribes, so anything appended in
-between reaches neither. NEW, reproduced, NOT fixed — it is a restructure rather than a
-guard, and it is the third distinct way the "gap-free" contract has been broken in this one
-handler.** The other two were the branch (`Last-Event-ID: 1.5` became an OFFSET) and the live
+between reaches neither. RESOLVED 2026-08-14 — kept because HOW it was resolved is the part
+worth carrying, and because the entry above it spent a week disagreeing with the summary at
+the top of this file about what its status even was.** The fix is the restructure this entry
+asked for: `bus.subscribe` now opens BEFORE the baseline is read and buffers while the
+baseline drains, and `sent` — the highest seq already written to the client — de-duplicates
+the overlap, so the subscription's replay of the seam is a duplicate rather than a gap. That
+is `replayThenTail`'s shape, arrived at inline because this handler also owns the
+snapshot-versus-replay branch.
+
+**It was found again, in the other direction, by a verifier during the fix, and that is the
+reason it stopped being latent.** A backpressure `await` added in the same wave parked the
+handler between the baseline read and `bus.subscribe`, so an event published while a slow
+client stalled landed in neither half — the ASYNCHRONOUS store this entry said would open the
+window, arriving as a slow socket instead. The window was never really about the store. It was
+about there being any suspension point at all between two statements whose order was wrong.
+
+*The original entry follows, because the reproduction is the useful artefact.* It is the third
+distinct way the "gap-free" contract has been broken in this one handler. The other two were
+the branch (`Last-Event-ID: 1.5` became an OFFSET) and the live
 tail's floor (an id ahead of head got a baseline and then had every subsequent event skipped);
 both are closed. This one is the ORDER of two statements:
 
@@ -1394,8 +1437,50 @@ longest SLA it declares.
 **B5 · `NodeSpec.timeoutMs` is in the schema and enforced by nothing.** A node with a
 declared timeout runs as long as it likes; `E_TASK_TIMEOUT` is declared and unraisable.
 
+**The same is true of `JoinNode.timeoutMs`, and half of that is now fixed the cheap way.**
+`#maybeFireJoin` decides on `branches`, `mode` and `k`; `#foldJoin` on `onBranchError`;
+neither reads a clock, nothing in `src/` reads the field, and `E_JOIN_TIMEOUT` is in
+`NEVER_RAISED`. It was **required** by the type, so every author wrote a number that decides
+nothing — the "looks supervised" shape, one field over from the gates that refuse it. It is
+optional now, and says so in its own docstring, which is as far as a type change can go: the
+deadline itself needs lease reclaim to be worth building, because a branch held by a dead
+worker is what actually strands a join under multi-process workers and a timer would fire
+against a task nobody is running. **Reversal is written into `spec.ts`**: when the deadline
+lands, the field becomes required again, `E_JOIN_TIMEOUT` leaves `NEVER_RAISED`, and this
+paragraph goes with it. `JoinNode.drain` was deleted outright for the same reason with none
+of the nuance — the runtime always behaved as `drain: false`, so the value that lied was the
+default.
+
 **B6 · Hooks are declared, validated by the compiler, pinned by the resolver, and never
 invoked.** Which is also why `hook.applied` has no appender (C1).
+
+**B9 · Compensation is a compile-time proof and a rewind refusal; nothing ever executes
+one.** `compensation` is a first-class `EdgeKind` with its own compile rule (`GRAPH012`), its
+own ancestor and entry-node handling, and a rewind refusal — and **no code path can emit
+one**. `#edgesToTake` breaks on `compensation`, and the only other arm, `#errorEdges` (the
+failure path, the one path that could take one), filters `kind === "error"` alone.
+`Engine.cancel(runId, reason)` has no `compensate` and no `gracePeriodMs`. Reproduced on the
+real incident-triage graph with a throwing `k8s.restart` and a recording `k8s.rollback`: no
+Task was ever created for the rollback node, the run took the error edge, and it ended
+**`succeeded`** — an irreversible restart attempted, failed, uncompensated.
+
+Two halves are already closed, so this entry is the residue rather than the whole thing.
+`onBranchError: "compensate"` is now a **compile error** instead of a silent alias for
+`"skip"` (it was byte-identical in behaviour: two run summaries `deepEqual`), and `GRAPH012`
+now requires the declared compensation to name a REGISTERED tool, because the rewind refusal
+reads the field's presence — so `compensation: {tool: "noop"}` bought a legal rewind that
+undid nothing. `test/graph/compensation-honesty.test.ts` holds both.
+
+What it still buys, and the only reason to keep declaring one: `Engine.rewind` refuses
+(`E_RESTORE_ILLEGAL`) to cross a committed irreversible effect whose tool declares no
+compensation. What it costs to build for real: reverse-commit-order tracking, a
+`Compensating` member in `RunStatus`/`TaskState` (neither has one), and `cancel{grace,
+compensate}`. That is a feature. The design corpus was corrected to describe the declaration
+rather than an executing saga — 02-EXECUTION-GRAPH D5.2 is the one authoritative paragraph
+and 01, 03 and 04 point at it — but **`src/graph/validate.ts` still asserts twice, in
+comments, that a compensation edge "runs on the error path, in reverse"**, which is the same
+false claim one layer down and is the next thing to fix. Cross-reference: C1's
+`task.skipped`, which is what `onBranchError: "skip"` cannot journal either.
 
 ### C · Vocabulary that is declared and never written
 
@@ -1457,11 +1542,25 @@ most guard synthesis and canary, both `DEFERRED-v2`. A header note now says so a
 misled. One row is worse than unbuilt: reward hacking cites "the eval suite is
 human-authored", which D10.d itself replaced in M9.
 
-**D3 · `99-DOD.md`'s **PROVEN** cells are largely unaudited. UNCONFIRMED.** The legend says
-PROVEN means a test asserts it. Exactly one row was audited against the existence of a test;
-the drift guard only checks that the evidence cell is longer than 25 characters. The other
-PROVEN rows may or may not have tests behind them. Auditing them is a bounded afternoon and
-nobody has done it.
+**D3 · `99-DOD.md`'s **PROVEN** cells are largely unaudited.** No longer UNCONFIRMED: two
+were audited on 2026-08-15 and **both were overstated**, which is a rate that says something
+about the other thirty-odd.
+
+- **Row 3.1** read "`kill -9` with a gate open, resumed from a new process". No such test
+  exists anywhere in the tree. What exists is `skeleton.test.ts` row 6 — `store.close()` and
+  a second `Engine` **in the same OS process** — and a clean close is, as the last connection
+  in WAL mode, a checkpoint that removes the `-wal`/`-shm`, so the reopen never reads a hot
+  WAL. The row now says what that test is worth. **The test it claimed is still missing**, and
+  is D12.
+- **Row 1** cited "16 edges → 24 interfaces". That string appears in exactly one place in the
+  corpus: the cell itself. Nothing derives either number from D2 or D3. The clauses that ARE
+  tested (the taxonomy is eight; all eight execute) are kept and the count is deleted, and the
+  row is PARTIAL.
+
+`test/docs-drift.test.ts` now also fails if a DoD cell cites a test file that does not exist.
+That closes the RENAME and not this class — row 3.1 named no path, so nothing mechanical would
+have caught it. **The remaining PROVEN rows are still unaudited, and the two data points say
+the way to audit one is to go and look for the test, not to read the sentence.**
 
 **D4 · The performance numbers have not been re-measured. UNVERIFIED.** `99-DOD.md`'s
 coverage matrix quotes compile 61 ms, layout 0.95 ms, a 485 KiB snapshot, a 3 ms 10k-event
@@ -1539,6 +1638,46 @@ grep -aroE 'HANDOFF(\.md)?.{0,12}\*{0,2}[A-E][0-9]+' design packages scripts
 scoping the grep to `design/` is precisely how the seventh one survived a pass whose whole
 purpose was finding it. The guard cannot catch this class at all; it tracks span names, error
 codes, `GRAPH` ids, method names and event appenders, not register ids.
+
+**D11 · The sanctioned way to satisfy invariant 4 does not exist, and there is no typecheck
+between the author and the failure.** CLAUDE.md's invariant 4 and four design documents told
+authors to route all nondeterminism through `ctx.effect(key, fn)`. **`ctx.effect` has never
+existed in this repo**, and neither has `ctx.random()`. Reproduced: a `function` resource
+written exactly as `00-OVERVIEW.md:136` instructs, invoked with the verbatim context
+`Engine.#runFunction` builds, throws `TypeError: ctx.effect is not a function`; `ctx` has
+three keys, `now`, `signal`, `taskId`. A function resource's body is source text compiled by
+`vm.runInContext`, so the documented call reaches the runtime unchecked — and the thrown
+error is cross-realm, so `e instanceof TypeError` is false in the host.
+
+The real boundary is `effectKey(taskId, kind, ordinal)` inside `Engine`, with kinds `model`,
+`tool`, `subgraph`, `summarize`. **Three separate gaps sit inside that one sentence**, and
+the doc fix (CLAUDE.md, D9.5 row 5) closes the sentence, not the gaps:
+
+1. `effect.started` declares `clock` and `random` kinds that **nothing in `src/` appends**.
+2. `FunctionContext.now` is the engine's injected clock passed straight through. Calling it
+   journals nothing and `#runFunction` has no replay branch, so a body that reads it executes
+   live on replay and gets a different answer than the run being replayed — **unmarked**.
+3. `SAFE_GLOBALS` sets `Date: undefined` and passes `Math` through **whole**, so
+   `Math.random()` — banned by invariant 4's own second sentence — runs unrecorded inside the
+   one place the ban was supposed to be total. There is no publish-time lint rule; `08-PLAN`
+   R4 lists one as a mitigation.
+
+Closing it is a recorded clock effect plus a seeded PRNG in the sandbox context, at which
+point `ABSENT_CONTEXT_METHODS` in `docs-drift.test.ts` goes red and tells you which
+paragraphs to rewrite. **Do not "fix" this by adding a `ctx.effect` that wraps nothing.**
+
+**D12 · No test kills a process.** Durable suspension across a restart is a shipped path —
+the multi-process decision made it one — and every "restart" test in the tree is
+`close()`-then-reopen in one process. Census: only `cli/cli.test.ts` and
+`sandbox/subprocess.test.ts` spawn anything, and neither has a run, a gate or a resume. The
+missing test is bounded and was written out of tree: spawn a child that advances the skeleton
+to its gate and hangs, `SIGKILL` it, **assert `journal.db-wal` and `journal.db-shm` are on
+disk** — that assertion is the point, because it is what distinguishes this from a clean
+close — then spawn a second process, `attach`, approve, and assert `succeeded` with the
+deferred write executed once. It passed in 254 ms, so there is no cost argument. The fixture
+must be a `.child.ts` so the `packages/*/test/**/*.test.ts` glob does not run it directly,
+and both the `rmSync` and a `SIGKILL` of the child belong in a `finally`, so a regression
+costs a failed test rather than a hung suite. `99-DOD.md` row 3.1 points here.
 
 ### E · Process and build state
 
@@ -1802,17 +1941,40 @@ npm run build:binary                     # bin/loom; fails if any node_modules i
 ```
 
 If several agents or shells are working at once, **do not run `npm run check`, `npm run
-build` or a bare `tsc -b`** — concurrent `tsc -b` races on emit. Use
+build` or a bare `tsc -b`** — concurrent `tsc -b` races on emit, and it now races harder,
+because `typecheck` and `build` are `tsc -b --force`. Use
 `npx tsc -p packages/core/tsconfig.test.json` for a read-only typecheck and
 `node --test <file>` for a single suite.
 
+**`--force` is not tidiness.** `tsc -b` decides whether to build by comparing input
+timestamps against output timestamps, so a tree whose sources are older than its `dist/` is
+"up to date" whatever it now says: the build is skipped, `node --test` strips types rather
+than checking them, and the surface guard then reads a `.d.ts` that no longer describes
+`src/`. Reproduced with the real scripts — the whole gate green with an unpinned public
+export in the tree. `npm run typecheck:fast` is the incremental one and is **not** a gate;
+`packages/core/test/toolchain-gate.test.ts` reads the flags out of `package.json` and hands
+them to the real compiler, so dropping `--force` fails on what the compiler did.
+
 **Two CI guards will stop you, on purpose:**
 
-- **zero-dep** — parses every source file; a bare import specifier that is not `node:` fails
-  the build. It is a TS-parser check, not a regex, so it will not false-positive on a string.
-- **surface** — pins the public export set. Adding an export is fine; it just has to be
-  deliberate. Re-pin and commit `scripts/surface.json` in the same change that adds one.
-  It reads `dist/`, so a stale `dist/` gives a stale answer — build first.
+- **zero-dep** — parses **every file under `packages/core/src`, and fails on one it cannot
+  parse** rather than skipping it, so `.mjs`/`.mts`/`.json` beside your `.ts` is a failure and
+  not a silent gap. Three checks: every npm dependency field except `devDependencies` must be
+  empty (an allowlist over `/ependencies$/i`, so `optionalDependencies` and
+  `bundleDependencies` are covered and a field npm invents next year is too); no bare import
+  specifier that is not `node:`; and no module load a parser cannot read — `createRequire`, a
+  bare `require(…)`, an `import()` with a computed or template-literal specifier,
+  `module._load`, `process.binding`, `process.dlopen`. It is a TS-parser check, not a regex,
+  so it will not false-positive on a string — and the `require` rule is keyed to the callee's
+  SHAPE, not its name, because `ToolRegistry.require` and friends are real methods with about
+  fifteen call sites. `test/check-zero-dep.test.ts` drives it against fixtures, in both
+  directions. **This is the only automatic enforcement of invariant 1**: `build:binary`'s
+  esbuild metafile backstop is not in `ci.yml`, and esbuild cannot resolve those loads either.
+- **surface** — pins the public export **name set**, and nothing else: not signatures, not
+  arity, not the members of a union, not value-versus-type. Adding an export is fine; it just
+  has to be deliberate. Re-pin and commit `scripts/surface.json` in the same change that adds
+  one. It reads `dist/`, so a stale `dist/` gives a stale answer — which is why `typecheck`
+  forces the build. Shape changes are caught one arm earlier, by the two `tsc` projects.
 
 **Toolchain facts that shape the code** (all in `CLAUDE.md`, repeated because they cause the
 most confusion):

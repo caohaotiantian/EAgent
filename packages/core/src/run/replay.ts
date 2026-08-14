@@ -119,7 +119,7 @@ export class ReplayEffects {
 
 export interface ReplayFrame {
   readonly seq: number;
-  readonly kind: "state.reduced" | "task.committed" | "run.completed" | "run.failed";
+  readonly kind: "state.reduced" | "task.committed" | "run.completed" | "run.failed" | "graph.bound" | "effect.rebound";
   readonly taskId?: string;
   readonly match: boolean;
   readonly expected?: string;
@@ -136,6 +136,31 @@ export interface ReplayReport {
   /** Recorded effects the replay never consumed. Non-empty means the graph changed. */
   readonly unservedEffects: readonly string[];
   readonly hermetic: boolean;
+  /**
+   * The graph the journal was produced by, against the graph this replay ran.
+   *
+   * Reported whatever `onGraphChange` says, including under `"allow"`: opting out changes
+   * the VERDICT, never the record. A caller that suppressed the frame can still see, and
+   * journal, that it replayed a candidate.
+   */
+  readonly graph: {
+    readonly recorded: string;
+    readonly replayed: string;
+    readonly match: boolean;
+  };
+  /**
+   * Effect keys where the recording and the replay made DIFFERENT CALLS.
+   *
+   * An effect key is `taskId:kind:ordinal` and says nothing about the call it names, so
+   * the same key in two graphs can be two different tools. Each entry is a recorded result
+   * that was handed to a call other than the one that produced it.
+   */
+  readonly reboundEffects: readonly {
+    readonly key: string;
+    readonly field: "tool" | "model";
+    readonly recorded: string;
+    readonly replayed: string;
+  }[];
 }
 
 export interface ReplayOptions {
@@ -146,6 +171,22 @@ export interface ReplayOptions {
   readonly engine: Omit<EngineOptions, "store" | "bus">;
   /** Auto-answer gates with what the human actually decided. Default true. */
   readonly replayGates?: boolean;
+  /**
+   * What to do when `graph` is not the graph the journal came out of.
+   *
+   * `"diverge"` (default) runs the replay and reports `match: false` with a `graph.bound`
+   * frame. `"throw"` refuses before serving a single result. `"allow"` runs and does not
+   * count the change against `match`.
+   *
+   * THE OPT-OUT IS NAMED RATHER THAN DEFAULTED, and the asymmetry is deliberate. Replaying
+   * against a different graph is a real thing to want — it is `runEvalSuite`'s entire job —
+   * but it is a thing a caller has to SAY, because the caller that does it by accident is
+   * the one this option exists for. `"diverge"` was chosen over `"throw"` as the default
+   * for the same reason `identicalToRecording` is off in `EvalCase`: a candidate graph
+   * still has to produce a report to be judged against, and a throw at the door would make
+   * the eval gate unreachable without every call site being edited first.
+   */
+  readonly onGraphChange?: "diverge" | "throw" | "allow";
 }
 
 /**
@@ -164,6 +205,49 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
 
   const submitted = events.find((e) => isEvent(e, "run.submitted"));
   const inputs = submitted !== undefined && isEvent(submitted, "run.submitted") ? submitted.payload.inputs : {};
+
+  // The SUBMITTED hash, not `original.graphHash`. The projection's field folds
+  // `graph.mutated` too, so on a run that rewrote itself mid-flight it holds the FINAL
+  // hash — while `opts.graph` is the graph a replay starts from and the engine re-applies
+  // the recorded mutations to it. Comparing against the fold would make every
+  // self-modifying run look like a tampered one.
+  const recordedGraph = submitted !== undefined && isEvent(submitted, "run.submitted") ? submitted.payload.graphHash : "";
+  // An empty recorded hash means the journal has no `run.submitted` to bind to — a
+  // fragment, or a fixture assembled by hand. Nothing to compare, so nothing is claimed.
+  // THE HASH IS OVER THE SPEC, AND THE SPEC IS FULL OF POINTERS.
+  //
+  // `graphHash = digest(spec)` covers the ref `prompt/summarize-file@stable`, never the
+  // bytes it resolves to — and re-pointing a `@stable` channel is exactly how one Loom
+  // graph normally differs from another, because `resource:promote` moves the pointer
+  // without touching the spec. So a run whose prompt, agent profile, function body and
+  // oversight spec ALL changed replayed green on an identical hash. The compile already
+  // journals what each ref resolved to; binding it costs a comparison.
+  const compiled = events.find((e) => isEvent(e, "run.compiled"));
+  const recordedRefs = compiled !== undefined && isEvent(compiled, "run.compiled") ? compiled.payload.resolutionManifest : [];
+  const refKey = (m: readonly { ref: string; digest: string }[]): string =>
+    m
+      .map((r) => `${r.ref}=${r.digest}`)
+      .sort()
+      .join("\n");
+  const recordedManifest = refKey(recordedRefs);
+  const replayedManifest = refKey(opts.graph.resolutionManifest);
+  const refsBound = recordedManifest === "" || recordedManifest === replayedManifest;
+
+  const graphBound = (recordedGraph === "" || recordedGraph === opts.graph.graphHash) && refsBound;
+  if (!graphBound && opts.onGraphChange === "throw") {
+    const what = recordedGraph !== "" && recordedGraph !== opts.graph.graphHash ? "graph" : "resolved resources";
+    throw err.internal(
+      CODES.E_REPLAY_DIVERGENCE,
+      `run ${opts.runId} recorded ${what} ${recordedGraph}, but this replay was handed ${opts.graph.graphHash} — its recorded results were produced by a different ${what}`,
+      {
+        details: {
+          recorded: recordedGraph,
+          replayed: opts.graph.graphHash,
+          ...(refsBound ? {} : { recordedManifest, replayedManifest }),
+        },
+      },
+    );
+  }
 
   const shadow = new MemoryStateStore({ now: opts.engine.now ?? (() => original.startedAt) });
   const engine = new Engine({ ...opts.engine, store: shadow, replay: effects });
@@ -209,7 +293,21 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     }
   }
 
+  const replayedEvents: JournalEvent[] = [];
+  for await (const e of shadow.read(replayRunId, 1)) replayedEvents.push(e);
+  const rebound = reboundEffects(events, replayedEvents);
+
   const frames = compare(original, replayed);
+  // Appended after `compare`, so the frame seq numbers of the three original kinds are
+  // untouched by whether a binding held.
+  let seq = frames.length;
+  if (!graphBound && opts.onGraphChange !== "allow") {
+    frames.push({ seq: seq++, kind: "graph.bound", match: false, expected: recordedGraph, actual: opts.graph.graphHash });
+  }
+  for (const r of rebound) {
+    frames.push({ seq: seq++, kind: "effect.rebound", match: false, expected: r.recorded, actual: r.replayed });
+  }
+
   return {
     runId: opts.runId,
     replayRunId,
@@ -221,7 +319,63 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     // Non-hermetic when the recorded run had effects with no outcome: replay cannot
     // invent what the world did while the process was dying.
     hermetic: effects.unknownOutcomes.length === 0,
+    graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound },
+    reboundEffects: rebound,
   };
+}
+
+/**
+ * Effect keys where the recording and the replay made different CALLS.
+ *
+ * THIS IS THE HALF THAT SURVIVES A LEGITIMATE GRAPH CHANGE. The hash check answers "is
+ * this the same graph?", which is the wrong question to ask `runEvalSuite` — a candidate
+ * is a different graph by definition. This one asks the narrower question that stays
+ * meaningful there: whatever else moved, was each recorded result handed back to the call
+ * that produced it? A candidate that swaps `fs.write` for `fs.append` at the same node
+ * keeps the effect key `write@root#0:tool:0`, so it is served the recorded `fs.write`
+ * result and, before this, nothing anywhere said so.
+ *
+ * Derived from the two journals rather than checked at serve time, because that is what is
+ * possible from here: the journal records a call's TYPE SHAPE and never its argument
+ * VALUES (`tool.called.argsShape`, and see the comment there for why), and there is no
+ * per-effect input digest for `ReplayEffects.require` to compare against. So this catches
+ * a different tool, a different tool version, a different argument SHAPE, and a different
+ * model — and does NOT catch the same call with a different argument VALUE. That last one
+ * is caught today by the graph hash, and only by it, which means it is not caught at all
+ * under `onGraphChange: "allow"`. Closing it needs an `inputDigest` on `effect.started`,
+ * written where the effect is journaled and compared in `require`.
+ *
+ * Joined on the intersection of keys. Recorded-and-never-asked-for is already
+ * `unservedEffects`; asked-for-and-never-recorded is `E_REPLAY_DIVERGENCE` at serve time.
+ */
+function reboundEffects(
+  recorded: readonly JournalEvent[],
+  replayed: readonly JournalEvent[],
+): ReplayReport["reboundEffects"] {
+  const index = (events: readonly JournalEvent[]): Map<string, { field: "tool" | "model"; call: string }> => {
+    const out = new Map<string, { field: "tool" | "model"; call: string }>();
+    for (const e of events) {
+      if (isEvent(e, "tool.called")) {
+        out.set(e.payload.key, { field: "tool", call: `${e.payload.name}@${e.payload.version}(${e.payload.argsShape})` });
+      } else if (isEvent(e, "model.called")) {
+        // The MODEL, and deliberately not the provider. A replay reaches no adapter, so
+        // it journals `provider: "replay"` — a fact about the replay, not about the call,
+        // and comparing it would make every model effect in every replay look rebound.
+        out.set(e.payload.key, { field: "model", call: e.payload.model });
+      }
+    }
+    return out;
+  };
+
+  const before = index(recorded);
+  const after = index(replayed);
+  const out: { key: string; field: "tool" | "model"; recorded: string; replayed: string }[] = [];
+  for (const [key, a] of before) {
+    const b = after.get(key);
+    if (b === undefined || b.call === a.call) continue;
+    out.push({ key, field: a.field, recorded: a.call, replayed: b.call });
+  }
+  return out.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
 }
 
 /**
