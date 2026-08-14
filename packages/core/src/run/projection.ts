@@ -42,7 +42,7 @@ import {
   type ChannelState,
   type StateView,
 } from "../state/channels.ts";
-import { ZERO_USAGE, addUsage, type Posture, type UsageRecord } from "../vocab.ts";
+import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from "../vocab.ts";
 import type { GraphSpec } from "../graph/spec.ts";
 
 export type RunStatus =
@@ -271,6 +271,21 @@ export interface RunProjection {
   readonly usage: UsageRecord;
   /** Reserved-but-not-yet-settled spend. Non-zero mid-flight, zero at rest. */
   readonly reservedUsd: number;
+  /**
+   * Scope → the posture oversight has been RAISED to, and scope → a human's CEILING.
+   *
+   * Both were process-local, so a restart rebuilt an empty `PolicyEngine` and every
+   * escalation this run had earned silently vanished — a posture lowered with no human
+   * `deescalate`, which is invariant 5 broken by the recovery path itself. They are
+   * journaled, so they are foldable; folding them is what makes the journal the only
+   * authoritative state rather than merely the longest-lived one.
+   *
+   * Folded in SEQ ORDER and not as two independent max-folds: `deescalate` deletes an
+   * escalation AND sets a ceiling, so folding the `to` values alone can reconstruct a
+   * posture lower than the process ever held.
+   */
+  readonly escalations: Readonly<Record<string, Posture>>;
+  readonly ceilings: Readonly<Record<string, Posture>>;
   readonly outputs: Readonly<Record<string, unknown>>;
   readonly error?: ErrorRecord;
   /** Effects that started with no terminal record. Never claim these did not happen. */
@@ -314,6 +329,8 @@ interface MutableProjection {
   gates: Record<GateId, GateRecord>;
   usage: UsageRecord;
   reservedUsd: number;
+  escalations: Record<string, Posture>;
+  ceilings: Record<string, Posture>;
   outputs: Record<string, unknown>;
   error?: ErrorRecord;
   openEffects: Set<string>;
@@ -448,6 +465,8 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     outputs: {},
     openEffects: new Set(),
     everStarted: new Set(),
+    escalations: {},
+    ceilings: {},
     budgetExhausted: false,
     fanouts: {},
   };
@@ -467,6 +486,8 @@ function freeze(p: MutableProjection): RunProjection {
     gates: { ...p.gates },
     usage: { ...p.usage },
     reservedUsd: p.reservedUsd,
+    escalations: { ...p.escalations },
+    ceilings: { ...p.ceilings },
     outputs: { ...p.outputs },
     unknownEffects: [...p.openEffects].sort(),
     startedEffects: [...p.everStarted].sort(),
@@ -573,6 +594,19 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     p.status = "running";
     p.posture = e.payload.posture;
     p.startedAt = e.ts;
+    return;
+  }
+  if (isEvent(e, "policy.escalated")) {
+    // `max`, never assignment: two rules may raise the same scope, and the journal
+    // records each raise rather than the running total.
+    p.escalations[e.payload.scope] = maxPosture(p.escalations[e.payload.scope] ?? "out", e.payload.to);
+    return;
+  }
+  if (isEvent(e, "policy.deescalated")) {
+    // A human lowered it. Order matters: this DELETES the escalation and installs a
+    // ceiling, so a later escalation in the same scope raises from the floor again.
+    delete p.escalations[e.payload.scope];
+    p.ceilings[e.payload.scope] = e.payload.to;
     return;
   }
   if (isEvent(e, "run.suspended")) {

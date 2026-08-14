@@ -333,6 +333,30 @@ export class PolicyEngine {
     this.#ceilings.set(scope, to);
   }
 
+  /**
+   * Re-seed from the journal, without journaling.
+   *
+   * Escalations, human ceilings and spend are all decisions the journal already records,
+   * and all three lived only in this object — so a restart rebuilt an empty engine and
+   * silently handed the run back its full budget at a lowered posture. `escalate` cannot
+   * be reused for this: it would fire `onEscalate` and re-append the very events being
+   * replayed, growing the journal on every attach.
+   *
+   * Called once per attach, from the first path that holds a projection. It only ever
+   * RAISES a posture and only ever ADDS spend, so a double call cannot loosen anything.
+   */
+  restore(state: {
+    readonly escalations: Readonly<Record<string, Posture>>;
+    readonly ceilings: Readonly<Record<string, Posture>>;
+    readonly spentUsd: number;
+  }): void {
+    for (const [scope, to] of Object.entries(state.escalations)) {
+      this.#escalations.set(scope, maxPosture(this.#escalations.get(scope) ?? "out", to));
+    }
+    for (const [scope, to] of Object.entries(state.ceilings)) this.#ceilings.set(scope, to);
+    this.#spentUsd = round6(Math.max(this.#spentUsd, state.spentUsd));
+  }
+
   /** Restore the computed floor by removing a human ceiling. Always allowed: it tightens. */
   clearCeiling(scope: string): void {
     this.#ceilings.delete(scope);

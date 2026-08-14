@@ -293,6 +293,18 @@ interface RunContext {
   readonly toolCalls: Map<TaskId, string[]>;
   /** E2 fires once per run, not once per reservation past the line. */
   warnedBudget: boolean;
+  /**
+   * In-flight `policy.escalated` appends, awaited after each wave.
+   *
+   * `PolicyEngine.escalate` is synchronous — the posture must tighten before the next
+   * decision reads it — so its journal record cannot be awaited where it is produced.
+   * It used to be fired with `void` and no catch: unordered, and a rejection nobody
+   * observed, on the one append that justifies a posture change. Serializing it keeps the
+   * order and parking the promise here keeps the failure.
+   */
+  readonly escalationWrites: Promise<unknown>[];
+  /** Has the journal's oversight and spend been folded back into `policy` yet? */
+  policySeeded: boolean;
   readonly log: RunLog;
   readonly policy: PolicyEngine;
   readonly abort: AbortController;
@@ -509,6 +521,19 @@ export class Engine {
     for (;;) {
       const p = await this.#project(ctx);
       if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} has no journal`);
+
+      // RE-SEED OVERSIGHT AND SPEND FROM THE JOURNAL, once per attach.
+      //
+      // `PolicyEngine` held escalations, human ceilings and spend in memory only, and
+      // `#contextFor` builds a fresh one — so a restart handed the run back its full
+      // budget at a posture lowered with no human `deescalate`, which is invariant 5
+      // broken by the recovery path. `attach` is synchronous and public, so the seeding
+      // happens on the first path that holds a projection instead. `restore` only raises
+      // a posture and only adds spend, so arriving here twice cannot loosen anything.
+      if (!ctx.policySeeded) {
+        ctx.policySeeded = true;
+        ctx.policy.restore({ escalations: p.escalations, ceilings: p.ceilings, spentUsd: p.usage.costUsd });
+      }
       if (isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") return p;
 
       // A run-fatal failure stops the run even if Tasks remain runnable. The budget
@@ -571,6 +596,11 @@ export class Engine {
       if (selected.length === 0) return p;
 
       await this.#runWave(ctx, selected);
+      // A posture that tightened during the wave must be on disk before the next
+      // projection is read as authoritative — and if the append failed, the caller of
+      // `advance` is who should hear about it.
+      const escalations = ctx.escalationWrites.splice(0);
+      if (escalations.length > 0) await Promise.all(escalations);
     }
   }
 
@@ -1130,9 +1160,13 @@ export class Engine {
         ...this.#policyOpts,
         ...(budgetUsd === undefined ? {} : { budget: { ...this.#policyOpts.budget, runUsd: budgetUsd } }),
         onEscalate: (rule, from, to, scope) => {
-          void ctx.log.append([
-            { type: "policy.escalated", payload: { rule, from, to, scope }, actor: SYSTEM_ACTOR("policy") },
-          ]);
+          ctx.escalationWrites.push(
+            this.#serialize(() =>
+              ctx.log.append([
+                { type: "policy.escalated", payload: { rule, from, to, scope }, actor: SYSTEM_ACTOR("policy") },
+              ]),
+            ),
+          );
         },
       }),
       abort: new AbortController(),
@@ -1143,6 +1177,8 @@ export class Engine {
       tainted: new Set(),
       toolCalls: new Map(),
       warnedBudget: false,
+      escalationWrites: [],
+      policySeeded: false,
     };
     this.#runs.set(runId, ctx);
     return ctx;
