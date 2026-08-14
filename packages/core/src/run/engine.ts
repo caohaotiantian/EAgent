@@ -341,6 +341,8 @@ export class Engine {
   #sweeper: GateSweeper | undefined;
 
   readonly #runs = new Map<RunId, RunContext>();
+  /** Per-run advance chain. See `advance`. Self-evicting. */
+  readonly #advancing = new Map<RunId, Promise<void>>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
   #commitChain: Promise<unknown> = Promise.resolve();
   #fencing = 0;
@@ -499,7 +501,7 @@ export class Engine {
    * Returns rather than blocking on a gate: a suspended run holds no worker slot, so
    * "advance" ending with `awaiting_gate` is a normal, cheap outcome.
    */
-  async advance(runId: RunId): Promise<RunProjection> {
+  async #advanceSerially(runId: RunId): Promise<RunProjection> {
     const ctx = this.#runs.get(runId);
     if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
     await this.#rehydrateGraph(ctx);
@@ -560,8 +562,49 @@ export class Engine {
         workerId: this.#workerId,
       });
 
-      await this.#runWave(ctx, [...wave]);
+      // AN EMPTY WAVE OVER A NON-EMPTY READY SET IS NOT AN ERROR — it is a peer holding
+      // the leases. `LeasedScheduler` returns exactly that, legitimately, whenever
+      // another worker got there first. Looping would spin in pure microtasks and starve
+      // the event loop with a perfectly valid integer, so hand control back and let the
+      // caller advance again when the world has moved.
+      const selected = [...wave];
+      if (selected.length === 0) return p;
+
+      await this.#runWave(ctx, selected);
     }
+  }
+
+  /**
+   * Drive a run forward. Serialized per run.
+   *
+   * `#serialize` orders journal APPENDS; it is not an execution lock, so two concurrent
+   * `advance` calls — both reachable from shipped HTTP routes — projected the same state,
+   * saw the same ready Tasks and dispatched every one of them twice, paid model calls and
+   * irreversible tools included. Nothing raised `E_SEQ_CONFLICT`, because both were
+   * appending legal events in a legal order; they were simply doing the work twice.
+   *
+   * Callers are chained rather than coalesced: a second caller wants the run advanced
+   * from where it is *after* the first finishes, not the first's answer.
+   */
+  async advance(runId: RunId): Promise<RunProjection> {
+    const prev = this.#advancing.get(runId);
+    const run = (async () => {
+      if (prev !== undefined) await prev;
+      return this.#advanceSerially(runId);
+    })();
+
+    // Store a never-rejecting handle: a predecessor that threw must not reject its
+    // successor, and an unhandled rejection here would take the process down.
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#advancing.set(runId, settled);
+    // Self-evicting, so the map does not grow with every run the process ever saw.
+    void settled.then(() => {
+      if (this.#advancing.get(runId) === settled) this.#advancing.delete(runId);
+    });
+    return run;
   }
 
   /**
@@ -2957,7 +3000,10 @@ export class Engine {
     for (const e of ctx.index.outbound.get(nodeId) ?? []) {
       if (e.kind !== "join") continue;
       const mode = ctx.index.byId.get(e.to)?.join?.onBranchError;
-      if (mode === "skip" || mode === "compensate") return true;
+      // `compensate` is refused at compile (GRAPH008_COMPENSATE_UNIMPLEMENTED), so it
+      // cannot reach here. It is NOT aliased to `skip` — that alias is what let a graph
+      // ask for a rollback and silently get a discard.
+      if (mode === "skip") return true;
     }
     return false;
   }

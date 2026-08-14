@@ -756,6 +756,24 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   for (const n of spec.nodes) {
     const join = n.join;
     if (join === undefined) continue;
+
+    // `compensate` NAMES AN EXECUTOR THAT DOES NOT EXIST.
+    //
+    // It was accepted and then treated as an exact synonym for `skip`, with no
+    // diagnostic — so an author who asked for their failed branch to be rolled back got
+    // it silently discarded instead, and the graph read as though somebody had thought
+    // about the failure. A word that means something weaker than it says is worse than
+    // not offering the word: the refusal and the enforcement belong in the same change,
+    // and until there is an executor the honest answer is to refuse.
+    if (join.onBranchError === "compensate") {
+      d.push({
+        severity: "error",
+        code: "GRAPH008_COMPENSATE_UNIMPLEMENTED",
+        message: `join "${n.id}" sets onBranchError: "compensate", but no compensation executor exists — it would behave exactly as "skip"`,
+        at: { nodeId: n.id },
+        fix: `set onBranchError: "skip" to accept partial evidence, or "fail" to stop the run`,
+      });
+    }
     for (const branch of join.branches) {
       if (!idx.byId.has(branch)) {
         d.push({
@@ -1078,6 +1096,40 @@ function rule011And012ErrorPaths(
         message: `tool "${manifest.name}" declares no compensation, so "${e.compensates}" cannot be rolled back`,
         at: { edgeId: e.id },
         fix: `remove edge "${e.id}", or declare a compensation on tool "${manifest.name}"`,
+      });
+      continue;
+    }
+
+    // A DECLARED COMPENSATION MUST NAME A TOOL THAT EXISTS.
+    //
+    // The only runtime effect a declared compensation has today is to REMOVE a refusal:
+    // `Engine.rewind` will not cross an uncompensated irreversible effect, and it decides
+    // that by asking whether the field is present. So `compensation: {tool: "noop"}` —
+    // or a name with a typo in it — buys a legal rewind that undoes nothing. Presence is
+    // not a promise; a registered tool is the least this can check.
+    const undo = tools[manifest.compensation.tool];
+    if (undo === undefined) {
+      d.push({
+        severity: "error",
+        code: "GRAPH012_COMPENSATION_UNKNOWN",
+        message: `tool "${manifest.name}" names compensation "${manifest.compensation.tool}", which is not a registered tool`,
+        at: { edgeId: e.id },
+        fix: `register "${manifest.compensation.tool}", or correct the compensation on tool "${manifest.name}"`,
+      });
+      continue;
+    }
+
+    // An undo that is itself hard to undo is a second irreversible action, not a
+    // rollback. It may still be the right answer — refunding a charge is externally
+    // visible and is exactly what you want — so this is a warning that says a human
+    // should be in the loop, not a refusal.
+    if (undo.irreversibility === "irreversible" || undo.irreversibility === "externally_visible") {
+      d.push({
+        severity: "warning",
+        code: "GRAPH012_COMPENSATION_VISIBLE",
+        message: `compensation "${undo.name}" for "${manifest.name}" is itself ${undo.irreversibility}: undoing is a second visible action, not a restoration`,
+        at: { edgeId: e.id },
+        fix: `keep it if that is intended — a refund is externally visible by nature — but gate the compensating node`,
       });
     }
   }
