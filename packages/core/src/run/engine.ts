@@ -66,6 +66,7 @@ import {
 import { validate, type JSONSchema } from "../schema.ts";
 import { assembleContext } from "./context.ts";
 import {
+  foldPartial,
   reduceState,
   stateHash,
   type ChannelSpec,
@@ -1370,8 +1371,10 @@ export class Engine {
         return this.#runFunction(ctx, p, w);
       case "router":
         return this.#runRouter(ctx, p, w);
+      // A join has no body. Its whole job is the fold, and the fold happens at commit
+      // against a fresh projection — see `#foldJoin`.
       case "join":
-        return this.#runJoin(ctx, p, w);
+        return { status: "succeeded", writes: {}, usage: { ...ZERO_USAGE } };
       case "tool":
         return this.#runToolNode(ctx, p, w);
       case "agent":
@@ -1510,29 +1513,51 @@ export class Engine {
    * Fold every contribution from the branches below this join, in branch-coordinate
    * order. This is where a fan-out's held writes finally become state.
    */
-  async #runJoin(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
+  /**
+   * Fold a join's declared branches. Called from `#commit`, against the projection as it
+   * stands after this wave's siblings have committed — never from the body phase.
+   */
+  #foldJoin(ctx: RunContext, p: RunProjection, w: Wave): NodeOutcome {
     const join = w.node.join!;
     const prefix = encodeBranch(w.task.branch);
     const byChannel = new Map<string, Contribution[]>();
     let branchCount = 0;
     let skipped = 0;
 
+    // THE DECLARATION, under or at this join's own coordinate.
+    //
+    // `join.branches` names the nodes that count as part of the branch, and it used to be
+    // destructured here and never read — membership was pure prefix descent, so a second
+    // fan-out under the same prefix had its contributions folded by BOTH joins. `at` as
+    // well as `under` is load-bearing: `isDescendantBranch` requires a strict descendant,
+    // so a static join whose arms sit at its own coordinate folded nothing at all.
+    const declared = new Set<string>(join.branches);
     const members = Object.values(p.tasks)
-      .filter((t) => isDescendantBranch(prefix, encodeBranch(t.branch)))
-      .sort((a, b) => compareBranch(a.branch, b.branch));
+      .filter((t) => {
+        if (!declared.has(t.nodeId)) return false;
+        const b = encodeBranch(t.branch);
+        return b === prefix || isDescendantBranch(prefix, b);
+      })
+      .sort((a, b) => compareBranch(a.branch, b.branch) || a.iteration - b.iteration || (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
 
+    // Counted per COORDINATE, not per task: a branch holding two nodes is one branch, and
+    // D4 deviation 2 requires `branchCount + skipped` to equal the planned width.
+    const contributing = new Set<string>();
+    const seen = new Set<string>();
     for (const t of members) {
+      const coord = encodeBranch(t.branch);
+      seen.add(coord);
       if (t.state === "succeeded") {
-        branchCount++;
+        contributing.add(coord);
         for (const [channel, value] of Object.entries(t.writes)) {
           const list = byChannel.get(channel) ?? [];
-          list.push({ branch: t.branch, value });
+          list.push({ branch: t.branch, nodeId: t.nodeId, iteration: t.iteration, value });
           byChannel.set(channel, list);
         }
-      } else if (t.state === "failed" || t.state === "skipped" || t.state === "cancelled") {
-        skipped++;
       }
     }
+    branchCount = contributing.size;
+    skipped = seen.size - contributing.size;
 
     if (join.onBranchError === "fail" && skipped > 0) {
       return {
@@ -1548,6 +1573,23 @@ export class Engine {
 
     const wave: Record<string, readonly Contribution[]> = {};
     for (const [channel, list] of byChannel) wave[channel] = list;
+
+    // HOLD AT DEPTH, APPLY AT ROOT — the rule `#immediateReduce` already enforces for
+    // every other node type, and joins were the sole exception.
+    //
+    // A join inside a fan-out runs once per enclosing branch. Applying its fold to shared
+    // channel state there would make the result depend on which sibling committed first;
+    // returning it as this Task's own write instead lets the ENCLOSING join fold the
+    // siblings in branch order. Associativity — which D5.3 already demands of every
+    // reducer — is what makes the two-level fold equal the one-level fold.
+    if ((ctx.index.fanoutDepth.get(w.node.id) ?? 0) > 0) {
+      return {
+        status: "succeeded",
+        writes: foldPartial(ctx.graph.spec.channels, wave).values,
+        usage: { ...ZERO_USAGE },
+      };
+    }
+
     const before = stateAtPrefix(p, w.task.branch);
     const reduced = reduceState(ctx.graph.spec.channels, before, wave);
 
@@ -2364,8 +2406,21 @@ export class Engine {
 
   // ── commit + edge activation ──────────────────────────────────────────────
 
-  async #commit(ctx: RunContext, w: Wave, outcome: NodeOutcome): Promise<void> {
+  async #commit(ctx: RunContext, w: Wave, settling: NodeOutcome): Promise<void> {
     const p = (await this.#project(ctx))!;
+
+    // A JOIN FOLDS HERE, NOT IN THE BODY PHASE.
+    //
+    // `#runWave` awaits every body before committing any of them, so a fold computed in
+    // the body phase reads the projection as it stood BEFORE the wave — and returns an
+    // absolute channel value computed from that stale base. Two joins in one wave then
+    // both wrote absolutes over the same base and the later silently discarded the
+    // earlier, which made the final state a function of `maxParallelism`: a number the
+    // journal never records, so the same journal replayed to different state on a
+    // differently-configured engine. `p` here is freshly re-projected, so the fold sees
+    // its siblings' commits. This is the whole of the fix.
+    const outcome =
+      w.node.type === "join" && settling.status === "succeeded" ? this.#foldJoin(ctx, p, w) : settling;
 
     if (outcome.status === "gate") {
       // THE RUN MAY HAVE ENDED WHILE THIS TASK WAS IN FLIGHT.
@@ -2766,7 +2821,7 @@ export class Engine {
 
     const wave: Record<string, readonly Contribution[]> = {};
     for (const [channel, value] of Object.entries(outcome.writes)) {
-      wave[channel] = [{ branch: w.task.branch, value }];
+      wave[channel] = [{ branch: w.task.branch, nodeId: w.node.id, iteration: w.task.iteration, value }];
     }
     const reduced = reduceState(ctx.graph.spec.channels, p.channels, wave);
     return { values: pick(reduced.state, reduced.channels), channels: reduced.channels, branchCount: 1, skipped: 0 };
@@ -3008,14 +3063,27 @@ export class Engine {
     const join = joinNode?.join;
     if (join === undefined) return undefined;
 
-    const parent: BranchCoordinate = { segments: w.task.branch.segments.slice(0, -1) };
+    // WHICH INSTANCE OF THIS BARRIER the arriving branch belongs to comes from the
+    // GRAPH, not from the arriving task's own depth. `slice(0, -1)` answers "one level
+    // up from whoever just arrived", so two arms at different fan-out depths computed
+    // different parents and minted several instances of one barrier. The compiled
+    // fan-out depth is the same for every arm — `GRAPH008_JOIN_DEPTH` refuses the graphs
+    // where it would not be.
+    const depth = ctx.index.fanoutDepth.get(edge.to) ?? Math.max(0, w.task.branch.segments.length - 1);
+    if (depth > w.task.branch.segments.length) return undefined;
+    const parent: BranchCoordinate = { segments: w.task.branch.segments.slice(0, depth) };
     const parentPath = encodeBranch(parent);
     const joinTaskId = makeTaskId(edge.to, parent, 0);
     if (p.tasks[joinTaskId] !== undefined) return undefined; // already fired
 
-    const siblings = Object.values(p.tasks).filter(
-      (t) => join.branches.includes(t.nodeId) && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
-    );
+    // Members are the DECLARED branch nodes under or at this instance's coordinate — the
+    // same set `#foldJoin` folds. Counting one set and folding another is the shape
+    // invariant 6 forbids for tools, reproduced one subsystem over.
+    const siblings = Object.values(p.tasks).filter((t) => {
+      if (!join.branches.includes(t.nodeId)) return false;
+      const b = encodeBranch(t.branch);
+      return b === parentPath || isDescendantBranch(parentPath, b);
+    });
 
     // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
     // materialisation a sibling count is "how many have started", so using it would
@@ -3043,6 +3111,34 @@ export class Engine {
         const to = ctx.index.edgeById.get(id as EdgeId)?.to;
         return to !== undefined && join.branches.includes(to);
       });
+
+    // QUIESCENCE: a barrier may not fire while an arrival is still possible.
+    //
+    // `terminal >= expected` counts what has ALREADY arrived, which is only the right
+    // question when every member is a direct fan-out target. With a fan-out inside a
+    // fan-out, the outer join's declared `innerJoin` members have not been created yet
+    // when the outer branches finish — so the barrier fired over an empty member set and
+    // committed nothing, and the result depended on how many branches a wave happened to
+    // hold. A node still reaches a member if it IS one or is one of its ancestors.
+    const reachesMember = (nodeId: NodeId): boolean =>
+      join.branches.some((bn) => bn === nodeId || (ctx.index.ancestors.get(bn as NodeId)?.has(nodeId) ?? false));
+
+    // This Task's own hand-off is not in `p` yet, so read it from `take`.
+    if (take.some((id) => {
+      const to = ctx.index.edgeById.get(id)?.to;
+      return to !== undefined && reachesMember(to);
+    })) {
+      return undefined;
+    }
+
+    const stillComing = Object.values(p.tasks).some((t) => {
+      if (t.taskId === w.task.taskId) return false;
+      if (isTerminalState(t.state)) return false;
+      const b = encodeBranch(t.branch);
+      if (!(b === parentPath || isDescendantBranch(parentPath, b))) return false;
+      return reachesMember(t.nodeId);
+    });
+    if (stillComing) return undefined;
 
     let succeeded = 0;
     let terminal = 0;

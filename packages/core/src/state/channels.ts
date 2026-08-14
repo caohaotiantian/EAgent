@@ -92,12 +92,36 @@ export const REDUCER_NAMES: readonly ReducerName[] = [
   "last_write_wins_by_ts",
 ];
 
-/** One branch's proposed write to one channel. */
+/**
+ * One TASK's proposed write to one channel.
+ *
+ * Not one branch's: a branch is a path, and a path can hold several nodes, each of which
+ * may write. Keying on the coordinate alone left those tied, and a tie in the sort key is
+ * arrival order wearing a different hat — which is exactly what invariant 7 exists to
+ * forbid. `nodeId` and `iteration` are the two remaining coordinates of a Task, so
+ * carrying them makes the key total.
+ */
 export interface Contribution {
   readonly branch: BranchCoordinate;
+  readonly nodeId: string;
+  readonly iteration: number;
   readonly value: unknown;
   /** `last_write_wins_by_ts` only. Recorded effect time, never `Date.now()` at fold time. */
   readonly ts?: number;
+}
+
+/**
+ * The total order contributions fold in: branch coordinate, then iteration, then node id.
+ *
+ * Node id breaks the last tie by code unit rather than by anything semantic, because the
+ * only property required of it is that it is total and derived from the graph — two
+ * contributions from one Task cannot exist, so no further key is needed.
+ */
+export function compareContribution(a: Contribution, b: Contribution): number {
+  const byBranch = compareBranch(a.branch, b.branch);
+  if (byBranch !== 0) return byBranch;
+  if (a.iteration !== b.iteration) return a.iteration - b.iteration;
+  return a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0;
 }
 
 export type ChannelState = Readonly<Record<string, unknown>>;
@@ -107,9 +131,11 @@ export type ChannelState = Readonly<Record<string, unknown>>;
 // ---------------------------------------------------------------------------
 
 /**
- * Apply contributions to one channel. Contributions are sorted by branch coordinate
- * FIRST, so this function's result is independent of the order the caller collected
- * them in — which is the property the whole parallel model rests on.
+ * Apply contributions to one channel. Contributions are sorted by the TOTAL key
+ * (`compareContribution`) FIRST, so this function's result is independent of the order the
+ * caller collected them in — which is the property the whole parallel model rests on. A
+ * partial key would leave ties to be broken by arrival, which is the same defect one level
+ * down.
  */
 export function reduceChannel(
   name: string,
@@ -119,11 +145,61 @@ export function reduceChannel(
 ): unknown {
   if (contributions.length === 0) return current;
 
-  const ordered = [...contributions].sort((a, b) => compareBranch(a.branch, b.branch));
+  const ordered = [...contributions].sort(compareContribution);
   let acc = current === undefined ? initialFor(spec) : current;
 
   for (const c of ordered) acc = step(name, spec, acc, c);
   return acc;
+}
+
+/**
+ * Fold a wave WITHOUT applying it to channel state — the partial fold a join inside a
+ * fan-out returns as its own write.
+ *
+ * Seeded from the reducer's algebraic identity rather than from `spec.initial`, because
+ * this result will be folded again by the enclosing join: seeding with `initial` would
+ * apply it once per inner branch, so a `sum` with `initial: 10` over three branches would
+ * arrive at the outer join already carrying 30.
+ */
+export function foldPartial(
+  specs: Readonly<Record<string, ChannelSpec>>,
+  wave: Readonly<Record<string, readonly Contribution[]>>,
+): { readonly values: Record<string, unknown>; readonly channels: readonly string[] } {
+  const values: Record<string, unknown> = {};
+  const channels: string[] = [];
+  for (const name of Object.keys(wave).sort()) {
+    const spec = specs[name];
+    const list = wave[name];
+    if (spec === undefined || list === undefined || list.length === 0) continue;
+    const folded = reduceChannel(name, spec, identityFor(spec), list);
+    if (folded === undefined) continue;
+    // A held `last_write_wins_by_ts` value is the `{value, ts}` envelope `step` builds.
+    // The enclosing fold re-wraps, so hand it the bare value or the timestamp is lost.
+    values[name] =
+      spec.reduce === "last_write_wins_by_ts" && typeof folded === "object" && folded !== null && "value" in folded
+        ? (folded as { value: unknown }).value
+        : folded;
+    channels.push(name);
+  }
+  return { values, channels };
+}
+
+/** `initialFor` without the `spec.initial` shortcut — the reducer's identity alone. */
+function identityFor(spec: ChannelSpec): unknown {
+  switch (spec.reduce) {
+    case "append_ordered":
+    case "union_set":
+      return [];
+    case "merge_object":
+      return {};
+    case "sum":
+      return 0;
+    case "max":
+    case "min":
+    case "replace":
+    case "last_write_wins_by_ts":
+      return undefined;
+  }
 }
 
 function initialFor(spec: ChannelSpec): unknown {

@@ -104,6 +104,16 @@ export interface GraphIndex {
    */
   readonly parallelWidth: ReadonlyMap<NodeId, number>;
   /**
+   * How many fan-out coordinate segments a Task of this node carries — the LENGTH of its
+   * enclosing fan-out stack. A join reads it to know which instance of itself an arriving
+   * branch belongs to: the instance's coordinate is the arriving branch truncated to this
+   * depth. Absent means the depth is ambiguous, which `GRAPH008_JOIN_DEPTH` refuses for
+   * joins and their arms and tolerates everywhere else.
+   */
+  readonly fanoutDepth: ReadonlyMap<NodeId, number>;
+  /** Every `join` node, so the runtime can notify barriers without scanning the spec. */
+  readonly joinNodes: readonly NodeId[];
+  /**
    * Worst-case TOTAL instances over the whole run: parallelWidth × loop iterations.
    * This is what GRAPH009 (budget) and GRAPH018 (task count) must use — three loop
    * passes cost three times as much even though they never overlap.
@@ -171,11 +181,16 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     for (const e of outbound.get(id) ?? []) stack.push(e.to);
   }
 
-  const parallelWidth = computeParallelWidth(spec, topoOrder, inbound);
+  const { stacks, widths: parallelWidth } = computeFanoutStacks(spec, topoOrder, inbound);
+  const fanoutDepth = new Map<NodeId, number>();
+  for (const [id, s] of stacks) if (s !== undefined) fanoutDepth.set(id, s.length);
+  const joinNodes = spec.nodes.filter((n) => n.type === "join").map((n) => n.id);
   const multiplicity = applyLoopFactors(spec, parallelWidth, loopEdges, ancestors);
   const criticalPath = computeCriticalPath(spec, topoOrder, outbound);
 
   return {
+    fanoutDepth,
+    joinNodes,
     byId,
     edgeById,
     inbound,
@@ -214,28 +229,57 @@ function topoSort(ids: readonly NodeId[], edges: readonly EdgeSpec[]): NodeId[] 
   return out.length === ids.length ? out : [];
 }
 
-/** Concurrent instances only: fan-out multiplies, a join collapses back to one. */
-function computeParallelWidth(
+/**
+ * The stack of fan-out widths enclosing each node.
+ *
+ * A STACK, not a product, because two things are wanted from it and only one survives
+ * multiplication. Its LENGTH is the node's fan-out depth — how many coordinate segments a
+ * Task of that node carries — which is what a join needs to know which instance of itself
+ * an arriving branch belongs to. Its PRODUCT is the concurrent width GRAPH010 uses.
+ *
+ * The predecessor collapsed to `1` on any inbound `join` edge, which is wrong for a join
+ * nested inside a fan-out: such a join runs once per outer branch and reported width 1, so
+ * a nested graph whose only writer of a `replace` channel was that join compiled with no
+ * diagnostic. Popping one level instead of collapsing keeps the outer widths.
+ *
+ * `undefined` for a node means AMBIGUOUS — two inbound paths disagree about the enclosing
+ * fan-outs. That is legal for ordinary nodes (GRAPH010 then takes the widest reading) and
+ * refused for joins and their arms, where the depth decides identity.
+ */
+function computeFanoutStacks(
   spec: GraphSpec,
   topoOrder: readonly NodeId[],
   inbound: ReadonlyMap<NodeId, readonly EdgeSpec[]>,
-): Map<NodeId, number> {
-  const width = new Map<NodeId, number>();
-  for (const n of spec.nodes) width.set(n.id, 1);
+): { stacks: Map<NodeId, readonly number[] | undefined>; widths: Map<NodeId, number> } {
+  const stacks = new Map<NodeId, readonly number[] | undefined>();
+  const widths = new Map<NodeId, number>();
+  for (const n of spec.nodes) {
+    stacks.set(n.id, []);
+    widths.set(n.id, 1);
+  }
+
+  const product = (s: readonly number[]): number => s.reduce((a, b) => a * b, 1);
 
   for (const id of topoOrder) {
     const ins = (inbound.get(id) ?? []).filter((e) => e.kind !== "loop" && e.kind !== "compensation");
     if (ins.length === 0) continue;
-    let best = 0;
-    for (const e of ins) {
-      const parent = width.get(e.from) ?? 1;
-      // A join is a barrier: its branches converge to a single downstream instance.
-      const w = e.kind === "join" ? 1 : e.kind === "fanout" ? parent * (e.maxWidth ?? 1) : parent;
-      best = Math.max(best, w);
-    }
-    width.set(id, Math.max(1, best));
+
+    const candidates: (readonly number[] | undefined)[] = ins.map((e) => {
+      const parent = stacks.get(e.from);
+      if (parent === undefined) return undefined;
+      if (e.kind === "fanout") return [...parent, e.maxWidth ?? 1];
+      if (e.kind === "join") return parent.slice(0, -1);
+      return parent;
+    });
+
+    const known = candidates.filter((c): c is readonly number[] => c !== undefined);
+    const agreed =
+      known.length === candidates.length &&
+      known.every((c) => c.length === known[0]!.length && c.every((w, i) => w === known[0]![i]));
+    stacks.set(id, agreed ? known[0]! : undefined);
+    widths.set(id, Math.max(1, ...known.map(product), 1));
   }
-  return width;
+  return { stacks, widths };
 }
 
 /**

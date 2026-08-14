@@ -15,8 +15,12 @@ import {
 } from "../../src/state/channels.ts";
 
 const b = (i: number): BranchCoordinate => childBranch(ROOT_BRANCH, "e1", i);
+/** One contribution from branch `i`. `nodeId`/`iteration` are constant here, so the
+ *  branch coordinate remains the only key these tests vary. */
 const c = (i: number, value: unknown, ts?: number): Contribution =>
-  ts === undefined ? { branch: b(i), value } : { branch: b(i), value, ts };
+  ts === undefined
+    ? { branch: b(i), nodeId: "n", iteration: 0, value }
+    : { branch: b(i), nodeId: "n", iteration: 0, value, ts };
 
 // ── the determinism property, which everything else rests on ─────────────────
 
