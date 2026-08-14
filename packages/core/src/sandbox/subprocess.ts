@@ -75,7 +75,8 @@
 
 import { constants as BUFFER } from "node:buffer";
 import { spawn } from "node:child_process";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CODES, err } from "../errors.ts";
 
@@ -373,28 +374,144 @@ function boundedStdin(v: unknown): string | undefined {
 const BASE_ENV_ALLOW = ["PATH", "LANG", "LC_ALL", "TZ"] as const;
 
 /**
- * Reject a path that escapes the jail.
+ * The path a caller will actually open — every symlink already resolved, as far as the
+ * filesystem has one to resolve.
+ *
+ * `realpathSync` answers only for a path that EXISTS, and the jail is asked about paths
+ * that do not yet: `fs.write` creates files. So this resolves the deepest existing
+ * ancestor and re-appends the components that are still missing. `<jail>/new/file.txt`
+ * under a jail whose real location is `/private/tmp/x` comes back as
+ * `/private/tmp/x/new/file.txt`, and nothing about the answer depends on a string.
+ *
+ * A DANGLING SYMLINK IS REFUSED RATHER THAN TREATED AS ABSENT, and that is the one
+ * subtle case here. `ws/evil -> /etc/nope` makes `realpath` answer ENOENT exactly like a
+ * name that was never created, so the naive walk would append `evil` to the real
+ * `ws` and call the result contained — after which `open(…, O_CREAT)` follows the link
+ * and creates `/etc/nope`. `lstat` is what tells the two apart: it succeeds on a link
+ * whose target is missing. Containment that cannot be established is containment denied.
+ *
+ * Every other resolution failure — ELOOP, EACCES, ENAMETOOLONG — is denied for the same
+ * reason. There is no answer to "is this inside the jail?" that a caller can act on when
+ * the filesystem will not say where the path leads.
+ */
+function realOrLexical(abs: string, candidate: string): string {
+  const missing: string[] = [];
+  let head = abs;
+  for (;;) {
+    try {
+      // `.native`, not the JS implementation. A resolved path is still a STRING, and on a
+      // case-insensitive filesystem two different strings name one file — so a deny-list
+      // compared case-sensitively is walked past by `.LOOM/journal.db`. That is the same
+      // error H21 was about one level up: the JS `realpathSync` resolves links but
+      // preserves the spelling the caller used, while the native binding asks the
+      // filesystem and returns the name it actually stores.
+      const real = realpathSync.native(head);
+      return missing.length === 0 ? real : join(real, ...missing.reverse());
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw err.policy(
+          CODES.E_CAP_DENIED,
+          `path "${candidate}" cannot be resolved (${String(code)} at "${head}"), so it cannot be shown to be inside the sandbox root`,
+          { details: { candidate, at: head, errno: code } },
+        );
+      }
+      if (code === "ENOENT") {
+        let dangling = false;
+        try {
+          lstatSync(head);
+          dangling = true;
+        } catch {
+          dangling = false;
+        }
+        if (dangling) {
+          throw err.policy(
+            CODES.E_CAP_DENIED,
+            `path "${candidate}" runs through "${head}", a symlink whose target does not exist — where it would be created cannot be checked`,
+            { details: { candidate, at: head } },
+          );
+        }
+      }
+      const parent = dirname(head);
+      // The filesystem root resolved to nothing, which means the whole path is
+      // hypothetical. Fall back to the lexical answer so a jail that has not been
+      // created yet still behaves like an empty one rather than like an escape.
+      if (parent === head) return abs;
+      missing.push(basename(head));
+      head = parent;
+    }
+  }
+}
+
+/**
+ * Reject a path that escapes the jail, or that lands in a subtree the jail denies.
  *
  * Uses `path.relative` rather than a `startsWith` prefix check: `startsWith` accepts
  * `/jail-evil` for a root of `/jail`, and it does not resolve `..` at all.
+ *
+ * **AND IT COMPARES REAL PATHS, BECAUSE A LEXICAL CHECK IS NOT A BOUNDARY.** It used to
+ * be `resolve` + `relative` and nothing else, while all three callers (`fs.read`,
+ * `fs.write`, `fs.restore`) open paths through the OS, which follows symlinks. One
+ * pre-existing link in the workspace — and the workspace defaults to the process's cwd,
+ * a directory nobody audited — was the whole escape: with `ws/vendor -> /somewhere/else`,
+ * `vendor/secret.txt` is a child of the *string* `ws` and a child of no such directory.
+ * Reads exfiltrated, writes created files outside, and a leaf link was clobbered.
+ *
+ * `deny` is the second half, and it exists because the jail root legitimately CONTAINS
+ * something the tools must not touch: `openWorkspace` puts `.loom/journal.db` inside the
+ * workspace, and the journal is the only authoritative durable state there is
+ * (invariant 2). Entries are resolved against the root — relative or absolute, both
+ * spellings work — and compared as real paths too, because `ws/link -> ws/.loom` defeats
+ * a deny-list checked lexically exactly as it defeats a containment check checked
+ * lexically. The two fixes are one fix.
+ *
+ * WHAT IS PROMISED: at the moment this returns, the answer names a real location, it is
+ * inside the real root, it is outside every denied subtree, and it contains no symlink
+ * for the caller's `open` to follow anywhere else.
+ *
+ * WHAT IS NOT: atomicity. This is a check followed by a separate `open`, so an adversary
+ * who can already create files inside the workspace can swap a directory component for a
+ * symlink in between (TOCTOU) — the classic answer, `openat2(RESOLVE_BENEATH)`, has no
+ * Node binding, and `O_NOFOLLOW` (which `builtin/tools.ts` does apply) closes only the
+ * leaf. The threat this jail is built for is a MODEL choosing a path, not a local
+ * attacker racing the orchestrator; `DEFERRED-v2` seccomp/Landlock is where the second
+ * one gets an honest answer.
  */
-export function assertWithin(root: string, candidate: string): string {
+export function assertWithin(root: string, candidate: string, deny: readonly string[] = []): string {
   const absRoot = resolve(root);
   const absPath = resolve(absRoot, candidate);
-  const rel = relative(absRoot, absPath);
-  if (rel === "") return absPath;
-  if (rel.startsWith("..") || isAbsolute(rel)) {
+  const lexical = relative(absRoot, absPath);
+  if (lexical.startsWith("..") || isAbsolute(lexical)) {
     throw err.policy(CODES.E_CAP_DENIED, `path "${candidate}" escapes the sandbox root`, {
       details: { root: absRoot, candidate },
     });
   }
-  return absPath;
+
+  const realRoot = realOrLexical(absRoot, candidate);
+  const real = realOrLexical(absPath, candidate);
+  const rel = relative(realRoot, real);
+  if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+    throw err.policy(CODES.E_CAP_DENIED, `path "${candidate}" escapes the sandbox root once its symlinks are resolved`, {
+      details: { root: realRoot, candidate, resolved: real },
+    });
+  }
+
+  for (const entry of deny) {
+    const denied = realOrLexical(resolve(absRoot, entry), candidate);
+    const inside = relative(denied, real);
+    if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) {
+      throw err.policy(CODES.E_CAP_DENIED, `path "${candidate}" is inside "${denied}", which this sandbox denies`, {
+        details: { root: realRoot, candidate, resolved: real, denied },
+      });
+    }
+  }
+  return real;
 }
 
 /** True when the path stays inside the jail. For callers that want a boolean. */
-export function isWithin(root: string, candidate: string): boolean {
+export function isWithin(root: string, candidate: string, deny: readonly string[] = []): boolean {
   try {
-    assertWithin(root, candidate);
+    assertWithin(root, candidate, deny);
     return true;
   } catch {
     return false;

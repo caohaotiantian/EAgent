@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -40,6 +40,107 @@ test("the jail check is not a startsWith prefix test", () => {
 
 test("the root itself is inside the root", () => {
   assert.equal(isWithin("/jail", "."), true);
+});
+
+// ── the jail is a REAL-path relation, not a string one ───────────────────────
+
+test("A SYMLINK OUT OF THE ROOT IS AN ESCAPE, and a lexical check cannot see it", () => {
+  const j = jail();
+  const outside = mkdtempSync(join(tmpdir(), "loom-outside-"));
+  try {
+    writeFileSync(join(outside, "secret.txt"), "not yours");
+    symlinkSync(outside, join(j.dir, "vendor"));
+    // Lexically `<jail>/vendor/secret.txt` is a child of the root. It is a child of the
+    // string, which is not the same claim as being a child of the directory.
+    assert.throws(() => assertWithin(j.dir, "vendor/secret.txt"), /escapes the sandbox root/);
+    assert.equal(isWithin(j.dir, "vendor"), false, "the link itself is the target, and the target is outside");
+    assert.equal(isWithin(j.dir, "vendor/nothing/here.txt"), false, "a path UNDER the link that does not exist yet");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    j.dispose();
+  }
+});
+
+test("what comes back is the REAL path, so the caller opens something with no links left in it", () => {
+  const j = jail();
+  try {
+    mkdirSync(join(j.dir, "real"));
+    symlinkSync(join(j.dir, "real"), join(j.dir, "alias"));
+    assert.equal(assertWithin(j.dir, "alias/f.txt"), join(realpathSync(j.dir), "real", "f.txt"));
+  } finally {
+    j.dispose();
+  }
+});
+
+test("a symlink INSIDE the root is not an escape — the rule is where it points", () => {
+  const j = jail();
+  try {
+    mkdirSync(join(j.dir, "real"));
+    symlinkSync(join(j.dir, "real"), join(j.dir, "alias"));
+    assert.equal(isWithin(j.dir, "alias/f.txt"), true);
+  } finally {
+    j.dispose();
+  }
+});
+
+test("a path that cannot be resolved AT ALL is refused, not waved through", () => {
+  // A symlink cycle: `realpath` answers ELOOP, which is neither "inside" nor "does not
+  // exist yet". Containment that cannot be established is containment denied.
+  const j = jail();
+  try {
+    symlinkSync(join(j.dir, "b"), join(j.dir, "a"));
+    symlinkSync(join(j.dir, "a"), join(j.dir, "b"));
+    assert.throws(() => assertWithin(j.dir, "a/x"), /ELOOP|cannot be resolved|escapes the sandbox root/);
+  } finally {
+    j.dispose();
+  }
+});
+
+test("a root that does not exist yet still resolves lexically, and says so", () => {
+  // `/jail` is not a directory on any machine running this. Refusing every path under an
+  // absent root would turn "not created yet" into "outside the jail"; resolving what
+  // exists and appending what does not keeps both answers honest.
+  assert.equal(assertWithin("/jail", "a/b.txt"), "/jail/a/b.txt");
+  assert.equal(isWithin("/jail", "../etc/passwd"), false);
+});
+
+// ── the deny-list ────────────────────────────────────────────────────────────
+
+test("A DENIED SUBTREE INSIDE THE ROOT IS STILL DENIED", () => {
+  const j = jail();
+  try {
+    const data = join(j.dir, ".loom");
+    mkdirSync(data);
+    writeFileSync(join(data, "journal.db"), "x");
+    for (const bad of [".loom", ".loom/journal.db", "./.loom/journal.db", "graphs/../.loom/journal.db"]) {
+      assert.throws(() => assertWithin(j.dir, bad, [data]), /which this sandbox denies/, bad);
+    }
+    assert.equal(isWithin(j.dir, "notes.txt", [data]), true, "everything else is unaffected");
+  } finally {
+    j.dispose();
+  }
+});
+
+test("the deny-list is checked on the RESOLVED path, so a symlink does not launder it", () => {
+  const j = jail();
+  try {
+    const data = join(j.dir, ".loom");
+    mkdirSync(data);
+    symlinkSync(data, join(j.dir, "link"));
+    assert.throws(() => assertWithin(j.dir, "link/journal.db", [data]), /which this sandbox denies/);
+  } finally {
+    j.dispose();
+  }
+});
+
+test("a denied entry may be given relative to the root", () => {
+  const j = jail();
+  try {
+    mkdirSync(join(j.dir, ".loom"));
+    assert.equal(isWithin(j.dir, ".loom/journal.db", [".loom"]), false);
+  } finally {
+    j.dispose();
+  }
 });
 
 // ── environment ──────────────────────────────────────────────────────────────

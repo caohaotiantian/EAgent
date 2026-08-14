@@ -379,6 +379,34 @@ function channelTypeMap(channels: Readonly<Record<string, ChannelSpec>>): Record
 
 // ── GRAPH003 + GRAPH020: structure ───────────────────────────────────────────
 
+/**
+ * The characters an id may be built from.
+ *
+ * Not a style rule. Every durable id in the system is a STRING JOIN with no escaping:
+ * `taskId` is `nodeId@branchPath#iteration`, `encodeBranch` writes each segment as
+ * `edgeId[index]` and joins them with `/`, and `effectKey` appends `:kind:ordinal`. So an
+ * id carrying one of those characters is not a name, it is a second parse of somebody
+ * else's id — and two consequences follow immediately. `encodeBranch` stops being
+ * INJECTIVE (segments `a[0]` then `b[3]` and the single segment `a[0]/b[3]` encode to one
+ * string, so two branches share one TaskId — invariant 3 — while `compareBranch` still
+ * orders them strictly, which invariant 7's fold relies on being an order over distinct
+ * things). And `decodeBranch` throws on a `branchPath` that is ALREADY JOURNALED, which
+ * an append-only log cannot take back: every later fold of that run throws too.
+ *
+ * The first character must be alphanumeric, which additionally keeps `__proto__` out of
+ * every object these names end up keying: the channel-state record, and the projection's
+ * per-id maps.
+ *
+ * Widening this is safe; narrowing it is not, because ids already journaled must stay
+ * decodable.
+ */
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** `unknown` rather than `string`: a model-proposed spec is cast, never checked. */
+function isSafeId(id: unknown): boolean {
+  return typeof id === "string" && SAFE_ID.test(id);
+}
+
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
   if (spec.apiVersion !== GRAPH_API_VERSION) {
@@ -391,6 +419,24 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     fatal = true;
   }
 
+  // Ids first, and fatally: every rule after this keys a map by them, and the runtime
+  // derives TaskIds, branch paths and effect keys from them by concatenation.
+  const badId = (what: string, id: unknown, at: Diagnostic["at"]): void => {
+    const base = {
+      severity: "error" as const,
+      code: "GRAPH003_BAD_ID",
+      message: `${what} ${JSON.stringify(id)} is not a usable id`,
+      fix: "an id starts with a letter or digit and may then use letters, digits, `.`, `_` and `-`; `@ # / [ ] :` are the separators TaskId, branch paths and effect keys are built from",
+    };
+    d.push(at === undefined ? base : { ...base, at });
+    fatal = true;
+  };
+  for (const n of spec.nodes) if (!isSafeId(n.id)) badId("node id", n.id, typeof n.id === "string" ? { nodeId: n.id } : undefined);
+  for (const e of spec.edges) if (!isSafeId(e.id)) badId("edge id", e.id, typeof e.id === "string" ? { edgeId: e.id } : undefined);
+  // A channel name is an object key in `ChannelState`, and `initialState` assigns it with
+  // `out[name] = …` — which for `__proto__` writes the prototype and declares nothing.
+  for (const name of Object.keys(spec.channels ?? {})) if (!isSafeId(name)) badId("channel name", name, { channel: name });
+
   const seenNodes = new Set<string>();
   for (const n of spec.nodes) {
     if (seenNodes.has(n.id)) {
@@ -398,6 +444,28 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       fatal = true;
     }
     seenNodes.add(n.id);
+
+    // A TYPE OUTSIDE THE UNION USED TO PASS BOTH HALVES OF GRAPH020 VACUOUSLY.
+    // `REQUIRED_BLOCK[n.type]` is `undefined` for an unknown type, so no block was
+    // required; and one block is not more than one, so the extra-block check passed too.
+    // `REQUIRED_BLOCK` is the only runtime enumeration of `NodeType` and every untyped
+    // entry point casts — the CLI, the resource store, a model-proposed mutation — so a
+    // typo compiled clean and the engine, which has no dispatch case for it, then failed
+    // the run on a raw `TypeError` rather than on anything an author could read.
+    //
+    // `Object.hasOwn`, not `in`: `"toString" in REQUIRED_BLOCK` is true and its value is a
+    // Function, so `in` would admit exactly the names that break a lookup.
+    if (!Object.hasOwn(REQUIRED_BLOCK, n.type)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH020_UNKNOWN_TYPE",
+        message: `node "${n.id}" declares type ${JSON.stringify(n.type)}, which is not a node type`,
+        at: { nodeId: n.id },
+        fix: `use one of ${Object.keys(REQUIRED_BLOCK).join(", ")}`,
+      });
+      fatal = true;
+      continue;
+    }
 
     const required = REQUIRED_BLOCK[n.type];
     if (required !== undefined && n[required] === undefined) {
@@ -440,8 +508,13 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     }
   }
 
+  // `Object.hasOwn` at every "is this a declared channel?" site in this file. `in` walks
+  // the prototype chain, so `toString`, `constructor` and `valueOf` all answered "declared"
+  // against a `channels` object that declares nothing of the sort — while the state layer
+  // asks `hasOwnProperty` (see `declared` in state/channels.ts) and refuses the same name
+  // at run time. The compiler proved a dataflow the runtime does not have.
   for (const name of [...spec.inputs, ...spec.outputs]) {
-    if (!(name in spec.channels)) {
+    if (!Object.hasOwn(spec.channels, name)) {
       d.push({
         severity: "error",
         code: "GRAPH003_UNDECLARED_CHANNEL",
@@ -557,9 +630,13 @@ function rule004Expressions(
     if (e.until !== undefined) check(e.until, { edgeId: e.id }, e.from);
   }
   for (const n of spec.nodes) {
-    if (n.router?.mode === "expression") {
-      for (const c of n.router.cases) check(c.when, { nodeId: n.id }, n.id);
-    }
+    // EVERY mode, not only `expression`. `#runRouter` evaluates `cases[].when` whatever
+    // the mode says, so gating this check on the mode meant declaring the unbuilt `model`
+    // mode also switched the expression rules off for that node: an unparseable condition
+    // compiled clean and died at run time, and a condition reading an undeclared channel
+    // compiled clean and then really decided the branch — the exact thing
+    // `GRAPH004_UNDECLARED_READ` exists to make impossible.
+    for (const c of n.router?.cases ?? []) check(c.when, { nodeId: n.id }, n.id);
   }
 }
 
@@ -583,7 +660,7 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
 
   for (const n of spec.nodes) {
     for (const w of n.writes ?? []) {
-      if (!(w in spec.channels)) {
+      if (!Object.hasOwn(spec.channels, w)) {
         d.push({
           severity: "error",
           code: "GRAPH005_UNDECLARED_WRITE",
@@ -605,10 +682,33 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
       });
     }
 
+    // `mode: "model"` NAMES AN EXECUTOR THAT DOES NOT EXIST.
+    //
+    // `#runRouter` never reads `mode`; it evaluates `cases[].when` and takes the first
+    // match. So a graph that says "a model picks the branch" ran as "a fixed expression
+    // picks the branch" — with a model profile pinned in the resolution manifest that is
+    // never called, which is the paperwork of a decision nobody made. Same rule as
+    // `ApprovalSpec.mode`: the field exists so the graph asking for it is REFUSED, and
+    // whoever builds the mode deletes this refusal in the change that adds the
+    // enforcement.
+    //
+    // Placed here rather than in `checkStructure` on purpose: a fatal structural error
+    // returns before GRAPH004 runs, and the author needs the expression diagnostics in the
+    // same pass.
+    if (n.router?.mode === "model") {
+      d.push({
+        severity: "error",
+        code: "GRAPH005_ROUTER_MODE_UNSUPPORTED",
+        message: `router "${n.id}" declares mode "model", which no executor implements — its \`when\` expressions would decide the branch instead`,
+        at: { nodeId: n.id },
+        fix: `use mode: expression and say the rule in \`when\`, or move the judgement into an agent node upstream of "${n.id}"`,
+      });
+    }
+
     const items = fanoutItems.get(n.id) ?? new Set<string>();
     for (const r of n.reads ?? []) {
       if (items.has(r)) continue;
-      if (!(r in spec.channels)) {
+      if (!Object.hasOwn(spec.channels, r)) {
         d.push({
           severity: "error",
           code: "GRAPH005_UNDECLARED_READ",
@@ -728,7 +828,7 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
         at: { edgeId: e.id },
       });
     }
-    if (e.over !== undefined && !(e.over in spec.channels)) {
+    if (e.over !== undefined && !Object.hasOwn(spec.channels, e.over)) {
       d.push({
         severity: "error",
         code: "GRAPH007_UNKNOWN_OVER",
@@ -738,7 +838,7 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
     }
     // The per-branch item is a real channel: the StateView has to serve it and the
     // expression type-checker has to know its type.
-    if (e.as !== undefined && !(e.as in spec.channels)) {
+    if (e.as !== undefined && !Object.hasOwn(spec.channels, e.as)) {
       d.push({
         severity: "error",
         code: "GRAPH007_UNKNOWN_ITEM",
@@ -1751,7 +1851,7 @@ function rule016Subgraphs(
     if (child === undefined) continue; // GRAPH015 already reported a missing ref
 
     for (const [childCh, parentCh] of Object.entries(sub.inputs)) {
-      if (!(parentCh in spec.channels)) {
+      if (!Object.hasOwn(spec.channels, parentCh)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
@@ -1759,7 +1859,7 @@ function rule016Subgraphs(
           at: { nodeId: n.id },
         });
       }
-      if (!(childCh in child.channels)) {
+      if (!Object.hasOwn(child.channels, childCh)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
@@ -1769,7 +1869,7 @@ function rule016Subgraphs(
       }
     }
     for (const [parentCh, childCh] of Object.entries(sub.outputs)) {
-      if (!(parentCh in spec.channels)) {
+      if (!Object.hasOwn(spec.channels, parentCh)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
@@ -1777,7 +1877,7 @@ function rule016Subgraphs(
           at: { nodeId: n.id },
         });
       }
-      if (!(childCh in child.channels)) {
+      if (!Object.hasOwn(child.channels, childCh)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",

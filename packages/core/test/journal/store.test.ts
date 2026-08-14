@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { type ChildProcess, fork } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,8 +9,10 @@ import { DatabaseSync } from "node:sqlite";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import { EVENT_TYPES, SYSTEM_ACTOR } from "../../src/journal/events.ts";
-import type { RunId } from "../../src/ids.ts";
+import type { RunId, TaskId } from "../../src/ids.ts";
+import { foldRun } from "../../src/run/projection.ts";
 import { runConformance } from "./conformance.ts";
+import type { FromWorker, ToWorker } from "./open-worker.ts";
 
 // The same contract, both implementations. If these ever diverge, the StateStore
 // interface is not the real boundary and the local -> distributed swap is a lie.
@@ -108,6 +111,224 @@ test("[sqlite] refuses to open a journal from a newer schema version", () => {
     db.close();
 
     assert.throws(() => new SqliteStateStore({ path }), /newer than this build/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── multi-process startup ────────────────────────────────────────────────────
+//
+// v1 runs several worker processes against one journal file on one device, so the
+// constructor is a contended path, not a private one. Two tests: one isolates the
+// single-peer case against a lock held on demand, the other runs the stampede that a
+// fleet actually produces at startup.
+
+const WORKER = join(import.meta.dirname, "open-worker.ts");
+
+function spawnWorker(role: "holder" | "opener"): ChildProcess {
+  // `execArgv: []` because the parent is running under `node --test`; inheriting that
+  // flag would make the child try to be a test runner.
+  return fork(WORKER, [role], { execArgv: [], stdio: ["ignore", "ignore", "inherit", "ipc"] });
+}
+
+/** Resolves on the first message the predicate accepts. */
+function nextMessage(child: ChildProcess, want: (m: FromWorker) => boolean): Promise<FromWorker> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (raw: unknown): void => {
+      const msg = raw as FromWorker;
+      if (!want(msg)) return;
+      cleanup();
+      resolve(msg);
+    };
+    const onExit = (code: number | null): void => {
+      cleanup();
+      reject(new Error(`worker exited early with code ${String(code)}`));
+    };
+    const cleanup = (): void => {
+      child.off("message", onMessage);
+      child.off("exit", onExit);
+    };
+    child.on("message", onMessage);
+    child.on("exit", onExit);
+  });
+}
+
+function tell(child: ChildProcess, msg: ToWorker): void {
+  child.send(msg);
+}
+
+/**
+ * True while some other connection is parked waiting to upgrade to EXCLUSIVE.
+ *
+ * A waiting upgrader holds PENDING, and PENDING refuses *new* readers while leaving
+ * existing ones alone — so a throwaway connection that cannot even read the schema is
+ * proof that someone is blocked on the lock. This is the observable that makes the
+ * test below deterministic: it distinguishes "waited" from "died instantly" without
+ * measuring time.
+ */
+function someoneIsWaitingForTheLock(path: string): boolean {
+  const probe = new DatabaseSync(path);
+  try {
+    probe.prepare("SELECT count(*) FROM sqlite_schema").get();
+    return false;
+  } catch {
+    return true;
+  } finally {
+    probe.close();
+  }
+}
+
+test("[sqlite] a WAL conversion blocked by another process waits for the lock instead of dying", { timeout: 60_000 }, async () => {
+  // The defect is an ORDERING one: `PRAGMA busy_timeout` must be set before the WAL
+  // conversion, because the conversion needs a brief exclusive lock and SQLite's
+  // default timeout is zero. A holder process pins a SHARED lock, and the parent
+  // releases it only once it can SEE that the opener is parked on the lock. So the
+  // pass condition is not "the open eventually succeeded" — a store that dies on
+  // contention never parks, the release is never sent, and it reports its failure
+  // instead. No sleeps, and no dependence on which process the scheduler runs first.
+  const dir = mkdtempSync(join(tmpdir(), "loom-walrace-"));
+  const path = join(dir, "journal.db");
+  const holder = spawnWorker("holder");
+  const opener = spawnWorker("opener");
+  try {
+    const held = nextMessage(holder, (m) => m.kind === "held");
+    tell(holder, { kind: "hold", path });
+    await held;
+
+    const settled = nextMessage(opener, (m) => m.kind === "opened" || m.kind === "failed");
+    let gaveUp = false;
+    void settled.then(
+      () => {
+        gaveUp = true;
+      },
+      () => {
+        gaveUp = true;
+      },
+    );
+    const announced = nextMessage(opener, (m) => m.kind === "opening");
+    tell(opener, { kind: "open", id: 1, path });
+    await announced;
+
+    while (!gaveUp && !someoneIsWaitingForTheLock(path)) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    tell(holder, { kind: "release" });
+
+    const result = await settled;
+    assert.equal(
+      result.kind,
+      "opened",
+      `the constructor must park on a held lock, not die on it: ${JSON.stringify(result)}`,
+    );
+  } finally {
+    holder.kill("SIGKILL");
+    opener.kill("SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[sqlite] many processes opening one fresh journal at once all survive the constructor", { timeout: 120_000 }, async () => {
+  // A fleet starting up: N workers all open the same journal at once. Every step of
+  // the constructor that touches a lock is in scope here, and empirically two of them
+  // are — the WAL conversion and the schema-version stamp — so this catches a
+  // regression in either without knowing in advance which one broke. Rounds are
+  // barrier-synchronised over IPC (no sleeps), and each round gets a fresh path so
+  // the conversion really runs rather than short-circuiting on an already-WAL file.
+  const WORKERS = 6;
+  const ROUNDS = 14;
+  const dir = mkdtempSync(join(tmpdir(), "loom-stampede-"));
+  const workers = Array.from({ length: WORKERS }, () => spawnWorker("opener"));
+  const failures: string[] = [];
+  try {
+    for (let round = 0; round < ROUNDS; round++) {
+      const path = join(dir, `round-${round}.db`);
+      const settled = workers.map((w) =>
+        nextMessage(w, (m) => m.kind === "opened" || m.kind === "failed"),
+      );
+      for (const w of workers) tell(w, { kind: "open", id: round, path });
+      for (const m of await Promise.all(settled)) {
+        if (m.kind === "failed") failures.push(m.error);
+      }
+    }
+    assert.deepEqual(
+      failures,
+      [],
+      `${failures.length} of ${WORKERS * ROUNDS} concurrent opens died in the constructor`,
+    );
+  } finally {
+    for (const w of workers) w.kill("SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── durability of the write-ahead record ─────────────────────────────────────
+
+test("[sqlite] the write-ahead effect record is what survives a restart", async () => {
+  // `effect.started` is appended and awaited immediately before an irreversible tool
+  // runs, precisely so that a crash leaves evidence the effect may have reached the
+  // world. This pins the property the durability pragma exists to protect: after a
+  // restart, folding the journal must still report the key as unknown. If the record
+  // is lost, the fold is perfectly self-consistent and reports a CLEAN stop — the
+  // failure has no symptom, which is why it needs a test of its own.
+  const dir = mkdtempSync(join(tmpdir(), "loom-wal-intent-"));
+  const path = join(dir, "journal.db");
+  const run = "01JRUNINTENT00000000000000" as RunId;
+  const task = "send-email@root#0" as TaskId;
+  const key = "send-email@root#0:tool:0";
+  try {
+    const first = new SqliteStateStore({ path });
+    await first.append({
+      runId: run,
+      expectedSeq: 0,
+      events: [
+        { type: "run.started", payload: { posture: "in" }, actor: SYSTEM_ACTOR("test") },
+        {
+          type: "effect.started",
+          payload: { key, kind: "tool", attempt: 0 },
+          actor: SYSTEM_ACTOR("test"),
+          taskId: task,
+        },
+      ],
+    });
+    first.close();
+
+    const second = new SqliteStateStore({ path });
+    const projection = foldRun(await Array.fromAsync(second.read(run, 1)));
+    second.close();
+    assert.ok(projection);
+    assert.deepEqual(projection.unknownEffects, [key], "a restart must not turn an open effect into a clean stop");
+    assert.deepEqual(projection.startedEffects, [key]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[sqlite] the durability knob changes only durability, never behaviour", async () => {
+  // `synchronous` is per-connection state and `#db` is private, so the pragma itself
+  // is not observable from out here, and the loss it prevents needs a power cut — no
+  // offline test can prove the fsync happened. What a test CAN pin is that this is a
+  // durability knob and nothing else: both values must yield the same events, the same
+  // head and the same fold, so no semantic difference can later be smuggled in behind
+  // it.
+  const dir = mkdtempSync(join(tmpdir(), "loom-sync-knob-"));
+  const run = "01JRUNSYNCKNOB000000000000" as RunId;
+  try {
+    const read = async (mode: "full" | "normal"): Promise<unknown> => {
+      const store = new SqliteStateStore({ path: join(dir, `${mode}.db`), synchronous: mode, now: () => 7 });
+      await store.append({
+        runId: run,
+        expectedSeq: 0,
+        events: [
+          { type: "run.started", payload: { posture: "in" }, actor: SYSTEM_ACTOR("test") },
+          { type: "effect.started", payload: { key: "k:tool:0", kind: "tool", attempt: 0 }, actor: SYSTEM_ACTOR("test") },
+        ],
+      });
+      const events = await Array.fromAsync(store.read(run, 1));
+      const head = await store.head(run);
+      store.close();
+      return { head, events, fold: foldRun(events) };
+    };
+    assert.deepEqual(await read("full"), await read("normal"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

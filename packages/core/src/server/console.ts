@@ -493,18 +493,35 @@ $("tok").onchange = async () => {
   localStorage.setItem("loom.token", token);
   await whoami();
   await loadRuns();
+  // Entering a token backfills the box a pre-credential 401 left empty.
+  await loadGraphs();
   if (selected) await select(selected);
 };
 
+// The graph names come from the CREDENTIALED route, not from /health. /health is a
+// liveness probe reachable without a credential, and the list of workflows a deployment
+// can run is not a liveness fact — it names the business actions this plane takes. Before
+// a credential is entered this 401s, which is the answer, not an error to shout about:
+// the operator has one field to fill in and the page already says so.
+async function loadGraphs() {
+  // Never over a name the operator has already typed. The load is async and the field is
+  // editable from the first paint, so the only safe write is into an empty box.
+  if ($("wf").value) return;
+  try {
+    const { graphs } = await api("/graphs");
+    if (graphs.length && !$("wf").value) $("wf").value = graphs[0].name;
+  } catch { /* no credential yet, or none this credential may see */ }
+}
+
 api("/health").then((h) => {
   $("conn").textContent = h.auth === "open" ? "open" : "authorized";
-  if (h.graphs?.length) $("wf").value = h.graphs[0];
   // On the input rather than the identity pill, which whoami owns — two writers on one
   // element is a race whose loser is whichever request was slower.
   if (!h.identity) $("tok").placeholder = "no identity source";
 });
 whoami();
 loadRuns();
+loadGraphs();
 setInterval(loadRuns, 4000);
 </script>
 </body>

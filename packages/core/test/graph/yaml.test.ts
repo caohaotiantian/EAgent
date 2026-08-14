@@ -142,6 +142,45 @@ test("A DUPLICATE KEY IS AN ERROR, not a silent last-wins", () => {
   // In JSON the last one silently wins. In a GraphSpec it means two declarations
   // disagree and one is being ignored — which is exactly what an author needs told.
   refuses("posture: out\nposture: in\n", /duplicate key "posture"/);
+  // A flow mapping is a spelling of the same document model, so it owes the same answer;
+  // it used to silently last-wins.
+  refuses("budget: {costUsd: 1, costUsd: 2}\n", /duplicate key "costUsd"/);
+});
+
+test("A KEY NAMED AFTER AN Object.prototype MEMBER IS AN ORDINARY KEY", () => {
+  // The duplicate-key check asked `key in out`, which walks the prototype chain, so
+  // every name `Object.prototype` happens to carry was reported as a duplicate of a key
+  // the author never wrote. `constructor` is a plausible channel or label name, and the
+  // refusal quoted a line the author could not see anything wrong with.
+  assert.deepEqual(parseYaml("constructor: 1\ntoString: 2\nvalueOf: 3\nhasOwnProperty: 4"), {
+    constructor: 1,
+    toString: 2,
+    valueOf: 3,
+    hasOwnProperty: 4,
+  });
+  assert.deepEqual(parseYaml("labels: {constructor: a, toString: b}"), {
+    labels: { constructor: "a", toString: "b" },
+  });
+  // And the check still has to work for those names.
+  refuses("constructor: 1\nconstructor: 2\n", /duplicate key "constructor"/);
+});
+
+test("A `__proto__` KEY IS DATA, not an assignment to the prototype", () => {
+  // `out[key] = value` invokes `Object.prototype.__proto__`'s SETTER for that one name:
+  // the key vanishes from the parsed document and the object's prototype changes
+  // instead. A parser that loses a line it was given, silently, is the failure this
+  // subset exists to refuse — and the compiler's id charset can only refuse a channel
+  // named `__proto__` if the parser hands it one.
+  const parsed = parseYaml("__proto__: 1\nb: 2") as Record<string, unknown>;
+  assert.deepEqual(Object.keys(parsed), ["__proto__", "b"]);
+  assert.equal(Object.getPrototypeOf(parsed), Object.prototype, "the prototype is untouched");
+  assert.equal(Object.getOwnPropertyDescriptor(parsed, "__proto__")?.value, 1);
+
+  const flow = parseYaml("a: {__proto__: 1}") as { a: Record<string, unknown> };
+  assert.deepEqual(Object.keys(flow.a), ["__proto__"]);
+  assert.equal(Object.getPrototypeOf(flow.a), Object.prototype);
+
+  refuses("__proto__: 1\n__proto__: 2\n", /duplicate key "__proto__"/);
 });
 
 test("a line that is not `key: value` is refused with the line quoted back", () => {

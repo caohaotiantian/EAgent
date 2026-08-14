@@ -178,32 +178,55 @@ function parseMapping(lines: readonly Line[], start: number, indent: number, whe
     const [key, rest] = split;
     // A duplicate key in JSON silently wins; here it is an error, because in a GraphSpec
     // it means two declarations disagree and one of them is being ignored.
-    if (key in out) throw fail(where, line.no, `duplicate key "${key}"`);
+    //
+    // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so `constructor`,
+    // `toString` and every other name `Object.prototype` carries was reported as a
+    // duplicate of a key the author never wrote — a refusal quoting a line with nothing
+    // wrong with it.
+    if (Object.hasOwn(out, key)) throw fail(where, line.no, `duplicate key "${key}"`);
 
     if (rest === "") {
       const child = lines[i + 1];
       if (child === undefined || child.indent <= indent) {
-        out[key] = null;
+        put(out, key, null);
         i++;
         continue;
       }
       const [value, next] = parseBlock(lines, i + 1, child.indent, where);
-      out[key] = value;
+      put(out, key, value);
       i = next;
       continue;
     }
 
     if (rest === "|" || rest === ">" || rest === "|-" || rest === ">-") {
       const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"));
-      out[key] = text;
+      put(out, key, text);
       i = next;
       continue;
     }
 
-    out[key] = scalar(rest, line.no, where);
+    put(out, key, scalar(rest, line.no, where));
     i++;
   }
   return [out, i];
+}
+
+/**
+ * Write a parsed key as a KEY, whatever it is called.
+ *
+ * `out[key] = value` is not an assignment for one name: `__proto__` has a setter on
+ * `Object.prototype`, so that line changes the object's prototype and stores nothing. The
+ * key then vanishes from the parsed document — a line the author wrote, silently dropped,
+ * which is exactly the mis-read this subset refuses anchors to avoid. `defineProperty`
+ * makes it an own data property like any other, so a `__proto__` channel reaches the
+ * compiler's id charset rule instead of disappearing before it.
+ */
+function put(out: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === "__proto__") {
+    Object.defineProperty(out, key, { value, writable: true, enumerable: true, configurable: true });
+    return;
+  }
+  out[key] = value;
 }
 
 function blockScalar(lines: readonly Line[], start: number, indent: number, folded: boolean, chomp: boolean): [string, number] {
@@ -338,7 +361,10 @@ class FlowReader {
       const key = unquote(this.#bare());
       this.skipSpace();
       if (this.src[this.#i++] !== ":") throw fail(this.where, this.no, `expected ":" after "${key}" in a flow mapping`);
-      out[key] = this.value();
+      // The same two rules as a block mapping, for the same two reasons — a flow
+      // collection is a spelling, not a different document model.
+      if (Object.hasOwn(out, key)) throw fail(this.where, this.no, `duplicate key "${key}"`);
+      put(out, key, this.value());
       this.skipSpace();
       const c = this.src[this.#i++];
       if (c === "}") return out;

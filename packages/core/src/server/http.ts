@@ -80,14 +80,41 @@
  * warning exists because configuring per-subject identities implies isolation to anyone
  * who does it, and a false implication is worse than an absence.
  *
+ * ## AND THE CALLER MAY BE A BROWSER SOMEBODY ELSE IS DRIVING
+ *
+ * Everything above reasons about who can reach the socket. On the supported open posture
+ * the answer is "the operator", and the operator runs a browser — which any web page they
+ * visit can aim at `127.0.0.1` on their behalf. That omission is what made an open plane
+ * shippable: `POST /runs` with `content-type: text/plain` is a CORS-SIMPLE request, so it
+ * takes no preflight, and an HTML form with `enctype="text/plain"` reaches the same place
+ * with no JavaScript at all — as a NAVIGATION, which is outside Chrome's Private Network
+ * Access restrictions and implemented by nobody else. Reproduced end to end: a run
+ * submitted, driven to its gate, and the gate APPROVED, with the journal recording
+ * `gate.decided actor {"kind":"human","via":"api"}` for a decision made by a page.
+ *
+ * So three guards stand in front of routing, in `crossSite` and `#refusedHost` and
+ * `#readBody`, and each covers a case the others cannot: `Sec-Fetch-Site` sees the
+ * navigation that carries no CORS semantics, `Origin` covers the browser too old to send
+ * it, and the Host allowlist covers DNS rebinding — after which the attacker's page
+ * genuinely IS this origin and no origin check can tell. ABSENCE PASSES in the first two,
+ * because curl, the CLI and every webhook sender send neither header, and a guard that
+ * refuses on absence is a browser-only API rather than a perimeter.
+ *
+ * The blast radius they close is exactly `openToEveryCaller`. A tokened plane was already
+ * immune — a cross-origin page cannot set `Authorization` without a preflight, and there
+ * are no CORS response headers here to grant one — but "already immune" is a property of a
+ * posture, and the open one is documented, supported, and what `loom serve` gives an
+ * operator who omits `--token`.
+ *
  * See design/loom/01-INTERFACES.md D3.17–D3.18 and D3.20.
  */
 
 import { constants as BUFFER } from "node:buffer";
+import { once } from "node:events";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 
-import type { EventBus } from "../bus.ts";
+import { SubscriberOverflowError, type EventBus } from "../bus.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
 import type { GateId, RunId } from "../ids.ts";
 import type { HumanActor, JournalEvent } from "../journal/events.ts";
@@ -589,6 +616,28 @@ export interface ControlPlaneOptions {
    * this dispatcher knows that implement `parseCallback`.
    */
   readonly dispatcher?: GateDispatcher;
+  /**
+   * The `Host` values this plane answers to — the DNS-rebinding guard.
+   *
+   * ABSENT derives it from the address actually bound, which is what a loopback
+   * deployment wants and cannot state ahead of time: `listen(0)` does not know its port
+   * until the socket exists. On a LOOPBACK bind the derived set is the bound address plus
+   * `localhost`, `127.0.0.1` and `[::1]`, with and without the port. On any other bind
+   * there is no derived set at all — the plane is directly routable, so rebinding buys an
+   * attacker nothing it did not already have, and this file cannot know the name a proxy
+   * or a service mesh will put in front of it.
+   *
+   * This is the one guard an `Origin` check cannot stand in for. After a rebind the
+   * attacker's page IS this server's origin, by construction; what it is not is a name
+   * this deployment answers to.
+   *
+   * A LIST REPLACES the derived set rather than adding to it — it is the whole answer, so
+   * a deployment behind a proxy names the proxy's host and nothing else. The literal
+   * `"*"` turns the check off, for a proxy that rewrites `Host` on the way through. The
+   * EMPTY LIST is refused at construction: it is a plane no caller can reach, spelled
+   * like a policy, and it is the same one-character deployment slip as an empty token.
+   */
+  readonly allowedHosts?: readonly string[];
 }
 
 /**
@@ -644,6 +693,64 @@ function boundedCount(v: unknown, where: string, what: string): number | undefin
     );
   }
   return v;
+}
+
+/**
+ * `ControlPlaneOptions.allowedHosts` as a set, checked — `undefined` for "derive it".
+ *
+ * An EMPTY set is the encoding of `"*"`, and the two are one value on purpose: "answer to
+ * any name" and "the check is off" are the same statement, and giving them one
+ * representation is what stops a later edit from implementing only one of them.
+ *
+ * The empty LIST is refused instead of being read as either. It is the shape a `--host`
+ * flag with no value, or a config array a template filtered down to nothing, produces —
+ * and it would install a plane that refuses every request including `/health`, which an
+ * operator reads as "the process is down" while the process is fine.
+ */
+function allowedHosts(configured: readonly string[] | undefined): ReadonlySet<string> | undefined {
+  if (configured === undefined) return undefined;
+  if (!Array.isArray(configured) || configured.some((h) => typeof h !== "string" || h.trim() === "")) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `ControlPlaneOptions.allowedHosts must be a list of non-empty host names — the values a caller may send in \`Host\`, ` +
+        `such as ["loom.internal", "loom.internal:8787"]. Use ["*"] to answer to any name, or omit the option to derive the ` +
+        `list from the address bound.`,
+    );
+  }
+  if (configured.length === 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `ControlPlaneOptions.allowedHosts is the empty list, which would refuse EVERY request — including /health, so a load ` +
+        `balancer would read this process as down while it is fine. Name the hosts this deployment answers to, pass ["*"] to ` +
+        `answer to any of them, or omit the option to derive them from the address bound.`,
+    );
+  }
+  return configured.includes("*") ? new Set<string>() : new Set(configured.map((h) => h.trim().toLowerCase()));
+}
+
+/**
+ * The names a LOOPBACK bind answers to, or `undefined` for a bind that gets no check.
+ *
+ * The set is the bound address plus the other two spellings of "this machine", with and
+ * without the port, because a browser sends whichever one the operator typed and all
+ * three are the same socket.
+ *
+ * A NON-LOOPBACK bind derives nothing, and that is a decision rather than an omission.
+ * DNS rebinding exists to reach a service the attacker cannot route to; a plane on a
+ * routable address is one they can already reach directly, so the guard buys nothing there
+ * — while the name such a deployment actually answers to is a proxy's or a mesh's, which
+ * this file cannot know and must not guess. `allowedHosts` is how that deployment says it.
+ * The cross-site checks are unaffected and apply on every bind.
+ */
+function loopbackHosts(host: string, port: number): ReadonlySet<string> | undefined {
+  const bare = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+  if (bare !== "localhost" && bare !== "::1" && !/^127\./.test(bare)) return undefined;
+  const names = new Set<string>();
+  for (const h of [bare.includes(":") ? `[${bare}]` : bare, "localhost", "127.0.0.1", "[::1]"]) {
+    names.add(h);
+    names.add(`${h}:${port}`);
+  }
+  return names;
 }
 
 /**
@@ -1018,6 +1125,19 @@ export class ControlPlane {
    * construction. See "THE LIMIT" in the module docstring for what is not scoped.
    */
   readonly distinctPrincipals: number;
+  /**
+   * `allowedHosts` as configured, captured like every other option. `undefined` is "derive
+   * it from the bind"; an empty set is "`*`" — the check turned off on purpose.
+   */
+  readonly #configuredHosts: ReadonlySet<string> | undefined;
+  /**
+   * The names this plane answers to RIGHT NOW, or `undefined` for no check.
+   *
+   * Not `readonly`, and the only field that is not: the default is a fact about the socket
+   * (`listen(0)` learns its port from the OS), so it cannot exist until `listen` returns.
+   * Set there, from the address actually bound rather than from the one requested.
+   */
+  #allowedHosts: ReadonlySet<string> | undefined;
   #server: Server | undefined;
   /**
    * The in-flight `close()`, so a second one waits for the socket instead of for nothing.
@@ -1096,6 +1216,12 @@ export class ControlPlane {
     // is the only member of this family with a remote party on the far side.
     this.#maxBodyBytes = boundedCount(opts.maxBodyBytes, "maxBodyBytes", "cap on how many bytes of request body are buffered");
     this.#hotWindow = boundedCount(opts.hotWindow, "hotWindow", "threshold that decides replay-versus-snapshot on reconnect");
+    // THE THIRD OPTION THAT BECOMES ITS OWN OPPOSITE. An empty list reads as "restrict the
+    // hosts" and installs "answer to no host at all", which is a plane that 403s every
+    // request while `/health` — reached by the same refusal — stops answering too. The
+    // deliberate spelling of "no restriction" is `["*"]`, a value nothing can expand to by
+    // accident, exactly as an open plane is the ABSENCE of a token rather than an empty one.
+    this.#configuredHosts = allowedHosts(opts.allowedHosts);
     // THE COLLABORATORS, captured for the same reason as the numbers rather than for a
     // different one. `graphs` reached `/health` — the route that promises to answer from
     // process-local state alone — and `engine`, `store` and `bus` were re-read inside
@@ -1321,7 +1447,14 @@ export class ControlPlane {
       });
     }
     const address = server.address();
-    return { port: typeof address === "object" && address !== null ? address.port : port };
+    const bound = typeof address === "object" && address !== null ? address.port : port;
+    // FROM THE ADDRESS ACTUALLY BOUND, which is the only reason this is here rather than
+    // in the constructor: `listen(0)` learns its port from the OS, and a `Host` allowlist
+    // that does not contain the port the browser typed refuses the console it is meant to
+    // protect. Set before the first request can arrive — `listening` has fired, but the
+    // event loop has not yet reached an accepted connection.
+    this.#allowedHosts = this.#configuredHosts ?? loopbackHosts(host, bound);
+    return { port: bound };
   }
 
   /**
@@ -1403,6 +1536,24 @@ export class ControlPlane {
       return;
     }
 
+    // BEFORE THE DEADLINE AND BEFORE ROUTING, because a request that names a host this
+    // plane does not have is not a request for this plane at all. It is the DNS-rebinding
+    // arm of the browser guard: an `Origin` check cannot see this one, since after a
+    // rebind the attacker's page really is this origin.
+    const claimed = this.#refusedHost(url);
+    if (claimed !== undefined) {
+      send(res, 403, {
+        error: {
+          code: "E_NOT_AUTHORIZED",
+          message:
+            `this plane does not answer to Host ${claimed} — a name it does not have is how a rebound DNS record reaches a ` +
+            `loopback socket from a web page. Set ControlPlaneOptions.allowedHosts to the names this deployment really has, ` +
+            `or ["*"] if a proxy rewrites Host on the way through.`,
+        },
+      });
+      return;
+    }
+
     try {
       // EVERYTHING is inside the deadline, identity resolution included. It used to start
       // after `#principal` had already been awaited, which left the one call in the path
@@ -1420,6 +1571,25 @@ export class ControlPlane {
 
   /** Authenticate, then route. Split out only so the deadline can wrap the whole of it. */
   async #serve(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    // FIRST, ahead of `#requiresBearer` and `#principal`, and the order is the rule this
+    // module already states: nothing a stranger can reach may make the injected
+    // `IdentitySource` do work. A cross-site prober is a stranger by definition, so it is
+    // answered before anything deployment-supplied is consulted.
+    const forged = crossSite(req, url);
+    if (forged !== undefined) {
+      send(res, 403, {
+        error: {
+          code: "E_NOT_AUTHORIZED",
+          message:
+            `refused a cross-site request (${forged}). This plane is reachable from the operator's browser, so a page they ` +
+            `merely visited could otherwise submit runs and answer gates as them. Open the console by typing its address ` +
+            `rather than by following a link from another site. A client that is not a browser sends neither header and is ` +
+            `unaffected.`,
+        },
+      });
+      return;
+    }
+
     const guarded = this.#requiresBearer(req, url);
     // ONLY for a guarded route. An injected identity source is deployment code that may
     // talk to a network, and no route a stranger can reach may be a way to make it do so
@@ -1452,16 +1622,40 @@ export class ControlPlane {
   }
 
   /**
+   * The `Host` this request asks for, WHEN it is not one this plane answers to.
+   *
+   * `undefined` is "fine", so the caller reads as a refusal rather than as a permission —
+   * the same shape as `crossSite`, and the reason both are worded as questions about the
+   * refusal: a guard that returns `true` for "allowed" inverts silently when someone
+   * rewrites the condition.
+   *
+   * It reads `url.host` and not the header, deliberately. `new URL` has already lowercased
+   * it, dropped a redundant `:80`, and bracketed an IPv6 literal, so one comparison covers
+   * the spellings a header comparison would need four of — and an absolute-form request
+   * target, which overrides `Host` in `requestUrl`, is checked as the thing that will
+   * actually be routed.
+   */
+  #refusedHost(url: URL): string | undefined {
+    const allowed = this.#allowedHosts;
+    // No derived set (a non-loopback bind) and the explicit `["*"]` are one case: no check.
+    if (allowed === undefined || allowed.size === 0) return undefined;
+    return allowed.has(url.host.toLowerCase()) ? undefined : truncate(url.host);
+  }
+
+  /**
    * Which requests must present a credential. Every one but three, and all three are
    * listed here.
    *
    * `/health` is open because a load balancer probes it, and what it says to an
    * unauthenticated caller is only that the process is up. It is a LIVENESS probe and it
    * answers from process-local state alone — see `#healthDiagnostics` for what that
-   * costs and why it is worth it. `identity` is the one thing it discloses to anyone, and
-   * deliberately: it names a mechanism, and the console has to be able to tell "sign in"
-   * from "this deployment cannot take your decision" before it has anything to sign in
-   * with.
+   * costs and why it is worth it. `auth` and `identity` are the two things it discloses to
+   * anyone, and deliberately: each names a MECHANISM, and the console has to be able to
+   * tell "sign in" from "this deployment cannot take your decision" before it has anything
+   * to sign in with. Everything on that route with deployment CONTENT in it — the graph
+   * inventory, the callback refusal counts — is behind `#healthDiagnostics`, and this
+   * sentence is the file's own argument for the route being safe to leave open, so it has
+   * to stay true of the payload rather than of the intent.
    *
    * `GET /` is open because it is the console's static shell and **a browser cannot put a
    * bearer token on a top-level navigation.** Behind the token, the console is a page that
@@ -1527,7 +1721,12 @@ export class ControlPlane {
   }
 
   /**
-   * Whether this `/health` caller sees the diagnostics as well as the liveness answer.
+   * Whether this `/health` caller sees the deployment as well as the liveness answer.
+   *
+   * TWO fields now, not one: the callback refusal counts and the graph inventory. What
+   * they have in common is that neither is a fact about whether the process is up — one
+   * says who is knocking, the other says what this deployment can be asked to do — and
+   * both were reachable by anyone who could reach the port.
    *
    * The SHARED TOKEN and nothing else, which is the entire point: it is a configured
    * constant compared in constant time, with no I/O and no injected code behind it, so
@@ -1537,10 +1736,12 @@ export class ControlPlane {
    * check rather than caught by one. A probe that fails when a dependency fails is a
    * readiness probe wearing the wrong name.
    *
-   * The cost, stated because it is real: a deployment that configures `identity` and NO
-   * shared token cannot read `callbackRefusals` here at all. That is the right trade —
-   * the two options are not alternatives, `token` is described as a service credential
-   * and these counts are a service-shaped diagnostic — but it is a cost.
+   * The cost, stated because it is real and it grew: a deployment that configures
+   * `identity` and NO shared token cannot read `callbackRefusals` here at all, and now
+   * cannot read the graph list here either. That is the right trade — the two options are
+   * not alternatives, `token` is described as a service credential and these counts are a
+   * service-shaped diagnostic — and the graph list has a credentialed route of its own in
+   * `GET /graphs`, which is where the console reads it. But it is a cost.
    *
    * An OPEN plane discloses them to everyone, because it discloses everything to everyone.
    * Withholding one counter from a caller who may read the whole journal is theatre.
@@ -1686,6 +1887,30 @@ export class ControlPlane {
   async #readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     const raw = await this.#readRaw(req);
     if (raw.length === 0) return {};
+    // THE SECOND RUNG OF THE BROWSER GUARD, and the one that does not depend on a header
+    // the browser sets. The three content types below are the whole set a cross-site
+    // request can send WITHOUT a preflight; `application/json` is not among them, so
+    // requiring it means a page cannot reach any body-reading route here without asking
+    // this server's permission first — and there are no CORS response headers to give it.
+    //
+    // HERE AND NOT PER ROUTE, for the same reason the object check below is here: three
+    // routes read a field off this immediately, and a refusal each is three places to
+    // forget. **The callback route is exempt BY CONSTRUCTION** — it reads `raw()` and
+    // never `body()` — which is exactly the exemption wanted, since the vendor posting a
+    // button click chooses its own media type, with no special case to keep in sync.
+    //
+    // An EMPTY body has already returned above: "no fields" is a coherent request, and it
+    // carries nothing for a media type to describe.
+    const ct = header(req, "content-type");
+    if (ct === undefined || !/^application\/json\s*(;|$)/i.test(ct.trim())) {
+      throw err.validation(
+        CODES.E_PROVIDER_BAD_REQUEST,
+        `every route here reads a JSON object, so a request with a body must send \`content-type: application/json\`, not ` +
+          `${ct === undefined ? "none at all" : `"${truncate(ct)}"`}. text/plain, multipart/form-data and ` +
+          `application/x-www-form-urlencoded are refused by name: they are the three shapes a web page can post to this ` +
+          `plane cross-site without a preflight, which is a request the operator's browser makes and the operator did not.`,
+      );
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString("utf8")) as unknown;
@@ -1796,7 +2021,18 @@ export class ControlPlane {
             // unauthenticated request, on the one route whose whole value is that it
             // cannot be made to fail by something else failing.
             identity: this.#identityName,
-            graphs: Object.keys(this.#graphs),
+            // WHAT THIS DEPLOYMENT CAN DO, WHICH IS NOT A LIVENESS FACT. Behind the same
+            // predicate as the counter below, and it was not: a graph list names the
+            // business actions this plane takes, and it is exactly the input a blind
+            // cross-origin `POST /runs` needs to stop being blind. Every other field in
+            // this literal carries the argument for its own disclosure; this one arrived
+            // with none, three commits before the docstring that claimed `identity` was
+            // the only thing here a stranger could read.
+            //
+            // A CONDITIONAL SPREAD and never `graphs: cond ? … : undefined`, because
+            // `"graphs" in body` is what a client branches on and an explicit `undefined`
+            // still answers true to it.
+            ...(this.#healthDiagnostics(req) ? { graphs: Object.keys(this.#graphs) } : {}),
             // WHAT THE JOURNAL IS NOT ALLOWED TO HOLD. A forged-signature campaign
             // against the unauthenticated callback route writes no journal row on
             // purpose — see `GateCallbackRouter` — so without this, "someone is hammering
@@ -2342,6 +2578,31 @@ export class ControlPlane {
    * Every id this server issues is decimal digits, because `write` emits `id: ${seq}` for a
    * `number`. So `seqIn` accepts exactly that, and everything else is not an id — the same
    * verdict the fractional case gets, and for the same reason.
+   *
+   * ## THE READER'S SPEED IS `res.write`'s ANSWER, AND IT USED TO BE DISCARDED
+   *
+   * Both loops below ignored what `write` returned, so nothing in this handler ever slowed
+   * down for a client that had stopped reading — and the bus's 1024-slot queue could not
+   * make up for it, because `Channel.push` hands an event to a parked waiter and returns
+   * BEFORE the queue-length test. A synchronous loop body re-parks a waiter within a
+   * microtask after every delivery, so the bound that exists to hold a slow subscriber was
+   * never reached and the growth moved into `ServerResponse`'s userland buffer instead,
+   * where nothing counts it and `Subscription.dropped` reports 0. Measured with a paused
+   * reader: 20 000 events of ~1 KB left `writableLength` at 22 459 002 bytes.
+   *
+   * And when the loop DOES fall behind enough to fill the queue, `drop_oldest` discards
+   * from the OLD end — a hole in the middle of the one stream whose stated contract is
+   * that the client never silently misses an event. Measured at 4000 events: 3025
+   * delivered, 976 holes, `1025 → 1027 → 1029 …`, ending on the run's real head so nothing
+   * downstream could tell.
+   *
+   * So: `write` reports back-up, both loops `await drained(res)` on it, and the
+   * subscription is `onOverflow: "close"`. A client that falls far enough behind is CUT —
+   * the response ENDS, which is a signal — and `EventSource` reconnects with
+   * `Last-Event-ID` and replays from the journal, gap-free, because the journal and not
+   * this stream is the truth. That is invariant 8 in its exact shape: the backpressure
+   * lands on admission to this stream, never on what is durable. Peak buffering per
+   * connection is now one frame plus the socket's high-water mark.
    */
   async #streamEvents(ctx: RequestContext): Promise<void> {
     const { res, req, params } = ctx;
@@ -2381,38 +2642,71 @@ export class ControlPlane {
       "x-accel-buffering": "no",
     });
 
-    const write = (event: string, id: number | undefined, data: unknown): void => {
+    // FALSE MEANS "STOP", and it is the last write's answer because the three are one
+    // frame: once the buffer is over its high-water mark every write in the frame answers
+    // false, and while it is under, only the last one can be the write that crosses it.
+    const write = (event: string, id: number | undefined, data: unknown): boolean => {
       if (id !== undefined) res.write(`id: ${id}\n`);
       res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      return res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
+    // SUBSCRIBE BEFORE THE BASELINE, not after it.
+    //
+    // The baseline and the live tail are two sources, and the handler parks between them
+    // whenever a slow client makes `write` report back-up. Subscribing afterwards meant an
+    // event published during that park landed in neither: past the journal read's upper
+    // bound, and before the subscription existed. That is a contiguous hole in the MIDDLE
+    // of the stream — the exact shape this route refuses `drop_oldest` to avoid. The
+    // subscription buffers while the baseline drains, and `sent` is what de-duplicates the
+    // overlap.
+    const sub = bus?.subscribe({ runId }, { queueSize: 1024, onOverflow: "close" });
+    if (sub !== undefined) req.on("close", () => sub.dispose());
+
+    let sent = resumed;
     if (!resumable || head - lastSeq > hot) {
       const p = await this.#engine.projection(runId);
-      if (p !== undefined) write("snapshot", p.seq, summarise(p));
+      if (p !== undefined) {
+        if (!write("snapshot", p.seq, summarise(p))) await drained(res);
+        sent = Math.max(sent, p.seq);
+      }
     } else {
       // `resumed`, not `lastSeq`. Equal on this branch — it is only reached when `resumable`
       // — and written this way so the validated value has ONE consumption point rather than
       // two spellings a later change can move apart, which is precisely how the live tail
       // below came to be reading the unvalidated one.
-      for await (const e of this.#store.read(runId, resumed + 1)) write("event", e.seq, frame(e));
+      for await (const e of this.#store.read(runId, resumed + 1)) {
+        if (!write("event", e.seq, frame(e))) await drained(res);
+        sent = e.seq;
+        // THE REPLAY BRANCH IS NOT THE COLD PATH IT SOUNDS LIKE: `lastSeq = 0` with a head
+        // under `hotWindow` satisfies `resumable`, so EVERY fresh connection to a run with
+        // fewer than 10 000 events comes through here. A client that vanished mid-replay
+        // would otherwise have the whole journal read and serialised at it.
+        if (res.writableEnded || res.destroyed) return;
+      }
     }
 
-    if (bus === undefined) {
+    // `close`, not `drop_oldest`, and the two are not "the same loss with a different
+    // signal": `drop_oldest` cuts at the OLD end, which is a hole this route promises it
+    // will not have, while `close` cuts at the new end and leaves a contiguous prefix the
+    // client can resume from. This handler's own contract is what decides it.
+    if (sub === undefined) {
       res.end();
       return;
     }
 
-    const sub = bus.subscribe({ runId }, { queueSize: 1024, onOverflow: "drop_oldest" });
-    const stop = (): void => sub.dispose();
-    req.on("close", stop);
-
     try {
       for await (const e of sub) {
-        if (e.seq <= resumed) continue;
-        write("event", e.seq, frame(e));
+        if (e.seq <= sent) continue;
+        if (!write("event", e.seq, frame(e))) await drained(res);
+        if (res.writableEnded || res.destroyed) break;
         if (e.type === "run.completed" || e.type === "run.failed" || e.type === "run.cancelled") break;
       }
+    } catch (e) {
+      // A client that fell too far behind, ended rather than truncated. Without this the
+      // throw reaches `#dispatch`, whose `send` no-ops on a response with headers already
+      // sent — survivable, but it logs a 500 for an ordinary slow reader.
+      if (!(e instanceof SubscriberOverflowError)) throw e;
     } finally {
       sub.dispose();
       res.end();
@@ -2425,6 +2719,87 @@ export class ControlPlane {
 function header(req: IncomingMessage, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/** A caller-supplied string on its way into a message. Bounded, because a header is not. */
+function truncate(v: string): string {
+  return v.length <= 120 ? v : `${v.slice(0, 120)}…`;
+}
+
+/**
+ * WHY this request is another site's, or `undefined` if it is not one.
+ *
+ * Two rungs, because they fail on different browsers and cover different attacks.
+ *
+ * `Sec-Fetch-Site` FIRST. The browser sets it, page script cannot forge it — it is a
+ * forbidden header name — and it is the only one of the two present on a NAVIGATION,
+ * which is the case with no CORS semantics at all: `<form method="POST"
+ * enctype="text/plain">` posts a body `JSON.parse` accepts, from any page, with no
+ * JavaScript and no preflight. `same-site` is refused with `cross-site`: a sibling
+ * subdomain is a different origin and there is no cookie here for "site" to be the right
+ * boundary of. `none` is a user-initiated load — the address bar, a bookmark — and passes.
+ *
+ * Then `Origin`, for a browser too old to send the first. **ABSENT MUST PASS.** curl, the
+ * CLI, every webhook sender and every service client send no `Origin`; refusing on absence
+ * would turn this into a browser-only API, which is the opposite of a perimeter. `"null"`
+ * — the opaque origin of a sandboxed iframe or a `data:` document — is REFUSED rather than
+ * read as absent: declining to name yourself is a claim, not a silence. An origin that is
+ * not a URL is refused for the same reason.
+ *
+ * The comparison is HOST only, not scheme: a plane behind a TLS-terminating proxy sees
+ * `https://…` from the browser and `http://…` in `requestUrl`, and refusing that would
+ * break the deployment shape this guard is least worried about.
+ *
+ * GET IS NOT EXEMPT, though every route here is read-only, and the exemption is what a
+ * first draft reaches for so a cross-site link to the console keeps working. What it also
+ * keeps working is `<iframe src="http://127.0.0.1:8787/">` on an attacker's page, with the
+ * console's approve buttons positioned under something worth clicking. One rule, no method
+ * carve-out, and a link to the console opened from another site is answered with a 403
+ * that says how to open it directly.
+ */
+function crossSite(req: IncomingMessage, url: URL): string | undefined {
+  const site = header(req, "sec-fetch-site");
+  if (site !== undefined && site !== "same-origin" && site !== "none") return `Sec-Fetch-Site: ${truncate(site)}`;
+
+  const origin = header(req, "origin");
+  if (origin === undefined) return undefined;
+  if (origin === "null") return "Origin: null";
+  let host: string;
+  try {
+    host = new URL(origin).host;
+  } catch {
+    return `Origin: ${truncate(origin)}`;
+  }
+  return host.toLowerCase() === url.host.toLowerCase() ? undefined : `Origin: ${truncate(origin)}`;
+}
+
+/**
+ * Wait for a backed-up response to be read, or for the reader to go away.
+ *
+ * **THE `close` ARM IS LOAD-BEARING.** A client that vanishes mid-backup never emits
+ * `drain`, so a bare `once(res, "drain")` parks the streaming loop forever and leaks the
+ * subscription with it — and the handler's existing `req.on("close", …)` cannot rescue it,
+ * because that resolves the channel's waiter, which is not what this promise is waiting on.
+ *
+ * Both arms carry their own `catch`, and the abort comes after the race has settled: the
+ * LOSER's promise rejects when the signal fires, and a rejection nobody has handled is an
+ * unhandled rejection in a process whose whole arrangement exists to avoid one.
+ *
+ * The early return is not an optimisation. `writableNeedDrain` goes false the instant the
+ * buffer clears, which can happen between the `write` that answered false and this call —
+ * and `drain` has then already been emitted, so waiting for the next one waits for a write
+ * this loop is not going to make.
+ */
+async function drained(res: ServerResponse): Promise<void> {
+  if (!res.writableNeedDrain || res.writableEnded || res.destroyed) return;
+  const stop = new AbortController();
+  const flushed = once(res, "drain", { signal: stop.signal }).catch(() => undefined);
+  const gone = once(res, "close", { signal: stop.signal }).catch(() => undefined);
+  try {
+    await Promise.race([flushed, gone]);
+  } finally {
+    stop.abort();
+  }
 }
 
 /**

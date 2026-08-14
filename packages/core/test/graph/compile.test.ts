@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { compile, compileOrThrow, createGraphCompiler, graphHashOf } from "../../src/graph/compile.ts";
 import type { GraphSpec, NodeSpec } from "../../src/graph/spec.ts";
 import { indexGraph, validateGraph, type Diagnostic } from "../../src/graph/validate.ts";
-import type { NodeId } from "../../src/ids.ts";
+import { ROOT_BRANCH, childBranch, encodeBranch, taskId, type EdgeId, type NodeId } from "../../src/ids.ts";
 import { TENANT_CAPABILITIES, TOOLS, clone, incidentTriage, minimal, omit, stubResolver } from "./fixtures.ts";
 
 const base = (spec: GraphSpec, over: Partial<Parameters<typeof compile>[0]> = {}) => ({
@@ -368,6 +368,170 @@ test("GRAPH020: a node whose type block is missing or duplicated", () => {
   const extra = clone(minimal());
   extra.nodes = extra.nodes.map((x) => ({ ...x, tool: { name: "fs.write", version: "1.0" } }));
   expectCode(extra, "GRAPH020_EXTRA_BLOCK");
+});
+
+// ── GRAPH003: the id charset every derived id depends on ─────────────────────
+
+/** `minimal()` plus a second node, so there is an edge whose id can be varied. */
+function twoNode(edgeId: string): GraphSpec {
+  const s = clone(minimal());
+  s.nodes = [
+    ...s.nodes,
+    { id: "second" as NodeId, type: "function", reads: ["out"], writes: ["out"], function: { ref: "function/x@stable" } },
+  ];
+  s.edges = [{ id: edgeId as EdgeId, from: "only" as NodeId, to: "second" as NodeId, kind: "seq" }];
+  return s;
+}
+
+test("GRAPH003: a node id carrying a character TaskId derivation reserves", () => {
+  // `taskId` is `nodeId@branchPath#iteration` and `effectKey` joins on `:`, so an id
+  // holding one of those separators is not a name — it is a second parse of somebody
+  // else's id. Reproduced before this rule existed: `id: "a@b"` compiled with an empty
+  // diagnostics array and `advance` then threw `malformed branch coordinate: b@root`,
+  // after events naming the undecodable path were already durable.
+  for (const bad of ["a@b", "a#b", "a/b", "a[0]", "a]b[", "a:b", "__proto__", "", " lead", "-lead"]) {
+    const s = clone(minimal());
+    s.nodes = s.nodes.map((x) => ({ ...x, id: bad as NodeId }));
+    const hit = expectCode(s, "GRAPH003_BAD_ID");
+    assert.equal(hit.severity, "error", `"${bad}" must fail the compile, not warn`);
+  }
+});
+
+test("GRAPH003: an edge id is held to the same charset, because branch paths are built from it", () => {
+  for (const bad of ["e/f", "e[0]", "e@x", "e#x", "e:x", ""]) {
+    expectCode(twoNode(bad), "GRAPH003_BAD_ID");
+  }
+  assert.equal(compile(base(twoNode("e-1.a_b"))).ok, true, "the ordinary charset still compiles");
+});
+
+test("GRAPH003: an id that is not a string at all is refused rather than coerced", () => {
+  // `extractMutation` casts model output to `NodeSpec[]`/`EdgeSpec[]` without checking
+  // field types, and `compileMutation` re-runs this validator over the result — so the
+  // runtime really can hand the compiler a number or an object here.
+  const s = clone(minimal());
+  s.nodes = s.nodes.map((x) => ({ ...x, id: 42 as unknown as NodeId }));
+  expectCode(s, "GRAPH003_BAD_ID");
+  expectCode(twoNode(null as unknown as string), "GRAPH003_BAD_ID");
+});
+
+test("GRAPH003: the edge-id charset is what makes branch encoding injective", () => {
+  // `encodeBranch` joins segments with `/` and writes each as `edgeId[index]`, so it is
+  // NOT injective over unrestricted edge ids: two different coordinates encode to one
+  // string, and `taskId` then names one Task for two branches (invariant 3), while
+  // `compareBranch` still orders them strictly (invariant 7). Nothing in `ids.ts`
+  // prevents that — the compiler is the only thing that does, by making the colliding
+  // edge id unreachable.
+  const nested = childBranch(childBranch(ROOT_BRANCH, "a", 0), "b", 3);
+  const single = childBranch(ROOT_BRANCH, "a[0]/b", 3);
+  assert.equal(encodeBranch(nested), encodeBranch(single), "encodeBranch alone does not separate these");
+  assert.equal(taskId("n" as NodeId, nested), taskId("n" as NodeId, single), "…so neither does taskId");
+  expectCode(twoNode("a[0]/b"), "GRAPH003_BAD_ID");
+});
+
+test("GRAPH003: a channel name is an object key, so `__proto__` is refused there too", () => {
+  // Built through JSON so the key is an OWN property — `{__proto__: …}` in a literal is
+  // the prototype, not a key. `initialState` assigns `out[name] = spec.initial`, which
+  // for this one name writes the prototype and declares no channel at all.
+  const s = clone(minimal());
+  s.channels = JSON.parse('{"inp":{"type":"string","reduce":"replace"},"out":{"type":"string","reduce":"replace"},"__proto__":{"type":"object","reduce":"replace"}}') as GraphSpec["channels"];
+  const hit = expectCode(s, "GRAPH003_BAD_ID");
+  assert.match(hit.message, /__proto__/);
+});
+
+// ── GRAPH003/GRAPH005: `in` is not "declared" ────────────────────────────────
+
+test("GRAPH005: a channel every object inherits is not a declared channel", () => {
+  // `w in spec.channels` answers true for every name on `Object.prototype`, while the
+  // state layer asks `hasOwnProperty` — so this compiled clean and then died at run time
+  // with an untyped internal error instead of E_CHANNEL_UNDECLARED (see the `declared`
+  // docstring in state/channels.ts).
+  const w = clone(minimal());
+  w.nodes = w.nodes.map((x) => ({ ...x, writes: ["out", "toString"] }));
+  expectCode(w, "GRAPH005_UNDECLARED_WRITE");
+
+  const r = clone(minimal());
+  r.nodes = r.nodes.map((x) => ({ ...x, reads: ["inp", "constructor"] }));
+  expectCode(r, "GRAPH005_UNDECLARED_READ");
+
+  const io = clone(minimal());
+  expectCode({ ...io, inputs: ["valueOf"] }, "GRAPH003_UNDECLARED_CHANNEL");
+});
+
+test("GRAPH007: a fan-out over an inherited name is not a fan-out over a channel", () => {
+  const over = clone(incidentTriage());
+  over.edges = over.edges.map((e) => (e.id === "e1" ? { ...e, over: "hasOwnProperty" } : e));
+  expectCode(over, "GRAPH007_UNKNOWN_OVER");
+
+  const as = clone(incidentTriage());
+  as.edges = as.edges.map((e) => (e.id === "e1" ? { ...e, as: "toString" } : e));
+  expectCode(as, "GRAPH007_UNKNOWN_ITEM");
+});
+
+// ── GRAPH020: a type outside the taxonomy ────────────────────────────────────
+
+test("GRAPH020: a node whose type is not a NodeType is refused at compile", () => {
+  // The missing-block check keyed on `REQUIRED_BLOCK[n.type]`, which is `undefined` for a
+  // type outside the union — so the node was skipped by both halves of GRAPH020 and
+  // compiled with a zero-length diagnostics array. `#dispatch` then has no case for it,
+  // returns `undefined`, and the run dies on a raw TypeError rather than on a diagnostic.
+  for (const bogus of ["functoin", "Function", "human-gate", ""] as string[]) {
+    const s = clone(minimal());
+    s.nodes = s.nodes.map((x) => ({ ...x, type: bogus as NodeSpec["type"] }));
+    const hit = expectCode(s, "GRAPH020_UNKNOWN_TYPE");
+    assert.equal(hit.fix, "use one of function, agent, tool, router, join, evaluator, human_gate, subgraph");
+  }
+});
+
+test("GRAPH020: a type naming an Object.prototype member is not a node type either", () => {
+  // `!(n.type in REQUIRED_BLOCK)` would let these through: `"toString" in REQUIRED_BLOCK`
+  // is true and `REQUIRED_BLOCK["toString"]` is a Function, so the guard has to ask
+  // `Object.hasOwn`.
+  for (const bogus of ["toString", "constructor", "__proto__"] as string[]) {
+    const s = clone(minimal());
+    s.nodes = s.nodes.map((x) => ({ ...x, type: bogus as NodeSpec["type"] }));
+    expectCode(s, "GRAPH020_UNKNOWN_TYPE");
+  }
+});
+
+test("GRAPH020: every real node type still compiles", () => {
+  // The guard must not become a ninth thing that decides what a node type is.
+  const d = validateGraph({ ...base(incidentTriage()), depth: 0, expanding: [] });
+  assert.equal(codes(d).includes("GRAPH020_UNKNOWN_TYPE"), false);
+});
+
+// ── GRAPH004 + GRAPH005: the router mode nothing implements ──────────────────
+
+const withRouterMode = (mode: "expression" | "model", when?: string): GraphSpec => {
+  const s = clone(incidentTriage());
+  s.nodes = s.nodes.map((x) => {
+    if (x.id !== "choose_path") return x;
+    const router = x.router!;
+    const cases = when === undefined ? router.cases : [{ when, take: router.cases[0]!.take }];
+    return mode === "model"
+      ? { ...x, router: { mode, cases, fallbackEdge: router.fallbackEdge, profile: "agent_profile/sre-lead@stable" } }
+      : { ...x, router: { mode, cases, fallbackEdge: router.fallbackEdge } };
+  });
+  return s;
+};
+
+test("GRAPH005: a router asking for the unimplemented `model` mode is refused", () => {
+  // `#runRouter` never reads `router.mode` — it evaluates `cases[].when` whatever the
+  // mode says. So `mode: "model"` compiled clean, pinned a model profile in the
+  // resolution manifest that is never called, and ran "a fixed expression picks the
+  // branch" under a graph that reads "a model picks the branch".
+  const hit = expectCode(withRouterMode("model"), "GRAPH005_ROUTER_MODE_UNSUPPORTED");
+  assert.equal(hit.severity, "error");
+});
+
+test("GRAPH004: a router's `when` is checked in EVERY mode", () => {
+  // The check ran only for `mode === "expression"`, so declaring the unbuilt mode also
+  // switched off the expression rules for that node. These two assertions are the half
+  // that must survive whoever implements the mode and deletes the refusal above.
+  for (const mode of ["expression", "model"] as const) {
+    expectCode(withRouterMode(mode, "this is not ( valid"), "GRAPH004_EXPR");
+    expectCode(withRouterMode(mode, "nosuchchannel == 1"), "GRAPH004_EXPR");
+    expectCode(withRouterMode(mode, "has(plan)"), "GRAPH004_UNDECLARED_READ");
+  }
 });
 
 // ── aggregation and error shape ──────────────────────────────────────────────

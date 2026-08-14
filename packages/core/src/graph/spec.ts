@@ -116,24 +116,65 @@ export interface RouterCase {
   readonly take: readonly EdgeId[];
 }
 
+/**
+ * Which outgoing edges fire.
+ *
+ * `mode: "model"` IS DECLARED IN ORDER TO BE REFUSED — the same treatment `DelegationSpec`
+ * gets, and for the same reason. Nothing dispatches on `mode`: the router evaluates
+ * `cases[].when` whichever mode is declared, so accepting `model` would run "a fixed
+ * expression picks the branch" under a graph that reads "a model picks the branch", with
+ * a model profile pinned in the resolution manifest and never called. The compiler refuses
+ * it (`GRAPH005_ROUTER_MODE_UNSUPPORTED`); whoever builds the mode deletes that check in
+ * the change that adds the recorded model effect, the closed-set validation of the
+ * returned edge id, and the `E_ROUTE_INVALID` fallback.
+ */
 export interface RouterNode {
   readonly mode: "expression" | "model";
   readonly cases: readonly RouterCase[];
-  /** Taken when no case matches, or when a `model` router returns an invalid id. */
+  /** Taken when no case matches. */
   readonly fallbackEdge: EdgeId;
-  /** `model` mode only. */
+  /** `model` mode only — see the note above; the compiler refuses that mode today. */
   readonly profile?: ResourceRef;
 }
 
+/**
+ * The barrier: which branches, how many of them, and what a failed one means.
+ *
+ * THERE IS NO `drain` FIELD, and its absence is the honest form of what the runtime does.
+ * It meant "keep non-arriving branches running after the join fires", and the runtime
+ * keeps them running unconditionally — a short-circuiting `any` or `quorum` join fires and
+ * the remaining branches run to completion, with no `task.cancelled` appended anywhere.
+ * So the value that lied was `drain: false`, which is the default and therefore every
+ * graph that never mentioned it; a field cannot be salvaged by refusing the value nobody
+ * writes. It returns with straggler cancellation, in one change.
+ */
 export interface JoinNode {
   readonly branches: readonly NodeId[];
   readonly mode: "all" | "any" | "quorum" | "firstSuccess";
   /** `quorum` only: an integer count, or a fraction of the branch width. */
   readonly k?: number;
   readonly onBranchError: "fail" | "skip" | "compensate";
-  readonly timeoutMs: number;
-  /** Keep non-arriving branches running after the join fires. */
-  readonly drain?: boolean;
+  /**
+   * DECLARED AND UNENFORCED: THERE IS NO JOIN DEADLINE.
+   *
+   * `#maybeFireJoin` decides on `branches`, `mode` and `k`, and `#foldJoin` on
+   * `onBranchError`. Neither reads a clock, nothing in `src/` reads this field at all, and
+   * `E_JOIN_TIMEOUT` is declared in `errors.ts` with no call site — so a run whose branch
+   * never arrives waits forever, however small a number is written here. It was REQUIRED
+   * by this type, so every author had to write one that decides nothing, which is the
+   * "looks supervised" shape one field over from the gates that refuse it.
+   *
+   * Optional rather than refused, and the difference is only who can act: refusing it is
+   * the right answer and it belongs in the change that implements the deadline, because a
+   * deadline needs lease reclaim to be worth anything — a branch held by a dead worker is
+   * what actually strands a join under multi-process workers, and a timer would fire
+   * against a task nobody is running. Until then the type says what is true and an author
+   * who omits it loses nothing.
+   *
+   * Reversal: when the deadline lands, this becomes required again, `E_JOIN_TIMEOUT`
+   * leaves `NEVER_RAISED`, and the note in `design/HANDOFF.md` goes with it.
+   */
+  readonly timeoutMs?: number;
 }
 
 export interface EvaluatorNode {

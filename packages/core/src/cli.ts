@@ -57,7 +57,8 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
 
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
-  --data-dir  DIR   journal location (default: <workspace>/.loom)
+  --data-dir  DIR   journal location (default: <workspace>/.loom). Off limits to the
+                    fs tools wherever it is put, including inside the workspace.
 `;
 
 /**
@@ -177,7 +178,31 @@ export function openWorkspace(args: Args): Workspace {
   const bus = new InProcessEventBus({ store });
 
   const tools = new ToolRegistry();
-  const jail = { root, ...(args.flags["egress"] === undefined ? {} : { egressAllowlist: String(args.flags["egress"]).split(",") }) };
+  // THE JAIL ROOT CONTAINS THE JOURNAL, so containment alone is not the boundary.
+  //
+  // `root` is the workspace and `dataDir` defaults to `<root>/.loom`, so `journal.db` —
+  // the only authoritative durable state there is (invariant 2) — sits inside the
+  // directory a model may write to, with `fs:write` granted below and
+  // `reversible_write` meaning no gate. Measured before this line existed: a `tool` node
+  // with `fs.write {path: ".loom/journal.db"}` reported `status: "succeeded"` having
+  // truncated the database, and `fs.read` of the same path hands back everything ever
+  // journaled — including secrets that arrived as run inputs — past every redaction the
+  // event path applies.
+  //
+  // THE FIX IS THE DENY-LIST, NOT A DIFFERENT DEFAULT LOCATION, and the reason is
+  // `--data-dir`: an operator may put the journal anywhere, including deliberately
+  // inside the workspace, so a rule that depends on where the default happens to fall
+  // protects only the default. Deriving the denial from the data dir that was ACTUALLY
+  // chosen covers every spelling, and it keeps `.loom` beside the graphs it belongs to —
+  // one directory to copy, archive or delete, which is the whole ergonomic story of
+  // "boot from an empty directory". Moving the journal out as well would buy no safety
+  // this line does not already give and would hide the run's own history from the person
+  // looking for it.
+  const jail = {
+    root,
+    deny: [dataDir],
+    ...(args.flags["egress"] === undefined ? {} : { egressAllowlist: String(args.flags["egress"]).split(",") }),
+  };
   for (const t of builtinTools(jail)) tools.register(t);
   tools.register(fsRestore(jail));
 

@@ -1571,8 +1571,12 @@ test("an unknown workflow is a clean 404", async () => {
 test("malformed JSON and oversized bodies are rejected with 400", async () => {
   const r = await rig();
   try {
-    const bad = await fetch(`${r.base}/runs`, { method: "POST", body: "{not json" });
+    // WITH the content type, or this stops testing what it says. `fetch` labels a string
+    // body `text/plain`, which `#readBody` now refuses on its own — the same 400, for a
+    // reason that has nothing to do with the JSON being malformed.
+    const bad = await fetch(`${r.base}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" });
     assert.equal(bad.status, 400);
+    assert.match(((await json(bad))["error"] as { message: string }).message, /not valid JSON/);
   } finally {
     await r.close();
   }
@@ -2893,6 +2897,47 @@ test("with no dispatcher the field is absent, not an empty list", async () => {
   }
 });
 
+test("THE GRAPH INVENTORY IS BEHIND THE TOKEN TOO — /health names a mechanism, never the deployment's workflows", async () => {
+  // Reproduced on a token-protected plane before this was gated:
+  //
+  //     curl -s /health   (no credential) -> {"ok":true,"auth":"required","identity":…,"graphs":["deploy-prod","payroll-run"]}
+  //     curl -s /graphs   (no credential) -> 401
+  //     curl -s /runs     (no credential) -> 401
+  //
+  // One handler withheld a refusal counter from that caller and handed over the list of
+  // business actions this plane can take — which is precisely the input a blind
+  // cross-origin POST /runs needs to stop being blind. `#requiresBearer`'s docstring said
+  // `identity` was the one thing /health disclosed to anyone; it was not, and that
+  // sentence is what a reviewer reads to decide the open route is safe to leave open.
+  const r = await rig({ token: "s3cret" });
+  try {
+    const anon = await fetch(`${r.base}/health`);
+    assert.equal(anon.status, 200, "liveness is still free — a load balancer probes it");
+    const body = await json(anon);
+    assert.equal(body["ok"], true);
+    assert.equal(body["auth"], "required");
+    assert.equal("graphs" in body, false, "…and it says nothing about what this deployment runs");
+    assert.equal((await fetch(`${r.base}/graphs`)).status, 401, "the credentialed route the console reads instead");
+
+    const authed = await json(await fetch(`${r.base}/health`, { headers: { authorization: "Bearer s3cret" } }));
+    assert.deepEqual(authed["graphs"], ["skeleton-summarize"], "the shared-token caller still gets the whole list");
+  } finally {
+    await r.close();
+  }
+});
+
+test("an OPEN plane still lists its graphs — it discloses everything to everyone anyway", async () => {
+  // Same predicate as `callbackRefusals`, so a dev console on a tokenless plane is
+  // unaffected. Withholding one field from a caller who may read the whole journal is
+  // theatre.
+  const r = await rig();
+  try {
+    assert.deepEqual((await json(await fetch(`${r.base}/health`)))["graphs"], ["skeleton-summarize"]);
+  } finally {
+    await r.close();
+  }
+});
+
 test("an unknown channel name never becomes a key in the counter", async () => {
   // The counter is reachable by anyone who can POST at the callback route. A map keyed by
   // the name off the URL would be an unbounded allocation on an unauthenticated endpoint.
@@ -3019,6 +3064,232 @@ test("AN INVALID PERCENT ESCAPE IN THE CHANNEL NAME IS A 404, not a 500", async 
       assert.match(answer, /^HTTP\/1\.1 404 /, `channel ${JSON.stringify(name)} is unknown, not an internal error`);
       assert.equal(/E_INTERNAL/.test(answer), false, "a stranger's typo is not our exception");
     }
+  } finally {
+    await r.close();
+  }
+});
+
+// ── the browser as a confused deputy ─────────────────────────────────────────
+//
+// The module docstring used to reason only about who can reach the socket. On the
+// supported open posture the answer is "the operator", and the operator runs a browser
+// that any web page can aim at 127.0.0.1 on their behalf.
+
+test("A CROSS-SITE POST IS REFUSED — a page the operator merely visited must not be able to submit a run", async () => {
+  // The CORS-SIMPLE shape: `text/plain` is one of the three content types a page may send
+  // cross-origin with no preflight, so nothing has to say yes before this arrives. These
+  // exact bytes answered **202** before the guard — and a 202 from this route is the
+  // strongest statement it makes: `run.submitted` and `run.compiled` are already in the
+  // journal by the time the status is written. A page the operator merely visited had
+  // therefore started a run that spends money.
+  const r = await rig();
+  try {
+    const simple = await fetch(`${r.base}/runs`, {
+      method: "POST",
+      headers: {
+        origin: "https://evil.example",
+        referer: "https://evil.example/post",
+        "sec-fetch-site": "cross-site",
+        "content-type": "text/plain;charset=UTF-8",
+      },
+      body: JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } }),
+    });
+    assert.equal(simple.status, 403);
+    assert.equal(((await json(simple))["error"] as { code: string }).code, "E_NOT_AUTHORIZED");
+    assert.deepEqual(await r.h.store.listRuns(), [], "and nothing reached the journal");
+  } finally {
+    await r.close();
+  }
+});
+
+test("A GATE CANNOT BE APPROVED BY A CROSS-SITE FORM — the zero-JavaScript variant", async () => {
+  // `<form method="POST" enctype="text/plain">` with the `=`-inside-a-JSON-string trick
+  // serialises to a body `JSON.parse` accepts, and a form POST is a NAVIGATION — so
+  // Chrome's Private Network Access restrictions, which cover subresource fetches, do not
+  // apply, and Firefox and Safari implement none of it. `JSON.parse` tolerates the
+  // trailing CRLF a form appends. Measured end to end with the guards removed:
+  //
+  //     POST /runs (cross-site)             -> 202
+  //     POST …/gates/… (cross-site form)    -> 200, run "succeeded"
+  //     journal: gate.decided actor {"kind":"human","subject":"(unidentified)","via":"api"}
+  //     the guarded fs.write behind the gate: RAN
+  //
+  // A web page, written down as somebody's approval, with the action taken.
+  //
+  // No `Origin` on this one, deliberately: `Sec-Fetch-Site` is the rung that sees a
+  // navigation, and a navigation carries no CORS semantics for the other one to read.
+  const r = await rig();
+  try {
+    const { runId } = await submit(r);
+    await settle(r, runId as string);
+    const gates = (await json(await fetch(`${r.base}/runs/${String(runId)}/gates`)))["gates"] as { gateId: string }[];
+
+    const res = await fetch(`${r.base}/runs/${String(runId)}/gates/${gates[0]!.gateId}`, {
+      method: "POST",
+      headers: {
+        "content-type": "text/plain;charset=UTF-8",
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+      },
+      body: JSON.stringify({ decision: { kind: "approve" }, pad: "=" }) + "\r\n",
+    });
+    assert.equal(res.status, 403);
+
+    const p = await r.h.engine.projection(runId as RunId);
+    assert.equal(p?.gates[gates[0]!.gateId as never]?.state, "open", "the gate is still waiting for a human");
+    assert.equal(r.h.writes.length, 0, "and the action behind it did not run");
+  } finally {
+    await r.close();
+  }
+});
+
+test("AN OPAQUE OR MISMATCHED Origin IS REFUSED TOO — Sec-Fetch-Site is not the only rung", async () => {
+  // For a browser too old to send `Sec-Fetch-*`. `null` is the opaque origin a sandboxed
+  // iframe or a `data:` document carries, and it is refused rather than read as "no
+  // origin": an absence and an origin that declines to name itself are different claims.
+  const r = await rig();
+  const body = JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } });
+  try {
+    for (const origin of ["null", "https://evil.example", "http://127.0.0.1:1", "not a url"]) {
+      const res = await fetch(`${r.base}/runs`, { method: "POST", headers: { origin, "content-type": "application/json" }, body });
+      assert.equal(res.status, 403, `Origin: ${origin}`);
+    }
+    for (const site of ["cross-site", "same-site"]) {
+      const res = await fetch(`${r.base}/runs`, { method: "POST", headers: { "sec-fetch-site": site, "content-type": "application/json" }, body });
+      assert.equal(res.status, 403, `Sec-Fetch-Site: ${site} — a sibling subdomain is not this origin either`);
+    }
+  } finally {
+    await r.close();
+  }
+});
+
+test("THE CONSOLE, A CLI AND THE ADDRESS BAR ALL STILL PASS — this refuses a cross-site browser, not every client", async () => {
+  const r = await rig();
+  const body = JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } });
+  try {
+    // The console's own fetch, with the Origin the browser attaches to a same-origin POST.
+    const console_ = await fetch(`${r.base}/runs`, {
+      method: "POST",
+      headers: { origin: r.base, "sec-fetch-site": "same-origin", "content-type": "application/json" },
+      body,
+    });
+    assert.equal(console_.status, 202);
+    // ABSENT MUST PASS. curl, the CLI, every webhook sender and service client send no
+    // `Origin` and no `Sec-Fetch-*`; refusing on absence would make this a browser-only API.
+    assert.equal((await fetch(`${r.base}/runs`, { method: "POST", headers: { "content-type": "application/json" }, body })).status, 202);
+    // Typed into the address bar or opened from a bookmark: a top-level navigation the
+    // browser reports as belonging to no site at all.
+    const shell = await fetch(`${r.base}/`, {
+      headers: { "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+    });
+    assert.equal(shell.status, 200);
+  } finally {
+    await r.close();
+  }
+});
+
+test("A REBOUND Host IS REFUSED — the one guard an Origin check cannot stand in for", async () => {
+  // After a DNS rebind the attacker's page genuinely IS this server's origin, so `Origin`
+  // matches and proves nothing. What does not match is the NAME the request asks for.
+  const r = await rig();
+  const port = new URL(r.base).port;
+  try {
+    const rebound = await raw(r.base, `GET /runs HTTP/1.1\r\nHost: attacker.example.com\r\n\r\n`);
+    assert.match(rebound, /^HTTP\/1\.1 403 /);
+    assert.match(rebound, /allowedHosts/, "…and the refusal names the option that widens it");
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, "127.0.0.1", "localhost", `LOCALHOST:${port}`, `[::1]:${port}`]) {
+      const ok = await raw(r.base, `GET /runs HTTP/1.1\r\nHost: ${host}\r\n\r\n`);
+      assert.match(ok, /^HTTP\/1\.1 200 /, `Host: ${host} is a name this plane really has`);
+    }
+    // AND THE PROBE THAT SENDS NO HOST AT ALL. `requestUrl` reads an absent one as
+    // `localhost`, and a load balancer speaking HTTP/1.0 is exactly the caller `/health`
+    // is left open for — a guard that answered it 403 would take the process out of
+    // rotation for being guarded.
+    assert.match(await raw(r.base, `GET /health HTTP/1.0\r\n\r\n`), /^HTTP\/1\.1 200 /);
+  } finally {
+    await r.close();
+  }
+});
+
+test("allowedHosts is how a proxied deployment says its own name, and the empty list is refused", async () => {
+  const h = harness();
+  const named = new ControlPlane({ engine: h.engine, store: h.store, graphs: {}, allowedHosts: ["loom.internal"] });
+  const { port } = await named.listen(0);
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    assert.match(await raw(base, `GET /runs HTTP/1.1\r\nHost: loom.internal\r\n\r\n`), /^HTTP\/1\.1 200 /);
+    assert.match(
+      await raw(base, `GET /runs HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`),
+      /^HTTP\/1\.1 403 /,
+      "an explicit list REPLACES the derived one — it is the whole answer, not an addition",
+    );
+  } finally {
+    await named.close();
+  }
+
+  const wild = new ControlPlane({ engine: h.engine, store: h.store, graphs: {}, allowedHosts: ["*"] });
+  const { port: wildPort } = await wild.listen(0);
+  try {
+    assert.match(
+      await raw(`http://127.0.0.1:${wildPort}`, `GET /runs HTTP/1.1\r\nHost: whatever.example\r\n\r\n`),
+      /^HTTP\/1\.1 200 /,
+      "the deliberate off switch, for a proxy that rewrites Host",
+    );
+  } finally {
+    await wild.close();
+  }
+
+  // An empty list is a plane no caller can reach, spelled like a policy — the same class
+  // of configuration slip as an empty token, refused for the same reason.
+  assert.throws(
+    () => new ControlPlane({ engine: h.engine, store: h.store, graphs: {}, allowedHosts: [] }),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /"\*"/.test(e.message),
+  );
+});
+
+test("A BODY IN A SHAPE A CROSS-SITE FORM CAN SEND IS REFUSED — the three preflight-free content types", async () => {
+  const r = await rig();
+  const port = new URL(r.base).port;
+  const body = JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } });
+  try {
+    for (const ct of ["text/plain;charset=UTF-8", "multipart/form-data; boundary=----x", "application/x-www-form-urlencoded"]) {
+      const res = await fetch(`${r.base}/runs`, { method: "POST", headers: { "content-type": ct }, body });
+      assert.equal(res.status, 400, ct);
+      assert.match(((await json(res))["error"] as { message: string }).message, /application\/json/);
+    }
+    // No content type at all, which `fetch` will not send — it labels a string body
+    // `text/plain` — so this one is spoken by hand.
+    const bare = await raw(r.base, `POST /runs HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
+    assert.match(bare, /^HTTP\/1\.1 400 /);
+
+    for (const ct of ["application/json", "application/json; charset=utf-8", "APPLICATION/JSON"]) {
+      const res = await fetch(`${r.base}/runs`, { method: "POST", headers: { "content-type": ct }, body });
+      assert.equal(res.status, 202, ct);
+    }
+  } finally {
+    await r.close();
+  }
+});
+
+test("THE CALLBACK ROUTE IS EXEMPT BY CONSTRUCTION — it reads raw bytes, and the vendor chooses its own content type", async () => {
+  // Not a special case anybody has to keep in sync: the check lives in `#readBody`, and
+  // this route never calls it. Slack, PagerDuty and an internal approvals service post
+  // what they post, and the HMAC — not the media type — is that route's authentication.
+  const r = await gated();
+  try {
+    const body = approvalBody(r.runId, r.gateId);
+    const ts = String(Math.floor(NOW / 1000));
+    const res = await fetch(`${r.base}/runs/${r.runId}/callbacks/slack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-loom-timestamp": ts,
+        "x-loom-signature": r.channel.sign(body, ts),
+      },
+      body,
+    });
+    assert.equal(res.status, 200);
   } finally {
     await r.close();
   }
@@ -3167,6 +3438,143 @@ test("a Last-Event-ID outside the hot window gets a SNAPSHOT, not a silent gap",
     assert.equal(frames[0]?.event, "snapshot", "the client is told it is looking at a fresh baseline");
     assert.ok((frames[0]?.data as { status?: string }).status);
   } finally {
+    await plane.close();
+  }
+});
+
+/**
+ * An SSE reader that starts STALLED — a paused tab, a mobile link that went away, a TCP
+ * zero window. Attaching a `data` listener puts the socket in flowing mode, so the
+ * `pause()` after it is the stall.
+ */
+function stalledStream(base: string, path: string): {
+  resume: () => void;
+  text: () => string;
+  /**
+   * Whether the RESPONSE is over — the last-chunk terminator, or the socket going away.
+   *
+   * Not a socket close: the connection is keep-alive, so `res.end()` finishes the chunked
+   * body with `0\r\n\r\n` and leaves the socket up for the next request. Watching for FIN
+   * would call an ended stream "still open" and pass this test with the bug in place.
+   */
+  finished: () => boolean;
+  destroy: () => void;
+} {
+  const port = Number(new URL(base).port);
+  let out = "";
+  let ended = false;
+  const socket = connect(port, "127.0.0.1", () =>
+    socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\naccept: text/event-stream\r\n\r\n`),
+  );
+  socket.setEncoding("utf8");
+  socket.on("data", (d: string) => {
+    out += d;
+  });
+  socket.on("end", () => {
+    ended = true;
+  });
+  socket.on("error", () => {
+    ended = true;
+  });
+  socket.pause();
+  return {
+    resume: () => socket.resume(),
+    text: () => out,
+    finished: () => ended || out.endsWith("\r\n0\r\n\r\n"),
+    destroy: () => socket.destroy(),
+  };
+}
+
+/** Every `id:` line in a raw SSE body, in order. */
+function idsOf(text: string): number[] {
+  return [...text.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+}
+
+/**
+ * Wait until the stream ends or stops producing — never for a fixed budget.
+ *
+ * A budget makes "the server sent less" and "the client had not finished reading" the
+ * same observation, which is how a truncated read passes for a bounded write.
+ */
+async function quiet(client: { text: () => string; finished: () => boolean }, stillMs = 500, capMs = 30_000): Promise<void> {
+  let seen = -1;
+  let still = 0;
+  for (let waited = 0; waited < capMs && !client.finished(); waited += 25) {
+    await new Promise((res) => setTimeout(res, 25));
+    const now = client.text().length;
+    still = now === seen ? still + 25 : 0;
+    seen = now;
+    if (still >= stillMs) return;
+  }
+}
+
+test("A STALLED SSE CLIENT IS CUT, NOT BUFFERED WITHOUT LIMIT — `res.write`'s answer is the only backpressure there is", async () => {
+  // Measured over a real socket with a paused reader, before this. In the shape below the
+  // subscription was still live after every event had been published — the 1024-slot bound
+  // NEVER FIRED — because `Channel.push` hands an event to a parked waiter and returns
+  // before the queue-length test, and a synchronous loop body re-parks a waiter within a
+  // microtask after every delivery. The unboundedness moved out of the queue designed to
+  // hold it and into the response object, where nothing counts it. With 4000 events of
+  // 4 kB the same reader eventually drew 12 898 531 bytes out of one `ServerResponse`,
+  // and the stream never ended.
+  const h = harness();
+  const plane = new ControlPlane({ engine: h.engine, store: h.store, bus: h.bus, graphs: {}, now: () => NOW });
+  const { port } = await plane.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const runId = "run-stalled" as RunId;
+  const actor: Actor = { kind: "system", component: "test" };
+  // ONE FRAME LARGER THAN ANY SOCKET WILL TAKE, so the moment the server is told to stop
+  // is a fact about `res.write` rather than about this machine's send buffer. Every
+  // remaining event is tiny, so what fills after that is the QUEUE and only the queue —
+  // which is the whole claim under test, and it is not measurable while the two are mixed.
+  const wall = "x".repeat(4 * 1024 * 1024);
+  const tick = "t";
+  const HEAD = 1102;
+  await h.store.append({ runId, expectedSeq: 0, events: [{ type: "task.progress", payload: { chunk: "seed" }, actor }] });
+
+  const client = stalledStream(base, `/runs/${runId}/events`);
+  try {
+    for (let i = 0; i < 200 && h.bus.subscriberCount === 0; i++) await new Promise((res) => setTimeout(res, 10));
+    assert.equal(h.bus.subscriberCount, 1, "the live tail is attached before anything is published");
+
+    const publish = async (seq: number, chunk: string): Promise<void> => {
+      await h.store.append({ runId, expectedSeq: seq - 1, events: [{ type: "task.progress", payload: { chunk }, actor }] });
+      h.bus.publish({ runId, seq, ts: NOW, type: "task.progress", payload: { chunk }, actor, classification: "internal" });
+    };
+    await publish(2, wall);
+    for (let seq = 3; seq <= HEAD; seq++) await publish(seq, tick);
+
+    assert.equal(client.text(), "", "the client has read nothing at all");
+    // THE CLAIM, AS ONE NUMBER. The 1024-slot bound exists to absorb a subscriber that
+    // cannot keep up; with `res.write`'s answer discarded, this consumer is never the one
+    // that cannot keep up — it accepts every event and grows the response buffer instead,
+    // so the bound never fires and `dropped` stays 0 while memory climbs. A disposed
+    // subscription here is the bound doing its job: the loss lands on ADMISSION to this
+    // stream, which is exactly what invariant 8 permits, and never on the journal.
+    assert.equal(h.bus.subscriberCount, 0, "the bounded queue took the overflow — the backpressure reached admission");
+
+    client.resume();
+    await quiet(client);
+
+    const ids = idsOf(client.text());
+    // AND THE LOSS IS AT THE NEW END. `drop_oldest` on a queue that finally does fill
+    // discards from the OLD end, in the middle of the one route whose stated contract is
+    // that the client never silently misses an event. Measured with that policy: 3025 ids
+    // delivered, `1025 -> 1027 -> 1029 …`, 976 holes, ending on the run's real head so
+    // nothing downstream could tell.
+    assert.deepEqual(ids, ids.map((_, i) => i + 1), "what is delivered is a contiguous prefix, never a hole");
+    assert.ok(client.finished(), "a client that fell far enough behind is CUT — the response ends and the client reconnects");
+    assert.ok(ids.length < HEAD, `the server stopped pulling from the bus once the socket backed up; it delivered ${ids.length} of ${HEAD}`);
+
+    // The cut costs nothing, which is what makes cutting the right answer: this route
+    // already honours `Last-Event-ID`, and the journal — not the stream — is the truth.
+    const last = ids[ids.length - 1]!;
+    const rest = await readSse(`${base}/runs/${runId}/events?lastEventId=${last}`, (f) => f.some((x) => x.id === HEAD), 8000);
+    const restIds = rest.filter((f) => f.event === "event").map((f) => f.id!);
+    assert.equal(restIds[0], last + 1, "the reconnect continues exactly where the cut landed");
+    assert.deepEqual(restIds, restIds.map((_, i) => i + last + 1), "contiguous to the head — gap-free across the cut");
+  } finally {
+    client.destroy();
     await plane.close();
   }
 });
