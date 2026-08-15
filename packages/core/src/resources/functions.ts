@@ -25,6 +25,25 @@
  * bytes share one compiled body, and a ref repointed to new bytes gets a new one — which
  * is the same guarantee the resource layer already gives prompts and profiles.
  *
+ * Caching per digest is not the same claim as *running* the pinned digest, and for a while
+ * only the first was true here. `load(ref)` called `store.resolve` — the COMPILE-time half
+ * of the rule — from inside a running node, so a promotion between compile and execute
+ * swapped the body underneath the Run. Every other dependency is pinned into
+ * `RunGraph.resolutionManifest` and read from that pin; code was the exception.
+ * `FunctionLoaderOptions.pins` is the manifest seam that closes it, and the loader
+ * refuses rather than falls back when a manifest is supplied and a ref is missing from it.
+ *
+ * WIRING IT IS THE CALLER'S JOB and is not done here: `FunctionRegistry`'s loader seam is
+ * `(ref: string) => FunctionBody | undefined`, which carries no run identity, so nothing
+ * in `run/` currently passes a manifest. Until it does, an embedder that constructs the
+ * loader itself gets the guarantee and the default engine path does not.
+ *
+ * That seam is also why a manifest-bound loader belongs to ONE RUN. `FunctionRegistry`
+ * caches a loaded body under the REF, not the digest, so a registry shared across runs
+ * would hand run B whatever run A's manifest resolved that ref to — the same drift by
+ * another road. Build the loader (and the registry that wraps it) per run, or key the
+ * cache by digest.
+ *
  * See design/loom/08-PLAN.md open thread T2, and A13.
  */
 
@@ -38,6 +57,43 @@ import type { ResourceStore } from "./store.ts";
 
 export interface FunctionLoaderOptions {
   readonly store: ResourceStore;
+  /**
+   * The run's resolution manifest, as a lookup: ref → the digest the compiler pinned.
+   *
+   * WITHOUT IT, `load` resolves the ref through the store when the node RUNS. That is the
+   * compile-time half of the pinning rule executed at run time, and it is exactly the
+   * thing `store.ts` says must not happen: promote a new version between compile and
+   * execute and the body that runs is not the body that was compiled, validated and
+   * gated. `RunGraph`'s docstring — "a Run reads only what its manifest names" — held for
+   * every dependency except the one that is CODE.
+   *
+   * Supplying it makes the manifest AUTHORITATIVE and EXHAUSTIVE: a pinned ref loads its
+   * pinned digest whatever the selector now says, and a ref the manifest does not name
+   * does not load at all. Exhaustive rather than best-effort because a fallback to the
+   * selector is the hole itself, reachable again by one ref the compiler failed to pin.
+   *
+   * It is a function rather than a map so one loader can serve many runs: the caller
+   * closes over whichever `RunGraph` is executing.
+   */
+  /**
+   * NOT USABLE YET FOR A GRAPH WITH A `subgraph` NODE THAT CONTAINS `function` NODES.
+   *
+   * The lookup must cover every graph the run can REACH, and an embedder cannot build
+   * that today: `resolveManifest` walks the top-level spec only, `Engine.#compileChild`
+   * compiles each child into its own `RunGraph` with its own manifest, and
+   * `FunctionRegistry` is a single Engine-wide dependency. A loader closed over the
+   * parent's manifest is then asked for the child's ref, misses, and fails closed —
+   * killing a run that is doing nothing wrong.
+   *
+   * Left strict rather than relaxed, because the relaxed version reopens the hole this
+   * exists to close: a miss would have to fall through to the floating lookup, which is
+   * the unpinned path. Nothing in `src/` passes `pins` today, so the strictness costs
+   * nothing until the child manifests are reachable.
+   *
+   * Reversal: when child manifests are exposed (or the registry becomes per-graph), this
+   * note goes and the contract becomes plainly exhaustive.
+   */
+  readonly pins?: (ref: ResourceRef) => Digest | undefined;
   /**
    * Globals the body may see. Deliberately tiny, and NOT a security control — see the
    * module docstring. `JSON` and `Math` are here because a body that cannot parse or
@@ -69,7 +125,13 @@ const SAFE_GLOBALS: Readonly<Record<string, unknown>> = {
 };
 
 export interface FunctionLoader {
-  /** Compile the body a ref pins, or `undefined` when the ref names no function. */
+  /**
+   * Compile the body a ref names, or `undefined` when it names no function.
+   *
+   * Which digest that is depends on `pins`: the manifest's, when one is supplied, and
+   * otherwise whatever the selector points at right now. See `FunctionLoaderOptions.pins`
+   * for why only the first of those is the pinning rule.
+   */
   load(ref: ResourceRef): FunctionBody | undefined;
   /** Compile a specific digest. Replay uses this: the ref may have moved on. */
   loadDigest(digest: Digest): FunctionBody;
@@ -131,6 +193,22 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
 
   return {
     load(ref) {
+      if (opts.pins !== undefined) {
+        const pinned = opts.pins(ref);
+        if (pinned === undefined) {
+          // `internal`, not `validation`: the compiler pins every ref it can see, so a
+          // miss here means some path reached the executor without going through it and
+          // the Run's view of the world is no longer frozen.
+          throw err.internal(
+            CODES.E_FLOATING_REF_AT_RUNTIME,
+            `function "${ref}" is not in this run's resolution manifest, so there is no pinned body to run`,
+            { details: { ref } },
+          );
+        }
+        const record = opts.store.fetch<unknown>(pinned);
+        if (record.kind !== "function") return undefined;
+        return compile(pinned, sourceOf(record.content, ref), ref);
+      }
       const resolved = opts.store.resolve(ref);
       if (resolved === undefined) return undefined;
       const record = opts.store.fetch<unknown>(resolved.digest);

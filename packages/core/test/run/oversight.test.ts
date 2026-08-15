@@ -18,7 +18,14 @@ import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import type { GateDecision } from "../../src/vocab.ts";
-import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import {
+  FunctionRegistry,
+  MockModelAdapter,
+  ModelRegistry,
+  ToolRegistry,
+  type ToolDefinition,
+} from "../../src/run/registry.ts";
+import type { ToolManifestLite } from "../../src/graph/validate.ts";
 import { resolver } from "./skeleton.ts";
 
 const RUN = "01JRUNOVERSIGHT00000000000" as RunId;
@@ -532,6 +539,186 @@ test("a read-only action does not hold at all", async () => {
   const runId = await e.submit({ graph, inputs: { amount: 1 } });
   const p = await e.advance(runId);
   assert.equal(p.status, "succeeded");
+});
+
+// ── the capability check INSIDE the one tool dispatch path ───────────────────
+//
+// `#invokeTool` runs `ctx.policy.decide` and returns on `deny`. Within a single
+// Engine that check can never be the one that fires: `#executeTask` decides first
+// over `#capabilitiesOf(node)`, which is the UNION of every reachable tool's
+// capabilities, so a denial at the tool is always a denial at the node. The one
+// shape that reaches it is the shape below — a run suspended on an approved gate,
+// resumed by a process whose policy is tighter than the one that raised it, where
+// `lastDecidedGate` short-circuits the node-level decision entirely. Deleting the
+// `deny` arm in `#invokeTool` makes the charge below happen.
+
+const PAY_MANIFEST: Record<string, ToolManifestLite> = {
+  "pay.charge": {
+    name: "pay.charge",
+    version: "1.0",
+    capabilities: ["pay:write"],
+    irreversibility: "irreversible",
+    idempotent: false,
+  },
+};
+
+/** One agent node that may reach an irreversible tool, so it floors at `in` and gates. */
+function agentChargeSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "agent-charge", project: "test", version: 1 },
+    policy: { posture: "out", budget: { costUsd: 1 }, capabilities: ["pay:write"] },
+    channels: { amount: { type: "number", reduce: "replace" }, receipt: { type: "object", reduce: "replace" } },
+    inputs: ["amount"],
+    outputs: ["receipt"],
+    nodes: [
+      {
+        id: "act" as NodeId,
+        type: "agent",
+        reads: ["amount"],
+        writes: ["receipt"],
+        agent: {
+          profile: "agent_profile/actor@stable",
+          prompt: "prompt/act@stable",
+          maxTurns: 3,
+          tools: ["pay.charge"],
+          outputSchema: { type: "object", properties: { done: { type: "boolean" } }, required: ["done"] },
+        },
+      },
+    ],
+    edges: [],
+  } as unknown as GraphSpec;
+}
+
+interface DenyRig {
+  readonly engine: Engine;
+  readonly turns: number[];
+}
+
+/**
+ * An Engine over a shared store and a shared charge counter.
+ *
+ * `denied` is the only difference between the two processes this test simulates:
+ * "deny beats allow, always", applied to a run that was authorised under the older,
+ * looser configuration.
+ */
+function denyRig(store: MemoryStateStore, charged: { n: number }, denied?: readonly string[]): DenyRig {
+  const now = (): number => 1_700_000_000_000;
+  const tools = new ToolRegistry();
+  tools.register({
+    ...PAY_MANIFEST["pay.charge"]!,
+    description: "Takes money. Cannot be undone.",
+    parameters: { type: "object", properties: { amount: { type: "number" } } },
+    execute: () => {
+      charged.n++;
+      return { content: "charged" };
+    },
+  } satisfies ToolDefinition);
+
+  const turns: number[] = [];
+  const models = new ModelRegistry();
+  models.register(
+    new MockModelAdapter({
+      script: (_req, turn) => {
+        turns.push(turn);
+        return turn === 0
+          ? { toolCalls: [{ id: "c0", name: "pay.charge", arguments: { amount: 10 } }], finishReason: "tool_use" }
+          : { text: JSON.stringify({ done: true }), finishReason: "stop" };
+      },
+      pricePerMTok: 1,
+    }),
+    true,
+  );
+
+  return {
+    engine: new Engine({
+      store,
+      tools,
+      functions: new FunctionRegistry(),
+      models,
+      now,
+      policy: {
+        granted: ["pay:write"],
+        ...(denied === undefined ? {} : { denied }),
+        systemFloor: "out",
+        budget: { runUsd: 1 },
+      },
+    }),
+    turns,
+  };
+}
+
+const compileAgentCharge = () =>
+  compileOrThrow({
+    spec: agentChargeSpec(),
+    resolver: resolver(),
+    tools: PAY_MANIFEST,
+    tenantCapabilities: ["pay:write"],
+  });
+
+test("A GATE APPROVED UNDER THE OLD POLICY DOES NOT AUTHORISE A NOW-DENIED CAPABILITY", async () => {
+  // The gate short-circuit in `#executeTask` is what makes this reachable: a Task with a
+  // decided gate is dispatched WITHOUT re-deciding policy, so the capability check inside
+  // `#invokeTool` is the only one left between the model's choice and the money.
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const charged = { n: 0 };
+  const graph = compileAgentCharge();
+
+  // Process 1 — the permissive configuration that raised the gate.
+  const before = denyRig(store, charged);
+  const runId = await before.engine.submit({ graph, inputs: { amount: 10 } });
+  const raised = await before.engine.advance(runId);
+  assert.equal(raised.status, "awaiting_gate", "precondition: the agent gates before the model runs");
+  assert.deepEqual(before.turns, [], "precondition: and it gates BEFORE the model is asked anything");
+
+  // Process 2 — `pay:write` has since been deny-listed. Same store, same graph.
+  const after = denyRig(store, charged, ["pay:write"]);
+  after.engine.attach(runId, graph);
+  const gate = Object.values(raised.gates).find((g) => g.state === "open")!;
+  await after.engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:bob", via: "console" },
+    idempotencyKey: "k1",
+  });
+
+  // The control: the approval really did resume the node and the model really did ask
+  // for the tool. Without this the assertion below would also pass on a run that never
+  // got that far.
+  assert.ok(after.turns.length > 0, "the approved node must actually have run its agent");
+  assert.equal(charged.n, 0, "a denied capability is refused inside the one tool dispatch path");
+
+  const called: string[] = [];
+  for await (const ev of store.read(runId, 1)) {
+    if (ev.type === "tool.called") called.push((ev.payload as { name: string }).name);
+  }
+  assert.deepEqual(called, [], "and nothing records a call that policy refused");
+});
+
+test("…and the same run charges when the capability is NOT denied", async () => {
+  // The other half of the pin. Without it, the test above passes on any run that fails
+  // to resume for any reason at all — a broken attach would read as a working guard.
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const charged = { n: 0 };
+  const graph = compileAgentCharge();
+
+  const before = denyRig(store, charged);
+  const runId = await before.engine.submit({ graph, inputs: { amount: 10 } });
+  const raised = await before.engine.advance(runId);
+  assert.equal(raised.status, "awaiting_gate");
+
+  const after = denyRig(store, charged);
+  after.engine.attach(runId, graph);
+  const gate = Object.values(raised.gates).find((g) => g.state === "open")!;
+  await after.engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:bob", via: "console" },
+    idempotencyKey: "k1",
+  });
+
+  assert.equal(charged.n, 1, "an approval with the capability still granted authorises the action");
 });
 
 test("an UNREGISTERED tool is treated as irreversible — fail closed", async () => {

@@ -6,6 +6,12 @@
  * manifest recorded its digest, and the executor ignored both — `function` was the one
  * node type whose resource reference was decorative.
  *
+ * The second gap, found later and closed here: T2 pinned the ref and then resolved it
+ * again at RUN time, so a promotion between compile and execute swapped the body under a
+ * live run. `FunctionLoaderOptions.pins` makes the run's manifest authoritative; the tests
+ * under "the manifest, not the selector" are that property, and the last of them records
+ * the half a caller can still get wrong.
+ *
  * The honesty this file has to keep: `node:vm` is NOT a sandbox. These tests assert
  * scoping, which is what it actually provides, and never claim isolation.
  */
@@ -15,7 +21,7 @@ import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
-import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import type { NodeId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { createFunctionLoader } from "../../src/resources/functions.ts";
@@ -42,6 +48,7 @@ const view = (channels: Record<string, unknown>) => makeStateView(SPECS, channel
 const ctx = () => ({ taskId: "t@root#0" as never, signal: new AbortController().signal, now: () => 1 });
 
 const DOUBLE = `(view) => ({ writes: { doubled: (view.get("amount") ?? 0) * 2 } })`;
+const TRIPLE = `(view) => ({ writes: { doubled: (view.get("amount") ?? 0) * 3 } })`;
 
 function storeWith(source: unknown, name = "double") {
   const store = new ResourceStore({ now: () => 1 });
@@ -49,6 +56,10 @@ function storeWith(source: unknown, name = "double") {
   promoteToStable(store, ref);
   return { store, ref };
 }
+
+/** What the engine would hand the loader: the run's own manifest, as a lookup. */
+const pinsOf = (graph: RunGraph) => (ref: string) =>
+  graph.resolutionManifest.find((r) => r.ref === ref)?.digest;
 
 // ── loading ──────────────────────────────────────────────────────────────────
 
@@ -209,6 +220,57 @@ test("extra globals can be injected deliberately", () => {
   assert.deepEqual(loader.load("function/double@stable")!(view({}), ctx()), { writes: { doubled: 7 } });
 });
 
+// ── the manifest, not the selector ───────────────────────────────────────────
+
+test("A PIN BEATS A MOVED SELECTOR — the body that runs is the body that was compiled", () => {
+  // `load(ref)` called `store.resolve` — the COMPILE-time half of the pinning rule — from
+  // inside a running node. Promote a new version and the selector moves under the run's
+  // feet, so the body that executes need not be the body the compiler gated.
+  const { store, ref } = storeWith(DOUBLE);
+  const loader = createFunctionLoader({ store, pins: (r) => (r === "function/double@stable" ? ref.digest : undefined) });
+
+  promoteToStable(store, store.publish({ kind: "function", name: "double", content: TRIPLE, actor: ACTOR }));
+
+  assert.deepEqual(
+    loader.load("function/double@stable")!(view({ amount: 2 }), ctx()),
+    { writes: { doubled: 4 } },
+    "the pinned digest, not whatever @stable points at now",
+  );
+});
+
+test("a manifest is EXHAUSTIVE — a ref it does not name refuses to load at all", () => {
+  // Fail closed. The alternative — falling back to the selector for an unpinned ref — is
+  // the hole this option exists to close, reachable by a typo in one ref.
+  const { store } = storeWith(DOUBLE);
+  const loader = createFunctionLoader({ store, pins: () => undefined });
+  assert.throws(
+    () => loader.load("function/double@stable"),
+    (e: unknown) => (e as { code: string }).code === "E_FLOATING_REF_AT_RUNTIME",
+  );
+});
+
+test("a pinned digest naming a non-function is `undefined`, exactly as an unpinned one is", () => {
+  const store = new ResourceStore({ now: () => 1 });
+  const p = store.publish({ kind: "prompt", name: "hello", content: "hi", actor: ACTOR });
+  promoteToStable(store, p);
+  const loader = createFunctionLoader({ store, pins: () => p.digest });
+  assert.equal(loader.load("prompt/hello@stable"), undefined);
+});
+
+test("a yanked pin still loads — in-flight runs are not stranded mid-way", () => {
+  // D8.5: yanking breaks NEW compiles and escalates in-flight runs to human oversight; it
+  // does not strand them. `store.resolve` returns `undefined` for a yanked resource, so a
+  // loader that re-resolved would kill the run outright. `fetch` by digest does not.
+  const { store, ref } = storeWith(DOUBLE);
+  store.yank("function", "double", 1, "INC-1", ACTOR);
+
+  const floating = createFunctionLoader({ store });
+  assert.equal(floating.load("function/double@stable"), undefined, "re-resolving: the selector is gone");
+
+  const pinned = createFunctionLoader({ store, pins: () => ref.digest });
+  assert.deepEqual(pinned.load("function/double@stable")!(view({ amount: 2 }), ctx()), { writes: { doubled: 4 } });
+});
+
 // ── the registry seam ────────────────────────────────────────────────────────
 
 test("a HAND-REGISTERED body wins over a stored one", () => {
@@ -222,7 +284,8 @@ test("a HAND-REGISTERED body wins over a stored one", () => {
 });
 
 test("A GRAPH RUNS WITH NO HAND-REGISTERED FUNCTIONS AT ALL", async () => {
-  // The whole point of T2: the ref the compiler pinned is the body the executor runs.
+  // The whole point of T2: a graph's `function` ref is enough to run it. WHICH body that
+  // ref reaches is the separate question the next test asks.
   const { store } = storeWith(DOUBLE);
   const spec: GraphSpec = {
     apiVersion: "loom.dev/v1",
@@ -257,6 +320,82 @@ test("A GRAPH RUNS WITH NO HAND-REGISTERED FUNCTIONS AT ALL", async () => {
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
   assert.equal(p.channels["doubled"], 40);
   assert.equal(loader.compiled, 1);
+});
+
+test("A RUN EXECUTES THE BODY ITS MANIFEST PINNED, not the one @stable moved to", async () => {
+  // `RunGraph`'s own docstring: "a Run reads only what its manifest names, so a Resource
+  // published, promoted, or deprecated mid-run cannot affect it." That was true of every
+  // dependency except the one that is CODE — a `function` body was looked up by ref when
+  // the node ran, so a promotion between compile and execute swapped it.
+  const { store } = storeWith(DOUBLE);
+  const spec: GraphSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "pinned", project: "t", version: 1 },
+    channels: SPECS,
+    inputs: ["amount"],
+    outputs: ["doubled"],
+    nodes: [
+      { id: n("double"), type: "function", reads: ["amount"], writes: ["doubled"], function: { ref: "function/double@stable" } },
+    ],
+    edges: [],
+  };
+
+  const graph = compileOrThrow({ spec, resolver: store, tools: {}, tenantCapabilities: ["*"] });
+  // …and now the selector moves, exactly as a promotion between compile and execute would.
+  promoteToStable(store, store.publish({ kind: "function", name: "double", content: TRIPLE, actor: ACTOR }));
+
+  const loader = createFunctionLoader({ store, pins: pinsOf(graph) });
+  const journal = new MemoryStateStore({ now: () => 1 });
+  const engine = new Engine({
+    store: journal,
+    bus: new InProcessEventBus({ store: journal }),
+    tools: new ToolRegistry(),
+    functions: new FunctionRegistry({ loader: (ref) => loader.load(ref) }),
+    models: new ModelRegistry(),
+    now: () => 1,
+    resolver: store,
+    policy: { granted: ["*"], systemFloor: "out" },
+  });
+
+  const runId = await engine.submit({ graph, inputs: { amount: 20 } });
+  const p = await engine.advance(runId);
+
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(p.channels["doubled"], 40, "×2 was compiled and gated; ×3 was promoted afterwards");
+});
+
+test("A REGISTRY SHARED ACROSS RUNS DEFEATS THE PIN — so build one per run", () => {
+  // `FunctionRegistry` caches a loaded body under the REF, not the digest (`#stacks.set(ref,
+  // [loaded])`), so the second run never reaches its own loader. Pinning the manifest fixes
+  // which digest a loader resolves and does nothing about a cache above it. Asserted rather
+  // than only written down, because it is the road the same drift comes back by.
+  const { store, ref } = storeWith(DOUBLE);
+  const v2 = store.publish({ kind: "function", name: "double", content: TRIPLE, actor: ACTOR });
+  promoteToStable(store, v2);
+
+  const runA = createFunctionLoader({ store, pins: () => ref.digest });
+  const runB = createFunctionLoader({ store, pins: () => v2.digest });
+
+  // A seam that IS run-aware — it re-reads `current` on every call — wrapped by one
+  // long-lived registry.
+  let current = runA;
+  const shared = new FunctionRegistry({ loader: (r) => current.load(r) });
+
+  assert.deepEqual(shared.require("function/double@stable")(view({ amount: 1 }), ctx()), { writes: { doubled: 2 } });
+  current = runB;
+  assert.deepEqual(
+    shared.require("function/double@stable")(view({ amount: 1 }), ctx()),
+    { writes: { doubled: 2 } },
+    "run B's manifest is never consulted: the cache answered first, keyed by ref",
+  );
+
+  const perRun = new FunctionRegistry({ loader: (r) => runB.load(r) });
+  assert.deepEqual(
+    perRun.require("function/double@stable")(view({ amount: 1 }), ctx()),
+    { writes: { doubled: 3 } },
+    "…which a registry built for run B gets right",
+  );
 });
 
 test("a graph naming a function nobody published still fails LOUDLY", async () => {

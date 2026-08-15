@@ -80,6 +80,20 @@ export interface PolicyEngineOptions {
   /** Deny beats allow, always. */
   readonly denied?: readonly string[];
   /**
+   * Deny-lists the ENGINE holds, keyed by actor id.
+   *
+   * `PolicyActor.denied` is carried on the object being authorized, which makes it an
+   * assertion the SUBJECT gets to make about itself. `deescalate` used to ask exactly
+   * that field whether the caller was denied `oversight:loosen`, so an actor that simply
+   * omitted `denied` was on no deny-list at all — on the one path invariant 5 permits a
+   * posture to drop, the guard was answerable by the thing it guards.
+   *
+   * Entries here are UNIONED with `EVOLUTION_ACTOR`'s own list and with whatever the
+   * actor object carries. Deny beats allow in every direction, so supplying this map can
+   * only ever add denials; passing `{"evolution-engine": []}` does not un-deny it.
+   */
+  readonly deniedActors?: Readonly<Record<string, readonly string[]>>;
+  /**
    * The system-wide posture floor. Defaults to `on`.
    *
    * `on` is very nearly free — the intervention window for `read_only` is 0 ms, so
@@ -123,6 +137,24 @@ export const EVOLUTION_ACTOR: PolicyActor = {
   id: "evolution-engine",
   denied: ["oversight:loosen", "resource:promote(stable)", "policy:write", "graph:mutate(policy)"],
 };
+
+/** The capability `deescalate` spends. Named once so the three deny-lists agree on it. */
+const LOOSEN = "oversight:loosen";
+
+/**
+ * The deny-lists the engine keeps, seeded so the built-in one cannot be dropped.
+ *
+ * `EVOLUTION_ACTOR` is the identity the codebase already declares must never loosen, and
+ * it is the source of truth for what it is denied — copying its list here rather than
+ * restating it keeps one declaration. Supplied entries are appended, never substituted.
+ */
+function engineDenyLists(
+  supplied: Readonly<Record<string, readonly string[]>> | undefined,
+): ReadonlyMap<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>([[EVOLUTION_ACTOR.id, EVOLUTION_ACTOR.denied ?? []]]);
+  for (const [id, caps] of Object.entries(supplied ?? {})) out.set(id, [...(out.get(id) ?? []), ...caps]);
+  return out;
+}
 
 const DEFAULT_WINDOWS: Readonly<Record<IrreversibilityClass, number>> = {
   read_only: 0,
@@ -188,6 +220,7 @@ export class PolicyEngine {
   readonly #granted: readonly string[];
   readonly #windows: Readonly<Record<IrreversibilityClass, number>>;
   readonly #denied: readonly string[];
+  readonly #deniedActors: ReadonlyMap<string, readonly string[]>;
   readonly #systemFloor: Posture;
   readonly #budget: BudgetLimits;
   readonly #onEscalate: PolicyEngineOptions["onEscalate"];
@@ -209,6 +242,7 @@ export class PolicyEngine {
   constructor(opts: PolicyEngineOptions) {
     this.#granted = opts.granted;
     this.#denied = opts.denied ?? [];
+    this.#deniedActors = engineDenyLists(opts.deniedActors);
     this.#systemFloor = opts.systemFloor ?? "on";
     this.#budget = opts.budget ?? {};
     this.#windows = boundedWindows(opts.interventionWindowMs);
@@ -314,6 +348,11 @@ export class PolicyEngine {
    * Loosening. A different method with a different parameter type on purpose: the
    * signature alone rejects an agent or the evolution engine, and the runtime
    * deny-list rejects it again if someone casts around the type.
+   *
+   * THREE deny-lists, checked in descending order of authority, because the first two
+   * are the engine's and only the third belongs to the caller. Reading `actor.denied`
+   * alone — which is all this did — let anything pass that named itself
+   * `evolution-engine` and left the field off, since an absent list matches nothing.
    */
   deescalate(scope: string, to: Posture, justification: string, actor: PolicyActor): void {
     if (actor.kind !== "human") {
@@ -323,8 +362,22 @@ export class PolicyEngine {
         { details: { actor: actor.id, scope } },
       );
     }
-    if (matches(actor.denied ?? [], "oversight:loosen")) {
-      throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `actor "${actor.id}" is deny-listed for oversight:loosen`);
+    if (matches(this.#deniedActors.get(actor.id) ?? [], LOOSEN)) {
+      throw err.policy(
+        CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN,
+        `identity "${actor.id}" is deny-listed for ${LOOSEN} by this engine`,
+        { details: { actor: actor.id, scope, source: "engine.deniedActors" } },
+      );
+    }
+    if (matches(this.#denied, LOOSEN)) {
+      throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `${LOOSEN} is denied for this tenant`, {
+        details: { actor: actor.id, scope, source: "engine.denied" },
+      });
+    }
+    if (matches(actor.denied ?? [], LOOSEN)) {
+      throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `actor "${actor.id}" is deny-listed for ${LOOSEN}`, {
+        details: { actor: actor.id, scope, source: "actor.denied" },
+      });
     }
     if (justification.trim() === "") {
       throw err.validation(CODES.E_HUMAN_APPROVAL_REQUIRED, "de-escalation requires a non-empty justification");

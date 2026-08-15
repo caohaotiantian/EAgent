@@ -307,6 +307,78 @@ test("multiple secrets in one string are all redacted", () => {
   assert.ok(!String(r.value).includes("sk-aaaa"));
 });
 
+// ── URL userinfo, which is the one entry on that list that is not a guess ─────
+//
+// The shape a credential most often takes when it reaches free text, and the one the
+// sweep did not know: `scheme://user:pass@host`. It got here by the road every entry
+// above is for — a string SOMEBODY ELSE wrote, quoting a value this deployment
+// configured — and `providers/http.ts` had its own private copy of this redaction for
+// exactly that reason. A private copy is how `run/delivery.ts` came to carry a second
+// walk that disagreed with this file's about depth and cycles; the answer then was to
+// delegate, and it is the answer here.
+
+const URL_MSG =
+  "Request cannot be constructed from a URL that includes credentials: https://svc:hunter2@api.example.com/v1/messages";
+const URL_MSG_MASKED =
+  "Request cannot be constructed from a URL that includes credentials: https://[redacted]@api.example.com/v1/messages";
+
+test("A URL'S USERINFO IS A CREDENTIAL, AND THE SWEEP TAKES IT — the exact bytes, not a boolean", () => {
+  // Asserted as WHOLE-STRING EQUALITY rather than `!includes("hunter2")`, because the
+  // second passes for a redactor that deleted the message, and half of what this
+  // mechanism has to keep is the diagnosis around the credential.
+  const r = redact(URL_MSG, "internal");
+  assert.equal(r.value, URL_MSG_MASKED);
+  assert.deepEqual(r.hits, ["url-credentials"]);
+});
+
+test("a userinfo with no password is a credential too", () => {
+  const r = redact("connect ECONNREFUSED https://ghp_liveTokenValue@github.example.com/api");
+  assert.equal(r.value, "connect ECONNREFUSED https://[redacted]@github.example.com/api");
+  assert.deepEqual(r.hits, ["url-credentials"]);
+});
+
+test("AN `@` THAT IS NOT USERINFO IS LEFT ALONE — a redactor nobody can read is one nobody keeps", () => {
+  // The userinfo run stops at the authority's first `/`, `?`, `#`, whitespace or second
+  // `@`, so a path that merely contains an address and a bare `mailto:` are both prose.
+  // These three strings are `test/providers/http.test.ts`'s, deliberately: the provider
+  // file's private redaction is being replaced by this one, so the thing it promised not
+  // to shred has to keep coming out identical here.
+  const kept = [
+    "socket hang up while POSTing https://api.example.com/v1/mail/a@b.example",
+    "no route to host for mailto:ops@example.com",
+    "unexpected token @ in body",
+  ];
+  for (const text of kept) {
+    const r = redact(text);
+    assert.equal(r.value, text, text);
+    assert.deepEqual(r.hits, [], text);
+  }
+});
+
+test("A CREDENTIAL IN USERINFO IS REPORTED TWICE WHEN IT IS ALSO A SHAPE — the hit list is the alert", () => {
+  // ORDER IN `DETECTORS` IS LOAD-BEARING AND THE ONLY OBSERVABLE IT MOVES IS `hits`.
+  // `url-credentials` runs LAST, so a provider key sitting in userinfo position is first
+  // named by what it IS and only then masked by where it SAT. Running it first produces
+  // byte-identical output and one hit instead of two — the same redaction, with the
+  // "a live provider key was in this string" signal thrown away.
+  const r = redact("POST https://sk-abcdefghijklmnopqrstuvwx@api.example.com/v1 failed");
+  assert.equal(r.value, "POST https://[redacted]@api.example.com/v1 failed");
+  assert.deepEqual(r.hits, ["provider-key", "url-credentials"]);
+});
+
+test("THE MASK REACHES A SPAN ATTRIBUTE AND A GATE DELIVERY, because it is in the one walk", () => {
+  // The point of putting this in `DETECTORS` rather than beside a caller: every read
+  // boundary in the codebase already runs the sweep, so all of them close at once.
+  const attrs = withKey(KEY_A, () => redactAttributes({ "gate.reason": URL_MSG }, {}, "run_a"));
+  assert.equal(attrs["gate.reason"], URL_MSG_MASKED);
+
+  // …including the legible path of a field-list redaction, which is what a human approving
+  // a gate reads. `only` names a different field, so this leaf takes the sweep.
+  const delivered = redact({ requester: "u:alice", note: URL_MSG }, "pii", { only: ["requester"], scope: "run_a" });
+  assert.equal((delivered.value as Record<string, unknown>)["note"], URL_MSG_MASKED);
+  assert.ok(delivered.hits.includes("url-credentials"));
+});
+
 // ── secret-ish keys ──────────────────────────────────────────────────────────
 
 test("a key that NAMES a secret redacts its value regardless of classification", () => {

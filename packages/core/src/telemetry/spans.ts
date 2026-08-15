@@ -69,6 +69,40 @@
  * whole of that argument; see `deploymentKey` there, including why reading it is
  * configuration rather than nondeterminism under invariant 4.
  *
+ * WHAT A SPAN IS ALLOWED TO LOSE, AND WHAT IT IS NOT ALLOWED TO CARRY — invariant 8, in the
+ * one direction that is easy to get backwards. *Telemetry may drop data; the journal may
+ * not.* Read forwards that licenses everything this file already does: an unusable scope
+ * costs the `pii` attributes, a missing `LOOM_PII_TOKEN_KEY` costs them too, a value that
+ * throws mid-walk costs one attribute, and a sampled-out run costs the whole trace. Read
+ * BACKWARDS it is a prohibition rather than a licence: **a span may be poorer than the
+ * journal and may never be richer.** The journal is the source of truth and is not redacted,
+ * so "richer" cannot mean an extra fact; it can only mean a fact the journal holds under a
+ * classification and this file ships without one. That is what `ATTRIBUTE_CLASSES` and the
+ * `close`-only egress are between them for.
+ *
+ * CHECKED, RATHER THAN ASSERTED, BECAUSE THE LAST TWO DEFECTS HERE WERE BOTH "a second bag
+ * nobody enumerated". `done.push` happens in `close` and nowhere else, `close` runs all
+ * three bags through `redactAttributes`, and the end-of-journal sweep closes what is still
+ * open through the same function — so there is one egress. What that egress hands on is
+ * deliberately narrow, and the narrowing is where the real protection is: the fold takes
+ * `binding.channel` and never `binding.value`, `state.reduced`'s `channels` and never its
+ * `values`, `effect.completed`'s key and never its `result`, `run.completed`'s usage and
+ * never its `outputs`, and an error's `code` and never its `message` or `details`. Every
+ * payload field a secret actually travels in is left in the journal, where an authenticated
+ * operator reads it and a collector does not.
+ *
+ * WHICH LEAVES THE FREE TEXT, and that is where this file leaked. `gate.reason` and
+ * `run.suspended`'s reason are operator- and channel-authored strings, and `to` is a
+ * recipient list; the first two get `redact.ts`'s detector sweep and the third is `pii`.
+ * The sweep did not know the shape a credential most often takes — `scheme://user:pass@host`
+ * — so a gate withdrawn by a channel that quoted its own URL put a live password on a span
+ * bound for a third-party collector, in the clear, while `providers/http.ts` masked the
+ * identical string one road over. `url-credentials` in `DETECTORS` is that hole closed, in
+ * the one walk rather than in this file, so the SSE stream and gate delivery close with it.
+ * See the WHICH BOUNDARY note in `security/redact.ts` for why a fix there is still only half
+ * of it: the journal keeps what the write boundary let through, and this file is downstream
+ * of that by construction.
+ *
  * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.1–D9.2, and D9.6 for why the journal
  * is never redacted.
  */

@@ -2882,7 +2882,8 @@ export class GateCallbackRouter {
  *     approved. The approver is asked "may I rotate [secret]?". `tokens` matches too, and
  *     on an agent framework a token is a unit of spend, not a credential; so does
  *     `max_tokens`, through the `(?:.*_)?` prefix. Those are D7.3's own failure;
- *   - UNDER. `db_url: "postgres://svc:hunter2@db.internal:5432/app"` is a real credential
+ *   - UNDER (now closed by the VALUE detector, not by these name rules).
+ *     `db_url: "postgres://svc:hunter2@db.internal:5432/app"` is a real credential
  *     under a name no rule names, and no detector matches a DSN. It reaches the channel
  *     verbatim. The rule is a heuristic, so `redact` remains the mechanism a graph author
  *     is entitled to believe, and this is a backstop that misses.

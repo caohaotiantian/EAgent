@@ -132,11 +132,25 @@ would make us change our minds.
 
 ### DL-5 · Determinism via a recorded effect boundary
 
-- **Choice:** all nondeterminism (model calls, tool calls, clock, random, resource
-  resolution) passes through `ctx.effect(key, fn)`, which journals its result. Replay
-  serves recorded results and never re-executes `fn`.
+- **Choice:** a nondeterministic call is journaled as `effect.started` / `effect.completed`
+  under a **derived** key — `effectKey(taskId, kind, ordinal)`, which deliberately excludes
+  the attempt number so a retry and a replay resolve to the same record. Replay serves the
+  recorded result and never re-executes.
+- **The boundary is inside `Engine`, not a method a node body calls.** `#invokeTool`, the
+  agent turn, context summarization and a subgraph invocation each open and close their own
+  effect. A node body is handed `{taskId, signal, now}` (`FunctionContext`) or
+  `{taskId, signal, progress}` (`ToolContext`) and has no way to declare an effect of its
+  own — so an author cannot forget to wrap one and cannot invent a key. **Do not write a
+  node body that reaches for an effect API; there isn't one.**
 - **Rationale:** the only way to get faithful replay without pretending the world is
-  pure. Borrowed directly from durable-execution engines (Temporal, DBOS).
+  pure. Borrowed directly from durable-execution engines (Temporal, DBOS). Putting the
+  boundary in the engine rather than in the body is what makes invariant 4 checkable by
+  reading one file instead of every resource anyone ever publishes.
+- **What is actually recorded:** model calls, tool calls, and the subgraph result. **Not
+  the clock, and not randomness** — `effect.started` declares `clock` and `random` kinds
+  that nothing appends, `FunctionContext.now` is injected but unjournaled, and `Math`
+  reaches a `function` body whole. A body that must replay identically takes its timestamp
+  from a channel it reads. See D9 and R4.
 - **Rejected:** re-running everything against live systems on replay. Unsafe for any
   irreversible action and non-reproducible for model calls.
 - **Reverses when:** never for replay. It is *lossy* in three known cases — secrets,
@@ -231,7 +245,7 @@ erDiagram
 | **Run** | One execution of one RunGraph. The unit of lifecycle commands, budget, tenancy, and trace root. | Workflow 1:N | `runs` (derived) + journal (authoritative) | status derived |
 | **Task** | One *scheduled instance* of a Node in a Run at a specific **branch coordinate** (`nodeId@branchPath#iteration`). The unit the scheduler leases, retries, checkpoints, and cancels. **A Node with a fan-out of 50 produces 50 Tasks.** | Node 1:N | journal | status derived |
 | **Step** | One atomic journaled transition inside a Task — a model call, a tool call, an effect, a state write, a gate raise. Carries a monotonic per-Run `seq`. | Task 1:N | journal | **no** |
-| **Effect** | Any interaction with the world outside the deterministic core, wrapped by `ctx.effect(key, fn)` so its result is recorded and replayable. ModelCall and ToolCall are Effects. | Step 1:0..1 | journal | **no** |
+| **Effect** | One interaction with the world outside the deterministic core, opened and closed by `Engine` under a derived key (`effectKey(taskId, kind, ordinal)`) so its result is recorded and replayable. ModelCall and ToolCall are Effects. A node body does not declare one — see DL-5. | Step 1:0..1 | journal | **no** |
 | **Agent** | The *runtime instantiation* of an AgentProfile executing inside an agent-node Task: a bounded ReAct loop with its own private message list. Ephemeral; dies with the Task. | AgentProfile 1:N | journal (its turns) | n/a |
 | **AgentProfile** | A versioned Resource declaring persona/prompt ref, model policy and fallback chain, tool allowlist, context budget, and oversight defaults. Design-time. | Project 1:N | `resources` (kind `agent_profile`) | **no** (versions) |
 | **Tool** | A capability-declaring, schema-typed callable with an **irreversibility class**. Registered by a built-in, a plugin, or an MCP server. | Registry 1:N | `tool_manifest` | versioned |

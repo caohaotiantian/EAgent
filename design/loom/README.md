@@ -63,7 +63,17 @@ Read in order. Each file carries the `D<n>` headings from the brief verbatim.
      registered;
   4. a **stale marker fails** — mark something that exists and the suite goes red, so the
      caveat cannot outlive the gap and the day the span is emitted you are told to delete
-     the paragraph hedging it;
+     the paragraph hedging it. **"Absent from `src/`" is decided per family, by the test
+     rather than by your reading of the code**, and the two families are decided
+     differently. `src/` is `packages/core/src/`, walked recursively, `.ts` files only. A
+     `loom.*` symbol counts as PRESENT when `telemetry/spans.ts` produces it as a span name
+     or an attribute, **or** when the string literal appears anywhere else under `src/` —
+     with TypeScript comments stripped first, so a name that lives only in a comment is
+     still absent. That second half exists because the same literal once moved one
+     directory out of `spans.ts` and went invisible to the guard while five documents
+     hedged it. An `E_*` symbol counts as present when it is a key of the `CODES` table:
+     DECLARED, not raised. A code in the table that nothing ever throws is "built" as far
+     as this rule can tell, and may not be marked;
   5. **an HTML comment does not count** — wrap a marker in `<!--` … `-->` and the guard
      finds it and *rejects* it. Rule 2 exists so the reader of *this* file is told, and a
      caveat that renders as nothing tells nobody.

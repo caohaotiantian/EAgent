@@ -19,6 +19,59 @@
  * journal is never redacted — `state.reduced` payloads ARE the channel state, so a
  * redacted journal folds to corrupted state.
  *
+ * WHICH BOUNDARY IS THIS APPLIED AT? THE **READ** ONE, EVERYWHERE — SAID HERE BECAUSE THE
+ * ANSWER WAS EVERYWHERE ASSUMED AND NOWHERE WRITTEN, AND THE TWO ANSWERS HAVE OPPOSITE
+ * FAILURE MODES. Every live caller redacts on the way OUT of the process: `server/http.ts`'s
+ * `frame` on the event stream and its `summarise` on a projection's `channels` and
+ * `outputs`, `telemetry/spans.ts`'s `close` on the three span bags, `GateDispatcher.deliver`
+ * on a gate rendering. The journal underneath them all holds the real value, deliberately
+ * (D9.6). So the design is: **one durable copy of the truth, and every reader is trusted to
+ * redact.** Nothing in this module is called on the way IN.
+ *
+ * AND "EVERY READER IS TRUSTED TO REDACT" IS A PREMISE, NOT A GUARANTEE — the enumeration
+ * above is what a `grep` finds, and the interesting entries are the reads it does NOT
+ * contain. `summarise` sweeps `channels` and `outputs` and hands `error` and each task's
+ * `error` straight on, two lines below; an `ErrorRecord` is a `message` and a `details`
+ * this module has never seen. That is the cost of the read-boundary design stated exactly:
+ * adding a reader is adding a redaction obligation, and forgetting one is silent.
+ *
+ * THAT CHOICE IS RIGHT FOR A CLASSIFIED VALUE AND WRONG FOR FOREIGN TEXT, WHICH IS THE
+ * WHOLE OF WHAT THIS PARAGRAPH IS FOR. A payload carries its `Classification` with it, so a
+ * reader added in three years still knows what it is holding and can redact it — the
+ * decision is recoverable, and keeping the value is what makes an authenticated operator's
+ * view and a channel's view two renderings of one fact instead of two facts. A string
+ * SOMEBODY ELSE WROTE carries nothing. Once
+ * `Request cannot be constructed from a URL that includes credentials: https://svc:pw@host`
+ * is in `LoomError.message`, `errorRecord` has copied it into an append-only file, and from
+ * that moment: it is indistinguishable from ordinary diagnostics, no classification marks
+ * it, it is in every backup and every `journal.db` an operator can `sqlite3`, and no later
+ * fix removes it. Read-boundary redaction defends the readers this repo currently has; it
+ * defends nothing against the next one, and it never defends the store.
+ *
+ * **SO: A VALUE THIS DEPLOYMENT CONFIGURED, QUOTED BACK BY A STRING THIS PROCESS DID NOT
+ * AUTHOR, MUST BE MASKED WHERE THE STRING IS BUILT — NOT WHERE IT IS READ.** `maskLiterals`
+ * is that mechanism when the literal is in hand, and `url-credentials` in `DETECTORS` is it
+ * when the credential is recognisable by POSITION rather than by value. Both are mechanism 1;
+ * neither is a guess. The write-boundary sites, named so the next reader does not have to
+ * find them: `providers/http.ts`'s `normalizeTransport` (an `Error.message` from undici or
+ * from an injected `FetchLike`) and its `normalizeError` (`details.detail`, which is 500
+ * bytes of the provider's own response body), and `run/delivery.ts`'s `describeFailure`
+ * (a channel's failure text), which is the one of the three that already does it.
+ *
+ * **AND THE RESIDUAL, MEASURED RATHER THAN INFERRED, because a fix believed is a fix
+ * unmade.** `normalizeTransport` masks userinfo on the arm that wraps a native error and
+ * returns early on `isLoomError(e)` — an arm added for a sibling defect, which routes around
+ * the redaction it was added beside. Same input, two roads, one process:
+ *
+ *     normalizeTransport(new TypeError(msg))        ⇒ "…: https://[redacted]@api.example.com/…"
+ *     normalizeTransport(err.unavailable(CODE, msg)) ⇒ "…: https://svc:hunter2@api.example.com/…"
+ *
+ * — the second is what `errorRecord` writes. That file is not this one's to edit; what this
+ * one owes it is a single mechanism to call, which is now here, and the READ boundaries are
+ * closed either way: with the detector in the sweep, the same credential is masked out of
+ * every span, every SSE frame and every gate delivery, including the ones already sitting in
+ * journals written before this change.
+ *
  * ONE CALLER ASKS MORE OF IT THAN THE REST, and that is worth knowing before editing
  * `walk`. Spans and the SSE stream redact on the way out of a process an operator
  * already trusts; `DeliverySpec.redact` (see `run/delivery.ts`) uses this to decide what
@@ -117,6 +170,17 @@ export function isSecret(v: unknown): v is SecretValue {
 interface Detector {
   readonly name: string;
   readonly pattern: RegExp;
+  /**
+   * What the match becomes, when `[redacted:<name>]` would throw away the readable half.
+   *
+   * Every other entry matches a value ENTIRELY, so replacing the whole match loses
+   * nothing but the secret. `url-credentials` matches a value in POSITION — the scheme
+   * and the `@` that delimit it are part of the match and are not secret — so a fixed
+   * replacement would turn `https://svc:pw@api.example.com` into
+   * `[redacted:url-credentials]api.example.com`: the credential gone, and with it the
+   * two facts an operator debugs a transport failure with.
+   */
+  readonly replace?: string;
 }
 
 /**
@@ -132,6 +196,40 @@ const DETECTORS: readonly Detector[] = [
   { name: "provider-key", pattern: /\b(?:sk|rk)-[A-Za-z0-9_-]{16,}\b/g },
   { name: "github-token", pattern: /\bgh[pousr]_[A-Za-z0-9]{16,}\b/g },
   { name: "bearer", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}/g },
+  /**
+   * `scheme://userinfo@host` — the one place a URL is allowed to carry a secret, and THE
+   * ONE ENTRY ON THIS LIST THAT IS NOT A GUESS.
+   *
+   * The list above is mechanism 2: patterns that resemble a secret, with false negatives
+   * this file apologises for in its opening paragraph. This one is mechanism 1 wearing
+   * mechanism 2's clothes — userinfo is a GRAMMATICAL POSITION in RFC 3986, not a shape,
+   * so there is nothing to tune and nothing to miss about what a match means. It lives
+   * here anyway because `sweep` is the TRAVERSAL that already reaches every string in
+   * every payload, span attribute, event attribute and gate delivery in the codebase, and
+   * a structural fact with no way to reach those is a structural fact nobody applies. The
+   * sweep is the plumbing; it is not the epistemology.
+   *
+   * IT WAS A PRIVATE COPY IN `providers/http.ts` FIRST, which is why it is here now.
+   * `run/delivery.ts` carried its own walk for `DeliverySpec.redact` until the two
+   * disagreed about depth, cycles and function-valued properties, and the fix was to
+   * delegate to this file rather than to keep them in step by hand. A credential redaction
+   * that exists in one caller is the same arrangement one wave earlier: measured, the
+   * identical string came out of `normalizeTransport`'s non-LoomError arm masked and out of
+   * its `isLoomError` arm verbatim, and out of a `loom.gate` span verbatim, because only
+   * one of the three roads had the copy.
+   *
+   * THE RUN STOPS AT THE AUTHORITY, so a path that merely contains an address
+   * (`/v1/mail/a@b.example`) and a bare `mailto:` are both left alone — `[^/?#\s]*` cannot
+   * cross the `/` that ends the authority, nor a second `@`. That restraint is not
+   * politeness: a redactor that shreds ordinary diagnostics is one an operator turns off.
+   *
+   * LAST IN THE LIST, and the order is load-bearing for exactly one observable. A provider
+   * key sitting in userinfo position is masked to the same bytes either way, but running
+   * this entry FIRST replaces the token before `provider-key` can see it — so `hits` loses
+   * the "a live provider key was in this string" alert while the output is unchanged. Named
+   * by what it IS, then masked by where it SAT.
+   */
+  { name: "url-credentials", pattern: /\b([a-z][a-z0-9+.-]{0,31}):\/\/[^/?#\s]*@/gi, replace: "$1://[redacted]@" },
 ];
 
 export interface RedactionResult {
@@ -143,6 +241,13 @@ export interface RedactionResult {
    * worth alerting on rather than merely a redaction. The structural names —
    * `secret-value`, `secretish-key`, `secret-classified`, `cycle`, `unserializable` —
    * say the walk met a shape rather than guessed at one.
+   *
+   * `url-credentials` IS ON BOTH SIDES OF THAT LINE, which is why it is worth naming here.
+   * It arrives through `DETECTORS`, so it reads as "the declared path missed something" —
+   * true, and it is also a structural match rather than a guess, so unlike its neighbours it
+   * has no false negatives to discount. Alert on it the way you would alert on
+   * `secretish-key`: a credential was in free text somebody is about to read, and the
+   * question is which WRITE boundary let it in. See the WHICH BOUNDARY note above.
    */
   readonly hits: readonly string[];
 }
@@ -635,7 +740,12 @@ function sweep(text: string, hits: string[]): string {
   for (const d of DETECTORS) {
     // `replace` with a global regex is stateless here because a fresh string is
     // produced each pass; `test` on a /g regex would carry lastIndex and miss.
-    const replaced = out.replace(d.pattern, `[redacted:${d.name}]`);
+    //
+    // A DETECTOR'S OWN REPLACEMENT WHEN IT HAS ONE, because a pattern that matches a
+    // POSITION rather than a value has readable text inside its own match — see
+    // `Detector.replace`. The default keeps the shape's name in the output, which is what
+    // makes a swept string say WHY a run of characters is missing.
+    const replaced = out.replace(d.pattern, d.replace ?? `[redacted:${d.name}]`);
     if (replaced !== out) hits.push(d.name);
     out = replaced;
   }

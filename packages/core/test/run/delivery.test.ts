@@ -1894,7 +1894,9 @@ test("…AND THE SECOND OF THE THREE IS A RULE ABOUT THE NAME, WHICH CUTS BOTH W
     // credential. `tokens` matches; so does `max_tokens`, through the `(?:.*_)?` prefix.
     tokens: 15_000,
     max_tokens: 4000,
-    // A REAL credential under a name no rule names, and no detector matches a DSN.
+    // A REAL credential under a name no rule names. The NAME rules still do not reach
+    // it — `db_url` says nothing about secrecy — but the VALUE detector now does, because
+    // a credential in a URL is recognisable by position rather than by key.
     db_url: "postgres://svc:hunter2@db.internal:5432/app",
     email: EMAIL,
   };
@@ -1907,8 +1909,11 @@ test("…AND THE SECOND OF THE THREE IS A RULE ABOUT THE NAME, WHICH CUTS BOTH W
   assert.equal(out["action"], "rotate", "the verb survives, so the approver knows they are being asked to approve blind");
 
   // ── UNDER: an innocuous name holding a credential ─────────────────────────
-  assert.equal(out["db_url"], payload.db_url, "a password in a DSN reaches the channel verbatim");
-  assert.ok(String(out["db_url"]).includes("hunter2"), "…including the half that is the credential");
+  // Closed by the value detector, not by the name rules — which is the point: the key
+  // `db_url` is still invisible to every name rule, and a credential the approver must
+  // not see gets out on the strength of where it sits in the string.
+  assert.ok(!String(out["db_url"]).includes("hunter2"), "the password must not reach the channel");
+  assert.ok(String(out["db_url"]).includes("db.internal"), "…while the host stays legible, so the approver still knows what they are approving");
 
   // AND THE SHAPE OF THE HIDING IS STILL THE PART THAT IS RIGHT. Each rule leaves the key
   // in place and puts a legible marker in the value, so an approver sees that something was

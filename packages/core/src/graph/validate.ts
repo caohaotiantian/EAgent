@@ -139,8 +139,17 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     outbound.get(e.from)?.push(e);
   }
 
-  // `compensation` is not forward flow — it runs on the error path, in reverse — so
-  // including it would make almost every graph look cyclic.
+  // `compensation` is not forward flow, and including it would make almost every graph
+  // look cyclic.
+  //
+  // NOTHING TRAVERSES ONE. `Engine.#edgesToTake` has `case "compensation": break;`, and
+  // the error path takes `kind === "error"` edges only — which is why GRAPH008 refuses
+  // `onBranchError: "compensate"` outright rather than letting it read as a rollback. A
+  // compensation edge is a DECLARATION, and it earns its place as one: GRAPH012 refuses
+  // an edge whose target tool declares no undo, and GRAPH010 reads it to order two
+  // writers. It is NOT what lets `rewind` cross an irreversible effect — `rewind` reads
+  // `ToolDefinition.compensation` from the registry, and a graph with no compensation
+  // edges at all rewinds exactly the same.
   const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation");
   const loopEdges = spec.edges.filter((e) => e.kind === "loop");
 
@@ -149,9 +158,10 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   // second thing that can disagree with the edges.
   //
   // Note this differs from `dagEdges`: a compensation edge is excluded from the DAG
-  // (it runs in reverse, on the error path, so including it makes almost every graph
-  // look cyclic) but it DOES mean its target is not a start point. Treating a
-  // compensation target as an entry node would schedule a rollback at run start.
+  // (including it makes almost every graph look cyclic) but it DOES mean its target is
+  // not a start point. Nothing traverses a compensation edge, so listing its target here
+  // would be the ONLY thing that ever scheduled that node — and it would run at the start
+  // of the run, before the action it is declared to undo.
   const hasNonLoopIn = new Set(spec.edges.filter((e) => e.kind !== "loop").map((e) => e.to));
   const entryNodes = spec.nodes.filter((n) => !hasNonLoopIn.has(n.id)).map((n) => n.id);
   const hasForwardOut = new Set(dagEdges.map((e) => e.from));
@@ -177,7 +187,10 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     const id = stack.pop()!;
     if (reachable.has(id)) continue;
     reachable.add(id);
-    // Loop and compensation targets are reachable too — just not via forward flow.
+    // Every edge kind counts here, because this set answers "is this node connected to
+    // the graph at all" for the unreachable-node rules — not "will it run". A loop target
+    // is reached by the runtime; a compensation target is reached by nothing, which is a
+    // fact about the executor rather than about connectivity and does not belong here.
     for (const e of outbound.get(id) ?? []) stack.push(e.to);
   }
 
@@ -1046,9 +1059,11 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
         const b = writers[j]!;
         const related = (idx.ancestors.get(a)?.has(b) ?? false) || (idx.ancestors.get(b)?.has(a) ?? false);
         if (related) continue; // sequential — last write is well-defined
-        // A compensation node runs only after its target failed, so the two are ordered
-        // even though `ancestors` deliberately excludes compensation edges (a rollback
-        // must not become an entry node or inherit a layout rank).
+        // A compensation node is DECLARED to run only after its target failed, so the two
+        // are ordered even though `ancestors` deliberately excludes compensation edges (a
+        // rollback must not become an entry node or inherit a layout rank). Today the
+        // declaration is the whole of it: nothing traverses a compensation edge, so a node
+        // reached ONLY that way never runs and the pair cannot overlap for a second reason.
         if (compensationOrdered(spec, idx, a, b)) continue;
         // Different arms of one router cannot both run: a router takes exactly one
         // case. Without this, every branch-and-merge graph is unbuildable — the author

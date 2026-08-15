@@ -421,6 +421,51 @@ test("SPAN EVENTS ARE REDACTED TOO — `attributes` was never the only bag that 
   assert.equal("attributes" in task.events[0]!, false, `${task.events[0]!.name} grew an empty attribute bag`);
 });
 
+test("A URL'S CREDENTIALS DO NOT REACH THE COLLECTOR — the shape the sweep did not know", () => {
+  // THE END OF THE TRACE THIS WAVE FOLLOWED. A provider is configured with
+  // `baseUrl: https://svc:hunter2@api.example.com`, the transport refuses it, undici names
+  // the whole URL in its message, and that string is journaled — `providers/http.ts` masks
+  // it on ONE of its two paths, so the other one puts a live credential in an append-only
+  // file. The journal is not redacted by design (D9.6), so from there the credential is in
+  // every read of that run forever, and this file is the read that leaves the process.
+  //
+  // `run.suspended`'s reason is the EVENT bag and `gate.cancelled`'s is the ATTRIBUTE bag,
+  // asserted together because they are two different lines in `close` and the last defect
+  // in this area was one of them being handed on raw.
+  //
+  // WHOLE-STRING EQUALITY, not `!includes("hunter2")`: the second is satisfied by a span
+  // that lost the attribute entirely, and the host is the half an operator debugs with.
+  const URL_MSG =
+    "Request cannot be constructed from a URL that includes credentials: https://svc:hunter2@api.example.com/v1/messages";
+  const MASKED =
+    "Request cannot be constructed from a URL that includes credentials: https://[redacted]@api.example.com/v1/messages";
+
+  const events = [
+    submitted,
+    ev(2, "run.suspended", { reason: `provider unavailable: ${URL_MSG}` }, { taskId: null }),
+    ready,
+    raised,
+    ev(5, "gate.cancelled", { gateId: GATE, reason: `channel refused: ${URL_MSG}` }),
+    cancelledRun,
+  ];
+  const spans = spansFrom(events);
+
+  const root = spans.find((s) => s.name === "loom.run")!;
+  const gate = spans.find((s) => s.name === "loom.gate")!;
+  assert.equal(root.events.find((e) => e.name === "run.suspended")!.attributes?.["reason"], `provider unavailable: ${MASKED}`);
+  assert.equal(gate.attributes["gate.reason"], `channel refused: ${MASKED}`);
+
+  // THE END-TO-END STATEMENT, over the bytes an exporter actually ships. A per-attribute
+  // assertion says the two arms this test named are closed; this says no arm is.
+  assert.equal(JSON.stringify(spans).includes("hunter2"), false, "the credential left the process on some span this test did not name");
+
+  // AND THE OTHER HALF OF INVARIANT 8, which is the one a span may not break: telemetry may
+  // DROP a value the journal keeps, and it may not CARRY one the journal hid. The journal
+  // still has the credential — it is the source of truth, and this is what makes it
+  // recoverable by anyone entitled to it — so the span is strictly poorer, never richer.
+  assert.equal(JSON.stringify(events).includes("hunter2"), true, "the journal was redacted, which corrupts channel state (D9.6)");
+});
+
 test("EVERY ATTRIBUTE ON EVERY SPAN GOES THROUGH THE REDACTOR, including one no arm classified", () => {
   // Reverting `redactAttributes` to a bare spread turned NOTHING red before this test — the
   // one line the whole file's confidentiality rests on was unheld. A `SecretValue`-shaped
