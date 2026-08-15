@@ -887,6 +887,49 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
         fix: `set onBranchError: "skip" to accept partial evidence, or "fail" to stop the run`,
       });
     }
+    // THE DEPTH THAT DECIDES WHICH INSTANCE OF THIS BARRIER A BRANCH BELONGS TO.
+    //
+    // `#maybeFireJoin` truncates an arriving branch coordinate to the join's compiled
+    // fan-out depth to name the instance, and `#foldJoin` reads the same number to decide
+    // whether to HOLD its fold or apply it. Both were written against this rule and the
+    // rule did not exist: when the depth is ambiguous the runtime silently falls back to
+    // "one level up from whoever arrived", which is the pre-fix expression — so two arms
+    // at different depths mint two instances of one barrier and fold the same
+    // contributions twice. Refusing here is what makes that fallback unreachable.
+    const joinDepth = idx.fanoutDepth.get(n.id);
+    if (joinDepth === undefined) {
+      d.push({
+        severity: "error",
+        code: "GRAPH008_JOIN_DEPTH",
+        message: `join "${n.id}" is reachable at two different fan-out depths, so which instance of the barrier a branch belongs to is undecidable`,
+        at: { nodeId: n.id },
+        fix: `give the join one enclosing fan-out — split it into a join per depth, or route the shallower arm through the same fan-out as the others`,
+      });
+    } else {
+      // Every arm must agree with the join and with each other. Arms sit either at the
+      // join's own coordinate (a static join) or exactly one level deeper (a fan-out).
+      for (const branch of join.branches) {
+        const armDepth = idx.fanoutDepth.get(branch);
+        if (armDepth === undefined) {
+          d.push({
+            severity: "error",
+            code: "GRAPH008_JOIN_DEPTH",
+            message: `branch "${branch}" of join "${n.id}" is reachable at two different fan-out depths`,
+            at: { nodeId: n.id },
+            fix: `give "${branch}" one enclosing fan-out`,
+          });
+        } else if (armDepth !== joinDepth && armDepth !== joinDepth + 1) {
+          d.push({
+            severity: "error",
+            code: "GRAPH008_JOIN_DEPTH",
+            message: `branch "${branch}" sits at fan-out depth ${String(armDepth)} but join "${n.id}" is at ${String(joinDepth)} — a join folds arms at its own depth or one deeper, never further`,
+            at: { nodeId: n.id },
+            fix: `join "${branch}" at its own level first, then feed that join into "${n.id}"`,
+          });
+        }
+      }
+    }
+
     for (const branch of join.branches) {
       if (!idx.byId.has(branch)) {
         d.push({

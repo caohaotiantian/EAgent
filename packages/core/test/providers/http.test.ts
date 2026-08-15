@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import { CODES, err, isLoomError } from "../../src/errors.ts";
 import { normalizeTransport, postJson } from "../../src/providers/http.ts";
+import { redact } from "../../src/security/redact.ts";
 
 const ac = (): AbortSignal => new AbortController().signal;
 
@@ -42,6 +43,35 @@ test("a userinfo with no password is a credential too", () => {
   const e = normalizeTransport(new Error("connect ECONNREFUSED https://ghp_liveTokenValue@github.example.com/api"));
   assert.equal(e.message.includes("ghp_liveTokenValue"), false);
   assert.match(e.message, /\[redacted\]@github\.example\.com/);
+});
+
+test("A PASSWORD CONTAINING `@` LOSES ITS TAIL, NOT ITS HEAD", () => {
+  // `@` is legal inside a percent-decoded password and common in generated ones. A run that
+  // stops at the FIRST `@` masks the part before it and leaves everything after it standing,
+  // which is the worst of the three possible outcomes: the credential is in the journal AND
+  // the `[redacted]` beside it says it is not. RFC 3986 ends the userinfo at the LAST `@`
+  // before the authority terminator, so that is where the run has to stop.
+  const e = normalizeTransport(
+    new TypeError(
+      "Request cannot be constructed from a URL that includes credentials: https://svc:p@ssw0rd-tail@api.example.com/v1/messages",
+    ),
+  );
+
+  assert.equal(e.message.includes("ssw0rd-tail"), false, "the tail of the password must not survive either");
+  assert.match(e.message, /credentials: https:\/\/\[redacted\]@api\.example\.com\/v1\/messages$/);
+});
+
+test("the WRITE boundary and the READ boundary mask a credential identically", () => {
+  // Two copies of one rule drifted: `security/redact.ts` was widened and this file's private
+  // copy was not, so the same string was masked one way on its way into the journal and
+  // another way on its way out to a span. There is one mechanism now; this is what says so.
+  for (const text of [
+    "Request cannot be constructed from a URL that includes credentials: https://svc:p@ssw0rd-tail@api.example.com/v1",
+    "connect ECONNREFUSED https://ghp_liveTokenValue@github.example.com/api",
+    "socket hang up while POSTing https://api.example.com/v1/mail/a@b.example",
+  ]) {
+    assert.equal(normalizeTransport(new Error(text)).message, redact(text).value, text);
+  }
 });
 
 test("an `@` that is not userinfo is left alone — a redactor nobody can read is one nobody keeps", () => {

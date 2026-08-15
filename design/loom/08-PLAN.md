@@ -62,30 +62,53 @@ channels:
 inputs:  [paths]
 outputs: [written]
 nodes:
-  - { id: summarize, type: agent, reads: [path], writes: [digests, costUsd],
-      agent: { profile: agent_profile/summarizer@stable, prompt: prompt/summarize-file@stable,
-               outputSchema: { $ref: "#/defs/Digest" }, maxTurns: 3, tools: [fs.read] },
-      policy: { budget: { costUsd: 0.15 } }, timeoutMs: 60000 }
-  - { id: collect, type: join, reads: [digests], writes: [digests],
-      join: { branches: [summarize], mode: all, onBranchError: skip, timeoutMs: 90000 } }
-  - { id: merge, type: function, reads: [digests], writes: [merged],
-      function: { ref: function/merge-digests@stable } }
-  - { id: approve, type: human_gate, reads: [merged], writes: [merged],
-      humanGate: { ref: oversight/demo-write@stable }, checkpoint: before }
-  - { id: write, type: tool, reads: [merged], writes: [written],
-      tool: { name: fs.write, version: "1.0", args: { path: "out/summary.md", body: "${merged.markdown}" } },
-      retry: { maxAttempts: 1 }, checkpoint: both }
+  # A fanout is an EDGE, and an edge needs a source node. There is no `entry:` field in
+  # `GraphSpec` — this block used to end with one — so the graph starts at a node that
+  # reads the input array and hands it to the fanout.
+  - { id: start, type: function, reads: [paths], function: { ref: function/passthrough@stable } }
+  - id: summarize
+    type: agent
+    reads: [path]
+    writes: [digests, costUsd]
+    agent:
+      profile: agent_profile/summarizer@stable
+      prompt:  prompt/summarize-file@stable
+      outputSchema: { $ref: "#/defs/Digest" }
+      maxTurns: 3
+      tools: [fs.read]
+    policy: { budget: { costUsd: 0.15 } }
+    timeoutMs: 60000
+  - { id: collect, type: join, reads: [digests], writes: [digests], join: { branches: [summarize], mode: all, onBranchError: skip, timeoutMs: 90000 } }
+  - { id: merge, type: function, reads: [digests], writes: [merged], function: { ref: function/merge-digests@stable } }
+  - { id: approve, type: human_gate, reads: [merged], writes: [merged], humanGate: { ref: oversight/demo-write@stable }, checkpoint: before }
+  - id: write
+    type: tool
+    reads: [merged]
+    writes: [written]
+    tool: { name: fs.write, version: "1.0", args: { path: "out/summary.md", body: "${merged.markdown}" } }
+    retry: { maxAttempts: 1 }
+    checkpoint: both
 edges:
-  - { id: e1, from: summarize, to: collect, kind: join, branches: [summarize] }
-  - { id: e2, from: collect,   to: merge,   kind: seq }
-  - { id: e3, from: merge,     to: approve, kind: seq }
-  - { id: e4, from: approve,   to: write,   kind: seq }
-entry: { fanout: { from: paths, to: summarize, as: path, maxWidth: 5 } }
+  - { id: e0, from: start,     to: summarize, kind: fanout, over: paths, as: path, maxWidth: 5 }
+  - { id: e1, from: summarize, to: collect,   kind: join, branches: [summarize] }
+  - { id: e2, from: collect,   to: merge,     kind: seq }
+  - { id: e3, from: merge,     to: approve,   kind: seq }
+  - { id: e4, from: approve,   to: write,     kind: seq }
 ```
+
+**This block parses and compiles with no diagnostics at all**, and it is the same six nodes
+and five edges as `test/run/skeleton.ts`'s `skeletonSpec()` — the graph the HTTP and console
+tests submit under the name `skeleton-summarize`. Two things it used to do that the shipped
+code refuses: it spread flow mappings across two lines, which `graph/yaml.ts`'s subset does
+not join (a flow collection is one line, or it is a block mapping), and it declared the
+fanout under a top-level `entry:` key, which is not a field of `GraphSpec` — `apiVersion`,
+`kind`, `metadata`, `policy`, `channels`, `inputs`, `outputs`, `nodes`, `edges`, `hooks` is
+the whole list.
 
 ```mermaid
 graph LR
-  IN["inputs: paths[5]"] -->|"fanout maxWidth 5"| S["summarize[i]<br/><i>agent · 0.15 USD/branch</i>"]
+  IN["inputs: paths[5]"] --> ST["start<br/><i>function · passthrough</i>"]
+  ST -->|"fanout over paths, maxWidth 5"| S["summarize[i]<br/><i>agent · 0.15 USD/branch</i>"]
   S --> J["collect<br/><i>join all · append_ordered</i>"]
   J --> M["merge<br/><i>function · pure</i>"]
   M --> G["approve<br/><b>human_gate</b>"]
@@ -101,7 +124,7 @@ graph LR
 | 3 | Parallel fan-out works and is fair | 5 branches execute concurrently, bounded by `maxParallelism`. **The fairness half is not proven and is not yet provable:** `DESIGNED-NOT-BUILT(loom.schedule.pick)` — the span D5 declares is emitted nowhere — and `Scheduler.select` is handed one run's projection at a time, so "a second Run submitted mid-flight is not starved" has no mechanism behind it — cross-run fairness is `DEFERRED-v2` (G3) |
 | 4 | Typed join with a reducer | `digests` arrives in **branch-coordinate order**, not completion order — asserted by a test that delays branch 0 |
 | 5 | Partial failure is contained | Make branch 2 fail ⇒ `onBranchError: skip`, `state.reduced{skipped:1, degraded:true}`, run still completes |
-| 6 | **Durable human gate** | `kill -9` the process while the gate is open; restart; the gate is in the queue with its SLA clock intact; approving resumes the run |
+| 6 | **Durable human gate** | `kill -9` the process while the gate is open; restart; the gate is in the queue with its SLA clock intact; approving resumes the run. **Proven, and by a process that really was killed:** `test/run/restart-crash.test.ts` forks `restart-crash.child.ts`, waits for its `gated` message so the kill is ordered by an event and not a timer, `SIGKILL`s it, asserts the exit *signal* was `SIGKILL`, and asserts `journal.db-wal` and `journal.db-shm` are **still on disk** — which is what separates this from `close()`, since a clean close checkpoints the WAL and deletes both. It then opens a second store in a genuinely new process, recovers `awaiting_gate` with the same open `gateId`, approves, and asserts the deferred `fs.write` ran exactly once. A sibling test does the clean close as the control, so the `-wal` assertion is pinning something |
 | 7 | Checkpoints and rollback | Reject the gate ⇒ rewind to `checkpoint: before`; verify no `fs.write` occurred |
 | 8 | Deterministic replay | `loom replay <runId>` reproduces every `state.hash` with zero network calls |
 | 9 | Trace reconstructs the graph | `reconstruct(trace) ⊆ declared(graph.hash)` asserted in CI |
@@ -117,7 +140,7 @@ Eight weeks. Each milestone has a hard exit criterion; nothing advances on "most
 |---|---|---|---|
 | **M0** | 0.5 | Repo, workspaces, CI (typecheck, test, lint, zero-dep guard, interface-surface pin). `MockModelAdapter` (deterministic, offline) | `npm test` green offline with no API key |
 | **M1** | 1.5 | `StateStore` (SQLite WAL journal + fold), `EventBus`, domain types, `GraphCompiler` with `GRAPH001..010` | Compile the skeleton; a fold of a hand-written journal reproduces expected state; conditional-append CAS test passes under simulated concurrency |
-| **M2** | **2** | **The walking skeleton, end to end**: scheduler with leases + DWRR, executor, `AgentFactory`, `ToolExecutor`, `PolicyEngine` (capabilities + posture), `HumanGateBroker`, CLI. No UI | **All 12 acceptance rows above pass**, including the `kill -9` gate-durability test |
+| **M2** | **2** | **The walking skeleton, end to end**: scheduler with leases + DWRR, executor, `AgentFactory`, `ToolExecutor`, `PolicyEngine` (capabilities + posture), `HumanGateBroker`, CLI. No UI | **All 12 acceptance rows above pass**, including row 6's `kill -9` gate-durability test — with the one exception the table itself carries: row 3's cross-run fairness half, which is `DEFERRED-v2` (**G3**) and not expressible at the `Scheduler.select` seam |
 | **M3** | 1 | `TraceEmitter` + span taxonomy + graph reconstruction test; `JournalReader.replay`; `CheckpointStore` restore/fork | Replay CI green on ≥ 10 fixtures; reconstruction assertion in CI |
 | **M4** | 1 | Real `ModelAdapter`s (Anthropic, OpenAI, OpenAI-compatible) with normalized errors + fallback chains; cassette record/replay; sandbox (subprocess, fs jail, egress proxy); injection red-team suite | Live smoke test per provider; red-team suite must-pass |
 | **M5** | 1 | `@loom/ui`: graph canvas with delta streaming and reconnect, oversight queue with batching + SLA ordering, run detail, replay viewer | A 500-node synthetic graph renders and streams at ≥ 30 fps; reconnect after a 60 s disconnect is gap-free |

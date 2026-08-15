@@ -15,6 +15,7 @@
  */
 
 import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
+import { redact } from "../security/redact.ts";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -159,29 +160,44 @@ export function normalizeError(status: number, body: string, headers?: Headers):
  * the literal, this seam is handed an error and nothing else, and its `MIN_MASKABLE` floor of
  * 6 characters would pass a short password through untouched. The userinfo component of a URL
  * needs no literal to recognise — it is a grammatical position, not a pattern to guess at —
- * which makes this mechanism 1 (a structural fact) rather than the detector sweep's guess.
+ * which keeps it mechanism 1 (a structural fact) even though it travels with the detector
+ * sweep: `DETECTORS`' `url-credentials` entry is, in that file's words, mechanism 1 wearing
+ * mechanism 2's clothes, and the sweep is the plumbing rather than the epistemology.
+ *
+ * **THE RULE IS NOT WRITTEN HERE, AND THAT IS THE POINT OF THIS PARAGRAPH.** It was: a private
+ * `URL_USERINFO` regex sat below this function, and `security/redact.ts` grew its own copy for
+ * the read boundaries. The copies then drifted in the direction copies always drift — the
+ * shared one was widened to end the userinfo run at the LAST `@` before the authority, this
+ * one was not, and a password containing `@` came out of this function with its tail intact
+ * and a `[redacted]` beside it claiming otherwise. Measured, one string, two roads:
+ *
+ *     redact(msg).value      ⇒ "…credentials: https://[redacted]@api.example.com/v1"
+ *     this file's own copy   ⇒ "…credentials: https://[redacted]@ssw0rd-tail@api.example.com/v1"
+ *
+ * — and the second is the one `errorRecord` writes, where no later fix removes it. So there is
+ * one mechanism and this file CALLS it. `redact` is the exported way in; the `url-credentials`
+ * detector is the entry that matters here, and running the rest of the sweep over a foreign
+ * `Error.message` on its way into an append-only file is a gain, not a cost.
  */
 export function normalizeTransport(e: unknown): LoomError {
   if (isLoomError(e)) return toLoomError(e);
   if (e instanceof Error && e.name === "AbortError") return err.cancelled("model call aborted", { cause: e });
-  return err.unavailable(CODES.E_PROVIDER_TRANSPORT, redactUrlCredentials(e instanceof Error ? e.message : String(e)), {
+  return err.unavailable(CODES.E_PROVIDER_TRANSPORT, redactCredentials(e instanceof Error ? e.message : String(e)), {
     cause: e,
   });
 }
 
 /**
- * `scheme://userinfo@host` — the one place a URL is allowed to carry a secret.
+ * The shared sweep, narrowed back to the `string → string` this seam needs.
  *
- * The userinfo run stops at the authority's first `/`, `?`, `#`, whitespace or second `@`, so
- * a path that merely contains an address (`/v1/mail/a@b.example`) and a bare `mailto:` are
- * both left alone. That matters as much as the masking does: a redactor that shreds ordinary
- * diagnostics is one an operator turns off.
+ * `RedactionResult.value` is `unknown` because `redact` walks any payload; for a string leaf
+ * every arm of that walk returns a string, so the branch below is unreachable. It is written
+ * fail-CLOSED anyway — `[redacted]` rather than the original — because the one thing this
+ * function must never do is hand back an unmasked message on a path it did not expect.
  */
-const URL_USERINFO = /\b([a-z][a-z0-9+.-]*):\/\/[^/?#\s@]*@/gi;
-
-/** The host survives, the credential does not — see `normalizeTransport`. */
-function redactUrlCredentials(text: string): string {
-  return text.replace(URL_USERINFO, "$1://[redacted]@");
+function redactCredentials(text: string): string {
+  const out = redact(text).value;
+  return typeof out === "string" ? out : "[redacted]";
 }
 
 /**

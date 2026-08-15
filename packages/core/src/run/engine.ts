@@ -2748,17 +2748,26 @@ export class Engine {
     if (RUN_FATAL_CODES.has(error.code)) return undefined;
     if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
 
-    // Reachable, not named — the seventh site of the same question. An agent node names
-    // no tool, so this refusal used to skip every model-invoked call and re-run the whole
-    // turn, sending the same non-idempotent action again.
+    // A TOOL EFFECT, not any effect. The reachable set is the right question for a
+    // POSTURE — what a node might do decides how closely it is watched — and it is fine
+    // here too, PROVIDED the second half of the conjunction asks about a tool. It did
+    // not: `#effectStarted` matches any key prefixed by the taskId, `:model:` included,
+    // so an agent lost its retry policy the moment its first MODEL call started and a
+    // transport blip on turn one read as a non-idempotent tool that might have rung the
+    // bell.
     const nonIdempotentReachable = reachableToolNames(w.node).some((name) => {
       const t = this.tools.get(name);
       return t !== undefined && !t.idempotent;
     });
+    //
+    // The signal has to stay DURABLE — `startedEffects` is folded from the journal, so it
+    // survives a restart, where an in-memory list of calls does not. What was wrong was
+    // its precision, not its source: `${taskId}:` matches `:model:` too.
+    //
     // Only refuse once the call REACHED the sandbox. A failure before that (schema
     // validation, a policy deny) touched nothing, so retrying it is safe even for a
     // non-idempotent tool.
-    if (nonIdempotentReachable && this.#effectStarted(p, w.task.taskId)) return undefined;
+    if (nonIdempotentReachable && this.#toolEffectStarted(p, w.task.taskId)) return undefined;
 
     const initial = policy.initialMs ?? 500;
     const max = policy.maxMs ?? 30_000;
@@ -2772,6 +2781,17 @@ export class Engine {
   /** True when this Task already started an effect — i.e. the bell may have rung. */
   #effectStarted(p: RunProjection, taskId: TaskId): boolean {
     return p.startedEffects.some((k) => k.startsWith(`${taskId}:`));
+  }
+
+  /**
+   * True when this Task already started a TOOL effect.
+   *
+   * The narrower question, and the one the non-idempotent retry refusal wants: a model
+   * call that started and failed touched nothing outside Loom, so it says nothing about
+   * whether a tool may have.
+   */
+  #toolEffectStarted(p: RunProjection, taskId: TaskId): boolean {
+    return p.startedEffects.some((k) => k.startsWith(`${taskId}:tool:`));
   }
 
   /**

@@ -27,7 +27,7 @@ graph LR
 | `function` | Pure TS/JS over declared channels. Same input hash ⇒ same output. Runs in a worker thread if `cpuBound: true` | yes / yes | no | no | **yes** | inherits | no |
 | `agent` | A bounded ReAct loop from a pinned `AgentProfile`. Bounded by `maxTurns` **and** node budget, whichever binds first. Returns a value matching `outputSchema` or fails | yes / yes | yes | yes | no (recorded) | **`max` over every tool it can REACH** | yes — **before the first turn, never inside one** |
 | `tool` | Exactly one `ToolExecutor.invoke`. No model call. The only node type whose irreversibility class is known statically | yes / yes | no | one | no (recorded) | **from tool's irreversibility class** | yes (policy gate) |
-| `router` | Selects a subset of its declared outgoing edges. **Cannot write state.** Two modes: `expression` (deterministic) or `model` (an agent picks from the *closed set* of declared edge ids) | yes / **no** | mode-dependent | no | expression: yes | inherits | no |
+| `router` | Selects a subset of its declared outgoing edges. **Cannot write state.** `mode` has two values and only `expression` compiles: `model` is REFUSED (`GRAPH005_ROUTER_MODE_UNSUPPORTED`), see below | yes / **no** | **no** | no | **yes** | inherits | no |
 | `join` | A barrier over named incoming branches. Applies channel reducers in branch-coordinate order. Declares `mode` and `onBranchError`; `timeoutMs` is optional and **enforced by nothing — there is no join deadline** | yes / yes | no | no | **yes** | inherits | no |
 | `evaluator` | Produces a typed `Verdict {pass, score 0..1, reasons[], evidence[]}`. May be a function (assertions) or an agent (rubric judge). **Its output is the primary non-human signal for the evolution loop** | yes / yes | optional | optional | function: yes | inherits | no |
 | `human_gate` | Raises a durable `HumanGate` and suspends the Run. Resumes on `gate.decided`. Its decision may write channels (`edit`) or select edges (`redirect`) | yes / yes | no | no | **no** (human input is an Effect) | **`in` by definition** | **yes, always** |
@@ -51,21 +51,42 @@ gate raised there could not be answered after a restart. The approval of the nod
 carried into the turn as `nodeApproved`, which is what stops the refusal from turning a
 human's "yes" into a run that succeeds having done none of the work. See D3.6.
 
-**Three invariants that make the taxonomy load-bearing rather than decorative:**
+**Two invariants that make the taxonomy load-bearing rather than decorative:**
 
 1. **A router cannot write state.** If routing could also mutate, "why did it go there?"
    would require replaying arbitrary code. A router's entire output is an edge subset,
-   which the journal records verbatim.
-2. **A `model`-mode router chooses from a closed set.** The model returns an *index into
-   declared edge ids*; it cannot invent a target. An invalid selection is
-   `E_ROUTE_INVALID`, which takes the node's declared `fallbackEdge` or fails the Task.
-   This is the concrete mechanism behind "the graph, not the model's context, decides
-   what may happen next."
-3. **Only `human_gate`, `agent`, `tool`, and `subgraph` can suspend** — and all four
+   which the journal records verbatim. Enforced: `GRAPH005_ROUTER_WRITES`, "routers cannot
+   write state".
+2. **Only `human_gate`, `agent`, `tool`, and `subgraph` can suspend** — and all four
    suspend *between* Tasks, never inside a node body. `function`, `router`, and `join`
    are guaranteed to terminate without external input, which is what lets the scheduler
    treat them as cheap and run them inline on the committing worker rather than
    re-queueing.
+
+**Designed, not implemented — `mode: model` is a compile error today.** This used to sit
+above as a third invariant, asserting that a model-mode router "returns an index into
+declared edge ids", that an invalid selection is `E_ROUTE_INVALID` taking the declared
+`fallbackEdge`, and that this is "the concrete mechanism behind *the graph, not the
+model's context, decides what may happen next*". None of that runs. `RouterNode.mode` is
+`"expression" | "model"` and the field **is declared in order to be refused** — the same
+treatment `DelegationSpec` gets, and for the same reason: `Engine.#runRouter` never reads
+`mode`. It evaluates `cases[].when` in order whichever mode is declared and, when nothing
+matches, takes `router.fallbackEdge` — so accepting `model` would run "a fixed expression
+picks the branch" under a graph that reads "a model picks the branch", with a model
+`profile` pinned in the resolution manifest and never called. The compiler therefore
+pushes `GRAPH005_ROUTER_MODE_UNSUPPORTED`: *router "…" declares mode "model", which no
+executor implements — its `when` expressions would decide the branch instead.*
+
+`E_ROUTE_INVALID` is a real code, and it is not the router's. `Engine` raises it in exactly
+one place: a **human gate** whose `redirect` decision names an edge that is not one of the
+gate node's declared outgoing edges — and it FAILS the Task rather than falling back. The
+closed-set guarantee a reader is owed today is that one, plus `fallbackEdge`: nothing —
+model or human — can name a target the graph did not declare.
+
+Building the mode costs three things, and `graph/spec.ts`'s `RouterNode` docstring already
+names all three: a **recorded model effect** (so replay serves the same choice), **closed-set
+validation** of the returned edge id, and an `E_ROUTE_INVALID` **fallback** path at the
+router. Whoever builds it deletes the refusal in the same change.
 
 ---
 
@@ -75,7 +96,7 @@ human's "yes" into a run that succeeds having done none of the work. See D3.6.
 |---|---|---|---|
 | `seq` | Unconditional transition | `from`, `to` | — |
 | `conditional` | Taken iff `when` evaluates true, or iff the source router selected this edge id | `when` **xor** source is a `router` | An expression may reference only declared channels; unknown ref ⇒ `GRAPH004` |
-| `fanout` | Instantiates `to` once per element of `over`, each in its own branch coordinate | `over` (channel path), `as` (item channel), `maxWidth` | `maxWidth` mandatory and ≤ `policy.expansion.maxFanout` (`GRAPH007`) |
+| `fanout` | Instantiates `to` once per element of `over`, each in its own branch coordinate | `over` (channel path), `as` (item channel), `maxWidth` | `maxWidth` mandatory and ≤ `policy.expansion.maxFanout`; **both `over` and `as` must be declared channels** — the item channel is branch-scoped and is still a declaration, because the `StateView` has to serve it and the expression type-checker has to know its type (`GRAPH007`) |
 | `join` | Barrier. Named branches converge; reducers fold in branch-coordinate order | `branches[]`, `mode`, `onBranchError`; `timeoutMs` optional and unenforced | Every branch id must be reachable from a matching `fanout`/split (`GRAPH008`) |
 | `error` | Taken when the source Task terminates with `status:"error"` after retries are exhausted | `from`, `to`, optional `codes[]` | A node whose error is unhandled propagates to the Run — allowed, but warned (`GRAPH011`) |
 | `compensation` | **A declaration, not a runtime path — see below.** Says that `to` is what would undo `from`'s committed effects | `compensates` | Only valid from a node whose tool declares a `compensation` naming a REGISTERED tool (`GRAPH012`); a compensation that is itself irreversible or externally visible warns |
@@ -105,10 +126,26 @@ graph TB
 
 | `mode` | Fires when | Non-arriving branches |
 |---|---|---|
-| `all` | every branch reaches it | — (waits, then `timeoutMs`) |
-| `any` | the first branch arrives | cancelled with `task.cancelled(reason: join_short_circuit)` |
-| `quorum(k)` | `k` branches arrive (`k` integer or fraction of width) | cancelled after quorum. **There is no `drain` field**: the runtime always behaves as `drain: false`, so the value that lied was the default, and a field every author had to set to the only thing it could be is worse than no field |
-| `firstSuccess` | first branch with `status:"ok"` | cancelled |
+| `all` | every branch reaches it | waits — indefinitely, because `timeoutMs` is enforced by nothing |
+| `any` | the first branch arrives | **keep running to completion** |
+| `quorum(k)` | `k` branches arrive (`k` integer or fraction of width) | **keep running to completion** |
+| `firstSuccess` | first branch with `status:"ok"` | **keep running to completion** |
+
+**A short-circuiting join does not cancel its stragglers, and nothing records that it
+didn't.** `#maybeFireJoin` decides on `branches`, `mode` and `k`; the remaining branches
+keep their leases and run to the end, and **no `task.cancelled` is appended anywhere** —
+that event type is declared, folded in three places, and appended by nothing
+(`test/docs-drift.test.ts` pins it in `NEVER_APPENDED`). This column used to read
+"cancelled with `task.cancelled(reason: join_short_circuit)`", which is the shape the
+guard's own registry names as the false claim.
+
+**There is no `drain` field either**, and its absence is the honest form of the above. It
+meant *keep non-arriving branches running after the join fires* — which is what the runtime
+does, unconditionally — and its default was `drain: false`. So the DEFAULT was the value
+that lied: every graph that never mentioned the field asked for stragglers to be cancelled
+and got them kept, and a field whose only honest value is the one nobody writes cannot be
+salvaged by refusing the other one. It returns in the change that adds straggler
+cancellation, and not before.
 
 `onBranchError`: `fail` (whole join fails), `skip` (branch contributes nothing; recorded).
 **`compensate` is REFUSED at compile time.** It is still in the type — `NodeSpec` is pinned
@@ -249,7 +286,8 @@ nodes:
     function: { ref: ResourceRef, cpuBound: bool }
     agent:    { profile: ResourceRef, prompt: ResourceRef, outputSchema: {}, maxTurns: int, tools: [string] }
     tool:     { name: string, version: string, args: {} }        # args templated from `reads`
-    router:   { mode: expression|model, cases: [{when, take}], fallbackEdge: string, profile?: ResourceRef }
+    router:   { mode: expression|model,                # `model` is in the type and REFUSED (GRAPH005)
+                cases: [{when, take}], fallbackEdge: string, profile?: ResourceRef }
     join:     { branches: [string], mode: all|any|quorum|firstSuccess, k?: number,
                 onBranchError: fail|skip,          # `compensate` is in the type and REFUSED
                 timeoutMs?: integer }              # optional, and there is no join deadline
@@ -264,7 +302,7 @@ edges:
     kind: seq|conditional|fanout|join|error|compensation|loop
     when: string                 # conditional only — a restricted expression (see below)
     over: string                 # fanout only — a channel path
-    as: string                   # fanout only — the per-branch item channel
+    as: string                   # fanout only — the per-branch item channel; MUST be declared under `channels:`
     maxWidth: integer            # fanout only — MANDATORY
     branches: [string]           # join only
     until: string                # loop only
@@ -291,9 +329,24 @@ undecidable, which is exactly why they are excluded.
 
 ## D5.5 — Worked example: incident triage and remediation
 
-Non-trivial by construction: dynamic fan-out, a quorum join, an evaluator, a
-model-router, a bounded verify/remediate loop, an irreversible action behind a human
+Non-trivial by construction: dynamic fan-out, a quorum join, an evaluator, an
+expression router, a bounded verify/remediate loop, an irreversible action behind a human
 gate, and a compensation path.
+
+**This block is the corpus's one end-to-end artefact, so it is written to be READ BY THE
+SHIPPED CODE, not to look like YAML.** It parses under `graph/yaml.ts`'s subset and
+compiles with no errors. Two things it once did and no longer does, because the code
+refuses both: it spread flow mappings (`{ … }`) across two lines, which the subset does
+not join — a flow collection is one line, or it is a block mapping — and it fanned out to
+an item channel `signal` that `channels:` never declared, which is
+`GRAPH007_UNKNOWN_ITEM`. It also declared `drain: false` on `correlate`, a field
+`JoinNode` does not have; see D5.2.
+
+`compile()` still returns two **warnings** against a manifest where `k8s.apply` is
+`irreversible` and `chat.post` is `externally_visible`, and they are left in because they
+are what an author of this graph should see: `GRAPH009_UNBOUNDED_NODE` for `hypothesise`,
+`grade` and `plan_remediation`, which can spend and declare no node budget, and
+`GRAPH011_UNHANDLED_IRREVERSIBLE` for `escalate`, which posts to chat with no `error` edge.
 
 ```yaml
 apiVersion: loom.dev/v1
@@ -314,8 +367,13 @@ policy:
 channels:
   incident:    { type: object, schema: { $ref: "#/defs/Incident" }, reduce: replace, classification: pii }
   signals:     { type: array,  reduce: replace }
-  findings:    { type: array,  reduce: append_ordered,
-                 contextProjection: { select: "$[*].{h: host, s: severity, w: what}", maxTokens: 2500, overflow: summarize } }
+  # The per-branch item channel e1 binds with `as:`. It is branch-scoped and it is still a
+  # DECLARATION: `GRAPH007_UNKNOWN_ITEM` refuses a fanout whose `as` names nothing here.
+  signal:      { type: object, reduce: replace }
+  findings:
+    type: array
+    reduce: append_ordered
+    contextProjection: { select: "$[*].{h: host, s: severity, w: what}", maxTokens: 2500, overflow: summarize }
   hypothesis:  { type: object, reduce: replace }
   verdict:     { type: object, reduce: replace }
   plan:        { type: object, reduce: replace }
@@ -352,14 +410,17 @@ nodes:
     type: join
     reads: [findings]
     writes: [findings]
-    join: { branches: [investigate], mode: quorum, k: 0.8, onBranchError: skip, timeoutMs: 180000, drain: false }
+    join: { branches: [investigate], mode: quorum, k: 0.8, onBranchError: skip, timeoutMs: 180000 }
 
   - id: hypothesise
     type: agent
     reads: [incident, findings]
     writes: [hypothesis, costUsd]
-    agent: { profile: agent_profile/sre-lead@stable, prompt: prompt/root-cause@stable,
-             outputSchema: { $ref: "#/defs/Hypothesis" }, maxTurns: 4 }
+    agent:
+      profile: agent_profile/sre-lead@stable
+      prompt:  prompt/root-cause@stable
+      outputSchema: { $ref: "#/defs/Hypothesis" }
+      maxTurns: 4
 
   - id: grade
     type: evaluator
@@ -382,8 +443,11 @@ nodes:
     type: agent
     reads: [hypothesis, findings]
     writes: [plan, costUsd]
-    agent: { profile: agent_profile/sre-lead@stable, prompt: prompt/plan-remediation@stable,
-             outputSchema: { $ref: "#/defs/Plan" }, maxTurns: 3 }
+    agent:
+      profile: agent_profile/sre-lead@stable
+      prompt:  prompt/plan-remediation@stable
+      outputSchema: { $ref: "#/defs/Plan" }
+      maxTurns: 3
 
   - id: approve_remediation
     type: human_gate
@@ -426,8 +490,7 @@ nodes:
     function: { ref: function/render-incident-report@stable }
 
 edges:
-  - { id: e1,          from: gather_signals,     to: investigate,        kind: fanout,
-      over: signals, as: signal, maxWidth: 25 }
+  - { id: e1,          from: gather_signals,     to: investigate,        kind: fanout, over: signals, as: signal, maxWidth: 25 }
   - { id: e2,          from: investigate,        to: correlate,          kind: join, branches: [investigate] }
   - { id: e3,          from: correlate,          to: hypothesise,        kind: seq }
   - { id: e4,          from: hypothesise,        to: grade,              kind: seq }
@@ -438,8 +501,7 @@ edges:
   - { id: e6,          from: plan_remediation,   to: approve_remediation,kind: seq }
   - { id: e7,          from: approve_remediation,to: apply_remediation,  kind: seq }
   - { id: e8,          from: apply_remediation,  to: verify,             kind: seq }
-  - { id: e9,          from: verify,             to: plan_remediation,   kind: loop,
-      until: "verdict.pass || len(applied) >= 3", maxIterations: 3 }
+  - { id: e9,          from: verify,             to: plan_remediation,   kind: loop, until: "verdict.pass || len(applied) >= 3", maxIterations: 3 }
   - { id: e10,         from: verify,             to: write_report,       kind: conditional, when: "verdict.pass" }
   - { id: e11,         from: apply_remediation,  to: escalate,           kind: error }
   - { id: e12,         from: apply_remediation,  to: rollback,           kind: compensation, compensates: apply_remediation }
@@ -481,7 +543,7 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 | `GRAPH004` | Every expression type-checks against channel schemas; every referenced channel is declared and *read-declared* by that node | error | the expression language is total and typed |
 | `GRAPH005` | Every node's `writes` are declared channels; every `reads` is written by some upstream node or is an input | error | dataflow over the DAG |
 | `GRAPH006` | Every cycle has a mandatory `maxIterations` **and** contains a node writing a channel referenced by its `until` | error | a cycle whose condition no node can change is a guaranteed infinite loop |
-| `GRAPH007` | Every `fanout` declares `maxWidth ≤ policy.expansion.maxFanout` | error | static |
+| `GRAPH007` | Every `fanout` declares `maxWidth ≤ policy.expansion.maxFanout`, **and both the channel it fans `over` and the per-branch `as` item channel are declared under `channels:`** (`GRAPH007_UNKNOWN_OVER` / `GRAPH007_UNKNOWN_ITEM`) | error | static |
 | `GRAPH008` | Every `join.branches[]` id matches a reachable fan-out/split; no join waits on a branch that cannot occur | error | traversal |
 | `GRAPH009` | Node budgets are consistent: `Σ(perBranchBudget × maxWidth) + Σ(sequential budgets) ≤ graph budget` | **error** | arithmetic over the static bound. *This is the rule that catches "50 parallel agents each within budget, blowing the run budget collectively"* |
 | `GRAPH010` | No channel with a non-multi-writer-safe reducer is written by two concurrent branches | error | concurrency is static: two nodes are concurrent iff neither is an ancestor of the other |
@@ -507,26 +569,42 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 > **A code in this table is a *family*; the diagnostic carries the sub-code.** Every
 > `Diagnostic.code` is `GRAPHnnn_REASON`, and `test/docs-drift.test.ts` checks that each
 > `GRAPHnnn` family the compiler can emit appears here — the reason, not the family, is
-> what an author reads. `GRAPH014` currently emits six DISTINCT sub-codes from seven call
-> sites — count them with
+> what an author reads. `GRAPH014` currently emits **eight** distinct sub-codes from **ten**
+> call sites — count them with
 > `grep -aoE 'GRAPH014_[A-Z_]+' packages/core/src/graph/validate.ts | sort -u | wc -l`
-> rather than trusting this sentence, which has been wrong before. (`grep -c` counts LINES
-> and answers 7: `GRAPH014_DELIVERY_INVALID` is pushed from two places, once as an error and
-> once as a warning. A count is only as good as the command under it.)
+> rather than trusting this sentence, which has now been wrong three times. (`grep -c`
+> counts LINES and answers 10, which happens to be the call-site count and is not the same
+> question: two sub-codes are pushed from two places each — `GRAPH014_APPROVER_INVALID`
+> once for a non-subject and once for a synthetic marker like `(unidentified)`, and
+> `GRAPH014_DELIVERY_INVALID` once as an error and once as a warning. A count is only as
+> good as the command under it, and 8 + 2 = 10 is the check that this paragraph is
+> internally consistent.) The eight:
 > `GRAPH014_OVERSIGHT_LOOSENED` (error, and the only one that surfaces as
 > `E_OVERSIGHT_LOOSENED` rather than `E_GRAPH_INVALID`), `GRAPH014_GATE_GATES_NOTHING`
 > (**warning** — a `human_gate` with no non-error outbound edge, so approving it does
 > nothing), `GRAPH014_APPROVAL_UNSUPPORTED` (error — `mode` other than `single`, a `k`,
 > `separationOfDuties`, or `delegation`; see the deviation note in **D7.2**),
-> `GRAPH014_APPROVER_INVALID` (error — an approver that is not a subject string),
-> `GRAPH014_SLA_INVALID` (error — a `humanGate.sla` the runtime would not run: a
+> `GRAPH014_APPROVER_INVALID` (error — an approver that is not a subject string, or one
+> that is a marker the perimeter mints rather than a name: `(unidentified)` and
+> `(shared-token)` read as restricted and are satisfied by exactly the callers nobody
+> vouched for), `GRAPH014_SLA_INVALID` (error — a `humanGate.sla` the runtime would not run: a
 > `respondWithinMs` that is not a positive whole number of ms, an `onTimeout` a graph
 > cannot ask for, or `onTimeout: escalate` with no `delivery.escalation` chain behind it,
 > which expires at the first deadline and therefore reads as *escalate* and behaves as
-> *fail*), and `GRAPH014_DELIVERY_INVALID` (error, plus one warning — a `humanGate.delivery`
+> *fail*), `GRAPH014_DELIVERY_INVALID` (error, plus one warning — a `humanGate.delivery`
 > block naming no channels, a malformed `{kind, id}` recipient, a blank `redact` field, an
 > unknown `redactAs`, a non-positive tier `afterMs`, or a terminal `action: fail` tier
-> sitting anywhere but last, where every tier after it is unreachable).
+> sitting anywhere but last, where every tier after it is unreachable), and the two
+> saturation controls of **D7.9**, whose failure mode is quieter than doing nothing — a
+> misdeclared block merges or collapses nothing at all while the graph reads as though it
+> did: `GRAPH014_BATCHING_INVALID` (error — a `humanGate.batching` that is not a plain
+> object, a non-boolean `enabled`, or, with `enabled: true`, a blank `key`, a `windowMs`
+> that is not a positive whole number of ms, or a `maxBatch` that is not a whole number of
+> at least 2, since a cap of 1 declares a mechanism and gets none — and `NaN` is not a small
+> cap, it is no cap) and `GRAPH014_DEDUPE_INVALID` (error — a
+> `humanGate.dedupe` that is not a plain object, a non-boolean `enabled`, or `enabled: true`
+> with a `windowMs` that is not a positive whole number of ms, which would inherit a
+> decision of any age).
 >
 > The unsupported-approval errors are deliberate: an oversight rule accepted and not
 > enforced looks supervised and is not. Two things `GRAPH014` deliberately does **not**
@@ -861,11 +939,20 @@ sequenceDiagram
   CP-->>OP: receipt{seq, clean, unknownEffects[]}
 ```
 
-**Two things in that diagram do not exist**, and they are marked in it rather than left for a
+**Three things in that diagram do not exist.** Two are marked in it rather than left for a
 reader to discover: `Engine.cancel` takes `(runId, reason)` — no grace period, no compensate
 flag — and nothing executes a compensation. See "Compensation is a compile-time proof and a
 rewind refusal" under D5.2. The grace/`SIGKILL` ladder *does* exist, at the sandbox boundary,
 which is why the `par` block above is description rather than design.
+
+The third is **`task.cancelled` itself**, in all three `alt` arms. What `Engine.#cancelTree`
+appends is `operator.command`, then `gate.cancelled` for every open gate, then
+`run.cancelled` — nothing per Task, so an in-flight Task keeps whatever state it last had.
+The event type is declared and folded in `projection.ts`, `spans.ts` and `trajectory.ts`,
+and appended by nobody, which is why `test/docs-drift.test.ts` pins it in `NEVER_APPENDED`
+and names this diagram and D5.2's join-mode table as the places asserting otherwise. D5.2 is
+corrected above; Deviation 5's operator-interrupt diagram is a third occurrence and carries
+the same caveat under it.
 
 **The honest part:** `run.cancelled` carries `clean: false` and an explicit
 `unknownEffects[]` list when cancellation raced an irreversible effect. The UI shows this
@@ -891,7 +978,7 @@ graph LR
   J["join quorum(0.8) k=20"] --> D{"arrived ≥ 20?"}
   D -->|"yes"| OK["reduce over ARRIVED branches only<br/>state.reduced{skipped: 4}"]
   D -->|"no, and no branch can still arrive"| F["task.failed E_QUORUM_UNREACHABLE<br/>→ node's error edge"]
-  D -->|"no, and timeoutMs elapsed"| T["task.failed E_JOIN_TIMEOUT<br/>→ cancel stragglers unless drain:true"]
+  D -->|"no, and timeoutMs elapsed"| T["task.failed E_JOIN_TIMEOUT<br/>DESIGNED, NOT BUILT — no join deadline, no straggler cancellation"]
   OK --> DEG["degraded:true recorded on the reduce<br/>→ evaluator sees a lower-confidence input"]
 ```
 
@@ -986,12 +1073,24 @@ deployment calls on whatever interval it owns. `@loom/core` still starts no time
 no wall clock on its own; `now` is a parameter, so a test advances an injected clock and
 observes exactly one escalation. Everything below therefore describes what one sweep does,
 and a sweep that happens late is still correct: deadlines are absolute timestamps folded out
-of the journal, not in-memory timers. The gate's declared
-`onTimeout` is one of: `escalate` (next approver tier, SLA clock resets, journal
-`gate.escalated`), `default_action` (only permissible when the node's irreversibility is
-`read_only` or `reversible_write` — `GRAPH014` rejects a `default_action: approve` on an
-irreversible node), or `fail` (the default). **No timeout path can auto-approve an
-irreversible action.**
+of the journal, not in-memory timers.
+
+A GRAPH's declared `onTimeout` is one of exactly **two** values: `escalate` (next approver
+tier, SLA clock resets, journal `gate.escalated`) or `fail` (the default). There is no
+third. `GateSlaSpec.onTimeout` is typed `"escalate" | "fail"` and `defaultAction` is absent
+from the type **by construction** — pre-authorizing a decision is only safe once a compiler
+has proved the action's irreversibility class permits one, and that proof does not exist —
+so `checkSla` refuses any other value with `GRAPH014_SLA_INVALID`: *declares onTimeout "…",
+which a graph cannot ask for.* (The refusal is reachable, because the canonical on-disk form
+is JSON and nothing type-checks it on the way in.) `escalate` is refused too when no
+reachable `delivery.escalation` tier stands behind it, since that reads as *escalate* and
+behaves as *fail*.
+
+`TimeoutAction` in `run/gates.ts` does carry a third member, `default_action`, and it is
+reachable only for a caller driving `HumanGateBroker.raise` directly with its own
+`defaultAction` — never from a `GraphSpec`. If the pre-authorized decision did not survive
+the process that raised the gate, `#fireTimeout` degrades it to `fail` rather than leaving a
+run suspended with no path out. **No timeout path can auto-approve an irreversible action.**
 
 ---
 
@@ -1033,8 +1132,16 @@ sequenceDiagram
 
 **The pre-irreversible hold is the mechanism that makes on-the-loop meaningful.** Before
 any effect classified `irreversible` or `externally_visible`, the executor pauses for
-`min(policy.interventionWindowMs, budget remaining)` and publishes an
-`irreversible.pending` frame. Without it, "the supervisor may interrupt" is a promise the
-system cannot keep — by the time a human sees the event, the action has happened. The
-window is configurable per class and defaults to `0` for `read_only`, `2000 ms` for
-`reversible_write`, and `5000 ms` for `irreversible`/`externally_visible`.
+`min(policy.interventionWindowMs, budget remaining)` and appends **`action.pending`**
+`{nodeId, irreversibility, windowMs, toolName?}` — the frame a supervisor watches for.
+Without it, "the supervisor may interrupt" is a promise the system cannot keep — by the
+time a human sees the event, the action has happened. The window is configurable per class
+and defaults to `0` for `read_only`, `2000 ms` for `reversible_write`, and `5000 ms` for
+`irreversible`/`externally_visible`.
+
+Two corrections to that diagram. The frame is `action.pending`, not `irreversible.pending`:
+`PolicyEngine.decide` returns `holdMs` and `Engine` appends `action.pending` at two sites,
+node-level and tool-level, and it is in D3.10's vocabulary under that name — a reader who
+greps for `irreversible.pending` finds nothing, in the one place the design tells them the
+mechanism is observable. And `task.cancelled` here is the same absent event as in
+Deviation 1: the abort stops the effect, nothing marks the Task.

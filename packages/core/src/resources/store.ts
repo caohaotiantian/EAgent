@@ -22,7 +22,7 @@ import { digest, type Digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import type { GraphSpec, ResolvedRef, ResourceRef } from "../graph/spec.ts";
 import type { ResourceResolver } from "../graph/validate.ts";
-import type { PolicyActor } from "../run/policy.ts";
+import { EVOLUTION_ACTOR, type PolicyActor } from "../run/policy.ts";
 
 export type ResourceKind =
   | "prompt"
@@ -77,6 +77,46 @@ const TRANSITIONS: Readonly<Record<Channel, readonly Channel[]>> = {
 
 export interface ResourceStoreOptions {
   readonly now?: () => number;
+  /**
+   * Deny-lists the STORE holds, keyed by actor id.
+   *
+   * `PolicyActor.denied` rides on the object being authorized, which makes it an assertion
+   * the SUBJECT gets to make about itself. Both doors onto `@stable` used to ask exactly
+   * that field, so an identity that named itself `evolution-engine` and simply left the
+   * field off was on no deny-list at all — and the guard whose whole job is to stop the
+   * evolution engine pointing `@stable` at its own un-gated draft was satisfiable by the
+   * evolution engine. `PolicyEngine.deescalate` was fixed the same way and this is the same
+   * shape; see `PolicyEngineOptions.deniedActors`.
+   *
+   * Entries here are UNIONED with `EVOLUTION_ACTOR`'s own list and with whatever the actor
+   * object carries. Deny beats allow in every direction, so supplying this map can only ever
+   * add denials; passing `{"evolution-engine": []}` does not un-deny it.
+   */
+  readonly deniedActors?: Readonly<Record<string, readonly string[]>>;
+}
+
+/** The capability both doors onto `@stable` spend. Named once so the deny-lists agree on it. */
+const PROMOTE_STABLE = "resource:promote(stable)";
+
+/**
+ * The deny-lists the store keeps, seeded so the built-in one cannot be dropped.
+ *
+ * A near-twin of `run/policy.ts`'s `engineDenyLists`, and a copy rather than an import for
+ * the reason that file gives about `MAX_TIMER_MS`: exporting a two-line seeding helper would
+ * put it on the pinned public surface, and the shared thing that MUST NOT drift — the list
+ * itself — is imported from `EVOLUTION_ACTOR` rather than restated.
+ */
+function storeDenyLists(
+  supplied: Readonly<Record<string, readonly string[]>> | undefined,
+): ReadonlyMap<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>([[EVOLUTION_ACTOR.id, EVOLUTION_ACTOR.denied ?? []]]);
+  for (const [id, caps] of Object.entries(supplied ?? {})) out.set(id, [...(out.get(id) ?? []), ...caps]);
+  return out;
+}
+
+/** Trailing `*` is a prefix wildcard — the same reading `PolicyEngine` gives a pattern. */
+function matches(patterns: readonly string[], capability: string): boolean {
+  return patterns.some((p) => (p.endsWith("*") ? capability.startsWith(p.slice(0, -1)) : p === capability));
 }
 
 export class ResourceStore implements ResourceResolver {
@@ -87,9 +127,12 @@ export class ResourceStore implements ResourceResolver {
   readonly #byDigest = new Map<Digest, ResourceVersion>();
   readonly #idempotency = new Map<string, Digest>();
   readonly #now: () => number;
+  /** Deny-lists this STORE holds. External to the actor on purpose — see the option. */
+  readonly #deniedActors: ReadonlyMap<string, readonly string[]>;
 
   constructor(opts: ResourceStoreOptions = {}) {
     this.#now = opts.now ?? Date.now;
+    this.#deniedActors = storeDenyLists(opts.deniedActors);
   }
 
   // ── publish ───────────────────────────────────────────────────────────────
@@ -154,9 +197,12 @@ export class ResourceStore implements ResourceResolver {
    * Move a selector. Never mutates content.
    *
    * `stable` requires a HUMAN actor. The evolution engine's identity is deny-listed
-   * for `resource:promote(stable)` (D10.g), so the check is on the actor's kind and
-   * its deny-list, not on an absent grant — "forgot to grant" and "must never have"
-   * are different facts and only the second survives someone widening a grant.
+   * for `resource:promote(stable)` (D10.g), so the check is on a deny-list rather than
+   * on an absent grant — "forgot to grant" and "must never have" are different facts
+   * and only the second survives someone widening a grant.
+   *
+   * WHICH deny-list is the whole question, and it is `#requireStablePromoter`'s: the
+   * store's, not the caller's.
    */
   promote(ref: ResolvedRef | string, to: Channel, actor: PolicyActor): ResolvedRef {
     const resolved = typeof ref === "string" ? this.#requireRef(ref) : ref;
@@ -168,18 +214,7 @@ export class ResourceStore implements ResourceResolver {
     if (!(TRANSITIONS[from] ?? []).includes(to)) {
       throw err.conflict(CODES.E_ILLEGAL_TRANSITION, `cannot promote ${from} → ${to}`, { details: { from, to } });
     }
-    if (to === "stable") {
-      if (actor.kind !== "human") {
-        throw err.policy(
-          CODES.E_HUMAN_APPROVAL_REQUIRED,
-          `promoting to stable requires a human actor; got "${actor.kind}"`,
-          { details: { actor: actor.id } },
-        );
-      }
-      if ((actor.denied ?? []).includes("resource:promote(stable)")) {
-        throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `actor "${actor.id}" is deny-listed for stable promotion`);
-      }
-    }
+    if (to === "stable") this.#requireStablePromoter(actor, "promoting to stable");
 
     const key = `${record.kind}/${record.name}`;
     this.#selectors.set(`${key}@${to}`, resolved.digest);
@@ -207,18 +242,47 @@ export class ResourceStore implements ResourceResolver {
     if (record === undefined) {
       throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `${kind}/${name}@${toVersion} does not exist`);
     }
-    if (actor.kind !== "human") {
-      throw err.policy(
-        CODES.E_HUMAN_APPROVAL_REQUIRED,
-        `rolling back moves @stable and requires a human actor; got "${actor.kind}"`,
-        { details: { actor: actor.id } },
-      );
-    }
-    if ((actor.denied ?? []).includes("resource:promote(stable)")) {
-      throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `actor "${actor.id}" is deny-listed for stable promotion`);
-    }
+    this.#requireStablePromoter(actor, "rolling back moves @stable and");
     this.#selectors.set(`${kind}/${name}@stable`, record.digest);
     return { ref: `${kind}/${name}@${toVersion}`, digest: record.digest, channel: "stable" };
+  }
+
+  /**
+   * The ONE door onto `@stable`, so the two callers cannot disagree about it.
+   *
+   * They did. `promote` and `rollback` write the same selector and carried two copies of the
+   * check, and both copies read `actor.denied` — a field on the object being authorized, so
+   * the guard was answerable by the thing it guards. THREE facts are checked here and only
+   * the last belongs to the caller:
+   *
+   *   1. the actor is a HUMAN. A kind is still self-asserted, which is why 2 exists.
+   *   2. the STORE's own deny-list, seeded from `EVOLUTION_ACTOR` and un-droppable. This is
+   *      the authority that does not travel on the request.
+   *   3. the actor's own list, kept because an embedder minting a scoped actor should be able
+   *      to hand it a narrower one than the store knows about. Deny beats allow, so a third
+   *      list can only ever refuse more.
+   *
+   * `what` is the caller's own phrasing of what it is about to do, because "you may not
+   * promote" is a confusing thing to be told by `rollback`.
+   */
+  #requireStablePromoter(actor: PolicyActor, what: string): void {
+    if (actor.kind !== "human") {
+      throw err.policy(CODES.E_HUMAN_APPROVAL_REQUIRED, `${what} requires a human actor; got "${actor.kind}"`, {
+        details: { actor: actor.id },
+      });
+    }
+    if (matches(this.#deniedActors.get(actor.id) ?? [], PROMOTE_STABLE)) {
+      throw err.policy(
+        CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN,
+        `identity "${actor.id}" is deny-listed for ${PROMOTE_STABLE} by this store`,
+        { details: { actor: actor.id, source: "store.deniedActors" } },
+      );
+    }
+    if (matches(actor.denied ?? [], PROMOTE_STABLE)) {
+      throw err.policy(CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN, `actor "${actor.id}" is deny-listed for ${PROMOTE_STABLE}`, {
+        details: { actor: actor.id, source: "actor.denied" },
+      });
+    }
   }
 
   /**

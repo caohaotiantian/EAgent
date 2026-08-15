@@ -12,8 +12,8 @@ between them.** That forces one mechanism, not three features.
 graph TB
   ACT["An action is about to happen<br/>(node execution or tool effect)"] --> PE["PolicyEngine.decide"]
   PE --> P{"effective posture =<br/>max(system, workflow, node, tool, escalations)"}
-  P -->|"out"| GO["execute immediately<br/>· post-hoc audit is COMPLETE<br/>· pre-authorization envelope was checked at compile"]
-  P -->|"on"| WIN["publish irreversible.pending<br/>· hold for interventionWindowMs<br/>· execute unless interrupted"]
+  P -->|"out"| GO["execute immediately<br/>· post-hoc audit is COMPLETE<br/>· `out` was COMPUTED by the max fold, not declared — D7.10"]
+  P -->|"on"| WIN["append action.pending<br/>· hold for interventionWindowMs<br/>· execute unless interrupted"]
   P -->|"in"| GATE["HumanGateBroker.raise<br/>· Run SUSPENDS (zero slots)<br/>· resume on gate.decided"]
   WIN -->|"operator interrupts"| ESC["auto-escalate to `in`<br/>· convert the pending action into a gate"]
   ESC --> GATE
@@ -27,7 +27,7 @@ config change and never a code change.
 
 | Posture | Executor behaviour | Worker slots held | Survives restart | Human required |
 |---|---|---|---|---|
-| `out` | proceed | 1 (executing) | n/a | no — but audit is complete and demotion triggers are armed |
+| `out` | proceed | 1 (executing) | n/a | no — but audit is complete and the E1–E10 escalation triggers are armed |
 | `on` | hold `interventionWindowMs`, publish, proceed | 1 (holding) | the hold does not, but the *action record* does | no, unless one intervenes |
 | `in` | suspend the Run, release the slot, raise a gate | **0** | **yes — by construction** | yes |
 
@@ -902,11 +902,11 @@ resolved for `apply_remediation`. No node is added or removed; no code changes.
 graph TB
   subgraph OUT["posture: out — fully autonomous"]
     A1["plan_remediation"] --> A2["apply_remediation<br/><i>executes immediately</i>"] --> A3["verify"] --> A4["write_report"]
-    A2 -.->|"pre-authorization envelope checked at COMPILE:<br/>cost ≤ 12 USD · blast ≤ 1 ns · tools ⊆ allowlist<br/>+ demotion triggers E1–E11 armed"| A2
+    A2 -.->|"posture out was COMPUTED, not declared:<br/>max(system, graph, tool class, data class, node)<br/>+ escalation triggers E1–E10 armed"| A2
   end
 
   subgraph ON["posture: on — supervised"]
-    B1["plan_remediation"] --> B2["apply_remediation<br/><b>hold 5 s · irreversible.pending</b>"] --> B3["verify"] --> B4["write_report"]
+    B1["plan_remediation"] --> B2["apply_remediation<br/><b>hold 5 s · action.pending</b>"] --> B3["verify"] --> B4["write_report"]
     B2 -.->|"supervisor may pause / redirect / rollback<br/>within the window; doing so escalates to in"| BX["Interrupted"]
   end
 
@@ -920,22 +920,74 @@ Note what stays constant across all three: the journal shape, the span taxonomy,
 audit record, the checkpoint before `apply_remediation`, and the compensation edge. Only
 the `PolicyDecision.effect` differs — `allow`, `allow`-after-hold, or `gate`.
 
-### Pre-authorization envelope (required for `out`)
+### What actually gates `out`
 
-A node may run out-of-the-loop only if **all** of these are declared and checked at
-compile time. A missing field is `GRAPH014`, not a default.
+**A node does not declare its way to `out`; it computes there.** There is no
+`preAuthorization` block anywhere in `GraphSpec`, no such check in `graph/validate.ts`, and
+no `GRAPH014` sub-code for one — see the designed-not-implemented block below, which used
+to stand here as a compile-time requirement.
+
+What `compile()` really does is one `max` fold per node, in `graph/compile.ts`:
+
+```
+posture = max( systemPostureFloor,          // the deployment's floor
+               spec.policy.posture,          // the graph's declared default
+               classFloor,                   // max over CLASS_DEFAULT_POSTURE of every tool
+                                             //   reachableToolNames(node) can reach
+               dataFloor,                    // max over CLASSIFICATION_POSTURE_FLOOR of every
+                                             //   channel in reads ∪ writes
+               node.policy.posture )         // the node's own declaration — an input to the
+                                             //   max, never an override
+```
+
+So a node reaches `out` only when **every tool it can reach is `read_only`** and **every
+channel it touches is `public` or `internal`** (`CLASS_DEFAULT_POSTURE`:
+`read_only → out`, `reversible_write → on`, `irreversible`/`externally_visible → in`;
+`CLASSIFICATION_POSTURE_FLOOR`: `public`/`internal → out`, `pii → on`, `secret_ref → in`),
+and neither the system nor the graph floors it higher. That is a stronger guarantee than
+the envelope was, because nothing an author writes can weaken it — a node declaring
+`posture: out` under a higher floor gets `GRAPH019_POSTURE_NO_EFFECT`, a **warning**, and
+runs at the floor anyway.
+
+The three things a compiler genuinely refuses around this: `GRAPH014_OVERSIGHT_LOOSENED`
+(an evolution candidate whose computed posture sits below its baseline — the asymmetry rule
+of D7.7, and it needs a `baselinePostures` map to compare against, so an ordinary compile
+never raises it), `GRAPH017_CAPABILITY_NOT_GRANTED` (declared capabilities ⊄
+tenant-granted), and `GRAPH009_BUDGET_OVERCOMMIT` (`Σ(per-branch budget × maxWidth) +
+Σ(sequential) ≤ graph budget`). Two nearby rules only **warn** and must not be read as
+gates: `GRAPH009_UNBOUNDED_NODE`, when a node that can spend declares no budget, and
+`GRAPH011_UNHANDLED_IRREVERSIBLE`, when a node with irreversibility ≥ `irreversible` has no
+`error` edge.
+
+**Audit completeness is not a per-run switch; it is invariant 8.** Telemetry may be
+sampled and dropped, the journal may not. That is what makes a fully autonomous run
+reconstructable after the fact, and it holds for every run without anything being declared.
+
+### Designed, not implemented — do not merge this block back into the section above
+
+This is what the section above claimed, in full: *"A node may run out-of-the-loop only if
+**all** of these are declared and checked at compile time. A missing field is `GRAPH014`,
+not a default."* A graph declaring the block gets silence, and a graph omitting it runs at
+`out` regardless of it.
 
 ```yaml
-preAuthorization:
+preAuthorization:                                                 # NOT A FIELD OF GraphSpec
   costCeilingUsd: 12.0
   blastRadius: { namespaces: ["ns-staging"], maxResources: 5, maxRecords: 0 }
   toolScope: ["k8s.scale", "k8s.describe", "obs.query_window"]   # closed set
   dataClassification: [internal]                                  # no pii, no secrets
   allowedSideEffects: [reversible_write]                          # NOT irreversible
   auditCompleteness: full                                         # journal sampling forbidden for this run
-  demotionTriggers: [E1, E2, E4, E5, E6, E7, E8, E11]             # which of D7.7 are armed
+  demotionTriggers: [E1, E2, E4, E5, E6, E7, E8]                  # which of D7.7 are armed
 ```
 
-`auditCompleteness: full` is the one that makes out-of-the-loop defensible: telemetry may
-be sampled, but the **journal never is**, so a fully autonomous run is always
-reconstructable after the fact.
+`grep -ran 'preAuthorization|blastRadius|toolScope|auditCompleteness|demotionTriggers'
+packages/core/src/` returns nothing. Building it is a `GraphSpec` field plus a `GRAPH014`
+sub-code per clause, and `blastRadius` needs a tool manifest that describes reach — which no
+`ToolManifest` does today, so it is the expensive clause and not the cheap one. Two of these
+clauses are already enforced by other means and would be redundant: `dataClassification` is
+the `dataFloor` fold above, and `allowedSideEffects` is the `classFloor` fold.
+
+`demotionTriggers` listed **E11** until this edit. E11 is D7.7's own designed-not-built row
+— `run/escalation.ts` declares `ESCALATION_RULES` with codes E1…E10 and stops — so the
+envelope was arming a rule that does not exist, four hundred lines below the note saying so.

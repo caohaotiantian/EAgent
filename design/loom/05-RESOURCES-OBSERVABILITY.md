@@ -8,7 +8,7 @@
 
 | Kind | Content | Schema-validated at publish | Immutable | Consumed by |
 |---|---|---|---|---|
-| `prompt` | Templated text + declared variables + a rendering contract | yes | yes | agent, evaluator, router(model), gate payload |
+| `prompt` | Templated text + declared variables + a rendering contract | yes | yes | agent, evaluator, gate payload — **not** `router`, whose `mode: model` is refused at compile (**D5.1**) |
 | `agent_profile` | Persona ref, model policy + fallback chain, tool allowlist, context budget, `maxTurns`, oversight defaults | yes | yes | `AgentFactory` |
 | `graph` | A `GraphSpec` | yes (every rule in **D5.6** — `GRAPH000`–`GRAPH021` today, and the table there is the list) | yes | `GraphCompiler` |
 | `subgraph` | A `GraphSpec` with declared `inputs`/`outputs` mappings | yes | yes | `subgraph` nodes |

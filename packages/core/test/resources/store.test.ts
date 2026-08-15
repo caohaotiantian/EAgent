@@ -149,6 +149,66 @@ test("ROLLBACK MOVES @stable, so the evolution engine may not do it either", () 
   assert.equal(s.resolve("prompt/p@stable")?.digest, v2.digest, "the selector did not move");
 });
 
+test("THE DENY-LIST IS THE STORE'S, NOT THE CALLER'S — an omitted `denied` is not an empty one", () => {
+  // `PolicyActor.denied` rides on the object being authorized, so reading it alone asks the
+  // subject whether the subject is allowed. The two tests above only ever spread
+  // `EVOLUTION_ACTOR`, which CARRIES the list — so they proved the guard works for a caller
+  // that volunteers its own denial. Nothing made a caller volunteer it: a hand-built literal
+  // naming the same identity and simply leaving the field off was on no deny-list at all,
+  // and both doors onto `@stable` opened.
+  const s = store();
+  const v1 = s.publish({ kind: "prompt", name: "p", content: { text: "v1" }, actor: HUMAN });
+  s.promote(v1, "canary", HUMAN);
+  s.promote(v1, "stable", HUMAN);
+  const v2 = s.publish({ kind: "prompt", name: "p", content: { text: "v2" }, actor: HUMAN });
+  s.promote(v2, "canary", HUMAN);
+  s.promote(v2, "stable", HUMAN);
+
+  const forged: PolicyActor = { kind: "human", id: EVOLUTION_ACTOR.id };
+  assert.equal(forged.denied, undefined, "the whole point: the actor asserts nothing about itself");
+
+  assert.throws(
+    () => s.rollback("prompt", "p", 1, forged),
+    (e: unknown) => (e as { code: string }).code === "E_OVERSIGHT_LOOSEN_FORBIDDEN",
+    "rollback writes @stable",
+  );
+  assert.equal(s.resolve("prompt/p@stable")?.digest, v2.digest, "the selector did not move");
+
+  const v3 = s.publish({ kind: "prompt", name: "p", content: { text: "v3" }, actor: HUMAN });
+  s.promote(v3, "canary", HUMAN);
+  assert.throws(
+    () => s.promote(v3, "stable", forged),
+    (e: unknown) => (e as { code: string }).code === "E_OVERSIGHT_LOOSEN_FORBIDDEN",
+    "and so does promotion — the two doors must agree",
+  );
+  assert.equal(s.resolve("prompt/p@stable")?.digest, v2.digest, "still did not move");
+});
+
+test("a deny-list the embedder supplies is UNIONED with the built-in one, never substituted", () => {
+  // Supplying the map is how a deployment denies an identity of its own; it must not be a
+  // way to un-deny the one the codebase already declares. `{"evolution-engine": []}` is the
+  // shortest spelling of that attempt.
+  const s = new ResourceStore({
+    now: () => 1_700_000_000_000,
+    deniedActors: { "evolution-engine": [], "u:contractor": ["resource:promote(stable)"] },
+  });
+  const v1 = s.publish({ kind: "prompt", name: "p", content: { text: "v1" }, actor: HUMAN });
+  s.promote(v1, "canary", HUMAN);
+
+  assert.throws(
+    () => s.promote(v1, "stable", { kind: "human", id: EVOLUTION_ACTOR.id }),
+    (e: unknown) => (e as { code: string }).code === "E_OVERSIGHT_LOOSEN_FORBIDDEN",
+    "an empty supplied list does not un-deny the built-in identity",
+  );
+  assert.throws(
+    () => s.promote(v1, "stable", { kind: "human", id: "u:contractor" }),
+    (e: unknown) => (e as { code: string }).code === "E_OVERSIGHT_LOOSEN_FORBIDDEN",
+    "and a supplied identity is denied on the store's word alone",
+  );
+  s.promote(v1, "stable", HUMAN);
+  assert.equal(s.resolve("prompt/p@stable")?.digest, v1.digest, "an actor on no list still promotes");
+});
+
 test("listing is ordered by code unit, not by the machine's collation", () => {
   // `localeCompare` is locale- and ICU-dependent: two machines would page a resource
   // list in different orders, and a cursor over that list would skip or repeat rows.

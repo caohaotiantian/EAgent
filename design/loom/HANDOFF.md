@@ -1448,8 +1448,13 @@ worker is what actually strands a join under multi-process workers and a timer w
 against a task nobody is running. **Reversal is written into `spec.ts`**: when the deadline
 lands, the field becomes required again, `E_JOIN_TIMEOUT` leaves `NEVER_RAISED`, and this
 paragraph goes with it. `JoinNode.drain` was deleted outright for the same reason with none
-of the nuance — the runtime always behaved as `drain: false`, so the value that lied was the
-default.
+of the nuance. It meant *keep non-arriving branches running after the join fires*, and the
+runtime does exactly that, unconditionally: a short-circuiting `any` or `quorum` join fires
+and the stragglers run to completion with no `task.cancelled` appended anywhere (C1). Its
+default was `drain: false`, so **the DEFAULT was the value that lied** — every graph that
+never mentioned the field asked for cancellation and got none. A field whose only honest
+value is the one nobody writes cannot be salvaged by refusing the other one; it returns with
+straggler cancellation, in one change.
 
 **B6 · Hooks are declared, validated by the compiler, pinned by the resolver, and never
 invoked.** Which is also why `hook.applied` has no appender (C1).
@@ -1666,18 +1671,25 @@ Closing it is a recorded clock effect plus a seeded PRNG in the sandbox context,
 point `ABSENT_CONTEXT_METHODS` in `docs-drift.test.ts` goes red and tells you which
 paragraphs to rewrite. **Do not "fix" this by adding a `ctx.effect` that wraps nothing.**
 
-**D12 · No test kills a process.** Durable suspension across a restart is a shipped path —
-the multi-process decision made it one — and every "restart" test in the tree is
-`close()`-then-reopen in one process. Census: only `cli/cli.test.ts` and
-`sandbox/subprocess.test.ts` spawn anything, and neither has a run, a gate or a resume. The
-missing test is bounded and was written out of tree: spawn a child that advances the skeleton
-to its gate and hangs, `SIGKILL` it, **assert `journal.db-wal` and `journal.db-shm` are on
-disk** — that assertion is the point, because it is what distinguishes this from a clean
-close — then spawn a second process, `attach`, approve, and assert `succeeded` with the
-deferred write executed once. It passed in 254 ms, so there is no cost argument. The fixture
-must be a `.child.ts` so the `packages/*/test/**/*.test.ts` glob does not run it directly,
-and both the `rmSync` and a `SIGKILL` of the child belong in a `finally`, so a regression
-costs a failed test rather than a hung suite. `99-DOD.md` row 3.1 points here.
+**D12 · A test now kills a process. CLOSED 2026-08-15 (`2d4baf1`).** This entry read "No test
+kills a process", and it was true until the fixture it describes landed in tree:
+`test/run/restart-crash.test.ts` plus `test/run/restart-crash.child.ts`. The child advances
+the skeleton to its gate and announces `gated` **after** the raising append has returned, so
+the kill is ordered by a message rather than by a timer; the parent `SIGKILL`s it, asserts the
+exit *signal* was `SIGKILL` — killed, not asked to stop — and asserts `journal.db-wal` and
+`journal.db-shm` are still on disk. That pair is the whole point: a clean `close()` is the
+last WAL connection, so it checkpoints and removes both, and every earlier "restart" test read
+a tidied file. A second process then opens the store, `attach`es, recovers `awaiting_gate`
+with the same open `gateId`, approves, and asserts the deferred `fs.write` ran exactly once. A
+sibling test performs the clean close as the control, so the `-wal` assertion is pinning
+something rather than restating a default. The shape held: the fixture is a `.child.ts` so the
+`packages/*/test/**/*.test.ts` glob does not run it directly, and both the `rmSync` and a
+`SIGKILL` of the child sit in a `finally`, so a regression costs a failed test and not a hung
+suite.
+
+**`99-DOD.md` row 3.1 still says "No such test exists" and points here.** That row is now
+stale in the other direction and is not this file's to edit; it needs the same correction, and
+until it gets one the corpus asserts both.
 
 ### E · Process and build state
 
