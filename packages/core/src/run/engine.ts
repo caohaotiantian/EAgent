@@ -305,6 +305,13 @@ interface RunContext {
   readonly escalationWrites: Promise<unknown>[];
   /** Has the journal's oversight and spend been folded back into `policy` yet? */
   policySeeded: boolean;
+  /**
+   * TaskId → the seq of the lease this process holds.
+   *
+   * Presented on the commit so the store can refuse a worker whose lease another process
+   * has since taken. Cleared on commit, so it does not grow with the run.
+   */
+  readonly leases: Map<TaskId, number>;
   readonly log: RunLog;
   readonly policy: PolicyEngine;
   readonly abort: AbortController;
@@ -1179,6 +1186,7 @@ export class Engine {
       warnedBudget: false,
       escalationWrites: [],
       policySeeded: false,
+      leases: new Map(),
     };
     this.#runs.set(runId, ctx);
     return ctx;
@@ -1289,7 +1297,15 @@ export class Engine {
     // Work in parallel …
     const outcomes = await Promise.all(
       wave.map(async (w) => {
-        await this.#serialize(() =>
+        // THE TOKEN IS THE SEQ OF THE LEASE ITSELF.
+        //
+        // `#fencing` was a per-process counter, which cannot fence anything across
+        // processes: a second worker starts at 1 and loses to the first's `max_token`, so
+        // arming it as-was would raise `E_FENCING_STALE` at the LEGITIMATE worker. The
+        // journal's seq is the only monotonic source every process already shares — the
+        // store's compare-and-set assigns it — so the lease's own seq is the token, and a
+        // re-lease by another worker necessarily gets a higher one.
+        const leasedAt = await this.#serialize(() =>
           ctx.log.append(
             [
               {
@@ -1302,6 +1318,7 @@ export class Engine {
             { taskId: w.task.taskId },
           ),
         );
+        ctx.leases.set(w.task.taskId, leasedAt);
         try {
           return { w, outcome: await this.#executeTask(ctx, w) };
         } catch (e) {
@@ -2693,7 +2710,16 @@ export class Engine {
     // task ready" would otherwise strand the run with nothing runnable.
     events.push(...this.#activate(ctx, p, w, take, outcome, outcome.status === "failed" ? "failed" : "succeeded"));
 
-    await ctx.log.commit(p.seq, events, { taskId: w.task.taskId });
+    // PRESENT THE LEASE. The store refuses an append whose token is below the highest it
+    // has seen for this Task, so a worker whose lease another process has taken cannot
+    // commit over it. Without this the fence was inert: the token was minted, journaled,
+    // and never shown to the thing that checks it, so `E_LEASE_LOST` had no thrower.
+    const token = ctx.leases.get(w.task.taskId);
+    await ctx.log.commit(p.seq, events, {
+      taskId: w.task.taskId,
+      ...(token === undefined ? {} : { fencingToken: token }),
+    });
+    ctx.leases.delete(w.task.taskId);
   }
 
   /**
