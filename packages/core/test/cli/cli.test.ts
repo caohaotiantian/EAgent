@@ -105,9 +105,14 @@ test("DoD 6 — an EMPTY directory becomes a working workspace with no external 
       assert.equal(existsSync(join(d.dir, ".loom", "journal.db")), true, "the journal exists after boot");
       assert.equal(existsSync(join(d.dir, "graphs")), true);
       // Built-in tools are registered, so a fresh install can run a real graph.
+      //
+      // What is ABSENT matters as much as what is present: `net.fetch` and `proc.exec` are
+      // both opt-in and neither `--egress` nor `--allow-exec` was passed, so an empty
+      // directory becomes a workspace that can read, search and edit its own files and
+      // reach nothing else. That is the intended shape of "no external service".
       assert.deepEqual(
         ws.engine.tools.list().map((t) => t.name).sort(),
-        ["fs.read", "fs.restore", "fs.write"],
+        ["fs.edit", "fs.glob", "fs.grep", "fs.read", "fs.restore", "fs.write"],
       );
     } finally {
       ws.close();

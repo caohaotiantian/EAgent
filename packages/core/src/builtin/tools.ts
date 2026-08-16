@@ -32,6 +32,8 @@ import { dirname, join, resolve } from "node:path";
 import { CODES, err } from "../errors.ts";
 import { encodeBranch, parseTaskId } from "../ids.ts";
 import { assertWithin, runSandboxed } from "../sandbox/subprocess.ts";
+import { locateEdit } from "./edit-match.ts";
+import { globToRegExp, walk } from "./search-match.ts";
 import type { ToolContext, ToolDefinition } from "../run/registry.ts";
 
 export interface BuiltinOptions {
@@ -203,7 +205,7 @@ function writeLeaf(path: string, body: string): void {
 }
 
 export function builtinTools(opts: BuiltinOptions): readonly ToolDefinition[] {
-  const tools: ToolDefinition[] = [fsRead(opts), fsWrite(opts)];
+  const tools: ToolDefinition[] = [fsRead(opts), fsWrite(opts), fsEdit(opts), fsGlob(opts), fsGrep(opts)];
   if ((opts.egressAllowlist ?? []).length > 0) tools.push(netFetch(opts));
   if ((opts.execAllowlist ?? []).length > 0) tools.push(procExec(opts));
   return tools;
@@ -429,6 +431,342 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
         // of it — the same rule `net.fetch` follows for the host that answered.
         details: { path: rel, bytes: String(args["body"]).length, previous, at: path },
         writes: { written: { path: rel, bytes: String(args["body"]).length } },
+      };
+    },
+  };
+}
+
+/**
+ * Replace a span in a file, without making the model reproduce the parts it is not changing.
+ *
+ * `fs.write` is the only edit primitive Loom had, and for editing it is the wrong one: it
+ * costs output tokens proportional to the FILE rather than to the change, and it fails by
+ * silently dropping whatever the model paraphrased on the way through. This is the primitive
+ * an agent actually needs, and its one hard problem is that a model reconstructs `find` from
+ * memory and gets the whitespace wrong — which `locateEdit` answers by relaxing whitespace
+ * and escaping and nothing else.
+ *
+ * THE THREE REFUSALS ARE THE FEATURE. `ambiguous` (the span occurs twice), `disproportionate`
+ * (the located span is far larger than what was asked for) and `not-found` all change
+ * nothing and say so. A fuzzy-match edit tool that guesses is how a change lands in the
+ * wrong function, and the file it lands in is one the human asked it to be careful with.
+ *
+ * `reversible_write` with `fs.restore` as its compensation, on the same terms as `fs.write`:
+ * the prior content is captured BEFORE the write, because a declared compensation that
+ * cannot actually compensate is worse than none.
+ *
+ * Reads through `readPath` (branch overlay, then workspace) and writes through `writePath`
+ * (branch only). That asymmetry is inherited deliberately: an edit in a fan-out branch sees
+ * the shared file if it has not touched it yet, and its result is visible to nobody else.
+ */
+function fsEdit(opts: BuiltinOptions): ToolDefinition {
+  return {
+    name: "fs.edit",
+    version: "1.0",
+    description:
+      "Replace an exact span of a UTF-8 text file. Whitespace and escaping are matched leniently; " +
+      "the edit is REFUSED if the span is ambiguous, disproportionate, or absent.",
+    // Both, and the read half is not incidental: the ladder needs the current bytes to
+    // locate the span, so this tool reads every file it writes.
+    capabilities: ["fs:read", "fs:write"],
+    irreversibility: "reversible_write",
+    // A second identical edit finds `find` already replaced and refuses with `not-found`.
+    // That is a refusal rather than a no-op, so re-running is not free and this is false.
+    idempotent: false,
+    compensation: { tool: "fs.restore" },
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path relative to the workspace root." },
+        find: { type: "string", description: "The exact text to replace." },
+        replace: { type: "string", description: "What to put in its place." },
+        replaceAll: { type: "boolean", default: false, description: "Replace every occurrence rather than refusing an ambiguous one." },
+      },
+      required: ["path", "find", "replace"],
+    },
+    execute: (args, ctx) => {
+      const rel = String(args["path"]);
+      const find = String(args["find"]);
+      const replace = String(args["replace"]);
+      const replaceAll = args["replaceAll"] === true;
+
+      // OUTSIDE the try, exactly as `fs.read` does it. `assertWithin` throws
+      // `E_CAP_DENIED`, and that is a containment refusal, not a failed read: catching it
+      // here would hand the model an ordinary tool error it is free to retry with a
+      // different spelling, and would report a jail escape as a missing file.
+      const readFrom = readPath(opts, ctx, rel);
+      const path = writePath(opts, ctx, rel);
+
+      let current: string;
+      let fd: number | undefined;
+      try {
+        fd = openLeaf(readFrom, constants.O_RDONLY);
+        current = readFileSync(fd, "utf8");
+      } catch (e) {
+        return { content: `cannot read ${rel}: ${(e as Error).message}`, isError: true };
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+      }
+
+      const match = locateEdit(current, find, replaceAll);
+      // `locateEdit` enforces uniqueness on its RELAXED rungs but not on the exact one —
+      // it reports `{kind: "exact", count}` for a span occurring any number of times. Left
+      // unchecked, `String.replace` then edits the FIRST occurrence and reports success,
+      // which is the silent partial edit this tool exists to make impossible. The count is
+      // right there in the result; refusing on it costs one line.
+      if (match.kind === "exact" && match.count > 1 && !replaceAll) {
+        return {
+          content:
+            `fs.edit: the text occurs ${String(match.count)} times in ${rel} — ` +
+            `give more surrounding context, or pass replaceAll`,
+          isError: true,
+        };
+      }
+      if (match.kind === "not-found") {
+        return { content: `fs.edit: no match for the given text in ${rel}`, isError: true };
+      }
+      if (match.kind === "ambiguous") {
+        return {
+          content: `fs.edit: the text matches more than one place in ${rel} — give more surrounding context, or pass replaceAll`,
+          isError: true,
+        };
+      }
+      if (match.kind === "disproportionate") {
+        return {
+          content: `fs.edit: the closest match in ${rel} is far larger than the text given, so it is refused rather than guessed`,
+          isError: true,
+        };
+      }
+
+      const span = match.span;
+      const updated = replaceAll ? current.split(span).join(replace) : current.replace(span, replace);
+      const occurrences = replaceAll ? current.split(span).length - 1 : 1;
+
+      // The write goes to the BRANCH path even though the read may have come from the
+      // workspace. That is the overlay working as designed: the branch gets its own copy
+      // carrying the edit, and the shared file is untouched.
+      mkdirSync(dirname(path), { recursive: true });
+      // Captured from the WRITE path, not from `current`: on the first edit in a branch
+      // `current` came from the shared workspace file, and restoring that content to the
+      // branch path would fabricate a file that never existed there.
+      let previous: string | undefined;
+      let prevFd: number | undefined;
+      try {
+        prevFd = openLeaf(path, constants.O_RDONLY);
+        previous = readFileSync(prevFd, "utf8");
+      } catch {
+        previous = undefined;
+      } finally {
+        if (prevFd !== undefined) closeSync(prevFd);
+      }
+
+      writeLeaf(path, updated);
+      return {
+        content: `edited ${rel} (${match.kind}${match.kind === "relaxed" ? `: ${match.strategy}` : ""}, ${String(occurrences)} occurrence${occurrences === 1 ? "" : "s"})`,
+        details: { path: rel, match: match.kind, occurrences, bytes: updated.length, previous, at: path },
+        writes: { written: { path: rel, bytes: updated.length } },
+      };
+    },
+  };
+}
+
+/** Results past this are dropped, and the drop is stated in the content. */
+const SEARCH_RESULT_CAP = 100;
+
+/** Bytes of any one file `fs.grep` will scan. A match past it is not found, and says so. */
+const GREP_FILE_CAP = 1_000_000;
+
+/**
+ * Where a SEARCH looks: the branch's own files shadowing the workspace's, same as a read.
+ *
+ * `readPath` gives one file that answer; a search has to give it to a whole tree. The
+ * traversal therefore runs twice — the branch directory, then the workspace — and a relative
+ * path found in both is reported once, from the branch. `.branches` is skipped in the
+ * workspace pass, or every branch would see every sibling's working files under a path that
+ * is real but that no graph ever asked for.
+ */
+function searchRoots(opts: BuiltinOptions, ctx: ToolContext): { deny: readonly string[]; roots: { base: string; from: string }[] } {
+  const deny = resolvedDeny(opts);
+  const branch = branchRoot(opts.root, deny, ctx);
+  const roots: { base: string; from: string }[] = [];
+  if (branch !== undefined && existsSync(branch)) roots.push({ base: branch, from: branch });
+  roots.push({ base: opts.root, from: opts.root });
+  return { deny, roots };
+}
+
+/** Walk every search root, yielding each relative path once, branch shadowing workspace. */
+function eachFile(
+  opts: BuiltinOptions,
+  ctx: ToolContext,
+  sub: string | undefined,
+  visit: (rel: string, abs: string) => void,
+  shouldStop: () => boolean,
+): void {
+  const { deny, roots } = searchRoots(opts, ctx);
+  const seen = new Set<string>();
+  for (const { base, from } of roots) {
+    if (shouldStop()) return;
+    // The sub-path is confined against the ROOT it will be walked under, so `..` cannot
+    // step from the branch directory into the workspace or out of either.
+    let start: string;
+    try {
+      start = sub === undefined || sub === "." ? base : assertWithin(base, sub, deny);
+    } catch {
+      // A sub-path that does not exist under this root simply contributes nothing; the
+      // other root may still have it. A genuine escape throws from the caller's own
+      // `assertWithin` below, which runs before this.
+      continue;
+    }
+    walk(
+      start,
+      from,
+      { deny, ...(from === opts.root ? { skipDirs: [BRANCH_DIR] } : {}) },
+      (rel, abs) => {
+        if (seen.has(rel)) return;
+        seen.add(rel);
+        visit(rel, abs);
+      },
+      shouldStop,
+    );
+  }
+}
+
+function fsGlob(opts: BuiltinOptions): ToolDefinition {
+  return {
+    name: "fs.glob",
+    version: "1.0",
+    description: "Find files by glob pattern (e.g. src/**/*.ts), relative to the workspace root.",
+    capabilities: ["fs:read"],
+    irreversibility: "read_only",
+    idempotent: true,
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Glob matched against root-relative POSIX paths. `**` spans directories." },
+        path: { type: "string", description: "Subdirectory to search. Defaults to the workspace root." },
+      },
+      required: ["pattern"],
+    },
+    execute: (args, ctx) => {
+      const sub = args["path"] === undefined ? undefined : String(args["path"]);
+      // Outside any try: an escape here is a containment refusal, not an empty result.
+      if (sub !== undefined) assertWithin(opts.root, sub, resolvedDeny(opts));
+
+      const re = globToRegExp(String(args["pattern"]));
+      const matches: string[] = [];
+      let capped = false;
+      eachFile(
+        opts,
+        ctx,
+        sub,
+        (rel) => {
+          if (!re.test(rel)) return;
+          if (matches.length >= SEARCH_RESULT_CAP) {
+            capped = true;
+            return;
+          }
+          matches.push(rel);
+        },
+        () => capped,
+      );
+      matches.sort();
+      return {
+        content:
+          matches.length === 0
+            ? "(no matches)"
+            : capped
+              ? `${matches.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} files; narrow the pattern to see more)`
+              : matches.join("\n"),
+        details: { pattern: String(args["pattern"]), count: matches.length, truncated: capped },
+      };
+    },
+  };
+}
+
+/**
+ * Grep, with the regex compiled from the model's string.
+ *
+ * `new RegExp(userInput)` is normally a red flag, and the reason it is acceptable here is
+ * narrow and worth stating: the input is already trusted to the extent that this process
+ * runs whatever tools the graph declared, and the cost of a pathological pattern is bounded
+ * by the file cap and the result cap rather than unbounded. An invalid pattern is a tool
+ * error, not a throw — a model that wrote a bad regex should be told so and allowed to fix
+ * it, which is the one case where returning `isError` beats raising.
+ */
+function fsGrep(opts: BuiltinOptions): ToolDefinition {
+  return {
+    name: "fs.grep",
+    version: "1.0",
+    description: "Search file contents by regular expression. Returns path:line:text, read-only.",
+    capabilities: ["fs:read"],
+    irreversibility: "read_only",
+    idempotent: true,
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "JavaScript regular expression." },
+        path: { type: "string", description: "Subdirectory to search. Defaults to the workspace root." },
+        include: { type: "string", description: "Only search files whose path matches this glob." },
+        ignoreCase: { type: "boolean", default: false },
+      },
+      required: ["pattern"],
+    },
+    execute: (args, ctx) => {
+      const sub = args["path"] === undefined ? undefined : String(args["path"]);
+      if (sub !== undefined) assertWithin(opts.root, sub, resolvedDeny(opts));
+
+      let re: RegExp;
+      try {
+        re = new RegExp(String(args["pattern"]), args["ignoreCase"] === true ? "i" : "");
+      } catch (e) {
+        return { content: `fs.grep: invalid pattern — ${(e as Error).message}`, isError: true };
+      }
+      const include = args["include"] === undefined ? undefined : globToRegExp(String(args["include"]));
+
+      const hits: string[] = [];
+      let capped = false;
+      eachFile(
+        opts,
+        ctx,
+        sub,
+        (rel, abs) => {
+          if (include !== undefined && !include.test(rel)) return;
+          let text: string;
+          try {
+            // Bounded before it is scanned: a multi-gigabyte file in the workspace must
+            // narrow the results, not exhaust the process.
+            const fd = openLeaf(abs, constants.O_RDONLY);
+            try {
+              text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
+            } finally {
+              closeSync(fd);
+            }
+          } catch {
+            return;
+          }
+          // A NUL in the first chunk means binary; scanning it produces noise, not matches.
+          if (text.includes("\u0000")) return;
+          const lines = text.split("\n");
+          for (const [i, line] of lines.entries()) {
+            if (!re.test(line)) continue;
+            if (hits.length >= SEARCH_RESULT_CAP) {
+              capped = true;
+              return;
+            }
+            hits.push(`${rel}:${String(i + 1)}:${line.slice(0, 400)}`);
+          }
+        },
+        () => capped,
+      );
+
+      return {
+        content:
+          hits.length === 0
+            ? "(no matches)"
+            : capped
+              ? `${hits.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} matches; narrow the search to see more)`
+              : hits.join("\n"),
+        details: { pattern: String(args["pattern"]), count: hits.length, truncated: capped },
       };
     },
   };
