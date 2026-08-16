@@ -3264,21 +3264,18 @@ export class Engine {
       join.branches.some((bn) => bn === nodeId || (ctx.index.ancestors.get(bn as NodeId)?.has(nodeId) ?? false));
 
     // This Task's own hand-off is not in `p` yet, so read it from `take`.
-    if (take.some((id) => {
+    const handingOff = take.some((id) => {
       const to = ctx.index.edgeById.get(id)?.to;
       return to !== undefined && reachesMember(to);
-    })) {
-      return undefined;
-    }
-
-    const stillComing = Object.values(p.tasks).some((t) => {
+    });
+    const stillLive = Object.values(p.tasks).some((t) => {
       if (t.taskId === w.task.taskId) return false;
       if (isTerminalState(t.state)) return false;
       const b = encodeBranch(t.branch);
       if (!(b === parentPath || isDescendantBranch(parentPath, b))) return false;
       return reachesMember(t.nodeId);
     });
-    if (stillComing) return undefined;
+    const quiescent = !handingOff && !stillLive;
 
     let succeeded = 0;
     let terminal = 0;
@@ -3289,17 +3286,27 @@ export class Engine {
       if (isTerminalState(state)) terminal++;
     }
 
+    // QUIESCENCE GATES THE "NO" ANSWERS, NOT THE "YES" ONES.
+    //
+    // A mode that short-circuits does so on EVIDENCE ALREADY IN HAND — one success is one
+    // success whether or not siblings are still running, and that is the whole reason to
+    // ask for `any` rather than `all`. Only the conclusions that rest on ABSENCE need
+    // quiescence: "every branch is in" and "the quorum can no longer be met" are both
+    // claims about arrivals that will never come, and both were wrong before, because
+    // `terminal >= expected` counted what had arrived rather than asking whether more
+    // could. Gating the whole decision instead of just those two collapsed `any`,
+    // `firstSuccess` and `quorum` into `all`: they released at exactly the same point.
     const fire = (() => {
       switch (join.mode) {
         case "all":
-          return terminal >= expected;
+          return quiescent && terminal >= expected;
         case "any":
         case "firstSuccess":
           return succeeded >= 1;
         case "quorum": {
           const k = join.k ?? 1;
           const need = k <= 1 ? Math.ceil(k * expected) : k;
-          return succeeded >= need || terminal >= expected;
+          return succeeded >= need || (quiescent && terminal >= expected);
         }
       }
     })();
