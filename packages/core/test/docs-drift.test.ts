@@ -1063,7 +1063,7 @@ const NEVER_RAISED: readonly string[] = [
   "E_GATE_REQUIRED",
   "E_INSUFFICIENT_COHORT",
   "E_JOIN_TIMEOUT", // D5 join timeouts: the spec field is honoured, the code is not used.
-  "E_LEASE_LOST", // the executor never arms the fence; see HANDOFF A2.
+  "E_LEASE_LOST", // the executor arms the fence on all three #commit exits now, and the STORE raises this; nothing in src/ raises it directly.
   "E_POLICY_UNAVAILABLE",
   "E_SECRET_UNAVAILABLE",
   "E_STORAGE_FULL",
@@ -1213,6 +1213,62 @@ test("every unappended event type is one this file can name a reason for", () =>
   const known = new Set<string>(EVENT_TYPES);
   const unknown = NEVER_APPENDED.map((e) => e.type).filter((t) => !known.has(t));
   assert.deepEqual(unknown, [], "pinned here, absent from EVENT_TYPES — the vocabulary moved under this list");
+});
+
+/**
+ * Escalation rules that exist in the ladder and that nothing raises.
+ *
+ * The same shape as `NEVER_RAISED` one level up, applied to a different vocabulary, and for
+ * the same reason: a declared-but-never-raised rule reads, from any single file, exactly
+ * like a rule that works. `escalation.ts` is a table of eleven and D7 presents them as the
+ * oversight ladder, so an operator reading D7 expects a posture bump this system will never
+ * perform.
+ *
+ * Two near-misses while writing this, both from grepping instead of asking the table, and
+ * both the argument for pinning the set mechanically:
+ *
+ *   - `mutation_introduced_irreversible` was going on the list until it turned out to BE
+ *     raised, through `ctx.policy.escalate` directly rather than through the `#escalate`
+ *     helper, so a grep for the helper missed it;
+ *   - `usage` was going on the list as an eleventh rule, and is not a rule at all — the
+ *     name was picked up from a different object literal in the same file.
+ *
+ * The table has ten entries and exactly one of them has no caller.
+ */
+const RULES_NEVER_RAISED: readonly { readonly id: string; readonly why: string }[] = [
+  {
+    id: "taint",
+    why: "the behaviour exists and this rule is a redundant second expression of it: PolicyEngine.decide bumps a tainted irreversible or externally_visible action to `in` compositionally and records it in policy.decided's reasons, which is stronger than a one-shot escalation because no caller can forget it",
+  },
+];
+
+test("EVERY ESCALATION RULE IS RAISED SOMEWHERE, except the ones pinned here", () => {
+  // A rule is raised if its id appears as a STRING LITERAL anywhere in `src/` outside the
+  // table that declares it. Deliberately loose in that direction and strict about comments:
+  // there are two spellings of a raise (`#escalate(ctx, "id")` and `policy.escalate(scope,
+  // to, "id")`), and a regex tight enough to match both without matching prose is a regex
+  // that will miss the third spelling somebody adds. Over-counting can only SHRINK this
+  // list, and shrinking it wrongly fails the assertion below rather than hiding a gap.
+  const raised = new Set<string>();
+  for (const file of sourceFiles()) {
+    if (file.endsWith("/run/escalation.ts")) continue; // the declaration is not a raise
+    const text = stripTsComments(readFileSync(file, "utf8"));
+    for (const id of Object.keys(ESCALATION_RULES)) if (text.includes(`"${id}"`)) raised.add(id);
+  }
+  const unraised = Object.keys(ESCALATION_RULES).filter((id) => !raised.has(id)).sort();
+  assert.deepEqual(
+    unraised,
+    RULES_NEVER_RAISED.map((e) => e.id).sort(),
+    "an escalation rule gained (or lost) its only caller — reconcile D7's ladder, then update this list",
+  );
+});
+
+test("every unraised escalation rule is one this file can name a reason for", () => {
+  const thin = RULES_NEVER_RAISED.filter((e) => e.why.length < 40).map((e) => e.id);
+  assert.deepEqual(thin, [], "say what stands in for the rule, or what would have to be built");
+  const known = new Set(Object.keys(ESCALATION_RULES));
+  const unknown = RULES_NEVER_RAISED.map((e) => e.id).filter((id) => !known.has(id));
+  assert.deepEqual(unknown, [], "pinned here, absent from the ladder — the table moved under this list");
 });
 
 test("GateDelivery.deliver raises WHAT ITS TAXONOMY ROW CLAIMS, checked by running it", () => {
