@@ -324,3 +324,108 @@ function hardTruncate(sections: readonly Section[], budget: number): Section[] {
 function total(sections: readonly Section[]): number {
   return sections.reduce((a, s) => a + s.tokens, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Bounding the turn transcript
+// ---------------------------------------------------------------------------
+
+/**
+ * Tokens a message costs on the wire, including the tool calls it carries.
+ *
+ * `Message.content` is not the whole message: an assistant turn that calls three tools
+ * carries their names and arguments in `toolCalls`, and those are sent. Counting only
+ * `content` reports an assistant message that requested a 40 kB argument as costing
+ * nothing, which is the shape of request this bound exists to catch.
+ */
+export function messageTokens(m: Message): number {
+  const calls = m.toolCalls === undefined ? 0 : estimateTokens(JSON.stringify(m.toolCalls));
+  return estimateTokens(m.content) + calls;
+}
+
+export interface BoundedTurns {
+  readonly messages: readonly Message[];
+  /** 0 when nothing was folded, 3 when the summarizer ran — the ladder's own numbering. */
+  readonly rung: 0 | 3;
+  /** How many of the original messages the summary replaced. 0 when `rung` is 0. */
+  readonly folded: number;
+  /** True when even the un-foldable tail exceeds the budget. Reported, never silent. */
+  readonly overBudget: boolean;
+}
+
+/**
+ * Keep an agent's own turn transcript inside the context budget.
+ *
+ * `assembleContext` bounds what a node is GIVEN. This bounds what it ACCUMULATES, and the
+ * two were never connected: `#runAgent` assembled once, before its turn loop, then pushed
+ * an assistant message and a tool result per turn into the same array it had already
+ * measured. Reproduced on an eight-turn loop with 16 kB tool results against a 2,000-token
+ * budget — the request that crossed the provider boundary was ~28,000 tokens, fourteen
+ * times the bound, with no rung fired and no `E_CONTEXT_OVERFLOW`. The failure arrives from
+ * the provider as a 400, after the spend.
+ *
+ * THE CUT IS ONLY EVER BEFORE AN ASSISTANT MESSAGE, and that is a correctness constraint
+ * rather than a nicety. A tool result is only meaningful beside the call that produced it;
+ * providers reject a `tool` message whose `tool_call_id` names a call no longer in the
+ * transcript. So the fold point walks forward to the next assistant boundary rather than
+ * cutting where the arithmetic happens to land — the same rule EAgent's `compact` reached
+ * by a different route, and the one thing its implementation got right that Loom's ladder
+ * did not have to think about while `turns` was always empty.
+ *
+ * `messages[0]` is the node's own instruction envelope and is never folded: it carries the
+ * prompt and the channel state, so folding it would summarise away the task itself.
+ *
+ * The summariser is an EFFECT in the caller, keyed per turn, so replay serves the same
+ * summary and this stays deterministic. A caller that passes no summariser gets the
+ * transcript back untouched with `overBudget` set — the bound is then a report, not a fix,
+ * which is the honest behaviour for a replay that has no provider.
+ */
+export async function boundTurns(
+  messages: readonly Message[],
+  maxTokens: number,
+  summarize?: (text: string) => Promise<string>,
+): Promise<BoundedTurns> {
+  const cost = (ms: readonly Message[]): number => ms.reduce((a, m) => a + messageTokens(m), 0);
+  if (cost(messages) <= maxTokens) return { messages, rung: 0, folded: 0, overBudget: false };
+  if (summarize === undefined || messages.length < 3) {
+    return { messages, rung: 0, folded: 0, overBudget: true };
+  }
+
+  // Candidate cut points, newest first: every assistant boundary after the envelope. The
+  // first one whose tail fits is the least we can fold, which keeps the most detail.
+  const boundaries: number[] = [];
+  for (let i = 1; i < messages.length; i++) if (messages[i]!.role === "assistant") boundaries.push(i);
+  if (boundaries.length === 0) return { messages, rung: 0, folded: 0, overBudget: true };
+
+  const envelope = messages[0]!;
+  let cut = boundaries[0]!;
+  for (let b = boundaries.length - 1; b >= 0; b--) {
+    const candidate = boundaries[b]!;
+    // The summary itself costs tokens; it is bounded by the summariser's own prompt, so a
+    // conservative reserve keeps the arithmetic honest rather than optimistic.
+    if (messageTokens(envelope) + SUMMARY_RESERVE_TOKENS + cost(messages.slice(candidate)) <= maxTokens) {
+      cut = candidate;
+      break;
+    }
+    cut = candidate;
+  }
+
+  const folded = messages.slice(1, cut);
+  if (folded.length === 0) return { messages, rung: 0, folded: 0, overBudget: true };
+
+  const summary = await summarize(folded.map((m) => `${m.role}: ${m.content}`).join("\n"));
+  const out: Message[] = [
+    envelope,
+    { role: "user", content: `[earlier turns, summarised]\n${summary}` },
+    ...messages.slice(cut),
+  ];
+  return { messages: out, rung: 3, folded: folded.length, overBudget: cost(out) > maxTokens };
+}
+
+/**
+ * Headroom left for the summary when choosing a cut point.
+ *
+ * The summariser is told "under 200 words"; 200 words is ~260 tokens, and the reserve is
+ * rounded up from there rather than fitted to it, because a model that overshoots its word
+ * limit must not be the thing that puts the request back over the budget.
+ */
+const SUMMARY_RESERVE_TOKENS = 400;

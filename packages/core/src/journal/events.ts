@@ -181,7 +181,26 @@ export interface EventPayloads {
   "channel.written": { readonly channel: string; readonly reducer: string; readonly valueDigest: string };
 
   // ── effects ──────────────────────────────────────────────────────────────
-  "effect.started": { readonly key: string; readonly kind: "model" | "tool" | "clock" | "random" | "mailbox"; readonly attempt: number };
+  /**
+   * `kind` must agree with the kind inside `key`. Two of the four sites did not.
+   *
+   * `effectKey(task, kind, ordinal)` builds `${task}:${kind}:${ordinal}`, and this union is
+   * what the event declares. They were separate lists that drifted: the subgraph effect
+   * keyed `subgraph` and declared `mailbox`, and the summariser keyed `summarize` and
+   * declared `model` — not by choice but because neither word was in this union, so the
+   * honest value would not typecheck. The consequence is not cosmetic: an auditor filtering
+   * `effect.started` by `kind` cannot find a single summarisation, and the telemetry span
+   * for a subgraph is named after a mailbox.
+   *
+   * `clock` and `random` remain declared and unappended — see CLAUDE.md invariant 4, which
+   * says so — and are kept here rather than removed because removing them would hide a gap
+   * that is better left visible.
+   */
+  "effect.started": {
+    readonly key: string;
+    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "clock" | "random" | "mailbox";
+    readonly attempt: number;
+  };
   "effect.completed": { readonly key: string; readonly result: unknown; readonly resultDigest: string };
   "effect.failed": { readonly key: string; readonly error: ErrorRecord };
   "model.called": {

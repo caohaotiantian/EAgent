@@ -687,7 +687,13 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     if (isEvent(e, "effect.started")) {
       const id = spanId(runId, "effect", e.payload.key);
       start(id, {
-        name: e.payload.kind === "model" ? "loom.model" : "loom.tool",
+        // `summarize` rides with `model` because it IS a model call — the journal now says
+        // so honestly, and this keeps the span taxonomy at the eight D9.1 documents rather
+        // than growing it as a side effect of correcting a durable field. The literals stay
+        // on this line on purpose: `docs-drift` reads a span name as a `loom.*` literal
+        // following `name:` ON THE SAME LINE, so a lookup table hides every one of them and
+        // the guard loses its ability to check the design against the code.
+        name: e.payload.kind === "model" || e.payload.kind === "summarize" ? "loom.model" : "loom.tool",
         kind: "client",
         start: ts,
         parent: taskSpan,

@@ -2922,3 +2922,56 @@ useful — that is, if the taken files cannot be made to work against `ToolDefin
 `ExtensionAPI` — then the subprocess seam is the fallback, and its two-binary cost is paid
 deliberately. That is the condition to watch during intake, and it fails file by file, not
 all at once.
+
+---
+
+## The context budget bounded a request the model was never sent
+
+Found while checking a vendoring survey's claim that `AssembleInput.turns` is never
+populated. It is not, and the consequence is larger than a dead field.
+
+`#runAgent` called `assembleContext` ONCE, before its turn loop, over `system`,
+`instruction` and `channels` — the smallest the request will ever be. The loop then pushed
+an assistant message and a tool result per turn into the same array that becomes
+`req.messages`. So the ladder measured a request the model is never sent, and the request
+the model IS sent was unmeasured.
+
+**Reproduced**: an eight-turn loop with 16 kB tool results against a 2,000-token budget sent
+~28,000 tokens — fourteen times the bound, no rung fired, no `E_CONTEXT_OVERFLOW`. In
+production that failure arrives from the provider as a 400, after the spend.
+
+Three defects were tangled here, and the second is why the first stayed invisible:
+
+1. The budget did not bound the transcript.
+2. `AssembleInput.turns` and `.retrieved` are declared and passed by nobody, so rung 3 — the
+   one rung that is a recorded Effect — operated on a section that was always empty. The
+   `summarize` effect kind invariant 4 names was unreachable in a live run.
+3. `#summarizeEffect` keyed on `effectKey(taskId, "summarize", 0)` — a FIXED ordinal. Safe
+   only while (2) meant it never ran twice; the moment folding happens per turn, every
+   summary in a task collides on one key and replay serves whichever was recorded last.
+
+**Decision.** `boundTurns` in `run/context.ts` folds the transcript per turn, and the cut is
+only ever *before* an assistant message. That is correctness, not tidiness: a `tool` message
+whose `tool_call_id` names a call no longer present is rejected by the provider, so the fold
+point walks to the next assistant boundary rather than cutting where the arithmetic lands.
+`messages[0]` — the instruction envelope — is never folded. The fold is in place, so a prefix
+summarised on turn 3 stays summarised on turn 4 rather than costing a model call per turn to
+recompute the same summary under a different key. A tail that alone exceeds the window raises
+`E_CONTEXT_OVERFLOW`, the same verdict `assembleContext` reaches for the same condition.
+
+**A second, independent defect found by the repro.** `MockModelAdapter.seen` pushed `req` by
+reference, and `#runAgent` mutates `req.messages` in place — so every test asserting about
+"the request at turn N" was reading the state at the LAST turn. First and last both reported
+28,022 tokens on a loop that demonstrably grew. Now snapshotted one level deep.
+
+**Rejected: adding `loom.subgraph` and `loom.summarize` spans.** Correcting the durable
+`kind` field tempted a matching telemetry change, which `docs-drift` correctly refused —
+it would have grown D9.1's span taxonomy from eight as a side effect of fixing a journal
+field. `summarize` rides with `model` in telemetry because it *is* a model call. The guard
+also taught the rule: it reads a span name as a `loom.*` literal following `name:` **on the
+same line**, so a lookup table hides every name from it. Kept inline.
+
+**Reverses when.** A model appears whose tool-result pairing rules differ enough that
+"cut before an assistant message" is no longer sufficient — then the boundary rule needs the
+provider's own constraint, and `boundTurns` needs to take it as an argument rather than
+assume it.

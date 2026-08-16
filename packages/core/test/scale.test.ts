@@ -99,11 +99,37 @@ test("a 500-node graph compiles well inside a second", () => {
   assert.ok(elapsed < 3000, `compile took ${elapsed.toFixed(0)} ms`);
 });
 
+/**
+ * Fastest of N runs.
+ *
+ * A single timing is not a measurement of the code, it is a measurement of the code plus
+ * whatever else the machine was doing. That distinction is the whole reason this test was
+ * flaky: it passed 5/5 in isolation and failed inside `npm test`, where the suite runs in
+ * parallel — a scheduler stall landing in the 500-node run while the 100-node run got a
+ * clean window reported "33.7×" for an algorithm that had not changed.
+ *
+ * The minimum is the right statistic because interference is one-directional: a run can be
+ * delayed by other work but never finish faster than the code allows. So min-of-N converges
+ * on the true cost from above as N grows, while a mean or a single shot carries the load of
+ * whatever else was running. `CLAUDE.md` asks tests not to depend on the wall clock; this
+ * one legitimately must, so it depends on the least clock-contaminated statistic available.
+ */
+function fastest(label: string, fn: () => void, runs = 5): number {
+  let best = Infinity;
+  for (let i = 0; i < runs; i++) {
+    const t0 = process.hrtime.bigint();
+    fn();
+    best = Math.min(best, Number(process.hrtime.bigint() - t0) / 1e6);
+  }
+  console.log(`    ${label}: ${best.toFixed(1)} ms (best of ${String(runs)})`);
+  return best;
+}
+
 test("compile scales sub-quadratically from 100 to 500 nodes", () => {
   // The real guard. A 5× node count under an O(n²) analysis would cost ~25×; the bound
   // below fails long before that while tolerating ordinary measurement noise.
-  const small = ms("compile 100 nodes", () => compileBig(bigSpec(10, 10)));
-  const big = ms("compile 500 nodes", () => compileBig(bigSpec(50, 10)));
+  const small = fastest("compile 100 nodes", () => compileBig(bigSpec(10, 10)));
+  const big = fastest("compile 500 nodes", () => compileBig(bigSpec(50, 10)));
   assert.ok(big < Math.max(small, 1) * 25, `100→500 nodes cost ${(big / Math.max(small, 0.01)).toFixed(1)}×`);
 });
 

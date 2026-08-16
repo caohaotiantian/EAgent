@@ -113,7 +113,15 @@ A file is not vendored until it satisfies the invariants. In particular:
 4. **Every nondeterministic call is journaled under a derived effect key.** The
    boundary is inside `Engine` — `effectKey(taskId, kind, ordinal)` from `src/ids.ts`,
    with `kind` one of `model`, `tool`, `subgraph`, `summarize` — and replay serves the
-   recorded result instead of calling out. **There is no `ctx.effect` and no
+   recorded result instead of calling out. **The kind in the key and the `kind` on
+   `effect.started` must agree**, and for two of the four sites they did not: the subgraph
+   effect keyed `subgraph` and declared `mailbox`, the summariser keyed `summarize` and
+   declared `model`. Not by choice — neither word was in the event's union, so the honest
+   value would not typecheck. An auditor filtering by `kind` therefore could not find a
+   single summarisation. The union is now the superset and the sites are honest.
+   `summarize`'s ordinal is the TURN: it was a literal `0`, which was invisible only while
+   the section it summarised was never populated (see below) and would otherwise collide
+   every summary in a task onto one key. **There is no `ctx.effect` and no
    `ctx.random`**: a node body is handed `{taskId, signal, now}` (`function`) or
    `{taskId, signal, progress}` (`tool`), and nothing else. Two gaps sit inside this
    invariant rather than outside it, so do not read it as a closed boundary: the clock

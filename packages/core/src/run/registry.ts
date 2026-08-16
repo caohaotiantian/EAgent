@@ -420,7 +420,20 @@ export class MockModelAdapter implements ModelAdapter {
   readonly provider: string;
   readonly #script: MockScript;
   readonly #pricePerMTok: number;
-  /** Every request seen, for assertions about context assembly. */
+  /**
+   * Every request seen, for assertions about context assembly.
+   *
+   * SNAPSHOTTED, not aliased. `#runAgent` builds one `messages` array before its turn loop
+   * and then MUTATES it in place — `messages.push(assistant)`, `messages.push(tool_result)`
+   * — while `ModelRequest.messages` holds that same array by reference. Pushing `req` here
+   * therefore recorded eight pointers to one array, and every assertion about "the request
+   * at turn N" read the state at the LAST turn instead. Measured on an eight-turn loop:
+   * first and last both reported 28,022 tokens, and a probe written to watch the transcript
+   * grow saw it flat.
+   *
+   * The copy is one level deep, which is exactly what this needs: `Message` is treated as
+   * immutable everywhere, and it is the ARRAY the loop mutates.
+   */
   readonly seen: ModelRequest[] = [];
 
   constructor(opts: { provider?: string; script: MockScript; pricePerMTok?: number }) {
@@ -431,7 +444,7 @@ export class MockModelAdapter implements ModelAdapter {
 
   async *stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
     if (signal.aborted) throw err.cancelled();
-    this.seen.push(req);
+    this.seen.push({ ...req, messages: [...req.messages] });
     // Per-conversation, not per-adapter: one prior assistant message means turn 1.
     const turnIndex = req.messages.filter((m) => m.role === "assistant").length;
     const turn = this.#script(req, turnIndex);

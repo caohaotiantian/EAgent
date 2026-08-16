@@ -64,7 +64,7 @@ import {
   type SequenceIndex,
 } from "./escalation.ts";
 import { validate, type JSONSchema } from "../schema.ts";
-import { assembleContext } from "./context.ts";
+import { assembleContext, boundTurns } from "./context.ts";
 import {
   foldPartial,
   reduceState,
@@ -1837,7 +1837,7 @@ export class Engine {
       },
     );
 
-    const messages: Message[] = [
+    let messages: Message[] = [
       {
         role: "user",
         content: JSON.stringify({
@@ -1852,6 +1852,30 @@ export class Engine {
     let finalText = "";
 
     for (let turn = 0; turn < maxTurns; turn++) {
+      // BOUND WHAT IS SENT, not merely what was assembled. `assembleContext` above ran
+      // once, before this loop, over the smallest the request will ever be; the loop then
+      // pushes an assistant message and a tool result per turn into the same array that
+      // becomes `req.messages`. Without this the budget describes a request the model is
+      // never sent. The fold is in-place because a prefix summarised on turn 3 must stay
+      // summarised on turn 4 — re-deriving it every turn would spend a model call per turn
+      // to compute the same summary under a different effect key.
+      const bounded = await boundTurns(messages, this.#contextTokens, (text) =>
+        this.#summarizeEffect(ctx, w, text, turn),
+      );
+      messages = [...bounded.messages];
+      if (bounded.overBudget) {
+        // The same verdict `assembleContext` reaches when its ladder cannot fit the
+        // sections, raised for the same reason and with the same code: a transcript whose
+        // un-foldable tail alone exceeds the window is not something a rung can repair.
+        // Raised HERE rather than left to the provider, because the provider's answer is a
+        // 400 that arrives after the request was paid for.
+        throw err.validation(
+          CODES.E_CONTEXT_OVERFLOW,
+          `node "${w.node.id}" turn ${String(turn)}: transcript is over the ${String(this.#contextTokens)} token budget after folding`,
+          { details: { node: w.node.id, turn, budget: this.#contextTokens, folded: bounded.folded } },
+        );
+      }
+
       const req: ModelRequest = {
         model: agent?.profile ?? "mock",
         system: `You are node ${w.node.id}.`,
@@ -2185,7 +2209,7 @@ export class Engine {
     await this.#serialize(() =>
       ctx.log.append(
         [
-          { type: "effect.started", payload: { key, kind: "mailbox", attempt: 1 }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
+          { type: "effect.started", payload: { key, kind: "subgraph", attempt: 1 }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
           {
             type: "effect.completed",
             payload: { key, result: { writes }, resultDigest: digest(writes) },
@@ -2288,8 +2312,19 @@ export class Engine {
     return compiled;
   }
 
-  async #summarizeEffect(ctx: RunContext, w: Wave, text: string): Promise<string> {
-    const key = effectKey(w.task.taskId, "summarize", 0);
+  /**
+   * `ordinal` is the TURN, not a constant.
+   *
+   * This keyed on a literal `0` while it had exactly one call site — `assembleContext`'s
+   * rung 3, called once before the turn loop. That was safe only because the section it
+   * summarised (`turns`) was never populated, so it never actually ran. The moment a
+   * transcript is folded per turn, a fixed ordinal makes every summary in a task collide on
+   * one key: the last write wins, and replay serves that one summary for every turn that
+   * asked for a different one. Invariant 3 is the general form — a key that does not
+   * distinguish two calls is not derived, it is merely stable.
+   */
+  async #summarizeEffect(ctx: RunContext, w: Wave, text: string, ordinal = 0): Promise<string> {
+    const key = effectKey(w.task.taskId, "summarize", ordinal);
     if (this.#replay !== undefined) return String(this.#replay.require(key).result);
 
     const adapter = this.models.require();
@@ -2309,7 +2344,7 @@ export class Engine {
     await this.#serialize(() =>
       ctx.log.append(
         [
-          { type: "effect.started", payload: { key, kind: "model", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+          { type: "effect.started", payload: { key, kind: "summarize", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
           { type: "effect.completed", payload: { key, result: summary, resultDigest: digest(summary) }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
         ],
         { taskId: w.task.taskId },
