@@ -2860,3 +2860,65 @@ to that coupling doubles it.
 **Reverses when.** The `loom.*` literals move out of `spans.ts` on purpose — into a constants
 module, or a second tracer. The premise test is the one that fails first, and it names the two
 choices rather than a fix, because either is defensible.
+
+---
+
+## Vendoring EAgent: Loom becomes a monorepo
+
+**Maintainer decision, 2026-08-16.** EAgent's source is taken into this repo rather than
+referenced. `init` stays frozen at `eagent-v1` and `../eagent-ref` stays readable; vendored
+files are copies carrying a provenance header, fixed on the way in.
+
+Three seams were considered and two are recorded as refuted, because they are the obvious
+ideas and will otherwise be proposed again.
+
+**Hosted kernel** — Loom injects adapter implementations into EAgent's four registries
+(`tools`, `providers`, `hooks`, `capabilities`), which `AgentOptions` accepts. Refuted four
+ways, each verified: `ctx.effect` does not exist and invariant 4 says so in bold, yet the
+plan routed the provider seam through it; the four registries carry `#private` fields, so
+TypeScript types them *nominally* and no structural adapter can be passed at all;
+`@eagent/core` is not installable — no committed `dist/`, 404 on npm, `../eagent-ref` absent
+in CI, so every phase's `npm run check` was unreachable; and `#invokeTool`, `#runAgent`,
+`#gates` are `#`-private with `#dispatch` a hard-coded switch on `NodeType`, so all four
+adapters needed new public seams and "core is untouched by construction" — the plan's own
+strongest argument — was false.
+
+**Subprocess** — exec `eagent-headless --json` under `runSandboxed`. This one worked: it
+preserved every invariant, needed no new machinery (`sandbox/subprocess.ts:552` is already
+public and hardened), and EAgent already speaks JSONL on stdout by design (`cli.ts:147`).
+It was rejected on cost, not correctness. `scripts/build-binary.mjs:35` bundles
+`packages/core/dist/cli.js` only, so the SEA binary cannot contain EAgent — a deployment
+using it is two binaries. And Loom cannot gate a subprocess's individual tool calls, so an
+EAgent node's posture floor would have to be the `max` over the whole class table.
+
+**Decision.** Vendor the source. It is the only option that permits *fixing* what is taken,
+and the fixes are the point: three tool-dispatch paths merge into one, `jiti` goes away, the
+parameter property at `capabilities.ts:27` becomes assignments, and nondeterminism comes off
+the recorded paths.
+
+**What is NOT vendored: the loop.** Two independent plan reviews converged on this from
+opposite directions — EAgent contributes ~320 lines over a `Message[]`, which
+`Engine.#runAgent` already is, with journaling, budget reservation, replay, and containment
+that EAgent's loop has none of. The value is the 21k LOC of extensions, not the 2.3k-LOC
+kernel. What may be ported *into* `#runAgent` is the filter points and `forceTool`, journaled.
+Parallel tool waves are deliberately excluded: `engine.ts:1993-1997` derives tool ordinals
+from array position precisely so they survive replay, and calls arrival-ordering "invariant
+7's failure mode wearing a different hat."
+
+**The intake rule**, fixed before the survey so the survey cannot rationalise around it: an
+extension is redundant if the engine already provides its guarantee *durably*. The journal,
+`PolicyEngine`, `EventBus`, subgraph nodes, oversight and retry already cover checkpointing,
+cost, budget, tracing, sub-agents and recovery. Taking those back would add a second,
+in-memory answer to a question the journal already answers — invariant 2's failure mode.
+Additive is what touches the world: shell, MCP, search, and the guards over them. Core
+already ships `fs.read`/`fs.write`/`net.fetch`/`fs.restore`, so the fs basics are not a gap.
+
+**Rejected: replacing `Engine.#runAgent` with EAgent's loop.** It would trade journaling,
+budget reservation and replay for filters and parallel dispatch. The filters can be ported;
+the journaling cannot be recovered.
+
+**Reverses when.** If the vendored surface turns out to need EAgent's extension host to be
+useful — that is, if the taken files cannot be made to work against `ToolDefinition` without
+`ExtensionAPI` — then the subprocess seam is the fallback, and its two-binary cost is paid
+deliberately. That is the condition to watch during intake, and it fails file by file, not
+all at once.
