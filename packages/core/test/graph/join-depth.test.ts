@@ -123,3 +123,68 @@ test("…and the ordinary one-fan-out shape still compiles", () => {
     "a rule that refuses the normal shape is worse than no rule",
   );
 });
+
+/**
+ * A held join's fold has to be collected by something.
+ *
+ * A join inside a fan-out does not apply its fold to shared channel state — that would make
+ * the result depend on which sibling committed first — so it returns the fold as its own
+ * Task's writes and relies on the ENCLOSING join to fold the siblings in branch order.
+ *
+ * The premise nothing checked: an enclosing join has to EXIST and has to NAME it. Without
+ * that, the held fold is written to a task nobody reads, and the run reports success having
+ * silently dropped everything the inner barrier collected — invisible from the journal,
+ * because the inner join really did succeed and really did write.
+ */
+test("A JOIN INSIDE A FAN-OUT THAT NO OUTER JOIN COLLECTS IS REFUSED", () => {
+  // Two fan-out levels, so `innerJoin` sits at depth 1 and HOLDS its fold. `outerJoin`
+  // deliberately does not name it — which is the whole defect: the held fold is written to
+  // a task nobody reads and the run reports success having dropped it.
+  const spec = {
+    ...base,
+    metadata: { name: "held-uncollected", project: "probe", version: 1 },
+    channels: {
+      outerSeed: { type: "array", reduce: "replace" },
+      outerItem: { type: "object", reduce: "replace" },
+      innerSeed: { type: "array", reduce: "replace" },
+      innerItem: { type: "object", reduce: "replace" },
+      findings: { type: "array", reduce: "append_ordered" },
+      report: { type: "object", reduce: "replace" },
+    },
+    inputs: ["outerSeed"],
+    outputs: ["report"],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["outerSeed"], function: { ref: "function/seed@stable" } },
+      { id: n("outer"), type: "function", reads: ["outerItem"], function: { ref: "function/outer@stable" } },
+      { id: n("inner"), type: "function", reads: ["innerItem"], writes: ["findings"], function: { ref: "function/inner@stable" } },
+      {
+        id: n("innerJoin"),
+        type: "join",
+        reads: ["findings"],
+        writes: ["findings"],
+        join: { branches: [n("inner")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+      },
+      {
+        id: n("outerJoin"),
+        type: "join",
+        reads: ["findings"],
+        writes: ["findings"],
+        // `innerJoin` is NOT here. That is the defect under test.
+        join: { branches: [n("outer")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+      },
+      { id: n("finish"), type: "function", reads: ["findings"], writes: ["report"], function: { ref: "function/report@stable" } },
+    ],
+    edges: [
+      { id: e("fo"), from: n("start"), to: n("outer"), kind: "fanout", over: "outerSeed", as: "outerItem", maxWidth: 8 },
+      { id: e("fi"), from: n("outer"), to: n("inner"), kind: "fanout", over: "innerSeed", as: "innerItem", maxWidth: 8 },
+      { id: e("ji"), from: n("inner"), to: n("innerJoin"), kind: "join", branches: [n("inner")] },
+      { id: e("jo1"), from: n("outer"), to: n("outerJoin"), kind: "join", branches: [n("outer")] },
+      { id: e("done"), from: n("outerJoin"), to: n("finish"), kind: "seq" },
+    ],
+  };
+  const got = codes(spec as unknown as GraphSpec);
+  assert.ok(
+    got.includes("GRAPH008_HELD_JOIN_UNCOLLECTED"),
+    `expected the held join to be refused; got ${got.join(", ") || "(no diagnostics)"}`,
+  );
+});

@@ -951,6 +951,32 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       }
     }
 
+    // A HELD JOIN'S FOLD HAS TO BE COLLECTED BY SOMETHING.
+    //
+    // A join inside a fan-out (`fanoutDepth > 0`) does NOT apply its fold to shared channel
+    // state — doing so would make the result depend on which sibling committed first. It
+    // returns the fold as its own Task's writes instead, so the ENCLOSING join folds the
+    // siblings in branch order, and associativity makes the two-level fold equal the
+    // one-level one.
+    //
+    // That argument has a premise nothing checked: an enclosing join must exist AND must
+    // name this join among its `branches`. When it does not, the held fold is written to a
+    // Task nobody reads and the run reports success having silently dropped every result
+    // the inner barrier collected. It is invisible from the journal, because the inner join
+    // really did succeed and really did write.
+    if (joinDepth !== undefined && joinDepth > 0) {
+      const collectedBy = spec.nodes.filter((o) => o.join?.branches.includes(n.id) === true);
+      if (collectedBy.length === 0) {
+        d.push({
+          severity: "error",
+          code: "GRAPH008_HELD_JOIN_UNCOLLECTED",
+          message: `join "${n.id}" is inside a fan-out, so it HOLDS its fold for an enclosing join to collect — but no join declares "${n.id}" among its branches, so that fold is written to a task nobody reads`,
+          at: { nodeId: n.id },
+          fix: `add "${n.id}" to the enclosing join's \`branches\`, or move "${n.id}" outside the fan-out so it applies its own fold`,
+        });
+      }
+    }
+
     for (const branch of join.branches) {
       if (!idx.byId.has(branch)) {
         d.push({
