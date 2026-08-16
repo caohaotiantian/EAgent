@@ -74,6 +74,13 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     goes to. Without it every agent node answers "[mock] …". The API
                     key is named by the file and READ FROM THE ENVIRONMENT, never
                     stored in it. Accepted by every command, not just serve.
+  --allow-exec P,P  programs proc.exec may run, matched EXACTLY by name — not as a
+                    prefix, not as a path. Without it the tool is not registered and
+                    the run cannot execute anything. This list is the whole boundary:
+                    a child process does its own open(), so allow-listing a shell
+                    dissolves the fs jail rather than narrowing it.
+  --exec-env  N,N   environment variable NAMES proc.exec passes to the child. Default
+                    is an empty environment, because this process holds API keys.
 `;
 
 /**
@@ -251,6 +258,11 @@ export function openWorkspace(args: Args, env: Readonly<Record<string, string | 
     root,
     deny: [dataDir],
     ...(args.flags["egress"] === undefined ? {} : { egressAllowlist: String(args.flags["egress"]).split(",") }),
+    // Both default to absent, and absent means the tool is not registered at all. A run
+    // that never names a program cannot run one — see `procExec`, where the allowlist is
+    // the entire boundary rather than one check among several.
+    ...(args.flags["allow-exec"] === undefined ? {} : { execAllowlist: String(args.flags["allow-exec"]).split(",") }),
+    ...(args.flags["exec-env"] === undefined ? {} : { execEnvAllow: String(args.flags["exec-env"]).split(",") }),
   };
   for (const t of builtinTools(jail)) tools.register(t);
   tools.register(fsRestore(jail));

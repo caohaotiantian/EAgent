@@ -31,7 +31,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { CODES, err } from "../errors.ts";
 import { encodeBranch, parseTaskId } from "../ids.ts";
-import { assertWithin } from "../sandbox/subprocess.ts";
+import { assertWithin, runSandboxed } from "../sandbox/subprocess.ts";
 import type { ToolContext, ToolDefinition } from "../run/registry.ts";
 
 export interface BuiltinOptions {
@@ -64,6 +64,20 @@ export interface BuiltinOptions {
   /** Domains `net.fetch` may reach. Empty means the tool is not registered at all. */
   readonly egressAllowlist?: readonly string[];
   readonly fetch?: typeof globalThis.fetch;
+  /**
+   * Program names `proc.exec` may run. Empty means the tool is not registered at all.
+   *
+   * Matched EXACTLY against the `command` argument — not as a prefix, not as a path. See
+   * `procExec`, which explains why this list is the entire boundary rather than one check
+   * among several: a child process does its own `open()`, so `assertWithin` and `deny`
+   * stop applying the moment a shell is reachable through this list.
+   */
+  readonly execAllowlist?: readonly string[];
+  /**
+   * Environment variable NAMES `proc.exec` passes through. Absent means an empty
+   * environment, which is the right default in a process that holds provider API keys.
+   */
+  readonly execEnvAllow?: readonly string[];
 }
 
 /** Absent on platforms without the flag, where this is an ordinary open. */
@@ -191,7 +205,111 @@ function writeLeaf(path: string, body: string): void {
 export function builtinTools(opts: BuiltinOptions): readonly ToolDefinition[] {
   const tools: ToolDefinition[] = [fsRead(opts), fsWrite(opts)];
   if ((opts.egressAllowlist ?? []).length > 0) tools.push(netFetch(opts));
+  if ((opts.execAllowlist ?? []).length > 0) tools.push(procExec(opts));
   return tools;
+}
+
+/**
+ * Run one allow-listed program, argv-only, inside the branch's directory.
+ *
+ * `runSandboxed` has been in this tree — hardened, with four listeners that may not throw
+ * and a SIGTERM→grace→SIGKILL path measured against a child that never exits — with **zero
+ * callers**. This is its first. Until now a graph could read files, write files, and fetch a
+ * URL, and could not run anything, which is the gap between "a walking skeleton" and a
+ * framework someone deploys an agent with.
+ *
+ * THE ALLOWLIST IS THE WHOLE BOUNDARY, and it is a different KIND of boundary from the one
+ * above. `fs.read` and `fs.write` are contained by `assertWithin`, which works because the
+ * argument's meaning is known here — a path is a path. A subprocess has no such property:
+ * once `sh` is reachable, every containment in this file is advisory, because the child
+ * reads `.loom/journal.db` with its own open() and never passes through `resolvedDeny`. So
+ * the check that matters is *which binary*, made before the spawn, and there is nothing
+ * downstream that recovers it.
+ *
+ * It therefore follows `egressAllowlist` exactly: **no default, and an empty list means the
+ * tool is not registered at all.** An embedder who has not thought about which programs a
+ * model may run gets a system that cannot run programs. That asymmetry is deliberate — the
+ * `deny` docstring above records what an inherited default already cost this file once.
+ *
+ * `irreversible`, so `CLASS_DEFAULT_POSTURE` puts it at `in` — a human gate by default — and
+ * `CLASS_AUTO_RETRYABLE` refuses to retry it. Both are right and neither is conservative
+ * padding: the engine cannot know whether the argv it is re-running appends to a file, and
+ * a tool that declared itself `reversible_write` would need `fs.restore`'s equivalent for
+ * arbitrary programs, which does not exist and cannot.
+ *
+ * The environment is **empty unless named**. `buildEnv` drops everything not in `envAllow`,
+ * so a provider key in the orchestrator's environment does not reach the child by default.
+ */
+function procExec(opts: BuiltinOptions): ToolDefinition {
+  const allow = opts.execAllowlist ?? [];
+  return {
+    name: "proc.exec",
+    version: "1.0",
+    description: `Run one allow-listed program with arguments. Allowed: ${allow.join(", ")}.`,
+    capabilities: ["proc:exec"],
+    irreversibility: "irreversible",
+    idempotent: false,
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: `Program to run. One of: ${allow.join(", ")}.` },
+        args: { type: "array", items: { type: "string" }, description: "Arguments, passed as an array — never a shell string." },
+        timeoutMs: { type: "integer", default: 30_000 },
+        stdin: { type: "string" },
+      },
+      required: ["command"],
+    },
+    execute: async (args, ctx) => {
+      const command = String(args["command"]);
+      // Exact match on the name, not a prefix and not a path. A prefix test admits
+      // `gitk`, and accepting a path admits `./git` — a file the model just wrote with
+      // `fs.write`, which would turn the allowlist into a formality.
+      if (!allow.includes(command)) {
+        return { content: `proc.exec: "${command}" is not allow-listed. Allowed: ${allow.join(", ")}.`, isError: true };
+      }
+      const raw = args["args"] ?? [];
+      if (!Array.isArray(raw) || raw.some((a) => typeof a !== "string")) {
+        return { content: "proc.exec: `args` must be an array of strings.", isError: true };
+      }
+      const deny = resolvedDeny(opts);
+      // The branch's directory, for the same reason writes go there: two fan-out branches
+      // running the same command must not share a working directory.
+      const cwd = branchRoot(opts.root, deny, ctx) ?? opts.root;
+      mkdirSync(cwd, { recursive: true });
+      const stdin = args["stdin"];
+      const result = await runSandboxed(
+        {
+          command,
+          args: raw as readonly string[],
+          cwd,
+          timeoutMs: Number(args["timeoutMs"] ?? 30_000),
+          ...(opts.execEnvAllow === undefined ? {} : { envAllow: opts.execEnvAllow }),
+          ...(typeof stdin === "string" ? { stdin } : {}),
+        },
+        ctx.signal,
+      );
+      // A non-zero exit is a RESULT, not a tool failure: the model asked to run a program
+      // and the program ran, so a failing build is an answer rather than a broken call.
+      //
+      // A TIMEOUT does not arrive here at all — `runSandboxed` throws `E_TOOL_TIMEOUT`
+      // (subprocess.ts:855-860) rather than returning with `timedOut` set, so the flag on
+      // `SandboxResult` is unreachable from this path. Letting the throw propagate is also
+      // the better answer: it is a typed `LoomError` carrying `retryable`, and this tool's
+      // `irreversible` class already means `CLASS_AUTO_RETRYABLE` will not act on it.
+      const head = `exit=${String(result.code ?? "null")}${result.signal === null ? "" : ` signal=${result.signal}`}`;
+      const body = [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n");
+      return {
+        content: `${head}\n${body}${result.truncated ? "\n…[output truncated]" : ""}`,
+        details: {
+          command,
+          code: result.code,
+          signal: result.signal,
+          ms: result.ms,
+          truncated: result.truncated,
+        },
+      };
+    },
+  };
 }
 
 /**
