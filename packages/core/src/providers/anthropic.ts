@@ -143,6 +143,19 @@ export class AnthropicAdapter implements ModelAdapter {
             break;
           }
           case "error": {
+            // THE ONE STRING IN THIS FILE THE REMOTE PARTY WRITES, and it is on its way to an
+            // append-only journal row via `errorRecord`. It is not masked HERE — the catch
+            // below hands every exit of this loop to `normalizeTransport`, which sweeps and
+            // bounds foreign text on both of its arms, and a second sweep here would be the
+            // private copy `security/redact.ts` spent two waves consolidating.
+            //
+            // THAT IS A DEPENDENCE ON A CALLER, so it is named rather than assumed: this
+            // `throw` is inside the `try`, the catch is unconditional, and the arm that
+            // catches it was for a wave the arm that returned BEFORE any redaction — measured,
+            // an `error` frame carrying `https://svc:p@ssw0rd-tail@api.example.com/v1` reached
+            // `errorRecord` verbatim. `test/providers/http.test.ts` drives this adapter with
+            // exactly that frame and asserts the journaled bytes, so the dependence is held by
+            // a test rather than by this comment.
             throw err.unavailable(CODES.E_PROVIDER_TRANSPORT, ev.error?.message ?? "provider stream error");
           }
           default:

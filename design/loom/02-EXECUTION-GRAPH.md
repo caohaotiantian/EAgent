@@ -78,15 +78,41 @@ pushes `GRAPH005_ROUTER_MODE_UNSUPPORTED`: *router "…" declares mode "model", 
 executor implements — its `when` expressions would decide the branch instead.*
 
 `E_ROUTE_INVALID` is a real code, and it is not the router's. `Engine` raises it in exactly
-one place: a **human gate** whose `redirect` decision names an edge that is not one of the
-gate node's declared outgoing edges — and it FAILS the Task rather than falling back. The
-closed-set guarantee a reader is owed today is that one, plus `fallbackEdge`: nothing —
-model or human — can name a target the graph did not declare.
+one place — `#applyGateDecision`, for a **human gate** whose `redirect` decision names an
+edge that is not one of the gate node's declared outgoing edges — and it FAILS the Task
+rather than falling back:
 
-Building the mode costs three things, and `graph/spec.ts`'s `RouterNode` docstring already
-names all three: a **recorded model effect** (so replay serves the same choice), **closed-set
-validation** of the returned edge id, and an `E_ROUTE_INVALID` **fallback** path at the
-router. Whoever builds it deletes the refusal in the same change.
+```ts
+const invented = (gate.take ?? []).filter((id) => !outbound.includes(id as EdgeId));
+```
+
+**That closed set is enforced for the human gate and for nothing else.** A router's
+`cases[].take` and its `fallbackEdge` are checked by no one, at no phase. `validate.ts`
+reads `take` in exactly one place — `routerExclusive`, a `GRAPH010` concurrency helper
+asking whether two arms can both fire — and never reads `fallbackEdge` at all. At run time
+`#runRouter` returns `c.take` and `[router.fallbackEdge]` verbatim, `#edgesToTake` passes an
+`outcome.take` through unfiltered, and `#activate` resolves each id against
+`ctx.index.edgeById` — **the whole graph's edge table** — with `if (e === undefined)
+continue;`. Two consequences, both live:
+
+- a router naming an edge that belongs to **some other node** activates that node's target,
+  jumping whatever sat between. Compile the D5.5 example with `choose_path`'s first case
+  rewritten to `take: [e8]` (`apply_remediation → verify`) and the compiler returns
+  `ok: true` with no diagnostic; the run then skips `approve_remediation` and the
+  `k8s.apply` behind it. That is exactly the bug `#applyGateDecision`'s comment records
+  having fixed **for gates** — still open one node type over;
+- a router naming an edge that exists **nowhere** is a silent no-op that strands the run.
+
+**Designed, not implemented — the router's half of the closed set.** It is a `GRAPH005`
+sub-code asserting `take ∪ {fallbackEdge} ⊆ outbound(node)`, and it does not exist. Do not
+read the gate check as covering routers; nothing does.
+
+Building `mode: model` therefore costs three things, and `graph/spec.ts`'s `RouterNode`
+docstring already names all three: a **recorded model effect** (so replay serves the same
+choice), **closed-set validation** of the returned edge id — which the paragraph above says
+is owed for `expression` mode too, so it is one check built once for both — and an
+`E_ROUTE_INVALID` **fallback** path at the router. Whoever builds it deletes the refusal in
+the same change.
 
 ---
 
@@ -1090,7 +1116,25 @@ behaves as *fail*.
 reachable only for a caller driving `HumanGateBroker.raise` directly with its own
 `defaultAction` — never from a `GraphSpec`. If the pre-authorized decision did not survive
 the process that raised the gate, `#fireTimeout` degrades it to `fail` rather than leaving a
-run suspended with no path out. **No timeout path can auto-approve an irreversible action.**
+run suspended with no path out.
+
+**No timeout path a GRAPH can declare can auto-approve anything at all** — not an
+irreversible action, and not a reversible one, because `default_action` is unrepresentable
+in `GateSlaSpec` and `checkSla` refuses it again for a spec that arrived as JSON. That is
+the whole of the guarantee, and it is a guarantee about *representability*, not about
+irreversibility: `checkSla` never reads the action's class.
+
+**A broker driven directly can, and nothing there checks the class.** A caller-supplied
+`defaultAction` passes `assertDefaultActionIsSatisfiable` at `raise` — the decision is one of
+the four kinds, a mirror gate is not carrying an `edit`/`redirect`, an `edit` writes only
+`allowEdit` channels — and `#fireTimeout` then applies it. (A `rehydrate`d one skips even
+that and is checked only by `#validate` at the deadline, on the same acceptance set.) No arm
+of either path reads `IrreversibilityClass`. This paragraph used to end with the unqualified sentence *"No timeout path can
+auto-approve an irreversible action"*, justified by a `GRAPH014` rule rejecting
+`default_action` on irreversible nodes. That rule has never existed, and the comment in
+`run/gates.ts` above the `default_action` arm still asserts it (`HANDOFF.md` **D14**). The
+engine's own path is safe for a narrower reason than the sentence claimed: `scheduleOf` in
+`run/engine.ts` can only forward `sla.onTimeout`, which is typed `"escalate" | "fail"`.
 
 ---
 

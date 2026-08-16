@@ -1551,12 +1551,17 @@ human-authored", which D10.d itself replaced in M9.
 were audited on 2026-08-15 and **both were overstated**, which is a rate that says something
 about the other thirty-odd.
 
-- **Row 3.1** read "`kill -9` with a gate open, resumed from a new process". No such test
-  exists anywhere in the tree. What exists is `skeleton.test.ts` row 6 — `store.close()` and
-  a second `Engine` **in the same OS process** — and a clean close is, as the last connection
-  in WAL mode, a checkpoint that removes the `-wal`/`-shm`, so the reopen never reads a hot
-  WAL. The row now says what that test is worth. **The test it claimed is still missing**, and
-  is D12.
+- **Row 3.1** read "`kill -9` with a gate open, resumed from a new process". At the time of
+  the audit no such test existed anywhere in the tree; what existed was `skeleton.test.ts`
+  row 6 — `store.close()` and a second `Engine` **in the same OS process** — and a clean
+  close is, as the last connection in WAL mode, a checkpoint that removes the `-wal`/`-shm`,
+  so the reopen never reads a hot WAL. **The missing test then landed** (`2d4baf1`,
+  2026-08-15) as `restart-crash.test.ts`, D12 is closed, and row 3.1 is now **PROVEN**
+  citing that path. Note the sequel, because it is the same defect twice: for a day the
+  corpus asserted BOTH — 08-PLAN row 6 said proven, 99-DOD said "no such test exists" — and
+  the second correction had to be made in a different file from the first. What row 3.1 still
+  does **not** claim is the SLA clock; the skeleton gate declares no `sla`, so that half is
+  `gate-clock.test.ts`'s and is split out in 08-PLAN row 6.
 - **Row 1** cited "16 edges → 24 interfaces". That string appears in exactly one place in the
   corpus: the cell itself. Nothing derives either number from D2 or D3. The clauses that ARE
   tested (the taxonomy is eight; all eight execute) are kept and the count is deleted, and the
@@ -1687,9 +1692,68 @@ something rather than restating a default. The shape held: the fixture is a `.ch
 `SIGKILL` of the child sit in a `finally`, so a regression costs a failed test and not a hung
 suite.
 
-**`99-DOD.md` row 3.1 still says "No such test exists" and points here.** That row is now
-stale in the other direction and is not this file's to edit; it needs the same correction, and
-until it gets one the corpus asserts both.
+**`99-DOD.md` row 3.1 is corrected too** — it is **PROVEN**, citing `test/run/restart-crash.test.ts`,
+which `docs-drift.test.ts`'s "EVERY TEST FILE THE DoD CITES AS EVIDENCE EXISTS" check now pins.
+It briefly said "No such test exists" while 08-PLAN row 6 said the opposite, which is the
+duplicated-claim failure this register keeps recording: one copy corrected, the other left
+standing in a different file.
+
+**What this fixture does NOT prove, and 08-PLAN row 6 now says so:** the SLA clock. The
+skeleton's `approve` node declares no `sla` block, so there is no deadline for the crash to
+preserve (`grep -aic sla` over both crash files: 0). The clock-across-restart evidence is
+`test/run/gate-clock.test.ts`'s *"THE SWEEP REACHES A RUN THIS PROCESS NEVER ATTACHED"* — a
+fresh `Engine` over the same `MemoryStateStore`, which is a restart of the engine and not of
+a process. Anyone extending this fixture: giving the skeleton gate an `sla` would let one
+test carry both halves, and that is the obvious next edit.
+
+**D13 · A ROUTER CAN NAME ANY EDGE IN THE GRAPH, and four documents used to imply it
+cannot.** The closed-set check `E_ROUTE_INVALID` performs is the HUMAN GATE's and only the
+human gate's: `Engine.#applyGateDecision` filters `gate.take` against that node's declared
+`outbound` and fails the Task. A router's `cases[].take` and `fallbackEdge` are checked at no
+phase. Reproduced against this tree by compiling three mutations of the D5.5 fixture
+(`test/graph/fixtures.ts`'s `incidentTriage()`) through the shipped `compile()`:
+
+| Mutation of `choose_path` | Result |
+|---|---|
+| `cases[0].take = ["does_not_exist_anywhere"]` | `ok: true`, no diagnostic |
+| `cases[0].take = ["e8"]` — `apply_remediation → verify`, another node's edge | `ok: true`, no diagnostic |
+| `fallbackEdge = "nope"` | `ok: true`, no diagnostic |
+
+The second is the live one. `#activate` resolves every id against `ctx.index.edgeById` — the
+whole graph's edge table — so that router jumps `approve_remediation` (a `human_gate`) and
+`apply_remediation` (the irreversible `k8s.apply`) and readies `verify` directly. It is the
+same bug `#applyGateDecision`'s own comment records having fixed for gates, still open one
+node type over. The first and third are silent no-ops that strand the run: `if (e ===
+undefined) continue;`.
+
+Evidence that nothing checks it: `grep -an '\btake\b' packages/core/src/graph/validate.ts`
+returns one hit, `routerExclusive` (a `GRAPH010` helper), and `fallbackEdge` appears nowhere
+in that file. The fix is a `GRAPH005` sub-code asserting `take ∪ {fallbackEdge} ⊆
+outbound(node)`; it is also one of the three costs `RouterNode`'s docstring lists for
+building `mode: model`, so build it once and both are paid. **D5.1 in `02-EXECUTION-GRAPH.md`
+now states this gap;** it briefly stated the opposite — *"nothing — model or human — can name
+a target the graph did not declare"* — in the very edit that was correcting D5.1's other
+false claim.
+
+**D14 · `run/gates.ts` cites a `GRAPH014` rule that does not exist, in the comment above the
+one arm that could auto-approve.** Above `#fireTimeout`'s `default_action` branch:
+
+> `// A timeout can never auto-approve an irreversible action: `defaultAction` is`
+> `// rejected at compile time (GRAPH014) for those classes, so if one is present`
+> `// here it has already been proven safe.`
+
+Both halves are false. `checkSla` refuses a non-`escalate`/`fail` `onTimeout` for **every**
+class and inspects none of them, so there is no class-conditional rule to have proved
+anything; and that arm is reachable only from `HumanGateBroker.raise` (or `rehydrate`) with a
+caller-supplied `defaultAction`, which passes `assertDefaultActionIsSatisfiable` — decision
+kind, `mirrorOf`, `allowEdit` channels — and no irreversibility check at all. So a
+`defaultAction` present at that line has **not** been proven safe; nothing on its path could
+have proved it. The comment is where the doc's version of the claim came from, which is why
+it is registered rather than just deleted from the docs: `02-EXECUTION-GRAPH.md` Deviation 4,
+`04-OVERSIGHT.md` D7.2's YAML, its gate-FSM note, D7.9's mitigation paragraph and D7.9's
+dedupe blockquote all carried it, and all five now say what is enforced. Fixing the comment
+is a `src/` edit and is not this file's to make. Either delete the safety rationale, or build
+the class check the comment assumes and make it true.
 
 ### E · Process and build state
 

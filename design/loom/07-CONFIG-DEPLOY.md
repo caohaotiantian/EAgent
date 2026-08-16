@@ -208,7 +208,7 @@ tool output also passes the redaction detector sweep (**D9.6**).
 | Node | `node.policy.posture` | `max` | |
 | Tool | derived from `irreversibility` (**D7.6**) | `max` | not overridable downward |
 | OversightPolicy resource | `posture` + `appliesTo` | `max` | a reusable, versioned bundle |
-| Runtime escalations | E1–E11 (**D7.7**) | `max` | journaled, and survive in the projection |
+| Runtime escalations | E1–E10 (**D7.7**; E11 is declared there and **not built**) | `max` | journaled, and survive in the projection |
 
 **Conflicts do not exist by construction** — `max` over a total order is total and
 associative, so the effective posture is independent of evaluation order. A declaration

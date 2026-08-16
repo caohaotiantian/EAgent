@@ -379,6 +379,87 @@ test("THE MASK REACHES A SPAN ATTRIBUTE AND A GATE DELIVERY, because it is in th
   assert.ok(delivered.hits.includes("url-credentials"));
 });
 
+test("SWEEPING TWICE IS BYTE-IDENTICAL TO SWEEPING ONCE — which is what makes two boundaries a design", () => {
+  // Redaction is applied at the READ boundary for a classified value and at the WRITE
+  // boundary for foreign text (see the module docstring), so a `LoomError.message` masked
+  // by `providers/http.ts` on its way into the journal is swept AGAIN on its way out to a
+  // span, an SSE frame and a gate delivery. `url-credentials` replaces `scheme://userinfo@`
+  // with `scheme://[redacted]@`, which is itself a match — so the property that keeps the
+  // two boundaries from disagreeing about a value they both handled correctly is that the
+  // replacement is a FIXED POINT. Asserted rather than assumed: a replacement that
+  // re-matched to something else would make the second pass corrupt the first pass's work.
+  for (const text of [
+    URL_MSG,
+    "connect ECONNREFUSED https://ghp_liveTokenValue@github.example.com/api",
+    "POST https://sk-abcdefghijklmnopqrstuvwx@api.example.com/v1 failed",
+    "two at once https://a:b@x.example/p and https://c:d@y.example/q",
+  ]) {
+    const once = redact(text).value;
+    assert.equal(typeof once, "string", text);
+    assert.equal(redact(once as string).value, once, `not a fixed point: ${text}`);
+  }
+
+  // AND THE SECOND PASS IS SILENT, which is a separate fact worth pinning because it is the
+  // one an alert is built on. `sweep` records a hit only when the replacement CHANGED the
+  // string, and on an already-masked string it does not — so `hits` keeps meaning "a
+  // credential was in free text HERE", and the `url-credentials` alert fires at the boundary
+  // that actually let it in rather than once more at every reader it travels past.
+  assert.deepEqual(redact(URL_MSG).hits, ["url-credentials"], "the write boundary, where it got in");
+  assert.deepEqual(redact(redact(URL_MSG).value as string).hits, [], "and not again at every reader downstream");
+});
+
+test("THE SWEEP DOES NOT BOUND ITS OWN INPUT, AND ONE DETECTOR IS QUADRATIC IN IT", () => {
+  // THE LIMIT, MADE EXECUTABLE, in the manner of `A Proxy DEFEATS THE SHAPE TEST`: this is
+  // not a defect being fixed here, it is a cost being pinned so a caller cannot inherit it
+  // by accident. `pem` is the one entry with an unanchored lazy tail —
+  // `-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END …` — so `[\s\S]*?` scans to the end
+  // of the string once per BEGIN that never gets an END. MEASURED through `redact`, with
+  // `-----BEGIN A PRIVATE KEY-----` repeated to fill a buffer:
+  //
+  //     64 KB → 20.8 ms   128 KB → 80.2 ms   256 KB → 306.4 ms
+  //    512 KB → 1 157 ms    1 MB → 4 682 ms     2 MB → 18 456 ms
+  //
+  // Four times the input, sixteen times the time. Every other entry has a literal prefix and
+  // a delimiter-terminated or bounded run and is linear: 256 KB of `x://` markers is 0.9 ms,
+  // and ONE 256 KB unterminated userinfo run — the worst case for `url-credentials`, the
+  // entry a write boundary is usually reaching for — is 0.7 ms. Both asserted below, because
+  // "the linear ones are linear" is the half that licenses the callers that do not bound.
+  //
+  // WHAT THIS MEANS FOR A CALLER: a string a REMOTE PARTY chose must be bounded BEFORE it
+  // reaches here. The read-boundary callers sweep values that came out of this deployment's
+  // own journal. `providers/http.ts` sweeps a provider's response body, and its `MAX_SWEEP`
+  // is that bound — pinned from the other side by *THE SWEEP OVER A PROVIDER BODY IS
+  // BOUNDED* in `test/providers/http.test.ts`.
+  const n = 256 * 1024;
+
+  // 1. THE FACT THAT MAKES A CALLER'S BOUND NECESSARY: this function truncates nothing.
+  const linear = "x://".repeat(n / 4);
+  const swept = redact(linear).value;
+  assert.equal(typeof swept, "string");
+  assert.equal((swept as string).length, linear.length, "the sweep returns what it was given, at any size");
+
+  // 2. THE LINEAR ENTRIES STAY LINEAR. A generous ceiling, not a benchmark: measured at
+  // 0.7–0.9 ms, so 4 s only fires if somebody makes `url-credentials` backtrack.
+  const userinfo = `x://${"a".repeat(n)}`;
+  for (const s of [linear, userinfo]) {
+    const t0 = performance.now();
+    redact(s);
+    assert.ok(performance.now() - t0 < 4_000, "a linear detector went superlinear");
+  }
+
+  // 3. THE QUADRATIC ONE, at a size chosen so the test costs ~80 ms rather than seconds.
+  // 128 KB measured at 80.2 ms; the ceiling catches a large regression without flaking on a
+  // loaded machine, and the numbers above are the record of the actual curve.
+  const unit = "-----BEGIN A PRIVATE KEY-----";
+  const pem = unit.repeat(Math.floor((128 * 1024) / unit.length));
+  const t0 = performance.now();
+  const out = redact(pem);
+  assert.ok(performance.now() - t0 < 8_000, "the pem detector got dramatically worse");
+  // …and every one of those scans found nothing, because no BEGIN ever gets an END.
+  assert.equal(out.value, pem);
+  assert.deepEqual(out.hits, []);
+});
+
 // ── secret-ish keys ──────────────────────────────────────────────────────────
 
 test("a key that NAMES a secret redacts its value regardless of classification", () => {

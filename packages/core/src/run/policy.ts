@@ -113,7 +113,7 @@ export interface PolicyEngineOptions {
    * which costs exactly the interruptions the mechanism exists to enable.
    */
   readonly interventionWindowMs?: Partial<Record<IrreversibilityClass, number>>;
-  /** Escalation rules armed for this run. See D7.7 E1–E11. */
+  /** Escalation rules armed for this run. See D7.7 E1–E10 (E11 is declared there and not built). */
   readonly onEscalate?: (rule: string, from: Posture, to: Posture, scope: string) => void;
 }
 

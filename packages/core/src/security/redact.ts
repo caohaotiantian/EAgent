@@ -15,62 +15,99 @@
  * already accepted leaks.
  *
  * NOTE ON PURPOSE. This exists to stop a credential or a personal detail in MODEL
- * OUTPUT from reaching a span or a browser. It is not an erasure mechanism and the
- * journal is never redacted — `state.reduced` payloads ARE the channel state, so a
+ * OUTPUT from reaching a span or a browser. It is not an erasure mechanism and a
+ * journal PAYLOAD is never redacted — `state.reduced` payloads ARE the channel state, so a
  * redacted journal folds to corrupted state.
  *
- * WHICH BOUNDARY IS THIS APPLIED AT? THE **READ** ONE, EVERYWHERE — SAID HERE BECAUSE THE
- * ANSWER WAS EVERYWHERE ASSUMED AND NOWHERE WRITTEN, AND THE TWO ANSWERS HAVE OPPOSITE
- * FAILURE MODES. Every live caller redacts on the way OUT of the process: `server/http.ts`'s
- * `frame` on the event stream and its `summarise` on a projection's `channels` and
- * `outputs`, `telemetry/spans.ts`'s `close` on the three span bags, `GateDispatcher.deliver`
- * on a gate rendering. The journal underneath them all holds the real value, deliberately
- * (D9.6). So the design is: **one durable copy of the truth, and every reader is trusted to
- * redact.** Nothing in this module is called on the way IN.
+ * "A JOURNAL PAYLOAD" AND "A JOURNAL ROW" ARE NOT THE SAME SENTENCE, and the distinction is
+ * the whole of the paragraph below. Nothing folds an `ErrorRecord`'s `message` or `details`
+ * into state — they are diagnostics — so masking a credential out of one before it is written
+ * costs no correctness and is the only chance anything gets: the file is append-only. What
+ * must never be masked is the payload a reducer reads back.
  *
- * AND "EVERY READER IS TRUSTED TO REDACT" IS A PREMISE, NOT A GUARANTEE — the enumeration
- * above is what a `grep` finds, and the interesting entries are the reads it does NOT
- * contain. `summarise` sweeps `channels` and `outputs` and hands `error` and each task's
- * `error` straight on, two lines below; an `ErrorRecord` is a `message` and a `details`
- * this module has never seen. That is the cost of the read-boundary design stated exactly:
- * adding a reader is adding a redaction obligation, and forgetting one is silent.
+ * WHICH BOUNDARY IS THIS APPLIED AT? **BOTH — AND WHICH ONE APPLIES IS DECIDED BY THE VALUE,
+ * NOT BY THE DESTINATION.** This paragraph said "THE READ ONE, EVERYWHERE" for a wave, which
+ * was a true statement about `grep` and a false one about the design, and the two answers have
+ * opposite failure modes, so the split is written out here rather than left to be inferred:
  *
- * THAT CHOICE IS RIGHT FOR A CLASSIFIED VALUE AND WRONG FOR FOREIGN TEXT, WHICH IS THE
- * WHOLE OF WHAT THIS PARAGRAPH IS FOR. A payload carries its `Classification` with it, so a
- * reader added in three years still knows what it is holding and can redact it — the
- * decision is recoverable, and keeping the value is what makes an authenticated operator's
- * view and a channel's view two renderings of one fact instead of two facts. A string
- * SOMEBODY ELSE WROTE carries nothing. Once
+ *   - **A value that CARRIES ITS OWN `Classification`** — a channel payload, a span attribute,
+ *     a journal payload, a gate rendering — is redacted at the **READ** boundary and NOWHERE
+ *     ELSE. `server/http.ts`'s `frame` on the event stream, its `summarise` on a projection's
+ *     `channels` and `outputs`, `telemetry/spans.ts`'s `close` on the three span bags,
+ *     `GateDispatcher.deliver` on a gate rendering. The journal underneath them all holds the
+ *     real value, deliberately (D9.6): `state.reduced` payloads ARE the channel state, so a
+ *     redacted journal folds to corrupted state. One durable copy of the truth, and every
+ *     reader trusted to redact.
+ *   - **FOREIGN TEXT** — a string this process did NOT author, quoting a value this deployment
+ *     configured — is masked at the **WRITE** boundary, where the string is built, before
+ *     anything durable holds it.
+ *
+ * WHY THE LINE IS THERE AND NOT SOMEWHERE ELSE: **the read-boundary choice is RECOVERABLE and
+ * the write-boundary one is not, and foreign text is the case where nothing is left to recover
+ * with.** A classified payload keeps its `Classification` beside it, so a reader added in three
+ * years still knows what it is holding and can decide — and keeping the value is what makes an
+ * authenticated operator's view and a channel's view two renderings of one fact instead of two
+ * facts. A string SOMEBODY ELSE WROTE carries nothing. Once
  * `Request cannot be constructed from a URL that includes credentials: https://svc:pw@host`
  * is in `LoomError.message`, `errorRecord` has copied it into an append-only file, and from
- * that moment: it is indistinguishable from ordinary diagnostics, no classification marks
- * it, it is in every backup and every `journal.db` an operator can `sqlite3`, and no later
- * fix removes it. Read-boundary redaction defends the readers this repo currently has; it
- * defends nothing against the next one, and it never defends the store.
+ * that moment: it is indistinguishable from ordinary diagnostics, no classification marks it,
+ * it is in every backup and every `journal.db` an operator can `sqlite3`, and no later fix
+ * removes it.
+ *
+ * AND FOR THAT ONE CASE THE READERS ARE NOT WATCHING EITHER, which is the second half of the
+ * argument and the one that closes it. "Every reader is trusted to redact" is a premise, and
+ * the interesting entries are the reads a `grep` does NOT return: `summarise` sweeps `channels`
+ * and `outputs` and hands `error` and each task's `error` straight on, two lines below. An
+ * `ErrorRecord` is a `message` and a `details` this module has never seen, at either boundary.
+ * So for foreign text the choice was never "write or read"; it was "write or never".
  *
  * **SO: A VALUE THIS DEPLOYMENT CONFIGURED, QUOTED BACK BY A STRING THIS PROCESS DID NOT
- * AUTHOR, MUST BE MASKED WHERE THE STRING IS BUILT — NOT WHERE IT IS READ.** `maskLiterals`
- * is that mechanism when the literal is in hand, and `url-credentials` in `DETECTORS` is it
- * when the credential is recognisable by POSITION rather than by value. Both are mechanism 1;
- * neither is a guess. The write-boundary sites, named so the next reader does not have to
- * find them: `providers/http.ts`'s `normalizeTransport` (an `Error.message` from undici or
- * from an injected `FetchLike`) and its `normalizeError` (`details.detail`, which is 500
- * bytes of the provider's own response body), and `run/delivery.ts`'s `describeFailure`
- * (a channel's failure text), which is the one of the three that already does it.
+ * AUTHOR, IS MASKED WHERE THE STRING IS BUILT.** `maskLiterals` is that mechanism when the
+ * literal is in hand, and `url-credentials` in `DETECTORS` is it when the credential is
+ * recognisable by POSITION rather than by value. Both are mechanism 1; neither is a guess.
+ * THE WRITE-BOUNDARY SITES, and what each one covers — a list rather than a claim, because the
+ * previous version of this list named a function that does not exist and credited it with a
+ * masking it does not do:
  *
- * **AND THE RESIDUAL, MEASURED RATHER THAN INFERRED, because a fix believed is a fix
- * unmade.** `normalizeTransport` masks userinfo on the arm that wraps a native error and
- * returns early on `isLoomError(e)` — an arm added for a sibling defect, which routes around
- * the redaction it was added beside. Same input, two roads, one process:
+ *   - `providers/http.ts`'s `normalizeTransport`, on **both** arms. The `isLoomError` arm
+ *     returned early for a wave, before any redaction — and that was the arm carrying the one
+ *     string a REMOTE PARTY gets to choose, because `anthropic.ts` turns a provider's `error`
+ *     SSE frame into `err.unavailable(E_PROVIDER_TRANSPORT, ev.error.message)` and throws it
+ *     into the catch that calls this. Measured, same string, two roads, before the fix:
  *
- *     normalizeTransport(new TypeError(msg))        ⇒ "…: https://[redacted]@api.example.com/…"
- *     normalizeTransport(err.unavailable(CODE, msg)) ⇒ "…: https://svc:hunter2@api.example.com/…"
+ *         normalizeTransport(new TypeError(msg))         ⇒ "…: https://[redacted]@api.example.com/v1"
+ *         normalizeTransport(err.unavailable(CODE, msg)) ⇒ "…: https://svc:p@ssw0rd-tail@api.example.com/v1"
  *
- * — the second is what `errorRecord` writes. That file is not this one's to edit; what this
- * one owes it is a single mechanism to call, which is now here, and the READ boundaries are
- * closed either way: with the detector in the sweep, the same credential is masked out of
- * every span, every SSE frame and every gate delivery, including the ones already sitting in
- * journals written before this change.
+ *   - `providers/http.ts`'s `normalizeError`, on `details.detail` — 500 bytes of the provider's
+ *     own response body, copied into a journal row by `errorRecord` and never swept at either
+ *     boundary. Measured before the fix:
+ *     `{"status":400,"detail":"…https://svc:p@ssw0rd-tail@api.example.com/v1"}`.
+ *   - `run/delivery.ts`'s `describeCause`, on a channel's failure text — `maskLiterals` against
+ *     the configured URL's forms, and NOT this module's detector sweep. So it covers the
+ *     literal a deployment configured and not a credential a channel invents. (The name in the
+ *     previous version of this paragraph was `describeFailure`, which lives in `server/http.ts`,
+ *     renders a log line, and masks nothing at all.)
+ *
+ * **AND THE RESIDUAL, MEASURED RATHER THAN INFERRED, because a fix believed is a fix unmade.**
+ * Two roads out of `providers/` still write foreign text into `errorRecord` verbatim, both
+ * reproduced end to end through the journal record:
+ *
+ *     providers/fallback.ts's  err.unavailable(…, String(e))   for a non-LoomError from an
+ *       injected adapter   ⇒ message: "TypeError: fetch failed for https://svc:p@ssw0rd-tail@…"
+ *     providers/fallback.ts's  ReplayingAdapter, details.key   ⇒ the WHOLE `requestKey` —
+ *       model, system prompt and every message, unbounded and unswept, on E_REPLAY_DIVERGENCE.
+ *
+ * Neither file is this one's to edit. What this one owes them is a single mechanism to call,
+ * which is here; and the READ boundaries are closed either way, so the same credential is
+ * masked out of every span, every SSE frame and every gate delivery — including the ones
+ * already sitting in journals written before this change.
+ *
+ * **A DOUBLE SWEEP IS SAFE, WHICH IS WHAT MAKES "BOTH" A DESIGN RATHER THAN A COLLISION.**
+ * `url-credentials` replaces `scheme://userinfo@` with `scheme://[redacted]@`, which is itself
+ * a match that replaces to the same bytes — so a string masked at the write boundary and swept
+ * again at the read boundary is byte-identical to one swept once. Verified rather than assumed;
+ * a replacement that re-matched to something else would make the two boundaries disagree about
+ * a value they both handled correctly.
  *
  * ONE CALLER ASKS MORE OF IT THAN THE REST, and that is worth knowing before editing
  * `walk`. Spans and the SSE stream redact on the way out of a process an operator
@@ -188,6 +225,29 @@ interface Detector {
  *
  * A long list of clever patterns produces false positives, which train people to
  * ignore redaction; these are shapes that are essentially never legitimate content.
+ *
+ * **ONE OF THEM IS QUADRATIC IN THE LENGTH OF ITS INPUT, WHICH IS A FACT ABOUT THIS LIST AND
+ * THEREFORE A CONSTRAINT ON EVERY CALLER OVER FOREIGN TEXT.** `pem` alone is unanchored at its
+ * tail: `[\s\S]*?` scans to the end of the string once for every `-----BEGIN … PRIVATE KEY-----`
+ * that never gets an `END`, so a string with k of them costs O(n·k). MEASURED through `redact`,
+ * `-----BEGIN A PRIVATE KEY-----` repeated to fill a buffer:
+ *
+ *     64 KB → 20.8 ms   128 KB → 80.2 ms   256 KB → 306.4 ms   512 KB → 1 157 ms
+ *     1 MB → 4 682 ms   2 MB → 18 456 ms
+ *
+ * Four times the input, sixteen times the time. Every other entry has a literal prefix and a
+ * bounded or delimiter-terminated run and is linear — 256 KB of `x://` markers is 0.9 ms and
+ * one 256 KB unterminated userinfo run is 0.7 ms, so `url-credentials`, the entry a write
+ * boundary is usually reaching for, is not the hazard.
+ *
+ * THE RULE THIS IMPOSES, stated here because this is where the cost lives rather than where it
+ * is paid: **a caller that sweeps a string a REMOTE PARTY chose must bound the string first.**
+ * The read-boundary callers sweep values that came out of this deployment's own journal; a
+ * write-boundary caller over a provider's response body does not, and `providers/http.ts`'s
+ * `MAX_SWEEP` is that bound — 8 KB, which makes the same six inputs cost 0.33–0.38 ms flat.
+ * Fixing the pattern instead would mean bounding the body of a PEM block, which is a change to
+ * what this detector CAN find; it is not made here, and the limit is pinned by a test in
+ * `test/security/redact.test.ts` so it cannot be narrowed by accident.
  */
 const DETECTORS: readonly Detector[] = [
   { name: "pem", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
@@ -248,6 +308,14 @@ export interface RedactionResult {
    * has no false negatives to discount. Alert on it the way you would alert on
    * `secretish-key`: a credential was in free text somebody is about to read, and the
    * question is which WRITE boundary let it in. See the WHICH BOUNDARY note above.
+   *
+   * **AND THAT QUESTION STAYS ANSWERABLE NOW THAT THERE IS A WRITE BOUNDARY UPSTREAM**, which
+   * is not obvious and is the reason the fixed-point property matters twice. A hit is recorded
+   * only when the replacement CHANGED the string, so a message `providers/http.ts` already
+   * masked passes through every reader afterwards with the same bytes and NO hit. The alert
+   * therefore keeps firing exactly where a credential entered free text, once, rather than
+   * once more at every span and every frame it travels past — which is what would make it
+   * noise. Pinned by *SWEEPING TWICE IS BYTE-IDENTICAL TO SWEEPING ONCE*.
    */
   readonly hits: readonly string[];
 }

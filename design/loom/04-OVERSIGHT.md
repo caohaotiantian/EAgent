@@ -69,7 +69,9 @@ sla:
     - { afterMs: 900000,  to: { kind: role, id: "sre-manager" } }
     - { afterMs: 2700000, to: { kind: role, id: "director" } }
     - { afterMs: 5400000, action: fail }
-  defaultAction: null             # COMPILE ERROR (GRAPH014) if non-null and irreversibility ≥ irreversible
+  defaultAction: null             # NOT A FIELD of the shipped GateSlaSpec, and onTimeout:
+                                  # default_action is a GRAPH014_SLA_INVALID error for EVERY
+                                  # class — checkSla inspects none of them. See the deviation
 
 # ── what the human is shown ──
 payload:
@@ -214,9 +216,12 @@ stateDiagram-v2
   note right of Open
     DELIVERY FAILURE NEVER AUTO-APPROVES.
     The only ways out are a human decision or the
-    declared timeout policy. `default_action` is
-    rejected at COMPILE (GRAPH014) for irreversible
-    classes, so a timeout can never take one.
+    declared timeout policy. A GRAPH cannot ask for
+    `default_action` at all: GRAPH014_SLA_INVALID
+    refuses it for EVERY irreversibility class, and
+    inspects none of them. An embedder calling
+    HumanGateBroker.raise with its own defaultAction
+    still can — nothing there checks the class.
     A CLAIM IS NOT A WAY OUT EITHER, AND NOT A
     WAY IN: nothing on the decision path reads one.
   end note
@@ -389,6 +394,25 @@ sweep. Closing that needs a store query the `StateStore` interface does not have
 **Every intervention tightens.** Note the right-hand column: there is no operator command
 that lowers a posture. Loosening exists only as `PolicyEngine.deescalate`, which is a
 different verb with a different authority (**D7.7**).
+
+> **Designed, not implemented — most of this table, and one row asserts an enforcement that
+> therefore cannot exist.** `Engine`'s public surface is `sweepGates`, `replaying`,
+> `submit`, `advance`, `deescalate`, `openGates`, `resolveGate`, `openGateBatches`,
+> `resolveGateBatch`, `projection`, `attach`, `cancel`, `rewind` — and nothing else. There
+> is **no** `pause`, `resume`, `steer`, `redirect` or `kill`
+> method, and `operator.command` is appended from exactly one place — `cancel` — so the
+> Journaled column describes an event only `cancel` and `rewind` actually write.
+>
+> The row to read carefully is **`redirect{take}`**, whose middle cell says the subset
+> "**must be a subset of that node's declared outgoing edges**". That closed-set check is
+> real, but it belongs to the **gate decision** `redirect`, not to an operator command:
+> `Engine.#applyGateDecision` filters `gate.take` against the gate node's `outbound` and
+> raises `E_ROUTE_INVALID`. Every `kind: "redirect"` in `src/` is that gate decision
+> (`vocab.ts`, `run/gates.ts`, `run/delivery.ts`, `run/replay.ts`). Read the cell as
+> describing the rule an operator `redirect` **would** have to satisfy — and note that the
+> equivalent rule for a **router**'s `take` does not exist at all (`02-EXECUTION-GRAPH.md`
+> D5.1, `HANDOFF.md` **D13**), so "an edge subset is always checked" is not a property of
+> this system.
 
 **A rewind may not undo a refusal, and the asymmetry is the point.** `Engine.rewind`
 refuses a `cancelled` run and refuses any rewind whose suppressed range contains a
@@ -656,9 +680,21 @@ order:
 | 5 | **Priority + SLA ordering** · BUILT | `HumanGateBroker.list` sorts by `(sla_remaining, blast_radius)` with an ageing term, not by arrival. `cost_at_risk` is deliberately absent — see the deviation below | perceived load | starvation of low-priority gates — bounded by the ageing term, and the bound is stated and driven |
 
 **Explicitly not used as a mitigation:** raising `onTimeout` to `default_action: approve`.
-`GRAPH014` rejects it for any action classified `irreversible` or `externally_visible`.
 Timeout-approval converts an overloaded queue into an *invisible* out-of-the-loop system,
 which is the worst possible failure mode — it looks supervised and is not.
+
+A graph cannot ask for it. `GateSlaSpec.onTimeout` is typed `"escalate" | "fail"`, and
+`checkSla` pushes `GRAPH014_SLA_INVALID` for any other value **whatever the action's
+irreversibility class** — it never reads the class. This paragraph used to say the rule
+"rejects it for any action classified `irreversible` or `externally_visible`", which was
+wrong twice: the refusal is categorical rather than class-conditional, and stating it as
+class-conditional implies a class check that would then be trusted where it does not exist.
+The uncovered path is an embedder calling `HumanGateBroker.raise` with its own
+`defaultAction`: `assertDefaultActionIsSatisfiable` validates that decision's *shape* — the
+kind is one of the four, a mirror gate carries no `edit`/`redirect`, an `edit` writes only
+`allowEdit` channels — and nothing about the class. See the timeout paragraph of
+**02-EXECUTION-GRAPH.md** Deviation 4, which states the same boundary from the executor's
+side.
 
 > **Implementation deviation — rows 2 and 3, as built.** Declared on the node as
 > `HumanGateNode.batching` and `HumanGateNode.dedupe` (`graph/spec.ts`), refused by
@@ -803,8 +839,18 @@ which is the worst possible failure mode — it looks supervised and is not.
 > a browser), and `#inheritable` requires `"human"`. Both other sources were reachable and
 > both were measured. A gate that expired into an `approve` by `gate-broker:timeout` was
 > inherited by an identical gate declaring `onTimeout: fail` and no default action of its
-> own — the pre-authorization `GRAPH014` had proved safe belonged to the source, and
-> `sameQuestion` compares neither field. And a CHAIN: each duplicate is itself a `decided`
+> own — the pre-authorization belonged to the source, and `sameQuestion` compares neither
+> field. **And nothing had proved that pre-authorization safe.** This sentence used to read
+> "the pre-authorization `GRAPH014` had proved safe", naming a rule that does not exist:
+> `checkSla` refuses `onTimeout: default_action` for every class without inspecting any, and
+> the only door a `defaultAction` actually passes through is
+> `assertDefaultActionIsSatisfiable` in `run/gates.ts`, which checks that the decision is one
+> of the four kinds, that a mirror gate is not carrying an `edit`/`redirect`, and that an
+> `edit` writes only `allowEdit` channels. Irreversibility is not consulted anywhere on that
+> path. So the inherited decision was not a *vetted* approval being copied — it was an
+> unvetted one, which is the stronger reason to require `decidedBy: "human"`.
+>
+> **And a CHAIN:** each duplicate is itself a `decided`
 > gate with a fresh `raisedAtTs`, so 20 duplicates 50 s apart carried one human click
 > **1000 s** past a declared 60 s window — a window measured from a source that can be
 > replaced is not a window, and "one hop to the human" was twenty. Requiring a human closes
@@ -932,7 +978,8 @@ What `compile()` really does is one `max` fold per node, in `graph/compile.ts`:
 ```
 posture = max( systemPostureFloor,          // the deployment's floor
                spec.policy.posture,          // the graph's declared default
-               classFloor,                   // max over CLASS_DEFAULT_POSTURE of every tool
+               classFloor,                   // "in" outright for a human_gate; otherwise max
+                                             //   over CLASS_DEFAULT_POSTURE of every tool
                                              //   reachableToolNames(node) can reach
                dataFloor,                    // max over CLASSIFICATION_POSTURE_FLOOR of every
                                              //   channel in reads ∪ writes
@@ -940,14 +987,28 @@ posture = max( systemPostureFloor,          // the deployment's floor
                                              //   max, never an override
 ```
 
-So a node reaches `out` only when **every tool it can reach is `read_only`** and **every
-channel it touches is `public` or `internal`** (`CLASS_DEFAULT_POSTURE`:
-`read_only → out`, `reversible_write → on`, `irreversible`/`externally_visible → in`;
-`CLASSIFICATION_POSTURE_FLOOR`: `public`/`internal → out`, `pii → on`, `secret_ref → in`),
-and neither the system nor the graph floors it higher. That is a stronger guarantee than
-the envelope was, because nothing an author writes can weaken it — a node declaring
-`posture: out` under a higher floor gets `GRAPH019_POSTURE_NO_EFFECT`, a **warning**, and
-runs at the floor anyway.
+So a node reaches `out` only when it is not a `human_gate`, **no tool it can reach is
+classified above `read_only`**, and **no channel it touches is classified `pii` or
+`secret_ref`** (`CLASS_DEFAULT_POSTURE`: `read_only → out`, `reversible_write → on`,
+`irreversible`/`externally_visible → in`; `CLASSIFICATION_POSTURE_FLOOR`:
+`public`/`internal → out`, `pii → on`, `secret_ref → in`), and neither the system nor the
+graph floors it higher.
+
+**State both conditions as absences, because that is how the code computes them, and the
+positive form overstates them.** `dataFloor` reads
+`spec.channels[c]?.classification === undefined ? "out" : CLASSIFICATION_POSTURE_FLOOR[cls]`,
+so a channel that declares no `classification` — the default, and the case for nine of the
+ten channels in D5.5 — contributes `out`, not `internal`-by-assumption. `classFloor` skips a
+tool name the `tools` map does not carry (`entry === undefined ? [] : […]`), so an unknown
+tool contributes nothing rather than flooring the node. Neither is a bug — flooring on what
+the compiler cannot see would gate every graph compiled against a partial manifest — but it
+means these floors are a `max` over *what was declared*, not a proof about what the node can
+do. Saying "every channel it touches is `public` or `internal`" invites a reader to conclude
+a classification was checked when none was declared.
+
+What the fold does guarantee is that nothing an author writes can weaken it, which the
+envelope never did — a node declaring `posture: out` under a higher floor gets
+`GRAPH019_POSTURE_NO_EFFECT`, a **warning**, and runs at the floor anyway.
 
 The three things a compiler genuinely refuses around this: `GRAPH014_OVERSIGHT_LOOSENED`
 (an evolution candidate whose computed posture sits below its baseline — the asymmetry rule
@@ -981,8 +1042,12 @@ preAuthorization:                                                 # NOT A FIELD 
   demotionTriggers: [E1, E2, E4, E5, E6, E7, E8]                  # which of D7.7 are armed
 ```
 
-`grep -ran 'preAuthorization|blastRadius|toolScope|auditCompleteness|demotionTriggers'
-packages/core/src/` returns nothing. Building it is a `GraphSpec` field plus a `GRAPH014`
+`grep -ranE 'preAuthorization|blastRadius|toolScope|auditCompleteness|demotionTriggers'
+packages/core/src/` returns nothing (exit 1). **The `-E` is load-bearing**: plain `grep` is
+BRE, where `|` is a literal, so the command without it returns nothing no matter what is in
+the tree and proves the claim for any string whatsoever. It was published here without the
+flag, which is the failure D5.6's count note warns about one file over — *a count is only as
+good as the command under it*. Building it is a `GraphSpec` field plus a `GRAPH014`
 sub-code per clause, and `blastRadius` needs a tool manifest that describes reach — which no
 `ToolManifest` does today, so it is the expensive clause and not the cheap one. Two of these
 clauses are already enforced by other means and would be redundant: `dataClassification` is

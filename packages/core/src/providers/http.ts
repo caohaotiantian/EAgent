@@ -14,7 +14,7 @@
  * See design/loom/01-INTERFACES.md D3.8.
  */
 
-import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
+import { CODES, LoomError, err, isLoomError, toLoomError } from "../errors.ts";
 import { redact } from "../security/redact.ts";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
@@ -58,6 +58,49 @@ const DEFAULT_BASE_DELAY_MS = 250;
 const DEFAULT_MAX_DELAY_MS = 8_000;
 
 /**
+ * How much foreign text this file will SWEEP. A bound on WORK, not a size policy.
+ *
+ * Every string this file masks is chosen by somebody else — a provider's response body, a
+ * provider's `error` SSE frame, an injected `FetchLike`'s `Error.message` — and `redact`'s
+ * `DETECTORS` include one pattern with an unanchored lazy run: `pem` is
+ * `-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END …`, whose literal prefix is cheap to
+ * find and whose tail scans to the end of the string once per BEGIN that never gets an END.
+ * That is O(n²) in the length of a string the remote party picks. MEASURED on this machine,
+ * `-----BEGIN A PRIVATE KEY-----` repeated to fill a buffer, through `redact`:
+ *
+ *     64 KB → 20.8 ms    128 KB → 80.2 ms    256 KB → 306.4 ms
+ *    512 KB → 1 157 ms   1 MB → 4 682 ms     2 MB → 18 456 ms
+ *
+ * — four times the input, sixteen times the time, and 2 MB is an ordinary error body. Sliced
+ * to this bound first, the same six inputs cost 0.33–0.38 ms, flat in body size. The linear
+ * detectors are not the problem and were measured too: 256 KB of `x://` markers costs 0.9 ms
+ * and one 256 KB unterminated userinfo run costs 0.7 ms, so `url-credentials` — the entry
+ * that does the masking here — is not what this bound is for.
+ *
+ * The alternative to bounding is not "sweep it all"; it is a provider that parks a worker for
+ * eighteen seconds per failed request by choosing its own 404 page.
+ */
+const MAX_SWEEP = 8_192;
+
+/**
+ * How much of a provider's own response body reaches `details.detail`.
+ *
+ * Unchanged from the `body.slice(0, 500)` this replaced. What changed is the ORDER: the
+ * sweep runs over the window and the cut happens after it, because cutting first can sever a
+ * credential and leave its head standing — `…https://svc:hunt` is not a match for
+ * `url-credentials` and is still most of a password.
+ */
+const MAX_DETAIL = 500;
+
+/**
+ * How much of somebody else's `Error.message` becomes a `LoomError.message`.
+ *
+ * The same number as `MAX_SWEEP`, so that a message is bounded exactly where it stops being
+ * swept and no unswept tail can be appended to a masked head.
+ */
+const MAX_MESSAGE = MAX_SWEEP;
+
+/**
  * A caller-supplied delay, refused rather than clamped when no timer can hold it.
  *
  * `baseDelayMs` and `maxDelayMs` are pinned public knobs, so this is the OPERATOR half of
@@ -94,10 +137,30 @@ function boundedDelay(v: unknown, fallback: number, where: string): number {
  *   - a CONTENT FILTER is `policy`. It must never trigger a fallback to another
  *     provider — trying a second vendor to evade a safety refusal is exactly the
  *     behaviour a fallback chain must not have.
+ *
+ * **`details.detail` IS 500 BYTES OF SOMEBODY ELSE'S RESPONSE BODY, AND IT IS A WRITE
+ * BOUNDARY.** `errorRecord` copies `details` verbatim into an append-only journal row and
+ * `server/http.ts`'s `summarise` hands a projection's `error` and each task's `error` straight
+ * on without a sweep — so this field had no redaction on either side of it. Measured, one
+ * string, before the change:
+ *
+ *     normalizeError(400, msg).toJSON().details
+ *       ⇒ {"status":400,"detail":"…credentials: https://svc:p@ssw0rd-tail@api.example.com/v1"}
+ *
+ * — the operator's password, in a file no later fix edits. It now goes through `redactForeign`
+ * like every other foreign string this file writes. `lower` is still computed from the RAW
+ * body, deliberately: the classification arms below ask what the provider SAID, and masking a
+ * credential must not be able to change which taxonomy entry a failure lands in.
+ *
+ * THE 401/403 ARM STILL CARRIES NO `detail` AT ALL, and that is not an oversight the sweep
+ * makes redundant. A body returned WITH an auth rejection is the one most likely to quote the
+ * credential it rejected, in whatever shape that vendor invented; the sweep is a backstop with
+ * false negatives (`security/redact.ts`'s own opening paragraph), and not writing the field is
+ * mechanism 1.
  */
 export function normalizeError(status: number, body: string, headers?: Headers): LoomError {
   const retryAfterMs = parseRetryAfter(headers?.get("retry-after"));
-  const detail = body.slice(0, 500);
+  const detail = redactForeign(body, MAX_DETAIL);
   const lower = body.toLowerCase();
 
   if (status === 429) {
@@ -178,26 +241,106 @@ export function normalizeError(status: number, body: string, headers?: Headers):
  * one mechanism and this file CALLS it. `redact` is the exported way in; the `url-credentials`
  * detector is the entry that matters here, and running the rest of the sweep over a foreign
  * `Error.message` on its way into an append-only file is a gain, not a cost.
+ *
+ * **AND THE FIRST BRANCH ROUTED AROUND ALL OF IT, WHICH IS THE THIRD THING THIS FUNCTION DOES
+ * THAT IS NOT ABOUT THE NETWORK.** The paragraph above was written for the last arm, the
+ * `isLoomError` arm was added for the sibling defect one paragraph up, and neither wave
+ * noticed that the first one returns before the third one runs. Same input, two roads, one
+ * process — measured, not inferred:
+ *
+ *     normalizeTransport(new TypeError(msg))                  ⇒ "…: https://[redacted]@api.example.com/v1"
+ *     normalizeTransport(err.unavailable(CODE, msg))          ⇒ "…: https://svc:p@ssw0rd-tail@api.example.com/v1"
+ *
+ * The second is not a hypothetical road. `anthropic.ts` turns a provider's `error` SSE frame
+ * into `err.unavailable(E_PROVIDER_TRANSPORT, ev.error.message)` — a string the REMOTE PARTY
+ * writes — and throws it into the very catch that calls this function. So the arm that
+ * skipped the sweep was the arm carrying the only text a provider gets to choose.
+ *
+ * **A CLASS IS NOT A PROVENANCE, and that is the whole reason the early return looked safe.**
+ * The arm exists so an inner layer's verdict survives — a `cancelled` must not become a
+ * retryable `unavailable` — and that is a fact about `class` and `code`. It says nothing
+ * whatsoever about `message` and `details`, which are the two fields `errorRecord` copies into
+ * the journal, and one layer down is exactly where a foreign string enters. Both arms now
+ * sweep; `redactForeignError` keeps the taxonomy untouched while doing it, so the property
+ * this arm was added for is unchanged and tested beside the new one.
  */
 export function normalizeTransport(e: unknown): LoomError {
-  if (isLoomError(e)) return toLoomError(e);
+  if (isLoomError(e)) return redactForeignError(toLoomError(e));
   if (e instanceof Error && e.name === "AbortError") return err.cancelled("model call aborted", { cause: e });
-  return err.unavailable(CODES.E_PROVIDER_TRANSPORT, redactCredentials(e instanceof Error ? e.message : String(e)), {
+  return err.unavailable(CODES.E_PROVIDER_TRANSPORT, redactForeign(e instanceof Error ? e.message : String(e), MAX_MESSAGE), {
     cause: e,
   });
 }
 
 /**
- * The shared sweep, narrowed back to the `string → string` this seam needs.
+ * The shared sweep, narrowed back to the `string → string` this seam needs, and BOUNDED.
  *
  * `RedactionResult.value` is `unknown` because `redact` walks any payload; for a string leaf
  * every arm of that walk returns a string, so the branch below is unreachable. It is written
  * fail-CLOSED anyway — `[redacted]` rather than the original — because the one thing this
  * function must never do is hand back an unmasked message on a path it did not expect.
+ *
+ * SWEEP THE WINDOW, THEN CUT — never the other way round. `MAX_SWEEP` says why there is a
+ * window at all (a hostile body makes `pem` quadratic); this order is why the window is wider
+ * than every `limit` any caller passes. Truncating first can sever `https://svc:hunter2@host`
+ * at `https://svc:hunt`, which no longer matches `url-credentials`, so the cut would both
+ * hide the leak from the sweep and leave most of the password in the row.
+ *
+ * WHAT SURVIVES THE BOUND, said plainly rather than left as a gap: a credential whose userinfo
+ * run starts inside the first `limit` characters and whose `@` sits beyond `MAX_SWEEP`. That
+ * takes 8 KB of unbroken text with no `/`, `?`, `#` or whitespace in it, because
+ * `url-credentials`' `[^/?#\s]*` cannot cross any of those — it is a body built to defeat this
+ * rather than a body that quotes a URL. Named because "bounded" and "total" are different
+ * claims and this file makes only the first.
  */
-function redactCredentials(text: string): string {
-  const out = redact(text).value;
-  return typeof out === "string" ? out : "[redacted]";
+function redactForeign(text: string, limit: number): string {
+  const out = redact(text.length <= MAX_SWEEP ? text : text.slice(0, MAX_SWEEP)).value;
+  const swept = typeof out === "string" ? out : "[redacted]";
+  return swept.length <= limit ? swept : swept.slice(0, limit);
+}
+
+/**
+ * Sweep an error that ALREADY HAS A CLASS, without touching the class.
+ *
+ * The two fields `errorRecord` copies into an append-only journal row are `message` and
+ * `details`; the two fields the retry ladder and the HTTP mapping branch on are `class` and
+ * `code`. This function acts on the first pair and is forbidden from the second, which is what
+ * lets `normalizeTransport`'s first arm keep the verdict it was added to keep while stopping
+ * being the road around the redaction it was added beside.
+ *
+ * IDENTITY IS PRESERVED WHEN NOTHING WAS FOUND, and the test is `hits`, not a deep compare.
+ * `redact` rebuilds every container it walks, so `value !== details` for any object whatsoever
+ * — comparing trees would rebuild every error in the ordinary case, and `toLoomError`'s
+ * docstring is right that identity is worth keeping: callers re-throw and compare `code`, and
+ * a rebuild costs `stack`. An empty `hits` means no arm of the walk replaced anything, so the
+ * caller's own value goes back untouched. (`walk`'s depth limit is the one replacement that
+ * pushes no hit; a `details` nested past 32 levels therefore keeps the original, which is the
+ * same answer this function gives a `details` it found nothing in.)
+ *
+ * `cause: le` rather than a copy of the original's own `cause`: the unmasked value stays
+ * reachable for a debugger and unreachable for the journal, which is exactly the arrangement
+ * the last arm of `normalizeTransport` already had — `toJSON` and `errorRecord` both drop
+ * `cause`. Reading `le.cause` instead would also be the one read on this path that
+ * `toLoomError` has not already probed.
+ *
+ * WHAT IS NOT BOUNDED HERE: `details`. `redact` walks it with its own depth and cycle limits
+ * but sweeps each string leaf whole, so the `MAX_SWEEP` argument does not reach them. Inside
+ * `@loom/core` every `details` on this path is built from an already-bounded `detail` or from
+ * counters; an INJECTED adapter can hand over an arbitrary one, and that is an embedder
+ * spending its own process on its own value. `message` — the field a provider actually writes
+ * through `anthropic.ts`'s error frame — is bounded.
+ */
+function redactForeignError(le: LoomError): LoomError {
+  const message = redactForeign(le.message, MAX_MESSAGE);
+  const swept = le.details === undefined ? undefined : redact(le.details);
+  const details = swept === undefined || swept.hits.length === 0 ? le.details : swept.value;
+  if (message === le.message && details === le.details) return le;
+  const retryAfterMs = le.retryAfterMs;
+  return new LoomError(le.class, le.code, message, {
+    cause: le,
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(details === undefined ? {} : { details }),
+  });
 }
 
 /**

@@ -1588,9 +1588,13 @@ export class HumanGateBroker {
     // behind it and no remaining path out — a hang dressed as a policy.
     const action = declared === "default_action" && eph?.defaultAction === undefined ? "fail" : declared;
 
-    // A timeout can never auto-approve an irreversible action: `defaultAction` is
-    // rejected at compile time (GRAPH014) for those classes, so if one is present
-    // here it has already been proven safe.
+    // THIS ARM IS REACHABLE ONLY FOR A CALLER-SUPPLIED `defaultAction`, and nothing has
+    // proved it safe. `checkSla` refuses `onTimeout: "default_action"` for EVERY class
+    // without inspecting any, and `assertDefaultActionIsSatisfiable` checks the decision's
+    // SHAPE — kind, `mirrorOf`, `allowEdit` channels — never the irreversibility class;
+    // `rehydrate` skips even that. A graph cannot reach here at all, because `scheduleOf`
+    // forwards only `escalate|fail`. The claim that GRAPH014 rejects it per class was
+    // copied into five places in the design corpus from this comment.
     if (action === "default_action" && eph?.defaultAction !== undefined) {
       // `idempotencyKey` is carried for the shape and is NOT what makes this once-only:
       // the broker's map is per process, so it never arbitrated between two of them. The
