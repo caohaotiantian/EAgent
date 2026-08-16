@@ -541,6 +541,20 @@ export interface EventPayloads {
     readonly usage: UsageRecord;
     readonly outputs: readonly string[];
   };
+  /**
+   * `atSeq` IS A REWIND TARGET, not this event's own seq. Measured: the event lands at seq
+   * 9 and `atSeq` says 8.
+   *
+   * That is deliberate and it is the useful number, but nothing said so, which made it read
+   * like an off-by-one. `rewind(runId, atSeq)` suppresses `(atSeq, marker)` EXCLUSIVE at
+   * both ends, so passing this value recovers the state the checkpoint captured — the last
+   * event before it. Passing the checkpoint's own seq would keep the checkpoint and
+   * everything the same append wrote after it, which is not what a checkpoint is for.
+   *
+   * Pinned by a test rather than left to this comment, because the arithmetic
+   * (`p.seq + events.length`, evaluated before the activation events are pushed) is the
+   * kind that a later edit silently changes.
+   */
   "checkpoint.created": { readonly checkpointId: CheckpointId; readonly atSeq: Seq; readonly kind: string; readonly openTasks: number };
   /**
    * A rewind is APPEND-ONLY: this marker hides events in `(atSeq, thisSeq)` from the
