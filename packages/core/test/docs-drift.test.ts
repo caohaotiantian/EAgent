@@ -167,6 +167,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CODES } from "../src/errors.ts";
 import { EVENT_TYPES } from "../src/journal/events.ts";
+import { membersDeep } from "./helpers/ts-members.ts";
 import { ESCALATION_RULES } from "../src/run/escalation.ts";
 
 /** The compiler's own taxonomies, so the test cannot drift from the code either. */
@@ -642,12 +643,66 @@ const declaredCodes = new Set(Object.keys(CODES));
  * it is absent. Pinning it is the point: without it, the second spelling is simply the
  * one that sounds less like a debt, and every row drifts toward it.
  */
+/** All of `src/`, concatenated once — `memberAbsent` looks a declaration up in it. */
+const SRC_TEXT = sourceFiles()
+  .map((f) => readFileSync(f, "utf8"))
+  .join("\n");
+
+/** `Interface.member` — the third kind of symbol the registry may name. */
+const INTERFACE_MEMBER = /^[A-Z][A-Za-z0-9_$]*\.[A-Za-z_$][\w$]*$/;
+
 const DESIGNED_NOT_BUILT: ReadonlyArray<{
   readonly symbol: string;
   readonly why: string;
   readonly marker: "DESIGNED-NOT-BUILT" | "NOT-IN-CODE";
   readonly markedIn: readonly string[];
 }> = [
+  // Interface MEMBERS the design describes and the code does not have. Added when
+  // `docs-type-equiv.test.ts` began comparing member sets and found twelve disagreements
+  // on its first run; the nine that were real gaps rather than doc errors are here.
+  {
+    symbol: "ToolDefinition.returns",
+    why: "a tool's result schema is unvalidated; ToolResult.content is a string and nothing checks it against a declared shape",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["01-INTERFACES.md"],
+  },
+  {
+    symbol: "ToolDefinition.timeoutMs",
+    why: "per-tool timeouts are not read; the bound that exists is SandboxOptions.timeoutMs, applied per subprocess rather than per tool",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["01-INTERFACES.md"],
+  },
+  {
+    symbol: "ToolDefinition.concurrencyKey",
+    why: "nothing serialises calls sharing a key; #runAgent runs tool calls strictly sequentially, so the need has not arisen",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["01-INTERFACES.md"],
+  },
+  {
+    symbol: "ModelAdapter.models",
+    why: "adapters expose no capability map; routing is a table in the models file and priceOf answers per model id",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["01-INTERFACES.md"],
+  },
+  {
+    symbol: "AuditRecord.delegationChain",
+    why: "delegation is recorded on the actor as onBehalfOf, not as a chain on the record",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["04-OVERSIGHT.md"],
+  },
+  {
+    symbol: "AuditRecord.quorum",
+    why: "quorum is refused at COMPILE time (GRAPH014_APPROVAL_UNSUPPORTED), so no record can carry it — D7.9 row 2 says so",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["04-OVERSIGHT.md"],
+  },
+  {
+    symbol: "AuditRecord.classification",
+    why: "data classification is computed per channel at compile time and folded into the posture; it is not stamped on the audit row",
+    marker: "DESIGNED-NOT-BUILT",
+    markedIn: ["04-OVERSIGHT.md"],
+  },
+
   // Spans. `telemetry/spans.ts` derives a span from journal events, so a span exists
   // exactly when some event folds into it — and nothing in `EVENT_TYPES` covers ingress,
   // compilation, admission, selection, or context assembly.
@@ -737,9 +792,28 @@ const DESIGNED_NOT_BUILT: ReadonlyArray<{
  * "The code" is all of `src/`, not `telemetry/spans.ts`. See `loomLiteralsInSrc` for the
  * reproduction of what the one-file version missed.
  */
+/**
+ * A third symbol kind: `Interface.member`.
+ *
+ * The registry understood span names and error codes, which are the two things the design
+ * used to over-claim about. It now also over-claims about interface MEMBERS — a document
+ * describing `ToolDefinition.timeoutMs` that the code does not have — and marking those
+ * needs the same discipline: a registered reason, and a check that the gap is still real.
+ * Without the second half a marker outlives its gap, which is exactly what rule 4 exists
+ * to prevent.
+ */
+function memberAbsent(symbol: string): boolean {
+  const dot = symbol.indexOf(".");
+  if (dot <= 0) return false;
+  const iface = symbol.slice(0, dot);
+  const member = symbol.slice(dot + 1);
+  return !membersDeep(SRC_TEXT, iface).has(member);
+}
+
 function absentFromCode(symbol: string): boolean {
   if (symbol.startsWith("loom.")) return !builtTelemetry.has(symbol) && !loomLiteralsInSrc.has(symbol);
   if (symbol.startsWith("E_")) return !declaredCodes.has(symbol);
+  if (INTERFACE_MEMBER.test(symbol)) return memberAbsent(symbol);
   return false;
 }
 
@@ -813,7 +887,9 @@ test("only span names and error codes may be marked, and only through the regist
   const bad: string[] = [];
   for (const [file, doc] of DOCS) {
     for (const symbol of doc.allMarkers) {
-      if (!symbol.startsWith("loom.") && !symbol.startsWith("E_")) bad.push(`${file}: ${symbol} — a marker names an identifier, not a concept`);
+      if (!symbol.startsWith("loom.") && !symbol.startsWith("E_") && !INTERFACE_MEMBER.test(symbol)) {
+        bad.push(`${file}: ${symbol} — a marker names an identifier, not a concept`);
+      }
       else if (!registered.has(symbol)) bad.push(`${file}: ${symbol} — add it to DESIGNED_NOT_BUILT with a reason, deliberately`);
     }
   }

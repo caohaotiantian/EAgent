@@ -406,13 +406,13 @@ export interface ToolDefinition {
   readonly version: string;
   readonly description: string;
   readonly parameters: JSONSchema;       // validated before AND after policy rewrite
-  readonly returns?: JSONSchema;
+  readonly returns?: JSONSchema;                    // DESIGNED-NOT-BUILT(ToolDefinition.returns)
   readonly capabilities: readonly string[];         // inherited from EAgent
   readonly irreversibility: IrreversibilityClass;   // NEW — drives default posture (D7)
   readonly idempotent: boolean;                     // NEW — gates automatic retry
   readonly compensation?: { tool: string; argsFrom: string };  // NEW — saga rollback
-  readonly timeoutMs: number;
-  readonly concurrencyKey?: string;                 // serialises calls sharing a key
+  readonly timeoutMs?: number;                      // DESIGNED-NOT-BUILT(ToolDefinition.timeoutMs)
+  readonly concurrencyKey?: string;                 // DESIGNED-NOT-BUILT(ToolDefinition.concurrencyKey) — serialises calls sharing a key
 }
 ```
 
@@ -550,7 +550,7 @@ export interface ResolvedRef {
 ```ts
 export interface ModelAdapter extends Versioned {
   readonly provider: string;                 // "anthropic" | "openai" | "vllm" | "mock" | …
-  readonly models: ReadonlyMap<string, ModelCapabilities>;
+  readonly models: ReadonlyMap<string, ModelCapabilities>;   // DESIGNED-NOT-BUILT(ModelAdapter.models)
 
   stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
   priceOf(model: string, usage: Usage): number;      // from a PINNED price-table version

@@ -580,16 +580,16 @@ export interface AuditRecord {
 
   decision?: GateDecision;                 // approve | reject | edit{writes} | redirect{take}
   justification?: string;                  // MANDATORY for reject, edit, redirect, and every de-escalation
-  priorState: { posture: Posture; stateHash: string };
-  newState:   { posture: Posture; stateHash: string };
+  priorState?: { posture: Posture; stateHash: string };
+  newState?:  { posture: Posture; stateHash: string };
 
   // Why this was even asked — the exact rules that fired.
   policyReasons: readonly string[];
   latencyMs?: number;                      // raised → decided; feeds SLA dashboards and D10 scoring
-  delegationChain?: readonly string[];
-  quorum?: { required: number; received: number; approvers: readonly string[] };
-  classification: "internal" | "pii";
-  contentDigest: string;                   // sha256 of the payload AS RAISED — see below
+  delegationChain?: readonly string[];    // DESIGNED-NOT-BUILT(AuditRecord.delegationChain)
+  quorum?: { required: number; received: number; approvers: readonly string[] };  // DESIGNED-NOT-BUILT(AuditRecord.quorum) — and see D7.9: a `human_gate` declaring quorum is a compile error
+  classification?: "internal" | "pii";     // DESIGNED-NOT-BUILT(AuditRecord.classification)
+  contentDigest?: string;                  // sha256 of the payload AS RAISED — see below
 }
 ```
 

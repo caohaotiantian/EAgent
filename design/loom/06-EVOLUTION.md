@@ -39,9 +39,9 @@ export interface Trajectory {
 }
 
 export interface TrajectoryStep {
-  taskId: TaskId; nodeId: NodeId; nodeType: NodeType; branchPath: string; attempt: number;
+  taskId: TaskId; nodeId: NodeId; nodeType: NodeType; branchPath: string; attempts: number;
   stateInHash: string; stateOutHash: string;
-  action:
+  actions:
     | { kind: "model"; model: string; promptRef: ResourceRef; promptDigest: string;
         toolCallNames: readonly string[]; finishReason: FinishReason }
     | { kind: "tool";  name: string; version: string; argsShape: string; ok: boolean; ms: number }
