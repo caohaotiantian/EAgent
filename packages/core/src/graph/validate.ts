@@ -23,6 +23,7 @@ import {
   maxPosture,
   type IrreversibilityClass,
   type Posture,
+  postureRank,
 } from "../vocab.ts";
 import { checkExpr, type Ty } from "./expr.ts";
 import {
@@ -290,7 +291,27 @@ function computeFanoutStacks(
       known.length === candidates.length &&
       known.every((c) => c.length === known[0]!.length && c.every((w, i) => w === known[0]![i]));
     stacks.set(id, agreed ? known[0]! : undefined);
-    widths.set(id, Math.max(1, ...known.map(product), 1));
+
+    // WIDTH IS COMPUTED SEPARATELY, AND NEVER FROM `known` ALONE.
+    //
+    // Ambiguity propagates: one undefined stack makes every descendant's stack undefined
+    // too. Taking the max over `known` therefore collapsed to `Math.max(1, ...[], 1)` — a
+    // width of ONE — for any node all of whose inbound paths were ambiguous, and
+    // GRAPH010's concurrent-writer refusal reads this number. Under-counting concurrency
+    // is the unsafe direction: it lets racing writers through on exactly the graphs whose
+    // shape the compiler already admits it cannot follow.
+    //
+    // So width falls back to the PARENT'S width rather than to 1, and a `join` whose
+    // parent stack is unknown does not pop a level it cannot see. Both over-approximate,
+    // which is the direction that refuses more rather than fewer.
+    const edgeWidth = (e: EdgeSpec): number => {
+      const parentWidth = widths.get(e.from) ?? 1;
+      const parentStack = stacks.get(e.from);
+      if (e.kind === "fanout") return parentWidth * (e.maxWidth ?? 1);
+      if (e.kind === "join") return parentStack === undefined ? parentWidth : product(parentStack.slice(0, -1));
+      return parentWidth;
+    };
+    widths.set(id, Math.max(1, ...ins.map(edgeWidth)));
   }
   return { stacks, widths };
 }
@@ -1235,9 +1256,20 @@ function rule011And012ErrorPaths(
     const manifest =
       source === undefined
         ? undefined
-        : reachableToolNames(source)
+        : // THE HARDEST-TO-UNDO REACHABLE TOOL, not the first one that happens to be
+          // registered. Taking the first made the verdict depend on the ORDER an author
+          // wrote `agent.tools`: the same graph compiled clean or errored depending on
+          // whether the read-only tool was listed before the irreversible one. The rule
+          // is about whether this node can do something that needs undoing, and that is
+          // a `max`, exactly as the posture floor next door is.
+          reachableToolNames(source)
             .map((name) => tools[name])
-            .find((m) => m !== undefined);
+            .filter((m): m is ToolManifestLite => m !== undefined)
+            .sort(
+              (a, b) =>
+                postureRank(CLASS_DEFAULT_POSTURE[b.irreversibility]) -
+                postureRank(CLASS_DEFAULT_POSTURE[a.irreversibility]),
+            )[0];
     if (manifest === undefined) {
       d.push({
         severity: "error",
