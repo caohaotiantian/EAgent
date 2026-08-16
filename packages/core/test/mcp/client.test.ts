@@ -20,6 +20,7 @@ import { join } from "node:path";
 
 import { McpClient, createBoundedLineReader } from "../../src/mcp/client.ts";
 import { mcpToolName, mcpTools } from "../../src/mcp/tools.ts";
+import { connectMcp, openWorkspace, parseArgs, readMcpServers } from "../../src/cli.ts";
 
 function serverFile(body: string): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "loom-mcp-"));
@@ -186,4 +187,60 @@ test("calling a client that is not running is refused, not silently pending", as
     async () => c.request("tools/list", {}),
     (e: unknown) => (e as { code: string }).code === "E_TOOL_SOURCE_UNAVAILABLE",
   );
+});
+
+// ── the CLI wiring, which is what makes any of this reachable ────────────────
+
+test("readMcpServers REFUSES A MALFORMED FILE rather than booting unconfigured", () => {
+  const d = mkdtempSync(join(tmpdir(), "loom-mcpcfg-"));
+  try {
+    const write = (doc: unknown): string => {
+      const p = join(d, "mcp.json");
+      writeFileSync(p, JSON.stringify(doc));
+      return p;
+    };
+    // Each refusal names what is wrong, because "looks configured and every call fails with
+    // unknown tool" is the outcome booting anyway produces.
+    assert.throws(() => readMcpServers(write({})), /at least one server/);
+    assert.throws(() => readMcpServers(write({ servers: [{ command: "x" }] })), /name must match/);
+    assert.throws(() => readMcpServers(write({ servers: [{ name: "a" }] })), /command is required/);
+    // A name that is not id-safe would produce a tool called `mcp__my server__x`.
+    assert.throws(() => readMcpServers(write({ servers: [{ name: "my server", command: "x" }] })), /name must match/);
+    // A duplicate would have the second server's tools shadow the first's silently.
+    assert.throws(
+      () => readMcpServers(write({ servers: [{ name: "a", command: "x" }, { name: "a", command: "y" }] })),
+      /used twice/,
+    );
+    // A command line assembled from a single string is how argument injection happens.
+    assert.throws(() => readMcpServers(write({ servers: [{ name: "a", command: "x", args: "-y foo" }] })), /array of strings/);
+    assert.deepEqual(readMcpServers(write({ servers: [{ name: "a", command: "x", args: ["-y"] }] })), [
+      { name: "a", command: "x", args: ["-y"] },
+    ]);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("A GRAPH COMPILES AGAINST A DISCOVERED MCP TOOL — the ordering that keeps the floor honest", async () => {
+  const s = serverFile(GOOD);
+  const d = mkdtempSync(join(tmpdir(), "loom-mcpws-"));
+  const cfg = join(d, "mcp.json");
+  writeFileSync(cfg, JSON.stringify({ servers: [{ name: "demo", command: process.execPath, args: [s.path] }] }));
+
+  const ws = openWorkspace(parseArgs(["compile", "--workspace", d]));
+  let clients: readonly McpClient[] = [];
+  try {
+    clients = await connectMcp(ws, readMcpServers(cfg));
+    // Registered into the engine's registry, which is what `loadGraph` compiles against —
+    // so the tool is inside `reachableToolNames` and the posture floor sees it. Registering
+    // after the compile would defeat invariant 5 by ordering rather than by argument.
+    const manifests = ws.engine.tools.manifests();
+    assert.ok(mcpToolName("demo", "echo") in manifests, "the discovered tool must be registered before any compile");
+    assert.equal(manifests[mcpToolName("demo", "echo")]!.irreversibility, "irreversible");
+  } finally {
+    for (const c of clients) c.close();
+    ws.close();
+    rmSync(d, { recursive: true, force: true });
+    s.cleanup();
+  }
 });

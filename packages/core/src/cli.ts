@@ -19,6 +19,8 @@ import { InProcessEventBus } from "./bus.ts";
 import { isLoomError, toLoomError } from "./errors.ts";
 import { parseYamlSpec } from "./graph/yaml.ts";
 import { compile } from "./graph/compile.ts";
+import { McpClient, type McpClientOptions } from "./mcp/client.ts";
+import { mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
@@ -81,6 +83,12 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     dissolves the fs jail rather than narrowing it.
   --exec-env  N,N   environment variable NAMES proc.exec passes to the child. Default
                     is an empty environment, because this process holds API keys.
+  --mcp-file  F     MCP servers to connect, as
+                    {"servers":[{"name":"docs","command":"npx","args":["-y","@scope/srv"]}]}.
+                    Connected BEFORE any graph compiles, so discovered tools are inside the
+                    posture floor. EVERY MCP tool is irreversible and therefore gates:
+                    tools/list cannot say whether a tool reads a file or wires money, and
+                    guessing from its name is a heuristic a hostile server defeats.
 `;
 
 /**
@@ -1007,13 +1015,120 @@ function readSpec(file: string): GraphSpec {
   return parsed as GraphSpec;
 }
 
+/**
+ * `--mcp-file` — which MCP servers to connect, and under what name.
+ *
+ * A file rather than a flag, for the reason `--models-file` is one: a server entry carries a
+ * command, an argv and an environment allow-list, and none of those survive being flattened
+ * into a comma-separated string legibly.
+ *
+ * Refuses to start on a malformed file, the same trade `readModels` and `readChannels` make:
+ * booting anyway produces a deployment that looks configured and whose every MCP call fails
+ * with "unknown tool".
+ */
+export function readMcpServers(file: string): readonly McpClientOptions[] {
+  const path = resolve(file);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch (e) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--mcp-file ${path}: ${(e as Error).message}`);
+  }
+  const refuse: (why: string) => never = (why) => {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--mcp-file ${path}: ${why}`);
+  };
+  const rows = (parsed as { servers?: unknown } | null)?.servers;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    refuse(`must be {"servers":[{"name":"docs","command":"npx","args":["-y","@scope/server"]}]} with at least one server`);
+  }
+  const seen = new Set<string>();
+  return rows.map((raw, i): McpClientOptions => {
+    const where = `servers[${String(i)}]`;
+    const row = raw as Record<string, unknown> | null;
+    if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    const name = row["name"];
+    const command = row["command"];
+    if (typeof name !== "string" || !/^[A-Za-z0-9_-]+$/.test(name)) {
+      refuse(`${where}.name must match [A-Za-z0-9_-]+ — it becomes part of every tool id as mcp__<name>__<tool>`);
+    }
+    if (typeof command !== "string" || command.length === 0) refuse(`${where}.command is required`);
+    // A duplicate name would have the second server's tools shadow the first's silently,
+    // which is the same refusal `readModels` makes about a duplicate adapter.
+    if (seen.has(name)) refuse(`${where}.name "${name}" is used twice`);
+    seen.add(name);
+    const args = row["args"];
+    const envAllow = row["envAllow"];
+    if (args !== undefined && (!Array.isArray(args) || args.some((a) => typeof a !== "string"))) {
+      refuse(`${where}.args must be an array of strings — a command line assembled from a single string is how argument injection happens`);
+    }
+    if (envAllow !== undefined && (!Array.isArray(envAllow) || envAllow.some((a) => typeof a !== "string"))) {
+      refuse(`${where}.envAllow must be an array of variable NAMES`);
+    }
+    return {
+      name,
+      command,
+      ...(args === undefined ? {} : { args: args as readonly string[] }),
+      ...(envAllow === undefined ? {} : { envAllow: envAllow as readonly string[] }),
+    };
+  });
+}
+
+/**
+ * Connect every configured server and register its tools BEFORE any graph is compiled.
+ *
+ * The ordering is the load-bearing part. An agent node's posture floor is a `max` over
+ * `reachableToolNames`, computed at COMPILE time — so a tool registered after the compile is
+ * a tool the floor never saw, and invariant 5 is defeated by ordering rather than by
+ * argument. `loadGraph` reads `ws.engine.tools.manifests()`, so registering here puts every
+ * discovered tool inside that computation.
+ *
+ * A server that fails to start is fatal, not skipped. Skipping produces a run whose graph
+ * compiled against tools that are not there, which fails later and further away.
+ */
+export async function connectMcp(ws: Workspace, servers: readonly McpClientOptions[]): Promise<readonly McpClient[]> {
+  const clients: McpClient[] = [];
+  for (const opts of servers) {
+    const client = new McpClient(opts);
+    try {
+      await client.start();
+    } catch (e) {
+      for (const c of clients) c.close();
+      client.close();
+      throw err.unavailable(
+        CODES.E_TOOL_SOURCE_UNAVAILABLE,
+        `mcp server "${opts.name}" failed to start: ${(e as Error).message}`,
+      );
+    }
+    clients.push(client);
+    for (const t of mcpTools(client)) ws.engine.tools.register(t);
+  }
+  return clients;
+}
+
 function loadGraph(ws: Workspace, file: string): RunGraph {
   const spec = readSpec(file);
   const result = compile({
     spec,
     resolver: ws.resolver,
     tools: (ws.engine.tools as ToolRegistry).manifests(),
-    tenantCapabilities: ["fs:read", "fs:write", "net:fetch"],
+    // Every registered MCP tool declares `mcp:<server>`, and a capability the tenant does
+    // not hold is a compile error — so a connected server has to appear here or its tools
+    // are visible to the compiler and unusable by every graph.
+    tenantCapabilities: [
+      "fs:read",
+      "fs:write",
+      "net:fetch",
+      "proc:exec",
+      // Every registered MCP tool declares `mcp:<server>`, and a capability the tenant does
+      // not hold is a compile error — so a connected server has to appear here or its tools
+      // are visible to the compiler and unusable by every graph. Derived from what is
+      // actually registered rather than from the config file, so the two cannot disagree.
+      ...new Set(
+        Object.values((ws.engine.tools as ToolRegistry).manifests())
+          .flatMap((m) => m.capabilities)
+          .filter((c) => c.startsWith("mcp:")),
+      ),
+    ],
   });
   if (!result.ok) {
     for (const d of result.diagnostics) {
@@ -1453,6 +1568,10 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   const ws = openWorkspace(args);
+  // BEFORE the switch, so every command that compiles a graph sees the discovered tools.
+  // `connectMcp` explains why the ordering is the load-bearing part.
+  const mcp =
+    args.flags["mcp-file"] === undefined ? [] : await connectMcp(ws, readMcpServers(requireFileFlag(args, "mcp-file")));
   try {
     switch (args.command) {
       case "compile": {
@@ -1600,6 +1719,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 2;
     }
   } finally {
+    // Children first: a server left running outlives the process that spawned it, and a
+    // stdio server holds the pipe open, so `loom run` would not exit.
+    for (const c of mcp) c.close();
     ws.close();
   }
 }
