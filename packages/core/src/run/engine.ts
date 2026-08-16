@@ -1461,7 +1461,52 @@ export class Engine {
   }
 
   /** Run the node body. Reached once policy has allowed it — or a human has. */
-  #dispatch(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> | NodeOutcome {
+  /**
+   * THE single point every node outcome passes through, and therefore where writes are
+   * confined to what the node declared.
+   *
+   * `node.writes` is not a hint. The compiler spends its analysis on it: GRAPH010 refuses
+   * two concurrent writers to a non-commutative channel, the posture floor is a `max` over
+   * what a node can reach, and `dataClassification` is derived from the union of reads and
+   * writes. Every one of those verdicts is computed over the DECLARED set, so a runtime
+   * that lets a node write outside it does not merely surprise the author — it makes each
+   * of those verdicts unearned, because the analysis proved something about a set the
+   * runtime was not enforcing.
+   *
+   * It was enforced in two of four places. The tool path filters through `mapToolWrites`
+   * and the agent path never supplies explicit keys, so both were confined; `#runFunction`
+   * and `#runEvaluator` each returned `{ ...(out.writes ?? {}) }` raw. Measured: a
+   * `function` node declaring `writes: ["mine"]` returned `{mine, secret}` and `secret`
+   * was committed.
+   *
+   * Confining HERE rather than at those two sites is the same argument invariant 6 makes
+   * about `#invokeTool`: a check applied per-caller is a check that the next node type
+   * forgets. A future body cannot opt out of this one without editing the wrapper.
+   */
+  async #dispatch(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
+    const outcome = await this.#dispatchBody(ctx, p, w);
+    const declared = new Set(w.node.writes ?? []);
+    const stray = Object.keys(outcome.writes).filter((c) => !declared.has(c));
+    if (stray.length === 0) return outcome;
+
+    // REFUSED, not dropped. Dropping leaves a node body that believes it wrote and a
+    // journal that disagrees — the silent divergence class that is hardest to diagnose
+    // later. A `function` body is trusted, reviewed, pinned code (A13), so an undeclared
+    // write is a defect in the graph or the body, and naming it is the useful answer.
+    return {
+      status: "failed",
+      writes: {},
+      usage: outcome.usage,
+      error: err.validation(
+        CODES.E_GRAPH_INVALID,
+        `node "${w.node.id}" wrote ${stray.map((c) => `"${c}"`).join(", ")}, which it did not declare in \`writes\`` +
+          ` (declared: ${(w.node.writes ?? []).map((c) => `"${c}"`).join(", ") || "none"})`,
+        { details: { node: w.node.id, stray, declared: [...declared] } },
+      ),
+    };
+  }
+
+  #dispatchBody(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> | NodeOutcome {
     switch (w.node.type) {
       case "function":
         return this.#runFunction(ctx, p, w);
