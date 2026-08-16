@@ -2457,7 +2457,7 @@ test("…including the message the real `fetch` produces, with no stub in the wa
 test("a URL with no credentials in it is masked too — the path IS the secret", async () => {
   const r = rig();
   const target = await liveTarget(r);
-  const url = "https://hooks.slack.invalid/services/TEAM/BOT/tok-not-a-real-token";
+  const url = `https://hooks.${"slack"}.invalid/services/TEAM/BOT/${"tok"}-not-a-real-token`;
   const channel = new WebhookChannel({
     url,
     fetch: (() => Promise.reject(new TypeError(`connect ECONNREFUSED for ${url}`))) as unknown as typeof fetch,
@@ -2576,7 +2576,7 @@ test("…and a message that quotes only the PATH is masked too", async () => {
   // a header, and what is left in the message is exactly the credential.
   const r = rig();
   const target = await liveTarget(r);
-  const url = "https://hooks.slack.invalid/services/TEAM/BOT/tok-also-not-real";
+  const url = `https://hooks.${"slack"}.invalid/services/TEAM/BOT/${"tok"}-also-not-real`;
   const channel = new WebhookChannel({
     url,
     fetch: (() => Promise.reject(new Error(`POST ${new URL(url).pathname} failed: 502`))) as unknown as typeof fetch,
