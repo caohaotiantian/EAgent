@@ -66,6 +66,7 @@ load-bearing across layers):
 | `E_BUDGET_EXHAUSTED` | exhausted | `PolicyEngine` | Run/node/tenant budget would be exceeded |
 | `E_ADMISSION_REJECTED` | exhausted | `AgentScheduler` | Tenant concurrency or queue depth exceeded; carries `retryAfterMs` |
 | `E_SEQ_CONFLICT` | conflict | `StateStore` | `expectedSeq` did not match; another attempt won |
+| `E_PAYLOAD_TOO_DEEP` | validation | `StateStore` | A payload or actor nests deeper than `canonicalize` will walk. Refused rather than truncated: a truncating canonicalizer would digest a value that is not the value, and `digest()` is what replay compares |
 | `E_IDEMPOTENCY_MISMATCH` | conflict | `ControlPlaneAPI` | Same key, different payload |
 | `E_LEASE_LOST` | conflict | `AgentScheduler` | Fencing token stale; this worker must abandon the Task |
 | `E_CONTEXT_OVERFLOW` | validation | `ModelAdapter` | Prompt exceeds the model window after compaction |

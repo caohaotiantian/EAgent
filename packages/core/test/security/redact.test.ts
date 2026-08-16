@@ -9,6 +9,7 @@ import {
   isSecret,
   redact,
   redactAttributes,
+  redactPayload,
 } from "../../src/security/redact.ts";
 
 // ── the deployment key ───────────────────────────────────────────────────────
@@ -425,11 +426,17 @@ test("THE SWEEP DOES NOT BOUND ITS OWN INPUT, AND ONE DETECTOR IS QUADRATIC IN I
   // entry a write boundary is usually reaching for — is 0.7 ms. Both asserted below, because
   // "the linear ones are linear" is the half that licenses the callers that do not bound.
   //
-  // WHAT THIS MEANS FOR A CALLER: a string a REMOTE PARTY chose must be bounded BEFORE it
-  // reaches here. The read-boundary callers sweep values that came out of this deployment's
-  // own journal. `providers/http.ts` sweeps a provider's response body, and its `MAX_SWEEP`
-  // is that bound — pinned from the other side by *THE SWEEP OVER A PROVIDER BODY IS
-  // BOUNDED* in `test/providers/http.test.ts`.
+  // WHAT THIS MEANS FOR A CALLER: a string the caller DID NOT AUTHOR must be bounded before
+  // it reaches here. This comment used to exempt the read boundary — "the read-boundary
+  // callers sweep values that came out of this deployment's own journal" — which is an
+  // argument about PROVENANCE where the cost is a question of AUTHORSHIP, and the journal is
+  // exactly where model output lives. Measured through `GET /runs/:id`, a 1 MB channel value
+  // cost 4767 ms with 4754 ms of event-loop lag. `redactPayload` and `redactAttributes` now
+  // bound themselves by default; `providers/http.ts`'s `MAX_SWEEP` is the write-boundary
+  // bound, pinned from the other side by *THE SWEEP OVER A PROVIDER BODY IS BOUNDED* in
+  // `test/providers/http.test.ts`. What is still deliberately unbounded is `redact` itself,
+  // and therefore `run/delivery.ts`'s `redactFields` — see *THE READ BOUNDARY BOUNDS ITS OWN
+  // SWEEP* below, which pins that on purpose rather than by omission.
   const n = 256 * 1024;
 
   // 1. THE FACT THAT MAKES A CALLER'S BOUND NECESSARY: this function truncates nothing.
@@ -965,6 +972,136 @@ test("A VALUE INSIDE THE BAG THAT THROWS COSTS ONE ATTRIBUTE — the same hazard
     /depth 2/,
     "`redact` became total by accident; then this test is the wrong shape and the docstrings are stale",
   );
+});
+
+// ── the read-boundary bound ──────────────────────────────────────────────────
+//
+// `DETECTORS` is quadratic in one entry, and the two read-boundary entry points hand it
+// MODEL OUTPUT: `redactPayload` sweeps a channel map and a journal payload, `redactAttributes`
+// sweeps operator- and channel-authored free text. The docstring that used to license those
+// two as unbounded said they "sweep values that came out of this deployment's own journal" —
+// an argument about provenance where the cost is a question of authorship. Measured end to
+// end before the bound, one 1 MB channel value through `GET /runs/:id`:
+//
+//     benign 1 MB      →    7 ms, peak event-loop lag    0 ms
+//     pem-shaped 1 MB  → 4767 ms, peak event-loop lag 4754 ms
+//
+// The four tests below pin the bound from all four sides: it BITES, it is not the whole
+// module, it can be SPELLED away, and it truncates nothing.
+
+/** Filler with no detector shape in it, so only the offset of the key decides the outcome. */
+const FILLER = "kept ".repeat(2_000);
+/** A `provider-key` match — one of the LINEAR detectors, so nothing here is a timing test. */
+const KEY = "sk-abcdefghijklmnop0123456789";
+/** The key sits at offset ~10 000, past the 8 KB default window and inside an unbounded one. */
+const PAST = FILLER + KEY;
+/** The same key inside the window, so "the bound sweeps nothing" is distinguishable. */
+const INSIDE = KEY + FILLER;
+
+const masked = (v: unknown): boolean => !JSON.stringify(v)!.includes(KEY);
+
+test("THE READ BOUNDARY BOUNDS ITS OWN SWEEP — and `redact` itself is still the unbounded primitive", () => {
+  // 1. THE BOUND BITES at both entry points, by default, with nothing spelled.
+  assert.equal(masked(redactPayload({ big: PAST }, "internal")), false, "redactPayload swept past its default window");
+  assert.equal(
+    masked(withKey(KEY_A, () => redactAttributes({ "gate.reason": PAST }, {}, "run_a"))),
+    false,
+    "redactAttributes swept past its default window",
+  );
+
+  // 2. AND IT IS A WINDOW, NOT AN OFF SWITCH. Without this the first assertion is also
+  // satisfied by a bound that sweeps nothing at all, which is the silent-leak reading.
+  assert.equal(masked(redactPayload({ big: INSIDE }, "internal")), true, "the bound stopped the sweep finding anything");
+  assert.equal(
+    masked(withKey(KEY_A, () => redactAttributes({ "gate.reason": INSIDE }, {}, "run_a"))),
+    true,
+    "the bound stopped the span sweep finding anything",
+  );
+
+  // 3. `redact` IS UNCHANGED, which is the half that keeps `run/delivery.ts`'s `redactFields`
+  // — the gate-delivery path, the one sink outside the trust boundary, and the one whose
+  // output is hashed into a content digest — behaving exactly as it did. If this flips, the
+  // bound leaked into a file this change does not own and a digest moved with it.
+  assert.equal(masked(redact({ big: PAST }, "internal").value), true, "`redact` acquired a default bound");
+
+  // 4. UNBOUNDED IS AN OPT-IN THE CALLER SPELLS, at both entry points.
+  assert.equal(masked(redactPayload({ big: PAST }, "internal", { maxSweepBytes: Number.POSITIVE_INFINITY })), true);
+  assert.equal(
+    masked(withKey(KEY_A, () => redactAttributes({ "gate.reason": PAST }, {}, "run_a", { maxSweepBytes: Number.POSITIVE_INFINITY }))),
+    true,
+  );
+
+  // 5. AND THE RESIDUAL IS REPORTED RATHER THAN SILENT. `sweep-bounded` says "the window
+  // closed", which a reader of `hits` must not confuse with "swept whole and found nothing".
+  assert.deepEqual(redact({ big: PAST }, "internal", { maxSweepBytes: 8_192 }).hits, ["sweep-bounded"]);
+  assert.deepEqual(redact({ big: PAST }, "internal").hits, ["provider-key"], "unbounded finds it and says so");
+});
+
+test("THE BOUND TRUNCATES NOTHING — the window is on the SWEEP, never on the value", () => {
+  // `providers/http.ts` is allowed to cut because it is building a 500-byte `details.detail`.
+  // These two render a channel value into an operator's console and a reason onto a span, and
+  // a value that silently loses everything past 8 KB is a reader MISLED about the run. The
+  // tail is concatenated back verbatim, so the only observable of the bound is which matches
+  // were found — asserted here as byte equality outside the window.
+  const out = redactPayload({ big: PAST }, "internal") as { big: string };
+  assert.equal(out.big.length, PAST.length, "the bound became a size policy");
+  assert.equal(out.big, PAST, "nothing in this value matched inside the window, so nothing may have changed");
+
+  // A match INSIDE the window is still replaced, and the tail past the window is still exact.
+  const both = redactPayload({ big: INSIDE + KEY }, "internal") as { big: string };
+  assert.equal(both.big.startsWith("[redacted:provider-key]"), true, "the head was not swept");
+  assert.equal(both.big.endsWith(KEY), true, "the tail past the window was not returned verbatim");
+
+  // AND THE SPLIT MAY LAND INSIDE A SURROGATE PAIR, which `slice` will happily do. The two
+  // halves are re-joined verbatim, so the astral character is whole in the output — pinned
+  // because the alternative (a mangled character on an operator's console) would be the bound
+  // becoming visible in the value, which is the one thing it must never be. Built so the pair
+  // straddles code unit 8192 exactly.
+  const emoji = "\u{1F600}";
+  const straddle = "a".repeat(8_191) + emoji + "tail";
+  assert.equal(straddle.charCodeAt(8_191) >= 0xd800 && straddle.charCodeAt(8_191) <= 0xdbff, true, "the fixture stopped straddling");
+  const rejoined = redactPayload({ big: straddle }, "internal") as { big: string };
+  assert.equal(rejoined.big, straddle);
+  assert.equal([...rejoined.big].includes(emoji), true, "the split severed an astral character");
+
+  // The residual is the STRADDLING MATCH and nothing narrower: a lone surrogate is not itself
+  // inert to the detectors. `pem`'s `[\s\S]*?` matches straight across one, which is why this
+  // file does not claim the split is safe BECAUSE no detector can see a half-character.
+  assert.deepEqual(redact(`-----BEGIN A PRIVATE KEY-----\ud83dx-----END A PRIVATE KEY-----`).hits, ["pem"]);
+});
+
+test("AN UNUSABLE maxSweepBytes IS THE DEFAULT BOUND — never no bound, and never no sweep", () => {
+  // The two alternative readings are both worse than 8 KB, and both are reachable by accident
+  // from an untyped caller: `slice(0, NaN)` is the empty string, so "sweep nothing" is a
+  // silent leak; treating a bad value as absent restores the stall. Every one of these is
+  // somebody asking for a bound and spelling it wrong.
+  for (const bad of [0, -1, Number.NaN, "8192", null, {}, [], true] as unknown[]) {
+    // `inspect`, not `JSON.stringify`: the latter renders both `NaN` and `null` as "null",
+    // so a failure would name the wrong member of the list it is iterating.
+    const what = inspect(bad);
+    const opts = { maxSweepBytes: bad as number };
+    assert.equal(masked(redactPayload({ big: INSIDE }, "internal", opts)), true, `${what}: read as "sweep nothing"`);
+    assert.equal(masked(redactPayload({ big: PAST }, "internal", opts)), false, `${what}: read as "no bound"`);
+  }
+});
+
+test("THE READ BOUNDARY IS NO LONGER QUADRATIC IN A 1 MB MODEL-AUTHORED STRING", () => {
+  // The one timing assertion here, and it is a curve rather than a benchmark. `-----BEGIN A
+  // PRIVATE KEY-----` repeated to 1 MB costs 4900 ms through unbounded `redact`, measured
+  // three times in three fresh processes (the table in `DETECTORS` records 4682 ms; *THE
+  // SWEEP DOES NOT BOUND ITS OWN INPUT* above holds the same shape at 128 KB). Through
+  // `redactPayload` it is one 8 KB window plus a concatenation: 1.2–1.6 ms isolated, 0.7 ms
+  // inside this file's warm process. The ceiling is ~60× that and 49× under the number it
+  // exists to refuse, so no loaded machine flakes it and no regression hides under it.
+  const unit = "-----BEGIN A PRIVATE KEY-----";
+  const pem = unit.repeat(Math.floor((1024 * 1024) / unit.length));
+
+  const t0 = performance.now();
+  const out = redactPayload({ big: pem }, "internal") as { big: string };
+  const ms = performance.now() - t0;
+
+  assert.ok(ms < 100, `the read boundary took ${ms.toFixed(0)} ms — the bound is not reaching the sweep`);
+  assert.equal(out.big, pem, "and it is still the whole value: no BEGIN here ever gets an END");
 });
 
 // ── provider ─────────────────────────────────────────────────────────────────

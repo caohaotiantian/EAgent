@@ -2945,6 +2945,14 @@ function send(res: ServerResponse, status: number, body: unknown): void {
  * The journal keeps real values — it is the source of truth, and redacting it would
  * corrupt channel state. Anything crossing the process boundary is redacted using the
  * event's own declared classification.
+ *
+ * THE DECLARED PATH IS WHOLE-VALUE; THE DETECTOR BACKSTOP IS WINDOWED. `redactPayload`
+ * bounds its sweep to the first 8 KB of each string leaf by default, because a journal
+ * payload is model output at whatever length a model chose and one entry in `DETECTORS` is
+ * quadratic in its input — unbounded, a 1 MB pem-shaped payload parked this thread, and this
+ * one thread also carries every other request and every SSE frame. Nothing is truncated and
+ * the classification arms are unaffected; what the bound costs is a detector run that BEGINS
+ * past 8 KB in one leaf. See `DETECTORS` in `security/redact.ts`.
  */
 function frame(e: JournalEvent): unknown {
   return {
@@ -2972,7 +2980,16 @@ function summarise(p: import("../run/projection.ts").RunProjection): unknown {
     posture: p.posture,
     // Channel values reach a browser here, so they are swept on the way out. The
     // per-channel classification lives in the GraphSpec; without it in hand the
-    // conservative `internal` sweep still catches credential shapes in model output.
+    // conservative `internal` sweep catches credential shapes in THE FIRST 8 KB of each
+    // string a model wrote — `redactPayload`'s default bound, and the word "still" used to
+    // stand where "the first 8 KB" is now, claiming the whole value.
+    //
+    // THIS IS THE CALL SITE THE BOUND EXISTS FOR. A channel value is agent output of
+    // unbounded length; `pem` in `DETECTORS` is quadratic; and this handler is `await`-free
+    // through the sweep, so its cost is not this request's latency but every concurrent
+    // client's. Measured before the bound: benign 1 MB → 7 ms; pem-shaped 1 MB → 4767 ms,
+    // of which 4754 ms was event-loop lag. Pinned by *A 1 MB pem-SHAPED CHANNEL VALUE DOES
+    // NOT STALL THE PLANE* in `test/server/http.test.ts`.
     channels: redactPayload(p.channels, "internal"),
     outputs: redactPayload(p.outputs, "internal"),
     usage: p.usage,

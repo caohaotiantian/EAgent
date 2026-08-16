@@ -9,11 +9,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { builtinTools, fsRestore } from "../../src/builtin/tools.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
@@ -27,9 +27,19 @@ import { resolver } from "../run/skeleton.ts";
 
 const ctx = () => ({ taskId: "t@root#0" as never, signal: new AbortController().signal, progress: () => {} });
 
+/** A ToolContext for a specific derived TaskId — `nodeId@branchPath#iteration`. */
+const ctxOf = (taskId: string) => ({ taskId: taskId as never, signal: new AbortController().signal, progress: () => {} });
+
 function sandbox(): { root: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "loom-tools-"));
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+/** Every file under `dir`, workspace-relative, sorted. Used to assert about clobber. */
+function filesUnder(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, encoding: "utf8" })
+    .filter((p) => statSync(join(dir, p)).isFile())
+    .sort();
 }
 
 const byName = (tools: readonly ToolDefinition[], name: string): ToolDefinition =>
@@ -464,4 +474,225 @@ test("a tool write whose key the node DID declare passes through untouched", asy
   assert.equal(p.channels["a"], 1);
   assert.equal(p.channels["b"], 2);
   s.cleanup();
+});
+
+// ── the jail is per BRANCH, not per workspace ────────────────────────────────
+
+test("TWO FAN-OUT BRANCHES WRITING THE SAME PATH GET DISTINCT FILES", async () => {
+  // The clobber, at the tool boundary. `cli.ts` constructs `builtinTools(jail)` ONCE
+  // with one `root`, so every branch of a fan-out resolves `out.txt` to the same
+  // inode: the second write wins, the first is gone, and nothing anywhere says so.
+  // `ToolContext.taskId` is `nodeId@branchPath#iteration` and the engine passes the
+  // real one, so the branch coordinate is already in hand at the only place that
+  // turns a relative path into a real one.
+  const s = sandbox();
+  try {
+    const write = byName(builtinTools({ root: s.root, deny: [] }), "fs.write");
+    await write.execute({ path: "out.txt", body: "from branch 0" }, ctxOf("w@root/fo[0]#0"));
+    await write.execute({ path: "out.txt", body: "from branch 1" }, ctxOf("w@root/fo[1]#0"));
+
+    const files = filesUnder(s.root);
+    assert.equal(files.length, 2, `both branches' writes survive, but the workspace holds: ${JSON.stringify(files)}`);
+    const bodies = files.map((f) => readFileSync(join(s.root, f), "utf8")).sort();
+    assert.deepEqual(bodies, ["from branch 0", "from branch 1"]);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("the ROOT branch still writes straight into the workspace — the common case is unchanged", async () => {
+  // Every graph without a fan-out has one branch, `root`, and its files must land
+  // where an operator (and `--workspace`) expects them. A scheme that moved even the
+  // root branch into a subdirectory would break every existing workspace.
+  const s = sandbox();
+  try {
+    const write = byName(builtinTools({ root: s.root, deny: [] }), "fs.write");
+    await write.execute({ path: "note.txt", body: "hello" }, ctxOf("only@root#0"));
+    assert.equal(readFileSync(join(s.root, "note.txt"), "utf8"), "hello");
+    assert.deepEqual(filesUnder(s.root), ["note.txt"]);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a branch READS BACK what it just wrote, and does not see its sibling's copy", async () => {
+  const s = sandbox();
+  try {
+    const tools = builtinTools({ root: s.root, deny: [] });
+    const write = byName(tools, "fs.write");
+    const read = byName(tools, "fs.read");
+    await write.execute({ path: "out.txt", body: "mine" }, ctxOf("w@root/fo[0]#0"));
+    await write.execute({ path: "out.txt", body: "theirs" }, ctxOf("w@root/fo[1]#0"));
+
+    assert.equal((await read.execute({ path: "out.txt" }, ctxOf("w@root/fo[0]#0"))).content, "mine");
+    assert.equal((await read.execute({ path: "out.txt" }, ctxOf("w@root/fo[1]#0"))).content, "theirs");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a branch still READS THE SHARED WORKSPACE — a fan-out over files is the ordinary case", async () => {
+  // Reads fall back to the workspace when the branch has no copy of its own. Without
+  // that, every fan-out branch reading an input file placed in the workspace by the
+  // operator would break, which is a larger regression than the clobber being fixed.
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "input.txt"), "shared input");
+    const read = byName(builtinTools({ root: s.root, deny: [] }), "fs.read");
+    assert.equal((await read.execute({ path: "input.txt" }, ctxOf("w@root/fo[7]#0"))).content, "shared input");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("A BRANCH CANNOT REACH THE JOURNAL, and CONTAINMENT is what refuses it — not the deny-list", async () => {
+  // The mechanism is asserted, not just the outcome, because the two walls are one step
+  // apart and only one of them is standing here. A branch's jail root does not contain
+  // `<ws>/.loom`, so both spellings of the journal are outside it and `assertWithin`
+  // refuses them before it ever looks at a denied subtree. Pinning the MESSAGE is what
+  // stops "the deny-list keeps branches off the journal" from becoming a second claim
+  // about the same wall — the failure mode this repo keeps finding.
+  const s = sandbox();
+  try {
+    const data = join(s.root, ".loom");
+    mkdirSync(data, { recursive: true });
+    writeFileSync(join(data, "journal.db"), "intact");
+    const branch = ctxOf("w@root/fo[0]#0");
+    const write = byName(builtinTools({ root: s.root, deny: [data] }), "fs.write");
+
+    // Where this branch's files really land is disclosed on the result, so the test does
+    // not have to restate the directory-naming scheme to find it.
+    const first = await write.execute({ path: "seed.txt", body: "x" }, branch);
+    const branchDir = dirname((first.details as { at: string }).at);
+    symlinkSync(data, join(branchDir, "j"));
+
+    await assert.rejects(
+      async () => write.execute({ path: "j/journal.db", body: "clobbered" }, branch),
+      (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED" && /escapes the sandbox root once its symlinks/.test((e as Error).message),
+    );
+    await assert.rejects(
+      async () => write.execute({ path: "../../.loom/journal.db", body: "clobbered" }, branch),
+      (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED" && /escapes the sandbox root/.test((e as Error).message),
+    );
+    assert.equal(readFileSync(join(data, "journal.db"), "utf8"), "intact");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("a RELATIVE deny entry names one directory, not one per branch", async () => {
+  // `assertWithin` resolves a relative deny entry against whatever root it is handed, and
+  // the root it is handed is now the branch's — so `deny: [".loom"]` would otherwise mean
+  // a different directory for every task that called a tool. The observable consequence is
+  // small and is the whole of it: the entry keeps denying the WORKSPACE's `.loom`, and a
+  // branch's own `.loom` is an ordinary directory. `cli.ts` passes an absolute `dataDir`
+  // and would never have shown this; the contract on `BuiltinOptions.deny` covers both.
+  const s = sandbox();
+  try {
+    const data = join(s.root, ".loom");
+    mkdirSync(data, { recursive: true });
+    writeFileSync(join(data, "journal.db"), "intact");
+    const write = byName(builtinTools({ root: s.root, deny: [".loom"] }), "fs.write");
+
+    await assert.rejects(
+      async () => write.execute({ path: ".loom/journal.db", body: "clobbered" }, ctxOf("w@root#0")),
+      (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED" && /denies/.test((e as Error).message),
+      "the root branch is still denied the workspace's .loom",
+    );
+
+    const out = await write.execute({ path: ".loom/note.txt", body: "mine" }, ctxOf("w@root/fo[0]#0"));
+    const at = (out.details as { at: string }).at;
+    assert.match(at, /\.branches\b/, `a branch's own .loom is its own directory, not the workspace's: ${at}`);
+    assert.equal(readFileSync(join(data, "journal.db"), "utf8"), "intact");
+    assert.equal(existsSync(join(data, "note.txt")), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("END TO END: a fan-out of three branches writing one declared path leaves three files", async () => {
+  // The unit tests above hand-build a TaskId. This one proves the premise underneath
+  // them — that `engine.ts` really passes a branch-coded `ToolContext.taskId` into a
+  // tool, so no engine change is needed for the jail to become per-branch. The graph
+  // names ONE output path, because that is what a graph author writes; the runtime is
+  // what runs it three times.
+  const s = sandbox();
+  try {
+    const spec: GraphSpec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "fanout-write", project: "t", version: 1 },
+      policy: { expansion: { maxNodes: 16, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+      channels: {
+        items: { type: "array", reduce: "replace" },
+        item: { type: "string", reduce: "replace" },
+        // `merge_object`, not `replace`: three branch instances of one node writing a
+        // `replace` channel is three racing writers, and GRAPH010 refuses that graph at
+        // compile time. The channel says the writes are commutative; nothing said the
+        // FILES were, which is the gap this test is about.
+        note: { type: "object", reduce: "merge_object" },
+      },
+      inputs: ["items"],
+      outputs: ["note"],
+      nodes: [
+        { id: "start" as NodeId, type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+        {
+          id: "write" as NodeId,
+          type: "tool",
+          reads: ["item"],
+          writes: ["note"],
+          tool: { name: "fs.write", version: "1.0", args: { path: "report.md", body: "branch ${item}" } },
+          unhandled: true,
+        },
+        {
+          id: "gather" as NodeId,
+          type: "join",
+          reads: ["note"],
+          writes: ["note"],
+          join: { branches: ["write" as NodeId], mode: "all", onBranchError: "fail" },
+        },
+      ],
+      edges: [
+        { id: "fo", from: "start" as NodeId, to: "write" as NodeId, kind: "fanout", over: "items", as: "item", maxWidth: 3 },
+        { id: "jn", from: "write" as NodeId, to: "gather" as NodeId, kind: "join" },
+      ],
+    } as unknown as GraphSpec;
+
+    const store = new MemoryStateStore({ now: () => 1 });
+    const tools = new ToolRegistry();
+    for (const t of builtinTools({ root: s.root, deny: [] })) tools.register(t);
+    const functions = new FunctionRegistry();
+    functions.register("function/seed@stable", () => ({}));
+
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions,
+      models: new ModelRegistry(),
+      now: () => 1,
+      maxParallelism: 3,
+      policy: { granted: ["*"], systemFloor: "out" },
+    });
+    const graph = compileOrThrow({
+      spec,
+      resolver: resolver(),
+      tools: Object.fromEntries(tools.list().map((t) => [t.name, t])),
+      tenantCapabilities: ["*"],
+    });
+    const runId = await engine.submit({ graph, inputs: { items: ["a", "b", "c"] } });
+    const p = await engine.advance(runId);
+    assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+
+    const files = filesUnder(s.root);
+    assert.equal(files.length, 3, `three branches wrote "report.md"; the workspace holds ${JSON.stringify(files)}`);
+    assert.deepEqual(
+      files.map((f) => readFileSync(join(s.root, f), "utf8")).sort(),
+      ["branch a", "branch b", "branch c"],
+      "each branch's body survived its siblings",
+    );
+    for (const f of files) assert.equal(f.endsWith("report.md"), true, `every file is still the path the graph named: ${f}`);
+  } finally {
+    s.cleanup();
+  }
 });

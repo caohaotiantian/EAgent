@@ -6,9 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { CODES, isLoomError } from "../../src/errors.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
-import { EVENT_TYPES, SYSTEM_ACTOR } from "../../src/journal/events.ts";
+import { type Actor, EVENT_TYPES, SYSTEM_ACTOR } from "../../src/journal/events.ts";
+import type { StateStore } from "../../src/journal/store.ts";
 import type { RunId, TaskId } from "../../src/ids.ts";
 import { foldRun } from "../../src/run/projection.ts";
 import { runConformance } from "./conformance.ts";
@@ -341,6 +343,184 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
   assert.equal(EVENT_TYPES.length, 52, "update this count when the vocabulary grows, deliberately");
 });
+
+// ── depth on the durable write path ──────────────────────────────────────────
+
+/**
+ * The limit `canonicalize` enforces, mirrored here as a literal.
+ *
+ * It is deliberately NOT imported: `scripts/check-surface.mjs` pins the exported NAME
+ * SET of `@loom/core`, `index.ts` re-exports all of `canonical.ts`, and adding a public
+ * export is a reviewed act that re-pins `surface.json`. So the constant stays private and
+ * this literal is the coupling. If it ever disagrees with `canonical.ts`, these tests fail
+ * — which is the intent.
+ */
+const MAX_DEPTH = 256;
+
+/** `depth` nested containers around a leaf. A loop, so building it cannot itself overflow. */
+function nest(depth: number, kind: "object" | "array" = "object"): unknown {
+  let v: unknown = 1;
+  for (let i = 0; i < depth; i++) v = kind === "object" ? { a: v } : [v];
+  return v;
+}
+
+const STORES: readonly { name: string; create: () => StateStore }[] = [
+  { name: "memory", create: () => new MemoryStateStore({ now: () => 5 }) },
+  { name: "sqlite", create: () => new SqliteStateStore({ path: ":memory:", now: () => 5 }) },
+];
+
+for (const { name, create } of STORES) {
+  test(`[${name}] append REFUSES an over-deep payload instead of overflowing the stack`, async () => {
+    // MEASURED, not guessed: on this machine (Node 24.16, default stack) the unbounded
+    // recursion in `canonicalize` dies at a nesting depth of 5700 flat, and lower the
+    // deeper the caller already is — 5100 under 1000 caller frames, 3800 under 3000. So
+    // 20_000 is comfortably past it and the pre-fix failure is a bare
+    // `RangeError: Maximum call stack size exceeded` thrown out of the durable write path.
+    //
+    // Invariant 2 says the journal is the only authoritative durable state. A write path
+    // that dies with an untyped host error tells no caller what to do — it is neither a
+    // `validation` refusal a caller can fix nor a `unavailable` one they can retry.
+    const store = create();
+    const run = `01JRUNDEEP${name.toUpperCase()}00000000000`.slice(0, 26) as RunId;
+    try {
+      await assert.rejects(
+        () =>
+          store.append({
+            runId: run,
+            expectedSeq: 0,
+            events: [
+              {
+                type: "operator.command",
+                payload: { kind: "probe", args: { deep: nest(20_000) } },
+                actor: SYSTEM_ACTOR("test"),
+              },
+            ],
+          }),
+        (e: unknown) => {
+          assert.ok(
+            isLoomError(e),
+            `expected a LoomError, got ${(e as Error)?.name}: ${String((e as Error)?.message).slice(0, 80)}`,
+          );
+          assert.equal(e.code, CODES.E_PAYLOAD_TOO_DEEP);
+          assert.equal(e.class, "validation");
+          assert.equal(e.retryable, false, "a deeper retry of the same value cannot succeed");
+          return true;
+        },
+      );
+      // REFUSED MEANS NOTHING LANDED. `prepare` runs before any row is written, so the
+      // batch is rejected whole; a half-written batch would break the CAS the next
+      // append performs against `expectedSeq`.
+      assert.equal(await store.head(run), 0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test(`[${name}] append refuses an over-deep ACTOR too`, async () => {
+    // `prepare` canonicalizes the actor as well as the payload — two calls, one line apart —
+    // so the guard has to cover both. `Actor` has no `unknown`-typed field, so reaching this
+    // needs a cast — which is exactly what the control plane does when it builds an actor
+    // out of external identity data, and what the type system cannot police at a process
+    // boundary.
+    const store = create();
+    const run = `01JRUNACTR${name.toUpperCase()}00000000000`.slice(0, 26) as RunId;
+    try {
+      await assert.rejects(
+        () =>
+          store.append({
+            runId: run,
+            expectedSeq: 0,
+            events: [
+              {
+                type: "run.started",
+                payload: { posture: "in" },
+                actor: { kind: "system", component: "test", rule: nest(20_000) } as unknown as Actor,
+              },
+            ],
+          }),
+        (e: unknown) => {
+          assert.ok(isLoomError(e), `expected a LoomError, got ${(e as Error)?.name}`);
+          assert.equal(e.code, CODES.E_PAYLOAD_TOO_DEEP);
+          return true;
+        },
+      );
+      assert.equal(await store.head(run), 0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test(`[${name}] the limit is the mechanism, not the stack: depth ${MAX_DEPTH} appends, ${MAX_DEPTH + 1} does not`, async () => {
+    // Both of these depths canonicalize fine on today's stack, so this pair pins the
+    // BOUNDARY rather than the crash — the difference between "we chose a limit" and "we
+    // happened to survive". The accepted side also round-trips, which is what makes the
+    // limit a promise about stored data rather than about a rejection message.
+    const store = create();
+    const ok = `01JRUNEDGE${name.toUpperCase()}00000000000`.slice(0, 26) as RunId;
+    const bad = `01JRUNOVER${name.toUpperCase()}00000000000`.slice(0, 26) as RunId;
+    try {
+      // The payload itself is a container and `args` is a second, so the nest under
+      // `args.deep` starts at depth 2 and may be at most MAX_DEPTH - 2 containers tall.
+      // Stating the arithmetic rather than a bare literal is the point: the limit is on
+      // the WHOLE journaled value, envelope included, not on the interesting part of it.
+      await store.append({
+        runId: ok,
+        expectedSeq: 0,
+        events: [
+          {
+            type: "operator.command",
+            payload: { kind: "probe", args: { deep: nest(MAX_DEPTH - 2, "array") } },
+            actor: SYSTEM_ACTOR("test"),
+          },
+        ],
+      });
+      const [event] = await Array.fromAsync(store.read(ok, 1));
+      assert.deepEqual(event?.payload, { kind: "probe", args: { deep: nest(MAX_DEPTH - 2, "array") } });
+
+      await assert.rejects(
+        () =>
+          store.append({
+            runId: bad,
+            expectedSeq: 0,
+            events: [
+              {
+                type: "operator.command",
+                payload: { kind: "probe", args: { deep: nest(MAX_DEPTH - 1, "array") } },
+                actor: SYSTEM_ACTOR("test"),
+              },
+            ],
+          }),
+        (e: unknown) => {
+          assert.ok(isLoomError(e), `expected a LoomError, got ${(e as Error)?.name}`);
+          assert.equal(e.code, CODES.E_PAYLOAD_TOO_DEEP);
+          return true;
+        },
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  test(`[${name}] the limit is on DEPTH, not size — a wide shallow payload still appends`, async () => {
+    // Guards against the cure becoming a payload-size cap by accident. 20_000 sibling keys
+    // canonicalize to a few hundred kilobytes — far more BYTES than any value these tests
+    // refuse — while nesting exactly two levels.
+    const store = create();
+    const run = `01JRUNWIDE${name.toUpperCase()}00000000000`.slice(0, 26) as RunId;
+    try {
+      const args: Record<string, unknown> = {};
+      for (let i = 0; i < 20_000; i++) args[`k${i}`] = i;
+      const seq = await store.append({
+        runId: run,
+        expectedSeq: 0,
+        events: [{ type: "operator.command", payload: { kind: "wide", args }, actor: SYSTEM_ACTOR("test") }],
+      });
+      assert.equal(seq.seq, 1);
+    } finally {
+      store.close();
+    }
+  });
+}
 
 test("SQLITE EMITS NO EXPERIMENTAL WARNING (open thread T3)", () => {
   // T3 asked whether to suppress `node:sqlite`'s ExperimentalWarning for CLI UX. As of

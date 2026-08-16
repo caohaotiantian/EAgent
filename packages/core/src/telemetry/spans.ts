@@ -103,6 +103,15 @@
  * of it: the journal keeps what the write boundary let through, and this file is downstream
  * of that by construction.
  *
+ * **AND THE SWEEP OVER THAT FREE TEXT IS A WINDOW, NOT THE WHOLE STRING** — the sentence
+ * above says "get `redact.ts`'s detector sweep" and this is the width of it. Those strings
+ * have no declared length and `pem` in `DETECTORS` is quadratic in its input, so `close`
+ * takes `redactAttributes`' default `maxSweepBytes` (8 KB per string leaf) and a detector run
+ * beginning past it is not found. Nothing is truncated and no attribute is dropped for
+ * length; what changed is only how far the BACKSTOP looks. The declared path —
+ * `ATTRIBUTE_CLASSES`, and the deliberately narrow set of payload fields this fold reads at
+ * all — is unaffected, which is where the real protection was already stated to live.
+ *
  * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.1–D9.2, and D9.6 for why the journal
  * is never redacted.
  */
@@ -291,6 +300,17 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // scope `redactFields` names for gate delivery, for the same reason, and it costs
       // only the cross-run half of correlation: everything a trace is read for — the
       // state chain, a repeated question, the same approver twice — is within one run.
+      //
+      // AND THE SWEEP INSIDE IT IS WINDOWED, WHICH IS A COST RATHER THAN A PROTECTION.
+      // `redactAttributes` bounds the detector backstop to the first 8 KB of each string
+      // leaf by default. The three bags carry operator- and channel-authored free text of no
+      // declared length — `gate.reason`, `run.suspended`'s reason, `policy.reasons` — and one
+      // entry in `DETECTORS` is quadratic in its input, so unbounded this fold is a `loom
+      // trace` that parks rather than one that fails. Nothing is truncated; a detector run
+      // that BEGINS past 8 KB in one attribute is what the bound lets past, and dropping the
+      // attribute instead (which invariant 8 would license, and which the three arms in
+      // `redactAttributes` already do) would lose the reason an operator opened the trace
+      // for. `security/redact.ts`'s `DETECTORS` states the trade in full.
       attributes: redactAttributes({ ...o.attributes, ...extra }, ATTRIBUTE_CLASSES, runId),
       links: o.links.map((l) =>
         l.attributes === undefined ? l : { spanId: l.spanId, attributes: redactAttributes(l.attributes, ATTRIBUTE_CLASSES, runId) },

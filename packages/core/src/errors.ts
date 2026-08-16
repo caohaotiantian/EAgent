@@ -245,6 +245,16 @@ export const CODES = {
   E_CONFIG_INVALID: "E_CONFIG_INVALID",
   /** A cohort measured under different score weights is a different metric. */
   E_COHORT_INVALIDATED: "E_COHORT_INVALIDATED",
+  /**
+   * A value nests deeper than `canonicalize` will walk.
+   *
+   * `validation`, so NEVER retried: the same bytes will be refused again, and the retry
+   * would be a second attempt at the stack overflow this code replaces. Raised only from
+   * `canonical.ts`, which is on the durable write path (`journal/store.ts` canonicalizes
+   * every payload and every actor) — so the alternative was a bare `RangeError` out of the
+   * one path invariant 2 says must not fail unrecognisably.
+   */
+  E_PAYLOAD_TOO_DEEP: "E_PAYLOAD_TOO_DEEP",
 
   // policy
   E_OVERSIGHT_LOOSENED: "E_OVERSIGHT_LOOSENED",

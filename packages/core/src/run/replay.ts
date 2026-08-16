@@ -11,6 +11,11 @@
  * and asserts every `state.hash` matches — which is how a reducer regression is
  * caught).
  *
+ * THE VERDICT IS OVER TWO QUESTIONS, not one: did the projections agree, and was the
+ * recording actually consumed? The second is not implied by the first — a recorded result
+ * nobody asks for moves no channel — so `unservedEffects` counts against `match` rather
+ * than being reported beside it. See `ReplayReport.match`.
+ *
  * WHAT CANNOT BE REPLAYED FAITHFULLY is documented in D9.5 and is honest: secrets
  * (never journaled, so re-resolved), redacted fields (serve a token), forked runs
  * with modified inputs (they re-execute for real), and effects whose outcome was
@@ -19,6 +24,7 @@
  * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.5.
  */
 
+import { digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import type { GateId, RunId, TaskId } from "../ids.ts";
 import { isEvent, type JournalEvent } from "../journal/events.ts";
@@ -31,7 +37,51 @@ import { foldRun, type GateRecord, type RunProjection } from "./projection.ts";
 export interface RecordedEffect {
   readonly key: string;
   readonly result: unknown;
+  /**
+   * `digest(result)` as the recording computed it. `require` compares it; nothing else
+   * does anything with it beyond copying it out of the event.
+   *
+   * It was written at four sites in `engine.ts` and compared nowhere: a durable field
+   * whose NAME asserted a property nothing verified. Kept rather than deleted because the
+   * check it enables is the journal's only defense against a substituted result, and
+   * deleting it would have been a change to the durable event vocabulary
+   * (`journal/events.ts`) plus its four writers — see `require` for what a mismatch means
+   * and what it cannot see.
+   */
   readonly resultDigest: string;
+}
+
+/**
+ * Effect KINDS whose recorded digest is known not to be a digest of `result`.
+ *
+ * `#runSubgraph` in `engine.ts` (`:2191` when this was written) journals
+ * `result: {writes}` alongside `resultDigest: digest(writes)`, so the recorded digest
+ * addresses a sub-object of the result and a strict comparison refuses every subgraph
+ * replay. This is a narrowed CLAIM, not a weakened check: the comparison is exact for
+ * every kind not listed, and nothing here tries to guess which encoding a mismatch meant.
+ *
+ * The exemption is pinned by a test that re-derives the disagreement from a real subgraph
+ * run rather than by this sentence ("THE SUBGRAPH SITE STILL DOES NOT DIGEST ITS RESULT",
+ * `test/run/replay.test.ts`), so fixing `engine.ts` turns that test red with the
+ * instruction to delete this set. A prose reason nobody re-executes is how this repo grew
+ * four of the claims this file is being repaired for.
+ */
+const DIGEST_NOT_OVER_RESULT: ReadonlySet<string> = new Set(["subgraph"]);
+
+/** The `kind` of `taskId:kind:ordinal`. Empty when the key is not in that shape. */
+function kindOf(key: string): string {
+  const last = key.lastIndexOf(":");
+  if (last <= 0) return "";
+  const prev = key.lastIndexOf(":", last - 1);
+  return prev < 0 ? "" : key.slice(prev + 1, last);
+}
+
+/** The `taskId` of `taskId:kind:ordinal`, for a frame a human has to place. */
+function taskOf(key: string): string | undefined {
+  const last = key.lastIndexOf(":");
+  if (last <= 0) return undefined;
+  const prev = key.lastIndexOf(":", last - 1);
+  return prev <= 0 ? undefined : key.slice(0, prev);
 }
 
 /**
@@ -72,11 +122,49 @@ export class ReplayEffects {
     return ReplayEffects.fromEvents(events);
   }
 
-  /** Throws `E_REPLAY_DIVERGENCE` rather than falling back to a live call. */
+  /**
+   * Throws `E_REPLAY_DIVERGENCE` rather than falling back to a live call.
+   *
+   * THE RESULT IS CHECKED AGAINST THE DIGEST RECORDED WITH IT, which makes exactly one
+   * claim: the bytes being served are the bytes the engine hashed when it wrote them. Two
+   * things produce a mismatch, and they are told apart by looking at the journal rather
+   * than by this code guessing:
+   *
+   *   - THE JOURNAL WAS EDITED UNDER THE REPLAY. A row rewritten by hand, a restore that
+   *     spliced results from another run, a store that corrupted a payload. The digest is
+   *     the only thing that notices, because a wrong tool result reaches the agent's
+   *     transcript and the model turn that would react to it is served from the journal
+   *     too — so the replay still reaches the recorded end state and `compare` still
+   *     reports every frame green.
+   *   - CANONICALIZATION CHANGED. `canonical.ts` decides these bytes; a change to key
+   *     ordering, number formatting or what it refuses re-addresses every result ever
+   *     recorded. That is a migration, and it should be loud on the first replay rather
+   *     than silently redefine what a recorded run was.
+   *
+   * WHAT IT DOES NOT CLAIM: the digest is over the RESULT only. It says nothing about
+   * which call produced it (`reboundEffects`), about arguments (there is no input digest —
+   * see `reboundEffects`' docstring), or about a journal rewritten CONSISTENTLY, digest
+   * included, by anyone who can run `digest`. It is an integrity check against edits and
+   * drift, never an authenticity check against an adversary; the journal is not signed.
+   *
+   * COST is one `canonicalize` + sha256 per served effect, on the replay path only — live
+   * runs never enter this class. It is linear in the size of the recorded result, so a run
+   * whose results are large pays proportionally, and it pays it once per replay.
+   */
   require(key: string): RecordedEffect {
     const hit = this.#completed.get(key);
     if (hit !== undefined) {
       this.#served.add(key);
+      if (!DIGEST_NOT_OVER_RESULT.has(kindOf(key))) {
+        const computed = digest(hit.result);
+        if (computed !== hit.resultDigest) {
+          throw err.internal(
+            CODES.E_REPLAY_DIVERGENCE,
+            `effect "${key}" no longer hashes to its recorded digest — the journal was edited under this replay, or canonicalization changed`,
+            { details: { key, recorded: hit.resultDigest, computed } },
+          );
+        }
+      }
       return hit;
     }
     if (this.#failed.has(key)) {
@@ -119,7 +207,14 @@ export class ReplayEffects {
 
 export interface ReplayFrame {
   readonly seq: number;
-  readonly kind: "state.reduced" | "task.committed" | "run.completed" | "run.failed" | "graph.bound" | "effect.rebound";
+  readonly kind:
+    | "state.reduced"
+    | "task.committed"
+    | "run.completed"
+    | "run.failed"
+    | "graph.bound"
+    | "effect.rebound"
+    | "effect.unserved";
   readonly taskId?: string;
   readonly match: boolean;
   readonly expected?: string;
@@ -129,11 +224,40 @@ export interface ReplayFrame {
 export interface ReplayReport {
   readonly runId: RunId;
   readonly replayRunId: RunId;
+  /**
+   * The verdict — every frame agreed, INCLUDING one frame per recorded effect the replay
+   * never asked for.
+   *
+   * Folded into `match` rather than reported as a separate `complete` flag, and the
+   * argument is about readers. `match` is the field consumers act on: `cli.ts` returns it
+   * as a process exit code, and `evolution/gate.ts` reads it for
+   * `EvalCase.expect.identicalToRecording`, which decides whether a candidate is
+   * promotable. A new field would have had no reader on the day it landed — the exact
+   * shape being repaired one type up in this file, where `resultDigest` sat written and
+   * unread — and making it load-bearing means editing the consumers, so the choice was
+   * between one honest verdict and a second field that certifies nothing until somebody
+   * else wires it.
+   *
+   * The narrower reading was available — "`match` means the compared frames agreed;
+   * completeness is a separate question" — and it is what the code did. It is wrong here
+   * because the frames CANNOT SEE this class. An agent's tool result reaches the
+   * transcript only, and the model turn that would react to it is itself served from the
+   * journal, so a recorded result nobody fetches moves no channel and changes no task
+   * state. A green `compare` over a replay that skipped two recorded calls is not evidence
+   * of agreement; it is the absence of evidence, reported as agreement to the one field
+   * that gets acted on.
+   */
   readonly match: boolean;
   readonly frames: readonly ReplayFrame[];
   readonly original: RunProjection;
   readonly replayed: RunProjection;
-  /** Recorded effects the replay never consumed. Non-empty means the graph changed. */
+  /**
+   * Recorded effects the replay never asked for.
+   *
+   * Non-empty means this replay did not make a call the recording made — because the
+   * GRAPH changed, or because the code walking it did. Both are divergences and both
+   * count against `match`; which one it was is answered by `graph.match` beside it.
+   */
   readonly unservedEffects: readonly string[];
   readonly hermetic: boolean;
   /**
@@ -307,6 +431,23 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   for (const r of rebound) {
     frames.push({ seq: seq++, kind: "effect.rebound", match: false, expected: r.recorded, actual: r.replayed });
   }
+  // A FRAME PER UNSERVED EFFECT, not one boolean, because `loom replay` prints the frames
+  // that did not match and "the replay never asked for this" is useless without the key.
+  // Unconditional, including under `onGraphChange: "allow"`: that opt-out is a statement
+  // about which GRAPH may run, and this is the narrower fact that survives it — whatever
+  // graph ran, it did not consume what the recording produced.
+  const unserved = effects.unserved;
+  for (const key of unserved) {
+    const taskId = taskOf(key);
+    frames.push({
+      seq: seq++,
+      kind: "effect.unserved",
+      ...(taskId === undefined ? {} : { taskId }),
+      match: false,
+      expected: key,
+      actual: "(never requested)",
+    });
+  }
 
   return {
     runId: opts.runId,
@@ -315,7 +456,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     frames,
     original,
     replayed,
-    unservedEffects: effects.unserved,
+    unservedEffects: unserved,
     // Non-hermetic when the recorded run had effects with no outcome: replay cannot
     // invent what the world did while the process was dying.
     hermetic: effects.unknownOutcomes.length === 0,

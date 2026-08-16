@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { main, openWorkspace, parseArgs } from "../src/cli.ts";
+import { main, openWorkspace, parseArgs, readModels } from "../src/cli.ts";
 import type { RunId } from "../src/ids.ts";
 
 function emptyDir(): { dir: string; dispose: () => void } {
@@ -179,6 +179,206 @@ test("a symlink planted in the workspace does not reopen either hole", async () 
     }
   } finally {
     rmSync(outside, { recursive: true, force: true });
+    d.dispose();
+  }
+});
+
+// ── --models-file: the binary can call a real provider ───────────────────────
+
+/**
+ * These tests are OFFLINE and hold no key. `readModels` constructs adapters and returns a
+ * router; nothing here calls `stream`, so no socket is opened and no credential is needed
+ * beyond the fake one injected through `env`. `env` is a parameter for exactly this reason:
+ * mutating `process.env` inside a test is a global side effect, and a credential is the
+ * last input that should be set that way.
+ */
+const FAKE_ENV = { ANTHROPIC_API_KEY: "sk-ant-not-a-real-key", OPENAI_API_KEY: "sk-not-a-real-key" };
+
+function modelsFile(dir: string, doc: unknown): string {
+  const p = join(dir, "models.json");
+  writeFileSync(p, JSON.stringify(doc));
+  return p;
+}
+
+const ONE_ANTHROPIC = {
+  adapters: [{ provider: "anthropic" }],
+  routes: { "agent_profile/summarizer@stable": { adapter: "anthropic", model: "claude-sonnet-5" } },
+};
+
+test("A ROUTED REQUEST REACHES THE PROVIDER AS A REAL MODEL ID — not as the graph's ResourceRef", async () => {
+  // The point of the whole flag, asserted on the BYTES rather than on a proxy for them.
+  // `engine.ts`'s `#runAgent` puts `agent.profile` into `ModelRequest.model`, so without the route
+  // table a real adapter puts `agent_profile/summarizer@stable` into `body.model` and the
+  // provider rejects it as an unknown model. `fetch` is injected, so nothing leaves the process
+  // and the fake key is never presented to anyone.
+  const d = emptyDir();
+  try {
+    const sent: { url?: string; body?: { model?: unknown } } = {};
+    const cfg = readModels(modelsFile(d.dir, ONE_ANTHROPIC), FAKE_ENV, async (url, init) => {
+      sent.url = url;
+      sent.body = JSON.parse(String(init.body)) as { model?: unknown };
+      // A 400 is NOT retryable, so this returns exactly one request to assert about
+      // rather than three identical ones separated by real sleeps.
+      return new Response("stop here", { status: 400 });
+    });
+    assert.deepEqual(cfg.adapters, ["anthropic"]);
+
+    const req = {
+      model: "agent_profile/summarizer@stable",
+      system: "s",
+      messages: [{ role: "user" as const, content: "hello" }],
+      tools: [],
+      maxTokens: 1000,
+    };
+    await assert.rejects(async () => {
+      for await (const _ of cfg.adapter.stream(req, new AbortController().signal)) void _;
+    });
+
+    assert.equal(sent.body?.model, "claude-sonnet-5", "the ResourceRef was rewritten to the routed model id");
+    assert.equal(sent.url, "https://api.anthropic.com/v1/messages");
+
+    // `estimateOf` routes on the same table, which is the quieter half: an adapter prices
+    // by `req.model`, and every adapter in this repo prices an UNKNOWN model at 0 — so an
+    // unrouted request reserves nothing and the budget silently stops bounding the run.
+    assert.equal(cfg.adapter.estimateOf(req) > 0, true, "a routed request reserves a real cost");
+  } finally {
+    d.dispose();
+  }
+});
+
+test("AN UNROUTED model id is refused LOCALLY, naming the file — never as a provider's 400", async () => {
+  const d = emptyDir();
+  try {
+    const cfg = readModels(modelsFile(d.dir, ONE_ANTHROPIC), FAKE_ENV);
+    // "mock" is what a RUBRIC EVALUATOR sends (`#runEvaluator` calls `#runAgent` with no `agent`)
+    // and "compaction" is what the context summariser sends (`#summarizeEffect`, read from
+    // source rather than run — reaching it needs a context large enough to compact). Neither is a
+    // model id, and neither is routed by the file above.
+    for (const model of ["mock", "compaction", "agent_profile/other@stable"]) {
+      assert.throws(
+        () => cfg.adapter.estimateOf({ model, system: "", messages: [], tools: [] }),
+        (e: unknown) =>
+          (e as { code: string }).code === "E_CONFIG_INVALID" &&
+          new RegExp(`no route for model "${model}"`).test((e as Error).message) &&
+          /models\.json/.test((e as Error).message),
+        model,
+      );
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
+test("the API key is read from the ENVIRONMENT, and an unset one refuses to start", async () => {
+  const d = emptyDir();
+  try {
+    const file = modelsFile(d.dir, ONE_ANTHROPIC);
+    assert.throws(
+      () => readModels(file, {}),
+      (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID" && /ANTHROPIC_API_KEY.*not set/s.test((e as Error).message),
+      "an adapter that fails on its first call instead is a failure an hour later, in a run's error field",
+    );
+    assert.throws(() => readModels(file, { ANTHROPIC_API_KEY: "" }), /is empty/);
+
+    // A named variable, so one process can hold two keys for one provider.
+    const named = modelsFile(d.dir, {
+      adapters: [{ provider: "anthropic", apiKeyEnv: "TEAM_B_KEY" }],
+      routes: ONE_ANTHROPIC.routes,
+    });
+    assert.equal(readModels(named, { TEAM_B_KEY: "sk-ant-team-b" }).adapters.length, 1);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("a LOCAL OpenAI-compatible endpoint needs no key — the adapter's own rule, not a second one", async () => {
+  const d = emptyDir();
+  try {
+    const file = modelsFile(d.dir, {
+      adapters: [{ name: "ollama", provider: "openai", baseUrl: "http://127.0.0.1:11434/v1" }],
+      routes: { "agent_profile/summarizer@stable": { adapter: "ollama", model: "llama3" } },
+    });
+    assert.deepEqual(readModels(file, {}).adapters, ["ollama"]);
+
+    // ...and the carve-out is exactly as wide as the adapter's: no baseUrl, no exemption.
+    const noBase = modelsFile(d.dir, {
+      adapters: [{ provider: "openai" }],
+      routes: { "agent_profile/summarizer@stable": { adapter: "openai", model: "gpt-5" } },
+    });
+    assert.throws(() => readModels(noBase, {}), /OPENAI_API_KEY/);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("every malformed models file is a refusal to start, and each refusal names what is wrong", async () => {
+  const d = emptyDir();
+  try {
+    const cases: readonly [unknown, RegExp][] = [
+      [{}, /at least one adapter/],
+      [{ adapters: [] }, /at least one adapter/],
+      [{ adapters: [{ provider: "antropic" }], routes: {} }, /"antropic".*one of: anthropic, openai/s],
+      [{ adapters: [{ provider: "anthropic" }, { provider: "anthropic" }], routes: {} }, /repeats the adapter name/],
+      [{ adapters: [{ provider: "anthropic" }] }, /"routes" must be an object/],
+      [{ adapters: [{ provider: "anthropic" }], routes: {} }, /"routes" is empty/],
+      [{ adapters: [{ provider: "anthropic" }], routes: { k: { adapter: "nope", model: "m" } } }, /not declared. Declared: anthropic/],
+      [{ adapters: [{ provider: "anthropic" }], routes: { k: { adapter: "anthropic" } } }, /"model" must be a non-empty string/],
+      [
+        { adapters: [{ provider: "anthropic", prices: { m: { input: -1, output: 1 } } }], routes: {} },
+        /non-negative finite number/,
+      ],
+    ];
+    for (const [doc, expected] of cases) {
+      assert.throws(
+        () => readModels(modelsFile(d.dir, doc), FAKE_ENV),
+        (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID" && expected.test((e as Error).message),
+        JSON.stringify(doc),
+      );
+    }
+    writeFileSync(join(d.dir, "models.json"), "{ not json");
+    assert.throws(() => readModels(join(d.dir, "models.json"), FAKE_ENV), /E_CONFIG_INVALID|JSON/);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("THE FILE REPLACES THE MOCK — `openWorkspace` registers the router and nothing else", async () => {
+  // The wiring, not a copy of it: the assertion is against the registry the real
+  // `openWorkspace` built, because a test that rebuilt these options by hand would be
+  // testing its own copy — the argument `controlPlaneOptions` already makes.
+  const d = emptyDir();
+  try {
+    const file = modelsFile(d.dir, ONE_ANTHROPIC);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", d.dir, "--models-file", file]), FAKE_ENV);
+    try {
+      assert.equal(ws.models?.adapters.join(), "anthropic");
+      assert.equal(ws.engine.models.require().provider, "routed", "the default adapter is the router, not the mock");
+      assert.equal(ws.engine.models.get("mock"), undefined, "the mock is not registered alongside it");
+    } finally {
+      ws.close();
+    }
+
+    const plain = openWorkspace(parseArgs(["gates", "--workspace", d.dir]), FAKE_ENV);
+    try {
+      assert.equal(plain.models, undefined);
+      assert.equal(plain.engine.models.require().provider, "mock", "with no file, the mock is still the default");
+    } finally {
+      plain.close();
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
+test("a broken models file refuses BEFORE the journal is created", async () => {
+  // The same ordering `readChannels` gets, for the same reason: a refusal that has already
+  // made a directory and opened a SQLite handle is a refusal that leaks one.
+  const d = emptyDir();
+  try {
+    const file = modelsFile(d.dir, { adapters: [{ provider: "anthropic" }], routes: {} });
+    assert.throws(() => openWorkspace(parseArgs(["gates", "--workspace", join(d.dir, "fresh"), "--models-file", file]), FAKE_ENV));
+    assert.equal(existsSync(join(d.dir, "fresh", ".loom", "journal.db")), false, "no journal was opened");
+  } finally {
     d.dispose();
   }
 });

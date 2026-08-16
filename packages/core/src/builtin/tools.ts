@@ -20,14 +20,19 @@
  *    the journal;
  *  - `opts.egressAllowlist` — which hosts may be reached, re-checked on EVERY redirect,
  *    because the host that answers is not the host the model named.
+ *
+ * A fourth thing they will not do was added later, and it is a CORRECTNESS bound rather
+ * than a security one: two fan-out branches writing the same relative path no longer land
+ * on the same file. See `branchRoot`.
  */
 
-import { closeSync, constants, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import { CODES, err } from "../errors.ts";
+import { encodeBranch, parseTaskId } from "../ids.ts";
 import { assertWithin } from "../sandbox/subprocess.ts";
-import type { ToolDefinition } from "../run/registry.ts";
+import type { ToolContext, ToolDefinition } from "../run/registry.ts";
 
 export interface BuiltinOptions {
   /** The jail. Every path argument is resolved against it and may not escape. */
@@ -50,6 +55,10 @@ export interface BuiltinOptions {
    * `deny: []` is a sentence someone had to write, and `[dataDir]` is what `cli.ts`
    * writes. Entries may be absolute or relative to `root`, and are compared as REAL
    * paths — see `assertWithin`.
+   *
+   * `root` here means the WORKSPACE root in both spellings, never a branch's directory:
+   * a relative entry is resolved once, up front, by `resolvedDeny`. See its docstring for
+   * what would otherwise stop being denied.
    */
   readonly deny: readonly string[];
   /** Domains `net.fetch` may reach. Empty means the tool is not registered at all. */
@@ -59,6 +68,98 @@ export interface BuiltinOptions {
 
 /** Absent on platforms without the flag, where this is an ordinary open. */
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+/**
+ * Where a non-root branch's files go, relative to the workspace root.
+ *
+ * One directory, not one per run: `TaskId` is `nodeId@branchPath#iteration` and the
+ * branch path is unique within a run, but NOT across runs — two runs of the same graph
+ * produce the same coordinates. Runs sharing a workspace therefore still share these
+ * directories, which is the same sharing `--workspace` already implies for the root
+ * branch. Making it per-run needs a `runId` on `ToolContext`, which is an `engine.ts`
+ * change and is not this one.
+ */
+const BRANCH_DIR = ".branches";
+
+/**
+ * THE JAIL IS PER BRANCH, and this is the whole of it.
+ *
+ * `cli.ts` builds `builtinTools(jail)` ONCE, with one `root`, for every run and every
+ * branch and every worker in the process. So a fan-out over three items whose branches
+ * each write `report.md` produced ONE file: the last writer won, the other two were
+ * gone, and nothing was appended, printed or returned to say a write had been
+ * overwritten by a sibling. Silent, and wrong in a way the journal cannot show, because
+ * all three `effect.completed` records say the write succeeded — and each did.
+ *
+ * `ToolContext.taskId` is already the fix. It is DERIVED (invariant 3) —
+ * `nodeId@branchPath#iteration` — and `engine.ts` passes the real one into every tool
+ * call, so the branch coordinate is in hand at the one place that turns a relative path
+ * into a real one. No engine change is involved in this file's version of the fix.
+ *
+ * THE ROOT BRANCH IS THE WORKSPACE ITSELF, unchanged. A graph with no fan-out has one
+ * branch, `root`, and its files must keep landing where `--workspace` says — otherwise
+ * every existing workspace, every operator's `ls`, and every graph that names an output
+ * path breaks for a hazard it does not have.
+ *
+ * THE NAME IS FLAT, AND INJECTIVE OVER THE COORDINATES A COMPILED GRAPH CAN PRODUCE.
+ * `encodeBranch` joins segments with `/`, and nesting child branches inside their parent's
+ * directory would put a child's files inside the parent's workspace — a second collision
+ * to fix the first. Replacing the separator with `+` is injective because `+` cannot occur
+ * inside a segment: a segment is `edgeId[index]`, an index is digits, and an edge id is
+ * `[A-Za-z0-9._-]` by `validate.ts`'s `SAFE_ID`, which is a COMPILE-time refusal
+ * (`GRAPH003_BAD_ID`). It is deliberately not claimed of every string `decodeBranch` will
+ * accept — that regex only excludes `[` and `]`, so a hand-built TaskId carrying a `+` can
+ * collide. Nothing derives one: invariant 3 says the engine computes this id from the
+ * graph, and the graph is what `SAFE_ID` governs.
+ *
+ * **WHAT THIS IS NOT.** It is not a privilege boundary and must not be described as one.
+ * Every branch still shares one jail root, so a task that spells `.branches/root+fo[1]/x`
+ * explicitly reaches a sibling's file, exactly as it always could. What is closed is the
+ * ACCIDENT — two branches that each asked for `report.md` — which is the failure that
+ * actually happens, because a graph author writes one path and the runtime runs it N
+ * times. A privilege boundary between branches needs a jail per branch that the branch
+ * cannot name its way out of, which is a sandbox change and not a path change.
+ *
+ * A malformed `taskId` THROWS out of `parseTaskId` rather than falling back to the root
+ * branch. A fallback would silently restore the clobber for exactly the caller that got
+ * the id wrong, and `E_INTERNAL: malformed task id: …` is the true diagnosis: invariant 3
+ * says this id is derived, so a bad one is a bug above this file, not a user error.
+ */
+function branchRoot(root: string, deny: readonly string[], ctx: ToolContext): string | undefined {
+  const branch = parseTaskId(ctx.taskId).branch;
+  // `undefined`, not `root`. The callers need to know "this IS the workspace" in order to
+  // skip the read fallback, and answering that by string-comparing two paths would couple
+  // them to whether this function happens to return the argument it was given or a
+  // resolved copy of it.
+  if (branch.segments.length === 0) return undefined;
+  // Through `assertWithin` so the derived directory is PROVEN to be inside the workspace
+  // and outside every denied subtree, rather than assumed to be by an argument about
+  // which characters `SAFE_ID` allows. The argument is true today; the check stays true
+  // if `SAFE_ID` widens, and it costs one call per tool invocation.
+  return assertWithin(root, join(BRANCH_DIR, encodeBranch(branch).replaceAll("/", "+")), deny);
+}
+
+/**
+ * The deny-list, resolved ONCE against the workspace root.
+ *
+ * `assertWithin` resolves a relative deny entry against whatever root it is given, and
+ * the root it is given is now the BRANCH's. So without this, `deny: [".loom"]` would name
+ * `<workspace>/.loom` for the root branch and `<workspace>/.branches/root+fo[0]/.loom` for
+ * a branch: one configured entry, a different directory per caller.
+ *
+ * **THIS IS NOT WHAT KEEPS THE JOURNAL OUT OF A BRANCH'S REACH, and an earlier version of
+ * this comment claimed it was.** A branch's jail root does not contain `<workspace>/.loom`
+ * at all, so every spelling of the real journal — `../../.loom/journal.db`, or a symlink
+ * to it planted in the branch's own directory — is refused by CONTAINMENT, one step before
+ * the deny-list is consulted; the test named for that asserts the containment message
+ * precisely so this stays true rather than becoming a second claim about the same wall.
+ * Resolving here is narrower than that: it makes a configured entry mean ONE directory
+ * instead of one per task, which is a claim-drift bound, not a stronger boundary. Its only
+ * behavioural effect is on a branch's own `<branch>/.loom`, which it leaves writable.
+ */
+function resolvedDeny(opts: BuiltinOptions): readonly string[] {
+  return opts.deny.map((d) => resolve(opts.root, d));
+}
 
 /**
  * Open the leaf WITHOUT following a symlink, and read or write through the descriptor.
@@ -93,6 +194,40 @@ export function builtinTools(opts: BuiltinOptions): readonly ToolDefinition[] {
   return tools;
 }
 
+/**
+ * Where a READ looks, which is not simply the branch's own directory.
+ *
+ * Branch first, then the shared workspace. The fallback is not a convenience: a fan-out
+ * over a list of filenames is the ordinary shape of this feature, and every one of those
+ * branches reads a file the operator put in the workspace before the run started. Without
+ * the fallback, confining writes would break every such graph — a larger regression than
+ * the clobber being closed.
+ *
+ * The two lookups are NOT symmetric and that asymmetry is the point: a write goes to the
+ * branch and only the branch, so nothing a branch does is visible to a sibling, while a
+ * read sees the branch's own copy shadowing the shared one. That is an overlay, and it
+ * has the property a graph author needs — write-then-read inside one branch returns what
+ * this branch wrote, not what a sibling did.
+ *
+ * `existsSync` decides the layer, and it is a TOCTOU by construction: the file can vanish
+ * between the check and the open. The consequence is bounded — the open then fails and
+ * the tool returns `isError` — because both candidates were already proven inside the
+ * jail. The check picks a layer; it is not what enforces containment.
+ */
+function readPath(opts: BuiltinOptions, ctx: ToolContext, rel: string): string {
+  const deny = resolvedDeny(opts);
+  const branch = branchRoot(opts.root, deny, ctx);
+  if (branch === undefined) return assertWithin(opts.root, rel, deny);
+  const mine = assertWithin(branch, rel, deny);
+  return existsSync(mine) ? mine : assertWithin(opts.root, rel, deny);
+}
+
+/** Where a WRITE lands: the branch's own directory, with no fallback. */
+function writePath(opts: BuiltinOptions, ctx: ToolContext, rel: string): string {
+  const deny = resolvedDeny(opts);
+  return assertWithin(branchRoot(opts.root, deny, ctx) ?? opts.root, rel, deny);
+}
+
 function fsRead(opts: BuiltinOptions): ToolDefinition {
   return {
     name: "fs.read",
@@ -109,8 +244,8 @@ function fsRead(opts: BuiltinOptions): ToolDefinition {
       },
       required: ["path"],
     },
-    execute: (args) => {
-      const path = assertWithin(opts.root, String(args["path"]), opts.deny);
+    execute: (args, ctx) => {
+      const path = readPath(opts, ctx, String(args["path"]));
       const max = Number(args["maxBytes"] ?? 200_000);
       let text: string;
       let fd: number | undefined;
@@ -149,9 +284,9 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
       properties: { path: { type: "string" }, body: { type: "string" } },
       required: ["path", "body"],
     },
-    execute: (args) => {
+    execute: (args, ctx) => {
       const rel = String(args["path"]);
-      const path = assertWithin(opts.root, rel, opts.deny);
+      const path = writePath(opts, ctx, rel);
       mkdirSync(dirname(path), { recursive: true });
       // Capture the prior content so `fs.restore` has something to restore to. A
       // declared compensation that cannot actually compensate is worse than none.
@@ -168,7 +303,13 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
       writeLeaf(path, String(args["body"]));
       return {
         content: `wrote ${rel}`,
-        details: { path: rel, bytes: String(args["body"]).length, previous },
+        // `path` stays the RELATIVE path the graph asked for, in both `details` and
+        // `writes`: `writes.written` becomes a channel value that a downstream node and a
+        // human both read, and a branch-qualified path there would make the same node
+        // write a different value on every branch of a fan-out. Where the bytes actually
+        // landed is `at`, which is diagnostic and reported beside it rather than in place
+        // of it — the same rule `net.fetch` follows for the host that answered.
+        details: { path: rel, bytes: String(args["body"]).length, previous, at: path },
         writes: { written: { path: rel, bytes: String(args["body"]).length } },
       };
     },
@@ -301,7 +442,14 @@ function netFetch(opts: BuiltinOptions): ToolDefinition {
   };
 }
 
-/** The compensation for `fs.write`, registered alongside it by the CLI. */
+/**
+ * The compensation for `fs.write`, registered alongside it by the CLI.
+ *
+ * Resolves through `writePath`, so it undoes the write in the branch that made it. A
+ * compensation that resolved against the workspace while the write resolved against the
+ * branch would restore a file nobody touched and leave the modified one standing, which
+ * is worse than having no compensation at all — the rewind would look done.
+ */
 export function fsRestore(opts: BuiltinOptions): ToolDefinition {
   return {
     name: "fs.restore",
@@ -315,8 +463,8 @@ export function fsRestore(opts: BuiltinOptions): ToolDefinition {
       properties: { path: { type: "string" }, previous: { type: "string" } },
       required: ["path"],
     },
-    execute: (args) => {
-      const path = assertWithin(opts.root, String(args["path"]), opts.deny);
+    execute: (args, ctx) => {
+      const path = writePath(opts, ctx, String(args["path"]));
       const previous = args["previous"];
       if (typeof previous !== "string") {
         return { content: `no previous content recorded for ${String(args["path"])}`, isError: true };

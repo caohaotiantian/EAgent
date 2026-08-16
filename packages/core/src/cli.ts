@@ -33,7 +33,18 @@ import {
   type WebhookChannelOptions,
 } from "./run/delivery.ts";
 import { HumanGateBroker } from "./run/gates.ts";
-import { FunctionRegistry, ModelRegistry, MockModelAdapter, ToolRegistry } from "./run/registry.ts";
+import {
+  FunctionRegistry,
+  ModelRegistry,
+  MockModelAdapter,
+  ToolRegistry,
+  type ModelAdapter,
+  type ModelEvent,
+  type ModelRequest,
+} from "./run/registry.ts";
+import { AnthropicAdapter } from "./providers/anthropic.ts";
+import { OpenAIAdapter } from "./providers/openai.ts";
+import type { HttpOptions } from "./providers/http.ts";
 import { replayRun } from "./run/replay.ts";
 import { BearerTokenIdentity, ControlPlane, unanswerableGraphs, type ControlPlaneOptions, type IdentitySource } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
@@ -59,6 +70,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
   --data-dir  DIR   journal location (default: <workspace>/.loom). Off limits to the
                     fs tools wherever it is put, including inside the workspace.
+  --models-file F   which providers to call, and which model each ModelRequest.model
+                    goes to. Without it every agent node answers "[mock] …". The API
+                    key is named by the file and READ FROM THE ENVIRONMENT, never
+                    stored in it. Accepted by every command, not just serve.
 `;
 
 /**
@@ -91,6 +106,32 @@ interface Args {
   readonly command: string;
   readonly positional: readonly string[];
   readonly flags: Readonly<Record<string, string | true>>;
+}
+
+/**
+ * `kind/name@selector` — the shape `graph/spec.ts` documents for a `ResourceRef` — written
+ * ONCE and used two ways.
+ *
+ * The whole-string form is what this deployment's stand-in resolver accepts. The scanning
+ * form answers a different question that turned out to matter more: *has a ref reached a
+ * place that wanted a resolved value?* `engine.ts`'s `#runAgent` puts `agent.profile` straight into
+ * `ModelRequest.model`, so `agent_profile/summarizer@stable` is what a provider is asked to
+ * run, and nothing between the graph and the socket looks at it. A provider rejects that
+ * as an unknown model — at runtime, in production, having already been sent the prompt.
+ * `test/helpers/strict-doubles.ts` reaches the same verdict offline as a red test, and
+ * `readModels` reaches it at the boundary, before a socket exists.
+ *
+ * Two RegExps and one pattern string, rather than two patterns: the second copy is exactly
+ * the artifact this repo keeps finding drifted from the first. The scanning one is rebuilt
+ * per call because a `g` RegExp carries `lastIndex` between calls, and a shared one would
+ * make the answer depend on who asked last.
+ */
+const RESOURCE_REF_PATTERN = "[a-z_]+/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+";
+export const RESOURCE_REF = new RegExp(`^${RESOURCE_REF_PATTERN}$`);
+
+/** Every `kind/name@selector` occurring anywhere in `text`, in order, deduplicated. */
+export function resourceRefsIn(text: string): readonly string[] {
+  return [...new Set(text.match(new RegExp(RESOURCE_REF_PATTERN, "g")) ?? [])];
 }
 
 /**
@@ -144,6 +185,8 @@ interface Workspace {
   readonly resolver: ResourceResolver;
   /** `undefined` when `--channels-file` was not given: no channels, and no callback route. */
   readonly delivery: DeliveryConfig | undefined;
+  /** `undefined` when `--models-file` was not given: the mock is the only adapter. */
+  readonly models: ModelConfig | undefined;
   close(): void;
 }
 
@@ -154,11 +197,17 @@ interface Workspace {
  * journal, registers the built-in tools against a jail, and returns a working engine.
  * No service, no migration step, no configuration file required.
  */
-export function openWorkspace(args: Args): Workspace {
+export function openWorkspace(args: Args, env: Readonly<Record<string, string | undefined>> = process.env): Workspace {
   // BEFORE ANYTHING IS CREATED OR OPENED. A malformed channels file is a refusal to start,
   // and a refusal that has already made a directory and opened a SQLite handle is a
   // refusal that leaks one — `main`'s `finally` only closes a workspace it was handed.
   const delivery = args.flags["channels-file"] === undefined ? undefined : readChannels(requireFileFlag(args, "channels-file"));
+  // Same rule, same reason: a models file naming an env var that is not set is a refusal
+  // to start, and it must happen before the journal is opened. `env` is a PARAMETER so a
+  // test can hand this function a key without writing one into the process — the same
+  // injection every clock and id source in this codebase takes, applied to the one input
+  // that is a credential.
+  const models = args.flags["models-file"] === undefined ? undefined : readModels(requireFileFlag(args, "models-file"), env);
 
   // `pathFlag`, not `String(… ?? default)`. `String(true)` is `"true"`, so `--workspace`
   // with no value used to resolve to `./true` and `loom compile g.json --workspace` printed
@@ -206,13 +255,24 @@ export function openWorkspace(args: Args): Workspace {
   for (const t of builtinTools(jail)) tools.register(t);
   tools.register(fsRestore(jail));
 
-  const models = new ModelRegistry();
-  // Offline by default. A real adapter is registered by configuration; the mock is
-  // what makes `loom run` work on a fresh machine with no API key.
-  models.register(
-    new MockModelAdapter({
-      script: (req) => ({ text: `[mock] ${req.messages.at(-1)?.content.slice(0, 80) ?? ""}` }),
-    }),
+  const modelRegistry = new ModelRegistry();
+  // OFFLINE BY DEFAULT, AND ONLY ONE OF THE TWO IS EVER REGISTERED.
+  //
+  // The mock is what makes `loom run` work on a fresh machine with no API key. It is also
+  // the reason this binary could not call a model at all until `--models-file` existed —
+  // `AnthropicAdapter` and `OpenAIAdapter` were constructed nowhere in `src/`.
+  //
+  // The file REPLACES the mock rather than joining it. Keeping both would leave the mock
+  // registered under a provider name nothing ever asks for by name (`#runAgent` calls
+  // `models.require()` with no argument, i.e. the default and only the default), which is
+  // a registered-and-unreachable adapter — the "declared but unread" shape this repo keeps
+  // finding. It also makes `announce`'s "the only adapter is the mock" line a fact about
+  // the registry rather than a guess about configuration.
+  modelRegistry.register(
+    models?.adapter ??
+      new MockModelAdapter({
+        script: (req) => ({ text: `[mock] ${req.messages.at(-1)?.content.slice(0, 80) ?? ""}` }),
+      }),
     true,
   );
 
@@ -221,7 +281,7 @@ export function openWorkspace(args: Args): Workspace {
     bus,
     tools,
     functions: new FunctionRegistry(),
-    models,
+    models: modelRegistry,
     // THE ONE REASON THE BROKER IS CONSTRUCTED HERE: a dispatcher. `HumanGateBroker.raise`
     // delivers only when it has one AND the gate's request names channels, so without this
     // line a graph declaring `humanGate.delivery` would compile, raise a durable gate, and
@@ -241,12 +301,12 @@ export function openWorkspace(args: Args): Workspace {
     // enough for the compiler's pinning to be structurally correct locally, and it is
     // replaced by a real ResourceStore the moment one is configured.
     resolve: (ref) =>
-      /^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)
+      RESOURCE_REF.test(ref)
         ? { ref, digest: `sha256:${Buffer.from(ref).toString("hex").padEnd(64, "0").slice(0, 64)}`, channel: "stable" }
         : undefined,
   };
 
-  return { root, dataDir, store, engine, bus, resolver, delivery, close: () => store.close() };
+  return { root, dataDir, store, engine, bus, resolver, delivery, models, close: () => store.close() };
 }
 
 /**
@@ -459,6 +519,292 @@ export function readChannels(file: string): DeliveryConfig {
     publishesAddress: baseUrl !== undefined && answerable.length > 0,
     file: path,
   };
+}
+
+// ---------------------------------------------------------------------------
+// --models-file: the one thing that makes this binary able to call a model
+// ---------------------------------------------------------------------------
+
+/** One `ModelRequest.model` the engine can produce, and where it should actually go. */
+interface Route {
+  readonly adapter: string;
+  readonly model: string;
+}
+
+export interface ModelConfig {
+  /** The single adapter `openWorkspace` registers: a router over the declared ones. */
+  readonly adapter: ModelAdapter;
+  /** Declared adapter names, for the boot line. */
+  readonly adapters: readonly string[];
+  /** Declared route keys, for the boot line and for the router's own error message. */
+  readonly routes: readonly string[];
+  readonly file: string;
+}
+
+/** The two adapters this binary can construct. A typo here must not become a silent mock. */
+const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string }>> = {
+  anthropic: { keyEnv: "ANTHROPIC_API_KEY" },
+  openai: { keyEnv: "OPENAI_API_KEY" },
+};
+
+/**
+ * Adapters, and where each `ModelRequest.model` should go — read from a file at boot.
+ *
+ * **WHY A ROUTE TABLE AND NOT JUST AN ADAPTER.** `ModelRequest.model` is not a model id
+ * today and there is no code anywhere that makes it one. `engine.ts`'s `#runAgent` assigns
+ * `agent.profile` verbatim, and `validate.ts`'s `rule015Resources` (GRAPH015) requires it to be a
+ * `kind/name@selector` that RESOLVES — so a graph literally cannot name `claude-sonnet-5`
+ * in the field the provider reads. Registering `AnthropicAdapter` and nothing else would
+ * therefore have shipped a `--models-file` whose every agent node fails at the provider,
+ * in production, on a request that has already left the machine carrying its prompt. Three
+ * distinct strings reach `model`, and the first two were OBSERVED by running the node
+ * through the real engine and reading the request back off the adapter; the third is read
+ * off `#summarizeEffect`, because reaching it needs a context large enough to compact:
+ *
+ *     agent node        → the graph's `agent.profile`, e.g. `agent_profile/summarizer@stable`
+ *     rubric evaluator  → the literal `"mock"`      (`#runAgent` again, reached from `#runEvaluator` where `agent` is undefined)
+ *     context compaction→ the literal `"compaction"` (`#summarizeEffect`) — read, not run
+ *
+ * The route table is the deployment supplying the resolution its ResourceStore would
+ * otherwise supply — the same job `--channels-file` does for delivery — and it is written
+ * as a MAP over those strings rather than as a per-provider default, because a default
+ * would answer for the two literals as well and hide that they are not model ids.
+ *
+ * **REVERSAL.** When `agent_profile` resources carry a real profile document and something
+ * resolves one into a model id, the `routes` table is what gets deleted; `adapters` stays.
+ * Nothing else in this file depends on it.
+ *
+ * **THE KEY IS NEVER IN THE FILE.** `apiKeyEnv` names an environment variable; the file
+ * holds configuration and the environment holds the credential. `--channels-file` argues
+ * the other half of this — a secret may not be in argv — and a config file is one `git add`
+ * away from being as public as argv, so it gets the same treatment one step further out.
+ * An UNSET or EMPTY variable refuses to start rather than constructing an adapter that
+ * fails on its first call, which would be an hour later and in a run's error field.
+ *
+ * **A MALFORMED FILE REFUSES TO START**, the trade `readIdentities` and `readChannels` both
+ * make, for the reason they make it: booting anyway produces a deployment that looks
+ * configured and answers every model call with an error.
+ */
+export function readModels(
+  file: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  fetchImpl?: HttpOptions["fetch"],
+): ModelConfig {
+  const path = resolve(file);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch (e) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--models-file ${path}: ${(e as Error).message}`);
+  }
+  const refuse: (why: string) => never = (why) => {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--models-file ${path}: ${why}`);
+  };
+
+  const root = (parsed ?? {}) as { adapters?: unknown; routes?: unknown };
+  const rows = root.adapters;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    refuse(
+      `must be {"adapters":[{"provider":"anthropic"}],"routes":{"agent_profile/x@stable":{"adapter":"anthropic","model":"claude-sonnet-5"}}} ` +
+        `with at least one adapter`,
+    );
+  }
+
+  const adapters = new Map<string, ModelAdapter>();
+  rows.forEach((raw, i) => {
+    const where = `adapters[${i}]`;
+    const row = raw as Record<string, unknown> | null;
+    if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    const provider = row["provider"];
+    if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+      refuse(
+        `${where} has provider ${JSON.stringify(provider)}, which must be one of: ${Object.keys(PROVIDERS).join(", ")}. ` +
+          `An unknown provider is refused rather than skipped, because a skipped adapter is a deployment that boots ` +
+          `looking configured and answers every model call with "no route".`,
+      );
+    }
+    // The registry keys adapters by name and a second row with the same one would replace
+    // the first with nothing anywhere saying so — the same refusal, for the same reason,
+    // that `readChannels` makes about a duplicate channel name.
+    const name = row["name"] === undefined ? provider : nonEmpty(row["name"], `${where} "name"`, refuse);
+    if (adapters.has(name)) refuse(`${where} repeats the adapter name "${name}" — one of them would never be reachable`);
+
+    const baseUrl = row["baseUrl"] === undefined ? undefined : nonEmpty(row["baseUrl"], `${where} ("${name}") "baseUrl"`, refuse);
+    const keyEnv = row["apiKeyEnv"] === undefined ? PROVIDERS[provider]!.keyEnv : nonEmpty(row["apiKeyEnv"], `${where} ("${name}") "apiKeyEnv"`, refuse);
+    const apiKey = env[keyEnv] ?? "";
+    // The one place a keyless adapter is legal, and it is the adapter's own rule rather
+    // than a second one invented here: `OpenAIAdapter` accepts an empty key when a
+    // `baseUrl` is given, because a local endpoint legitimately has no credential.
+    if (apiKey === "" && !(provider === "openai" && baseUrl !== undefined)) {
+      refuse(
+        `${where} ("${name}") needs the environment variable ${keyEnv}, which is ${env[keyEnv] === undefined ? "not set" : "empty"}. ` +
+          `The key is deliberately NOT a field in this file — the file is configuration and the key is a credential. ` +
+          `Set ${keyEnv}, or name a different variable with "apiKeyEnv"` +
+          (provider === "openai" ? `, or give this adapter a "baseUrl" if it is a local endpoint that needs no key.` : `.`),
+      );
+    }
+
+    // ANNOTATED, not inferred, and assignable to BOTH adapters' option types. Inference
+    // over a chain of conditional spreads gives `baseUrl?: string | undefined`, which
+    // `exactOptionalPropertyTypes` does not accept where the adapter declares
+    // `baseUrl?: string`. The same reason `readChannels`'s `common` carries
+    // `WebhookChannelOptions` rather than letting the spread decide.
+    const common: {
+      readonly apiKey: string;
+      // `NonNullable`, because `HttpOptions["fetch"]` is `FetchLike | undefined` and
+      // `exactOptionalPropertyTypes` treats `fetch?: FetchLike | undefined` and
+      // `fetch?: FetchLike` as different types — the adapters declare the second.
+      readonly fetch?: NonNullable<HttpOptions["fetch"]>;
+      readonly baseUrl?: string;
+      readonly prices?: Readonly<Record<string, { input: number; output: number }>>;
+      readonly defaultMaxTokens?: number;
+    } = {
+      apiKey,
+      // INJECTED, and only ever by a test. The claim this flag makes — "a routed request
+      // reaches the provider as a real model id" — is a claim about the bytes in the
+      // request body, and the only way to assert it without a socket and a credential is
+      // to hand the adapter its `fetch`. Production passes nothing and `postJson` uses
+      // `globalThis.fetch`, so this adds no configuration and no code path of its own.
+      ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }),
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+      ...(row["prices"] === undefined ? {} : { prices: priceTable(row["prices"], `${where} ("${name}") "prices"`, refuse) }),
+      ...(row["defaultMaxTokens"] === undefined
+        ? {}
+        : { defaultMaxTokens: wholePositive(row["defaultMaxTokens"], `${where} ("${name}") "defaultMaxTokens"`, refuse) }),
+    };
+    try {
+      adapters.set(name, provider === "anthropic" ? new AnthropicAdapter(common) : new OpenAIAdapter({ ...common, provider: name }));
+    } catch (e) {
+      // The adapter's own construction refusal, re-raised naming the file and the row —
+      // `readChannels` does the same for a channel, and for the same reason: "anthropic
+      // adapter requires an apiKey" does not tell an operator which file to open.
+      if (isLoomError(e)) refuse(`${where} ("${name}"): ${e.message}`);
+      throw e;
+    }
+  });
+
+  const routes = new Map<string, Route>();
+  const routeRows = root.routes;
+  if (typeof routeRows !== "object" || routeRows === null || Array.isArray(routeRows)) {
+    refuse(`"routes" must be an object mapping each ModelRequest.model the engine sends to {"adapter":…,"model":…}`);
+  }
+  for (const [key, raw] of Object.entries(routeRows as Record<string, unknown>)) {
+    const where = `routes[${JSON.stringify(key)}]`;
+    const row = raw as Record<string, unknown> | null;
+    if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    const adapter = nonEmpty(row["adapter"], `${where} "adapter"`, refuse);
+    if (!adapters.has(adapter)) {
+      refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
+    }
+    routes.set(key, { adapter, model: nonEmpty(row["model"], `${where} "model"`, refuse) });
+  }
+  if (routes.size === 0) {
+    refuse(
+      `"routes" is empty, so no model call could be served. Every agent node sends its \`agent.profile\` as the model ` +
+        `id, a rubric evaluator sends "mock", and context compaction sends "compaction" — each needs a row.`,
+    );
+  }
+
+  return {
+    adapter: new RoutingAdapter(adapters, routes, path),
+    adapters: [...adapters.keys()],
+    routes: [...routes.keys()],
+    file: path,
+  };
+}
+
+/**
+ * The adapter `openWorkspace` registers: it rewrites `model` and delegates.
+ *
+ * **IT REFUSES BEFORE THE SOCKET, WHICH IS THE WHOLE POINT.** An unrouted key throws here,
+ * locally, naming the key and the file — never as a provider's rejection of a model that
+ * does not exist, arrived at after the prompt was already sent. That refusal is the production half of
+ * `test/helpers/strict-doubles.ts`: the same class of defect, caught at the same boundary,
+ * with the offline detector red first so this path is never the one that discovers it.
+ *
+ * **`estimateOf` ROUTES TOO.** `#runAgent` calls it to reserve budget, one line
+ * before `stream`, so routing there means an unrouted key fails during the reservation and
+ * never reaches the network at all. It also fixes the quieter half: a delegate prices by
+ * `req.model`, and an unrewritten key is priced at **0** by every adapter in this repo, so
+ * the budget silently stops bounding anything. One lookup, three entry points, no drift.
+ *
+ * It is NOT a resolver and must not grow into one: it maps strings the engine already
+ * produces, and knows nothing about resources, digests or channels.
+ */
+class RoutingAdapter implements ModelAdapter {
+  readonly provider = "routed";
+  readonly #adapters: ReadonlyMap<string, ModelAdapter>;
+  readonly #routes: ReadonlyMap<string, Route>;
+  readonly #file: string;
+
+  constructor(adapters: ReadonlyMap<string, ModelAdapter>, routes: ReadonlyMap<string, Route>, file: string) {
+    this.#adapters = adapters;
+    this.#routes = routes;
+    this.#file = file;
+  }
+
+  #resolve(model: string): { readonly adapter: ModelAdapter; readonly model: string } {
+    const route = this.#routes.get(model);
+    if (route === undefined) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `no route for model "${model}" in ${this.#file}. Routed: ${[...this.#routes.keys()].join(", ")}. ` +
+          `An agent node sends its \`agent.profile\` here, a rubric evaluator sends "mock", and context compaction ` +
+          `sends "compaction" — none of those is a model id, which is why the mapping has to be written down.`,
+      );
+    }
+    return { adapter: this.#adapters.get(route.adapter)!, model: route.model };
+  }
+
+  stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    const to = this.#resolve(req.model);
+    return to.adapter.stream({ ...req, model: to.model }, signal);
+  }
+
+  estimateOf(req: ModelRequest): number {
+    const to = this.#resolve(req.model);
+    return to.adapter.estimateOf({ ...req, model: to.model });
+  }
+
+  priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
+    const to = this.#resolve(model);
+    return to.adapter.priceOf(to.model, usage);
+  }
+}
+
+/**
+ * A count, not a duration — which is why it does not reuse `positive`.
+ *
+ * `positive` refuses anything above `MAX_TIMER_MS` and explains itself in terms of Node
+ * timers truncating a delay to one millisecond. That explanation is true of every caller
+ * it has and false of this one: `defaultMaxTokens` never reaches a timer, so borrowing the
+ * helper would have attached a reason that does not hold to the value it refused. A
+ * separate six lines is cheaper than a message an operator cannot act on.
+ */
+function wholePositive(v: unknown, where: string, refuse: (why: string) => never): number {
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) refuse(`${where} must be a positive whole number`);
+  return v;
+}
+
+/** `{ "claude-sonnet-5": { "input": 3, "output": 15 } }` — USD per million tokens. */
+function priceTable(v: unknown, where: string, refuse: (why: string) => never): Record<string, { input: number; output: number }> {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) refuse(`${where} must be an object of {input,output} pairs`);
+  const out: Record<string, { input: number; output: number }> = {};
+  for (const [model, raw] of Object.entries(v as Record<string, unknown>)) {
+    const row = raw as { input?: unknown; output?: unknown } | null;
+    if (typeof row !== "object" || row === null) refuse(`${where}.${model} must be {"input":n,"output":n}`);
+    // A price of 0 is legal — a free local endpoint is a real thing — but a NEGATIVE or
+    // non-finite one would credit the budget instead of spending it, which turns a bound
+    // into an unbounded run.
+    for (const field of ["input", "output"] as const) {
+      const n = row[field];
+      if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+        refuse(`${where}.${model}.${field} must be a non-negative finite number of USD per million tokens`);
+      }
+    }
+    out[model] = { input: row.input as number, output: row.output as number };
+  }
+  return out;
 }
 
 function stringMap(v: unknown, where: string, refuse: (why: string) => never): Record<string, string> {
@@ -928,6 +1274,20 @@ function announce(plane: ControlPlane, ws: Workspace, opts: ControlPlaneOptions,
   // The gate clock is the difference between a declared SLA and an enforced one, so it is
   // stated as a fact about the running process rather than left to be inferred from a flag.
   process.stdout.write(`  clock:  gate SLAs, escalation tiers and onTimeout swept every ${sweepMs}ms\n`);
+  // WHICH MODELS, said at boot for the same reason the callback route is: a deployment
+  // whose agent nodes all answer `[mock] …` and one that calls a provider are materially
+  // different things, and which one you have was not visible from anywhere in the output.
+  const models = ws.models;
+  process.stdout.write(
+    `  models: ${models === undefined ? "(mock only — every agent node answers \"[mock] …\")" : `${models.adapters.join(", ")} via ${models.file}`}\n`,
+  );
+  if (models === undefined) {
+    process.stderr.write(
+      `! NO MODEL ADAPTER — the only registered adapter is the offline mock, so every agent node and every rubric\n` +
+        `  evaluator returns canned text. Runs will look successful.\n` +
+        `  fix: loom serve --models-file <file> with {"adapters":[{"provider":"anthropic"}],"routes":{…}}\n`,
+    );
+  }
   // The plane's own posture, not a third derivation of it: `openToEveryCaller` is
   // what `/health` reports and what `#principal` admits on, so this line cannot
   // promise a perimeter the running process does not have.

@@ -241,10 +241,70 @@ interface Detector {
  * boundary is usually reaching for, is not the hazard.
  *
  * THE RULE THIS IMPOSES, stated here because this is where the cost lives rather than where it
- * is paid: **a caller that sweeps a string a REMOTE PARTY chose must bound the string first.**
- * The read-boundary callers sweep values that came out of this deployment's own journal; a
- * write-boundary caller over a provider's response body does not, and `providers/http.ts`'s
- * `MAX_SWEEP` is that bound — 8 KB, which makes the same six inputs cost 0.33–0.38 ms flat.
+ * is paid: **a caller that sweeps a string it did not author must bound the string first.**
+ *
+ * **THAT SENTENCE USED TO EXEMPT THE READ BOUNDARY, AND THE EXEMPTION WAS THE ONE SELF-DoS IN
+ * THIS CODEBASE.** It read: "the read-boundary callers sweep values that came out of this
+ * deployment's own journal" — true, and an argument about PROVENANCE where the cost is a
+ * question of AUTHORSHIP. The journal is exactly where model output lives: a channel value is
+ * whatever an agent node wrote, and `state.reduced` puts it there under this deployment's own
+ * signature. So "our journal" and "a string we chose" are different sets, and the second is
+ * the one the bound is about. Measured end to end, a 1 MB channel value through
+ * `GET /runs/:id`, which is `redactPayload` on `summarise`'s `channels`:
+ *
+ *     benign 1 MB      →    7 ms, peak event-loop lag    0 ms
+ *     pem-shaped 1 MB  → 4767 ms, peak event-loop lag 4754 ms
+ *
+ * — on the single thread that also serves every other request and every SSE stream, with no
+ * attacker and no credentials: one agent node returning a long string is enough.
+ *
+ * **SO THE BOUND IS THE DEFAULT AT BOTH READ-BOUNDARY ENTRY POINTS AND UNBOUNDED IS SPELLED**:
+ * `redactPayload` and `redactAttributes` default `maxSweepBytes` to `DEFAULT_MAX_SWEEP`, and a
+ * caller that wants today's behaviour writes `maxSweepBytes: Number.POSITIVE_INFINITY`. The
+ * default lives on the FUNCTIONS rather than at their call sites on purpose: those two
+ * functions have exactly six callers between them in `src/` — `http.ts`'s `frame` (once) and
+ * `summarise` (twice), `spans.ts`'s `close` (three times, one per bag) — so the entry-point
+ * default and the call-site set are the same thing today, and a seventh caller written next
+ * year is bounded without being told. Six explicit arguments would pin a grep result instead
+ * of a property. Re-derive the six rather than trusting this sentence — it prints 6 today:
+ *
+ *     grep -rn 'redactPayload(\|redactAttributes(' packages/core/src \
+ *       | grep -vE 'import|security/redact\.ts'
+ *
+ * **WHAT IS STILL UNBOUNDED, BY NAME, because "the sweep is bounded" is wider than what was
+ * built.** `redact` itself takes the option and defaults it to INFINITY, so every other caller
+ * behaves exactly as before — and the one that matters is `run/delivery.ts`'s `redactFields`,
+ * the gate-delivery path, whose reader is outside the trust boundary and whose output is
+ * hashed into a content digest. Bounding it would trade a stall for a disclosure on the one
+ * sink this module calls untrusted, and change a digest; that is its owner's call, not this
+ * one's. `providers/http.ts`'s `MAX_SWEEP` is the write-boundary bound and is unchanged.
+ *
+ * **AND WHAT SURVIVES THE BOUND, since "bounded" and "total" are different claims** — the same
+ * sentence `providers/http.ts`'s `redactForeign` makes about its own window. A detector match
+ * that BEGINS past `maxSweepBytes` in a single string leaf is not found, and a PEM block that
+ * straddles the limit is not found either. Nothing is truncated — the tail is concatenated
+ * back verbatim, so the reader sees the whole value and only the SWEEP is windowed — and the
+ * walk records a `sweep-bounded` hit so the residual is observable rather than silent.
+ *
+ * **AND THE BOUND IS PER STRING LEAF, WHICH IS A SMALLER CLAIM THAN "THE SWEEP IS BOUNDED".**
+ * A payload of many leaves costs the sum, so what this buys is a change of CURVE and not a
+ * ceiling. Measured through `redactPayload`, the same pem-shaped bytes arranged two ways, each
+ * row in its own process because a warm heap inflated an earlier run of this table by 2.2×:
+ *
+ *     ONE leaf         0.25 MB → 1.2 ms    0.5 MB → 1.2 ms   1 MB →  1.6 ms   2 MB →   1.6 ms
+ *     8 KB leaves      0.25 MB → 22.8 ms   0.5 MB → 44.4 ms  1 MB → 87.7 ms   2 MB → 172.3 ms
+ *
+ * — flat in the length of any ONE string, and 87 ms per MB of TOTAL payload in the worst
+ * arrangement, doubling with the payload rather than with its square. Linear at 87 ms/MB is
+ * what was built; "no payload can be expensive" is not, and the bound that would buy that is a
+ * budget across the whole walk, which nothing here needs yet.
+ *
+ * The unbounded curve is the table at the top of this docstring and is NOT restated here: this
+ * machine reproduces its 256 KB and 1 MB rows (300 ms, 4900 ms, three runs each) and does not
+ * reproduce its 512 KB one (2650 ms against 1157 ms), so the shape is confirmed and the
+ * midpoint is not, and copying six numbers that were measured elsewhere is how a table becomes
+ * a claim nobody re-derives.
+ *
  * Fixing the pattern instead would mean bounding the body of a PEM block, which is a change to
  * what this detector CAN find; it is not made here, and the limit is pinned by a test in
  * `test/security/redact.test.ts` so it cannot be narrowed by accident.
@@ -302,6 +362,13 @@ export interface RedactionResult {
    * `secret-value`, `secretish-key`, `secret-classified`, `cycle`, `unserializable` —
    * say the walk met a shape rather than guessed at one.
    *
+   * `sweep-bounded` IS THE NEWEST STRUCTURAL NAME AND THE ONE THAT REPORTS AN ABSENCE. Every
+   * other entry says the walk FOUND something; this one says it stopped looking — a string
+   * leaf was longer than `maxSweepBytes`, so the detectors saw a window and the rest of that
+   * leaf went out unswept. It is not a leak and not a redaction; it is the residual of the
+   * bound, made observable so that "the read boundary sweeps model output" keeps meaning
+   * something a reader can check. See `DETECTORS`.
+   *
    * `url-credentials` IS ON BOTH SIDES OF THAT LINE, which is why it is worth naming here.
    * It arrives through `DETECTORS`, so it reads as "the declared path missed something" —
    * true, and it is also a structural match rather than a guess, so unlike its neighbours it
@@ -344,14 +411,24 @@ export interface RedactionResult {
  * A `SecretValue` and a secret-ish KEY are hidden in both modes and at every depth: they
  * are facts about the value, not about what the caller asked to hide.
  *
- * BOTH OPTIONS FAIL CLOSED WHEN THEY ARE PRESENT AND UNUSABLE, and `hits` says which —
- * `unusable-only`, `unusable-scope`. Neither is a throw; see the comments in the body for
- * the caller that makes a throw here expensive.
+ * `opts.maxSweepBytes` bounds the DETECTOR SWEEP per string leaf, and its default here is
+ * INFINITY — this function is the unbounded primitive and the bound lives at the entry
+ * points whose readers need it (`redactPayload`, `redactAttributes`). Defaulting it here
+ * instead would silently bound `run/delivery.ts`'s `redactFields`, which is the one sink
+ * outside the trust boundary and the one whose output is hashed into a content digest. See
+ * `DETECTORS` for the cost that makes the bound necessary and for what survives it.
+ *
+ * ALL THREE OPTIONS FAIL CLOSED WHEN THEY ARE PRESENT AND UNUSABLE, and `hits` says which
+ * for two of them — `unusable-only`, `unusable-scope`. Neither is a throw; see the comments
+ * in the body for the caller that makes a throw here expensive. `maxSweepBytes` is the third
+ * and fails closed toward BOUNDED rather than toward a hit: a caller that passed `0`, `-1`,
+ * `NaN` or a non-number asked for a bound and got the default one, because the alternative
+ * readings are "sweep nothing" (a silent leak) and "sweep everything" (the stall).
  */
 export function redact(
   value: unknown,
   classification: Classification = "internal",
-  opts: { readonly only?: readonly string[]; readonly scope?: string } = {},
+  opts: { readonly only?: readonly string[]; readonly scope?: string; readonly maxSweepBytes?: number } = {},
 ): RedactionResult {
   const hits: string[] = [];
   // A NON-ARRAY `only` HIDES EVERYTHING, and the STRING case is why this is not a
@@ -382,6 +459,7 @@ export function redact(
     classification,
     only,
     hits,
+    maxSweep: sweepLimit(opts.maxSweepBytes),
     path: new Set(),
     key: () => (key ??= tokenKey(scope)),
   });
@@ -394,6 +472,8 @@ interface WalkState {
   /** Field names to hide, or `undefined` to hide everything. See `redact`. */
   readonly only: ReadonlySet<string> | undefined;
   readonly hits: string[];
+  /** How much of each string leaf the detectors see. `Infinity` for none. See `sweepLimit`. */
+  readonly maxSweep: number;
   /** The containers on the path from the root to here — cycle detection, not memoisation. */
   readonly path: Set<object>;
   /** This call's token key, derived on first use. See `redact` and `tokenKey`. */
@@ -406,6 +486,42 @@ interface WalkState {
  * 32 is far past any payload a human is asked to approve and far short of the stack.
  */
 const MAX_DEPTH = 32;
+
+/**
+ * The default window the two read-boundary entry points give the detectors, per string leaf.
+ *
+ * THE SAME 8 KB `providers/http.ts` PICKED, and deliberately the same number rather than a
+ * second one tuned here: it is the width at which the quadratic detector's cost stops being
+ * visible (0.33–0.38 ms flat, measured there over the six sizes in `DETECTORS`), and one
+ * number is one thing to change. It is NOT a size policy — nothing is truncated — and it is
+ * not a claim that 8 KB of credential-shaped text is safe; it is a bound on WORK, which is
+ * the only thing that was unbounded.
+ *
+ * It is not exported. A caller that wants no bound spells `Number.POSITIVE_INFINITY`, which
+ * says what it means at the call site; a caller that wants this one omits the option.
+ */
+const DEFAULT_MAX_SWEEP = 8_192;
+
+/**
+ * What a caller's `maxSweepBytes` actually means, with every unusable value reading as the
+ * default rather than as `Infinity`.
+ *
+ * `undefined` is the ONE value that means unbounded, because `redact`'s own default has to
+ * leave `redactFields` exactly as it was. Everything else a JS caller can pass — `0`, `-1`,
+ * `NaN`, `"8192"`, `null` — is somebody asking for a bound and spelling it wrong, and the
+ * two alternative readings are both worse than 8 KB: `slice(0, NaN)` sweeps nothing, and
+ * treating a bad value as absent restores the stall this exists to remove.
+ *
+ * COUNTED IN UTF-16 CODE UNITS — `String.prototype.slice`'s unit, and the unit the regex
+ * engine steps in, which is what the quadratic cost is per. The option is named `Bytes`
+ * because that is what a caller thinks in and because every measurement behind it is ASCII,
+ * where the two numbers are equal; for text outside Latin-1 the window is up to three times
+ * this many UTF-8 bytes. It bounds work, and the work is per code unit.
+ */
+function sweepLimit(v: number | undefined): number {
+  if (v === undefined) return Number.POSITIVE_INFINITY;
+  return typeof v === "number" && v > 0 ? v : DEFAULT_MAX_SWEEP;
+}
 
 function walk(value: unknown, hiding: boolean, depth: number, st: WalkState): unknown {
   if (depth > MAX_DEPTH) return "[depth-limit]";
@@ -483,7 +599,7 @@ function walk(value: unknown, hiding: boolean, depth: number, st: WalkState): un
   if (hiding && st.classification === "pii") {
     return value === null || value === undefined ? value : piiToken(value, st.key());
   }
-  return typeof value === "string" ? sweep(value, st.hits) : value;
+  return typeof value === "string" ? sweep(value, st.hits, st.maxSweep) : value;
 }
 
 const SECRETISH_KEY = /^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i;
@@ -803,7 +919,37 @@ function tokenKey(scope: Scope): Buffer {
   return createHmac("sha256", root).update(`loom.pii.token.v1\n${label}`, "utf8").digest();
 }
 
-function sweep(text: string, hits: string[]): string {
+/**
+ * Run the detectors over a string leaf, over a WINDOW of it when the caller bounded one.
+ *
+ * SWEEP THE HEAD, KEEP THE TAIL — never truncate. `providers/http.ts`'s `redactForeign` is
+ * allowed to cut because it is building a 500-byte `details.detail`; this function's callers
+ * are rendering a channel value to an operator's console and a reason onto a span, and a
+ * value that silently loses everything past 8 KB is a reader misled about the run rather than
+ * a reader protected from a secret. The tail is concatenated back byte-for-byte, so `sweep`
+ * is length-preserving at every bound and the ONLY observable of `maxSweepBytes` is which
+ * matches are found.
+ *
+ * THE SPLIT IS AT A CODE UNIT AND MAY LAND INSIDE A SURROGATE PAIR, and what that costs is
+ * nothing MORE than the bound already costs. The two halves are re-joined verbatim, so the
+ * astral character is intact in the output — verified with a pair straddling code unit 8192
+ * exactly: output byte-identical to the input, `[...out]` still contains the character, one
+ * `sweep-bounded` hit. What it does NOT buy is immunity in the sweep itself: the first draft
+ * of this paragraph said "a lone surrogate matches no entry in `DETECTORS`", and `pem`'s
+ * `[\s\S]*?` matches straight across one (measured: `hits: ["pem"]`). The honest statement is
+ * the weaker one — a match that STRADDLES the limit is lost, which is the residual named
+ * above, and a surrogate boundary is one instance of it rather than a separate hazard.
+ *
+ * THE HIT IS PUSHED WHETHER OR NOT ANYTHING WAS FOUND, which is the opposite rule to the
+ * detector hits below it. Those report a discovery; `sweep-bounded` reports that the window
+ * closed, and "we looked at the first 8 KB and found nothing" is exactly the case a reader
+ * of `hits` must not mistake for "we looked at all of it and found nothing".
+ */
+function sweep(text: string, hits: string[], limit = Number.POSITIVE_INFINITY): string {
+  if (text.length > limit) {
+    hits.push("sweep-bounded");
+    return sweep(text.slice(0, limit), hits) + text.slice(limit);
+  }
   let out = text;
   for (const d of DETECTORS) {
     // `replace` with a global regex is stateless here because a fresh string is
@@ -835,9 +981,22 @@ function sweep(text: string, hits: string[]): string {
  *
  * A caller shipping a payload to a third party wants `redactFields` and its required scope,
  * not this.
+ *
+ * **THE DETECTOR SWEEP IS BOUNDED HERE, PER STRING LEAF, AND UNBOUNDED IS SPELLED.** Its three
+ * callers are `http.ts`'s `frame` and `summarise`, and what they hand over is a JOURNAL
+ * PAYLOAD and a CHANNEL MAP — which is to say, model output, at whatever length a model chose.
+ * `DETECTORS` is quadratic in one entry, so before this default a 1 MB pem-shaped channel
+ * value made `GET /runs/:id` take 4767 ms, 4754 ms of it event-loop lag, stalling every other
+ * request and every SSE stream on the same thread. Pass `maxSweepBytes:
+ * Number.POSITIVE_INFINITY` to sweep whole values again, and read `DETECTORS` first for what
+ * that costs and what the bound lets through.
  */
-export function redactPayload(payload: unknown, classification: Classification): unknown {
-  return redact(payload, classification).value;
+export function redactPayload(
+  payload: unknown,
+  classification: Classification,
+  opts: { readonly maxSweepBytes?: number } = {},
+): unknown {
+  return redact(payload, classification, { maxSweepBytes: opts.maxSweepBytes ?? DEFAULT_MAX_SWEEP }).value;
 }
 
 /**
@@ -952,11 +1111,24 @@ export function redactPayload(payload: unknown, classification: Classification):
  * `classifications`' wrong shapes DISCLOSE, so every one of its failure modes — not a map,
  * not readable, not a classification — answers `secret_ref`. Totality is what neither
  * argument had; it is not the same statement as the asymmetry and it does not replace it.
+ *
+ * **AND TOTALITY IS NOT THE SAME STATEMENT AS BOUNDED EITHER**, which is why `maxSweepBytes`
+ * is here and defaults to `DEFAULT_MAX_SWEEP`. A function that cannot throw can still park the
+ * thread: `gate.reason`, `run.suspended`'s reason and `policy.reasons` are operator- and
+ * channel-authored free text of no declared length, and one entry in `DETECTORS` is quadratic
+ * in it, so an unbounded sweep here is a `loom trace` that hangs rather than one that fails.
+ * Dropping the attribute instead would be licensed — invariant 8, and the three arms above
+ * already drop — but it is the wrong trade for the ONE case that matters: an operator reading
+ * a trace to find out why a gate was refused needs the reason, and losing it because it was
+ * long is the poorer trace. So the window is on the SWEEP and the value goes out whole, with
+ * a detector run that begins past the window not found. `Number.POSITIVE_INFINITY` restores
+ * the old behaviour; `DETECTORS` states what each choice costs.
  */
 export function redactAttributes(
   attrs: Readonly<Record<string, unknown>>,
   classifications: Readonly<Record<string, Classification>>,
   scope: string,
+  opts: { readonly maxSweepBytes?: number } = {},
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   // Total in the value the caller hands over, because `SpanLink.attributes` and
@@ -1011,7 +1183,7 @@ export function redactAttributes(
     // collapses into it.
     let redacted: unknown;
     try {
-      redacted = redact(v, classification, { scope }).value;
+      redacted = redact(v, classification, { scope, maxSweepBytes: opts.maxSweepBytes ?? DEFAULT_MAX_SWEEP }).value;
     } catch {
       continue;
     }

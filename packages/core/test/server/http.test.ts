@@ -3778,3 +3778,77 @@ test("an unknown graph hash is a clean 404, not an empty canvas", async () => {
   r.close();
 });
 
+// ── the read boundary's own cost ─────────────────────────────────────────────
+
+test("A 1 MB pem-SHAPED CHANNEL VALUE DOES NOT STALL THE PLANE — the only self-DoS here, end to end", async () => {
+  // THE ONE THAT NEEDED NO ATTACKER AND NO CREDENTIALS. `summarise` sweeps `channels` and
+  // `outputs` through `redactPayload`, `DETECTORS` has one quadratic entry (`pem`'s
+  // `[\s\S]*?` scans to the end of the string once per BEGIN that never gets an END), and a
+  // channel value is whatever an AGENT NODE wrote — arbitrary length, chosen by a model. The
+  // route the sweep was licensed by said those values "came out of this deployment's own
+  // journal", which is where model output lives.
+  //
+  // Measured on this file, one 1 MB channel value, before the bound:
+  //
+  //     benign 1 MB      →    7 ms, peak event-loop lag    0 ms
+  //     pem-shaped 1 MB  → 4767 ms, peak event-loop lag 4754 ms
+  //
+  // …on the single thread that also serves every other request and every SSE stream. The lag
+  // is asserted alongside the latency because it is the half that makes it a DoS rather than
+  // a slow route: this handler is `await`-free through the sweep, so the number below is what
+  // every OTHER client waits.
+  const unit = "-----BEGIN A PRIVATE KEY-----";
+  const pem = unit.repeat(Math.floor((1024 * 1024) / unit.length));
+
+  const r = await rig();
+  try {
+    // Planted through `store.append` rather than run through the graph: `run.submitted`'s
+    // `inputs` fold straight into `p.channels` (`projection.ts`), which is the map
+    // `summarise` sweeps, and no mock model has to be persuaded to emit a megabyte.
+    const runId = "run_pem_1mb" as RunId;
+    await r.h.store.append({
+      runId,
+      expectedSeq: 0,
+      events: [
+        {
+          type: "run.submitted",
+          actor: { kind: "system", component: "test" } satisfies Actor,
+          payload: {
+            workflow: "skeleton-summarize",
+            graphHash: "sha256:unused",
+            inputs: { big: pem },
+            idempotencyKey: "k",
+            configDigest: "sha256:unused",
+          },
+        },
+      ],
+    });
+
+    // Warm the connection so the number is the handler and not TCP setup.
+    await fetch(`${r.base}/health`);
+
+    let lag = 0;
+    let last = performance.now();
+    const probe = setInterval(() => {
+      const now = performance.now();
+      lag = Math.max(lag, now - last - 10);
+      last = now;
+    }, 10);
+    const t0 = performance.now();
+    const res = await fetch(`${r.base}/runs/${runId}`);
+    const body = (await json(res)) as { channels: { big: string } };
+    const ms = performance.now() - t0;
+    clearInterval(probe);
+
+    assert.equal(res.status, 200);
+    assert.ok(ms < 100, `GET /runs/:id took ${ms.toFixed(0)} ms (was 4767 ms) — the sweep is unbounded again`);
+    assert.ok(lag < 50, `the event loop stalled ${lag.toFixed(0)} ms (was 4754 ms) — every other client waited that long`);
+    // AND THE OPERATOR STILL SEES THE WHOLE VALUE. The bound is on the sweep, never on the
+    // value; a console that silently loses everything past 8 KB would be this fix trading a
+    // stall for a reader misled about the run.
+    assert.equal(body.channels.big, pem, "the channel value was truncated — the bound became a size policy");
+  } finally {
+    await r.close();
+  }
+});
+

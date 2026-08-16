@@ -2,15 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { digest } from "../../src/canonical.ts";
 import { CODES } from "../../src/errors.ts";
 import { runEvalSuite } from "../../src/evolution/gate.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
+import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
-import type { JournalEvent } from "../../src/journal/events.ts";
+import type { JournalEvent, NewEvent } from "../../src/journal/events.ts";
 import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { FunctionRegistry } from "../../src/run/registry.ts";
+import { FunctionRegistry, ModelRegistry, ToolRegistry, type MockScript, type ToolDefinition } from "../../src/run/registry.ts";
 import { ReplayEffects, replayRun } from "../../src/run/replay.ts";
 import { conformsToGraph, reconstructGraph, shouldExport, spansFrom } from "../../src/telemetry/spans.ts";
 import { DOCS, SKELETON_TENANT_CAPS, SKELETON_TOOLS, compileSkeleton, harness, resolver, skeletonSpec } from "./skeleton.ts";
@@ -744,4 +746,344 @@ test("an unchanged run rebinds nothing", async () => {
   const { h, graph, runId } = await recorded();
   const report = await replayRun({ store: h.store, runId, graph, engine: REPLAY_ENGINE(h) });
   assert.deepEqual(report.reboundEffects, []);
+});
+
+// ── a recorded effect the replay never asked for ─────────────────────────────
+//
+// `unservedEffects` was reported BESIDE `match` and excluded FROM it, so a replay could
+// certify a recording two of whose results it never consumed. Two shapes reproduce it,
+// and neither is visible to `compare`: an agent's tool result reaches the transcript
+// only, and the model turn that would have reacted to it is itself served from the
+// journal — so a tool result that is never fetched cannot move a channel.
+
+/** Two `fs.read` calls in ONE model turn, so the journal carries `:tool:0` AND `:tool:1`. */
+const TWO_CALL_SCRIPT: MockScript = (req, turn) => {
+  const parsed = JSON.parse(req.messages[0]?.content ?? "{}") as { state?: { path?: string } };
+  const path = parsed.state?.path ?? "unknown";
+  if (turn % 2 === 0) {
+    return {
+      toolCalls: [
+        { id: `c${turn}a`, name: "fs.read", arguments: { path } },
+        { id: `c${turn}b`, name: "fs.read", arguments: { path: `OTHER-${path}` } },
+      ],
+      finishReason: "tool_use",
+    };
+  }
+  return { text: JSON.stringify({ path, summary: `summary of ${path}` }), finishReason: "stop" };
+};
+
+const ONE_DOC = ["doc-0.md"];
+const TOOL_0 = "summarize@root/e0[0]#0:tool:0";
+const TOOL_1 = "summarize@root/e0[0]#0:tool:1";
+const MODEL_0 = "summarize@root/e0[0]#0:model:0";
+
+/** One document, an agent that calls its tool twice in the first turn, gate approved. */
+async function recordedTwoCall(): Promise<{ h: ReturnType<typeof harness>; graph: RunGraph; runId: RunId }> {
+  const h = harness({ script: TWO_CALL_SCRIPT });
+  const graph = compileSkeleton();
+  const runId = await h.engine.submit({ graph, inputs: { paths: ONE_DOC } });
+  let p = await h.engine.advance(runId);
+  if (p.status === "awaiting_gate") {
+    const gate = Object.values(p.gates).find((g) => g.state === "open")!;
+    p = await h.engine.resolveGate(runId, {
+      gateId: gate.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: "k1",
+    });
+  }
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  return { h, graph, runId };
+}
+
+/**
+ * The same journal, under the same runId, with one event rewritten.
+ *
+ * Rebuilt through `append` rather than mutated in place, so every row goes through
+ * `canonicalize` exactly as the engine's own writes did and the copy is a journal a
+ * store would accept — seqs contiguous from 1, ts and actor and taskId preserved.
+ */
+async function rebuiltJournal(
+  events: readonly JournalEvent[],
+  runId: RunId,
+  edit: (e: JournalEvent) => JournalEvent,
+): Promise<MemoryStateStore> {
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  let seq = 0;
+  for (const original of events) {
+    const e = edit(original);
+    await store.append({
+      runId,
+      expectedSeq: seq,
+      events: [
+        {
+          type: e.type,
+          payload: e.payload,
+          actor: e.actor,
+          ts: e.ts,
+          classification: e.classification,
+          ...(e.taskId === undefined ? {} : { taskId: e.taskId }),
+        } as NewEvent,
+      ],
+    });
+    seq += 1;
+  }
+  return store;
+}
+
+test("A REPLAY THAT NEVER SERVED A RECORDED EFFECT DOES NOT REPORT `match: true`", async () => {
+  // THE NAMED REPRO, reconstructed. The original is a journal written by HEAD (two tool
+  // calls in one turn → `:tool:0` and `:tool:1`) replayed by code that only ever asks for
+  // `:tool:0`; that code is a reverted `engine.ts` this test cannot run. What it CAN build
+  // is the state that distinguishes the two — a well-formed journal carrying a recorded
+  // `:tool:1` that this replay never requests — by serving a model turn that asks for one
+  // call while both results stay recorded. The digest is recomputed, so the journal is
+  // self-consistent and the digest check below is not what fires here.
+  const { h, graph, runId } = await recordedTwoCall();
+  const events = await eventsOf(h.store as MemoryStateStore, runId);
+  assert.deepEqual(
+    events.filter((e) => e.type === "effect.completed").map((e) => (e.payload as { key: string }).key),
+    [MODEL_0, TOOL_0, TOOL_1, "summarize@root/e0[0]#0:model:1", "write@root#0:tool:0"],
+    "the recording really did make two tool calls in one turn",
+  );
+
+  const store = await rebuiltJournal(events, runId, (e) => {
+    if (e.type !== "effect.completed" || (e.payload as { key: string }).key !== MODEL_0) return e;
+    const p = e.payload as { key: string; result: { toolCalls?: unknown[] }; resultDigest: string };
+    const result = { ...p.result, toolCalls: (p.result.toolCalls ?? []).slice(0, 1) };
+    return { ...e, payload: { key: p.key, result, resultDigest: digest(result) } } as JournalEvent;
+  });
+
+  const report = await replayRun({ store, runId, graph, engine: REPLAY_ENGINE(h) });
+
+  // Everything the verdict used to be built from says "fine": same tasks, same channels,
+  // same status, same graph, nothing rebound.
+  assert.deepEqual(report.replayed.channels, report.original.channels);
+  assert.equal(report.replayed.status, "succeeded");
+  assert.equal(report.graph.match, true);
+  assert.deepEqual(report.reboundEffects, []);
+  assert.equal(
+    report.frames.filter((f) => f.kind !== "effect.unserved").every((f) => f.match),
+    true,
+    "the divergence is invisible to `compare`, which is what made it silent",
+  );
+
+  // And the fact that says otherwise, which used to be reported beside the verdict.
+  assert.deepEqual(report.unservedEffects, [TOOL_1]);
+  assert.equal(report.match, false, "a replay that never served a recorded effect did not reproduce the recording");
+  const frame = report.frames.find((f) => f.kind === "effect.unserved");
+  assert.ok(frame, "the divergence is a frame, so `loom replay` prints it and exits non-zero");
+  assert.equal(frame.expected, TOOL_1);
+  assert.equal(frame.actual, "(never requested)");
+});
+
+/**
+ * The skeleton with the `write` TOOL node replaced by a function that writes the same
+ * value — a candidate graph that reaches the same end without making the recorded call.
+ *
+ * The second shape, and the one with no journal edit anywhere in it: the engine drives it
+ * end to end. `write@root#0:tool:0` is simply never requested.
+ */
+function computesInsteadOfWriting(h: ReturnType<typeof harness>): RunGraph {
+  h.functions.register("function/write-instead@stable", (view) => ({
+    writes: { written: { path: "out/summary.md", body: (view.get<{ markdown?: string }>("merged") ?? {}).markdown ?? "" } },
+  }));
+  const base = skeletonSpec();
+  return compileSkeleton(
+    skeletonSpec({
+      nodes: base.nodes.map((x) =>
+        x.id === ("write" as NodeId)
+          ? { id: x.id, type: "function", reads: ["merged"], writes: ["written"], function: { ref: "function/write-instead@stable" } }
+          : x,
+      ),
+    }),
+  );
+}
+
+test("A CANDIDATE THAT SKIPS A RECORDED CALL IS NOT `match: true` UNDER `\"allow\"`", async () => {
+  const { h, graph, runId } = await recorded();
+  const candidate = computesInsteadOfWriting(h);
+  assert.notEqual(candidate.graphHash, graph.graphHash);
+
+  // Opted out of the graph-hash check on purpose: that is the mode `runEvalSuite` exists
+  // for, and it is where the unserved effect is the ONLY thing left that can notice.
+  const report = await replayRun({ store: h.store, runId, graph: candidate, engine: REPLAY_ENGINE(h), onGraphChange: "allow" });
+
+  assert.deepEqual(report.replayed.channels, report.original.channels, "the candidate reached the same state");
+  assert.equal(report.replayed.status, "succeeded");
+  assert.deepEqual(report.unservedEffects, ["write@root#0:tool:0"]);
+  assert.equal(report.match, false, "the recorded fs.write result was never consumed by anything");
+  assert.equal(h.writes.length, 1, "…and the replay still performed no side effect of its own");
+});
+
+test("consuming every recorded effect is what keeps the check non-vacuous", async () => {
+  const { h, graph, runId } = await recorded();
+  const report = await replayRun({ store: h.store, runId, graph, engine: REPLAY_ENGINE(h) });
+  assert.deepEqual(report.unservedEffects, []);
+  assert.equal(report.frames.some((f) => f.kind === "effect.unserved"), false);
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match), null, 1));
+});
+
+// ── the digest of a served result ────────────────────────────────────────────
+
+test("A RECORDED RESULT THAT NO LONGER MATCHES ITS OWN DIGEST IS NOT SERVED", async () => {
+  // `effect.completed.resultDigest` was written at four sites and read by none: a durable
+  // field whose name asserted a property nothing checked. What it can check is exactly one
+  // thing — that the `result` in the journal is the `result` the engine hashed when it
+  // recorded it. Here a tool result is rewritten and the digest is left alone, which is
+  // what a hand-edited, corrupted, or substituted journal looks like from inside a replay.
+  const { h, graph, runId } = await recordedTwoCall();
+  const events = await eventsOf(h.store as MemoryStateStore, runId);
+
+  const store = await rebuiltJournal(events, runId, (e) => {
+    if (e.type !== "effect.completed" || (e.payload as { key: string }).key !== TOOL_0) return e;
+    const p = e.payload as { key: string; result: { content?: string }; resultDigest: string };
+    // The digest is deliberately NOT recomputed. That is the whole point.
+    return { ...e, payload: { ...p, result: { ...p.result, content: "contents of ATTACKER.md" } } } as JournalEvent;
+  });
+
+  const report = await replayRun({ store, runId, graph, engine: REPLAY_ENGINE(h) });
+
+  // The refusal lands where every other `E_REPLAY_DIVERGENCE` lands — the task that asked
+  // for the result fails, so the replayed run fails and the verdict is `false`. That is
+  // the same shape as "effect is not in the journal" (see the test above), and it is what
+  // makes the edit visible: without the check this journal replays to the recorded
+  // channels, the recorded status, and `match: true`.
+  assert.equal(report.match, false);
+  assert.equal(report.replayed.status, "failed");
+  const failure = JSON.stringify(report.replayed.error ?? {});
+  assert.match(failure, new RegExp(CODES.E_REPLAY_DIVERGENCE));
+  assert.match(failure, /no longer hashes to its recorded digest/);
+  assert.ok(failure.includes(TOOL_0), "the error names the effect whose result no longer hashes to its digest");
+});
+
+test("an untouched journal serves every result, so the digest check is not vacuous", async () => {
+  const { h, graph, runId } = await recordedTwoCall();
+  const events = await eventsOf(h.store as MemoryStateStore, runId);
+  const store = await rebuiltJournal(events, runId, (e) => e);
+  const report = await replayRun({ store, runId, graph, engine: REPLAY_ENGINE(h) });
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match), null, 1));
+});
+
+// ── the one write site whose digest is not a digest of its result ────────────
+
+const PAY_TOOLS: Record<string, ToolManifestLite> = {
+  "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "irreversible", idempotent: false },
+};
+
+function doublingChild(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "double", project: "sub", version: 1 },
+    policy: { posture: "out", capabilities: ["pay"] },
+    channels: {
+      amount: { type: "number", reduce: "replace" },
+      doubled: { type: "number", reduce: "replace" },
+    },
+    inputs: ["amount"],
+    outputs: ["doubled"],
+    nodes: [
+      { id: "double" as NodeId, type: "function", reads: ["amount"], writes: ["doubled"], function: { ref: "function/double@stable" } },
+    ],
+    edges: [],
+  };
+}
+
+function delegatingParent(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "parent", project: "sub", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 }, capabilities: ["pay"] },
+    channels: { total: { type: "number", reduce: "replace" }, result: { type: "object", reduce: "replace" } },
+    inputs: ["total"],
+    outputs: ["result"],
+    nodes: [
+      {
+        id: "delegate" as NodeId,
+        type: "subgraph",
+        reads: ["total"],
+        writes: ["result"],
+        subgraph: { ref: "graph/double@stable", inputs: { amount: "total" }, outputs: { result: "doubled" }, budgetShare: 0.5 },
+      },
+    ],
+    edges: [],
+  };
+}
+
+function subgraphResolver(child: GraphSpec): ResourceResolver {
+  return {
+    resolve: (ref) => (/^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref) ? { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" } : undefined),
+    subgraph: (ref) => (ref === "graph/double@stable" ? child : undefined),
+  };
+}
+
+function subgraphRig(child: GraphSpec): { engine: Engine; store: MemoryStateStore; tools: ToolRegistry; functions: FunctionRegistry } {
+  const now = (): number => 1_700_000_000_000;
+  const store = new MemoryStateStore({ now });
+  const tools = new ToolRegistry();
+  const functions = new FunctionRegistry();
+  const charge: ToolDefinition = {
+    ...PAY_TOOLS["pay.charge"]!,
+    description: "Take money.",
+    parameters: { type: "object", properties: { amount: { type: "number" } } },
+    execute: () => ({ content: "charged" }),
+  };
+  tools.register(charge);
+  functions.register("function/double@stable", (view) => ({ writes: { doubled: (view.get<number>("amount") ?? 0) * 2 } }));
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions,
+    models: new ModelRegistry(),
+    now,
+    resolver: subgraphResolver(child),
+    policy: { granted: ["pay"] },
+  });
+  return { engine, store, tools, functions };
+}
+
+test("THE SUBGRAPH SITE STILL DOES NOT DIGEST ITS RESULT — this is what the exemption is for", async () => {
+  // A RE-DERIVED PREDICATE, not a prose reason. `engine.ts:2191` writes
+  // `result: {writes}` with `resultDigest: digest(writes)`, so the recorded digest is a
+  // digest of a SUB-OBJECT of the result and a strict comparison would refuse every
+  // subgraph replay. When that line is fixed this test fails, and the failure is the
+  // instruction: delete `DIGEST_NOT_OVER_RESULT` from `run/replay.ts`.
+  const child = doublingChild();
+  const r = subgraphRig(child);
+  const graph = compileOrThrow({ spec: delegatingParent(), resolver: subgraphResolver(child), tools: PAY_TOOLS, tenantCapabilities: ["pay"] });
+  const runId = await r.engine.submit({ graph, inputs: { total: 4 } });
+  const p = await r.engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+
+  const completed = (await eventsOf(r.store, runId)).filter(
+    (e) => e.type === "effect.completed" && (e.payload as { key: string }).key.includes(":subgraph:"),
+  );
+  assert.equal(completed.length, 1);
+  const payload = completed[0]!.payload as { key: string; result: unknown; resultDigest: string };
+  assert.notEqual(
+    digest(payload.result),
+    payload.resultDigest,
+    "engine.ts:2191 now digests its result — delete DIGEST_NOT_OVER_RESULT in run/replay.ts",
+  );
+
+  // And with the exemption, a subgraph run still replays rather than being refused by a
+  // check aimed at journal edits.
+  const shadow = subgraphRig(child);
+  const report = await replayRun({
+    store: r.store,
+    runId,
+    graph,
+    engine: {
+      tools: shadow.tools,
+      functions: new FunctionRegistry(),
+      models: new ModelRegistry(),
+      now: () => 1_700_000_000_000,
+      resolver: subgraphResolver(child),
+      policy: { granted: ["pay"] },
+    },
+  });
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match), null, 1));
 });

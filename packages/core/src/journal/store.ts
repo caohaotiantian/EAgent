@@ -87,6 +87,31 @@ export interface PreparedEvent {
  * Turn a batch into positioned rows. Pure, so both stores share exactly one
  * definition of "what an append means" — the reason a conformance suite can hold
  * them to the same behaviour.
+ *
+ * THE TWO `canonicalize` CALLS BELOW ARE THE ONLY UNBOUNDED RECURSION ON THE DURABLE WRITE
+ * PATH, and a deeply nested payload used to take them — and the process — down with a bare
+ * `RangeError: Maximum call stack size exceeded`. That is the one failure mode invariant 2
+ * cannot have: a durable write that fails in a vocabulary no caller branches on is neither
+ * a refusal they can fix nor a fault they can retry. (Everything else here iterates. The
+ * memory store's `JSON.parse` of `payloadJson` does recurse, but only over text this
+ * function already produced, so it inherits the bound rather than needing its own.)
+ *
+ * The depth bound is enforced by the INJECTED FUNCTION, not by this one — `canonical.ts`
+ * raises `E_PAYLOAD_TOO_DEEP` (class `validation`) and both stores inject it. The signature
+ * deliberately keeps taking any `(v: unknown) => string`, so this function guarantees only
+ * that it is TOTAL OR NOTHING: it is pure, it canonicalizes before returning a single row,
+ * and both stores call it before they touch storage (SQLite before `BEGIN IMMEDIATE`,
+ * memory before its first `push`). A refusal therefore rejects the whole batch and leaves
+ * the head where it was. `test/journal/store.test.ts` tests that composition against both
+ * stores, because the composition is what an append actually is.
+ *
+ * WHAT IS NOT PINNED, and was not before this either: the two stores disagree about WHICH
+ * refusal wins when a batch is both stale and unrepresentable. Memory checks the CAS first,
+ * SQLite canonicalizes first, so one append reports `E_SEQ_CONFLICT` and the other
+ * `E_PAYLOAD_TOO_DEEP` for the same call — measured, not inferred. Both are honest
+ * refusals and neither writes anything, so this is a precedence difference rather than a
+ * durability one; it belongs to `memory.ts` and `sqlite.ts`, and `journal/conformance.ts`
+ * is where a decision about it would be pinned.
  */
 export function prepare(
   input: AppendInput,
