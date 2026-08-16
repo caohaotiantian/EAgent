@@ -61,3 +61,5 @@ export * from "./builtin/tools.ts";
 export * from "./builtin/authoring.ts";
 export * from "./security/redact.ts";
 export * from "./server/console.ts";
+export * from "./mcp/client.ts";
+export * from "./mcp/tools.ts";

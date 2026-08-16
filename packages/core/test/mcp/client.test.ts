@@ -1,0 +1,189 @@
+/**
+ * The MCP client, against a real child process speaking the real protocol.
+ *
+ * Offline and deterministic: the "server" is a few lines of Node written to a temp file and
+ * spawned, so the transport, the framing, the handshake and the timeout are all genuinely
+ * exercised rather than mocked. A mocked transport would prove the parts of this file that
+ * were never in doubt.
+ *
+ * The tests that matter are the ones about not trusting the server: a nameless tool entry, a
+ * non-JSON line on stdout, a server that answers nothing, and a server that dies mid-call.
+ * Each is something a third party's program does, and each has a wrong answer that looks
+ * fine until production.
+ */
+
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { McpClient, createBoundedLineReader } from "../../src/mcp/client.ts";
+import { mcpToolName, mcpTools } from "../../src/mcp/tools.ts";
+
+function serverFile(body: string): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "loom-mcp-"));
+  const path = join(dir, "server.mjs");
+  writeFileSync(path, body, "utf8");
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** A minimal, well-behaved MCP server: handshake, one tool, echoes its argument. */
+const GOOD = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  for (;;) {
+    const i = buf.indexOf("\\n");
+    if (i === -1) return;
+    const line = buf.slice(0, i);
+    buf = buf.slice(i + 1);
+    if (line.trim() === "") continue;
+    const msg = JSON.parse(line);
+    if (msg.method === "initialize") reply(msg.id, { capabilities: {}, protocolVersion: "2024-11-05" });
+    else if (msg.method === "tools/list") reply(msg.id, { tools: [
+      { name: "echo", description: "Echo it back.", inputSchema: { type: "object", properties: { text: { type: "string" } } } },
+      { name: "", description: "nameless — must be dropped" },
+      null,
+    ] });
+    else if (msg.method === "tools/call") reply(msg.id, { content: [{ type: "text", text: "echo:" + msg.params.arguments.text }] });
+    else if (msg.id !== undefined) reply(msg.id, {});
+  }
+});
+function reply(id, result) { process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n"); }
+`;
+
+// ── the line reader, which is the part a hostile server attacks ──────────────
+
+test("THE LINE READER DROPS A NO-NEWLINE FLOOD instead of growing without bound", () => {
+  const seen: string[] = [];
+  const r = createBoundedLineReader(64, (l) => seen.push(l));
+  r.push(Buffer.from("x".repeat(1000)));
+  assert.equal(r.discarding(), true, "past the cap with no newline, it must stop buffering");
+  assert.equal(r.buffered(), 0);
+  // …and it must resync ON the next newline, so the following message is parsed clean
+  // rather than as the tail of the garbage.
+  r.push(Buffer.from('more-garbage\n{"ok":1}\n'));
+  assert.deepEqual(seen, ['{"ok":1}']);
+});
+
+test("the line reader splits ordinary traffic exactly", () => {
+  const seen: string[] = [];
+  const r = createBoundedLineReader(1024, (l) => seen.push(l));
+  r.push(Buffer.from("a\nb"));
+  r.push(Buffer.from("c\nd\n"));
+  assert.deepEqual(seen, ["a", "bc", "d"]);
+});
+
+// ── the protocol, end to end ─────────────────────────────────────────────────
+
+test("A REAL HANDSHAKE ENUMERATES TOOLS, and drops the entries that are not tools", async () => {
+  const s = serverFile(GOOD);
+  const c = new McpClient({ name: "demo", command: process.execPath, args: [s.path], timeoutMs: 10_000 });
+  try {
+    await c.start();
+    // Three entries came back; one has an empty name and one is null. A nameless entry
+    // would register as `mcp__demo__` and shadow nothing usefully.
+    assert.deepEqual(c.tools.map((t) => t.name), ["echo"]);
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
+
+test("a discovered tool round-trips a real call", async () => {
+  const s = serverFile(GOOD);
+  const c = new McpClient({ name: "demo", command: process.execPath, args: [s.path], timeoutMs: 10_000 });
+  try {
+    await c.start();
+    const tool = mcpTools(c).find((t) => t.name === mcpToolName("demo", "echo"))!;
+    const r = await tool.execute({ text: "hi" }, { taskId: "t@root#0" as never, signal: new AbortController().signal, progress: () => {} });
+    assert.equal(r.content, "echo:hi");
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
+
+// ── the manifest, which is what oversight reads ──────────────────────────────
+
+test("EVERY MCP TOOL IS irreversible, so an unknown tool gates rather than guessing", async () => {
+  const s = serverFile(GOOD);
+  const c = new McpClient({ name: "demo", command: process.execPath, args: [s.path], timeoutMs: 10_000 });
+  try {
+    await c.start();
+    const [tool] = mcpTools(c);
+    // `tools/list` says nothing about whether a tool reads a file or wires money, and the
+    // two alternatives are worse: guessing from the NAME is a heuristic a hostile server
+    // picks its names to defeat, and trusting a self-declared class lets the party being
+    // governed choose its own governance.
+    assert.equal(tool!.irreversibility, "irreversible");
+    assert.equal(tool!.idempotent, false);
+    // One capability per SERVER: "this graph may use the demo server" is a decision an
+    // operator can actually make.
+    assert.deepEqual(tool!.capabilities, ["mcp:demo"]);
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
+
+// ── what a third party's program actually does ───────────────────────────────
+
+test("A SERVER THAT LOGS TO STDOUT DOES NOT BREAK THE SESSION", async () => {
+  const s = serverFile(`process.stdout.write("starting up, not JSON\\n");\n${GOOD}`);
+  const c = new McpClient({ name: "chatty", command: process.execPath, args: [s.path], timeoutMs: 10_000 });
+  try {
+    await c.start();
+    // Rejecting every in-flight request over one stray line would make a chatty server
+    // unusable, and each request's own deadline still bounds the damage.
+    assert.deepEqual(c.tools.map((t) => t.name), ["echo"]);
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
+
+test("A SERVER THAT NEVER ANSWERS TIMES OUT rather than wedging the run", async () => {
+  const s = serverFile(`process.stdin.on("data", () => {});\nsetInterval(() => {}, 1000);\n`);
+  const c = new McpClient({ name: "silent", command: process.execPath, args: [s.path], timeoutMs: 150 });
+  try {
+    await assert.rejects(async () => c.start(), (e: unknown) => (e as { code: string }).code === "E_TOOL_TIMEOUT");
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
+
+test("A SERVER THAT DIES MID-CALL REJECTS THE CALL, and does not leave it pending forever", async () => {
+  const s = serverFile(`
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const i = buf.indexOf("\\n");
+  if (i === -1) return;
+  const msg = JSON.parse(buf.slice(0, i));
+  buf = "";
+  if (msg.method === "initialize") { process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }) + "\\n"); return; }
+  process.exit(1);
+});
+`);
+  const c = new McpClient({ name: "dying", command: process.execPath, args: [s.path], timeoutMs: 10_000 });
+  try {
+    await assert.rejects(
+      async () => c.start(),
+      (e: unknown) => (e as { code: string }).code === "E_TOOL_SOURCE_UNAVAILABLE",
+    );
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
+
+test("calling a client that is not running is refused, not silently pending", async () => {
+  const c = new McpClient({ name: "never", command: process.execPath, args: ["-e", ""], timeoutMs: 100 });
+  await assert.rejects(
+    async () => c.request("tools/list", {}),
+    (e: unknown) => (e as { code: string }).code === "E_TOOL_SOURCE_UNAVAILABLE",
+  );
+});
