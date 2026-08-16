@@ -155,8 +155,17 @@ scripts/           CI guards (zero-dep, public surface) + the SEA build
 ../eagent-ref      EAgent v1, read-only reference worktree — the vendoring source
 ```
 
-Planned, **not yet built** — see the EAgent section above: `packages/tools/` (shell, grep,
-edit, MCP, guards) and `packages/skills/` (library/recipes/prompts as data).
+**Where vendored code actually went, and why it is not `packages/tools/`.** The plan said a
+separate package; building it changed the answer. Everything taken so far needs **no
+dependency** — `fs.edit`/`fs.glob`/`fs.grep` are pure Node, `proc.exec` wraps the sandbox
+already in core, and the MCP client is newline-JSON over `node:child_process`. A capability
+that needs no dependency belongs in core, because `build:binary` bundles
+`packages/core/dist/cli.js` **only**: a capability living in another package is absent from
+the single binary, and the single binary is the deployment.
+
+So the rule is: **zero-dep capability → `packages/core/src/`; a package only when something
+genuinely needs a dependency.** `packages/skills/` (library/recipes/prompts as data) is still
+the likely first one, and is not built.
 
 ## Commands
 

@@ -2975,3 +2975,65 @@ same line**, so a lookup table hides every name from it. Kept inline.
 "cut before an assistant message" is no longer sufficient — then the boundary rule needs the
 provider's own constraint, and `boundTurns` needs to take it as an argument rather than
 assume it.
+
+---
+
+## An autonomous pass over the remediation queue
+
+Seventeen commits, run without check-ins at the maintainer's instruction. What is worth
+keeping is the pattern in what turned out to be true, not the list.
+
+**Four claims in the queue were refuted rather than fixed.** `resultDigest` "written at four
+sites and read by none" is read — `replay.ts:160` compares it and raises
+`E_REPLAY_DIVERGENCE`. `budget.reserved`/`budget.settled` "have no producer" was already
+known and registered in `NEVER_APPENDED` with reasons. `--models-file` was "untested" because
+I grepped `test/cli/cli.test.ts` and the coverage is in `test/cli.test.ts` — seven tests,
+including one asserting on the HTTP bytes. And `usage` was going onto a registry as an
+eleventh escalation rule; there are ten, and the name came from a different object literal in
+the same file. **A queue carried forward across compactions decays**, and the check is
+cheaper than the fix.
+
+**The write-confinement hole was the severe one.** `node.writes` is what GRAPH010, the
+posture floor and `dataClassification` are all computed over, and two of the four node paths
+did not enforce it: `#runFunction` and `#runEvaluator` returned `{...out.writes}` raw. A node
+declaring `writes: ["mine"]` committed `secret`. Confined in `#dispatch` rather than at those
+two sites, on invariant 6's argument — a check applied per-caller is a check the next node
+type forgets. The whole suite passed unchanged afterwards, which is the evidence that the
+rule was already the intended contract everywhere and only the enforcement was partial.
+
+**Three defects were found by writing a repro rather than by reading.** The context budget
+bounded a request the model was never sent (~28,000 tokens against a 2,000 budget, fourteen
+times over) — and the probe for it found a second, independent defect in the test
+infrastructure: `MockModelAdapter.seen` pushed `req` by reference while `#runAgent` mutates
+`req.messages` in place, so every test asserting about "the request at turn N" was reading
+the last turn. `scale.test.ts` asserted on a wall-clock ratio and failed only under parallel
+load; best-of-N fixed it, because interference can delay a run but never make it finish
+faster.
+
+**Two attempts were stopped and recorded instead of pushed through.** Auto-retiring a
+terminal run looked obviously right and turned two failures into eleven; the honest move was
+to ship `forget` as a manual call, record precisely what blocked the automatic version, and
+come back to it — which is what happened three commits later, once `openGates`,
+`openGateBatches` and `rewind` no longer needed a live context. Rewind was the interesting
+one: it looked like a refactor and was not, because the only thing needing a context was an
+incremental fold that a rewind has just invalidated anyway.
+
+**A guard found twelve real disagreements on its first run.** Absorbing `verify-type-equiv`
+from deepseek-harness — comparing each `ts` block in `design/loom/` against the named
+declaration, member by member — turned up three kinds: members described and absent (now
+marked and registered), members whose optionality differed (the document was wrong), and a
+rename the design missed. Two design decisions inside it are worth keeping: a document may
+be INCOMPLETE and may not be FALSE, so a member the code has and the design omits is not
+drift; and inherited members count, because a first version reported nine of
+`ToolDefinition`'s as missing by not following `extends` — the guard's own bug, reported as
+the code's.
+
+**One thing was almost repeated.** `runSandboxed` had sat in this tree with zero callers,
+which is what `proc.exec` was written to fix — and then `McpClient` shipped with nothing
+constructing it. Wired in the next commit. A capability nothing calls is indistinguishable
+from one that does not exist.
+
+**Reverses when.** The MCP scope (tools only, stdio only) is the part most likely to need
+revisiting: the moment a server worth using offers only Streamable HTTP, the transport seam
+has to exist, and it should be added as a second transport behind the same client rather than
+as a second client.
