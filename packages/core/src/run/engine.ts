@@ -2294,6 +2294,31 @@ export class Engine {
     }
 
     const usage: UsageRecord = { ...ZERO_USAGE, costUsd: childP.usage.costUsd, wallMs: childP.usage.wallMs };
+
+    // NOT FINISHED IS NOT FAILED, and `!== "succeeded"` conflated them.
+    //
+    // `advance` returns as soon as a run has nothing RUNNABLE, which is not the same as
+    // nothing left to do: a child whose only task is in retry backoff comes back
+    // `status: "running"`, and so does one starved by `maxParallelism`. Both were reported
+    // to the parent as E_SUBGRAPH_FAILED — a permanent, non-retryable verdict on a child
+    // that was about to continue.
+    //
+    // The honest answer is retryable-unavailable: the parent's own retry policy re-enters
+    // this node, which re-advances the child, which is precisely the "come back later" this
+    // needs. `internal` would be wrong twice over — it is not a bug in Loom, and its class
+    // is not retryable, so the first backoff would have killed the run.
+    if (!isTerminal(childP.status)) {
+      return {
+        status: "failed",
+        writes: {},
+        usage,
+        error: err.unavailable(
+          CODES.E_SUBGRAPH_FAILED,
+          `subgraph "${sub.ref}" has not finished (${childP.status}) — it has work left, so this is a retry rather than a failure`,
+          { details: { childRunId, status: childP.status } },
+        ),
+      };
+    }
     if (childP.status !== "succeeded") {
       return {
         status: "failed",
