@@ -204,7 +204,21 @@ interface Workspace {
  * journal, registers the built-in tools against a jail, and returns a working engine.
  * No service, no migration step, no configuration file required.
  */
-export function openWorkspace(args: Args, env: Readonly<Record<string, string | undefined>> = process.env): Workspace {
+/**
+ * `fetchImpl` exists for the same reason `env` does, one step further along.
+ *
+ * `env` is a parameter so a test can supply a credential without writing one into the
+ * process. That got the models FILE under test but not the models PATH: `readModels`
+ * already accepts an injected `fetch`, and `openWorkspace` did not thread it, so the only
+ * way to exercise a whole graph through a real adapter was to let it reach the network —
+ * which the offline-and-deterministic rule forbids, so it was not exercised at all. Every
+ * `--models-file` test called `adapter.stream` directly and none ran a graph.
+ */
+export function openWorkspace(
+  args: Args,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  fetchImpl?: HttpOptions["fetch"],
+): Workspace {
   // BEFORE ANYTHING IS CREATED OR OPENED. A malformed channels file is a refusal to start,
   // and a refusal that has already made a directory and opened a SQLite handle is a
   // refusal that leaks one — `main`'s `finally` only closes a workspace it was handed.
@@ -214,7 +228,8 @@ export function openWorkspace(args: Args, env: Readonly<Record<string, string | 
   // test can hand this function a key without writing one into the process — the same
   // injection every clock and id source in this codebase takes, applied to the one input
   // that is a credential.
-  const models = args.flags["models-file"] === undefined ? undefined : readModels(requireFileFlag(args, "models-file"), env);
+  const models =
+    args.flags["models-file"] === undefined ? undefined : readModels(requireFileFlag(args, "models-file"), env, fetchImpl);
 
   // `pathFlag`, not `String(… ?? default)`. `String(true)` is `"true"`, so `--workspace`
   // with no value used to resolve to `./true` and `loom compile g.json --workspace` printed

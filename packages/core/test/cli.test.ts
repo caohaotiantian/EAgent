@@ -382,3 +382,97 @@ test("a broken models file refuses BEFORE the journal is created", async () => {
     d.dispose();
   }
 });
+
+/**
+ * The whole path, end to end, offline: a graph with an `agent` node, run through the
+ * workspace the CLI builds, answered by a real `AnthropicAdapter` whose `fetch` is injected.
+ *
+ * Every other `--models-file` test in this file calls `cfg.adapter.stream` directly, which
+ * proves the adapter and the route table and stops there. What was never covered is the
+ * segment between them — `openWorkspace` registering the router into the engine, `#runAgent`
+ * putting `agent.profile` into `ModelRequest.model`, and the answer coming back out as a
+ * committed channel value. That segment is the reason `--models-file` exists at all: before
+ * it, this binary could not call a model, and an agent node answered `[mock] …`.
+ *
+ * `fetchImpl` is threaded through `openWorkspace` for this test, on the same argument that
+ * makes `env` a parameter: the alternative is a test that reaches the network, and the
+ * offline rule means the alternative is no test.
+ */
+test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between the route table and the channel", async () => {
+  const d = emptyDir();
+  try {
+    const file = modelsFile(d.dir, {
+      adapters: [{ provider: "anthropic" }],
+      routes: { "agent_profile/summarizer@stable": { adapter: "anthropic", model: "claude-sonnet-5" } },
+    });
+
+    const sent: { model?: unknown; system?: unknown } = {};
+    // One non-streaming SSE body, shaped the way the adapter parses it. Nothing leaves the
+    // process and the fake key is never presented to anyone.
+    const body = [
+      `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 11, output_tokens: 0 } } })}\n\n`,
+      `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: '{"verdict":"ok"}' } })}\n\n`,
+      `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 7 } })}\n\n`,
+      `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+    ].join("");
+
+    const ws = openWorkspace(parseArgs(["run", "--workspace", d.dir, "--models-file", file]), FAKE_ENV, async (_url, init) => {
+      const parsed = JSON.parse(String(init.body)) as { model?: unknown; system?: unknown };
+      sent.model = parsed.model;
+      sent.system = parsed.system;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+
+    try {
+      const spec = {
+        apiVersion: "loom.dev/v1",
+        kind: "GraphSpec",
+        metadata: { name: "real-provider", project: "probe", version: 1 },
+        policy: { expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+        channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+        inputs: ["seed"],
+        outputs: ["out"],
+        nodes: [
+          {
+            id: "act",
+            type: "agent",
+            reads: ["seed"],
+            writes: ["out"],
+            agent: {
+              profile: "agent_profile/summarizer@stable",
+              prompt: "prompt/act@stable",
+              maxTurns: 1,
+              outputSchema: { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"] },
+            },
+            timeoutMs: 30_000,
+          },
+        ],
+        edges: [],
+      };
+
+      const { compileOrThrow } = await import("../src/graph/compile.ts");
+      const graph = compileOrThrow({
+        spec: spec as never,
+        resolver: ws.resolver,
+        tools: ws.engine.tools.manifests(),
+        tenantCapabilities: [],
+      });
+      const runId = await ws.engine.submit({ graph, inputs: { seed: "go" } });
+      const p = await ws.engine.advance(runId);
+
+      assert.equal(p?.status, "succeeded", "the agent node must complete against the real adapter");
+      // The answer came from the injected provider, not from the mock — which is the whole
+      // claim. `[mock] …` is what this returns when the router is not registered.
+      assert.deepEqual(p?.channels["out"], { verdict: "ok" });
+      // And the ResourceRef was rewritten on the way out, inside a real run rather than in
+      // a direct call to the adapter.
+      assert.equal(sent.model, "claude-sonnet-5");
+      // The provider reported usage, so the run is priced from real numbers rather than 0.
+      assert.equal((p?.usage.inputTokens ?? 0) > 0, true, "usage must come back from the provider");
+    } finally {
+      ws.close();
+    }
+  } finally {
+    d.dispose();
+  }
+});
