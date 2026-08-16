@@ -708,9 +708,12 @@ export class Engine {
    * run entirely.
    */
   async openGates(runId: RunId): Promise<readonly GateSummary[]> {
-    const ctx = this.#runs.get(runId);
-    if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
-    return this.#gates.list(ctx.log);
+    // A run this engine holds no context for is not an unknown run: a gate is a ROW, and
+    // `#logFor` is already the writer for exactly this case. Refusing here made `forget`
+    // unsafe to call automatically — retiring a completed run turned "list its gates" into
+    // E_RUN_NOT_FOUND — and it also meant a restarted process could not read a gate until
+    // something re-`attach`ed the run, for a question that never needed the graph.
+    return this.#gates.list(this.#runs.get(runId)?.log ?? this.#logFor(runId));
   }
 
   /**
@@ -759,9 +762,8 @@ export class Engine {
    * notion of what an open gate is.
    */
   async openGateBatches(runId: RunId): Promise<readonly GateBatch[]> {
-    const ctx = this.#runs.get(runId);
-    if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
-    return this.#gates.listBatches(ctx.log);
+    // Same rule as `openGates`, for the same reason: a batch is derived from rows.
+    return this.#gates.listBatches(this.#runs.get(runId)?.log ?? this.#logFor(runId));
   }
 
   /**
