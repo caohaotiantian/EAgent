@@ -10,12 +10,15 @@
  * authoritative and every field here is derived from it, which is why `projection` already
  * folds the log when it finds no context.
  *
- * RETIREMENT IS THE CALLER'S, and the automatic version is deliberately absent. Evicting on
- * the call that finishes a run looks obviously right and breaks two public operations that
- * legitimately act on terminal runs — `openGates`, which renders a payload the projection
- * does not carry, and `rewind`, which forks from a completed run. Both read the context and
- * both raise `E_RUN_NOT_FOUND` without it; the attempt cost three suite failures. Giving
- * each of them the journal fallback `advance` now has is the real fix and is its own change.
+ * RETIREMENT IS NOW AUTOMATIC, and getting there took fixing what depended on the context
+ * rather than weakening the eviction. Three public operations legitimately act on terminal
+ * runs and all three raised `E_RUN_NOT_FOUND` without one: `openGates` and `openGateBatches`,
+ * which read rows, and `rewind`, which reads the log and appends a marker. The first two now
+ * build a writer with `#logFor`; rewind folds with `projection` instead of advancing a live
+ * context's cursor — a whole fold rather than an incremental one, which a rewind can afford
+ * because it has just invalidated everything that cursor knew.
+ *
+ * `forget` stays public for the caller that wants to release a run early.
  */
 
 import assert from "node:assert/strict";
@@ -125,3 +128,18 @@ test("forget() on a live run leaves the journal intact — it releases memory, n
   assert.notEqual(p, undefined, "the run's log survives forgetting its context");
 });
 
+test("A TERMINAL RUN IS RETIRED AUTOMATICALLY, and every operation on it still works", async () => {
+  const { engine, graph } = rig();
+  const runId = await engine.submit({ graph, inputs: { seed: "s" } });
+  assert.equal((await engine.advance(runId)).status, "succeeded");
+
+  // No `forget` call. The run finished, so the engine released it — and the four things a
+  // caller does with a finished run all still answer, each from the journal.
+  assert.equal((await engine.projection(runId))?.status, "succeeded");
+  assert.equal((await engine.advance(runId)).status, "succeeded");
+  assert.deepEqual(await engine.openGates(runId), []);
+  // Rewinding a retired run is the case that blocked automatic retirement: the runs most
+  // worth rewinding are the finished ones.
+  const rewound = await engine.rewind(runId, 2 as never, "probe");
+  assert.notEqual(rewound, undefined);
+});

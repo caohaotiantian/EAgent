@@ -565,7 +565,13 @@ export class Engine {
       // fix and is its own change: `openGates` in particular would have to rebuild a
       // rendered payload from the log rather than read it from the broker. Until then
       // retirement is the caller's call, which is why `forget` is public.
-      if (isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") return p;
+      if (isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") {
+        // Only TERMINAL. `awaiting_gate` and `interrupted` are runs that will be driven
+        // again, and their context holds the taint set, the leases and the expression cache
+        // that driving them needs.
+        if (isTerminal(p.status)) this.#retire(runId);
+        return p;
+      }
 
       // A run-fatal failure stops the run even if Tasks remain runnable. The budget
       // ladder in D6.5 (warn → degrade → gate → fail) lives in policy; this is its
@@ -982,7 +988,11 @@ export class Engine {
    * So a rewind is itself auditable, and a trace still shows what was undone.
    */
   async rewind(runId: RunId, atSeq: Seq, reason: string): Promise<RunProjection> {
-    const ctx = this.#require(runId);
+    // A rewind reads the log and appends a marker, and needs nothing else from a live
+    // context — which matters because the runs most worth rewinding are the FINISHED ones,
+    // and requiring a context meant a completed run could be rewound only for as long as
+    // something held it. `#logFor` is the writer for exactly this case.
+    const ctx = { log: this.#runs.get(runId)?.log ?? this.#logFor(runId) };
 
     // A BOUNDARY BELOW THE RUN'S FIRST EVENT ERASES THE RUN, AND NOTHING BRINGS IT BACK.
     //
@@ -1020,7 +1030,9 @@ export class Engine {
       );
     }
 
-    const p = (await this.#project(ctx))!;
+    // Same reason as the return below: `projection` folds from seq 1 and needs no cursor, so
+    // the pre-flight checks work on a run this engine holds no context for.
+    const p = (await this.projection(runId))!;
 
     // A CANCEL IS NOT UNDOABLE, and this is the widest door back into a cancelled run.
     // Suppressing `run.cancelled` suppresses the `gate.cancelled` events appended beside
@@ -1199,7 +1211,11 @@ export class Engine {
         },
       ]),
     );
-    return (await this.#project(ctx))!;
+    // A FULL fold, not the incremental one. `#project` advances a live context's cursor, and
+    // a rewind has just invalidated everything that cursor knew; `projection` folds from
+    // seq 1 and works with or without a context. Rewind is rare by construction, so paying
+    // a whole fold here buys the ability to rewind a run this engine no longer holds.
+    return (await this.projection(runId))!;
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
