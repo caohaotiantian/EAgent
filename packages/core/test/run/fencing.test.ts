@@ -19,6 +19,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { InProcessEventBus } from "../../src/bus.ts";
+import { compileOrThrow } from "../../src/graph/compile.ts";
+import { CODES, err } from "../../src/errors.ts";
+import { Engine } from "../../src/run/engine.ts";
+import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
+import { resolver } from "./skeleton.ts";
 import { SYSTEM_ACTOR, type NewEvent } from "../../src/journal/events.ts";
 import type { RunId, TaskId } from "../../src/ids.ts";
 
@@ -78,4 +84,109 @@ test("the holder of the CURRENT lease still writes normally", async () => {
     events: [work()],
   });
   assert.ok(after.seq > leased.seq);
+});
+
+/**
+ * The fence has to be on EVERY exit from `#commit`, not just the last one.
+ *
+ * `#commit` has three: a retryable failure reschedules and returns, a rejected mutation
+ * records the failure and returns, and everything else falls through to the ordinary
+ * commit. Only the third presented the lease, so a worker whose lease another process had
+ * taken could still reschedule the Task or write a mutation failure on top of the new
+ * leaseholder's work — silently, because both paths commit successfully when the store is
+ * not shown a token to refuse.
+ */
+test("EVERY EXIT FROM #commit PRESENTS THE LEASE — the retry path is not a way around the fence", async () => {
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  // `store.append` is where the token is CHECKED — `MemoryStateStore` keeps a `fences` map
+  // per task and refuses anything below the highest it has seen. So it is also the honest
+  // place to observe whether a token was shown at all. Only appends carrying a `taskId` are
+  // counted: run-level events are not leased and have no token to present.
+  // Recorded per append, paired with the event types it carried, so the assertion can name
+  // the OUTCOME commits specifically. Two other task-scoped appends legitimately carry no
+  // token: `task.leased` mints it (there is nothing to present yet) and `policy.decided` is
+  // a decision record rather than a commit of the Task's outcome.
+  const appends: { types: string[]; token: number | undefined }[] = [];
+  const realAppend = store.append.bind(store);
+  (store as unknown as { append: unknown }).append = ((input: {
+    taskId?: string;
+    fencingToken?: number;
+    events: { type: string }[];
+  }) => {
+    if (input.taskId !== undefined) {
+      appends.push({ types: input.events.map((e) => e.type), token: input.fencingToken });
+    }
+    return realAppend(input as never);
+  }) as unknown;
+
+  const functions = new FunctionRegistry();
+  let attempts = 0;
+  // Fails once with a retryable class, so the retry-scheduled exit is taken, then succeeds.
+  functions.register("function/flaky@stable", () => {
+    attempts += 1;
+    if (attempts === 1) throw err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, "transient");
+    return { writes: { out: "ok" } };
+  });
+
+  const models = new ModelRegistry();
+  models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models,
+    now: () => 1_700_000_000_000,
+    sleep: async () => {},
+    maxParallelism: 1,
+    policy: { granted: [], budget: { runUsd: 1 } },
+  });
+
+  const spec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "fence-every-exit", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { seed: { type: "string", reduce: "replace" }, out: { type: "string", reduce: "replace" } },
+    inputs: ["seed"],
+    outputs: ["out"],
+    // `retry` is a NODE policy, not a graph one — putting it on the graph compiles and
+    // retries nothing, which is how this probe first reported one attempt.
+    nodes: [
+      {
+        id: "a",
+        type: "function",
+        reads: ["seed"],
+        writes: ["out"],
+        function: { ref: "function/flaky@stable" },
+        retry: { maxAttempts: 3, backoff: "fixed", initialMs: 1 },
+      },
+    ],
+    edges: [],
+  };
+  const graph = compileOrThrow({ spec: spec as never, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { seed: "go" } });
+  await engine.advance(runId).catch(() => engine.projection(runId));
+
+  // `advance` returns while the retry is still in backoff, so a second attempt has not run
+  // yet — the attempt COUNT is the wrong observable. The journal event is the right one:
+  // `task.retry_scheduled` is written by, and only by, the exit under test.
+  const events = [];
+  for await (const ev of store.read(runId, 1)) events.push(ev.type);
+  assert.ok(
+    events.includes("task.retry_scheduled"),
+    `the retry exit must actually be taken; saw ${events.join(", ")}`,
+  );
+  assert.ok(attempts >= 1);
+  // The three exits from `#commit`, by the event each one writes.
+  const COMMIT_EVENTS = new Set(["task.retry_scheduled", "task.committed"]);
+  const commits = appends.filter((a) => a.types.some((t) => COMMIT_EVENTS.has(t)));
+  assert.ok(commits.length > 0, "no commit was observed, so this proves nothing");
+  const unfenced = commits.filter((a) => a.token === undefined);
+  assert.equal(
+    unfenced.length,
+    0,
+    `every exit from #commit must present the lease; unfenced: ${unfenced.map((a) => a.types.join("+")).join(", ")}`,
+  );
 });

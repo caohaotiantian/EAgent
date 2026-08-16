@@ -2759,8 +2759,9 @@ export class Engine {
               taskId: w.task.taskId,
             },
           ],
-          { taskId: w.task.taskId },
+          this.#fence(ctx, w),
         );
+        ctx.leases.delete(w.task.taskId);
         return;
       }
     }
@@ -2787,7 +2788,7 @@ export class Engine {
               taskId: w.task.taskId,
             },
           ],
-          { taskId: w.task.taskId },
+          this.#fence(ctx, w),
         ));
       }
       mutationEvents.push(...applied.events);
@@ -2862,12 +2863,28 @@ export class Engine {
     // has seen for this Task, so a worker whose lease another process has taken cannot
     // commit over it. Without this the fence was inert: the token was minted, journaled,
     // and never shown to the thing that checks it, so `E_LEASE_LOST` had no thrower.
-    const token = ctx.leases.get(w.task.taskId);
-    await ctx.log.commit(p.seq, events, {
-      taskId: w.task.taskId,
-      ...(token === undefined ? {} : { fencingToken: token }),
-    });
+    await ctx.log.commit(p.seq, events, this.#fence(ctx, w));
     ctx.leases.delete(w.task.taskId);
+  }
+
+  /**
+   * The commit options for a Task, WITH its lease presented.
+   *
+   * The store refuses an append whose token is below the highest it has seen for a Task, so
+   * a worker whose lease another process has taken cannot commit over it — but only if the
+   * token is actually shown. `#commit` has three exits, and the fence was on one of them:
+   * the retry-scheduled path and the mutation-rejected path both committed with `{taskId}`
+   * alone, so a worker that had lost its lease could still reschedule the Task or record a
+   * failed mutation on top of the new leaseholder's work. Reproduced by un-fencing the
+   * retry exit alone: `unfenced: task.retry_scheduled+task.ready`.
+   *
+   * A helper rather than three call sites, for the reason invariant 6 gives about tool
+   * dispatch: a rule applied at each exit is a rule the fourth exit forgets. `E_LEASE_LOST`
+   * having no thrower was the previous version of this same mistake, one level up.
+   */
+  #fence(ctx: RunContext, w: Wave): { taskId: TaskId; fencingToken?: number } {
+    const token = ctx.leases.get(w.task.taskId);
+    return { taskId: w.task.taskId, ...(token === undefined ? {} : { fencingToken: token }) };
   }
 
   /**
