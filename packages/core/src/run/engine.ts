@@ -1638,11 +1638,17 @@ export class Engine {
 
     // Counted per COORDINATE, not per task: a branch holding two nodes is one branch, and
     // D4 deviation 2 requires `branchCount + skipped` to equal the planned width.
+    //
+    // A branch that lost ANY member is degraded, which is why `lost` is tracked rather
+    // than inferred from `seen − contributing`. Subtracting one set from the other made a
+    // coordinate holding both a succeeded and a failed task count as clean — it was in
+    // both sets, so `skipped` came out zero and `onBranchError: "fail"`, the mode whose
+    // entire job is to stop the run when a branch dies, never fired. A multi-node branch
+    // is exactly where that happens and exactly where the failure matters most.
     const contributing = new Set<string>();
-    const seen = new Set<string>();
+    const lost = new Set<string>();
     for (const t of members) {
       const coord = encodeBranch(t.branch);
-      seen.add(coord);
       if (t.state === "succeeded") {
         contributing.add(coord);
         for (const [channel, value] of Object.entries(t.writes)) {
@@ -1650,10 +1656,15 @@ export class Engine {
           list.push({ branch: t.branch, nodeId: t.nodeId, iteration: t.iteration, value });
           byChannel.set(channel, list);
         }
+      } else if (t.state === "failed" || t.state === "skipped" || t.state === "cancelled") {
+        lost.add(coord);
       }
     }
+    // A branch cannot be both. A loss anywhere in it wins, so the number an operator reads
+    // means "this many branches came through intact", not "this many produced something".
+    for (const coord of lost) contributing.delete(coord);
     branchCount = contributing.size;
-    skipped = seen.size - contributing.size;
+    skipped = lost.size;
 
     if (join.onBranchError === "fail" && skipped > 0) {
       return {
@@ -2778,17 +2789,13 @@ export class Engine {
     return { afterMs: Math.min(raw, max), code: error.code };
   }
 
-  /** True when this Task already started an effect — i.e. the bell may have rung. */
-  #effectStarted(p: RunProjection, taskId: TaskId): boolean {
-    return p.startedEffects.some((k) => k.startsWith(`${taskId}:`));
-  }
-
   /**
    * True when this Task already started a TOOL effect.
    *
    * The narrower question, and the one the non-idempotent retry refusal wants: a model
    * call that started and failed touched nothing outside Loom, so it says nothing about
-   * whether a tool may have.
+   * whether a tool may have. The broader `${taskId}:` form this replaced matched
+   * `:model:` too, which cost an agent its retry policy on a transport blip.
    */
   #toolEffectStarted(p: RunProjection, taskId: TaskId): boolean {
     return p.startedEffects.some((k) => k.startsWith(`${taskId}:tool:`));
