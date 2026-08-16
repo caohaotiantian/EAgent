@@ -522,7 +522,19 @@ export class Engine {
    */
   async #advanceSerially(runId: RunId): Promise<RunProjection> {
     const ctx = this.#runs.get(runId);
-    if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
+    if (ctx === undefined) {
+      // A RETIRED RUN IS NOT AN UNKNOWN RUN, and the journal is what tells them apart.
+      //
+      // Terminal runs are evicted from `#runs` (see `#retire`), so a caller that polls
+      // `advance` until it sees `succeeded` would otherwise get `E_RUN_NOT_FOUND` on the
+      // call after the one that finished — the eviction turning a completed run into a
+      // missing one. Folding the log answers it without a second in-memory registry:
+      // invariant 2 says the journal is authoritative, so "did this run finish?" is a
+      // question the log can always answer, with or without a live context.
+      const folded = await this.projection(runId);
+      if (folded !== undefined && isTerminal(folded.status)) return folded;
+      throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
+    }
     await this.#rehydrateGraph(ctx);
 
     for (;;) {
@@ -541,6 +553,18 @@ export class Engine {
         ctx.policySeeded = true;
         ctx.policy.restore({ escalations: p.escalations, ceilings: p.ceilings, spentUsd: p.usage.costUsd });
       }
+      // NOT RETIRED HERE, and the attempt is recorded because it looks obviously right.
+      //
+      // Evicting a terminal run's context on the call that finishes it fixes the leak
+      // `forget` exists for, and breaks two public operations that legitimately act on
+      // terminal runs: `openGates` renders a payload the projection does not carry, and
+      // `rewind` forks from a completed run. Both read `#runs` and both raise
+      // `E_RUN_NOT_FOUND` without it — measured, as three suite failures.
+      //
+      // Giving each of them the journal fallback `#advanceSerially` now has is the real
+      // fix and is its own change: `openGates` in particular would have to rebuild a
+      // rendered payload from the log rather than read it from the broker. Until then
+      // retirement is the caller's call, which is why `forget` is public.
       if (isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") return p;
 
       // A run-fatal failure stops the run even if Tasks remain runnable. The budget
@@ -784,6 +808,39 @@ export class Engine {
     const events = [];
     for await (const e of this.#store.read(runId, 1)) events.push(e);
     return foldRun(events);
+  }
+
+  /**
+   * Release everything this engine holds in memory for a run.
+   *
+   * `#runs` was written and never deleted, so a `loom serve` accumulated one `RunContext`
+   * per run it had ever seen for as long as the process lived — the taint set, the leases,
+   * the tool-call index, the expression cache, and a reference to the compiled graph.
+   * Measured at roughly 613 KB for a modest run, which is ~60 MB per thousand: not a leak
+   * that shows up in a test suite, and exactly the kind that ends a long-lived deployment.
+   *
+   * Safe because nothing durable lives here. Every field is derived — invariant 2 —- so a
+   * forgotten run is re-derivable by folding its journal, which is what `projection` already
+   * does when it finds no context. A run that is still going needs its graph re-bound with
+   * `attach` first; a terminal one needs nothing.
+   *
+   * Public because a caller that keeps a run alive on purpose (a long poll, a subscription)
+   * needs a way to say it is done, and because `forget` on a run this engine never saw is a
+   * no-op rather than an error — asking twice is not a mistake.
+   */
+  forget(runId: RunId): void {
+    this.#retire(runId);
+  }
+
+  /**
+   * Drop a run's in-memory context. See `forget` for why this is safe.
+   *
+   * `#childGraphs` is deliberately NOT touched: it is keyed by resource ref, not by run, and
+   * is a compile cache shared across every run that names the same subgraph. Evicting it per
+   * run would key a shared cache by the wrong thing and recompile for every caller.
+   */
+  #retire(runId: RunId): void {
+    this.#runs.delete(runId);
   }
 
   /**
