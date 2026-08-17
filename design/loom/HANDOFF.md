@@ -87,19 +87,25 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured 2026-08-15, mid-wave, with `src/` being edited by other builders around it.
+Measured **2026-08-17 at `56ee392`**, tree clean, `npm run check` green end to end.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1463 pass, 0 fail at `5c699c0`** — the last full gate, and already stale: three test files landed after it | `node --test "packages/*/test/**/*.test.ts"` |
-| Test files | 62 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
-| Source files | 49 | `node scripts/check-zero-dep.mjs` (it prints the count) |
-| Runtime dependencies | **0** | same command — it now fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
-| Public exports, pinned | 466 | `node -e "console.log(require('./scripts/surface.json').length)"` |
-| Public exports, built | re-run it | `npm run typecheck && node scripts/check-surface.mjs` — it reads `dist/`, and the build is now `--force`d precisely so this answer cannot come from a stale one |
+| Tests | **1686 pass, 0 fail** | `npm run check` (its test arm) |
+| Test files | 91 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Source files | 53 | `node scripts/check-zero-dep.mjs` (it prints the count) |
+| Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
+| Public exports, pinned | 475 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, built | re-run it | `npm run typecheck && node scripts/check-surface.mjs` — it reads `dist/`, and the build is `--force`d precisely so this answer cannot come from a stale one |
 | Event types | 52 | `node --test packages/core/test/journal/store.test.ts` (its count is deliberate) |
+| Escalation rules | 10, of which **9 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` pins the one that is not |
+| Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Typecheck | clean | `npx tsc -p packages/core/tsconfig.test.json` |
+
+**The previous version of this table was wrong in four rows** — 1463 tests, 62 test files,
+49 source files, 466 exports — which is the third time this has happened and the reason the
+command column exists. See the paragraph below, which predates this reading and was right.
 
 **Three of these were wrong when this table was re-read** — 1332 tests, 48 test files, 463
 pinned exports — after ten days in which nothing about the table looked out of date, because
@@ -158,11 +164,115 @@ and it is the only thing standing between "the binary works" and "a binary worke
 
 ---
 
+---
+
+## THE ONE THING THAT NEEDS A HUMAN
+
+**`loom` has never been pushed. 117 commits, no upstream.**
+
+```
+git rev-parse --abbrev-ref --symbolic-full-name @{u}   # fatal: no upstream configured
+git log --oneline --branches --not --remotes | wc -l   # 117
+```
+
+The push is refused by GitHub secret scanning: a **Slack-webhook-shaped string in a test
+fixture** (`packages/core/test/run/delivery.test.ts`) in commit `5451bb2`, which predates the
+work described below. The fixture at HEAD has been changed; the history still trips the scan,
+and a scan reads history.
+
+It is a false positive — the string is a fixture, never a live credential — and the bypass URL
+was deliberately **not** used, because clicking "allow this secret" is a decision about a real
+secret store that belongs to whoever owns the account, not to whoever is holding the keyboard.
+
+Three ways out, in the order I would take them:
+
+1. **Allowlist it through GitHub's UI.** One click, keeps history, and is honest about what
+   the string is.
+2. **Rewrite history** to change the fixture in `5451bb2`. Safe *specifically because the
+   branch has never been pushed* — nobody has these commits, so there is nothing to break.
+3. **Stay local.** Everything works; the risk is that 117 commits exist in one working copy.
+
+Until one of these happens, **this branch exists on one disk.**
+
+---
+
+## What this session changed (2026-08-16 → 17)
+
+Eighteen commits on top of `691df5e`. The full reasoning is in `JOURNAL.md`; this is the
+inventory.
+
+### Built
+
+| | What | Why it mattered |
+|---|---|---|
+| `proc.exec` | shell execution, argv-only, exact-match allowlist | `runSandboxed` had **zero callers** for the whole project |
+| `fs.edit` | span replace with a whitespace-relaxing ladder | `fs.write` made the model reproduce the file to change a line |
+| `fs.glob` / `fs.grep` | file search in pure Node | listing files otherwise needs a shell, which dissolves the fs jail |
+| `packages/core/src/mcp/` | MCP client, stdio, zero deps, `--mcp-file` | a graph can use tools it did not ship with |
+| `Engine.forget` + auto-retirement | terminal runs release their context | ~613 KB retained per run, ~60 MB per thousand |
+| `docs-type-equiv.test.ts` | design blocks compared to code member-by-member | found **12 real disagreements** on its first run |
+
+### Fixed
+
+- **Write confinement.** A node declaring `writes:["mine"]` committed `secret`. Enforced in
+  `#dispatch`, so a future node type cannot opt out.
+- **The context budget bounded a request the model was never sent** — ~28,000 tokens against
+  a 2,000 budget, no rung firing, no `E_CONTEXT_OVERFLOW`.
+- **The fence was on one of `#commit`'s three exits.**
+- **A subgraph in retry backoff was reported as permanently failed**, with a class the
+  parent's retry policy could not act on.
+- **A held join no enclosing join collects** now refuses at compile.
+- **`MockModelAdapter.seen` aliased a mutating array**, so every test asserting "the request
+  at turn N" was reading the last turn.
+- **`scale.test.ts` asserted on a wall-clock ratio** and failed only under parallel load.
+
+### Refuted rather than fixed — do not put these back on a list
+
+- `resultDigest` **is** read (`replay.ts:160`, raises `E_REPLAY_DIVERGENCE`).
+- `budget.reserved`/`budget.settled` having no producer was already registered in
+  `NEVER_APPENDED` with reasons.
+- `--models-file` was **not** uncovered; the coverage is in `test/cli.test.ts` (seven tests,
+  one asserting on the HTTP bytes). I had grepped `test/cli/cli.test.ts`.
+- `usage` is **not** an escalation rule. There are ten; the name came from a different object
+  literal in the same file.
+
+---
+
 ## What is left
 
 Four categories. **(D)** is new and is where the remaining product work is: **(A)** blocked
 by a constraint we chose, **(B)** deferred by an explicit design decision, **(C)** genuinely
 unbuilt and unblocked — now empty — and **(D)** designed in full, deliberately not started.
+
+### Added by the 2026-08-17 pass — unimplemented, with what each needs
+
+**The guard stack cannot be vendored yet, and this is the one real design gap.**
+`secret-guard` and `bash-policy` need **argument-level inspection before dispatch**, and
+`PolicyEngine.decide` authorizes on `{capabilities, irreversibility, dataClassification,
+tainted}` — it never looks at args. Worse, `irreversibility` is **static per tool**, so
+"this `git` invocation is read-only but that one force-pushes" has no home. The compile-time
+posture floor makes a runtime classifier useless on its own: the floor is a `max` over
+`reachableToolNames` and already forces `in`. The shape that works is to **split the tool** —
+a `read_only`-declaring variant whose `execute` REFUSES any argv its classifier cannot prove
+read-only. Refusing is always permitted; lowering never is.
+
+**MCP is tools-only and stdio-only.** `DEFERRED: resources, prompts, Streamable HTTP.` The
+moment a server worth using is HTTP-only, add a second transport behind the same client, not
+a second client.
+
+**Not vendored from EAgent** (survey verdict: TAKE 20 · DROP-redundant 30 · DROP-scope 7 ·
+MERGE 8 — full table in `.agent/eagent-as-node/`): `library/` as data (36 files, 982 LOC) with
+ONE frontmatter parser instead of the four EAgent has; `codeact`; `checkpoint` (git-stash
+based, a real delta over per-file `fs.restore`); `limits`' output spill; `memory`'s retrieval
+half — which is the only thing that would populate `AssembleInput.retrieved`, currently dead.
+
+**Two `AssembleInput` fields are still never populated**: `retrieved` (nothing retrieves) and
+— now partly addressed — `turns`, which `boundTurns` handles for the transcript but which
+`assembleContext` itself still never receives.
+
+**The surface guard counts exported NAMES, not members.** `Engine.forget` was added and the
+guard reported "unchanged", because `Engine` was already exported. A new public method on an
+existing class is invisible to it.
 
 ### (D) The oversight feature set — D7.2, D7.3 and D7.9
 
@@ -2287,6 +2397,40 @@ vocabulary onto the node's declared channels. Found by using the binary for four
 every built-in tool had been unusable by any graph that had not guessed its internals.
 
 ---
+
+**A queue carried across compactions decays, and checking an item is cheaper than fixing
+it.** Four items on the 2026-08-17 remediation list were already done or were never true:
+`resultDigest` "read by none" is read and raises `E_REPLAY_DIVERGENCE`; two "producerless"
+events were already registered with reasons; `--models-file` "untested" was seven tests in a
+file I had not grepped; and `usage` was not an escalation rule at all — the name came from a
+different object literal in the same file. Each looked exactly like real work until it was
+checked, and each check took under a minute.
+
+**A capability nothing calls is indistinguishable from one that does not exist.**
+`runSandboxed` sat in this tree — hardened, four listeners that may not throw, a
+SIGTERM→grace→SIGKILL path measured against a child that never exits — with **zero callers**,
+for the whole project. `proc.exec` was written to fix that, and one commit later `McpClient`
+shipped with nothing constructing it. Wire the caller in the same commit as the capability,
+or the capability is a plan.
+
+**Reproducing a defect by reverting a file destroys uncommitted work in that file.** Proving
+the fence fix mattered meant running the test against the pre-fix engine; `git checkout --
+packages/core/src/run/engine.ts` did that and also deleted the fix, which was not yet
+committed. `cp` the file aside and `cp` it back. The reproduction is worth doing — it is what
+turns "this looks wrong" into `unfenced: task.retry_scheduled+task.ready` — so make it cheap
+rather than skipping it.
+
+**A green test can be green for a reason it does not claim.** The first subgraph test passed
+because `skeleton.ts`'s resolver has no `subgraph()` method, so the child spec was never
+found and the assertion was vacuous. TypeScript caught it, not the test run. Before believing
+a new test, break the thing it tests and watch it fail — a test that has never been red has
+never been shown to test anything.
+
+**A guard that cries wolf on correct code is worse than no guard, and its first false
+positive will be its own bug.** `docs-type-equiv` reported nine of `ToolDefinition`'s members
+as missing from the code; they were on `ToolManifestLite`, and the guard did not follow
+`extends`. The finding read exactly like drift in the code. Fix the guard before filing the
+finding.
 
 ## The one habit worth keeping
 
