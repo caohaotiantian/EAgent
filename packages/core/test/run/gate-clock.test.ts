@@ -810,6 +810,19 @@ test("A LIMIT THE SWEEP CANNOT HONOUR IS REFUSED, not clamped", async () => {
     );
   }
 
+  // AND THROUGH `EngineOptions.sweep`, WHICH IS THE DOOR AN EMBEDDER ACTUALLY USES. `GateSweeper`
+  // is built lazily inside `sweepGates`, so a refusal that lived only in its constructor first
+  // surfaced from a TICK — and the deployment snippet in that method's own docstring wraps the
+  // tick in `.catch(() => {})`, which swallows it forever. `limit: 0` then swept NOTHING, on a
+  // process that had started clean: worse than the clamp this replaced, which swept one run.
+  for (const limit of [0, NaN, Infinity]) {
+    assert.throws(
+      () => new Engine({ store: r.store, now: () => r.clock.t, policy: { granted: [] }, sweep: { limit } } as never),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
+      `Engine must refuse sweep.limit ${String(limit)} at construction`,
+    );
+  }
+
   // AND A USABLE ONE STILL SWEEPS, so the refusal is not a sweeper that refuses everybody.
   const { gateId } = await park(r);
   r.clock.t += 60_001;

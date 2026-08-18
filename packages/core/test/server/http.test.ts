@@ -3154,6 +3154,71 @@ class HangingChannel implements DeliveryChannel {
   }
 }
 
+/**
+ * A channel that answers LATE, over a real socket, does not get its decision applied.
+ *
+ * `callback.test.ts` drives the router with a pre-aborted signal, which pins the refusal but not
+ * the WIRING — delete the `http.ts` half of it and that test stays green. This is the wiring:
+ * `#withDeadline`'s timer → `#serve` → `RequestContext.signal` → `CallbackInput.signal` → the
+ * check in `GateCallbackRouter.handle`. Nothing else in the suite crosses that boundary.
+ */
+class LateChannel implements DeliveryChannel {
+  readonly name = "slack";
+  #release: (() => void) | undefined;
+  readonly #decision: () => unknown;
+  constructor(decision: () => unknown) {
+    this.#decision = decision;
+  }
+  async deliver(): Promise<string> {
+    return "receipt";
+  }
+  async parseCallback(): Promise<never> {
+    // Held past the deadline, then answered with a PERFECTLY VALID decision — the point is that
+    // validity is not what is being refused.
+    await new Promise<void>((resolve) => (this.#release = resolve));
+    return this.#decision() as never;
+  }
+  release(): void {
+    this.#release?.();
+  }
+}
+
+test("A DECISION THAT ARRIVES AFTER THE 504 IS NOT APPLIED — over the wire", async () => {
+  let answer: unknown;
+  const late = new LateChannel(() => answer);
+  const r = await rig({ token: "s3cret", callbacks: true, channel: late, requestTimeoutMs: 150 });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer s3cret" });
+    await settle(r, String(runId));
+    const gate = (await r.h.engine.openGates(runId as RunId))[0]!;
+    answer = {
+      runId,
+      gateId: gate.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "slack" },
+      idempotencyKey: "late-1",
+    };
+
+    const res = await fetch(`${r.base}/runs/${String(runId)}/callbacks/slack`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.status, 504);
+
+    // Let the channel finish. Its decision is valid and it is exactly the gate's own — and it
+    // must still not land, because the caller has already been told the request failed.
+    late.release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const open = await r.h.engine.openGates(runId as RunId);
+    assert.equal(open.length, 1, "the gate must still be open");
+    assert.equal(open[0]!.gateId, gate.gateId);
+  } finally {
+    late.release();
+    await r.close();
+  }
+});
+
 test("A HANDLER THAT HANGS IS ANSWERED, NOT HELD FOREVER", async () => {
   // Before: an unauthenticated POST held a socket open with nothing journaled, nothing
   // counted and no response — repeat until the process runs out of sockets. There was no
