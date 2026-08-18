@@ -3688,3 +3688,78 @@ mutation-sweep habit already prescribes for guards.
 **Reverses when.** The live fallback is what makes this additive rather than a freeze. If a
 deployment ever needs a mutation to be sealed — no new refs at all, only recombination of what
 was compiled — that is a different rule and wants a different resolver, not a flag on this one.
+
+## 2026-08-19 · Wave 5 — what a long-lived process never releases
+
+Six unbounded collections, one uncancellable continuation, and two register entries that had
+drifted. The work is small; what is worth recording is that **the first plan for it was wrong in
+every direction that mattered, and two independent reviews refuted the same three things.**
+
+**The plan's central argument held for one map of the four it named.** It proposed a uniform size
+cap and argued eviction was safe because filling a 10 000-entry map costs 10 000 of the operation
+being deduplicated. True for `ControlPlane.#idempotency`. For `ResourceStore.#idempotency` the key
+is set BEFORE the content-address early return, so filling it is free — and the map is a mismatch
+DETECTOR, so evicting turns a refusal into a silent accept, the opposite sign from the harm the
+plan reasoned about. For `HumanGateBroker.#idempotency` eviction is replay-safe but converts a
+routine Slack redelivery into a durable rejection row naming a blameless human and a bump on a
+counter documented as unresettable.
+
+**And the map the plan called safest was the dangerous one.** It enumerated three readers of
+`#ephemeral` and concluded "eviction reaches a state the code is already written for". There are
+nine. The two it missed decide outcomes: an evicted live gate takes `#fireTimeout`'s
+`spec === undefined` arm and is **expired with the reason "exhausted its escalation chain with no
+decision"**, which is false, in the journal; and `onTimeout: "default_action"` degrades to `fail`.
+Insertion order is raise order, so a FIFO cap evicts the longest-open gate — the one nearest its
+SLA. The refutation was already written in the same file, about a different cause, in the words
+*"EXPIRES gates that should have escalated. Silently, and fail-closed, which is the kind of wrong
+that gets discovered a quarter later."* The plan cited that file as its evidence that eviction was
+safe.
+
+The option that was not in the list is the one that shipped: **release on the terminal
+transition.** It touches no live gate and reclaims more, because a month-old process is mostly
+closed gates.
+
+**A5's register entry credited a fix to the wrong layer, and I repeated it.** `#withDeadline`
+answers 504 and increments nothing; every counter lives past `parse`. So "the refusal is recorded
+nowhere" was still true while the plan said it was closed — read off a docstring instead of the
+code. The fix is four lines at the router, and it is stronger than the interface change the entry
+proposed: an `AbortSignal` on `CallbackRequest` is a request injected code may honour, and the one
+channel in the binary would have ignored it.
+
+**The heaviest leak was in neither the entry nor the plan.** `Engine.#childGraphs` holds compiled
+graphs forever, and `874c6d6` — the commit immediately before this wave — had just widened its key
+a third time. That fix was right and stays; it also multiplied the entries. **A correctness fix
+can have a resource cost, and this pass shipped one without looking.**
+
+**Reverses when:** a deployment measures child-graph recompiles it cares about (raise
+`MAX_CACHED_CHILD_GRAPHS`, it is a pure cache); or clients retry submits slower than the
+deployment submits 10 000 runs (raise `MAX_IDEMPOTENT_SUBMITS`, and note the unit is
+entries ÷ submission rate).
+
+### The probe that lied three times, and the two tests that could not fail
+
+Measuring `#ephemeral` took four attempts and the first three read "no leak". Payloads built from
+`"x".repeat(4096)` share one V8 backing store, so 2000 of them cost 1.2 MiB rather than 8. With
+that fixed the number stayed flat because **nothing referenced the broker after the loop**, so V8
+collected the entire thing before the measurement; one call on it afterwards moved the same probe
+from 0.7 MiB to 33.0.
+
+The test had the same disease. `WeakRef.deref()` pins its target until the microtask queue drains,
+so proving an object IS held guaranteed the later assertion that it is not. A default scavenge
+does not collect at all. And a binding that merely leaves scope stays reachable through its
+enclosing context — an object referenced by nothing survived a major GC. The probe now carries a
+two-sided control that must see a referenced object survive AND an unreferenced one go.
+
+**Two of this wave's tests are green with their fix reverted, and both say so in their own
+docstrings rather than being quietly counted as coverage.** The child-graph test cannot see an
+eviction because since A24/A25 a recompile is byte-identical — which is precisely why capping is
+safe there; it pins that flooding does not corrupt an answer, and the bound rests on inspection.
+The gate-escalation test pins the property the REJECTED design would have broken, so reintroducing
+a cap fails there rather than in a deployment a quarter later.
+
+**Where a clamp was overridden, the clamp's own argument was checked first.**
+`GateSweeperOptions.limit` fell back to `Math.max(1, …)` on the stated grounds that a floor makes a
+mistyped knob "a slow tick rather than no clock at all". `listRuns` is `ORDER BY run_id DESC
+LIMIT ?` over time-ordered ids, so a limit of 1 pins every tick to the newest run and every other
+run loses its clock entirely. The floor bought the appearance of the guarantee. **Reverses when**
+someone shows a deployment where refusing at construction is worse than sweeping one run.

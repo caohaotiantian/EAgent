@@ -767,14 +767,36 @@ between the mutation and the next turn. Measured: a frozen `function/mult2@stabl
 > once a Task is executing" is true for an ordinary run and false for a mutated one, and both
 > `HANDOFF` and `JOURNAL` now say so.
 
-**A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
-carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot
-cancel the channel call. Three consequences: each hung POST leaks a pending continuation
-holding the body buffer, on an unauthenticated route; counting and journaling both happen
-after `parse` resolves, so the refusal is recorded nowhere; and a channel that resolves after
-the 504 still reaches `resolveGate`, applying a decision minutes after its caller was told
-the request failed. A router-side `Promise.race` fixes the first two; the third needs
-`CallbackRequest.signal`, which is a published-interface change (surface pin + D3.20).
+**A5 · A hung `parseCallback` is the one refusal invisible in both sinks. RESOLVED 2026-08-19.**
+`CallbackRequest` carried no `AbortSignal`, so the HTTP request deadline could abandon the
+*response* but not the channel call. Three consequences: each hung POST leaks a pending
+continuation holding the body buffer, on an unauthenticated route; counting and journaling both
+happen after `parse` resolves, so the refusal is recorded nowhere; and a channel that resolves
+after the 504 still reaches `resolveGate`, applying a decision minutes after its caller was told
+the request failed.
+
+**`#withDeadline` closed the FIRST only, and this entry claimed two.** The timer callback does
+exactly one thing — `send(res, 504, …)` (`http.ts:2156`) — incrementing no counter and appending
+no event, while every `#count` call lives in `delivery.ts` and is reached only once `parse` has
+settled. So the socket was released and the refusal stayed in neither sink, which is this entry's
+own title. A plan in this pass asserted the second half was fixed, from the docstring rather than
+the code; two independent reviewers caught it.
+
+**Closed at the ROUTER, and the interface change was NOT made.** The deadline's `AbortSignal`
+reaches `GateCallbackRouter.handle`, which counts and refuses before admission if it has already
+fired — consequences 2 and 3 together, for channels that cooperate and channels that never will.
+An `AbortSignal` on `CallbackRequest` would have been a request injected code may honour, and the
+channel that ships in this binary would have ignored it: A5 would have been marked closed with its
+named residue fully reproducible. The signal rides on `CallbackInput` so a cooperative channel can
+still stop early. `E_CANCELLED` rather than a new code, for the reason `#withDeadline` already
+gives about the bare wire code it writes: every declared code must be named by a design-corpus
+row, and that reconciliation is not this change's to own. `test/run/callback.test.ts`.
+
+> **The interface change was also five signatures, not one** — `#withDeadline`'s callback,
+> `#serve`, `RequestContext`, `CallbackInput`, `CallbackRequest`, two of them published. And
+> `check-surface.mjs` would not have noticed any of it: it pins the exported NAME SET and nothing
+> else, so an added interface member is invisible to it. Anywhere this register calls an added
+> optional member "a surface pin change", it is wrong.
 
 **A6 · Replay picks a gate's recorded decision by enumeration order. RESOLVED 2026-08-06.**
 `run/replay.ts` found the first `open` gate in the replayed projection and then a `decided`
@@ -815,10 +837,33 @@ construction.
 > TRIMS, because the three callers disagreed about whitespace: `checkApproval` trimmed before
 > asking and the other two did not. Found by a reviewer, not by the sweep.
 
-**A8 · The control plane's idempotency map is unbounded.** `ControlPlane.#idempotency` is
-process-lifetime with no eviction. Stated as a limit in the field's docstring rather than
-silently fixed, because eviction changes what "idempotent" means at the boundary — a slow
-retry becomes a second run — and deserves its own test.
+**A8 · The control plane's idempotency map is unbounded. RESOLVED 2026-08-19, and the entry
+named one site of six.** `grep -a` for a `.delete` on any of them returns nothing.
+
+**Measured first, because the obvious probe lied three times.** `HumanGateBroker.#ephemeral` —
+the heaviest, holding the rendered gate payload the journal deliberately does not — retained
+**33.0 MiB across 6000 gates**. The first three readings said 0.4–0.8 MiB: payloads built with
+`"x".repeat(4096)` share one V8 backing store, and once that was fixed nothing referenced the
+broker after the loop, so V8 collected the whole thing before the measurement. A probe that
+reports "no leak" has to be shown capable of reporting one.
+
+**Each map got the treatment its own failure mode allows, and they differ:**
+
+| Site | Done | Why not the same as the others |
+|---|---|---|
+| `HumanGateBroker.#ephemeral` | released on the gate's TERMINAL transition | a size cap evicts in raise order, so it targets the longest-open gate — the one about to escalate. `#fireTimeout` then takes the `spec === undefined` arm and **expires it with a reason that is false** |
+| `Engine.#childGraphs` | FIFO cap | a pure cache of frozen inputs: eviction costs a recompile and cannot change an answer. Missed by this entry entirely, and `874c6d6` had just widened its key |
+| `ControlPlane.#idempotency` | FIFO cap | the one where eviction is a CORRECTNESS cost — nothing dedups on the key, so an evicted entry is a second run. Safe only because entries land on success |
+| `HumanGateBroker.#idempotency` | **left alone, deliberately** | safe against replay — the durable gate-state fold, not the map, is what refuses a repeat — but eviction turns a legitimate Slack redelivery into a durable `gate.callback_rejected` naming a blameless human, plus a bump on the **unresettable** `callbackRefusals` counter |
+| `ResourceStore.#idempotency` | **dropped from scope** | free to fill (the key is set BEFORE the content-address early return), and it is a MISMATCH DETECTOR rather than a dedupe — evicting turns a refusal into a silent accept. Also has no `publish` caller on the serve path |
+| `ResourceStore.#versions`/`#byDigest`/`#selectors` | **open** | these hold the actual content and are what grows in that class. Recorded, not fixed |
+
+> **The first plan for this got all of that backwards** and would have shipped a uniform cap over
+> four maps. It called `#ephemeral` "the safest to evict" while citing, as its evidence, the file
+> whose own docstring describes that exact state as a hazard — *"EXPIRES gates that should have
+> escalated. Silently, and fail-closed, which is the kind of wrong that gets discovered a quarter
+> later."* It had enumerated three of nine read sites. **Name every site that touches the value
+> and write the list into the claim** — the same lesson this register opens with.
 
 **A10 · The rewind boundary refusal covers `gate.decided` only, and `#expire` writes the same
 split.** `Engine.rewind` refuses a boundary that lands on a `gate.decided`, because `resolve`
@@ -885,7 +930,19 @@ check that already validates the field is a classification at all.
 > does not belong in a register of things known to be wrong. **Do not "fix" this without
 > reopening the type question first.**
 
-**A12 · Caller-supplied numbers with no bound. `PolicyEngineOptions.interventionWindowMs` is
+**A12 · Caller-supplied numbers with no bound. NARROWED 2026-08-19, not closed.**
+`interventionWindowMs` is genuinely bounded — `boundedWindows` (`run/policy.ts:200-217`, wired at
+`:248`, re-validated at `engine.ts:567`) — so the sentence below was already stale when this pass
+began. **But re-asking the question found another member in a file this entry had cleared**, which
+is verbatim what this entry's own third correction says its sweep does wrong.
+`GateSweeperOptions.limit` was `Math.max(1, opts.limit ?? 500)`; measured, `Math.max(1, NaN)` is
+`NaN`, `Math.max(1, Infinity)` is `Infinity`, `Math.max(1, 1.5)` is `1.5`, and all three reach
+`listRuns`. Now refused. **And the clamp's stated benefit was never real:** `listRuns` is
+`ORDER BY run_id DESC LIMIT ?` over time-ordered ids, so the floor of 1 it fell back to pins every
+tick to the single newest run — no clock at all for every other run, not "a slow tick". Treat this
+entry as a standing question, not a list.
+
+**The original text, for the grain of it: `PolicyEngineOptions.interventionWindowMs` is
 what is left; a timer above 2³¹−1 ms means one millisecond, and a cap of `NaN` means no cap.** `setTimeout`, `setInterval` and
 `AbortSignal.timeout` keep their
 delay in a 32-bit signed integer and TRUNCATE anything larger; they do not saturate and they
