@@ -136,10 +136,28 @@ export function compile(input: CompileInput): CompileResult {
     entryNodes: idx.entryNodes,
     terminalNodes: idx.terminalNodes,
     resolutionManifest: manifest,
+    documents: resolveDocuments(input, manifest),
     expansion,
   };
 
   return { ok: true, graph, diagnostics };
+}
+
+/**
+ * The text behind every pinned ref whose resolver has one, keyed by ref.
+ *
+ * Read through the DIGEST the manifest just froze, never through the ref: `document(pinned)`
+ * is the run-time half of the resource contract and this is the last moment at which "the
+ * pin" and "the bytes" are guaranteed to agree. A resolver with no `document` hook — every
+ * pin-only resolver, which is most of them — contributes nothing and the map stays empty.
+ */
+function resolveDocuments(input: CompileInput, manifest: readonly ResolvedRef[]): Readonly<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const pinned of manifest) {
+    const text = input.resolver.document?.(pinned.digest);
+    if (text !== undefined) out[pinned.ref] = text;
+  }
+  return out;
 }
 
 function resolveManifest(input: CompileInput): readonly ResolvedRef[] {

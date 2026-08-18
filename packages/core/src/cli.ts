@@ -12,8 +12,8 @@
  * JSON belongs in a CLI-only package that may take the dependency.
  */
 
-import { mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, existsSync, type Dirent } from "node:fs";
+import { basename, extname, join, resolve } from "node:path";
 
 import { InProcessEventBus } from "./bus.ts";
 import { isLoomError, toLoomError } from "./errors.ts";
@@ -58,6 +58,7 @@ import {
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
+import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId } from "./ids.ts";
 import type { HumanActor, SubmittedBy } from "./journal/events.ts";
@@ -327,14 +328,23 @@ export function openWorkspace(
   // node types execute" was a statement about the engine with an injected resolver rather
   // than about the product. The declaration used to sit below this constructor, which is the
   // entire bug.
+  // THE WORKSPACE'S OWN RESOURCES, layered over the pin. `<workspace>/resources/prompt/x.md`
+  // publishes `prompt/x@stable`, and an agent node naming it is sent the FILE rather than the
+  // eleven characters of its ref — which is what it was sent for the whole project.
+  //
+  // LAYERED, not substituted: a ref with no file still pins exactly as it did, so a graph with
+  // no `resources/` directory compiles unchanged and `humanGate.ref`/`function` refs — which
+  // are pins by design and have no documents — are untouched.
+  const documents = new ResourceStore({ seed: readResources(root) });
   const resolver: ResourceResolver = {
-    // Without a resource store, refs resolve to a digest of their own name. That is
-    // enough for the compiler's pinning to be structurally correct locally, and it is
-    // replaced by a real ResourceStore the moment one is configured.
+    // Without a published document, refs resolve to a digest of their own name. That is
+    // enough for the compiler's pinning to be structurally correct locally.
     resolve: (ref) =>
-      RESOURCE_REF.test(ref)
+      documents.resolve(ref) ??
+      (RESOURCE_REF.test(ref)
         ? { ref, digest: `sha256:${Buffer.from(ref).toString("hex").padEnd(64, "0").slice(0, 64)}`, channel: "stable" }
-        : undefined,
+        : undefined),
+    document: (pinned) => documents.document(pinned),
   };
 
   const engine = new Engine({
@@ -1898,6 +1908,51 @@ function submitterFlag(args: Args): { submittedBy?: SubmittedBy } {
 
 /** Matches the control plane's `MAX_IDENTITY_FIELD`; the journal is the same journal. */
 const MAX_SUBJECT = 256;
+
+/**
+ * Every document under `<workspace>/resources/<kind>/`, as the store's initial contents.
+ *
+ * `resources/prompt/investigate.md` becomes `prompt/investigate@stable`. The extension is not
+ * part of the ref; `.md` and `.txt` are both read, because a prompt is prose and neither
+ * spelling is wrong.
+ *
+ * READ ONCE, AT BOOT, AND NEVER FOLLOWED. `withFileTypes` reports a symlink as a symlink
+ * rather than as the file it points at, and a symlink is skipped — `resources/` sits INSIDE
+ * the tool jail and is writable by `fs.write`, so a run that plants
+ * `resources/prompt/x.md -> /etc/passwd` would otherwise have the next boot publish it as an
+ * instruction and hand it to a model. The same reasoning `openWorkspace` already applies to
+ * the data dir, one directory over.
+ *
+ * A missing directory is not an error: most workspaces have no resources, and the layered
+ * resolver above answers for them exactly as it did before this existed.
+ */
+function readResources(root: string): readonly { kind: ResourceKind; name: string; content: string }[] {
+  const base = join(root, "resources");
+  const out: { kind: ResourceKind; name: string; content: string }[] = [];
+  let kinds: Dirent[];
+  try {
+    kinds = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const kindDir of kinds) {
+    if (!kindDir.isDirectory()) continue;
+    const kind = kindDir.name;
+    if (!RESOURCE_KINDS.includes(kind)) continue;
+    for (const file of readdirSync(join(base, kind), { withFileTypes: true })) {
+      // NOT `isFile()` alone — that answers true for the TARGET of a symlink on some
+      // platforms. `isSymbolicLink()` is asked first and is the refusal.
+      if (file.isSymbolicLink() || !file.isFile()) continue;
+      const ext = extname(file.name);
+      if (ext !== ".md" && ext !== ".txt") continue;
+      out.push({ kind: kind as ResourceKind, name: basename(file.name, ext), content: readFileSync(join(base, kind, file.name), "utf8") });
+    }
+  }
+  return out;
+}
+
+/** The kinds a workspace directory may publish. Text documents only — see `readResources`. */
+const RESOURCE_KINDS: readonly string[] = ["prompt", "agent_profile", "skill"];
 
 /** `pathFlag`, for the commands where the path is not optional. */
 function requireFileFlag(args: Args, name: string): string {

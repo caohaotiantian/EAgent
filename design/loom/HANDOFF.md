@@ -563,7 +563,38 @@ reached the journal and stopped, so "who rewound this run" was the one A4 fact a
 > world-readable run once A3 lands. `test/run/submit-callers.test.ts` pins the four doors and
 > their per-file call counts; it proves each has been CONSIDERED, not that any is right.
 
-**A22 · AN AGENT NODE'S PROMPT IS THE REF STRING. There is no resource store, so a model is
+**A22 · AN AGENT NODE'S PROMPT IS THE REF STRING. RESOLVED 2026-08-18, and the fix is not
+where the entry said it would be.** The prescription was a run-time content hook on
+`ResourceResolver`. What landed resolves at COMPILE time instead: `RunGraph.documents` carries
+the text behind every pinned ref, frozen beside the manifest, and `#runAgent` reads the compiled
+graph rather than asking a resolver anything.
+
+> **The churn told me the design was wrong.** A run-time hook made 32 tests fail across 12
+> files, all with the same shape — *this Engine has no resolver*. `grep -c 'new Engine('
+> packages/core/test` is 54, and almost none passes one, while EVERY `compile` call site does.
+> A prompt that needed the engine's resolver would have made every engine construction a
+> resource deployment. Moving the read to compile took the failures from 32 to **1**, and the
+> one was the CLI test, which needed the loader that was the point of the wave.
+>
+> It is also the stronger reading of the pinning rule rather than a weaker one:
+> `resources/functions.ts` records what a run-time `resolve(ref)` costs — "a promotion between
+> compile and execute swapped the body underneath the Run" — and freezing the bytes into the
+> compiled artifact makes that unreachable rather than merely guarded.
+>
+> **Three things it took that the entry did not anticipate.** `req.system` is built at a
+> DIFFERENT site from the one `assembleContext` is handed, and only the second reaches a
+> provider — so setting the one the ladder measures changed nothing a model saw, and the test
+> caught it by asserting on the wire. `ResourceStore.publish` lands on `@draft` and `@stable`
+> needs a human actor, so the workspace loader goes through a named `seed` door instead of
+> minting a fake human to walk past the guard. And `resources/` sits inside the writable tool
+> jail, so the loader refuses symlinks — otherwise a run could plant
+> `resources/prompt/x.md -> /etc/passwd` and the next boot would hand it to a model.
+>
+> **What is still a pointer:** `agent_profile` (the model routing key, unchanged),
+> `oversight` (`humanGate.ref`, a pin by design), and `subgraph` — which is A23, and which the
+> same `seed` door now makes reachable by publishing a `GraphSpec`.
+
+**A22 (original entry, kept for the reproduction) · AN AGENT NODE'S PROMPT IS THE REF STRING. There is no resource store, so a model is
 sent the pointer instead of the document — and this is the one thing standing between the
 build and its own stated goal.** New, 2026-08-18, found by using the binary rather than by
 reading. `AgentNode.prompt` is a `ResourceRef`, `ResourceResolver.resolve` returns

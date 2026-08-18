@@ -2056,6 +2056,29 @@ export class Engine {
 
   // ── the agent node: a bounded ReAct loop ──────────────────────────────────
 
+  /**
+   * The text a node's prompt ref names, read through the pin the compiler froze.
+   *
+   * Refuses rather than degrading. `E_RESOURCE_NOT_FOUND` is what a `subgraph` node already
+   * raises for a ref that resolves to no `GraphSpec`, and a prompt that resolves to no
+   * document is the same fact about a different kind — the run cannot do what the graph says.
+   */
+  #documentFor(ctx: RunContext, nodeId: NodeId, ref: string): string {
+    // FROM THE COMPILED GRAPH, not from a resolver. `RunGraph.documents` was frozen when the
+    // manifest was, so the executor asks nobody anything and a promotion between compile and
+    // execute cannot reach it.
+    const text = ctx.graph.documents[ref];
+    if (text === undefined) {
+      throw err.notFound(
+        CODES.E_RESOURCE_NOT_FOUND,
+        `node "${nodeId}" names prompt "${ref}", which resolves to no document. Publish it — a workspace serves ` +
+          `resources/prompt/<name>.md — or the model is sent the ref instead of an instruction.`,
+        { details: { nodeId, ref } },
+      );
+    }
+    return text;
+  }
+
   async #runAgent(
     ctx: RunContext,
     p: RunProjection,
@@ -2097,10 +2120,31 @@ export class Engine {
     // The prompt envelope below is a stable contract with the model; the ladder is a
     // contract with the context window. Keeping them separate means changing one does
     // not silently change the other.
+    // THE DOCUMENT, NOT THE POINTER — and looked up by the PINNED DIGEST rather than by the
+    // ref. `agent.prompt` is a `ResourceRef`, and for the whole project it was interpolated
+    // verbatim, so a model received the eleven characters `prompt/x@stable` where its
+    // instruction should have been. The digest comes from `RunGraph.resolutionManifest`,
+    // frozen at compile: reading it by ref instead would let a promotion between compile and
+    // execute swap the instruction underneath a running node, which is the defect
+    // `resources/functions.ts` already found and fixed once for code.
+    //
+    // NO SILENT FALLBACK. A pin that names no document REFUSES, the way a `subgraph` node
+    // already refuses a ref that resolves to no `GraphSpec`. The alternative is what hid this
+    // for the whole project: a run that sends a pointer is a SUCCESSFUL run, and
+    // `[mock] {"prompt":"prompt/x@stable"}` is only wrong if somebody reads it.
+    const promptRef = promptOverride ?? agent?.prompt;
+    const instructions = promptRef === undefined ? "" : this.#documentFor(ctx, w.node.id, promptRef);
+    // The node's identity is orientation and goes AFTER the task, so a long document is not
+    // preceded by a line about plumbing. One string, used at both sites.
+    const systemPrompt = instructions === "" ? `You are node ${w.node.id}.` : `${instructions}\n\nYou are node ${w.node.id}.`;
+
     const assembled = await assembleContext(
       {
-        system: `You are node ${w.node.id}.`,
-        instruction: promptOverride ?? agent?.prompt ?? "",
+        // THE INSTRUCTION GOES IN THE SYSTEM SLOT, which is where a model looks for one and
+        // where a multi-line document survives without being JSON-escaped into a field. The
+        // node's identity is appended rather than replaced: it is orientation, not the task.
+        system: systemPrompt,
+        instruction: instructions,
         channels: Object.fromEntries(view.visible.map((c) => [c, view.get(c)])),
         channelSpecs: ctx.graph.spec.channels,
       },
@@ -2113,16 +2157,10 @@ export class Engine {
       },
     );
 
-    let messages: Message[] = [
-      {
-        role: "user",
-        content: JSON.stringify({
-          node: w.node.id,
-          prompt: promptOverride ?? agent?.prompt ?? "",
-          state: assembled.channels,
-        }),
-      },
-    ];
+    // The user message carries the STATE. The instruction moved to the system slot above, so
+    // `prompt` is gone from this envelope rather than duplicated into it — two copies of an
+    // instruction is two things for a reader of the transcript to reconcile.
+    let messages: Message[] = [{ role: "user", content: JSON.stringify({ node: w.node.id, state: assembled.channels }) }];
 
     let usage: UsageRecord = { ...ZERO_USAGE };
     let finalText = "";
@@ -2154,7 +2192,11 @@ export class Engine {
 
       const req: ModelRequest = {
         model: agent?.profile ?? "mock",
-        system: `You are node ${w.node.id}.`,
+        // THE SITE THAT REACHES THE MODEL. `assembleContext` is handed a `system` too and its
+        // answer is discarded — only `assembled.channels` is read — so changing that one alone
+        // changes nothing a provider sees. Both are set, deliberately: the ladder must MEASURE
+        // what is sent or the budget describes a request nobody made.
+        system: systemPrompt,
         messages,
         tools: toolSpecs,
       };

@@ -538,6 +538,24 @@ export interface RunGraph {
   readonly entryNodes: readonly NodeId[];
   readonly terminalNodes: readonly NodeId[];
   readonly resolutionManifest: readonly ResolvedRef[];
+  /**
+   * The TEXT behind every ref that names one, frozen at compile, keyed by ref.
+   *
+   * RESOLVED HERE RATHER THAN AT RUN TIME, and that is a stronger reading of the pinning rule
+   * than a runtime lookup, not a weaker one. `resources/functions.ts` records what a run-time
+   * `resolve(ref)` costs: "a promotion between compile and execute swapped the body underneath
+   * the Run". Freezing the bytes into the compiled artifact makes that unreachable rather than
+   * merely guarded — the executor never asks a resolver anything about a prompt.
+   *
+   * It also matches how this system is actually assembled: every `compile` call site has a
+   * resolver, and almost no `new Engine` call site does. A prompt that needed the engine's
+   * resolver would have made every engine construction a resource deployment.
+   *
+   * Empty for a resolver with no `document` hook, which is every resolver that serves only
+   * pins — and an agent node compiled against one is refused, because a graph that cannot say
+   * what it asks the model is not a graph that runs.
+   */
+  readonly documents: Readonly<Record<string, string>>;
   readonly expansion: ExpansionBudget;
 }
 

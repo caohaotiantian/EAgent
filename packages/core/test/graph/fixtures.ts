@@ -60,6 +60,7 @@ export function stubResolver(opts: { deprecated?: readonly string[]; missing?: r
   const deprecated = new Set(opts.deprecated ?? []);
   const missing = new Set(opts.missing ?? []);
   return {
+    document: () => "Test instructions.",
     resolve(ref): ResolvedRef | undefined {
       if (missing.has(ref)) return undefined;
       if (!/^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)) return undefined;

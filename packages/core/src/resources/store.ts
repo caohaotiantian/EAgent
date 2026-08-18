@@ -93,6 +93,22 @@ export interface ResourceStoreOptions {
    * add denials; passing `{"evolution-engine": []}` does not un-deny it.
    */
   readonly deniedActors?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * The store's INITIAL CONTENTS, at `@stable`, placed by whoever started the process.
+   *
+   * NOT A PROMOTION, and the distinction is the reason this door exists rather than the
+   * loader minting a human actor to walk `publish → canary → stable`. That ladder governs
+   * CHANGES to what `@stable` means while a deployment is running, and `#requireStablePromoter`
+   * refuses a non-human because a bot must not repoint `@stable` at its own draft. A working
+   * tree read at boot is not a bot: it is the operator's own filesystem, read once, before
+   * anything is serving. Faking a human actor to get past a guard would defeat exactly the
+   * guard's argument; naming the door for what it is leaves the guard intact and makes the
+   * exemption visible to a reader.
+   *
+   * Seeded versions are ordinary versions — `fetch`, `document`, `list` and `versions` see
+   * them — and the promotion ladder governs everything that happens to them afterwards.
+   */
+  readonly seed?: readonly { readonly kind: ResourceKind; readonly name: string; readonly content: unknown }[];
 }
 
 /** The capability both doors onto `@stable` spend. Named once so the deny-lists agree on it. */
@@ -133,6 +149,28 @@ export class ResourceStore implements ResourceResolver {
   constructor(opts: ResourceStoreOptions = {}) {
     this.#now = opts.now ?? Date.now;
     this.#deniedActors = storeDenyLists(opts.deniedActors);
+    for (const s of opts.seed ?? []) this.#seed(s.kind, s.name, s.content);
+  }
+
+  /** One initial version, at `@stable`. See `ResourceStoreOptions.seed`. */
+  #seed(kind: ResourceKind, name: string, content: unknown): void {
+    const digest = resourceDigest(kind, name, content);
+    const key = `${kind}/${name}`;
+    const version = (this.#versions.get(key)?.length ?? 0) + 1;
+    const record: ResourceVersion = {
+      kind,
+      name,
+      version,
+      digest,
+      content,
+      createdAt: this.#now(),
+      createdBy: "seed",
+      yanked: false,
+    };
+    this.#versions.set(key, [...(this.#versions.get(key) ?? []), record]);
+    this.#byDigest.set(digest, record);
+    this.#selectors.set(`${key}@stable`, digest);
+    this.#selectors.set(`${key}@${String(version)}`, digest);
   }
 
   // ── publish ───────────────────────────────────────────────────────────────
@@ -356,6 +394,25 @@ export class ResourceStore implements ResourceResolver {
     const record = this.#byDigest.get(d as Digest);
     if (record === undefined) throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no resource with digest ${d}`);
     return record as ResourceVersion<T>;
+  }
+
+  /**
+   * RUN TIME. The text a pinned document holds.
+   *
+   * `fetch` already refuses a floating ref, which is the property this method exists to
+   * inherit rather than restate. `undefined` for a pin whose content is not text — a
+   * `function` or a `subgraph` pin reaches here through the same resolver and is not a
+   * document, and answering `[object Object]` to a model would be worse than answering
+   * nothing.
+   */
+  document(pinned: Digest): string | undefined {
+    const record = this.#byDigest.get(pinned);
+    // `undefined` for a pin this store does not hold, rather than `fetch`'s throw: a layered
+    // resolver asks every pin it sees, and most of them belong to the pin-only half beneath
+    // it. `fetch` keeps its throw, which is right for a caller that believes it holds the
+    // resource; this is the caller that is asking whether it does.
+    if (record === undefined || record.yanked) return undefined;
+    return typeof record.content === "string" ? record.content : undefined;
   }
 
   /** For the compiler's subgraph recursion. */

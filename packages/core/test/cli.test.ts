@@ -453,6 +453,12 @@ test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between
       routes: { "agent_profile/summarizer@stable": { adapter: "anthropic", model: "claude-sonnet-5" } },
     });
 
+    // THE PROMPT, AS A FILE. `prompt/act@stable` is a POINTER, and for the whole project the
+    // model was sent those sixteen characters. A workspace publishes the document beside the
+    // graph, and this test is where that lands in a real `ModelRequest`.
+    mkdirSync(join(d.dir, "resources", "prompt"), { recursive: true });
+    writeFileSync(join(d.dir, "resources", "prompt", "act.md"), "Summarise the seed and answer with a verdict.");
+
     const sent: { model?: unknown; system?: unknown } = {};
     // One non-streaming SSE body, shaped the way the adapter parses it. Nothing leaves the
     // process and the fake key is never presented to anyone.
@@ -514,6 +520,16 @@ test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between
       // And the ResourceRef was rewritten on the way out, inside a real run rather than in
       // a direct call to the adapter.
       assert.equal(sent.model, "claude-sonnet-5");
+      // THE DOCUMENT REACHED THE MODEL, in the system slot, as words. This is the assertion
+      // A22 exists for: before it, `sent.system` was `You are node act.` and the sixteen
+      // characters `prompt/act@stable` sat in a JSON field of the user message, which is a
+      // pointer where an instruction belongs — and a run that sends a pointer SUCCEEDS, so
+      // nothing anywhere went red.
+      // Anthropic takes `system` as a block array, so the assertion reads the text out rather
+      // than stringifying the envelope.
+      const systemText = JSON.stringify(sent.system);
+      assert.match(systemText, /Summarise the seed and answer with a verdict\./);
+      assert.doesNotMatch(systemText, /prompt\\?\/act@stable/, "the ref is not what a model is asked");
       // The provider reported usage, so the run is priced from real numbers rather than 0.
       assert.equal((p?.usage.inputTokens ?? 0) > 0, true, "usage must come back from the provider");
     } finally {

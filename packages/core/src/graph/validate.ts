@@ -38,6 +38,7 @@ import {
   type ResolvedRef,
   type ResourceRef,
 } from "./spec.ts";
+import type { Digest } from "../canonical.ts";
 
 export interface Diagnostic {
   readonly severity: "error" | "warning" | "info";
@@ -63,6 +64,17 @@ export interface ResourceResolver {
   resolve(ref: ResourceRef): ResolvedRef | undefined;
   /** Nested GraphSpec for a `subgraph` node, if the ref names one. */
   subgraph?(ref: ResourceRef): GraphSpec | undefined;
+  /**
+   * RUN TIME. The TEXT a pinned document holds, or `undefined` if the pin names none.
+   *
+   * KEYED BY DIGEST, NEVER BY REF, and that is the whole reason it is a second method rather
+   * than a field on `resolve`'s answer. `resolve` is the COMPILE-time half — it turns a
+   * floating `@stable` into a pin — and `resources/functions.ts` records what happens when a
+   * running node calls it instead: "a promotion between compile and execute swapped the body
+   * underneath the Run". Code was the exception once; a prompt must not become the second.
+   * The digest comes from `RunGraph.resolutionManifest`, frozen at compile.
+   */
+  document?(pinned: Digest): string | undefined;
 }
 
 export interface ValidationContext {

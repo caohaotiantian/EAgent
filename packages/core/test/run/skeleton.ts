@@ -138,6 +138,11 @@ export function resolver(): ResourceResolver {
       if (!/^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)) return undefined;
       return { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" };
     },
+    // ONE DOCUMENT FOR EVERY PIN, because the digest above is constant and a fixture does not
+    // need per-ref fidelity — it needs an agent node to receive WORDS rather than a pointer,
+    // which is the property `#documentFor` refuses without. Only prompt and rubric refs ever
+    // reach here; `function` and `subgraph` pins go through their own hooks.
+    document: () => "Test instructions.",
   };
 }
 
