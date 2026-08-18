@@ -260,6 +260,18 @@ export function openWorkspace(
   const dataDir = resolve(pathFlag(args, "data-dir") ?? join(root, ".loom"));
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(join(root, "graphs"), { recursive: true });
+  // CREATED SO THAT DENYING IT MEANS SOMETHING. `assertWithin` canonicalises a deny entry with
+  // `realpathSync.native` precisely to defeat case tricks — and `realpath` can only canonicalise
+  // a path that EXISTS. On a fresh workspace `resources/` did not, so the comparison fell back
+  // to a lexical one and `RESOURCES/prompt/p.md` walked straight past it on any
+  // case-insensitive filesystem, which is the default on macOS and Windows. Measured: a tool
+  // node wrote it, the directory it created WAS `resources/` for the next boot's `readdirSync`,
+  // and the run after that was handed "PWNED via case" as its system prompt. The same trick
+  // reopened arbitrary GRAPH injection through `resources/subgraph/`.
+  //
+  // `.loom` was never exposed to this for the one reason that matters: it is always created
+  // here. The deny-list was right and the directory's absence made it advisory.
+  mkdirSync(join(root, "resources"), { recursive: true });
 
   const store = new SqliteStateStore({ path: join(dataDir, "journal.db") });
   const bus = new InProcessEventBus({ store });
@@ -2000,13 +2012,20 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
       // A SPEC THAT DOES NOT PARSE IS SKIPPED, not thrown. Same rule as the unreadable file
       // above and for the same reason: this runs inside `openWorkspace`, so one malformed
       // child graph would take down `compile`, `run`, `gates` and `approve` alike.
-      let spec: GraphSpec;
+      let parsed: unknown;
       try {
-        spec = ext === ".json" ? (JSON.parse(content) as GraphSpec) : (parseYamlSpec(content, { filename: file.name }) as unknown as GraphSpec);
+        parsed = ext === ".json" ? JSON.parse(content) : (parseYamlSpec(content, { filename: file.name }) as unknown);
       } catch {
         continue;
       }
-      out.push({ kind: kind as ResourceKind, name, content: spec });
+      // AND A SHAPE CHECK, because `JSON.parse` answers for `42`, `null`, `[]` and `"text"`
+      // just as happily as for a spec — while the YAML half already refuses a non-mapping, so
+      // the two spellings disagreed. Two things came through that hole: `null` passed the
+      // executor's `childSpec === undefined` guard, and a file holding a bare JSON STRING was
+      // served to a model as a system prompt, because `document` type-checks the CONTENT and
+      // not the kind.
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
+      out.push({ kind: kind as ResourceKind, name, content: parsed as GraphSpec });
     }
   }
   return out;

@@ -143,6 +143,30 @@ test("A RUN CANNOT WRITE THE NEXT RUN'S SYSTEM PROMPT — resources/ is denied l
   }
 });
 
+test("…AND NOT UNDER A DIFFERENT SPELLING, on a filesystem that does not care about case", async () => {
+  // THE DENY-LIST WAS ADVISORY UNTIL THE DIRECTORY EXISTED. `assertWithin` canonicalises a
+  // deny entry with `realpathSync.native` exactly to defeat this — and `realpath` can only
+  // canonicalise a path that is there. On a fresh workspace `resources/` was not, so the
+  // comparison was lexical and `RESOURCES/` walked past it. Measured: the write succeeded, the
+  // directory it created WAS `resources/` for the next boot, and the run after that was handed
+  // "PWNED via case" as its system prompt.
+  //
+  // The fixture here deliberately does NOT pre-create `resources/`, because the sibling test
+  // above does — and that is the only reason the sibling passed while this hole was open.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    const graphFile = join(d.dir, "graphs", "case.json");
+    writeFileSync(graphFile, JSON.stringify(graphWriting("RESOURCES/prompt/p.md")));
+
+    const r = await run(["run", graphFile, "--workspace", d.dir, "--input", JSON.stringify({ seed: "x" })]);
+    assert.equal((JSON.parse(r.out) as { status: string }).status, "failed", `the write must not succeed: ${r.out}`);
+    assert.equal(existsSync(join(d.dir, "RESOURCES", "prompt", "p.md")), false, "and nothing was planted");
+  } finally {
+    d.dispose();
+  }
+});
+
 test("A RUN CANNOT WRITE TO ITS OWN JOURNAL — the data dir is inside the jail root", async () => {
   // `--workspace` is both the fs jail and the parent of `.loom/journal.db`, and
   // `fs.write` is `reversible_write`, so no gate stands between a model and the run's

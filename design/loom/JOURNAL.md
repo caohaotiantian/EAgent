@@ -3529,3 +3529,43 @@ hop to `@stable` refuses a non-human, and minting a fake human at boot would def
 guard's argument. If prompts ever need versions an operator can roll back at run time, that is
 the moment the workspace stops being the source of truth and the store's ladder becomes the
 answer instead.
+
+---
+
+## A deny-list is advisory until the directory exists
+
+Wave 2 published child graphs so a `subgraph` node could finally run through the binary. Its
+review found two ways in, and the first is the more interesting because the guard it defeats was
+written one commit earlier, deliberately, with a docstring arguing about exactly this boundary.
+
+**`assertWithin` canonicalises a deny entry with `realpathSync.native` — and `realpath` can only
+canonicalise a path that EXISTS.** `openWorkspace` creates `.loom/` and `graphs/` and did not
+create `resources/`, so on a fresh workspace the deny comparison fell back to a lexical one and
+`RESOURCES/prompt/p.md` walked straight past it on any case-insensitive filesystem — the default
+on macOS and Windows. Measured through `bin/loom`: the write succeeded, the directory it created
+*was* `resources/` for the next boot's `readdirSync`, and the run after that was handed
+"PWNED via case" as its system prompt. The same trick reopened arbitrary GRAPH injection through
+`resources/subgraph/`, which is strictly worse — no model is in the loop, the child simply runs.
+
+`.loom/` was never exposed to this for one reason: it is always `mkdirSync`'d. The fix is one
+line beside it, and the lesson is that **a path-based guard has a precondition nobody states —
+the path has to be real.**
+
+**And my own regression test hid it.** The prompt-injection test written the commit before
+creates `resources/prompt/` in its fixture before writing the graph, so the directory existed
+and the deny worked. The test passed for a reason it did not claim, and the new sibling
+deliberately does NOT pre-create the directory — which is the whole difference between the two.
+
+**The second way in was a missing shape check.** The spec branch was a bare `JSON.parse` and a
+cast, while the YAML half already refused a non-mapping, so the two spellings of a child graph
+disagreed about what counts as one. `null` came through and passed the executor's
+`childSpec === undefined` guard; a file holding a bare JSON *string* came through and was served
+to a model as a system prompt, because `ResourceStore.document` type-checks the CONTENT and not
+the kind. The commit message claimed specs were "parsed with the same reader `loadGraph` uses" —
+`loadGraph` goes through `readSpec`, which refuses array, null and scalar and names the file. The
+claim was the design; the code was one function short of it.
+
+**Reverses when.** The shape check is `typeof === "object" && !== null && !Array.isArray` at the
+loader, duplicating `readSpec` rather than calling it, because `readSpec` also throws with a
+filename and this path must SKIP. If a third loader appears, that is the moment the two become
+one helper with a `mode` rather than a third copy of the same three predicates.
