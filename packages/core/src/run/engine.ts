@@ -396,6 +396,19 @@ function sodRefusal(p: RunProjection, approvers: readonly string[]): string | un
 const MAX_SUBJECT = 256;
 
 /**
+ * Distinct compiled child graphs one process keeps.
+ *
+ * The unit is (ref, child spec, parent freeze), so it is not "how many subgraphs does a graph
+ * name" but "how many combinations does this deployment produce" — a new one appears whenever a
+ * child is republished or a parent's frozen resources move. A deployment that promotes a
+ * resource daily and runs two subgraph refs adds two entries a day.
+ *
+ * REVERSE IT if a deployment measures recompiles it cares about; the cost of being wrong is a
+ * recompile, not an answer.
+ */
+const MAX_CACHED_CHILD_GRAPHS = 256;
+
+/**
  * What a `human_gate` node declared about a gate's LIFECYCLE — when it expires, where it
  * is sent, and whether it may merge with its siblings or inherit their answer.
  *
@@ -2730,6 +2743,26 @@ export class Engine {
     const key = `${ref}@${digest(spec)}@${parent.graphHash}`;
     const hit = this.#childGraphs.get(key);
     if (hit !== undefined) return hit;
+    // BOUNDED, because widening that key widened this cache. It held compiled `RunGraph`s for
+    // the life of the process with nothing to evict them: `#retire` declines to touch it, for a
+    // correct reason — the cache is keyed by ref rather than by run, so per-run eviction would
+    // key a shared cache by the wrong thing — which nonetheless left it growing forever on the
+    // one path meant to stay up for months. Adding the spec digest and then the parent hash each
+    // bought a real freeze and each multiplied the number of distinct entries one ref can hold.
+    //
+    // A COUNT CAP IS RIGHT HERE AND WRONG NEXT DOOR, and the reason is worth keeping straight.
+    // `HumanGateBroker.#ephemeral` is released on the gate's terminal transition rather than
+    // capped, because evicting a live gate's entry changes what the system DOES. This is a
+    // cache: everything it holds is a pure function of inputs that are themselves frozen, so an
+    // eviction costs one recompile and cannot change an answer. It is the one map in this pass
+    // where age is a safe policy.
+    //
+    // Insertion order and the shape of the eviction follow `GateCallbackRouter.#admitRow`,
+    // which made the same trade first.
+    if (this.#childGraphs.size >= MAX_CACHED_CHILD_GRAPHS) {
+      const oldest = this.#childGraphs.keys().next();
+      if (oldest.done !== true) this.#childGraphs.delete(oldest.value);
+    }
     const compiled = compileOrThrow({
       spec,
       // WHAT THE PARENT FROZE, THEN THE LIVE STORE — `frozenFirst` covers `resolve`, `document`
