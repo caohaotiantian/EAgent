@@ -27,7 +27,10 @@ const people = (): IdentitySource =>
   new BearerTokenIdentity({
     subjects: [
       { token: "alice-token", subject: "u:alice", via: "console" },
-      { token: "ci-token", subject: "svc:ci", kind: "service" },
+      // An OPERATOR: the service-cancel test below stops a run alice submitted, and runs are
+      // scoped to their submitter. The escape is the point of the credential, not a detail
+      // of the fixture.
+      { token: "ci-token", subject: "svc:ci", kind: "service", operator: true },
     ],
   });
 

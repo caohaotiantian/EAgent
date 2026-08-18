@@ -470,17 +470,37 @@ is also process-local, so worker B's first token is `1` — not greater than wor
 With one worker nothing is lost; the day there are two, a stale holder's commit is accepted.
 The contention suite covers all of it the moment the executor supplies the token.
 
-**A3 · Every valid credential is a full operator credential.** Runs are not owned by the
-principal that submitted them, so any authenticated caller can list, read, stream, cancel
-and see the gate payloads of every run. This was **decided, not overlooked** — see the
-`JOURNAL.md` entry and `http.ts`'s "THE LIMIT" docstring — because the honest fix needs a
-durable owner and the only version buildable in the server alone evaporates on restart.
-The deployment is warned at boot when `ControlPlane.distinctPrincipals > 1`, and a test
-(`EVERY VALID CREDENTIAL IS A FULL OPERATOR CREDENTIAL`) has one principal cancel another's
-run so the limit cannot be narrowed silently. **Fix, exactly:** a
-`submittedBy: {kind, subject, method}` on the `run.submitted` payload, written by
-`Engine.submit` from a new `SubmitInput` field, folded into the `runs` read model with a
-column `listRuns` can filter on, plus a designed operator escape.
+**A3 · Every valid credential is a full operator credential. RESOLVED 2026-08-18**, and the
+fix is the one this entry prescribed, plus two terms it did not anticipate. A run is owned by
+the principal that submitted it; `run_head.submitted_by` is written INSERT-ONLY inside the
+same transaction as the `run.submitted` it is derived from, and `listRuns(limit, filter)`
+filters in SQL BEFORE the limit — filtering after would empty a low-volume principal's list on
+a busy journal and let a caller measure other principals' submission rate by varying `limit`.
+The escape is `operator: true` on an identity entry, refused when malformed at all three doors.
+
+> **The two terms the prescription missed, and both are load-bearing.**
+>
+> **The gate routes cannot be owner-scoped.** Under `separationOfDuties` the only principal
+> permitted to decide is by construction not the submitter, so `ownsRun` governs the four
+> `#runs` routes and `mayReachGates` — that, or NAMED on one of this run's gates — governs the
+> two that carry gates. Named, never "not excluded": a posture-floor gate on a tool node names
+> nobody by construction, and reading that as "visible to everybody" would publish the node's
+> channel values to every principal.
+>
+> **And an approver still has to FIND the question.** `GET /runs` is scoped to the submitter,
+> so `GET /gates` was added — the cross-run queue, carrying the rendered payload, because
+> `GET /runs/:id` is closed to a non-owner and it is therefore the only place the question can
+> reach the person being asked. The console reads it as an "Awaiting you" panel and answers in
+> place; routing through `select()` would need `GET /runs/:id` and would 404.
+>
+> **`(shared-token)` is an operator only when it is the SOLE credential.** `#principal` falls
+> back to the shared token AFTER trying the identity source, and this file documents the mixed
+> arrangement as supported — so the unconditional grant would have handed every service a full
+> read of every human's runs, through a fallback nobody configured.
+>
+> **What is still not scoped**: gate payloads are redacted per the GRAPH's classification,
+> never per viewer, so two approvers on one gate see the same bytes. The filtering is per
+> GATE, not within one.
 
 **A4 · Nobody is recorded as having started or stopped a run. RESOLVED 2026-08-18.**
 `run.submitted` carries a `submittedBy` in its PAYLOAD — the control plane really is what

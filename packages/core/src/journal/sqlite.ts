@@ -37,14 +37,16 @@ import type { JournalEvent } from "./events.ts";
 import {
   type AppendInput,
   type AppendResult,
+  type RunFilter,
   type RunSummary,
   type StateStore,
   fencingStale,
   prepare,
   seqConflict,
+  submitterOf,
 } from "./store.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -72,7 +74,13 @@ CREATE TABLE IF NOT EXISTS run_head (
   run_id   TEXT    PRIMARY KEY,
   head_seq INTEGER NOT NULL,
   first_ts INTEGER NOT NULL,
-  last_ts  INTEGER NOT NULL
+  last_ts  INTEGER NOT NULL,
+  -- The submitting principal's SUBJECT, or NULL for a run nobody is recorded as owning.
+  -- Derived from the run.submitted this transaction is writing, so it is a read model
+  -- justified by the event beside it and rebuildable by folding. Written on INSERT only,
+  -- like first_ts, because an owner a later append could rewrite is an owner a reader has
+  -- already answered a question with.
+  submitted_by TEXT
 ) WITHOUT ROWID;
 
 -- Highest fencing token seen per task: stops a worker whose lease was stolen from
@@ -204,7 +212,48 @@ export class SqliteStateStore implements StateStore {
         `journal schema version ${found} is newer than this build understands (${SCHEMA_VERSION})`,
       );
     }
-    // No backward migrations yet; when there are, they run here, in order.
+    // Forward migrations, in order, each one transaction.
+    //
+    // THE STAMP IS PART OF THE MIGRATION, not a step after it. `#schemaVersion` writes the
+    // stamp ONLY in the bootstrap arm above, so an existing file keeps reading its old
+    // version forever — a DDL statement placed here without an accompanying `UPDATE` re-runs
+    // on every open and the second one throws `duplicate column name` out of the constructor.
+    // Every process after the first upgrade would be dead.
+    //
+    // AND IT IS `BEGIN IMMEDIATE`, for the reason the stamp itself is one conflict-clause
+    // statement rather than a read followed by an insert (see this file's header): two
+    // workers opening the same v1 file both read `1`, and the loser must find the work
+    // already done rather than repeat it. The version is re-read INSIDE the transaction, so
+    // the loser sees the winner's stamp and does nothing.
+    if (found < 2) this.#migrateInTransaction(2, "ALTER TABLE run_head ADD COLUMN submitted_by TEXT");
+  }
+
+  /**
+   * One forward migration: re-check, apply, stamp — atomically.
+   *
+   * The re-read is not belt-and-braces. `#migrate` decided to call this by reading the
+   * version OUTSIDE any transaction, which is exactly the read-then-write this file's header
+   * measured 70 failures out of 84 for; the second read is what makes a peer's completed
+   * migration visible before this one repeats it.
+   */
+  #migrateInTransaction(to: number, ...statements: readonly string[]): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      if ((this.#schemaVersion() ?? 0) >= to) {
+        this.#db.exec("COMMIT");
+        return;
+      }
+      for (const sql of statements) this.#db.exec(sql);
+      this.#db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(to));
+      this.#db.exec("COMMIT");
+    } catch (e) {
+      try {
+        this.#db.exec("ROLLBACK");
+      } catch {
+        // The transaction is already gone; the original failure is the one worth reporting.
+      }
+      throw e;
+    }
   }
 
   /** The stamp, or `undefined` on a journal that has never been stamped. */
@@ -237,6 +286,10 @@ export class SqliteStateStore implements StateStore {
         }
       }
 
+      // The owner this batch establishes, read back out of the canonicalized bytes rather
+      // than out of the caller's object — see `submitterOf`.
+      const owner = submitterOf(rows) ?? null;
+
       const insert = db.prepare(
         `INSERT INTO journal (run_id, seq, ts, type, actor, task_id, payload, classification)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -247,10 +300,15 @@ export class SqliteStateStore implements StateStore {
 
       const last = rows[rows.length - 1]!;
       const first = rows[0]!;
+      // `submitted_by` is absent from the DO UPDATE clause on purpose, exactly like
+      // `first_ts`: the owner is established when the row is created and no later append may
+      // rewrite it. The fold makes the same decision on the first `run.submitted` it sees,
+      // including when that first answer is "nobody" — the two must agree or the list route
+      // and the detail route answer differently about who owns a run.
       db.prepare(
-        `INSERT INTO run_head (run_id, head_seq, first_ts, last_ts) VALUES (?, ?, ?, ?)
+        `INSERT INTO run_head (run_id, head_seq, first_ts, last_ts, submitted_by) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (run_id) DO UPDATE SET head_seq = excluded.head_seq, last_ts = excluded.last_ts`,
-      ).run(input.runId, last.seq, first.ts, last.ts);
+      ).run(input.runId, last.seq, first.ts, last.ts, owner);
 
       if (input.fencingToken !== undefined && input.taskId !== undefined) {
         db.prepare(
@@ -298,16 +356,40 @@ export class SqliteStateStore implements StateStore {
     return row?.head_seq ?? 0;
   }
 
-  async listRuns(limit = 100): Promise<readonly RunSummary[]> {
+  async listRuns(limit = 100, filter?: RunFilter): Promise<readonly RunSummary[]> {
     this.#assertOpen();
-    const rows = this.#db
-      .prepare("SELECT run_id, head_seq, first_ts, last_ts FROM run_head ORDER BY run_id DESC LIMIT ?")
-      .all(limit) as unknown as readonly { run_id: string; head_seq: number; first_ts: number; last_ts: number }[];
+    // FILTERED IN SQL, BEFORE THE LIMIT. Selecting the newest N and filtering in JS answers
+    // the wrong question: a principal with few runs on a busy deployment gets an empty list
+    // because all N belong to others, and the count that survives varies with `limit` in a
+    // way that measures OTHER principals' submission rate.
+    //
+    // `IS NULL` is the permissive half, and it is in the same statement rather than a second
+    // query because "mine, plus the ones nobody owns" is one question.
+    const mine = filter?.submittedByOrUnowned;
+    const rows = (
+      mine === undefined
+        ? this.#db
+            .prepare("SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head ORDER BY run_id DESC LIMIT ?")
+            .all(limit)
+        : this.#db
+            .prepare(
+              `SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head
+               WHERE submitted_by IS NULL OR submitted_by = ? ORDER BY run_id DESC LIMIT ?`,
+            )
+            .all(mine, limit)
+    ) as unknown as readonly {
+      run_id: string;
+      head_seq: number;
+      first_ts: number;
+      last_ts: number;
+      submitted_by: string | null;
+    }[];
     return rows.map((r) => ({
       runId: r.run_id as RunId,
       headSeq: r.head_seq,
       firstTs: r.first_ts,
       lastTs: r.last_ts,
+      ...(r.submitted_by === null ? {} : { submittedBy: r.submitted_by }),
     }));
   }
 

@@ -13,17 +13,25 @@ import type { JournalEvent } from "./events.ts";
 import {
   type AppendInput,
   type AppendResult,
+  type RunFilter,
   type RunSummary,
   type StateStore,
   fencingStale,
   prepare,
   seqConflict,
+  submitterOf,
 } from "./store.ts";
 
 interface RunLog {
   events: JournalEvent[];
   /** Highest fencing token seen per task, for the late-writer check. */
   fences: Map<string, number>;
+  /**
+   * The owner, established once when the run's first batch lands — `run_head.submitted_by`'s
+   * counterpart, kept here rather than re-derived at list time so the two stores answer from
+   * the same shape as well as the same function.
+   */
+  submittedBy?: string;
 }
 
 export class MemoryStateStore implements StateStore {
@@ -50,6 +58,12 @@ export class MemoryStateStore implements StateStore {
     }
 
     const rows = prepare(input, canonicalize, this.#now());
+    // INSERT-ONLY, like the SQLite column: set when the run's row is created and never
+    // rewritten, so a second `run.submitted` cannot move a run between owners under a reader.
+    if (log.events.length === 0) {
+      const owner = submitterOf(rows);
+      if (owner !== undefined) log.submittedBy = owner;
+    }
     for (const row of rows) {
       const base = {
         runId: input.runId,
@@ -90,15 +104,21 @@ export class MemoryStateStore implements StateStore {
     return log.events[log.events.length - 1]!.seq;
   }
 
-  async listRuns(limit = 100): Promise<readonly RunSummary[]> {
+  async listRuns(limit = 100, filter?: RunFilter): Promise<readonly RunSummary[]> {
     const out: RunSummary[] = [];
+    const mine = filter?.submittedByOrUnowned;
     for (const [runId, log] of this.#runs) {
       if (log.events.length === 0) continue;
+      // Filtered BEFORE the slice below, matching the SQL store's `WHERE … LIMIT` order —
+      // filtering after would make a low-volume principal's list empty on a busy journal and
+      // would leak other principals' submission density through `limit`.
+      if (mine !== undefined && log.submittedBy !== undefined && log.submittedBy !== mine) continue;
       out.push({
         runId,
         headSeq: log.events[log.events.length - 1]!.seq,
         firstTs: log.events[0]!.ts,
         lastTs: log.events[log.events.length - 1]!.ts,
+        ...(log.submittedBy === undefined ? {} : { submittedBy: log.submittedBy }),
       });
     }
     // Newest first, matching the SQLite store's ORDER BY.

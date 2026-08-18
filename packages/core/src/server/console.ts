@@ -110,7 +110,9 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
 </header>
 <main>
   <section>
-    <h2>Runs</h2>
+    <h2>Awaiting you</h2>
+    <div id="mine"><div class="empty">nothing</div></div>
+    <h2 style="margin-top:18px">Runs</h2>
     <div id="runs"><div class="empty">none yet</div></div>
     <h2 style="margin-top:18px">Start a run</h2>
     <label>workflow</label><input id="wf" placeholder="graph name">
@@ -184,6 +186,46 @@ function invalidate() {
   setTimeout(() => { pending = false; draw(); }, 60);
 }
 
+// ── the questions addressed to this credential, across runs ─────────────────
+//
+// GET /runs is scoped to the SUBMITTER, and an approver is by construction somebody else —
+// so without this panel the one workflow the console exists for is unreachable for exactly
+// the person it is meant for: they would see an empty run list and no way to find the
+// question waiting on them. GET /gates is the cross-run queue and it carries the rendered
+// payload, because GET /runs/:id is closed to a non-owner and this is therefore the ONLY
+// place the question can reach the person being asked.
+async function loadMine() {
+  const el = $("mine");
+  let gates;
+  try {
+    ({ gates } = await api("/gates"));
+  } catch (e) {
+    el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (!gates.length) { el.innerHTML = '<div class="empty">nothing</div>'; return; }
+  el.innerHTML = "";
+  for (const g of gates) {
+    const d = document.createElement("div");
+    d.className = "row";
+    d.innerHTML = '<code>' + esc(g.nodeId) + '</code><div class="meta">' + esc(g.runId.slice(0, 12)) +
+      (g.deadline ? ' · due ' + new Date(g.deadline).toISOString().slice(11, 19) : '') + '</div>';
+    const actions = document.createElement("div");
+    actions.className = "meta";
+    for (const kind of ["approve", "reject"]) {
+      const b = document.createElement("button");
+      b.textContent = kind;
+      // Answered WHERE IT IS SHOWN. Routing through select() first would need
+      // GET /runs/:id, which a non-owner cannot read — the panel would render and its
+      // buttons would 404.
+      b.onclick = () => decideOn(g.runId, g.gateId, kind === "approve" ? { kind: "approve" } : { kind: "reject", reason: "rejected from the console" });
+      actions.appendChild(b);
+    }
+    d.appendChild(actions);
+    el.appendChild(d);
+  }
+}
+
 // ── run list ────────────────────────────────────────────────────────────────
 async function loadRuns() {
   const el = $("runs");
@@ -245,6 +287,7 @@ async function select(runId) {
   current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "" };
   if (stream) stream.abort();
   await loadRuns();
+loadMine();
 
   const run = await api("/runs/" + runId);
   applySnapshot(run);
@@ -457,6 +500,20 @@ function drawGates() {
   }
 }
 
+// One decision, addressed by run — the form the cross-run queue needs, since it holds gates
+// from runs that are not the selected one and may not be selectable at all.
+async function decideOn(runId, gateId, decision) {
+  try {
+    await api("/runs/" + runId + "/gates/" + gateId, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision }),
+    });
+    await loadMine();
+    if (runId === selected) await loadGates(selected, epoch);
+  } catch (e) { alert(e.message); }
+}
+
 async function decide(gateId, decision) {
   try {
     // NO actor field. The server takes the decider's subject from the credential this
@@ -471,6 +528,7 @@ async function decide(gateId, decision) {
     // The response is a run summary, so it reseeds the queue in journal order — the same
     // correction the snapshot frame needs, for the same reason.
     await loadGates(selected, epoch);
+    await loadMine();
   } catch (e) { alert(e.message); }
 }
 
@@ -493,6 +551,7 @@ $("tok").onchange = async () => {
   localStorage.setItem("loom.token", token);
   await whoami();
   await loadRuns();
+  await loadMine();
   // Entering a token backfills the box a pre-credential 401 left empty.
   await loadGraphs();
   if (selected) await select(selected);
@@ -523,6 +582,7 @@ whoami();
 loadRuns();
 loadGraphs();
 setInterval(loadRuns, 4000);
+setInterval(loadMine, 4000);
 </script>
 </body>
 </html>`;

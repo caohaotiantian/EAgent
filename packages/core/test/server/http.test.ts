@@ -1542,12 +1542,17 @@ test("TWO PRINCIPALS SHARING AN Idempotency-Key GET TWO RUNS, NOT ONE ANOTHER'S"
     const hers = await submit(r, { ...asAlice, "idempotency-key": "nightly" });
     const theirs = await submit(r, { ...asCi, "idempotency-key": "nightly" });
     assert.notEqual(hers["runId"], theirs["runId"], "svc:ci must not be handed u:alice's run");
-    assert.equal((await listAs(asAlice)).length, 2, "…and both submissions really happened");
+    // BOTH SUBMISSIONS REALLY HAPPENED, counted from the store rather than from one
+    // principal's list — because the list is scoped now, and asserting "alice sees 2" would
+    // be asserting the ABSENCE of the isolation this file's other tests exist to pin.
+    assert.equal((await r.h.store.listRuns()).length, 2, "…and both submissions really happened");
+    assert.equal((await listAs(asAlice)).length, 1, "each principal sees only its own");
+    assert.equal((await listAs(asCi)).length, 1);
 
     // The property the key exists for is untouched: the SAME principal retrying is one run.
     const retry = await submit(r, { ...asAlice, "idempotency-key": "nightly" });
     assert.equal(retry["runId"], hers["runId"]);
-    assert.equal((await listAs(asAlice)).length, 2, "a retry still creates nothing");
+    assert.equal((await listAs(asAlice)).length, 1, "a retry still creates nothing");
   } finally {
     await r.close();
   }
@@ -2149,38 +2154,185 @@ test("a deployment that cannot answer its own graphs is named at boot, by graph"
 // oversight, so that the day someone scopes runs to their submitter they have to come
 // here and say so.
 
-test("EVERY VALID CREDENTIAL IS A FULL OPERATOR CREDENTIAL — the limit, made executable", async () => {
-  // `auth` is admission only. A run submitted by one principal is readable, streamable
-  // and cancellable by every other principal the deployment configured, gate payloads
-  // included — those are redacted per the GRAPH's declared classification, never per
-  // viewer, so "everyone sees everything" is a statement about real data.
+test("A RUN IS THE SUBMITTER'S — the four #runs routes 404 for everybody else", async () => {
+  // This replaces `EVERY VALID CREDENTIAL IS A FULL OPERATOR CREDENTIAL`, which passed for
+  // the length of the project and whose own comment said the person who implemented scoping
+  // would rewrite it. It states the new boundary as precisely as the old one stated the
+  // absence, and it is deliberately about the FOUR run routes only — the gate routes are a
+  // separate rule with a separate test below, because conflating them is how the oversight
+  // workflow would break silently.
   //
-  // This test PASSES today and is here to fail the moment that changes silently. Whoever
-  // implements per-principal scoping rewrites it; whoever weakens it by accident does not
-  // get to do so quietly. See the module docstring in `http.ts` and D3.17.
+  // 404 AND NOT 403, everywhere. "Not yours" and "no such run" must be indistinguishable, or
+  // the refusal itself tells a stranger which run ids are real.
   const r = await rig({ identity: people() });
   try {
     const { runId } = await submit(r, { authorization: "Bearer alice-token" });
-    await settle(r, String(runId));
+    const id = String(runId);
+    await settle(r, id);
     const asLead = { authorization: "Bearer lead-token" };
 
-    assert.equal((await fetch(`${r.base}/runs/${String(runId)}`, { headers: asLead })).status, 200, "alice's run, read by the lead");
-    const listed = await json(await fetch(`${r.base}/runs`, { headers: asLead }));
-    assert.equal((listed["runs"] as unknown[]).length, 1, "and listed, unfiltered");
-
-    // The gate queue, with the payload the graph declared — the thing the redaction
-    // machinery exists for, and it is not scoped to the submitter either.
-    const gates = await json(await fetch(`${r.base}/runs/${String(runId)}/gates`, { headers: asLead }));
-    assert.equal((gates["gates"] as unknown[]).length, 1);
-
-    // …and cancelled. A read-only sharing story would at least be arguable; this is not.
-    const cancelled = await fetch(`${r.base}/runs/${String(runId)}/commands`, {
+    assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: asLead })).status, 404, "read");
+    assert.equal((await fetch(`${r.base}/runs/${id}/events`, { headers: asLead })).status, 404, "stream");
+    assert.equal(((await json(await fetch(`${r.base}/runs`, { headers: asLead })))["runs"] as unknown[]).length, 0, "list");
+    const cancelled = await fetch(`${r.base}/runs/${id}/commands`, {
       method: "POST",
       headers: { "content-type": "application/json", ...asLead },
       body: JSON.stringify({ kind: "cancel", reason: "not my run" }),
     });
-    assert.equal(cancelled.status, 200);
-    assert.equal((await json(cancelled))["status"], "cancelled");
+    assert.equal(cancelled.status, 404, "command");
+
+    // AN UNKNOWN RUN ANSWERS IDENTICALLY, which is what makes the 404 a refusal rather than
+    // a disclosure. `/events` is the one that had no existence check at all — it read a head
+    // of 0 and wrote a 200 — so scoping it without this would have built a clean oracle.
+    assert.equal((await fetch(`${r.base}/runs/r_nope/events`, { headers: asLead })).status, 404);
+    assert.equal((await fetch(`${r.base}/runs/r_nope`, { headers: asLead })).status, 404);
+
+    // And the submitter still reaches all four.
+    const asAlice = { authorization: "Bearer alice-token" };
+    assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: asAlice })).status, 200);
+    assert.equal(((await json(await fetch(`${r.base}/runs`, { headers: asAlice })))["runs"] as unknown[]).length, 1);
+  } finally {
+    await r.close();
+  }
+});
+
+test("`operator` IS REFUSED WHEN MALFORMED AT ALL THREE DOORS, not dropped", async () => {
+  // The rule `kind` already follows, one field over, and the argument is one step stronger
+  // here. Dropping a bad `operator` fails CLOSED — the default is `false` — which is exactly
+  // what makes the refusal easy to argue away and wrong anyway: a deployment whose config
+  // says `"operator": "true"` would silently have NO operators and would discover it when
+  // nobody could see anything. A field that grants must not be decided by whether a typo
+  // happened to be truthy.
+  const h = harness();
+
+  // Door 1 — the constructor an embedder calls.
+  assert.throws(
+    () => new BearerTokenIdentity({ subjects: [{ token: "t", subject: "u:a", operator: "yes" as unknown as boolean }] }),
+    /operator .*which must be true or false|operator .*neither true nor false/,
+  );
+
+  // Door 2 — the injected seam. A source is the deployment's own code, so it may SET this
+  // field; what it may not do is return a value nobody can read.
+  const shifty: IdentitySource = {
+    name: "sso",
+    identify: () => ({ kind: "human", subject: "u:a", method: "sso", operator: 1 } as unknown as AuthContext),
+  };
+  const r = await rig({ identity: shifty });
+  try {
+    const res = await fetch(`${r.base}/runs`, { headers: { authorization: "Bearer anything" } });
+    assert.equal(res.status, 500, "the deployment's source is what is broken; the caller cannot fix it");
+    assert.equal(((await json(res))["error"] as { code: string }).code, CODES.E_CONFIG_INVALID);
+  } finally {
+    await r.close();
+  }
+  void h;
+});
+
+test("THE SHARED TOKEN IS AN OPERATOR ONLY WHEN IT IS THE SOLE CREDENTIAL", async () => {
+  // `#principal` tries the identity source first and falls back to the shared token, and this
+  // file documents the mixed arrangement as supported — Alice her own token, the CI job the
+  // shared one. Granting the shared token operator unconditionally would therefore hand every
+  // service in such a deployment a full read of every human's runs and gate payloads, through
+  // the fallback rather than through anything anyone configured.
+  //
+  // Alone, it grants everything and changes nothing: every caller is the same principal, owns
+  // every run, and scoping is vacuous — which is what keeps the single-token deployment
+  // byte-for-byte what it was.
+  const sole = await rig({ token: "s3cret" });
+  try {
+    const { runId } = await submit(sole, { authorization: "Bearer s3cret" });
+    assert.equal((await fetch(`${sole.base}/runs/${String(runId)}`, { headers: { authorization: "Bearer s3cret" } })).status, 200);
+  } finally {
+    await sole.close();
+  }
+
+  const mixed = await rig({ token: "s3cret", identity: people() });
+  try {
+    const { runId } = await submit(mixed, { authorization: "Bearer alice-token" });
+    const asShared = { authorization: "Bearer s3cret" };
+    assert.equal((await fetch(`${mixed.base}/runs/${String(runId)}`, { headers: asShared })).status, 404, "not an operator here");
+    assert.equal(((await json(await fetch(`${mixed.base}/runs`, { headers: asShared })))["runs"] as unknown[]).length, 0);
+  } finally {
+    await mixed.close();
+  }
+});
+
+test("AN OPERATOR CREDENTIAL READS EVERYTHING — the escape, made executable too", async () => {
+  const r = await rig({
+    identity: new BearerTokenIdentity({
+      subjects: [
+        { token: "alice-token", subject: "u:alice" },
+        { token: "root-token", subject: "u:root", operator: true },
+      ],
+    }),
+  });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const id = String(runId);
+    await settle(r, id);
+    const asRoot = { authorization: "Bearer root-token" };
+
+    assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: asRoot })).status, 200);
+    assert.equal(((await json(await fetch(`${r.base}/runs`, { headers: asRoot })))["runs"] as unknown[]).length, 1);
+    assert.equal((await fetch(`${r.base}/runs/${id}/gates`, { headers: asRoot })).status, 200);
+  } finally {
+    await r.close();
+  }
+});
+
+test("A NAMED APPROVER REACHES THE GATE ON A RUN THEY DO NOT OWN — deliberately, and no further", async () => {
+  // THE HOLE IN A3, AND IT IS LOAD-BEARING. Under separation of duties the only principal
+  // allowed to decide is by construction NOT the submitter, so a rule that scoped the gate
+  // routes by owner would make every gate it guards unanswerable — supervision that looks
+  // configured and cannot be exercised.
+  //
+  // What the approver does NOT get is the run: `GET /runs/:id` and the command route stay
+  // closed to them. Being named on one question is not a key to somebody's work.
+  const r = await rig({ identity: people(), approvers: ["u:security-lead"] });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const id = String(runId);
+    await settle(r, id);
+    const asLead = { authorization: "Bearer lead-token" };
+
+    const gates = await fetch(`${r.base}/runs/${id}/gates`, { headers: asLead });
+    assert.equal(gates.status, 200, "the approver can see the question addressed to them");
+    assert.equal(((await json(gates))["gates"] as unknown[]).length, 1);
+
+    // AND THE CROSS-RUN QUEUE IS HOW THEY FIND IT, because `GET /runs` will not show them a
+    // run they do not own — which is the whole reason this route exists.
+    const queue = await json(await fetch(`${r.base}/gates`, { headers: asLead }));
+    assert.equal((queue["gates"] as unknown[]).length, 1, "their question, on somebody else's run");
+
+    // Not the run, and not the ability to stop it.
+    assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: asLead })).status, 404);
+    const cancelled = await fetch(`${r.base}/runs/${id}/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...asLead },
+      body: JSON.stringify({ kind: "cancel", reason: "no" }),
+    });
+    assert.equal(cancelled.status, 404, "an approver may answer a question, not cancel the work behind it");
+  } finally {
+    await r.close();
+  }
+});
+
+test("A STRANGER'S QUEUE IS EMPTY, and an unrestricted gate does not publish a run to everyone", async () => {
+  // `GET /gates` returns questions ADDRESSED to the caller. A gate that names nobody is
+  // answerable by whoever reaches it — but putting it in every principal's queue would
+  // publish its rendered payload, which carries the node's readable channel values, to the
+  // whole deployment. That is the disclosure A3 exists to close, arrived at through the one
+  // route added to keep A3 from breaking oversight.
+  const r = await rig({ identity: people() });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    await settle(r, String(runId));
+
+    const mine = await json(await fetch(`${r.base}/gates`, { headers: { authorization: "Bearer alice-token" } }));
+    assert.equal((mine["gates"] as unknown[]).length, 1, "the submitter sees their own run's open gate");
+
+    const theirs = await json(await fetch(`${r.base}/gates`, { headers: { authorization: "Bearer lead-token" } }));
+    assert.deepEqual(theirs["gates"], [], "and a stranger sees nothing, though the gate names nobody");
   } finally {
     await r.close();
   }
@@ -2199,7 +2351,14 @@ async function boot(opts: ControlPlaneOptions): Promise<{ lines: string[]; plane
   }
 }
 
-const SHARED_RIGHTS = /FULL OPERATOR CREDENTIAL/;
+/**
+ * The boot line about who can see whose runs.
+ *
+ * It no longer says "every credential is a full operator credential" — that premise died with
+ * A3 — so the matcher is the SUBJECT of the warning rather than its old wording: any line
+ * about operator credentials or about runs being scoped.
+ */
+const OWNERSHIP_LINE = /OPERATOR CREDENTIAL|SCOPED TO THE PRINCIPAL/;
 
 test("A DEPLOYMENT WITH MORE THAN ONE PRINCIPAL IS TOLD AT BOOT THAT THEY ARE NOT ISOLATED", async () => {
   // Configuring per-subject identities IMPLIES isolation to anyone who does it, and an
@@ -2234,7 +2393,7 @@ test("A DEPLOYMENT WITH MORE THAN ONE PRINCIPAL IS TOLD AT BOOT THAT THEY ARE NO
     const booted = await boot(opts);
     try {
       assert.equal(booted.plane.distinctPrincipals, principals, what);
-      assert.equal(booted.lines.some((l) => SHARED_RIGHTS.test(l)), warns, `${what}: warned?`);
+      assert.equal(booted.lines.some((l) => OWNERSHIP_LINE.test(l)), warns, `${what}: warned?`);
     } finally {
       await booted.close();
     }
@@ -2284,17 +2443,60 @@ test("AN OPEN PLANE IS UNREACHABLE BY TYPO, and /health, /whoami and the boot lo
   }
 });
 
-test("the boot warning says what is shared, not merely that something is", async () => {
+test("THE BOOT WARNING NAMES WHAT IS TRUE NOW, and a deployment with no operator is told so", async () => {
+  // The old line said every credential was a full operator credential. That is false since
+  // runs became scoped, and a false warning is worse than none — it is the one an operator
+  // learns to skip. What replaces it has to earn its place three different ways.
   const h = harness();
-  const booted = await boot({ engine: h.engine, store: h.store, graphs: {}, identity: people(), token: "s3cret" });
+
+  // (1) OPERATORS EXIST: say how many, and what they can reach.
+  const withOps = await boot({
+    engine: h.engine,
+    store: h.store,
+    graphs: {},
+    identity: new BearerTokenIdentity({
+      subjects: [
+        { token: "a", subject: "u:alice" },
+        { token: "b", subject: "u:bob" },
+        { token: "op", subject: "u:root", operator: true },
+      ],
+    }),
+  });
   try {
-    const line = booted.lines.find((l) => SHARED_RIGHTS.test(l));
+    const line = withOps.lines.find((l) => OWNERSHIP_LINE.test(l));
     assert.ok(line, "no warning at all");
-    assert.match(line, /4 principals/, "an operator can tell whether this is their deployment");
-    assert.match(line, /read, stream and cancel/, "the three verbs, so the risk is not left as an inference");
-    assert.match(line, /D3\.17/, "and where the limit is written down");
+    assert.match(line, /1 OPERATOR CREDENTIAL\b/, "how many, so an operator can tell whether this is their deployment");
+    assert.match(line, /reads, streams and cancels EVERY run/, "the three verbs, so the risk is not left as an inference");
   } finally {
-    await booted.close();
+    await withOps.close();
+  }
+
+  // (2) NO OPERATOR AT ALL is a lockout the plane can detect and its operator cannot: nobody
+  // can see anyone else's run, ever, including the person debugging the deployment.
+  const noOps = await boot({ engine: h.engine, store: h.store, graphs: {}, identity: people() });
+  try {
+    const line = noOps.lines.find((l) => OWNERSHIP_LINE.test(l));
+    assert.ok(line, "silence here is the failure mode: a locked-out deployment diagnosed by accident");
+    assert.match(line, /NO OPERATOR CREDENTIAL IS CONFIGURED/);
+    assert.match(line, /"operator": true/, "and the fix, spelled the way the identity file spells it");
+  } finally {
+    await noOps.close();
+  }
+
+  // (3) AN INJECTED SOURCE NEED NOT DECLARE A COUNT, and inventing one would repeat exactly
+  // the defect that retired the old warning. It says the number is unknown instead.
+  const opaque = await boot({
+    engine: h.engine,
+    store: h.store,
+    graphs: {},
+    identity: { name: "sso", principals: 5, identify: () => undefined },
+  });
+  try {
+    const line = opaque.lines.find((l) => OWNERSHIP_LINE.test(l));
+    assert.ok(line);
+    assert.match(line, /cannot tell how many/, "unknown is stated, never guessed");
+  } finally {
+    await opaque.close();
   }
 });
 
@@ -2340,7 +2542,11 @@ const services = (): IdentitySource =>
     name: "service-tokens",
     subjects: [
       { token: "deployer-token", subject: "svc:deployer", kind: "service" },
-      { token: "pager-token", subject: "svc:pager", kind: "service" },
+      // AN OPERATOR, because the scenario needs one: the pager answers gates on runs the
+      // deployer submitted, and runs are scoped to their submitter now. This is what the
+      // escape is for — a credential whose job is the whole journal — and declaring it here
+      // keeps the test about the idempotency slot rather than about access.
+      { token: "pager-token", subject: "svc:pager", kind: "service", operator: true },
     ],
   });
 

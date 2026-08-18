@@ -30,6 +30,21 @@ function started(): NewEvent {
   return { type: "run.started", payload: { posture: "on" }, actor: SYSTEM_ACTOR("test") };
 }
 
+function submitted(subject?: string): NewEvent {
+  return {
+    type: "run.submitted",
+    payload: {
+      workflow: "w",
+      graphHash: "h",
+      inputs: {},
+      idempotencyKey: "i",
+      configDigest: "c",
+      ...(subject === undefined ? {} : { submittedBy: { kind: "human" as const, subject, method: "test" } }),
+    },
+    actor: SYSTEM_ACTOR("control-plane"),
+  };
+}
+
 function progress(chunk: string): NewEvent {
   return { type: "task.progress", payload: { chunk }, actor: SYSTEM_ACTOR("test"), taskId: TASK };
 }
@@ -309,6 +324,55 @@ export function runConformance(factory: StoreFactory): void {
       assert.equal(mine.headSeq, 2);
       assert.equal(mine.firstTs, 1000);
       assert.equal(mine.lastTs, 2000);
+    });
+  });
+
+  test(`[${factory.name}] listRuns reports the owner, and filters on it BEFORE the limit`, async () => {
+    await withStore(async (s) => {
+      const hers = "01JRUN2222222222222222222" as RunId;
+      const nobodys = "01JRUN3333333333333333333" as RunId;
+      await s.append({ runId: RUN, expectedSeq: 0, events: [submitted("u:alice")] });
+      await s.append({ runId: hers, expectedSeq: 0, events: [submitted("u:bob")] });
+      await s.append({ runId: nobodys, expectedSeq: 0, events: [submitted()] });
+
+      const all = await s.listRuns();
+      assert.deepEqual(
+        all.map((r) => r.submittedBy).sort(),
+        ["u:alice", "u:bob", undefined],
+        "the subject alone reaches a summary — not `kind`, not `method`, which describe the deployment",
+      );
+
+      // MINE PLUS NOBODY'S. The permissive half is why the filter is one field: a run with no
+      // recorded principal stays readable by everyone, so a journal written before ownership
+      // existed is still reachable after an upgrade.
+      const scoped = await s.listRuns(100, { submittedByOrUnowned: "u:alice" });
+      assert.deepEqual(new Set(scoped.map((r) => r.runId)), new Set([RUN, nobodys]));
+
+      // BEFORE the limit, not after. Filtering the newest N would answer `[]` here — both of
+      // bob's-and-nobody's ids sort above alice's — and the count that survived would measure
+      // how often OTHER principals submit.
+      const oneOfMine = await s.listRuns(2, { submittedByOrUnowned: "u:alice" });
+      assert.equal(oneOfMine.length, 2, "two runs match; the limit cuts the matches, not the candidates");
+    });
+  });
+
+  test(`[${factory.name}] the owner is established once and no later append rewrites it`, async () => {
+    await withStore(async (s) => {
+      await s.append({ runId: RUN, expectedSeq: 0, events: [submitted("u:alice")] });
+      await s.append({ runId: RUN, expectedSeq: 1, events: [submitted("u:mallory")] });
+      const [only] = await s.listRuns(100, { submittedByOrUnowned: "u:alice" });
+      assert.equal(only?.submittedBy, "u:alice", "a second run.submitted cannot move a run between owners");
+    });
+  });
+
+  test(`[${factory.name}] a run whose FIRST submission named nobody stays unowned`, async () => {
+    await withStore(async (s) => {
+      await s.append({ runId: RUN, expectedSeq: 0, events: [submitted()] });
+      await s.append({ runId: RUN, expectedSeq: 1, events: [submitted("u:mallory")] });
+      // The permissive case is the one that must not be adoptable: it is what every
+      // pre-upgrade journal looks like, and the fold makes the identical decision.
+      const [only] = await s.listRuns();
+      assert.equal(only?.submittedBy, undefined);
     });
   });
 

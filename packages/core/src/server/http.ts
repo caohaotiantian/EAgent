@@ -50,38 +50,61 @@
  * and decides it from the shared token instead. Nor does it read anything OFF the source
  * at request time: the label it discloses is captured once, at construction.
  *
- * ## THE LIMIT: authentication is not authorization
+ * ## WHAT `auth` DECIDES, AND THE ONE GAP LEFT IN IT
  *
- * **Every valid credential is a full operator credential.** `auth` decides WHO you are
- * and whether you get in at all; it does not decide WHAT you may touch. A run is not
- * scoped to the principal that submitted it, so any principal this deployment can
- * authenticate may read, stream and cancel any other principal's run — `GET /runs`,
- * `GET /runs/:id`, `GET /runs/:id/events`, `POST /runs/:id/commands`. Gate payloads come
- * with that: `GET /runs/:id/gates` returns them redacted per the GRAPH's declared
- * classification, never per viewer, so "everyone sees everything" is a statement about
- * real data and not about a placeholder.
+ * Four things: admission (401 before routing, so an unauthenticated caller cannot discover
+ * which routes exist); who a gate decision is recorded as and whether the approvers list
+ * allows it; which idempotency slot a write lands in; and WHICH RUNS THE CALLER REACHES.
  *
- * What `auth` DOES decide is four things and stops: admission (401 before routing), who
- * a gate decision is recorded as and whether the approvers list allows it, which
- * idempotency slot a write lands in, and — since A4 — who a run is RECORDED as having been
- * submitted by and who a cancel or rewind is recorded as. Every one of those is about the
- * CALLER; none of them is yet about the run. The fourth is what the fix below needs and is
- * deliberately not wired to any access decision here: recording an owner and enforcing one
- * are separate changes, and this file still enforces nothing.
+ * That fourth one used to be the limit this section was named for — every valid credential
+ * was a full operator credential — and it is closed. A run is owned by the principal that
+ * submitted it, and two predicates govern the routes:
  *
- * This is a DECISION, not an omission, and it is a v1 decision. D3.17 gives every method
- * an `auth` parameter precisely so it CAN scope access, and this implementation does not.
- * Scoping needs a durable owner — the submitting principal
- * recorded on `run.submitted`, folded into the `runs` read model, and an operator role or
- * explicit grant to escape it — and durable state is the engine's to write, not this
- * file's. Half of it, an in-process ownership map, would be worse than none: it would
- * evaporate on restart and read as isolation while providing none.
+ *   - `ownsRun` — owner, unowned, or operator — for `GET /runs`, `GET /runs/:id`,
+ *     `GET /runs/:id/events` and `POST /runs/:id/commands`;
+ *   - `mayReachGates` — that, OR named on one of this run's gates — for the two routes that
+ *     carry gates, and only those.
  *
- * What stops the limit from being silent: it is stated here, stated in D3.17, pinned by a
- * test that exercises one principal reading another's run, and SHOUTED AT BOOT whenever
- * more than one principal is configured — see `ControlPlane.distinctPrincipals`. The
- * warning exists because configuring per-subject identities implies isolation to anyone
- * who does it, and a false implication is worse than an absence.
+ * **THE GAP BETWEEN THEM IS THE POINT.** Under `approval.separationOfDuties` the only
+ * principal permitted to decide is by construction NOT the submitter, so scoping the gate
+ * routes by owner would make every gate they guard unanswerable — supervision that looks
+ * configured and cannot be exercised. The converse holds too: being named an approver is a
+ * grant to answer one question, not a key to somebody's run, so it widens neither `GET
+ * /runs/:id` nor the command route.
+ *
+ * **404, NEVER 403.** "Not yours" and "no such run" must be indistinguishable or the
+ * refusal tells a stranger which ids are real. `GET /runs/:id/events` had no existence
+ * check at all — it read a head of 0 and wrote a 200 — so scoping it without adding one
+ * would have built a clean oracle rather than closing one.
+ *
+ * **A RUN NOBODY OWNS IS READABLE BY EVERY CREDENTIAL**, and "nobody" includes a SYNTHETIC
+ * owner: `(shared-token)` and `(unidentified)` say what this perimeter concluded rather than
+ * naming a person. That set is every journal written before ownership existed and every run
+ * started without a principal, so an upgrade loses nothing and the permissive set only
+ * shrinks. `ownedByNobody` is the one place that rule is spelled.
+ *
+ * **THE ESCAPE IS `AuthContext.operator`**, declared on an identity entry and validated as a
+ * field that DECIDES — refused when malformed at all three doors rather than dropped,
+ * because whether a deployment has an operator must not depend on whether a typo was truthy.
+ * The shared token is an operator only when it is the SOLE credential: alone, every caller is
+ * that principal and scoping is vacuous either way; alongside an identity source it is one
+ * principal among several, and `#principal` falls back to it, so granting it unconditionally
+ * would hand every service a full read of every human's runs.
+ *
+ * **AND `GET /gates` EXISTS BECAUSE OF ALL OF THIS.** `GET /runs` answers from the owner
+ * column with no fold, which is what keeps a polling console cheap — and it means an approver
+ * who is not the submitter cannot find the run their question lives on. The cross-run queue
+ * returns the questions ADDRESSED to the caller, with the rendered payload, since `GET
+ * /runs/:id` is closed to them and this is therefore the only place the question can reach
+ * the person being asked. A stranger's queue excludes an unrestricted gate: answerable by
+ * whoever reaches it must not mean published to everyone.
+ *
+ * ## WHAT IS STILL NOT SCOPED
+ *
+ * Gate payloads reaching a caller admitted by `mayReachGates` are redacted per the GRAPH's
+ * declared classification, never per viewer. A named approver sees the questions addressed
+ * to them and the ones addressed to nobody, filtered per gate — but within a gate the
+ * redaction is the graph's, so two approvers on one gate see the same bytes.
  *
  * ## AND THE CALLER MAY BE A BROWSER SOMEBODY ELSE IS DRIVING
  *
@@ -126,7 +149,7 @@ import type { RunGraph } from "../graph/spec.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
 import { gateDecisionOf, isSyntheticSubject, type GateDecision } from "../vocab.ts";
-import { gateOf } from "../run/projection.ts";
+import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
 import { redactPayload } from "../security/redact.ts";
 import { layoutGraph } from "./layout.ts";
@@ -220,6 +243,20 @@ export interface AuthContext {
   readonly via?: HumanActor["via"];
   readonly mfa?: boolean;
   readonly onBehalfOf?: string;
+  /**
+   * Whether this credential may reach runs it does not own.
+   *
+   * THE ONE FIELD HERE THAT GRANTS. `subject` decides one thing — whether a gate's approvers
+   * list admits this caller — and everything else on this record describes. This one widens
+   * READ scope across the whole journal, so it joins `subject` and `kind` in the class of
+   * fields `checkedAuth` REFUSES when malformed rather than dropping.
+   *
+   * An injected `IdentitySource` may set it. That is a deliberate trust position, not an
+   * oversight: the source is the deployment's own code and it already supplies `subject`,
+   * which decides whether a person may approve an irreversible action — a strictly larger
+   * grant than reading. What a source still may not do is claim a synthetic subject.
+   */
+  readonly operator?: boolean;
 }
 
 /**
@@ -272,6 +309,22 @@ export interface IdentitySource {
    * fires there is a warning operators learn to skip everywhere.
    */
   readonly principals?: number;
+  /**
+   * How many of those principals hold an OPERATOR credential, if it knows.
+   *
+   * Advisory in exactly the way `principals` is, and for the same one consumer: the boot
+   * warning. An operator credential reads every run in the journal, so a deployment is told
+   * how many of those it has issued — and, when it has issued NONE while configuring several
+   * principals, told that too, because "nobody can see anyone else's run, ever, including the
+   * person debugging this" is a configuration the plane can detect and its operator cannot.
+   *
+   * A source that cannot say leaves it undefined, and the warning says the count is UNKNOWN
+   * rather than asserting one. That is the honest reading and it is deliberately not the
+   * loud-by-default treatment `principals` gets: an undeclared `principals` is assumed to be
+   * many because a source exists to tell callers apart, whereas assuming many OPERATORS would
+   * shout at every deployment that implements this interface.
+   */
+  readonly operators?: number;
   identify(req: IdentityRequest): Promise<AuthContext | undefined> | AuthContext | undefined;
 }
 
@@ -282,6 +335,14 @@ export interface BearerSubject {
   readonly kind?: AuthContext["kind"];
   readonly via?: HumanActor["via"];
   readonly mfa?: boolean;
+  /**
+   * Whether this credential may read every run, not only its own.
+   *
+   * Default `false`, and the default is the SAFE one — which is why a malformed value is
+   * refused rather than dropped even though dropping would also fail closed: a field that
+   * GRANTS must never be decided by whether a typo happened to be truthy.
+   */
+  readonly operator?: boolean;
 }
 
 /**
@@ -306,6 +367,7 @@ export class BearerTokenIdentity implements IdentitySource {
   readonly name: string;
   /** Distinct SUBJECTS, not tokens: two credentials for one person are one principal. */
   readonly principals: number;
+  readonly operators: number;
   readonly #bySha = new Map<string, AuthContext>();
 
   constructor(opts: { readonly subjects: readonly BearerSubject[]; readonly name?: string }) {
@@ -321,6 +383,7 @@ export class BearerTokenIdentity implements IdentitySource {
       const kind = s.kind;
       const via = s.via;
       const mfa = s.mfa;
+      const operator = s.operator;
       if (token === "") throw err.validation(CODES.E_CONFIG_INVALID, `identity source "${this.name}": subject "${subject}" has an empty token`);
       if (subject === "") throw err.validation(CODES.E_CONFIG_INVALID, `identity source "${this.name}": a token maps to an empty subject`);
       // THE THIRD REFUSED CONFIGURATION, and it is a fail-OPEN rather than an ambiguity.
@@ -344,6 +407,19 @@ export class BearerTokenIdentity implements IdentitySource {
             `naming approvers — so a mistyped "service" would silently become a person who may approve.`,
         );
       }
+      // REFUSED HERE TOO, by the paragraph above's own rule. This field grants read access to
+      // every run in the journal, and `readIdentities` parses it out of a JSON file — where a
+      // `"operator": "true"` is a plausible typo. Dropping a bad value would fail closed, and
+      // that is precisely why the refusal is easy to argue away and still wrong: a deployment
+      // would silently have no operators and learn it by finding that nobody can see anything.
+      if (operator !== undefined && typeof operator !== "boolean") {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `identity source "${this.name}": subject "${subject}" declares operator ${JSON.stringify(operator)}, which is neither true nor ` +
+            `false. It is not dropped, because it grants read access to every run in the journal and a field that grants must not be ` +
+            `decided by whether a typo was truthy.`,
+        );
+      }
       const key = sha256(token);
       const clash = this.#bySha.get(key);
       if (clash !== undefined && clash.subject !== subject) {
@@ -359,9 +435,14 @@ export class BearerTokenIdentity implements IdentitySource {
         method: this.name,
         ...(via === undefined ? {} : { via }),
         ...(mfa === undefined ? {} : { mfa }),
+        ...(operator === true ? { operator: true } : {}),
       });
     }
     this.principals = subjects.size;
+    // Countable here, which is why the advisory field exists: this source knows exactly how
+    // many operator credentials it issued, and the boot warning can say so instead of saying
+    // "unknown" the way it must for an injected source.
+    this.operators = opts.subjects.filter((x) => x.operator === true).length;
   }
 
   identify(req: IdentityRequest): AuthContext | undefined {
@@ -507,6 +588,20 @@ function checkedAuth(who: unknown, source: string): AuthContext {
   // read once to test against the closed vocabulary and once to use. `who` is whatever an
   // injected source returned: a getter or a Proxy answers the two reads differently, so
   // the check passed on `console` while `telepathy` went into the journal.
+  // A FIELD THAT GRANTS JOINS THE DECIDING CLASS. `operator` widens read scope over every
+  // run in the journal, so a value that is neither `true`, `false` nor absent is refused the
+  // way a third `kind` is — not dropped. Dropping would fail closed here, which is exactly
+  // what makes the refusal easy to argue away and wrong anyway: a deployment whose source
+  // returns `"true"` would silently have no operators, and would find out by discovering
+  // nobody can see anything.
+  const operator: unknown = readField("operator");
+  if (operator !== undefined && typeof operator !== "boolean") {
+    refuse(
+      `operator of type ${operator === null ? "null" : typeof operator}, which is neither true nor false. ` +
+        `It grants read access to every run in the journal, so it is refused rather than dropped`,
+    );
+  }
+
   const method: unknown = readField("method");
   const via: unknown = readField("via");
   const mfa: unknown = readField("mfa");
@@ -514,6 +609,7 @@ function checkedAuth(who: unknown, source: string): AuthContext {
   return {
     kind,
     subject,
+    ...(operator === true ? { operator: true } : {}),
     method: typeof method === "string" && method !== "" ? method.slice(0, MAX_IDENTITY_FIELD) : source,
     ...(isVia(via) ? { via } : {}),
     ...(typeof mfa === "boolean" ? { mfa } : {}),
@@ -546,6 +642,57 @@ function mustAuth(auth: AuthContext | undefined): AuthContext {
     throw err.internal(CODES.E_INTERNAL, "a guarded route was reached with no principal; #serve should have answered 401");
   }
   return auth;
+}
+
+/**
+ * Whether a recorded owner names ANYBODY.
+ *
+ * Two ways a run has no owner and they must answer the same: nothing was recorded (a journal
+ * written before ownership existed, an embedder with no principal to name, `loom run` without
+ * `--as`), or what was recorded is a MARKER. The perimeter writes `(shared-token)` and
+ * `(unidentified)` to say what it concluded rather than to name a person, so a run "owned" by
+ * one is owned by nobody — and if the two answered differently, configuring identities on a
+ * plane that had been open would take every historical run out of the permissive set at once
+ * and read, to its operator, exactly like a wipe.
+ */
+function ownedByNobody(owner: string | undefined): boolean {
+  return owner === undefined || isSyntheticSubject(owner) || SYNTHETIC_SUBJECTS.includes(owner);
+}
+
+/**
+ * Whether this credential may reach THE RUN — its projection, its stream, its commands.
+ *
+ * Owner, unowned, or operator, and nothing else. Being named an approver on one of the run's
+ * gates deliberately does NOT appear here: that is a grant to answer one question, not a key
+ * to somebody's work, and the question is rendered server-side precisely so the approver needs
+ * no other context to answer it. See `mayReachGates`, which is the wider rule and is confined
+ * to the two routes that carry gates.
+ */
+function ownsRun(p: RunProjection, auth: AuthContext): boolean {
+  if (auth.operator === true) return true;
+  return ownedByNobody(p.submittedBy?.subject) || p.submittedBy?.subject === auth.subject;
+}
+
+/**
+ * Whether this credential may reach THE RUN'S GATES.
+ *
+ * `ownsRun`, OR named on one of them — and that second term is what keeps ownership from
+ * breaking the thing ownership exists to protect. Under separation of duties the only
+ * principal allowed to decide is by construction not the submitter, so a rule without it
+ * would make every gate it guards unanswerable: supervision that looks configured and cannot
+ * be exercised.
+ *
+ * NAMED, never "not excluded". A gate that names nobody is answerable by whoever reaches it,
+ * and the dominant gate class — a posture-floor gate on a tool node — names nobody by
+ * construction, so reading that as "visible to everybody" would hand every principal the
+ * channel values in that gate's rendered payload. The test is therefore an explicit `some`
+ * over gates that name the caller: a run with NO gates admits nobody through this term, where
+ * an `every`-shaped predicate would be vacuously true and turn the route into a run-existence
+ * oracle.
+ */
+function mayReachGates(p: RunProjection, auth: AuthContext): boolean {
+  if (ownsRun(p, auth)) return true;
+  return Object.values(p.gates).some((g) => (g.approvers ?? []).includes(auth.subject));
 }
 
 function principalOf(auth: AuthContext): SubmittedBy {
@@ -1191,6 +1338,13 @@ export class ControlPlane {
    */
   readonly distinctPrincipals: number;
   /**
+   * How many configured credentials may read every run, or `undefined` when unknowable.
+   *
+   * Advisory, like `distinctPrincipals`, and read by the boot warning alone. It grants
+   * nothing: what grants is `AuthContext.operator`, per request.
+   */
+  readonly operatorCredentials: number | undefined;
+  /**
    * `allowedHosts` as configured, captured like every other option. `undefined` is "derive
    * it from the bind"; an empty set is "`*`" — the check turned off on purpose.
    */
@@ -1324,6 +1478,19 @@ export class ControlPlane {
     // for a source that can authenticate nobody and no shared token, which is a plane no
     // caller can get into. Zero is the honest count there, and it warns about nothing.
     this.distinctPrincipals = this.openToEveryCaller ? 1 : (token === undefined ? 0 : 1) + fromSource;
+    // HOW MANY CREDENTIALS READ EVERYTHING, or `undefined` for "this plane cannot tell".
+    //
+    // `undefined` is a THIRD answer and not a zero. An injected `IdentitySource` need not
+    // declare `operators`, and asserting a count it did not give would be the same class of
+    // falsehood the warning below exists to prevent — so the warning says the number is
+    // unknown instead. A shared token that is the SOLE credential contributes one, because
+    // `#principal` grants it operator by construction; alongside an identity source it
+    // contributes none, and neither does an open plane, where scoping is vacuous anyway.
+    const sourceOperators = opts.identity === undefined ? 0 : opts.identity.operators;
+    this.operatorCredentials =
+      this.openToEveryCaller || sourceOperators === undefined
+        ? undefined
+        : sourceOperators + (token !== undefined && opts.identity === undefined ? 1 : 0);
     // EVERY NAME BELOW IS A FIELD OR A LOCAL, and `logFor` is why that matters rather than
     // being tidiness. It is a closure the constructor builds and `GateCallbackRouter` calls
     // PER REQUEST, from the unauthenticated callback route, to journal a refusal — so
@@ -1780,8 +1947,26 @@ export class ControlPlane {
       if (who !== undefined) return checkedAuth(who, this.#identityName ?? "(unnamed)");
     }
     if (this.#token !== undefined) {
-      return this.#sharedToken(req) ? { kind: "service", subject: SHARED_TOKEN_SUBJECT, method: "shared-token" } : undefined;
+      if (!this.#sharedToken(req)) return undefined;
+      // AN OPERATOR ONLY WHEN IT IS THE SOLE CREDENTIAL.
+      //
+      // The shared token names the deployment's own key rather than a person, so on a plane
+      // that has only it, every caller is the same principal, owns every run, and scoping is
+      // vacuous — declaring it an operator changes nothing and keeps the single-token
+      // deployment byte-for-byte what it was.
+      //
+      // A MIXED plane is the case this condition exists for, and `#principal`'s own ordering
+      // is why: the identity source is tried first and this is the FALLBACK, so the arrangement
+      // this file documents as supported — Alice her own token, the CI job the shared one —
+      // would otherwise hand every service in the deployment an operator credential over every
+      // human's runs and gate payloads. There the shared token is one principal among several,
+      // and a deployment that wants an operator says so on an identity entry.
+      const sole = source === undefined;
+      return { kind: "service", subject: SHARED_TOKEN_SUBJECT, method: "shared-token", ...(sole ? { operator: true } : {}) };
     }
+    // An open plane authenticates nobody, so every caller presents this same marker, owns
+    // every run it submits, and matches every run any other caller submitted. Scoping is
+    // vacuous by construction and no operator grant is needed to make it so.
     return this.openToEveryCaller ? { kind: "service", subject: UNIDENTIFIED_SUBJECT, method: "open" } : undefined;
   }
 
@@ -2277,26 +2462,95 @@ export class ControlPlane {
         },
       },
 
-      // THE FOUR UNSCOPED ROUTES. Each takes `auth` for admission and none of them for
-      // access: every principal sees and commands every run. Stated once here rather than
-      // four times, and in full in the module docstring under "THE LIMIT" — the one place
-      // to change when a run learns who submitted it.
+      // THE SCOPED ROUTES. Each takes `auth` for admission AND for access, and the two
+      // predicates differ on purpose — see `ownsRun` and `mayReachGates`.
+      {
+        method: "GET",
+        pattern: /^\/gates$/,
+        /**
+         * THE APPROVER'S ENTRY POINT, and the route that stops ownership from breaking the
+         * thing ownership exists to protect.
+         *
+         * `GET /runs` answers from the owner column with no fold, which is what keeps a
+         * polling console cheap — and it means an approver who is not the submitter cannot
+         * find the run their question lives on. Under separation of duties that approver is
+         * by construction NOT the submitter, so without this route the oversight workflow
+         * would be reachable only by `curl` against an id nobody had told them.
+         *
+         * WHAT IT RETURNS is the questions addressed to this caller, across runs: gates
+         * naming them, every open gate on runs they own, and everything for an operator. An
+         * unrestricted gate on a stranger's run is deliberately NOT here — it is answerable
+         * by whoever reaches it, and putting it in every principal's queue would publish its
+         * rendered payload, which carries the node's channel values.
+         *
+         * THE COST IS A FOLD PER CANDIDATE RUN, bounded by `limit`, which is the same shape
+         * and the same bound `GateSweeper` already pays on a timer. It is not free and it is
+         * not hidden: a caller that wants one run's queue should ask for that run.
+         */
+        handle: async ({ res, url, auth }) => {
+          const who = mustAuth(auth);
+          const limit = pageLimit(url.searchParams.get("limit"));
+          const out: unknown[] = [];
+          for (const summary of await store.listRuns(limit)) {
+            const p = await engine.projection(summary.runId);
+            if (p === undefined) continue;
+            const mine = ownsRun(p, who);
+            // A stranger's queue holds ONLY the questions naming them. An unrestricted gate is
+            // answerable by whoever reaches it, and putting it in everyone's queue would
+            // publish its rendered payload — the node's readable channel values — to the whole
+            // deployment, which is the disclosure ownership exists to close.
+            const wanted = Object.values(p.gates).filter(
+              (g) => g.state === "open" && (mine || (g.approvers ?? []).includes(who.subject)),
+            );
+            if (wanted.length === 0) continue;
+            // WITH THE RENDERED QUESTION, not just the record. A queue that lists gates
+            // without saying what each one asks is a queue people clear rather than read —
+            // and for this route it is worse than that, because `GET /runs/:id` is closed to
+            // a non-owner, so this is the ONLY place the question can reach the person being
+            // asked. Degraded to no payload on a run this process has not attached, exactly
+            // as the per-run route degrades, and for the same reason.
+            const rendered = new Map(
+              (
+                await engine.openGates(summary.runId).catch((e: unknown) => {
+                  if (isLoomError(e) && e.code === CODES.E_RUN_NOT_FOUND) return [];
+                  throw e;
+                })
+              ).map((g) => [g.gateId, g] as const),
+            );
+            for (const g of wanted) {
+              out.push({ runId: summary.runId, ...g, payload: rendered.get(g.gateId)?.payload, deadline: rendered.get(g.gateId)?.deadline });
+            }
+          }
+          send(res, 200, { gates: out });
+        },
+      },
+
       {
         method: "GET",
         pattern: /^\/runs$/,
-        // EVERY run, not this principal's. `listRuns` has no owner to filter on.
-        handle: async ({ res, url }) => {
-          send(res, 200, { runs: await store.listRuns(pageLimit(url.searchParams.get("limit"))) });
+        // THE CHEAP PREDICATE, and the only route that uses it: mine, plus the ones nobody
+        // owns, plus everything for an operator. It answers from the read-model column with
+        // no fold, which is what keeps a 4-second console poll from folding every run in the
+        // journal. An approver who is not the submitter does NOT find their run here; they
+        // find their question on `GET /gates`, which is the route that exists for it.
+        handle: async ({ res, url, auth }) => {
+          const who = mustAuth(auth);
+          const limit = pageLimit(url.searchParams.get("limit"));
+          const runs = who.operator === true ? await store.listRuns(limit) : await store.listRuns(limit, { submittedByOrUnowned: who.subject });
+          send(res, 200, { runs });
         },
       },
 
       {
         method: "GET",
         pattern: /^\/runs\/([^/]+)$/,
-        // Any principal's run. 404 means "no such run", never "not yours".
-        handle: async ({ res, params }) => {
+        // 404 means "no such run", never "not yours" — so a caller cannot use this route to
+        // learn that a run exists.
+        handle: async ({ res, params, auth }) => {
           const p = await engine.projection(params[0] as RunId);
-          if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${params[0]} not found`);
+          if (p === undefined || !ownsRun(p, mustAuth(auth))) {
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${params[0]} not found`);
+          }
           send(res, 200, summarise(p));
         },
       },
@@ -2304,16 +2558,24 @@ export class ControlPlane {
       {
         method: "GET",
         pattern: /^\/runs\/([^/]+)\/events$/,
-        // Any principal's stream, redacted per the graph's classification, not per viewer.
+        // Scoped inside `#streamEvents`, before its 200 is written — see the note there
+        // about why the check cannot live out here.
         handle: async (ctx) => this.#streamEvents(ctx),
       },
 
       {
         method: "POST",
         pattern: /^\/runs\/([^/]+)\/commands$/,
-        // The one that is not a read: any principal may cancel or rewind any run.
+        // Being named an approver on a run's gate lets you ANSWER the gate; it must not let
+        // you cancel somebody else's run, so this route asks `ownsRun` — owner, unowned, or
+        // operator — and never the wider gate rule.
         handle: async ({ res, params, body, auth }) => {
           const runId = params[0] as RunId;
+          const who = mustAuth(auth);
+          const existing = await engine.projection(runId);
+          if (existing === undefined || !ownsRun(existing, who)) {
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          }
           const cmd = await body();
           // WHO RAN THE COMMAND, on the envelope rather than in the payload, because a
           // cancel is caused by the caller directly — the split `SubmittedBy` documents.
@@ -2344,10 +2606,11 @@ export class ControlPlane {
       {
         method: "GET",
         pattern: /^\/runs\/([^/]+)\/gates$/,
-        handle: async ({ res, params }) => {
+        handle: async ({ res, params, auth }) => {
           const runId = params[0] as RunId;
+          const who = mustAuth(auth);
           const p = await engine.projection(runId);
-          if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          if (p === undefined || !mayReachGates(p, who)) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
           // Joined with the rendered payload where the broker still has it. A queue that
           // lists gates without saying what each one asks is a queue people clear rather
           // than read — and for a `subgraph` gate the question is in another run entirely.
@@ -2391,7 +2654,20 @@ export class ControlPlane {
           // `run/gates.ts`; a second ranking in this file is the "two validators for one
           // union" arrangement that agrees on the day it is written and drifts after.
           const ranked = new Map(detailed.map((g, i) => [g.gateId, i] as const));
-          const open = Object.values(p.gates).filter((g) => g.state === "open");
+          // AND THE LIST IS FILTERED TO THE GATES THIS CALLER IS ADMITTED TO, which is a
+          // second decision from the one that let them through the door. Reaching this route
+          // by being named on ONE gate must not hand over the rendered payload of every
+          // OTHER gate on the run — those payloads carry the node's readable channel values,
+          // and a question nobody asked this caller is a question they were not meant to see.
+          // The submitter and an operator see the whole queue, because for them the run is
+          // the unit; a named approver sees the questions addressed to them, plus the ones
+          // addressed to nobody, which anyone reaching this run may already answer.
+          const visible = (g: GateRecord): boolean => {
+            if (ownsRun(p, who)) return true;
+            const approvers = g.approvers ?? [];
+            return approvers.length === 0 || approvers.includes(who.subject);
+          };
+          const open = Object.values(p.gates).filter((g) => g.state === "open" && visible(g));
           // Partitioned rather than sorted with a `?? Infinity` key: `Infinity - Infinity` is
           // `NaN`, and a comparator that answers `NaN` for a pair silently discards the whole
           // ordering — the same inconsistent-comparator bug HANDOFF A18 measured in
@@ -2417,6 +2693,17 @@ export class ControlPlane {
         handle: async ({ req, res, params, body, auth }) => {
           const runId = params[0] as RunId;
           const gateId = params[1] as GateId;
+          // A DOOR PRE-FILTER, NOT THE AUTHORIZATION. `HumanGateBroker.#authorize` is the
+          // one chain, for this door and the four others, and it would refuse a decision this
+          // check lets through whenever the gate names somebody else. What this adds is the
+          // half `#authorize` cannot see: a gate that names NOBODY is answerable by whoever
+          // can reach it, and after ownership "whoever can reach it" is a real set rather
+          // than "everyone with a credential". `gates.ts` permits exactly this — callers may
+          // keep their own checks as defence in depth; none of them may be the only one.
+          const reachable = await engine.projection(runId);
+          if (reachable === undefined || !mayReachGates(reachable, mustAuth(auth))) {
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          }
           const input = await body();
           const claimed: unknown = input["actor"];
           if (input["decision"] === undefined) {
@@ -2703,6 +2990,20 @@ export class ControlPlane {
     const { res, req, params } = ctx;
     const runId = params[0] as RunId;
     const bus = this.#bus;
+
+    // EXISTENCE AND OWNERSHIP, CHECKED TOGETHER AND BEFORE THE 200.
+    //
+    // This route has no 404 to add a scope to: `head` answers `0` for a run that has never
+    // existed and the header is written unconditionally, so `GET /runs/r_madeup/events`
+    // streams. Adding "404 if not yours" while leaving the unknown case at 200 would build a
+    // clean existence oracle — exactly what the sibling route's "404 means 'no such run',
+    // never 'not yours'" exists to prevent — so both cases answer identically, and they are
+    // answered here rather than in the route table because the check has to happen before
+    // `writeHead`, which this method owns.
+    const scope = await this.#engine.projection(runId);
+    if (scope === undefined || !ownsRun(scope, mustAuth(ctx.auth))) {
+      throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+    }
 
     const lastHeader = header(req, "last-event-id") ?? ctx.url.searchParams.get("lastEventId") ?? undefined;
     // AN EMPTY ID IS "I HAVE NOTHING", the same statement as no id at all — a client sends
@@ -3106,6 +3407,57 @@ function summarise(p: import("../run/projection.ts").RunProjection): unknown {
 }
 
 /**
+ * What a deployment is told at boot about who can see whose runs.
+ *
+ * ONE COMPUTATION, TWO EMITTERS — `startControlPlane` and `loom serve`, which does not call
+ * it and prints its own diagnostics with its own fixes. They said the same thing before this
+ * because somebody kept them in step; they say the same thing now because there is one
+ * function, and the day they disagreed the binary would have contradicted the library about
+ * a security property.
+ *
+ * THE OLD WARNING IS GONE BECAUSE ITS PREMISE IS FALSE. It said every credential is a full
+ * operator credential; runs are scoped now. A warning that is false is worse than none — it
+ * is the thing an operator learns to skip — so what replaces it states only what is true:
+ *
+ *   - **an operator credential reads everything.** That is a real widening, deliberately
+ *     configured, and worth naming at boot the way the callback hole is;
+ *   - **how many there are, or that the number is unknown.** An injected `IdentitySource`
+ *     need not declare `operators`, and inventing a count would repeat the defect above;
+ *   - **NO operators at all, on a plane with several principals.** Nobody can see anyone
+ *     else's run, ever, including the person debugging the deployment — a lockout the plane
+ *     can detect and its operator will otherwise diagnose by accident.
+ */
+export function ownershipWarnings(plane: {
+  readonly distinctPrincipals: number;
+  readonly operatorCredentials: number | undefined;
+  readonly openToEveryCaller: boolean;
+}): readonly string[] {
+  // One principal has nobody to be isolated from, and an open plane authenticates nobody, so
+  // in both the scope is vacuous and a warning would fire where nothing is wrong.
+  if (plane.openToEveryCaller || plane.distinctPrincipals <= 1) return [];
+  const n = plane.operatorCredentials;
+  if (n === undefined) {
+    return [
+      `RUNS ARE SCOPED TO THE PRINCIPAL THAT SUBMITTED THEM, and this plane cannot tell how many of its ` +
+        `credentials are operators — the identity source declares no \`operators\` count. An operator credential reads, ` +
+        `streams and cancels EVERY run in the journal. See design/loom/01-INTERFACES.md D3.17.`,
+    ];
+  }
+  if (n === 0) {
+    return [
+      `NO OPERATOR CREDENTIAL IS CONFIGURED, and runs are scoped to the principal that submitted them — so no ` +
+        `credential can read, stream or cancel another's run, including yours while you debug this deployment. ` +
+        `Set \`"operator": true\` on an identity entry if that is not what you meant.`,
+    ];
+  }
+  return [
+    `${n} OPERATOR CREDENTIAL${n === 1 ? "" : "S"} CONFIGURED — each reads, streams and cancels EVERY run in the ` +
+      `journal, not only its own. Runs are otherwise scoped to the principal that submitted them, and a run with ` +
+      `no recorded principal stays readable by every credential.`,
+  ];
+}
+
+/**
  * Graphs whose gates name approvers no caller of THIS PLANE'S API could ever be.
  *
  * The earliest point at which "this deployment cannot identify anyone" and "this graph
@@ -3156,13 +3508,6 @@ export async function startControlPlane(opts: ControlPlaneOptions, port = 0): Pr
   // learn to skip. It fires on the arrangement that IMPLIES isolation — several
   // credentials, several names — which is precisely when the absence of scoping is a
   // surprise rather than a given.
-  const principals = plane.distinctPrincipals;
-  if (principals > 1) {
-    console.error(
-      `[loom] EVERY CREDENTIAL IS A FULL OPERATOR CREDENTIAL — ` +
-        `${Number.isFinite(principals) ? `${principals} principals are` : "more than one principal is"} configured, and runs are NOT scoped to the principal that submitted them: ` +
-        `any of them can read, stream and cancel any other's run, gate payloads included. See design/loom/01-INTERFACES.md D3.17.`,
-    );
-  }
+  for (const line of ownershipWarnings(plane)) console.error(`[loom] ${line}`);
   return { plane, port: bound };
 }

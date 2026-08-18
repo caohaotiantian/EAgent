@@ -467,6 +467,24 @@ test("THE SINGLE BINARY CAN BE GIVEN AN IDENTITY SOURCE, one token per person", 
       subject: "u:alice",
       method: "bearer-token",
     });
+
+    // `operator` GOES THE OTHER WAY, with `kind`, and one step further. It grants read
+    // access to every run in the journal, so a value nobody can read is a refusal to start
+    // rather than a dropped field — even though dropping would fail closed here. A
+    // deployment whose file says `"operator": "true"` must not silently have none.
+    const op = join(d.dir, "op.json");
+    writeFileSync(op, JSON.stringify({ subjects: [{ subject: "u:root", token: "t", operator: true }] }));
+    assert.deepEqual(readIdentities(op).identify({ method: "POST", path: "/x", headers: { authorization: "Bearer t" } }), {
+      kind: "human",
+      subject: "u:root",
+      method: "bearer-token",
+      operator: true,
+    });
+    assert.equal(readIdentities(op).operators, 1, "countable, which is what the boot warning reads");
+
+    const badOp = join(d.dir, "badop.json");
+    writeFileSync(badOp, JSON.stringify({ subjects: [{ subject: "u:root", token: "t", operator: "true" }] }));
+    assert.throws(() => readIdentities(badOp), /operator "true", which must be true or false/);
   } finally {
     d.dispose();
   }

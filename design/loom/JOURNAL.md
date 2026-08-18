@@ -3170,3 +3170,73 @@ candidate ever needs to stop its own trial run, that is the line to widen — an
 should carry the same `principal:`-style prefixing, because the reason the union is narrow is
 that a public door accepting any `system` component lets an embedder journal a cancel as
 `gate-broker:timeout`.
+
+---
+
+## A run belongs to whoever started it, and two predicates rather than one
+
+A3 was the oldest open security entry: every valid credential was a full operator credential.
+The fix it prescribed — a durable owner, folded into a read model, with a designed escape —
+is what landed. What the prescription did not anticipate is that **one predicate is not
+enough**, and getting that wrong would have closed A3 by breaking the thing A3 protects.
+
+**`ownsRun` and `mayReachGates`, and the gap between them is the design.** Owner, unowned or
+operator governs the four `#runs` routes. The two routes that carry gates add one term —
+*named on one of this run's gates* — because under `separationOfDuties` the only principal
+permitted to decide is by construction **not** the submitter. A rule without that term makes
+every gate it guards unanswerable: supervision that looks configured and cannot be exercised,
+which is the failure D7.9 calls the worst available. The converse is equally deliberate: being
+named an approver is a grant to answer one question, not a key to somebody's run, so it widens
+neither `GET /runs/:id` nor the command route.
+
+**NAMED, never "not excluded".** A gate that names nobody is answerable by whoever reaches it,
+and the dominant gate class — a posture-floor gate on a tool node — names nobody by
+construction. Reading that as "visible to everybody" would have published the node's readable
+channel values, inside the gate's rendered payload, to every principal in the deployment: the
+disclosure A3 exists to close, re-opened by the fix for A3. The predicate is an explicit
+`some` over gates naming the caller, so a run with NO gates admits nobody through that term
+rather than being vacuously true — which is the same "absence is not zero" the Traps list
+already records twice.
+
+**And the approver still has to FIND the question.** `GET /runs` is scoped to the submitter
+and answers from the owner column with no fold, which is what keeps a 4-second console poll
+from folding every run in the journal — and it means an approver sees an empty list. So
+`GET /gates` was added: the cross-run queue, returning the questions ADDRESSED to the caller,
+**with the rendered payload**, because `GET /runs/:id` is closed to them and this is therefore
+the only place the question can reach the person being asked. A stranger's queue excludes an
+unrestricted gate: answerable-by-whoever-reaches-it must not become published-to-everyone. The
+console reads it as an "Awaiting you" panel and answers in place — routing through `select()`
+would need `GET /runs/:id` and would render a panel whose buttons 404.
+
+**`(shared-token)` is an operator only when it is the SOLE credential.** `#principal` tries the
+identity source first and falls back to the shared token, and this file documents the mixed
+arrangement — Alice her own token, the CI job the shared one — as supported. An unconditional
+grant would therefore have handed every service in such a deployment a full read of every
+human's runs and gate payloads, through a fallback nobody configured. Alone, the grant changes
+nothing: every caller is that principal, owns every run, and scoping is vacuous — which is what
+keeps the single-token deployment byte-for-byte what it was.
+
+**"Nobody" includes a SYNTHETIC owner.** The HTTP door records whatever the perimeter
+concluded, so an open plane stamps `(unidentified)` and a shared-token plane `(shared-token)`.
+Those are coherent while the plane stays as it is and incoherent the moment identities are
+configured — the runs would be owned by a subject no principal can present and would leave the
+permissive set all at once, which reads to an operator exactly like a wipe. `ownedByNobody` is
+the one place that rule is spelled, and it is why the CLI's "record nothing" and the HTTP
+door's "record a marker" do not have to agree.
+
+**The migration would have bricked every process after the first.** `#migrate` stamps
+`schema_version` only in its bootstrap arm, so an existing file reads its old version forever:
+an `ALTER TABLE` placed where the file says migrations go re-runs on every open, and the second
+one throws `duplicate column name` out of the constructor. Found by a plan reviewer, reproduced
+before fixing, and pinned by a test that opens a hand-built v1 journal three times — the second
+open is the one that used to die.
+
+**And the filter is in SQL, before the LIMIT.** Selecting the newest N and filtering in JS
+answers a different question: a principal with few runs on a busy deployment gets an empty
+list, and the number that survives varies with `limit` in a way that measures how often OTHER
+principals submit.
+
+**Reverses when.** `GET /gates` folds every candidate run, bounded by `limit` — the same shape
+and bound `GateSweeper` already pays on a timer, and the console polls it every 4 s. If a
+deployment's journal makes that cost real, the answer is a denormalised open-gate index beside
+`run_head`, not a narrower queue: the queue is what makes an approver able to work at all.

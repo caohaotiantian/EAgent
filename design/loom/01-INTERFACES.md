@@ -1149,45 +1149,80 @@ export interface SecretProvider extends Versioned {
 // Journal, prompts, spans, and tool args record the REF; only the sandbox boundary sees the value.
 ```
 
-### What `auth` decides — and what, in v1, it does not
+### What `auth` decides
 
-Every method above takes an `AuthContext` so that it *can* scope what a caller reaches.
-**The shipped control plane uses it for admission and for one authorization decision, and
-for nothing else.** Written down here because the signature above implies more than the
-code does, and a contract that quietly over-promises is worse than one that admits a gap.
-
-What `auth` decides today:
+Every method above takes an `AuthContext` so that it *can* scope what a caller reaches, and
+the shipped control plane now uses it for four things.
 
 - **Admission.** No valid credential, no request: 401 before routing, so an
   unauthenticated caller cannot even discover which routes exist.
 - **Who a gate decision is recorded as, and whether it is allowed at all.** `auth.subject`
   is matched against a gate's `approvers`, `auth.kind` must be `human`, and a subject
-  claimed in the request body is refused rather than ignored. This is the one place a
-  principal's identity changes an outcome.
+  claimed in the request body is refused rather than ignored.
 - **Which idempotency slot a write lands in.** Run submission and gate resolution are
   both namespaced by principal, so two callers cannot collide on a key either of them
   chose.
+- **Which runs the caller reaches.** A run is owned by the principal that submitted it —
+  `run.submitted.submittedBy`, folded into `RunProjection` and denormalised onto
+  `run_head.submitted_by` so a listing filters in the store rather than in the server.
 
-What it does **not** decide: **every valid credential is a full operator credential.** A
-run is not scoped to the principal that submitted it, so `getRun`, `listRuns`, the event
-stream and `command` (cancel, rewind, advance) reach every run in the journal for every
-principal. Gate payloads come with that — they are redacted against the *graph's* declared
-classification, never against the viewer — so "everyone sees everything" describes real
-data, not a placeholder.
+#### Two predicates, and the gap between them is deliberate
 
-This is a v1 decision for a single-node deployment, taken over the alternative rather than
-in ignorance of it. Per-principal access needs a durable owner: the submitting principal
-recorded on `run.submitted`, folded into the `runs` read model so a restart does not
-forget it, `listRuns` filtered in the store rather than in the server, and a deliberate
-escape — an operator role, or an explicit grant — because a deployment whose on-call
-engineer cannot cancel someone else's runaway run has traded one outage for another. An
-in-process ownership map would be none of that while looking like all of it.
+`ownsRun` — owner, unowned, or operator — governs `getRun`, the event stream, `listRuns`
+and `command`. `mayReachGates` adds one term, *named on one of this run's gates*, and
+governs only the two routes that carry gates.
 
-Two things keep the gap from being silent. `ControlPlane` **warns at boot** whenever more
-than one principal is configured — because configuring per-subject identities is exactly
-what implies isolation to the person doing it — and a test drives one principal reading,
-listing and cancelling another's run, so closing the gap means deleting an assertion that
-states the limit in full.
+**The gap is what keeps oversight working.** Under `approval.separationOfDuties` the only
+principal permitted to decide is by construction *not* the submitter, so a rule that scoped
+the gate routes by owner would make every gate it guards unanswerable — supervision that
+looks configured and cannot be exercised. The converse matters too: being named an approver
+is a grant to answer one question, not a key to somebody's run, so it does not widen
+`getRun` or `command`.
+
+**Named, never "not excluded".** A gate that names nobody is answerable by whoever reaches
+it, and the dominant gate class — a posture-floor gate on a tool node — names nobody by
+construction. Treating that as "visible to everybody" would publish the node's readable
+channel values, in the gate's rendered payload, to every principal. So the test is an
+explicit `some` over gates naming the caller, and a run with no gates admits nobody through
+that term rather than being vacuously true.
+
+**A run with no recorded owner is readable by every credential**, and "no owner" includes a
+*synthetic* one: `(shared-token)` and `(unidentified)` describe what the perimeter
+concluded rather than naming a person. Every journal written before ownership existed, and
+every run an embedder or `loom run` starts without naming a principal, is in that set — so
+an upgrade loses nothing, and the permissive set only ever shrinks.
+
+**404, never 403**, on every scoped route. "Not yours" and "no such run" are
+indistinguishable, or the refusal itself tells a stranger which run ids are real. The event
+stream had no existence check at all — it read a head of `0` and wrote a `200` — so scoping
+it without adding one would have built a clean oracle rather than closing one.
+
+#### The escape, and what a deployment is told about it
+
+`AuthContext.operator` reads every run in the journal. It is declared on an identity entry
+and validated as a field that *decides* — a malformed value is `E_CONFIG_INVALID` at all
+three doors (`checkedAuth`, the `BearerTokenIdentity` constructor, `readIdentities`), never
+dropped, because whether a deployment has an operator must not depend on whether a typo was
+truthy.
+
+The shared token is an operator **only when it is the sole credential**. It names the
+deployment's own key rather than a person; alone, every caller is that principal and scoping
+is vacuous either way, which is what leaves the single-token deployment unchanged. Alongside
+an identity source it is one principal among several — and since `#principal` falls back to
+it, granting it unconditionally would hand every service a full read of every human's runs.
+
+The boot warning states what is true rather than what once was: how many operator
+credentials exist, or that the count is unknown for an injected source that does not declare
+one, or — the case a deployment cannot otherwise diagnose — that **none** is configured, so
+nobody can see anyone else's run including the person debugging it.
+
+**`GET /gates` is the approver's entry point.** `listRuns` is scoped to the submitter and
+answers from the read-model column with no fold, which is what keeps a polling console
+cheap — and it means an approver cannot find the run their question lives on. The cross-run
+queue returns the questions *addressed to* the caller, with the rendered payload, because
+`getRun` is closed to them and it is therefore the only place the question can reach the
+person being asked. A stranger's queue does not include an unrestricted gate: answerable-by
+-whoever-reaches-it must not mean published-to-everyone.
 
 ### The boundary error taxonomy
 

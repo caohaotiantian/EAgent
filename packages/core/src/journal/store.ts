@@ -43,6 +43,30 @@ export interface RunSummary {
   readonly headSeq: Seq;
   readonly firstTs: number;
   readonly lastTs: number;
+  /**
+   * The SUBJECT of the principal this run was submitted for, or absent for nobody.
+   *
+   * The subject alone, not the whole `SubmittedBy`. `GET /runs` sends `RunSummary[]` with no
+   * redaction pass, and `kind` plus `method` describe the deployment's identity topology —
+   * which sources exist, which principals are services — rather than naming the owner. The
+   * precedent is `GateRecord.decidedBy`, narrowed to a `kind` for the same reason: decide
+   * what a reader needs before the value reaches the wire, not after.
+   */
+  readonly submittedBy?: string;
+}
+
+/** Which runs a listing should return. Absent fields do not filter. */
+export interface RunFilter {
+  /**
+   * Only runs this subject owns, PLUS runs nobody owns.
+   *
+   * The permissive half is not an oversight and it is why this is one field rather than two:
+   * a run with no recorded principal is readable by every authenticated caller, so that every
+   * journal written before ownership existed stays reachable after an upgrade. A caller that
+   * wants strictly-mine has no use for it — the answer would be a subset of a set it already
+   * has — and offering the knob would invite a reader to assume the default is the strict one.
+   */
+  readonly submittedByOrUnowned?: string;
 }
 
 export interface StateStore {
@@ -62,7 +86,16 @@ export interface StateStore {
   /** 0 if the run has no events. */
   head(runId: RunId): Promise<Seq>;
 
-  listRuns(limit?: number): Promise<readonly RunSummary[]>;
+  /**
+   * Newest first, at most `limit`.
+   *
+   * THE FILTER IS APPLIED BEFORE THE LIMIT, and an implementation that reverses that is
+   * wrong in two ways: a low-volume principal on a busy deployment sees an empty list because
+   * every one of the newest N belongs to somebody else, and a caller can infer other
+   * principals' submission density by varying `limit` and watching how many of its own runs
+   * survive.
+   */
+  listRuns(limit?: number, filter?: RunFilter): Promise<readonly RunSummary[]>;
 
   close(): void;
 }
@@ -134,6 +167,44 @@ export function prepare(
     taskId: e.taskId ?? input.taskId ?? null,
     classification: e.classification ?? DEFAULT_CLASSIFICATION,
   }));
+}
+
+/**
+ * The owner a batch establishes, read back out of the bytes that were journaled.
+ *
+ * ONE DEFINITION, SHARED, for the reason `prepare` is shared: a divergence between the two
+ * stores here is a divergence about who may read a run, not a test-only inconsistency.
+ *
+ * IT PARSES `payloadJson` RATHER THAN READING `input.events` AGAIN. `prepare` has already
+ * canonicalized the payload; going back to the caller's object is a SECOND `[[Get]]` on a
+ * value from outside this process, and a getter or a `Proxy` may answer the two reads
+ * differently — leaving the read-model column and the journal row disagreeing about who owns
+ * the run, which is invariant 2's failure mode in the field that decides access. The parse
+ * costs one call per run and is provably the same value the row holds.
+ *
+ * `undefined` for a batch that establishes nothing — no `run.submitted`, or one naming
+ * nobody. Callers write it INSERT-ONLY, so "this batch says nothing about the owner" and
+ * "this batch says the owner is nobody" are the same instruction to a column that is only
+ * ever written when the row is created.
+ */
+export function submitterOf(rows: readonly PreparedEvent[]): string | undefined {
+  for (const r of rows) {
+    if (r.type !== "run.submitted") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.payloadJson);
+    } catch {
+      return undefined;
+    }
+    // Total reads throughout: this is a plain object minted by `JSON.parse`, but the shape
+    // inside it came from a caller and `submittedBy` may be any JSON value.
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const by: unknown = (parsed as Record<string, unknown>)["submittedBy"];
+    if (typeof by !== "object" || by === null) return undefined;
+    const subject: unknown = (by as Record<string, unknown>)["subject"];
+    return typeof subject === "string" && subject !== "" ? subject : undefined;
+  }
+  return undefined;
 }
 
 export function seqConflict(runId: RunId, expected: Seq, actual: Seq): never {

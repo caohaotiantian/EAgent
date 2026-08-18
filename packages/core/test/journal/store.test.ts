@@ -67,6 +67,61 @@ test("[sqlite] survives close and reopen on disk", async () => {
   }
 });
 
+test("[sqlite] A v1 JOURNAL MIGRATES, AND OPENS AGAIN — the second open is the one that used to die", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-migrate-"));
+  const path = join(dir, "journal.db");
+  const run = "01JRUNMIGRATE00000000000" as RunId;
+  try {
+    // A v1 file, built the way v1 built it: the pre-ownership `run_head`, stamped 1.
+    const v1 = new DatabaseSync(path);
+    v1.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE journal (
+        run_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, type TEXT NOT NULL,
+        actor TEXT NOT NULL, task_id TEXT, payload TEXT NOT NULL, classification TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq)
+      ) WITHOUT ROWID;
+      CREATE TABLE run_head (
+        run_id TEXT PRIMARY KEY, head_seq INTEGER NOT NULL, first_ts INTEGER NOT NULL, last_ts INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      CREATE TABLE task_fence (
+        run_id TEXT NOT NULL, task_id TEXT NOT NULL, max_token INTEGER NOT NULL, PRIMARY KEY (run_id, task_id)
+      ) WITHOUT ROWID;
+      INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+      INSERT INTO run_head (run_id, head_seq, first_ts, last_ts) VALUES ('${run}', 1, 5, 5);
+      INSERT INTO journal VALUES ('${run}', 1, 5, 'run.started', '{"kind":"system","component":"t"}', NULL, '{"posture":"on"}', 'internal');
+    `);
+    v1.close();
+
+    const first = new SqliteStateStore({ path });
+    const listed = await first.listRuns();
+    assert.equal(listed.length, 1, "the pre-existing run is still there");
+    assert.equal(listed[0]?.submittedBy, undefined, "and it is unowned, which is the permissive case");
+    first.close();
+
+    // THE POINT OF THIS TEST. `#migrate` stamps the version only in its bootstrap arm, so an
+    // ALTER TABLE that does not also restamp re-runs on every open and the SECOND one throws
+    // `duplicate column name` out of the constructor — every process after the first upgrade
+    // dead, on a journal that had already migrated successfully.
+    const second = new SqliteStateStore({ path });
+    assert.equal((await second.listRuns()).length, 1);
+    second.close();
+
+    // A third, for the same reason a second worker exists: nothing about the fix may depend
+    // on the migrating process being the only one.
+    const third = new SqliteStateStore({ path });
+    assert.equal((await third.head(run)), 1);
+    third.close();
+
+    const check = new DatabaseSync(path);
+    const row = check.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string };
+    assert.equal(row.value, "2", "the stamp moved, which is what stops the migration repeating");
+    check.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("[sqlite] fencing state also survives a restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-fence-"));
   const path = join(dir, "journal.db");

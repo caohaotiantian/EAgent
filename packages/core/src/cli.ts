@@ -48,7 +48,14 @@ import { AnthropicAdapter } from "./providers/anthropic.ts";
 import { OpenAIAdapter } from "./providers/openai.ts";
 import type { HttpOptions } from "./providers/http.ts";
 import { replayRun } from "./run/replay.ts";
-import { BearerTokenIdentity, ControlPlane, unanswerableGraphs, type ControlPlaneOptions, type IdentitySource } from "./server/http.ts";
+import {
+  BearerTokenIdentity,
+  ControlPlane,
+  ownershipWarnings,
+  unanswerableGraphs,
+  type ControlPlaneOptions,
+  type IdentitySource,
+} from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
@@ -378,7 +385,7 @@ export function readIdentities(file: string): IdentitySource {
   // it must be a refusal to start rather than a subject named "undefined".
   return new BearerTokenIdentity({
     subjects: subjects.map((s, i) => {
-      const row = s as { subject?: unknown; token?: unknown; kind?: unknown; via?: unknown; mfa?: unknown };
+      const row = s as { subject?: unknown; token?: unknown; kind?: unknown; via?: unknown; mfa?: unknown; operator?: unknown };
       if (typeof row.subject !== "string" || typeof row.token !== "string") {
         throw err.validation(CODES.E_CONFIG_INVALID, `--identity-file ${path}: entry ${i} needs a string subject and token`);
       }
@@ -402,12 +409,27 @@ export function readIdentities(file: string): IdentitySource {
             `a gate naming approvers — so a mistyped "service" would silently become a person who may approve.`,
         );
       }
+      // `operator` JOINS `kind` IN THE REFUSED CLASS, by the same rule and one step further.
+      // Dropping a malformed value here would fail CLOSED — the default is `false` — which is
+      // exactly the argument that makes the refusal look unnecessary and is beside the point:
+      // this field grants read access to every run in the journal, and whether a deployment
+      // has an operator must not be decided by whether a typo happened to be truthy.
+      // `"operator": "true"` would otherwise leave a plane silently with none, discovered
+      // when nobody can see anything.
+      if (row.operator !== undefined && typeof row.operator !== "boolean") {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `--identity-file ${path}: entry ${i} ("${row.subject}") has operator ${JSON.stringify(row.operator)}, which must be true or ` +
+            `false. It is not dropped, because it grants this credential read access to every run in the journal.`,
+        );
+      }
       return {
         subject: row.subject,
         token: row.token,
         ...(row.kind === undefined ? {} : { kind: row.kind }),
         ...(isVia(row.via) ? { via: row.via } : {}),
         ...(typeof row.mfa === "boolean" ? { mfa: row.mfa } : {}),
+        ...(row.operator === true ? { operator: true as const } : {}),
       };
     }),
   });
@@ -1437,22 +1459,14 @@ function announce(plane: ControlPlane, ws: Workspace, opts: ControlPlaneOptions,
     process.stderr.write("! NO TOKEN — every caller is authorized\n");
   }
   // AUTHENTICATION IS NOT AUTHORIZATION, said where the operator who configured
-  // `--identity-file` will read it. That flag buys one thing — a gate can name an
-  // approver and the right person can answer it — and no isolation at all: this
-  // plane admits on the credential and scopes nothing to it.
+  // `--identity-file` will read it. Runs ARE scoped to the submitting principal now, so
+  // what is worth saying at boot is who escapes that scope and whether anybody does.
   //
-  // The condition, and the message, are `startControlPlane`'s (which `serve` does
-  // not call: the binary prints its own diagnostics with its own fixes). The COUNT
-  // is computed in one place, `ControlPlane.distinctPrincipals`, so the two paths
-  // cannot disagree about when to speak.
-  if (plane.distinctPrincipals > 1) {
-    const n = plane.distinctPrincipals;
-    process.stderr.write(
-      `! EVERY CREDENTIAL IS A FULL OPERATOR CREDENTIAL — ${Number.isFinite(n) ? `${n} principals are` : "more than one principal is"} configured,\n` +
-        `  and runs are NOT scoped to the principal that submitted them: any of them can read, stream and\n` +
-        `  cancel any other's run, gate payloads included. See design/loom/01-INTERFACES.md D3.17.\n`,
-    );
-  }
+  // The condition and the words are `startControlPlane`'s — which `serve` does not call,
+  // because the binary prints its own diagnostics with its own fixes — and they come from
+  // ONE function rather than from two texts kept in step, so the binary cannot contradict
+  // the library about a security property.
+  for (const line of ownershipWarnings(plane)) process.stderr.write(`! ${line}\n`);
   // THE SECOND HOLE IN THE PERIMETER, named as loudly as the first. `opts.dispatcher` and
   // not `delivery.answerable`, because it is the field the plane was actually built with:
   // if the two ever disagree, this line follows the one that decides the route.
