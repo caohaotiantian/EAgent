@@ -61,10 +61,13 @@
  * classification, never per viewer, so "everyone sees everything" is a statement about
  * real data and not about a placeholder.
  *
- * What `auth` DOES decide is three things and stops: admission (401 before routing), who
- * a gate decision is recorded as and whether the approvers list allows it, and which
- * idempotency slot a write lands in. Every one of those is about the CALLER; none is
- * about the run.
+ * What `auth` DOES decide is four things and stops: admission (401 before routing), who
+ * a gate decision is recorded as and whether the approvers list allows it, which
+ * idempotency slot a write lands in, and — since A4 — who a run is RECORDED as having been
+ * submitted by and who a cancel or rewind is recorded as. Every one of those is about the
+ * CALLER; none of them is yet about the run. The fourth is what the fix below needs and is
+ * deliberately not wired to any access decision here: recording an owner and enforcing one
+ * are separate changes, and this file still enforces nothing.
  *
  * This is a DECISION, not an omission, and it is a v1 decision. D3.17 gives every method
  * an `auth` parameter precisely so it CAN scope access, and this implementation does not.
@@ -117,10 +120,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { SubscriberOverflowError, type EventBus } from "../bus.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
 import type { GateId, RunId } from "../ids.ts";
-import { SYSTEM_ACTOR, type Actor, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
+import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
-import type { Engine } from "../run/engine.ts";
+import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
 import { gateDecisionOf, isSyntheticSubject, type GateDecision } from "../vocab.ts";
 import { gateOf } from "../run/projection.ts";
@@ -197,7 +200,8 @@ export interface IdentityRequest {
  * It answers WHO, and in this implementation nothing else. Two principals with different
  * subjects have identical access to every run in the journal — see "THE LIMIT" in the
  * module docstring. `subject` is an authorization key for exactly one decision, a gate's
- * approvers list, and for nothing else.
+ * approvers list; everywhere else it reaches — the run's recorded submitter, the actor on a
+ * cancel — it is AUDIT, describing who acted rather than deciding what they may touch.
  */
 export interface AuthContext {
   readonly kind: "human" | "service";
@@ -438,52 +442,6 @@ function sourceLabel(source: IdentitySource): string {
  * `(unidentified)` turns the absence of identity into a person, and one that returns
  * `(shared-token)` claims to BE the plane's shared-token service principal.
  */
-/**
- * The principal a run is journaled as having been submitted for.
- *
- * A narrowing, not a rename: `AuthContext` also carries `via`, `mfa` and `onBehalfOf`, which
- * describe the REQUEST. `SubmittedBy` names the principal and is compared against approvers
- * lists and matched against a run's owner, so it carries only what identifies.
- *
- * A synthetic subject is passed through rather than dropped. `(shared-token)` and
- * `(unidentified)` are true statements about what the perimeter concluded, and a run owned by
- * "the shared credential" is a different fact from a run owned by nobody — which is what an
- * absent `submittedBy` means. Conflating them would make an upgrade look like a wipe.
- */
-function principalOf(auth: AuthContext): SubmittedBy {
-  return { kind: auth.kind, subject: auth.subject, method: auth.method };
-}
-
-/**
- * The actor a cancel or a rewind is journaled under — the ENVELOPE, not a payload field.
- *
- * A cancel is caused by its caller directly, so the event's own `actor` is the honest home;
- * `run.submitted` is the other way round and puts its principal in the payload. Three cases:
- *
- *   - **a person** ⇒ the human actor, carrying whatever the source vouched for. This is the
- *     whole point: "who cancelled this run" stops being "the software did";
- *   - **a named service** ⇒ `system:principal:<subject>`. `Actor` has no service arm, and a
- *     named service principal IS a system component in its vocabulary. The `principal:`
- *     prefix cannot collide with a built-in component name, and `GATE_SYSTEM_ACTORS` holds no
- *     `principal:*`, so this grants nothing anywhere;
- *   - **nobody identified** — an open plane, or the shared credential — ⇒
- *     `system:operator`, exactly what this path journaled before. A marker describes what the
- *     perimeter concluded rather than naming anyone, so `principal:(shared-token)` would
- *     claim a principal by that name. "An operator did it" is the most that can be said.
- */
-function commandActor(auth: AuthContext | undefined): Actor {
-  if (auth === undefined) return SYSTEM_ACTOR("operator");
-  if (isSyntheticSubject(auth.subject) || SYNTHETIC_SUBJECTS.includes(auth.subject)) return SYSTEM_ACTOR("operator");
-  if (auth.kind !== "human") return SYSTEM_ACTOR(`principal:${auth.subject}`);
-  return {
-    kind: "human",
-    subject: auth.subject,
-    via: auth.via ?? "api",
-    ...(auth.mfa === undefined ? {} : { mfa: auth.mfa }),
-    ...(auth.onBehalfOf === undefined ? {} : { onBehalfOf: auth.onBehalfOf }),
-  };
-}
-
 function checkedAuth(who: unknown, source: string): AuthContext {
   // A declaration and not a const arrow, so its `never` narrows the flow below: `subject`
   // really is a string after its check, with no cast to say so.
@@ -560,6 +518,67 @@ function checkedAuth(who: unknown, source: string): AuthContext {
     ...(isVia(via) ? { via } : {}),
     ...(typeof mfa === "boolean" ? { mfa } : {}),
     ...(typeof onBehalfOf === "string" && onBehalfOf !== "" && onBehalfOf.length <= MAX_IDENTITY_FIELD ? { onBehalfOf } : {}),
+  };
+}
+
+/**
+ * The principal a run is journaled as having been submitted for.
+ *
+ * A narrowing, not a rename: `AuthContext` also carries `via`, `mfa` and `onBehalfOf`, which
+ * describe the REQUEST. `SubmittedBy` names the principal and is compared against approvers
+ * lists and matched against a run's owner, so it carries only what identifies.
+ *
+ * A synthetic subject is passed through rather than dropped. `(shared-token)` and
+ * `(unidentified)` are true statements about what the perimeter concluded, and a run owned by
+ * "the shared credential" is a different fact from a run owned by nobody — which is what an
+ * absent `submittedBy` means. Conflating them would make an upgrade look like a wipe.
+ */
+/**
+ * `auth` on a route that cannot be reached without a credential.
+ *
+ * Not a check that is expected to fire — `#serve` 401s first, and an open plane mints
+ * `(unidentified)` rather than nothing. It exists so that the impossible case is a loud 500
+ * naming this file, instead of a quiet fallback to "no principal", which is the permissive
+ * value everywhere it is read.
+ */
+function mustAuth(auth: AuthContext | undefined): AuthContext {
+  if (auth === undefined) {
+    throw err.internal(CODES.E_INTERNAL, "a guarded route was reached with no principal; #serve should have answered 401");
+  }
+  return auth;
+}
+
+function principalOf(auth: AuthContext): SubmittedBy {
+  return { kind: auth.kind, subject: auth.subject, method: auth.method };
+}
+
+/**
+ * The actor a cancel or a rewind is journaled under — the ENVELOPE, not a payload field.
+ *
+ * A cancel is caused by its caller directly, so the event's own `actor` is the honest home;
+ * `run.submitted` is the other way round and puts its principal in the payload. Three cases:
+ *
+ *   - **a person** ⇒ the human actor, carrying whatever the source vouched for. This is the
+ *     whole point: "who cancelled this run" stops being "the software did";
+ *   - **a named service** ⇒ `system:principal:<subject>`. `Actor` has no service arm, and a
+ *     named service principal IS a system component in its vocabulary. The `principal:`
+ *     prefix cannot collide with a built-in component name, and `GATE_SYSTEM_ACTORS` holds no
+ *     `principal:*`, so this grants nothing anywhere;
+ *   - **nobody identified** — an open plane, or the shared credential — ⇒
+ *     `system:operator`, exactly what this path journaled before. A marker describes what the
+ *     perimeter concluded rather than naming anyone, so `principal:(shared-token)` would
+ *     claim a principal by that name. "An operator did it" is the most that can be said.
+ */
+function commandActor(auth: AuthContext | undefined): CommandActor {
+  if (auth === undefined) return SYSTEM_ACTOR("operator");
+  if (isSyntheticSubject(auth.subject) || SYNTHETIC_SUBJECTS.includes(auth.subject)) return SYSTEM_ACTOR("operator");
+  if (auth.kind !== "human") return SYSTEM_ACTOR(`principal:${auth.subject}`);
+  return {
+    kind: "human",
+    subject: auth.subject,
+    via: auth.via ?? "api",
+    ...(auth.mfa === undefined ? {} : { mfa: auth.mfa }),
+    ...(auth.onBehalfOf === undefined ? {} : { onBehalfOf: auth.onBehalfOf }),
   };
 }
 
@@ -2170,6 +2189,23 @@ export class ControlPlane {
             );
           }
 
+          // A BODY THAT CLAIMS A PRINCIPAL IS REFUSED, NOT IGNORED — the rule `#decider`
+          // already applies to a claimed gate approver, and its argument transfers verbatim:
+          // "a client that sends `actor` believes it is writing the audit trail; ignoring it
+          // would leave that client confidently wrong about what the journal says." Silence
+          // is worse here than at the gate, because the value being claimed is the one a
+          // later phase scopes access on. Refused even when it AGREES with the credential:
+          // unlike `#decider`'s `actor`, this is not a client restating who it is, it is a
+          // client asserting a field the perimeter owns.
+          for (const claimed of ["submittedBy", "actor", "principal"]) {
+            if (input[claimed] === undefined) continue;
+            throw err.policy(
+              CODES.E_NOT_AUTHORIZED,
+              `"${claimed}" is not accepted on this endpoint: who a run is submitted for comes from the credential, ` +
+                `never from the request body. Authenticate as the principal you mean to record.`,
+            );
+          }
+
           const name = workflow ?? "";
           // `graphIn`, NEVER a bare index — see its docstring for the six names that
           // reached `engine.submit` and came back 500.
@@ -2184,13 +2220,16 @@ export class ControlPlane {
             inputs: (inputs ?? {}) as Record<string, unknown>,
             workflow: name,
             ...(key === undefined ? {} : { idempotencyKey: key }),
-            // FROM THE CREDENTIAL, NEVER THE BODY — the same rule `#decider` states for the
-            // approver's subject, and for the same reason: this value names who started a
-            // run that will spend money and may take irreversible action. `auth` is never
-            // undefined here; `#serve` answers 401 before routing on any plane that
-            // authenticates at all, and an open plane hands every caller the same principal,
-            // which makes the scope it feeds vacuous rather than wrong.
-            ...(auth === undefined ? {} : { submittedBy: principalOf(auth) }),
+            // FROM THE CREDENTIAL, NEVER THE BODY — see the refusal above.
+            //
+            // UNCONDITIONAL, and `auth` is asserted rather than defaulted. `#serve` answers
+            // 401 before routing every guarded route, and an open plane still hands every
+            // caller a principal, so `undefined` is unreachable here — but the conditional
+            // that used to stand in its place had the PERMISSIVE value in its dead branch,
+            // so the day `/runs` joined `#requiresBearer`'s carve-out list it would have
+            // minted world-readable runs with nothing red. A dead branch whose value is the
+            // weaker claim is a fail-open waiting for an unrelated edit.
+            submittedBy: principalOf(mustAuth(auth)),
           });
           // 202, and the body says exactly what is durable — see the module docstring.
           const accepted = {

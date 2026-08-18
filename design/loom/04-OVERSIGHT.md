@@ -585,7 +585,9 @@ export interface AuditRecord {
   // IS its decider.
   principal?: { kind: "human" | "service"; subject: string; method: string };
 
-  decision?: GateDecision;                 // approve | reject | edit{writes} | redirect{take}
+  decision?: string;                       // a gate decision (approve|reject|edit|redirect), and for the
+                                           // other kinds the act itself: an operator command's kind,
+                                           // a tool's name@version, the workflow a run started
   justification?: string;                  // MANDATORY for reject, edit, redirect, and every de-escalation
   priorState?: { posture: Posture; stateHash: string };
   newState?:  { posture: Posture; stateHash: string };

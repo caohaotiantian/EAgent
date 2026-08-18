@@ -63,7 +63,7 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            humans answer them
                [--sweep-ms 1000]                           how often gate SLAs are checked
   loom compile <graph.json|yaml>                           validate and print diagnostics
-  loom run     <graph.json|yaml> [--input JSON]            run to completion or to a gate
+  loom run     <graph.json|yaml> [--input JSON] [--as ID]  run to completion or to a gate
   loom gates   <runId>                                     list open gates
   loom approve <runId> <gateId> [--reject REASON]          resolve a gate
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
@@ -1819,15 +1819,47 @@ function subjectFlag(args: Args): string {
  * So the absent case records nothing at all. The CLI authenticates nobody — it writes to the
  * journal directly, and `subjectFlag`'s docstring already states that limit — and inventing a
  * principal is exactly the synthetic-subject failure the perimeter refuses one door over.
- * `separationOfDuties` then refuses a gate on such a run rather than enforcing nothing, which
- * is the loud version of the same fact.
+ * When `separationOfDuties` lands it will refuse a gate on such a run rather than enforcing
+ * nothing, which is the loud version of the same fact. Today it is still a compile error.
  *
  * `method` is `cli` because that IS how identity was established here: it was not.
  */
 function submitterFlag(args: Args): { submittedBy?: SubmittedBy } {
-  if (args.flags["as"] === undefined) return {};
-  return { submittedBy: { kind: "human", subject: subjectFlag(args), method: "cli" } };
+  const v = args.flags["as"];
+  if (v === undefined) return {};
+  // ITS OWN REFUSALS, NOT `subjectFlag`'S. Borrowing them borrowed their WORDING too, and
+  // both sentences are false here: there is no gate on this path, and omitting the flag
+  // records nobody rather than "cli". An error message that describes a different command is
+  // how a user learns to distrust the rest of them.
+  if (v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--as needs a subject: ${v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `It is journaled as the principal this run was submitted for. Omit it entirely to record nobody.`,
+    );
+  }
+  if (isSyntheticSubject(v)) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--as "${v}" is a synthetic marker, not a subject: a parenthesised subject is what the control plane writes when ` +
+        `it could not identify a caller. It is journaled as who started this run, so it has to name somebody.`,
+    );
+  }
+  // BOUNDED, because the perimeter bounds it. `checkedAuth` refuses a subject over
+  // MAX_IDENTITY_FIELD rather than truncating, on the stated grounds that injected code
+  // writes into durable rows; a shell can supply a megabyte just as easily.
+  if (v.length > MAX_SUBJECT) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--as is ${v.length} characters; the limit is ${MAX_SUBJECT}. It goes into a durable journal row, and the ` +
+        `control plane refuses an over-long subject rather than truncating one — truncation invents a different person.`,
+    );
+  }
+  return { submittedBy: { kind: "human", subject: v, method: "cli" } };
 }
+
+/** Matches the control plane's `MAX_IDENTITY_FIELD`; the journal is the same journal. */
+const MAX_SUBJECT = 256;
 
 /** `pathFlag`, for the commands where the path is not optional. */
 function requireFileFlag(args: Args, name: string): string {

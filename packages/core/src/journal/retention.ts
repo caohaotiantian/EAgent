@@ -163,6 +163,7 @@ export function extractAudit(events: Iterable<JournalEvent>): AuditRecord[] {
   const raised = new Map<GateId, { digest: string; reasons: string[] }>();
   const reasonsByTask = new Map<string, string[]>();
   let posture: Posture = "out";
+  let submittedSeen = false;
 
   for (const e of events) {
     if (isEvent(e, "policy.decided")) {
@@ -211,9 +212,15 @@ export function extractAudit(events: Iterable<JournalEvent>): AuditRecord[] {
       continue;
     }
     if (isEvent(e, "run.submitted")) {
-      // WHO STARTED THE RUN, which is the question A4 exists for and the only run-lifecycle
-      // fact worth an audit row: the stops are already covered, because `cancel` and `rewind`
-      // journal their caller on the envelope and arrive here as `operator_command`.
+      // WHO STARTED THE RUN, which is the question A4 exists for.
+      //
+      // ONCE PER RUN, matching the fold. `Engine.submit` performs no existence check on a
+      // caller-supplied `runId`, so an embedder can append a second `run.submitted`; the
+      // projection folds the FIRST and so does this. Two "who started this run" rows naming
+      // different principals is the one shape in which an audit record could claim a
+      // principal for an act that principal did not perform.
+      if (submittedSeen) continue;
+      submittedSeen = true;
       out.push({
         runId: e.runId,
         seq: e.seq,
@@ -223,6 +230,33 @@ export function extractAudit(events: Iterable<JournalEvent>): AuditRecord[] {
         subject: {},
         ...(e.payload.submittedBy === undefined ? {} : { principal: e.payload.submittedBy }),
         decision: e.payload.workflow,
+        policyReasons: [],
+      });
+      continue;
+    }
+    if (isEvent(e, "checkpoint.restored")) {
+      // A REWIND IS A STOP, AND IT REACHED THIS TIER THROUGH NOTHING.
+      //
+      // `Engine.cancel` appends `operator.command` and lands in the arm below; `rewind`
+      // appends only this, and there was no arm for it — so the actor A4 threads into
+      // `rewind` reached the journal and stopped there. That matters because the audit tier
+      // is a separately stored, `Infinity`-retention duplicate, kept precisely so "who did
+      // what" survives a journal retention change: with `pruneJournal` configured, "who
+      // rewound this run" was the one A4 fact still destroyable.
+      //
+      // `operator_command` rather than a new kind, because that is what it is — an operator
+      // acting on a run from outside it — and `auditViolations` already requires a
+      // justification from nothing in this class, which is right: `reason` is mandatory on
+      // `rewind`'s signature, so the record cannot lack one.
+      out.push({
+        runId: e.runId,
+        seq: e.seq,
+        ts: e.ts,
+        kind: "operator_command",
+        actor: e.actor,
+        subject: {},
+        decision: e.payload.mode,
+        justification: e.payload.reason,
         policyReasons: [],
       });
       continue;

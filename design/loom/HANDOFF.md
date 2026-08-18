@@ -295,7 +295,7 @@ refusal exists to prevent.
 | # | Mechanism | Where it is specified | State today |
 |---|---|---|---|
 | 1 | **Approval quorum** (`mode: quorum`, `k`) | D7.2 `approval.mode`/`k`; D7.3's `PartiallyDecided` state | `ApprovalSpec.mode` and `.k` exist in `graph/spec.ts` **only so they can be refused**. `mode` other than `single`, and any `k` at all, are compile errors. `GateRecord` has no partial-decision shape and the broker has no counter |
-| 2 | **Separation of duties** | D7.2 `approval.separationOfDuties` | Compile error. Also **blocked on a prerequisite**: it means "an approver may not be the run's initiator", and the initiator is not journaled — `run.submitted` is written with a system control-plane actor and `SubmitInput` has no actor field. It needs the same `submittedBy` the per-principal work needs (see Known issues) |
+| 2 | **Separation of duties** | D7.2 `approval.separationOfDuties` | Compile error, and **no longer blocked**: `run.submitted.submittedBy` and `RunProjection.submittedBy` landed with A4, so the initiator is journaled and folded. What is left is the enforcement, and the shape is decided rather than open — the exclusion is RESOLVED AT RAISE and journaled onto `gate.raised`, so `#authorize` keeps reading the gate and nothing else. Read the plan in `.agent/run-ownership/` before starting: an initiator that is absent, synthetic (`(shared-token)`, `(unidentified)`) or a `service` must refuse the gate rather than resolve to an exclusion nobody can match, and the refusal has to be built where the gate OUTCOME is constructed — a throw out of `raise` escapes `#commit`, which sits outside the wave's catch, and wedges the task `leased` forever |
 | 3 | **Delegation** | D7.2 `approval.delegation{allowed, maxDepth, mustStayInGroup}`; D7.3's `Delegated` state | Compile error. `DelegationSpec` exists in `graph/spec.ts` *solely* so a graph asking for delegation is rejected rather than silently run as if it had asked for nothing |
 | 4 | **Batching** | D7.9 row 2 | **BUILT.** `HumanGateNode.batching` → `checkSaturation` (`graph/validate.ts`) → `batchFor`/`listBatches`/`resolveBatch` in `run/gates.ts`, `Engine.openGateBatches`/`resolveGateBatch`, receipt `gate.batch_decided`. N gates stay N gates; the batch is derived from the fold. Read D7.9's implementation-deviation block before changing it — "pure UX, no oversight semantics change" was true only once the merge predicate (`sameAuthority`), the **batch's journaled governance** (`batchGovernance` — the founder's `key`/`windowMs`/`maxBatch`/delivery digest, added after a joiner was found able to raise the cap from 2 to 20), the **one-page-per-tier** escalation rule (`siblingReachedTier`, decided at the seq the write swaps on — reading it back after the commit let two overlapping sweeps each conclude the other had paged, and nobody was) and `expectManifest` were all built. A joiner is suppressed only while the batch still holds an OPEN member (`batchHasOpenMember`): a batch every member of which is answered is a message nobody is holding. `test/run/gate-saturation.test.ts` |
 | 5 | **Deduplication** | D7.9 row 3 | **BUILT.** `HumanGateNode.dedupe` → `#inheritable` in `run/gates.ts`, which reruns the decision through the one `#validate` chain rather than writing a decided gate directly. `gate.deduped` is in `EVENT_TYPES` with an appender. Inherits **only from a `decided`** gate **that a HUMAN decided** (`GateRecord.decidedBy`, the actor KIND folded from `gate.decided`), keyed on the **journaled** digest (D7.8). Without that second condition a gate the CLOCK decided by default action was inheritable, and a chain of duplicates carried one click 1000 s past a declared 60 s window. Same test file |
@@ -482,11 +482,28 @@ run so the limit cannot be narrowed silently. **Fix, exactly:** a
 `Engine.submit` from a new `SubmitInput` field, folded into the `runs` read model with a
 column `listRuns` can filter on, plus a designed operator escape.
 
-**A4 · Nobody is recorded as having started or stopped a run.** `run.submitted` carries a
-system control-plane actor; `Engine.cancel(runId, reason)` and `rewind` take a string, not
-an actor, and journal a system operator. So "who started this run that spent money" and "who
-cancelled it" are unanswerable from the journal even in a deployment where the control plane
-knows. Same prerequisite as A3 and as D7.2's separation of duties.
+**A4 · Nobody is recorded as having started or stopped a run. RESOLVED 2026-08-18.**
+`run.submitted` carries a `submittedBy` in its PAYLOAD — the control plane really is what
+appended the row, so the envelope stays `system:control-plane` and the principal is a fact
+about the run, `gate.raised.approvers`' shape. `Engine.cancel` and `rewind` take a
+`CommandActor` and journal it on the ENVELOPE of every event their cascade writes, because a
+cancel is caused by its caller directly. A named service principal becomes
+`system:principal:<subject>`; an unidentified caller stays `system:operator`, unchanged,
+because a marker describes what the perimeter concluded rather than naming anybody.
+`AuditRecord.principal` carries it into the `Infinity`-retention audit tier, and
+`checkpoint.restored` gained an arm there — without it the actor threaded into `rewind`
+reached the journal and stopped, so "who rewound this run" was the one A4 fact a configured
+`pruneJournal` could destroy. `test/run/run-ownership.test.ts`, `test/run/submit-callers.test.ts`.
+
+> **The prerequisite it existed to unblock is only half spent.** A3 (scoping) and D7.2's
+> separation of duties both need this and neither is built, so the principal is currently
+> journaled and read by nothing but the audit fold — the shape this repo's own Traps section
+> calls "a capability nothing calls". The two open items below are the callers.
+>
+> **And the field is fail-open by construction**: `SubmitInput.submittedBy` is optional and an
+> absent principal is the PERMISSIVE case, so a `submit` call site that forgets it will mint a
+> world-readable run once A3 lands. `test/run/submit-callers.test.ts` pins the four doors and
+> their per-file call counts; it proves each has been CONSIDERED, not that any is right.
 
 **A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
 carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot
@@ -1900,6 +1917,15 @@ three times). The likely explanation is benign — `src/server/http.ts` was bein
 the check ran, and its mtime confirms an edit minutes later — but it is recorded rather than
 dismissed, because "it passed the second time" is exactly how a real flake gets filed as
 nothing.
+
+> **A third sighting, 2026-08-18, and it is the same shape.** One `npm run check` reported
+> `1697 pass / 1 fail` and the name of the failing test never reached the filtered output;
+> **seven consecutive runs afterwards were green** (`npm test` ×3, `npm run check` ×4). It
+> followed a `check-surface.mjs --write` in the same shell, so the suspicion is again the
+> documented one — `tsc -b --force` re-emitting `dist/` under a reader — rather than a defect
+> in any test. What makes this worth a line rather than a shrug: the failing test's NAME was
+> lost, because the grep that read the run filtered for `^✖` and the summary only. **Capture
+> the whole output when a gate fails**, or the next sighting is as uninformative as this one.
 
 **E4 · Guards with no test come in THREE kinds, and only one of them is a defect — and
 every count in this entry is a measurement, stated with the command that produced it.**

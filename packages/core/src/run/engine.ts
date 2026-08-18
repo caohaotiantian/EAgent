@@ -50,6 +50,7 @@ import {
   type HumanActor,
   type NewEvent,
   type SubmittedBy,
+  type SystemActor,
 } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
@@ -202,6 +203,22 @@ export interface SubmitInput {
    */
   readonly submittedBy?: SubmittedBy;
 }
+
+/**
+ * Who may be journaled as having cancelled or rewound a run.
+ *
+ * NARROWED, for the reason `resolveGate` narrows its own actor: a public door that accepts
+ * the whole `Actor` union accepts `{kind:"agent"}`, `{kind:"evolution"}`, and — worse — any
+ * `system` component name, including the ones this engine mints itself. An embedder could
+ * then journal a cancel as `system:gate-broker:timeout`, which is the audit-trail forgery
+ * `principal:` prefixing exists to prevent at the HTTP door, reached through the library
+ * door instead. It grants nothing today, because nothing folds a cancel's actor into an
+ * authorization decision, and "grants nothing today" is not a property to build on.
+ *
+ * A person, or a component. `agent` and `evolution` are excluded because neither cancels a
+ * run: a model does not hold an opinion about whether an operator's work should stop.
+ */
+export type CommandActor = HumanActor | SystemActor;
 
 /**
  * Failures a join must NEVER absorb.
@@ -919,7 +936,7 @@ export class Engine {
    *     closed — a state that re-running `cancel` finishes, rather than a half-cancelled
    *     tree that looks finished.
    */
-  async cancel(runId: RunId, reason = "operator", by: Actor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
+  async cancel(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
     const ctx = this.#require(runId);
     await this.#cancelTree(runId, reason, new Set(), by);
     return (await this.#project(ctx))!;
@@ -932,7 +949,7 @@ export class Engine {
    * (`parent~taskId`), so a cycle cannot arise from anything this engine writes — but this
    * walks a journal, and a journal is an input.
    */
-  async #cancelTree(runId: RunId, reason: string, seen: Set<RunId>, by: Actor): Promise<void> {
+  async #cancelTree(runId: RunId, reason: string, seen: Set<RunId>, by: CommandActor): Promise<void> {
     if (seen.has(runId)) return;
     seen.add(runId);
 
@@ -1015,7 +1032,7 @@ export class Engine {
    * The original journal is never edited; the fold hides `(atSeq, marker)` instead.
    * So a rewind is itself auditable, and a trace still shows what was undone.
    */
-  async rewind(runId: RunId, atSeq: Seq, reason: string, by: Actor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
+  async rewind(runId: RunId, atSeq: Seq, reason: string, by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
     // A rewind reads the log and appends a marker, and needs nothing else from a live
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as
@@ -2480,7 +2497,13 @@ export class Engine {
     // stopped a delegation the parent refused, and `GateRecord.decidedBy` carries a kind
     // rather than a subject (`projection.ts`) so the person is not available to name. Saying
     // `operator` would claim an operator cancelled this run, and nobody did.
-    await this.cancel(childRunId, reason, SYSTEM_ACTOR("executor:subgraph"));
+    // NOT `executor:subgraph`, though that is who is acting. That exact string is a member
+    // of `GATE_SYSTEM_ACTORS`, whose docstring says adding a name to it is granting a
+    // component the right to satisfy a human approval — so putting it on `operator.command`
+    // and `run.cancelled`, where it is not an entitlement claim, blurs what the list means
+    // for anything that later filters on it. A distinct name says the same thing and claims
+    // nothing.
+    await this.cancel(childRunId, reason, SYSTEM_ACTOR("executor:subgraph-cancel"));
   }
 
   /** Compile a child graph once per ref. The tree is fixed, so the cache never stales. */

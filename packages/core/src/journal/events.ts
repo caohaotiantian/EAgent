@@ -47,7 +47,17 @@ export type Actor =
  */
 export type HumanActor = Extract<Actor, { readonly kind: "human" }>;
 
-export const SYSTEM_ACTOR = (component: string): Actor => ({ kind: "system", component });
+/**
+ * The system arm of `Actor`, named because several doors accept only a person or a component.
+ *
+ * `Extract` rather than a restatement, so it cannot drift from the union it names.
+ */
+export type SystemActor = Extract<Actor, { readonly kind: "system" }>;
+
+// Returns the NARROW type, not `Actor`. It is assignable to `Actor` everywhere it was already
+// used, and it is what lets a door accept "a person or a component" without accepting an
+// `agent` or an `evolution` actor by construction.
+export const SYSTEM_ACTOR = (component: string): SystemActor => ({ kind: "system", component });
 
 /**
  * The principal a run was submitted ON BEHALF OF — not the component that appended the row.
@@ -120,9 +130,10 @@ export interface EventPayloads {
      * WHO this run was submitted for. Absent means nobody was recorded — see `SubmittedBy`.
      *
      * Optional because every journal written before this field existed lacks it, and a
-     * required field would make those journals unfoldable. The fold takes the FIRST one it
-     * sees, matching the `run_head` column, so a second `run.submitted` cannot rewrite an
-     * owner that a read model has already answered with.
+     * required field would make those journals unfoldable. The fold decides on the FIRST
+     * `run.submitted` it sees — including deciding "nobody" — so a second one cannot rewrite
+     * an owner a read model has already answered with. The read model that will depend on
+     * that is the `run_head` owner column, which is NOT built yet.
      */
     readonly submittedBy?: SubmittedBy;
   };

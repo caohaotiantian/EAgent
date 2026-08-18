@@ -3114,3 +3114,59 @@ call site has been *considered*, not that any of them is right. If a third-party
 matters more than the two internal callers, the honest move is the required field with the
 explicit `unowned` member and a major version — at which point the registry test is deleted
 rather than kept as a second, weaker answer.
+
+---
+
+## Two review findings that the first version of A4 got exactly backwards
+
+Both diff reviewers found the same two defects independently, and both were cases where a
+COMMENT asserted a property the code did not have. That is worse than an uncommented bug: the
+comment is what a later reader checks instead of the code.
+
+**"First wins" was "first NON-EMPTY wins".** The fold guarded on `p.submittedBy === undefined`,
+which reads as "have I already decided" and behaves as "have I already found somebody". So a
+run whose FIRST submission named nobody could be adopted by a later one — and "the first
+submission named nobody" is not the exotic case, it is the common one: every pre-upgrade
+journal, and every `loom run` without `--as`. The read-model column the next phase adds writes
+on the row-creating INSERT and never on the update, so it would have held NULL while the fold
+named a principal: the list route and the detail route disagreeing about who owns a run, in the
+field that decides access — precisely the divergence the comment was written to prevent. The
+guard is now `sawSubmitted`, a boolean that records that the QUESTION was answered rather than
+that the answer was somebody.
+
+**A rewind reached the audit tier through nothing.** `cancel` appends `operator.command` and
+lands in `extractAudit`'s existing arm; `rewind` appends only `checkpoint.restored`, and there
+was no arm for it. So the actor A4 threads into `rewind` reached the journal and stopped there,
+while a comment three lines up claimed both stops were covered. It matters because the audit
+tier is a separately stored `Infinity`-retention duplicate, kept so "who did what" survives a
+journal retention change — with `pruneJournal` configured, "who rewound this run" was the one
+A4 fact still destroyable. Reproduced by construction before fixing: two events in, one audit
+row out.
+
+**The registry test was keyed by FILE and claimed to be keyed by call site.** Its whole job is
+to stand in for a required field, and a second forgetful `submit(` inside a file already on the
+list passed it green. It now pins a COUNT per file, and the count was watched failing before it
+was believed. It also stopped shelling out to `grep` — it was the only test in the repo that
+did, which made it the only one that fails on a machine without the binary, and the `-a`
+reasoning it needed for non-ASCII files evaporates when the file is read in-process.
+
+**A dead branch whose value is the permissive one is a fail-open waiting for an unrelated
+edit.** `...(auth === undefined ? {} : {submittedBy: …})` was unreachable — `#serve` answers
+401 first — and its dead arm recorded no principal, which is the world-readable value. The day
+`/runs` joined the unauthenticated carve-out it would have minted open runs with nothing red.
+It is now `mustAuth(auth)`, which throws rather than defaults.
+
+**And a body that claims a principal is refused rather than ignored.** `#decider` already makes
+this argument for a claimed gate approver — *"a client that sends `actor` believes it is writing
+the audit trail; ignoring it would leave that client confidently wrong about what the journal
+says"* — and the first version cited `#decider` as its precedent while taking the opposite
+treatment. Refused even when the claim AGREES with the credential, which is stricter than
+`#decider`: there, `actor` is a client restating who it is; here it would be a client asserting
+a field the perimeter owns.
+
+**Reverses when.** `CommandActor` narrows `cancel`/`rewind` to a person or a component, which
+excludes `agent` and `evolution` on the argument that neither cancels a run. If an evolution
+candidate ever needs to stop its own trial run, that is the line to widen — and the widening
+should carry the same `principal:`-style prefixing, because the reason the union is narrow is
+that a public door accepting any `system` component lets an embedder journal a cancel as
+`gate-broker:timeout`.

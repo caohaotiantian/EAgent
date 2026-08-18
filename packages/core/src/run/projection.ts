@@ -328,6 +328,17 @@ interface MutableProjection {
   runId: RunId;
   graphHash: string;
   submittedBy?: SubmittedBy;
+  /**
+   * Whether a `run.submitted` has been folded at all — NOT whether it named anybody.
+   *
+   * The distinction is the whole point. Guarding on `submittedBy === undefined` reads as
+   * "first wins" and behaves as "first NON-EMPTY wins", so a run whose first submission
+   * named nobody could be ADOPTED by a later one. The read-model column the next phase adds
+   * is written on the row-creating INSERT and never on the update, so it would hold NULL for
+   * that run while this fold answered with the second principal — the list route and the
+   * detail route disagreeing about who owns a run, in the field that decides access.
+   */
+  sawSubmitted: boolean;
   status: RunStatus;
   seq: Seq;
   startedAt: number;
@@ -478,6 +489,7 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     escalations: {},
     ceilings: {},
     budgetExhausted: false,
+    sawSubmitted: false,
     fanouts: {},
   };
 }
@@ -595,14 +607,21 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "run.submitted")) {
     p.graphHash = e.payload.graphHash;
     p.channels = { ...p.channels, ...e.payload.inputs };
-    // FIRST WINS, and the alternative is a read model that disagrees with itself. The
-    // `run_head.submitted_by` column is written on the row-creating INSERT and never on the
-    // update — `first_ts`'s shape — so a second `run.submitted` leaves the column alone. If
-    // the fold took the later value instead, `GET /runs` (the column) and `GET /runs/:id`
-    // (this fold) would answer differently about who owns a run, in a field that decides
-    // access. Reachable from an embedder re-submitting an explicit `runId`.
-    if (p.submittedBy === undefined && e.payload.submittedBy !== undefined) {
-      p.submittedBy = e.payload.submittedBy;
+    // FIRST WINS, INCLUDING WHEN THE FIRST ANSWER IS "NOBODY". The read-model column the
+    // next phase adds is written on the row-creating INSERT and never on the update —
+    // `first_ts`'s shape — so a second `run.submitted` leaves it alone whatever it says. If
+    // this fold took the later value, the list route (the column) and the detail route (this
+    // fold) would answer differently about who owns a run, in the field that decides access.
+    //
+    // AND THE GUARD IS ON `sawSubmitted`, NOT ON `submittedBy`. Guarding on the folded value
+    // makes an UNOWNED first submission adoptable by a later one — the column would hold
+    // NULL and this would name a principal, which is the same divergence in the direction
+    // that matters, because "the first submission named nobody" is the common case: a
+    // pre-upgrade journal, and every `loom run` without `--as`. Reachable from an embedder
+    // re-submitting an explicit `runId`; `POST /runs` accepts no client-chosen id.
+    if (!p.sawSubmitted) {
+      p.sawSubmitted = true;
+      if (e.payload.submittedBy !== undefined) p.submittedBy = e.payload.submittedBy;
     }
     return;
   }

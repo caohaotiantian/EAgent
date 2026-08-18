@@ -61,13 +61,21 @@ async function submit(r: Rig, token: string): Promise<RunId> {
   return ((await res.json()) as { runId: RunId }).runId;
 }
 
-/** Park the run so a cancel has something to cancel. */
+/**
+ * Park the run so a cancel has something to cancel — and ASSERT that it parked.
+ *
+ * Returning quietly on timeout is what makes the strongest assertion below evaporate: an
+ * unparked run has no open gate, `cancelOpenGates` emits nothing, and the one check that
+ * pins "a person's cancel closes an approver's question under their name" would pass by
+ * being skipped.
+ */
 async function settle(r: Rig, runId: RunId): Promise<void> {
   for (let i = 0; i < 50; i++) {
     const p = await r.h.engine.projection(runId);
     if (p !== undefined && (p.status === "awaiting_gate" || p.status === "succeeded" || p.status === "failed")) return;
     await new Promise((res) => setTimeout(res, 20));
   }
+  assert.fail(`run ${runId} never settled; every assertion after this would be about a run that is still going`);
 }
 
 async function events(r: Rig, runId: RunId): Promise<JournalEvent[]> {
@@ -142,14 +150,19 @@ test("a human cancel journals the HUMAN, on every event the cascade writes", asy
     const evs = await events(r, runId);
     const cmd = evs.find((e) => e.type === "operator.command")!;
     const cancelled = evs.find((e) => e.type === "run.cancelled")!;
-    const gate = evs.find((e) => e.type === "gate.cancelled");
+    const gates = evs.filter((e) => e.type === "gate.cancelled");
 
     const alice = { kind: "human", subject: "u:alice", via: "console" };
     assert.deepEqual(cmd.actor, alice, "the command");
     assert.deepEqual(cancelled.actor, alice, "the terminal event");
     // The gates go with the run, and they go with it under the SAME actor. Before this, a
     // person's cancel closed an approver's open question as `system:operator`.
-    if (gate !== undefined) assert.deepEqual(gate.actor, alice, "and every gate it closed");
+    //
+    // UNCONDITIONAL. Guarding this on "if any gate was cancelled" would let the assertion
+    // disappear the day the fixture graph stops gating, which is the shape of covered-test
+    // rot this repo has already been bitten by.
+    assert.equal(gates.length, 1, "the skeleton parks on exactly one gate, and cancelling closes it");
+    assert.deepEqual(gates[0]!.actor, alice, "and every gate it closed");
   } finally {
     await r.close();
   }
