@@ -588,6 +588,20 @@ export class Engine {
     this.#sequences = opts.sequences;
     this.#baseline = opts.baseline;
     this.#sweepOpts = opts.sweep ?? {};
+    // SAME ARGUMENT AS `new PolicyEngine(...)` ABOVE, and it was missing ten lines below the
+    // idiom that makes it true. `GateSweeper` is built lazily in `sweepGates`, so an
+    // out-of-range `limit` first surfaced from inside a TICK — and the deployment snippet in
+    // that method's own docstring wraps the tick in `.catch(() => {})`, which swallows it
+    // forever: a sweeper that watches nothing, silently, on a process that started clean.
+    // Measured before this line existed: `new Engine({sweep: {limit: NaN}})` succeeded and every
+    // subsequent `sweepGates()` rejected. The instance is discarded; the constructor is the
+    // check.
+    new GateSweeper({
+      ...this.#sweepOpts,
+      store: this.#store,
+      broker: this.#gates,
+      ...(this.#bus === undefined ? {} : { bus: this.#bus }),
+    });
   }
 
   /**
@@ -1158,7 +1172,7 @@ export class Engine {
         // standing. Answering it afterwards resurrected the run and drove the action the
         // cancel existed to prevent. D6.4 rule 4 says it plainly: gates are cancelled by
         // command, not by signal.
-        ...(p === undefined ? [] : cancelOpenGates(p, `the run was cancelled: ${reason}`, by)),
+        ...(p === undefined ? [] : cancelOpenGates(p, `the run was cancelled: ${reason}`, by, this.#gates)),
         {
           type: "run.cancelled",
           payload: {
@@ -2750,12 +2764,24 @@ export class Engine {
     // one path meant to stay up for months. Adding the spec digest and then the parent hash each
     // bought a real freeze and each multiplied the number of distinct entries one ref can hold.
     //
-    // A COUNT CAP IS RIGHT HERE AND WRONG NEXT DOOR, and the reason is worth keeping straight.
-    // `HumanGateBroker.#ephemeral` is released on the gate's terminal transition rather than
-    // capped, because evicting a live gate's entry changes what the system DOES. This is a
-    // cache: everything it holds is a pure function of inputs that are themselves frozen, so an
-    // eviction costs one recompile and cannot change an answer. It is the one map in this pass
-    // where age is a safe policy.
+    // A COUNT CAP IS RIGHT HERE AND WRONG NEXT DOOR. `HumanGateBroker.#ephemeral` drops only a
+    // CLOSED gate's payload, because losing a live gate's route changes what the system does.
+    // Here an eviction costs a recompile, and the recompile is the same one the cache was
+    // standing in for.
+    //
+    // "THE SAME ONE" IS NOT "BYTE-IDENTICAL", and the stronger claim was written here first and
+    // is false. Two of `compileOrThrow`'s inputs are live rather than frozen: `resolveManifest`
+    // walks only the PARENT's nodes, so the child's own `function/…` and `prompt/…` refs miss
+    // the frozen map and go to the live resolver on every compile — measured, a probe recording
+    // `resolve` during `advance` saw `function/double@stable` three times. And `tools.manifests()`
+    // reads a registry an embedder may `register`/dispose at any time, which feeds `classFloor`.
+    // So a recompile that straddles a promotion or a tool disposal can differ, and for a
+    // long-lived subgraph Task the window is human-sized.
+    //
+    // That is a REAL limit of the freeze rather than of this cap — an uncached compile has it
+    // too, and always did — but a cap makes recompiles reachable on purpose, so it is recorded
+    // where the eviction is. Closing it means excluding entries a live run still references,
+    // which needs a run→key index this class does not have.
     //
     // Insertion order and the shape of the eviction follow `GateCallbackRouter.#admitRow`,
     // which made the same trade first.
@@ -3895,7 +3921,7 @@ export class Engine {
       if (started < plan.width) {
         await this.#serialize(() =>
           ctx.log.append([
-            ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor")),
+            ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
             {
               type: "run.failed",
               payload: {
@@ -3924,7 +3950,7 @@ export class Engine {
       const first = failed[0]!;
       await this.#serialize(() =>
         ctx.log.append([
-          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor")),
+          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
           {
             type: "run.failed",
             payload: {
@@ -3952,7 +3978,7 @@ export class Engine {
     if (declared.length > 0 && Object.keys(outputs).length === 0) {
       await this.#serialize(() =>
         ctx.log.append([
-          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor")),
+          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
           {
             type: "run.failed",
             payload: {
@@ -3972,7 +3998,7 @@ export class Engine {
 
     await this.#serialize(() =>
       ctx.log.append([
-        ...cancelOpenGates(p, "the run completed before this gate was answered", SYSTEM_ACTOR("executor")),
+        ...cancelOpenGates(p, "the run completed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
         {
           type: "run.completed",
           payload: { outputs, usage: p.usage },
@@ -4249,8 +4275,21 @@ async function childRunsOf(log: RunLog): Promise<readonly RunId[]> {
  * the two would leave a stopped run with a live gate, which is precisely the state that
  * made the run answerable again.
  */
-function cancelOpenGates(p: RunProjection, reason: string, actor: Actor): readonly NewEvent[] {
-  return openGates(p).map((g): NewEvent => ({
+function cancelOpenGates(
+  p: RunProjection,
+  reason: string,
+  actor: Actor,
+  gates: HumanGateBroker,
+): readonly NewEvent[] {
+  // The broker's non-durable half is NOT released here, deliberately — see `releaseClosed`,
+  // which the callers invoke once the append has landed. Building the events is not the same
+  // moment as the gates closing, and a cancel that loses its `commit` must not have dropped
+  // anything.
+  const closing = openGates(p);
+  // The engine closes these; the broker never sees them through `resolve` or `#expire`, so this
+  // is the only point at which their non-durable payloads can be let go.
+  gates.releaseClosed(closing.map((g) => g.gateId));
+  return closing.map((g): NewEvent => ({
     type: "gate.cancelled",
     payload: { gateId: g.gateId, reason },
     actor,

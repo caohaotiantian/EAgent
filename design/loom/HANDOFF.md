@@ -767,7 +767,8 @@ between the mutation and the next turn. Measured: a frozen `function/mult2@stabl
 > once a Task is executing" is true for an ordinary run and false for a mutated one, and both
 > `HANDOFF` and `JOURNAL` now say so.
 
-**A5 · A hung `parseCallback` is the one refusal invisible in both sinks. RESOLVED 2026-08-19.**
+**A5 · A hung `parseCallback` is the one refusal invisible in both sinks. TWO OF THREE CLOSED
+2026-08-19; consequence 1 REMAINS OPEN.**
 `CallbackRequest` carried no `AbortSignal`, so the HTTP request deadline could abandon the
 *response* but not the channel call. Three consequences: each hung POST leaks a pending
 continuation holding the body buffer, on an unauthenticated route; counting and journaling both
@@ -775,20 +776,31 @@ happen after `parse` resolves, so the refusal is recorded nowhere; and a channel
 after the 504 still reaches `resolveGate`, applying a decision minutes after its caller was told
 the request failed.
 
-**`#withDeadline` closed the FIRST only, and this entry claimed two.** The timer callback does
-exactly one thing — `send(res, 504, …)` (`http.ts:2156`) — incrementing no counter and appending
-no event, while every `#count` call lives in `delivery.ts` and is reached only once `parse` has
-settled. So the socket was released and the refusal stayed in neither sink, which is this entry's
-own title. A plan in this pass asserted the second half was fixed, from the docstring rather than
-the code; two independent reviewers caught it.
+**`#withDeadline` closed the SOCKET and nothing else, and two successive rewrites of this entry
+overstated it.** The timer callback does exactly one thing — `send(res, 504, …)` — incrementing no
+counter and appending no event, while every `#count` call lives in `delivery.ts` and is reached
+only once `parse` has settled. So the refusal stayed in neither sink, which is this entry's own
+title. The first rewrite claimed that half was closed, read off a docstring rather than the code.
+The second claimed `#withDeadline` had closed consequence 1; it has not. `#withDeadline` still
+`await`s the handler, and its own docstring says so: *"The losing handler is not cancelled — there
+is nothing here to cancel it with."* Reproduced: with `requestTimeoutMs: 100` and a channel that
+never resolves, a 50 000-byte POST returns 504 while `parseCallback` is still pending and the body
+still held. **N concurrent hung POSTs still retain N bodies on an unauthenticated route.** Closing
+it needs a `Promise.race` around `parse` — which the ORIGINAL entry proposed and both rewrites
+dropped.
 
 **Closed at the ROUTER, and the interface change was NOT made.** The deadline's `AbortSignal`
 reaches `GateCallbackRouter.handle`, which counts and refuses before admission if it has already
 fired — consequences 2 and 3 together, for channels that cooperate and channels that never will.
 An `AbortSignal` on `CallbackRequest` would have been a request injected code may honour, and the
 channel that ships in this binary would have ignored it: A5 would have been marked closed with its
-named residue fully reproducible. The signal rides on `CallbackInput` so a cooperative channel can
-still stop early. `E_CANCELLED` rather than a new code, for the reason `#withDeadline` already
+named residue fully reproducible. **The channel is NOT given the signal** — `parse` receives
+`{body, headers, now}` and `CallbackRequest` has exactly those three members; `CallbackInput` is
+what the ControlPlane hands the router. An earlier version of this entry and of the code comment
+both said otherwise. Handing it over would need more than a field: a channel cooperating by
+throwing an `AbortError` lands where `reasonOf` falls to `internal`, which
+`PERIMETER_REJECTIONS` counts as a broken channel rather than as our own deadline — the exact
+pollution the new reason exists to avoid. `E_CANCELLED` rather than a new code, for the reason `#withDeadline` already
 gives about the bare wire code it writes: every declared code must be named by a design-corpus
 row, and that reconciliation is not this change's to own. `test/run/callback.test.ts`.
 
@@ -842,21 +854,37 @@ named one site of six.** `grep -a` for a `.delete` on any of them returns nothin
 
 **Measured first, because the obvious probe lied three times.** `HumanGateBroker.#ephemeral` —
 the heaviest, holding the rendered gate payload the journal deliberately does not — retained
-**33.0 MiB across 6000 gates**. The first three readings said 0.4–0.8 MiB: payloads built with
-`"x".repeat(4096)` share one V8 backing store, and once that was fixed nothing referenced the
-broker after the loop, so V8 collected the whole thing before the measurement. A probe that
-reports "no leak" has to be shown capable of reporting one.
+**~24 MiB across 6000 gates, of ~38 MiB retained in total**. The first three readings said
+0.4–0.8 MiB: payloads built with `"x".repeat(4096)` share one V8 backing store, and once that was
+fixed nothing referenced the broker after the loop, so V8 collected the whole thing before the
+measurement. A probe that reports "no leak" has to be shown capable of reporting one. *(The first
+write-up of this entry said "33.0 MiB in `#ephemeral`" — a total-retention number worn as a map
+number. A reviewer separated them: the fix reclaims ~24 MiB and the residual ~14 MiB is journal
+the fix correctly does not touch.)*
 
 **Each map got the treatment its own failure mode allows, and they differ:**
 
 | Site | Done | Why not the same as the others |
 |---|---|---|
-| `HumanGateBroker.#ephemeral` | released on the gate's TERMINAL transition | a size cap evicts in raise order, so it targets the longest-open gate — the one about to escalate. `#fireTimeout` then takes the `spec === undefined` arm and **expires it with a reason that is false** |
+| `HumanGateBroker.#ephemeral` | a closed gate's PAYLOAD dropped; its route, SLA and default action kept | a size cap evicts in raise order, so it targets the longest-open gate — the one about to escalate. And **so did releasing the whole entry**: `Engine.rewind` reopens a decided gate by design, so the first version of this fix stripped a LIVE gate's `DeliverySpec` and `#fireTimeout` expired it with a reason that was false. Reproduced by both reviewers independently |
 | `Engine.#childGraphs` | FIFO cap | a pure cache of frozen inputs: eviction costs a recompile and cannot change an answer. Missed by this entry entirely, and `874c6d6` had just widened its key |
 | `ControlPlane.#idempotency` | FIFO cap | the one where eviction is a CORRECTNESS cost — nothing dedups on the key, so an evicted entry is a second run. Safe only because entries land on success |
 | `HumanGateBroker.#idempotency` | **left alone, deliberately** | safe against replay — the durable gate-state fold, not the map, is what refuses a repeat — but eviction turns a legitimate Slack redelivery into a durable `gate.callback_rejected` naming a blameless human, plus a bump on the **unresettable** `callbackRefusals` counter |
 | `ResourceStore.#idempotency` | **dropped from scope** | free to fill (the key is set BEFORE the content-address early return), and it is a MISMATCH DETECTOR rather than a dedupe — evicting turns a refusal into a silent accept. Also has no `publish` caller on the serve path |
 | `ResourceStore.#versions`/`#byDigest`/`#selectors` | **open** | these hold the actual content and are what grows in that class. Recorded, not fixed |
+
+**Gates the ENGINE closes** — `gate.cancelled`, from an operator cancel or a run that fails or
+completes with a question standing — never went through the broker at all, so every cancelled run
+leaked a payload per open gate. `cancelOpenGates` now calls `releaseClosed`. It does so as the
+events are BUILT rather than after they land, and the cost is stated in the method: an append that
+loses its compare-and-swap has dropped a payload for a still-open gate, leaving it in exactly the
+state a restarted process leaves it in.
+
+**Neither new cap is observable.** No counter, no event, no log line — against this tree's own
+practice for lossy structures (`Subscription.dropped`, `refusals()` on `/health`,
+`redact.ts`'s warned-keys cap, which "degrades to warning on every change of value — noisier,
+never quieter"). `MAX_CACHED_CHILD_GRAPHS`'s own reversal condition — "if a deployment measures
+recompiles it cares about" — is therefore unmeasurable. Open.
 
 > **The first plan for this got all of that backwards** and would have shipped a uniform cap over
 > four maps. It called `#ephemeral` "the safest to evict" while citing, as its evidence, the file

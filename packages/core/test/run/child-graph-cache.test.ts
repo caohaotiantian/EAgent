@@ -13,8 +13,8 @@
  *
  * A count cap is safe HERE and would not be next door: everything this map holds is a pure
  * function of frozen inputs, so an eviction costs a recompile and cannot change an answer.
- * `HumanGateBroker.#ephemeral` is released on a terminal transition instead, because evicting a
- * live gate's entry changes what the system does. Both tests below are about that distinction.
+ * `HumanGateBroker.#ephemeral` drops only a closed gate's PAYLOAD instead, because evicting a live
+ * gate's route changes what the system does. The one test below is about that distinction.
  */
 
 import test from "node:test";
@@ -183,19 +183,16 @@ test("A FLOODED CACHE STILL ANSWERS — eviction cannot change what a child comp
   // THIS TEST IS GREEN WITH THE CAP REMOVED, measured, and that is stated rather than hidden.
   //
   // The eviction is not observable, by design and for a reason worth writing down: since A24/A25
-  // the engine compiles a child through `frozenFirst`, so a MISS reads the same frozen spec and
-  // the same frozen documents out of the parent's `RunGraph` and asks the live resolver nothing
-  // at all. A recompile is byte-identical to the cached graph — which is exactly why capping is
-  // safe here, and exactly why no assertion can see it happen. The first version of this test
-  // counted grandchild lookups and measured zero for that reason.
+  // the engine compiles a child through `frozenFirst`, so a MISS reads the same frozen SPEC and
+  // the same frozen SUBGRAPH TREE out of the parent's `RunGraph`. The first version of this test
+  // counted grandchild lookups expecting to see a miss, and measured zero for that reason.
   //
   // So this pins the property the cap could break rather than the cap: that flooding does not
-  // corrupt or lose an answer. The bound itself rests on inspection — the map is a pure function
-  // of frozen inputs, so an eviction costs a recompile and nothing else. `#ephemeral` next door
-  // gets a real test because there the same policy WOULD change behaviour.
+  // corrupt or lose an answer. `#ephemeral` next door gets a real test because there the same
+  // policy WOULD change behaviour.
   assert.deepEqual(
     [first.lookups, again.lookups],
     [0, 0],
-    "a child compile must not reach the live resolver at all — the parent froze what it needs",
+    "a child compile must not re-resolve the grandchild SPEC — the parent's tree already holds it",
   );
 });

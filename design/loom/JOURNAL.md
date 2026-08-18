@@ -3732,9 +3732,44 @@ a third time. That fix was right and stays; it also multiplied the entries. **A 
 can have a resource cost, and this pass shipped one without looking.**
 
 **Reverses when:** a deployment measures child-graph recompiles it cares about (raise
-`MAX_CACHED_CHILD_GRAPHS`, it is a pure cache); or clients retry submits slower than the
-deployment submits 10 000 runs (raise `MAX_IDEMPOTENT_SUBMITS`, and note the unit is
-entries ÷ submission rate).
+`MAX_CACHED_CHILD_GRAPHS` — though nothing counts them today, so that condition is currently
+unmeasurable); or clients retry submits slower than the deployment submits 10 000 runs (raise
+`MAX_IDEMPOTENT_SUBMITS`; the unit is entries ÷ submission rate, ~17 h at ten runs a minute).
+
+### Then the diff review found that the fix had the bug the plan rejected the cap for
+
+Two reviewers, independently, with reproductions: **`Engine.rewind` reopens a decided gate by
+design** — the engine's own refusals tell operators to do it — and the `gate.raised` event
+survives, so the gate folds back to `open` with nothing to repopulate the broker's map. Deleting
+the entry on decision therefore stripped a LIVE gate's `DeliverySpec`. Measured: a rewound gate
+declaring `onTimeout: "escalate"` with a tier left went from one page and `gate.escalated` to zero
+pages, `gate.timeout`, `run.failed`, and a journaled reason — "exhausted its escalation chain with
+no decision" — that was false. That is the same sentence the plan quoted as its argument AGAINST
+the size cap, and I reintroduced it through a different door while quoting it.
+
+The fix is a split rather than a retreat: **drop the payload, keep the behaviour.** The bytes are
+in `payload`; `delivery`, `defaultAction`, `slaMs` and `reminders` are small config. A reopened
+gate now behaves exactly as it did and has lost only its rendered payload — which `#summaryOf`
+already takes as possibly-absent, because a process that did not raise the gate never had one. The
+test asserts both directions with two WeakRefs and fails against both wrong answers.
+
+**The general lesson, and it is the same one as the two waves before:** "terminal" was an
+assumption about the system, not a fact about it, and I did not check whether anything undoes a
+terminal transition before building on it. `grep -an 'rewind'` would have answered it.
+
+**Three more claims in the shipped comments were false and are corrected in place.** "A recompile
+is byte-identical" — no: `resolveManifest` walks only the PARENT's nodes, so a child's own refs
+miss the frozen map and resolve live every time, and `tools.manifests()` reads a mutable registry.
+That is a real limit of the freeze rather than of the cap, but a cap makes recompiles reachable on
+purpose, so it is recorded at the eviction. "The channel still gets the signal" — no: `parse`
+receives `{body, headers, now}`; `CallbackInput` is what the ControlPlane hands the ROUTER. And
+`boundedLimit` did not refuse at construction as four places claimed, because `GateSweeper` is
+built lazily — so `limit: 0` swept nothing forever, which is worse than the clamp it replaced. The
+`Engine` constructor now builds and discards one, the same idiom `interventionWindowMs` uses ten
+lines above.
+
+**And the headline measurement was over-attributed.** "33.0 MiB in `#ephemeral`" was total process
+retention; the map holds ~24 MiB of it and the rest is journal the fix correctly does not touch.
 
 ### The probe that lied three times, and the two tests that could not fail
 

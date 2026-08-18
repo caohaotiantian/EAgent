@@ -93,9 +93,15 @@ test("A DECIDED GATE'S PAYLOAD IS RELEASED — the map is the only thing holding
   // obvious way this probe reports "still held" for everything and can only ever fail. The
   // two-sided control at the end is what keeps that honest.
   let payload: object | undefined = { summary: "approve the deploy" };
+  // THE SPEC MUST SURVIVE WHAT THE PAYLOAD DOES NOT, and that is the whole shape of the fix.
+  // A gate that closes can be REOPENED — `Engine.rewind` does it by design and the engine's own
+  // refusals tell operators to — so dropping the entry whole stripped a live gate's route.
+  let delivery: object | undefined = { channels: ["console"], recipients: [{ kind: "user", id: "u:alice" }] };
   const seen = new WeakRef(payload);
-  const gateId = await broker.raise(log, request("gate@root#0", payload));
+  const route = new WeakRef(delivery);
+  const gateId = await broker.raise(log, request("gate@root#0", payload, { delivery: delivery as never }));
   payload = undefined;
+  delivery = undefined;
 
   await collect();
   assert.notEqual(seen.deref(), undefined, "an OPEN gate's payload must still be held");
@@ -109,6 +115,12 @@ test("A DECIDED GATE'S PAYLOAD IS RELEASED — the map is the only thing holding
 
   await collect();
   assert.equal(seen.deref(), undefined, "a decided gate's payload must not outlive the decision");
+  assert.notEqual(
+    route.deref(),
+    undefined,
+    "but its DeliverySpec must — a decided gate can be reopened by rewind, and a reopened gate " +
+      "with no route is expired by #fireTimeout with a reason that is false",
+  );
 
   // AND THE BROKER IS STILL ALIVE AT THE ASSERTION. Without this the whole broker is
   // unreachable by then and V8 collects it wholesale, so the WeakRef clears whether or not
@@ -129,6 +141,17 @@ test("A DECIDED GATE'S PAYLOAD IS RELEASED — the map is the only thing holding
   assert.equal(held.length, 1);
 });
 
+/**
+ * THIS ONE IS GREEN WITH THE RELEASE REVERTED, measured, and it is kept anyway.
+ *
+ * It does not cover the fix; it pins the property the REJECTED design would have broken. A size
+ * cap evicts in insertion order, insertion order is raise order, and the gate below is raised
+ * FIRST — so it is the first entry an age policy discards, and it is the one still waiting on a
+ * human. Losing its `DeliverySpec` sends `#fireTimeout` down the `spec === undefined` arm, which
+ * expires the gate with "exhausted its escalation chain with no decision" — false, in the
+ * journal, on a gate nobody was ever paged about. The `route` WeakRef in the test above is what
+ * actually covers the shipped behaviour; this is the deployment-shaped version of the same claim.
+ */
 test("AN OPEN GATE STILL ESCALATES AFTER OTHER GATES CLOSE — what an age policy would have broken", async () => {
   const store = new MemoryStateStore({ now: () => NOW });
   // A REAL `GateDispatcher` over a recording channel, not a stub in its place: `GateDispatcher`

@@ -205,8 +205,14 @@ export interface GateBrokerOptions {
  * serve. Read its note before widening it.
  */
 interface EphemeralGate {
-  /** What the human is shown. Re-derivable; `contentDigest` pins what they saw. */
-  readonly payload: unknown;
+  /**
+   * What the human is shown. Re-derivable; `contentDigest` pins what they saw.
+   *
+   * OPTIONAL, because it is dropped when the gate closes while the rest of this record stays.
+   * See `#releasePayload`: the bytes are here, the BEHAVIOUR is in the fields below it, and a
+   * gate that reopens needs the second without the first.
+   */
+  readonly payload?: unknown;
   /** Where to send it. A notification route, never a permission. */
   readonly delivery?: DeliverySpec;
   /**
@@ -268,30 +274,59 @@ export class HumanGateBroker {
   }
 
   /**
-   * Drop a gate's non-durable half once the gate is CLOSED.
+   * Drop the PAYLOAD of a gate that has closed, and keep everything else.
    *
-   * Measured before this existed: 6000 gates carrying a 4 KiB payload each held 33.0 MiB in
-   * `#ephemeral` for the life of the process, and nothing ever removed an entry. The journal
-   * is correctly not where that lives — `gate.raised` carries `contentDigest`, not the
-   * payload — so the map is the only holder and a long-lived `loom serve` grew without bound.
+   * Measured before this existed: 6000 gates carrying a 4 KiB payload each retained ~24 MiB in
+   * `#ephemeral` for the life of the process, and nothing ever removed anything. The journal is
+   * correctly not where that lives — `gate.raised` carries `contentDigest`, not the payload — so
+   * this map is the only holder and a long-lived `loom serve` grew without bound.
    *
-   * RELEASED ON THE TERMINAL TRANSITION, NEVER EVICTED BY AGE, and the difference is not a
-   * preference. A size cap on this map evicts in insertion order, insertion order is raise
-   * order, and the oldest-raised gate is the one still waiting on a slow human — so the
-   * policy would target exactly the entries still in use. What it would do to them is
-   * already written down one screen away, about a different cause: `GateSweeperOptions.broker`
-   * says a sweep holding no `DeliverySpec` makes `#fireTimeout` "conclude every escalation
-   * chain is exhausted and EXPIRE gates that should have escalated. Silently, and fail-closed."
-   * An evicted live gate also turns `onTimeout: "default_action"` into `fail`, and loses the
-   * SLA a `rehydrate` supplied. A closed gate has none of those futures left.
+   * THE PAYLOAD IS WHERE THE BYTES ARE AND THE OTHER FIELDS ARE WHERE THE BEHAVIOUR IS, which is
+   * why the split is here and not at the entry. `delivery`, `defaultAction`, `slaMs` and
+   * `reminders` are small config; the payload is whatever a node rendered for a human and can be
+   * model-sized. Dropping the entry whole reclaims nothing extra worth having and costs the
+   * gate's future.
    *
-   * Every reader is reached only for an OPEN record — `list` through `openGates`, `listBatches`
-   * through `gateBatchGroups(p, "open")`, and the sweep paths through the open-gate scan — and
-   * `#announceRemainder` reads the NEXT open member rather than the one just closed. `resolve`
-   * does not read this map at all.
+   * A CLOSED GATE IS NOT A PERMANENTLY CLOSED GATE — this is the correction, and it was a real
+   * regression before it was a docstring. `Engine.rewind` reopens a decided gate BY DESIGN, and
+   * the engine's own refusals tell operators to do it ("rewind to `atSeq - 1` to ask again").
+   * The `gate.raised` event survives, so the gate folds back to `open` with no re-raise and
+   * nothing to repopulate this map. Deleting the entry therefore stripped a LIVE gate's
+   * `DeliverySpec`, and `#fireTimeout` then took its `spec === undefined` arm: reproduced end to
+   * end, a rewound gate declaring `onTimeout: "escalate"` with a tier left went from one page and
+   * `gate.escalated` to zero pages, `gate.timeout`, `run.failed` and a journaled reason —
+   * "exhausted its escalation chain with no decision" — that was false.
+   *
+   * That is verbatim the failure this file already names as the reason a sweep must use the
+   * broker that raised the gate: "EXPIRES gates that should have escalated. Silently, and
+   * fail-closed, which is the kind of wrong that gets discovered a quarter later." It is also
+   * the failure a size cap was rejected for. Keeping the behavioural fields makes a reopened
+   * gate behave exactly as it did, and costs only the rendered payload — which `#summaryOf`
+   * already takes as possibly-absent, because a process that did not raise the gate never had it.
    */
-  #release(gateId: GateId): void {
-    this.#ephemeral.delete(gateId);
+  /**
+   * Drop the payloads of gates the ENGINE is closing, which it does without going through here.
+   *
+   * `gate.cancelled` is written by `Engine` — an operator cancel, and a run that fails or
+   * completes with a question still standing — so those gates closed with nothing releasing
+   * their half. Every cancelled run leaked one payload per open gate, permanently.
+   *
+   * Called as the events are BUILT rather than after they land, and the cost of that is stated:
+   * an append that loses its compare-and-swap will have dropped a payload for a gate that is
+   * still open. That degrades the gate to exactly the state a RESTARTED process leaves it in —
+   * route, SLA and default action intact, rendered payload absent — which every reader already
+   * handles, because a process that did not raise the gate never had one. The alternative,
+   * threading a post-append call through five sites, trades that for five chances to miss one.
+   */
+  releaseClosed(gateIds: readonly GateId[]): void {
+    for (const id of gateIds) this.#releasePayload(id);
+  }
+
+  #releasePayload(gateId: GateId): void {
+    const eph = this.#ephemeral.get(gateId);
+    if (eph === undefined) return;
+    const { payload: _dropped, ...keep } = eph;
+    this.#ephemeral.set(gateId, keep);
   }
 
   /**
@@ -533,7 +568,7 @@ export class HumanGateBroker {
     // above carried `decidedEvent` for it. `#ephemeral` is set before that append — it has to
     // be, because a gate that turns out to be answerable is only known to be so after
     // `#inheritable` has run — so this is the one path where the entry is born terminal.
-    if (inherited !== undefined) this.#release(gateId);
+    if (inherited !== undefined) this.#releasePayload(gateId);
     return gateId;
   }
 
@@ -805,7 +840,7 @@ export class HumanGateBroker {
     // legitimately loses to a concurrent writer, and recording a decision that did not
     // land would turn the caller's retry into a silent no-op.
     this.#idempotency.set(idemKey, decision.kind);
-    for (const g of gateIds) this.#release(g);
+    for (const g of gateIds) this.#releasePayload(g);
     return { resolved: true, gateIds };
   }
 
@@ -1021,7 +1056,7 @@ export class HumanGateBroker {
     await log.append([decidedEvent(gate, checked, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
 
     await this.#announceRemainder(log, p, gate);
-    this.#release(gate.gateId);
+    this.#releasePayload(gate.gateId);
     return { resolved: true };
   }
 
@@ -1767,7 +1802,7 @@ export class HumanGateBroker {
       // `resolve`, deliberately, so a batch whose only announced member was decided by the
       // clock is in exactly the state that method exists for.
       await this.#announceRemainder(log, at, gate);
-      this.#release(gate.gateId);
+      this.#releasePayload(gate.gateId);
       return true;
     }
 
@@ -1900,7 +1935,7 @@ export class HumanGateBroker {
         actor: SYSTEM_ACTOR("gate-broker"),
       },
     ]);
-    if (still !== undefined) this.#release(gate.gateId);
+    if (still !== undefined) this.#releasePayload(gate.gateId);
     return still !== undefined;
   }
 

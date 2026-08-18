@@ -2632,9 +2632,16 @@ export class GateCallbackRouter {
     //
     // Checked HERE rather than by handing the signal to the channel. An `AbortSignal` on
     // `CallbackRequest` would be a request injected code may honour; this holds for code that
-    // never does, which is the only version that closes the hole. The channel still gets the
-    // signal — it is on `CallbackInput` — so a cooperative one can stop early and reach this
-    // line by throwing instead.
+    // never does, which is the only version that closes the hole.
+    //
+    // THE CHANNEL IS NOT GIVEN THE SIGNAL, and an earlier version of this comment said it was.
+    // `parse` is called with `{body, headers, now}` and `CallbackRequest` has exactly those three
+    // members; `CallbackInput.signal` is what the ControlPlane hands the ROUTER. Giving it to the
+    // channel is a published-interface change this deliberately did not make — and it would need
+    // more than a field, because a channel that cooperated by throwing an `AbortError` would land
+    // in the catch above, where `reasonOf` falls to `internal` and `PERIMETER_REJECTIONS` counts
+    // it as a broken channel rather than as our own deadline. That is the pollution this reason
+    // exists to avoid, reached from the other side.
     if (input.signal?.aborted === true) {
       this.#count(name, "timeout");
       throw callbackRejection("timeout", "the request deadline passed before the channel answered");

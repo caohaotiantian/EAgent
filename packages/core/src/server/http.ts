@@ -944,6 +944,19 @@ export interface ControlPlaneOptions {
 const MAX_TIMER_MS = 2_147_483_647;
 
 /**
+ * Distinct `Idempotency-Key` values one process remembers.
+ *
+ * Read as a duration, not a size: entries land only on a successful submit, so this is
+ * `MAX_IDEMPOTENT_SUBMITS ÷ submissions per minute` — about 17 HOURS at ten runs a minute, about an
+ * hour at 170. REVERSE IT upward if a deployment submits faster than its clients retry.
+ *
+ * It bounds ENTRIES rather than bytes, and the key is caller-influenced: `idempotencySlot`
+ * includes the raw header, which `node:http` bounds only by its own header limit. So the memory
+ * this caps is a multiple of that limit, not of a small constant.
+ */
+const MAX_IDEMPOTENT_SUBMITS = 10_000;
+
+/**
  * The other two caller-supplied numbers, bounded — because a cap is a GUARD and `NaN`
  * silently removes one.
  *
@@ -974,19 +987,6 @@ const MAX_TIMER_MS = 2_147_483_647;
  * maximum string length because `#readBody` ends at `raw.toString("utf8")`, so a cap above
  * it is a cap this process could not honour even if the memory were there.
  */
-/**
- * Distinct `Idempotency-Key` values one process remembers.
- *
- * Read as a duration, not a size: entries land only on a successful submit, so this is
- * `MAX_IDEMPOTENT_SUBMITS ÷ submissions per minute` — about a day at ten runs a minute, about an
- * hour at 170. REVERSE IT upward if a deployment submits faster than its clients retry.
- *
- * It bounds ENTRIES rather than bytes, and the key is caller-influenced: `idempotencySlot`
- * includes the raw header, which `node:http` bounds only by its own header limit. So the memory
- * this caps is a multiple of that limit, not of a small constant.
- */
-const MAX_IDEMPOTENT_SUBMITS = 10_000;
-
 function boundedCount(v: unknown, where: string, what: string): number | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > BUFFER.MAX_STRING_LENGTH) {
@@ -1295,8 +1295,8 @@ export class ControlPlane {
    * What makes the count safe is that entries are recorded only on SUCCESS, so filling the map
    * costs `MAX_IDEMPOTENT_SUBMITS` real submissions — each of them the very operation being
    * deduplicated. Divide by the deployment's submission rate to get the window a retry may
-   * arrive in: at ten runs a minute this is about a day, and a client retrying slower than that
-   * is asking for a second run whatever this map does.
+   * arrive in: at ten runs a minute that is about 17 hours — so a nightly job retrying the next
+   * day is outside it, which is the case the number was chosen against.
    */
   readonly #idempotency = new Map<string, unknown>();
   readonly #callbacks: GateCallbackRouter | undefined;
