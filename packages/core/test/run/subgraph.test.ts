@@ -196,6 +196,68 @@ test("THE CHILD SPEC IS FROZEN AT COMPILE — an executing Task asks no resolver
   const p = await engine.advance(runId);
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
   assert.equal(p.channels["result"], 42, "the child ran, from the frozen spec");
+
+});
+
+test("…AND THE GRANDCHILD IS FROZEN TOO — the freeze used to stop one level down", async () => {
+  // `#compileChild` runs INSIDE the executing parent Task, so a live `subgraph()` there put the
+  // NEXT level straight back on the run-time path: the grandchild was read from the resolver
+  // mid-run, which is verbatim the swap this freeze exists to prevent, and every deep entry the
+  // collector gathered was dead code. Depth 1 passed either way, which is why the first version
+  // of the test above missed it.
+  const grand = childSpec();
+  const middle: GraphSpec = {
+    ...childSpec(),
+    metadata: { name: "middle", project: "sub", version: 1 },
+    policy: { ...childSpec().policy, expansion: { maxNodes: 32, maxDepth: 3, maxFanout: 4, maxLoopIterations: 1 } },
+    nodes: [
+      {
+        id: n("nest"),
+        type: "subgraph",
+        reads: ["amount"],
+        writes: ["doubled"],
+        subgraph: { ref: "graph/grand@stable", inputs: { amount: "amount" }, outputs: { doubled: "doubled" } },
+      },
+    ],
+    edges: [],
+  };
+  const tree: ResourceResolver = {
+    resolve: (ref) =>
+      /^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)
+        ? { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" }
+        : undefined,
+    subgraph: (ref) => (ref === "graph/double@stable" ? middle : ref === "graph/grand@stable" ? grand : undefined),
+  };
+
+  const r = rig(grand);
+  const parent = compileOrThrow({
+    spec: parentSpec({ policy: { ...parentSpec().policy, expansion: { maxNodes: 32, maxDepth: 3, maxFanout: 4, maxLoopIterations: 1 } } }),
+    resolver: tree,
+    tools: {},
+    tenantCapabilities: ["pay"],
+  });
+  assert.deepEqual(
+    Object.keys(parent.subgraphs).sort(),
+    ["graph/double@stable", "graph/grand@stable"],
+    "the whole tree is frozen, not just the level this spec names",
+  );
+
+  // Poisoned for the GRANDCHILD only, after the parent compiled. If `#compileChild` asked it,
+  // the middle graph's own compile would take a childless grandchild and the run would fail.
+  const poisonedTree: ResourceResolver = { ...tree, subgraph: (ref) => (ref === "graph/grand@stable" ? { ...grand, nodes: [], edges: [] } : tree.subgraph?.(ref)) };
+  const engine = new Engine({
+    store: r.store,
+    resolver: poisonedTree,
+    tools: r.engine.tools,
+    functions: r.engine.functions,
+    models: r.engine.models,
+    now: () => 1_700_000_000_000,
+    policy: { granted: ["pay"], budget: { runUsd: 1 } },
+  });
+  const runId = await engine.submit({ graph: parent, inputs: { total: 21 } });
+  const p = await engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(p.channels["result"], 42, "the grandchild that ran is the one the PARENT froze");
 });
 
 test("A DELEGATED RUN BELONGS TO WHOEVER STARTED THE PARENT", async () => {

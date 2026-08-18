@@ -137,7 +137,7 @@ export function compile(input: CompileInput): CompileResult {
     terminalNodes: idx.terminalNodes,
     resolutionManifest: manifest,
     documents: resolveDocuments(input, manifest),
-    subgraphs: resolveSubgraphs(input),
+    subgraphs: resolveSubgraphs(input, expansion),
     expansion,
   };
 
@@ -168,21 +168,33 @@ function resolveDocuments(input: CompileInput, manifest: readonly ResolvedRef[])
  * executing — and `Engine.#compileChild` compiles a child, which reads that child's own refs. A
  * top-level-only map would relocate the read rather than remove it.
  *
- * The `seen` set is a cycle guard and the depth bound mirrors the validator's, so a graph the
- * validator refuses for cycling or nesting too far cannot make this loop. It is not a second
- * enforcement of either rule: diagnostics are the validator's job and this only declines to
- * walk further.
+ * `reachedAt` is the cycle guard and the bound is the ROOT's `expansion.maxDepth`. That is not
+ * the validator's rule: `validateGraph` recomputes the budget from each level's own
+ * `policy.expansion`, so a root declaring `maxDepth: 1` over children declaring `9` accepts a
+ * tree this collector stops walking. Collecting less than the validator accepted is safe —
+ * `#compileChild` falls back to the live resolver for a ref that was not frozen — and it is
+ * recorded rather than reconciled, because agreeing would mean a second implementation of a
+ * rule whose diagnostics are the validator's job.
  */
-function resolveSubgraphs(input: CompileInput): Readonly<Record<string, GraphSpec>> {
+function resolveSubgraphs(input: CompileInput, expansion: ExpansionBudget): Readonly<Record<string, GraphSpec>> {
   const out: Record<string, GraphSpec> = {};
-  const maxDepth = input.spec.policy?.expansion?.maxDepth ?? DEFAULT_EXPANSION.maxDepth;
+  // THE DEPTH EACH REF WAS REACHED AT, not merely whether it was seen. Skipping an already-seen
+  // ref is the cycle guard, and on its own it also skips DESCENDING — so a ref first reached at
+  // the depth limit was recorded and never walked through, even when a shallower path to it
+  // came later in the node list. Measured on `root→[B,X], B→X, X→Y` at `maxDepth: 2`: `Y` was
+  // lost, and reversing the two nodes found it. Re-walking when a ref turns up shallower makes
+  // the answer independent of node order, which is the only version a compiled artifact can be.
+  const reachedAt = new Map<string, number>();
   const walk = (spec: GraphSpec, depth: number): void => {
-    if (depth > maxDepth) return;
+    if (depth > expansion.maxDepth) return;
     for (const n of spec.nodes) {
       const ref = n.subgraph?.ref;
-      if (ref === undefined || Object.hasOwn(out, ref)) continue;
+      if (ref === undefined) continue;
+      const seen = reachedAt.get(ref);
+      if (seen !== undefined && seen <= depth) continue;
       const child = input.resolver.subgraph?.(ref);
       if (child === undefined) continue;
+      reachedAt.set(ref, depth);
       out[ref] = child;
       walk(child, depth + 1);
     }

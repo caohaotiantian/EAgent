@@ -3580,18 +3580,32 @@ parent's compile now walks the subgraph tree and freezes every reachable child i
 `RunGraph.subgraphs`, reusing the cycle set and depth bound the validator already applies so a
 graph it refuses cannot make the collector loop. `grep -an '#resolver\.' engine.ts` is now empty.
 
-**The obvious next step was wrong, and measuring it is the entry.** If the parent freezes the
-tree, surely the child should compile against the frozen view rather than against a live
-resolver? I built that and it failed **38 tests**: a child's own `function/…` and `prompt/…`
-refs are not in the PARENT's manifest, so every one of them came back
-`GRAPH015_RESOURCE_NOT_FOUND`. The parent pinned what the parent names; the child names its own.
+**I measured one change and drew a conclusion about a different one, and it shipped.** If the
+parent freezes the tree, should the child compile against the frozen view or against a live
+resolver? I replaced the resolver WHOLESALE, watched **38 tests** fail — a child's own
+`function/…` and `prompt/…` refs are not in the PARENT's manifest — and concluded that the
+child's compile must keep the live resolver. The measurement was real. The conclusion covered a
+change I never ran: overriding the ONE hook the parent has an answer for,
+`{...resolver, subgraph: (r) => frozen[r] ?? resolver.subgraph?.(r)}`, costs **zero** failures.
+A reviewer tried it and the whole suite stayed green.
 
-Making it work would mean widening the parent's manifest to cover the whole tree — which is
-defensible, and changes what `replay` compares on every journal already written. That is a
-bigger decision than this entry, so what shipped is the narrower true thing: **a child's compile
-is a COMPILE.** The rule was never "no resolver during a run", it is "content is read at compile
-time rather than by an executing Task", and `#compileChild` pins the child's refs into the
-child's own manifest exactly as the parent's compile pinned its own.
+So the freeze stopped at depth 1. `#compileChild` runs inside the executing parent Task, so the
+GRANDCHILD spec was still read from the live resolver mid-run — verbatim the swap the entry
+exists to prevent — and every deep entry `resolveSubgraphs` gathered was dead code that nothing
+read. Reproduced with a promotion between the parent's compile and its execution: the promoted
+grandchild ran.
+
+**The lesson is not "test the fix", it is "a negative measurement is about the thing you
+measured".** "Replacing the resolver breaks 38 tests" is true and says nothing about narrowing
+it. I wrote the number into a source comment, the register and the journal, where it read as a
+refutation of the whole direction — three places all confidently wrong in the same way, because
+each was copied from the first rather than re-derived.
+
+**And the cache had to move with the spec.** `#compileChild` was keyed by ref under a docstring
+saying "the tree is fixed, so the cache never stales". It stopped being fixed the moment the
+spec came from a per-run `RunGraph`: two runs on one `loom serve` process with different frozen
+children for one ref both got the first one's compiled graph, so the freeze bound only the first
+run per process. A cache key that encodes an assumption outlives the assumption silently.
 
 **A2 turned out to be stale, and what was left was a field that lied.** The entry says the
 executor never arms the fencing token; it does, at all three `#commit` exits, using the lease's
@@ -3603,6 +3617,13 @@ for one thing, and the projection reported the one nothing compares.
 Nothing read it, so it misled rather than leaked — which is exactly the kind of defect that
 survives, because the failure it causes is somebody believing a number. The seq IS the token, so
 the payload stopped carrying a second one and the fold reads `e.seq`.
+
+**Two paths still read a resolver mid-run and are recorded rather than claimed shut.**
+`#applyMutation` recompiles a mutated graph, and `#rehydrateGraph` recompiles on every `advance`
+of a run that has mutated — both with the live resolver, so a `canMutate` agent's graph
+re-resolves its prompts and its children. A22's prompt freeze has the identical hole. The
+absolute sentence is false for a mutated graph and true otherwise, and saying so is worth more
+than an absolute that a reader will disprove.
 
 **Reverses when.** `RunGraph.subgraphs` holds specs and not compiled children, so a parent still
 pays nothing for a branch it never takes. If eager compilation ever becomes worth it — a

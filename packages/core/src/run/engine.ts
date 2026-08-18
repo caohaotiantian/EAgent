@@ -2408,11 +2408,14 @@ export class Engine {
     // reach when it was compiled, so nothing consults a resolver while a Task is executing —
     // the rule `resources/functions.ts` states for code and A22 established for prompts,
     // reaching the third and last kind of content.
-    const childSpec = ctx.graph.subgraphs[sub.ref];
+    // Optional-chained: `attach()` is public and `RunGraph` is exported, so a graph produced by
+    // an older build has no `subgraphs` at all, and a `TypeError` is a worse answer than the
+    // typed refusal two lines down.
+    const childSpec = ctx.graph.subgraphs?.[sub.ref];
     if (childSpec === undefined) {
       throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `subgraph "${sub.ref}" does not resolve to a GraphSpec`);
     }
-    const childGraph = this.#compileChild(sub.ref, childSpec);
+    const childGraph = this.#compileChild(sub.ref, childSpec, ctx.graph);
 
     // DERIVED, like every other id here: replay and a restart must find the same child.
     const childRunId = `${ctx.runId}~${w.task.taskId}` as RunId;
@@ -2671,27 +2674,34 @@ export class Engine {
     await this.cancel(childRunId, reason, SYSTEM_ACTOR("executor:subgraph-cancel"));
   }
 
-  /** Compile a child graph once per ref. The tree is fixed, so the cache never stales. */
-  #compileChild(ref: string, spec: GraphSpec): RunGraph {
-    const hit = this.#childGraphs.get(ref);
+  /** Compile a child graph once per (ref, spec). The spec is per-run now, so the ref alone stales. */
+  #compileChild(ref: string, spec: GraphSpec, parent: RunGraph): RunGraph {
+    // KEYED BY REF *AND* SPEC, because the ref alone stopped being enough the moment the spec
+    // started coming from a per-run `RunGraph`. Two runs on one long-lived process can carry
+    // different frozen children for one ref — a republished child between them — and the cache
+    // served the first run's compiled graph to the second, so the freeze bound only the first
+    // run per process. Measured: two parents with identical `graphHash` and different frozen
+    // children both produced the first one's answer.
+    const key = `${ref}@${digest(spec)}`;
+    const hit = this.#childGraphs.get(key);
     if (hit !== undefined) return hit;
     const compiled = compileOrThrow({
       spec,
-      // THE ENGINE'S RESOLVER, DELIBERATELY, and the reasoning is worth keeping because the
-      // obvious move is the other one. Freezing the parent's view and handing it here starves
-      // the child: its own `function/…` and `prompt/…` refs are not in the PARENT's manifest,
-      // so every one of them fails `GRAPH015_RESOURCE_NOT_FOUND` — measured, 38 tests.
+      // THE ENGINE'S RESOLVER FOR EVERYTHING EXCEPT `subgraph`, WHICH THE PARENT ALREADY FROZE.
       //
-      // And it is not the read A24 is about. The rule is that content is read at COMPILE time
-      // rather than by an executing Task, and this IS a compile: it pins the child's refs into
-      // the child's own manifest exactly as the parent's compile pinned its own. What A24
-      // closed is `#runSubgraph` asking a resolver for a SPEC mid-execution; the child's
-      // compile is the next compile, not a run-time content read.
-      resolver: this.#resolver,
+      // Replacing the resolver WHOLESALE starves the child: its own `function/…` and `prompt/…`
+      // refs are not in the PARENT's manifest, so every one fails `GRAPH015_RESOURCE_NOT_FOUND`
+      // — 38 tests. That measurement is about the WIDE substitution and says nothing about this
+      // narrow one, which overrides the single hook the parent has an answer for.
+      //
+      // Without it the freeze stops one level down: the GRANDCHILD spec is read from the live
+      // resolver while the parent's Task is executing, which is verbatim the swap A24 exists to
+      // prevent, and every deep entry `resolveSubgraphs` collected is dead.
+      resolver: { ...this.#resolver, subgraph: (r) => parent.subgraphs[r] ?? this.#resolver.subgraph?.(r) },
       tools: this.tools.manifests(),
       tenantCapabilities: this.#policyOpts.granted,
     });
-    this.#childGraphs.set(ref, compiled);
+    this.#childGraphs.set(key, compiled);
     return compiled;
   }
 

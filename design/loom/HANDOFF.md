@@ -693,15 +693,29 @@ freezes every reachable child spec into `RunGraph.subgraphs`, which `#runSubgrap
 The third and last kind of content leaves the run-time path; `grep -an '#resolver\.' engine.ts`
 returns nothing.
 
-> **What deliberately still consults a resolver, and why the obvious extension was wrong.**
-> `#compileChild` keeps `this.#resolver`. Handing it the parent's frozen view instead starves
-> the child — its own `function/…` and `prompt/…` refs are not in the PARENT's manifest, so every
-> one fails `GRAPH015_RESOURCE_NOT_FOUND`; measured, **38 tests**. And it is not the read this
-> entry is about: the rule is that content is read at COMPILE time rather than by an executing
-> Task, and a child's compile IS a compile — it pins the child's refs into the child's own
-> manifest exactly as the parent's compile pinned its own. Widening the parent's manifest to
-> cover the tree would fix it the other way and change what replay compares on every existing
-> journal, which is a bigger decision than this entry.
+> **The first attempt closed it at depth 1 only, and the measurement that justified stopping
+> there was about a different change.** `#compileChild` ran with the live `this.#resolver`, on
+> the argument that replacing it starves the child — its own `function/…` and `prompt/…` refs
+> are not in the PARENT's manifest, so every one fails `GRAPH015_RESOURCE_NOT_FOUND`, measured
+> at 38 tests. That measurement is of the WIDE substitution and says nothing about overriding
+> the ONE hook the parent has an answer for. A reviewer tried the narrow version: **zero new
+> failures**, and the grandchild stopped being read mid-run. Reproduced before and after —
+> parent → child → grandchild with the resolver promoted after the parent compiled ran the
+> PROMOTED grandchild, which is verbatim the swap this entry exists to prevent, one level down.
+> Every deep entry the collector gathered was dead until this landed.
+>
+> **`#compileChild`'s cache had to move with it.** It was keyed by ref, on a docstring saying
+> "the tree is fixed, so the cache never stales" — true until the spec started coming from a
+> per-run `RunGraph`. Two runs on one `loom serve` process with different frozen children for
+> one ref both got the first one's compiled graph, so the freeze bound only the first run per
+> process. Keyed by ref AND spec digest now.
+>
+> **What still reads a resolver mid-run, recorded rather than claimed shut:** `#applyMutation`
+> recompiles a mutated graph and `#rehydrateGraph` recompiles on every `advance` of a run that
+> has mutated, both with the live resolver — so a `canMutate` agent's graph re-resolves its
+> prompts and children. A22's prompt freeze has the same hole. The absolute sentence "nothing
+> consults a resolver once a Task is executing" is therefore **false for a mutated graph** and
+> true otherwise.
 
 **A24 (original entry, kept for the reproduction) · A subgraph's child spec is read at RUN time,
 by REF.** Split out of A23 rather than folded into it. `engine.ts`'s `#runSubgraph` calls `this.#resolver.subgraph?.(sub.ref)` while a
@@ -711,6 +725,22 @@ closed for prompts, still open for the third kind of content. Exposure today is 
 promotes at run time and the CLI's store is seeded once at boot. The fix is the one A22 used —
 freeze the child spec into `RunGraph` beside `documents` — and it is a redesign of subgraph
 resolution rather than a one-line guard, which is why it is its own entry.
+
+**A25 · A MUTATED graph re-resolves its prompts and children from a live resolver, mid-run.**
+New, 2026-08-18, found by a reviewer checking A24's absolute claim rather than by the fix that
+made it. `#applyMutation` recompiles the merged spec and assigns the result to `ctx.graph`, and
+`#rehydrateGraph` recompiles on every `advance` of a run that has mutated — both with
+`this.#resolver`. So `resolveDocuments` and `resolveSubgraphs` run again, from the live store,
+while a Task is executing: a `canMutate` agent's graph can have its prompt or its child swapped
+between the mutation and the next turn. Measured: a frozen `function/mult2@stable` became
+`function/mult1000@stable` after the mutation, with the resolver called twice.
+
+> It is the same hole A22 and A24 closed on the un-mutated path, on the one path that
+> recompiles by design. The fix is to thread the frozen maps through `compileMutation` so a
+> mutation inherits what the run already froze and can only ADD to it — which is also the
+> honest reading of additive-only mutation. Until then the sentence "nothing consults a resolver
+> once a Task is executing" is true for an ordinary run and false for a mutated one, and both
+> `HANDOFF` and `JOURNAL` now say so.
 
 **A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
 carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot
