@@ -3424,3 +3424,54 @@ was written; using it closes one of C2's thirteen and is why the `NEVER_RAISED` 
 If a graph ever needs to recover from an unsupervisable gate deliberately — a fallback that
 routes to a stricter, non-delegated path — the fatal listing is the line to reconsider, and the
 replacement is a distinct code rather than making this one routable.
+
+---
+
+## Four minutes as a user, again — and the prompt is a pointer
+
+The habit at the bottom of `HANDOFF.md` says every wave of this build found its real defects by
+running a NEW SHAPE of thing, and names "four minutes as a user, copying the binary into an
+empty directory and hand-writing a graph" as the one that found the tool-channel bug three test
+workflows structurally could not. It worked again, and this time it found the biggest thing in
+the build.
+
+**What the smoke test was for.** After the ownership chain landed I drove it through
+`bin/loom` rather than through the suite: boot with an identity file, submit as one principal,
+check another cannot see it. That all worked — the new boot warning printed, the owner listed
+one run, a named approver listed zero and got 404 on the run while `GET /gates` handed them
+exactly their question, an operator saw everything, and the answer to the write was the
+four-key scoped body rather than the fourteen-key summary. Separation of duties refused the
+initiator BY NAME through the CLI and let the co-approver through.
+
+**Then I wrote an agent node, because the goal at the top of `CLAUDE.md` says a user should be
+able to.** `prompt: "Say the word ready"` is `GRAPH015_RESOURCE_NOT_FOUND` — `RESOURCE_REF` is
+`[a-z_]+/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+`, so the field cannot hold a sentence. Written the way
+the corpus writes it, `prompt: prompt/say-ready@stable`, it compiles and runs — and the model
+receives the string `prompt/say-ready@stable`. Not a rendering of it. It.
+
+`ResourceResolver.resolve` returns `{ref, digest, channel}`, which `CLAUDE.md` already states
+plainly — "a pin, not a document" — and which is exactly right for `humanGate.ref`, where
+proving a policy exists and pinning its bytes is the whole job. Nobody carried the sentence one
+node type over. `#runAgent` interpolates `agent.prompt` into the instruction and the user
+message; `promptOverride`, the one parameter that could carry text, has a single caller, the
+evaluator, which passes `ev.ref` — another ref. `agent.profile` never reaches the request except
+as the model routing key, and the system message is a hard-coded
+`` `You are node ${w.node.id}.` ``.
+
+**What makes this worth an entry rather than a bug report is how well everything around it
+works.** The provider adapters are not stubs: an invalid key routed through
+`agent_profile/basic@stable` produced `loom.model [error] 1152ms` — a real round trip to a real
+API and a real 401. The graph compiled with useful diagnostics, the run journaled, the gate
+gated, the ownership scoped, the SQLite store survived restart. Every layer between a user and
+a working agent is built except the one that turns a name into words, and a build whose every
+component works is the hardest kind to notice a hole in.
+
+**The lesson is the one the file already had, and it took the harder form this time.** The
+previous four-minutes-as-a-user finding was a bug — tool writes routed onto channels no graph
+could guess. This one is an ABSENCE, and absences do not throw. `[mock] {"prompt":"prompt/
+say-ready@stable"}` is a successful run. It is only wrong if you read it.
+
+**Reverses when.** A `ResourceStore` with a content hook lands — the shape `subgraph(ref)`
+already has. At that point A22 closes and `packages/skills/` (library-as-data, already named as
+the likely first package) is the same question wearing a different hat: both are "where does the
+text live, and who is allowed to open it".

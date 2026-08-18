@@ -169,81 +169,99 @@ and it is the only thing standing between "the binary works" and "a binary worke
 
 ## THE ONE THING THAT NEEDS A HUMAN
 
-**`loom` has never been pushed. 117 commits, no upstream.**
+**`loom` has never been pushed. 125 commits, no upstream.** `origin` exists
+(`github.com/caohaotiantian/EAgent`); `origin/loom` does not.
 
 ```
 git rev-parse --abbrev-ref --symbolic-full-name @{u}   # fatal: no upstream configured
-git log --oneline --branches --not --remotes | wc -l   # 117
+git log --oneline --branches --not --remotes | wc -l   # 125
+git ls-remote --heads origin loom                      # (empty)
 ```
 
-The push is refused by GitHub secret scanning: a **Slack-webhook-shaped string in a test
-fixture** (`packages/core/test/run/delivery.test.ts`) in commit `5451bb2`, which predates the
-work described below. The fixture at HEAD has been changed; the history still trips the scan,
-and a scan reads history.
+**What trips the scan, exactly** — measured 2026-08-18, not inferred:
 
-It is a false positive — the string is a fixture, never a live credential — and the bypass URL
-was deliberately **not** used, because clicking "allow this secret" is a decision about a real
-secret store that belongs to whoever owns the account, not to whoever is holding the keyboard.
+```
+packages/core/test/run/delivery.test.ts:2455  "https://hooks.slack.invalid/services/TEAM/BOT/tok-not-a-real-token"
+packages/core/test/run/delivery.test.ts:2574  "https://hooks.slack.invalid/services/TEAM/BOT/tok-also-not-real"
+```
 
-Three ways out, in the order I would take them:
+Introduced in `5451bb2`, fixed at HEAD in `abe5678`, and present in the trees of **25 of the
+125 commits**. GitHub's Slack-webhook detector matches on URL SHAPE, not entropy: `T00000000`
+and `XXXX…` satisfy its character classes, and a scanner that could tell a placeholder from a
+live token would be a scanner one `sed` away from useless. That is why `abe5678` broke the
+GRAMMAR — an `.invalid` host and the substrings split across template literals — rather than
+changing the characters. **It does not unblock the push, because a scan reads the commits
+being pushed and not the tip.**
 
-1. **Allowlist it through GitHub's UI.** One click, keeps history, and is honest about what
-   the string is.
-2. **Rewrite history** to change the fixture in `5451bb2`. Safe *specifically because the
-   branch has never been pushed* — nobody has these commits, so there is nothing to break.
-3. **Stay local.** Everything works; the risk is that 117 commits exist in one working copy.
+**`--force` does not help and it is worth knowing why.** It overrides ref-update rules;
+push protection rejects at the content layer before the ref is considered. `origin/loom`
+does not exist, so there is nothing to force over.
+
+**The rest of the history is clean, checked rather than assumed.** All 825 blobs reachable
+from this branch were scanned for the usual provider shapes. Three other hits, all in tests,
+none of which should fire: `AKIAIOSFODNN7EXAMPLE` (AWS's own documentation example, which
+GitHub allowlists), a four-byte `BEGIN RSA PRIVATE KEY` stub, and `xoxb-2024-loom-bot-token`
+(real bot tokens are `xoxb-<digits>-<digits>-<24+ alnum>`). `.env` and `.env.glm` exist in the
+working tree and were **never tracked**.
+
+Two ways out:
+
+1. **Allowlist it through GitHub's UI.** The rejection carries a bypass URL. One click, history
+   intact, honest about what the string is. This is the cheaper one and it is what I would do.
+2. **Rewrite the 25 commits** — `git filter-repo --replace-text` over the two literals — then
+   push. Safe *specifically because nothing has ever been pushed*. **It has a cost this file
+   did not price before:** every SHA from `5451bb2` onward is renumbered, and the corpus cites
+   `2d4baf1`, `5451bb2`, `5f06c40`, `691df5e`, `cb103e6` and `e6cd569` as load-bearing
+   references. Fix those in the same change or the documentation points at commits that no
+   longer exist.
+
+`loom-backup-pre-rewrite` tags `30ca621`, so either path is revertible.
 
 Until one of these happens, **this branch exists on one disk.**
 
 ---
 
-## What this session changed (2026-08-16 → 17)
+## What this session changed (2026-08-18)
 
-Eighteen commits on top of `691df5e`. The full reasoning is in `JOURNAL.md`; this is the
-inventory.
-
-### Built
+Seven commits on top of `41ddf39`, closing the register's two oldest security entries and the
+oversight feature they were the prerequisite for. Reasoning in `JOURNAL.md`; this is the
+inventory. Each phase was reviewed by two independent agents on the committed diff, and every
+blocking finding was reproduced before it was fixed.
 
 | | What | Why it mattered |
 |---|---|---|
-| `proc.exec` | shell execution, argv-only, exact-match allowlist | `runSandboxed` had **zero callers** for the whole project |
-| `fs.edit` | span replace with a whitespace-relaxing ladder | `fs.write` made the model reproduce the file to change a line |
-| `fs.glob` / `fs.grep` | file search in pure Node | listing files otherwise needs a shell, which dissolves the fs jail |
-| `packages/core/src/mcp/` | MCP client, stdio, zero deps, `--mcp-file` | a graph can use tools it did not ship with |
-| `Engine.forget` + auto-retirement | terminal runs release their context | ~613 KB retained per run, ~60 MB per thousand |
-| `docs-type-equiv.test.ts` | design blocks compared to code member-by-member | found **12 real disagreements** on its first run |
+| **A4** `9dbf078` `1e4c171` | `run.submitted.submittedBy`; `cancel`/`rewind` journal their caller; subgraph children inherit; `AuditRecord.principal` | "who started this run that spent money" was unanswerable from the journal |
+| **A3** `b13f117` `026ec55` | runs owned by their submitter; `run_head.submitted_by` + a `1→2` migration; `operator: true`; `GET /gates` | every valid credential was a full operator credential |
+| **SoD** `9bab428` `cb103e6` | `approval.separationOfDuties` enforced — exclusion resolved at raise, journaled on `gate.raised` | it had been a compile error since it was designed |
 
-### Fixed
+**What the reviews caught, because the pattern is the point.** The migration would have
+bricked every process after the first (`#migrate` stamps only in its bootstrap arm, so an
+`ALTER TABLE` re-runs and the second throws). Reading `(shared-token)` as "nobody" was a live
+cross-principal **write** on a mixed plane — measured: list `0`, read `200`, cancel `200`. The
+gate-decision route returned the whole projection to an approver who is 404'd on the run. And
+`separationOfDuties: "true"` compiled clean and enforced nothing, because every test in the
+feature was `=== true` and YAML 1.2 reads a bare `yes` as a string.
 
-- **Write confinement.** A node declaring `writes:["mine"]` committed `secret`. Enforced in
-  `#dispatch`, so a future node type cannot opt out.
-- **The context budget bounded a request the model was never sent** — ~28,000 tokens against
-  a 2,000 budget, no rung firing, no `E_CONTEXT_OVERFLOW`.
-- **The fence was on one of `#commit`'s three exits.**
-- **A subgraph in retry backoff was reported as permanently failed**, with a class the
-  parent's retry policy could not act on.
-- **A held join no enclosing join collects** now refuses at compile.
-- **`MockModelAdapter.seen` aliased a mutating array**, so every test asserting "the request
-  at turn N" was reading the last turn.
-- **`scale.test.ts` asserted on a wall-clock ratio** and failed only under parallel load.
-
-### Refuted rather than fixed — do not put these back on a list
-
-- `resultDigest` **is** read (`replay.ts:160`, raises `E_REPLAY_DIVERGENCE`).
-- `budget.reserved`/`budget.settled` having no producer was already registered in
-  `NEVER_APPENDED` with reasons.
-- `--models-file` was **not** uncovered; the coverage is in `test/cli.test.ts` (seven tests,
-  one asserting on the HTTP bytes). I had grepped `test/cli/cli.test.ts`.
-- `usage` is **not** an escalation rule. There are ten; the name came from a different object
-  literal in the same file.
+**One claim did not reproduce and is recorded as such** rather than closed with a test that
+would pass for a reason it cannot name: a reviewer reported that a refused SoD gate takes an
+`error` edge and lets the run report `succeeded`. `E_GATE_REQUIRED` is run-fatal now, which is
+right on its own terms, but two attempted reproductions both ended `failed` with the recovery
+node never activated, identically with and without the fatal listing.
 
 ---
 
 ## What is left
 
-Four categories. **(D)** is new and is where the remaining product work is: **(A)** blocked
-by a constraint we chose, **(B)** deferred by an explicit design decision, **(C)** genuinely
-unbuilt and unblocked — now empty — and **(D)** designed in full, deliberately not started.
+Four categories: **(A)** blocked by a constraint we chose, **(B)** deferred by an explicit
+design decision, **(C)** genuinely unbuilt and unblocked, and **(D)** the oversight feature
+set, designed in full.
+
+> **READ A22 FIRST.** The largest gap in this build is not on any of these four lists, because
+> it is not a feature anybody decided to defer: there is no resource store, so an agent node's
+> prompt is the ref string and a model is sent a pointer instead of an instruction. Everything
+> around it works — the provider adapters really call out, the gate really gates, the replay
+> really reproduces — which is exactly why it survived this long unnoticed. It is the one item
+> between this build and the goal at the top of `CLAUDE.md`.
 
 ### Added by the 2026-08-17 pass — unimplemented, with what each needs
 
@@ -311,7 +329,11 @@ built; it falls out of D7.6's default posture and is not a loosening.
 
 ### (C) Unbuilt and unblocked
 
-**Empty.** Inbound gate callbacks shipped (mechanism *and* authorization *and* perimeter);
+**One, and it is A22: the resource store.** `ResourceResolver.resolve` returns a pin and
+nothing opens it, so `prompt`, `agent_profile` and `oversight` refs name documents that do not
+exist. Nothing blocks it — `subgraph(ref)` is the content hook that already works, and the
+`.loom/` workspace is the backing store — and it is what turns an agent node from a shape into
+a capability. Inbound gate callbacks shipped (mechanism *and* authorization *and* perimeter);
 scheduler contention is tested against real two-worker journals. What remains of both is
 recorded under *Known issues* as specific defects rather than as an open feature.
 
@@ -540,6 +562,41 @@ reached the journal and stopped, so "who rewound this run" was the one A4 fact a
 > absent principal is the PERMISSIVE case, so a `submit` call site that forgets it will mint a
 > world-readable run once A3 lands. `test/run/submit-callers.test.ts` pins the four doors and
 > their per-file call counts; it proves each has been CONSIDERED, not that any is right.
+
+**A22 · AN AGENT NODE'S PROMPT IS THE REF STRING. There is no resource store, so a model is
+sent the pointer instead of the document — and this is the one thing standing between the
+build and its own stated goal.** New, 2026-08-18, found by using the binary rather than by
+reading. `AgentNode.prompt` is a `ResourceRef`, `ResourceResolver.resolve` returns
+`{ref, digest, channel}` — a pin, never content — and `#runAgent` puts `agent.prompt`
+**verbatim** into the instruction and into the user message
+(`engine.ts:2103`, `:2121`). Measured end to end through `bin/loom`:
+
+```
+loom run agent.json          # agent: { prompt: "prompt/say-ready@stable", … }
+→ "answer": "[mock] {\"node\":\"ask\",\"prompt\":\"prompt/say-ready@stable\",\"state\":{}}"
+```
+
+The model received the eleven characters of the pointer. There is no way round it from a graph
+file: `RESOURCE_REF` is `[a-z_]+/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+`, so an instruction with
+spaces or punctuation is `GRAPH015_RESOURCE_NOT_FOUND` at compile, and `promptOverride` — the
+one parameter that could carry real text — has exactly one caller, the evaluator, which passes
+`ev.ref`, another ref. `agent.profile` never reaches the request at all except as the model
+ROUTING KEY (`engine.ts:2156`), and the system message is the hard-coded
+`` `You are node ${w.node.id}.` ``.
+
+> **Everything AROUND this works, which is why it went unnoticed for the whole project.** The
+> provider adapters are real and do call out — an invalid key against
+> `agent_profile/basic@stable` produced `loom.model [error] 1152ms`, a genuine network
+> round-trip and a genuine 401, not a mock. The graph compiles, the run journals, the gate
+> gates, the replay reproduces. The single missing piece is that nothing turns a `prompt/…@…`
+> into words.
+>
+> **Fix, exactly:** a `ResourceStore` behind `ResourceResolver` with a content hook — the
+> shape `subgraph(ref)` already has and which `CLAUDE.md` names as the one that exists
+> ("there is no equivalent for `oversight`"; there is none for `prompt` or `agent_profile`
+> either). The `.loom/` workspace is the obvious backing store, and `packages/skills/`
+> — library-as-data, already the named first package — is the same question wearing a
+> different hat. Until then an agent node is a shape, not a capability.
 
 **A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
 carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot
