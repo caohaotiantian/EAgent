@@ -289,22 +289,27 @@ interface GateAuthorization {
  * resolver is behind this one and answers it, once, at the compile that introduces it. What the
  * live resolver may not do is change an answer the run is already built on.
  *
- * `resolve` is deliberately NOT overridden. It returns a pin, the pin is a digest over the ref,
- * and re-deriving it is both cheap and stable — while a compile that could not pin a new ref
- * could not compile at all.
+ * `resolve` IS overridden, and leaving it live was a real defect rather than a nuance. A digest
+ * is over CONTENT — `resourceDigest` is `digest({kind, name, content})` — so a promotion MOVES
+ * it, and `@stable` is a mutable selector pointing at whichever digest is current. With `resolve`
+ * live, a recompile re-pinned an existing ref to the NEW digest, the frozen map (keyed by the
+ * old one) missed, and the fallback served the promoted bytes to a node that already existed.
+ * The freeze held only when the content had not changed, which is the case that needed no
+ * freeze. Reproduced through the engine before it was fixed.
  */
 function frozenFirst(graph: RunGraph, live: ResourceResolver): ResourceResolver {
-  // Built once. `documents` is keyed by REF and `document()` is asked by DIGEST, so the bridge
-  // is the manifest — and walking it per lookup would be a scan per prompt.
+  // Built once, both directions. `documents` is keyed by REF and `document()` is asked by
+  // DIGEST, so the manifest is the bridge — and walking it per lookup would be a scan per prompt.
+  const byRef = new Map(graph.resolutionManifest.map((p) => [p.ref, p] as const));
   const byDigest = new Map<string, string>();
   for (const pinned of graph.resolutionManifest) {
-    const text = graph.documents?.[pinned.ref];
+    const text = graph.documents[pinned.ref];
     if (text !== undefined) byDigest.set(pinned.digest, text);
   }
   return {
-    resolve: (ref) => live.resolve(ref),
+    resolve: (ref) => byRef.get(ref) ?? live.resolve(ref),
     document: (pinned) => byDigest.get(pinned) ?? live.document?.(pinned),
-    subgraph: (ref) => graph.subgraphs?.[ref] ?? live.subgraph?.(ref),
+    subgraph: (ref) => graph.subgraphs[ref] ?? live.subgraph?.(ref),
   };
 }
 
@@ -1475,9 +1480,12 @@ export class Engine {
 
     const result = compile({
       spec: { ...ctx.graph.spec, nodes: [...ctx.graph.spec.nodes, ...nodes], edges: [...ctx.graph.spec.edges, ...edges] },
-      // What this run already froze, then the live store for anything the mutation ADDED. A
-      // rehydrate runs on every `advance` of a run that has ever mutated, so without it a
-      // promotion re-resolved every prompt and child on every turn.
+      // What this run already froze, then the live store for anything the mutation ADDED.
+      //
+      // ONCE PER ATTACH, not once per turn: the early return above skips this whenever the
+      // in-memory graph already matches the journal's target, so within a process it recompiles
+      // when a run is picked up behind its own history. That is the case that matters — a
+      // second process replaying another's mutations against a store that has since moved.
       resolver: frozenFirst(ctx.graph, this.#resolver),
       tools: this.tools.manifests(),
       tenantCapabilities: this.#policyOpts.granted,
@@ -2711,18 +2719,21 @@ export class Engine {
 
   /** Compile a child graph once per (ref, spec). The spec is per-run now, so the ref alone stales. */
   #compileChild(ref: string, spec: GraphSpec, parent: RunGraph): RunGraph {
-    // KEYED BY REF *AND* SPEC, because the ref alone stopped being enough the moment the spec
-    // started coming from a per-run `RunGraph`. Two runs on one long-lived process can carry
-    // different frozen children for one ref — a republished child between them — and the cache
-    // served the first run's compiled graph to the second, so the freeze bound only the first
-    // run per process. Measured: two parents with identical `graphHash` and different frozen
-    // children both produced the first one's answer.
-    const key = `${ref}@${digest(spec)}`;
+    // KEYED BY EVERY INPUT THE COMPILE HAS, which the ref alone stopped being the moment the
+    // spec started coming from a per-run `RunGraph`: two runs on one long-lived process can
+    // carry different frozen children for one ref, and the cache served the first run's
+    // compiled graph to the second — measured, two parents with identical `graphHash` and
+    // different frozen children both produced the first one's answer. The parent's hash joins
+    // the key for the same reason one step on: the compile now also depends on what the PARENT
+    // froze, so two parents sharing a child spec across a promotion would otherwise share the
+    // first one's prompts.
+    const key = `${ref}@${digest(spec)}@${parent.graphHash}`;
     const hit = this.#childGraphs.get(key);
     if (hit !== undefined) return hit;
     const compiled = compileOrThrow({
       spec,
-      // THE ENGINE'S RESOLVER FOR EVERYTHING EXCEPT `subgraph`, WHICH THE PARENT ALREADY FROZE.
+      // WHAT THE PARENT FROZE, THEN THE LIVE STORE — `frozenFirst` covers `resolve`, `document`
+      // and `subgraph` alike.
       //
       // Replacing the resolver WHOLESALE starves the child: its own `function/…` and `prompt/…`
       // refs are not in the PARENT's manifest, so every one fails `GRAPH015_RESOURCE_NOT_FOUND`

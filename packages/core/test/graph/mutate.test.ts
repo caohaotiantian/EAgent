@@ -321,6 +321,7 @@ interface Rig {
   readonly engine: Engine;
   readonly store: MemoryStateStore;
   readonly ran: string[];
+  readonly models: MockModelAdapter;
 }
 
 function rig(script: MockScript, opts: { granted?: string[]; store?: MemoryStateStore; resolver?: ResourceResolver } = {}): Rig {
@@ -347,7 +348,8 @@ function rig(script: MockScript, opts: { granted?: string[]; store?: MemoryState
     return { writes: { detail: "elaborated" } };
   });
 
-  models.register(new MockModelAdapter({ script, pricePerMTok: 1 }), true);
+  const adapter = new MockModelAdapter({ script, pricePerMTok: 1 });
+  models.register(adapter, true);
 
   const engine = new Engine({
     store,
@@ -359,7 +361,7 @@ function rig(script: MockScript, opts: { granted?: string[]; store?: MemoryState
     resolver: opts.resolver ?? resolver(),
     policy: { granted: opts.granted ?? CAPS, systemFloor: "out" },
   });
-  return { engine, store, ran };
+  return { engine, store, ran, models: adapter };
 }
 
 /** A planner that proposes a hard-to-undo node — the case that must gate. */
@@ -457,7 +459,8 @@ test("a run that restarts mid-flight rebuilds its mutated graph FROM THE JOURNAL
 test("A MUTATION INHERITS WHAT THE RUN ALREADY FROZE, and only ADDS to it", async () => {
   // The mutated path was the one place a run still re-resolved content mid-flight.
   // `#applyMutation` recompiles from inside the executing Task that proposed the change, and
-  // `#rehydrateGraph` recompiles on every later `advance` — both with the live resolver, so a
+  // `#rehydrateGraph` recompiles when a process picks up a run behind its own history — both
+  // with the live resolver, so a
   // promotion between the run's compile and its mutation swapped the prompt or the child
   // underneath it. That is the swap A22 and A24 closed everywhere else.
   //
@@ -467,23 +470,38 @@ test("A MUTATION INHERITS WHAT THE RUN ALREADY FROZE, and only ADDS to it", asyn
   // The property is observable directly: after the run's own compile, a recompile must not ASK
   // the live store about a ref the run already froze. Counting the lookups is the assertion —
   // asserting on the original graph object would prove nothing, since it cannot change.
+  // A STORE-SHAPED RESOLVER: per-ref digests, and the digest MOVES when the content does —
+  // which is what `ResourceStore` actually does (`digest({kind, name, content})`). A fixture
+  // that gives every ref one constant digest cannot show this defect at all, and the first
+  // version of this test used one.
+  let promoted = false;
+  const pin = (ref: string, text: string): `sha256:${string}` => `sha256:${Buffer.from(`${ref}:${text}`).toString("hex").padEnd(64, "0").slice(0, 64)}` as `sha256:${string}`;
+  const textFor = (ref: string): string => (promoted && ref === "prompt/plan@stable" ? "PROMOTED" : `doc for ${ref}`);
   const asked: string[] = [];
   let counting = false;
   const shifting: ResourceResolver = {
-    resolve: (ref) =>
-      /^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)
-        ? { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" }
-        : undefined,
+    resolve: (ref) => {
+      if (!/^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)) return undefined;
+      return { ref, digest: pin(ref, textFor(ref)), channel: "stable" };
+    },
     document: (pinned) => {
       if (counting) asked.push(pinned);
-      return "Test instructions.";
+      for (const ref of ["agent_profile/planner@stable", "prompt/plan@stable", "function/detail@stable"]) {
+        if (pin(ref, textFor(ref)) === pinned) return textFor(ref);
+      }
+      return undefined;
     },
   };
 
   const r = rig(PROPOSER, { resolver: shifting });
   const graph = compileOrThrow({ spec: baseSpec(), resolver: shifting, tools: TOOLS, tenantCapabilities: CAPS });
-  assert.equal(Object.values(graph.documents)[0], "Test instructions.", "the run froze the original");
+  assert.equal(graph.documents["prompt/plan@stable"], "doc for prompt/plan@stable", "the run froze the original");
 
+  // PROMOTED between the run's compile and its mutation. A digest is over CONTENT, so this
+  // moves the pin — which is exactly why freezing only `document` was not enough: `resolve`
+  // came back with the NEW digest, the frozen map missed, and the live fallback served the
+  // promoted bytes to a node that already existed.
+  promoted = true;
   counting = true;
   const runId = await r.engine.submit({ graph, inputs: { seed: "go" } });
   const p = await r.engine.advance(runId);
@@ -492,10 +510,26 @@ test("A MUTATION INHERITS WHAT THE RUN ALREADY FROZE, and only ADDS to it", asyn
   const after = (await r.engine.projection(runId))!;
   assert.notEqual(after.graphHash, graph.graphHash, "the graph really did mutate");
 
-  // A SECOND advance is the rehydrate path, which recompiles on every advance of a run that has
-  // ever mutated — the site that turned one re-resolve into one per turn.
-  await r.engine.advance(runId);
-  assert.deepEqual(asked, [], "no recompile asked the live store about a ref the run had frozen");
+  // THE PROMOTED BYTES REACHED NOBODY. Counting lookups is not enough on its own — the point
+  // is which TEXT the already-compiled node ends up with.
+  const systems = r.models.seen.map((req) => String(req.system));
+  assert.equal(
+    systems.some((x) => x.includes("PROMOTED")),
+    false,
+    `a node compiled before the promotion was sent the promoted prompt: ${JSON.stringify(systems)}`,
+  );
+  // AND THE ADDITIVE HALF IS EXERCISED, which the first version of this test could not show:
+  // its fixture gave every ref one constant digest, so the genuinely NEW ref hit the frozen map
+  // too and the live fallback the whole design rests on was never called. Deleting it kept the
+  // suite green. Here the mutation's own `function/detail@stable` is the only thing asked live.
+  assert.deepEqual(asked, [pin("function/detail@stable", "doc for function/detail@stable")], "only the ref the mutation ADDED");
+
+  // THE REHYDRATE SITE IS NOT COVERED HERE, and saying so beats a test that cannot fail.
+  // `#rehydrateGraph` recompiles only when the in-memory graph is BEHIND the journal — a second
+  // process attaching a run that already mutated — and its effect is observable only through
+  // what a LATER node is sent. This fixture's run reaches `succeeded` on the first `advance`,
+  // so a re-attach does no work: an assertion there passed with the site reverted. Covering it
+  // needs a mutating graph that parks (a gate) and resumes, which this file has no fixture for.
 });
 
 test("a node that did not declare canMutate cannot grant itself the power", async () => {

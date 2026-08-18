@@ -710,12 +710,11 @@ returns nothing.
 > one ref both got the first one's compiled graph, so the freeze bound only the first run per
 > process. Keyed by ref AND spec digest now.
 >
-> **What still reads a resolver mid-run, recorded rather than claimed shut:** `#applyMutation`
-> recompiles a mutated graph and `#rehydrateGraph` recompiles on every `advance` of a run that
-> has mutated, both with the live resolver — so a `canMutate` agent's graph re-resolves its
-> prompts and children. A22's prompt freeze has the same hole. The absolute sentence "nothing
-> consults a resolver once a Task is executing" is therefore **false for a mutated graph** and
-> true otherwise.
+> **What still read a resolver mid-run — CLOSED by A25, kept for the reproduction:**
+> `#applyMutation` recompiled a mutated graph, and `#rehydrateGraph` recompiles when a process
+> picks up a run behind its own history, both with the live resolver — so a `canMutate` agent's
+> graph re-resolved its prompts and children. A22's prompt freeze had the same hole. Both now
+> go through `frozenFirst`.
 
 **A24 (original entry, kept for the reproduction) · A subgraph's child spec is read at RUN time,
 by REF.** Split out of A23 rather than folded into it. `engine.ts`'s `#runSubgraph` calls `this.#resolver.subgraph?.(sub.ref)` while a
@@ -734,16 +733,23 @@ ref nothing has seen reaches the live store. That is exactly what additive-only 
 which is why the rule fits rather than being bolted on: a mutation may ADD, and what it may not
 do is change an answer the run is already built on.
 
-> **One helper rather than three spreads**, on invariant 6's argument one layer over — the last
-> wave shipped the wide substitution, measured 38 failures, and only a reviewer's narrow retry
-> showed the cheap version worked. A shape that has already been got wrong once is a shape to
-> name.
+> **`resolve` had to be frozen too, and leaving it live made the first version a no-op.** A
+> digest is over CONTENT — `resourceDigest` is `digest({kind, name, content})` — so a promotion
+> MOVES it and `@stable` points at the new one. With `resolve` live, a recompile re-pinned an
+> existing ref to the new digest, the frozen map (keyed by the old one) missed, and the fallback
+> served the promoted bytes to a node that already existed. The freeze held only when the
+> content had not moved, which is the case needing no freeze. Reproduced through the engine
+> before it was fixed; the stated rationale ("the pin is a digest over the ref") was true of the
+> CLI's stand-in resolver and false of `ResourceStore`.
 >
-> **The test counts LOOKUPS, not values.** Asserting that a graph object's `documents` did not
-> change proves nothing — it cannot. What is observable is whether a recompile ASKS the live
-> store about a ref the run has frozen, and after a mutation plus a second `advance` (the
-> rehydrate path, which recompiles every turn) that count is zero. Reverting either call site
-> turns it red.
+> **What the test covers, measured rather than asserted: `#applyMutation` only.** It drives a
+> real mutation across a promotion and checks both that no already-compiled node is sent the
+> promoted prompt AND that the ref the mutation ADDED is the only thing asked live — so the
+> additive fallback is exercised rather than assumed. **`#rehydrateGraph` has no test**:
+> it recompiles only when a process picks up a run behind its own history, its effect shows only
+> in what a LATER node is sent, and this fixture's run reaches `succeeded` on the first
+> `advance`. An assertion there passed with the site reverted, so it was removed rather than
+> kept. Covering it needs a mutating graph that parks and resumes.
 
 **A25 (original entry, kept for the reproduction) · A MUTATED graph re-resolves its prompts and
 children from a live resolver, mid-run.** Found by a reviewer checking A24's absolute claim

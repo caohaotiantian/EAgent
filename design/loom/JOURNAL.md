@@ -3656,13 +3656,34 @@ wrote the number into three documents as though it refuted the whole direction, 
 reviewer's narrow retry showed the cheap version cost nothing. A shape that has been got wrong
 once is a shape to give a name, so the fourth site cannot re-derive it differently.
 
-**And the test counts questions, not answers.** The first draft asserted that the original
-graph's `documents` still held the original text — which proves nothing, because a frozen object
-cannot change; the test would have passed with the fix reverted. What is actually observable is
-whether a recompile ASKS the live store about a ref the run has already frozen. Counting those
-lookups, driving a real mutation, then a second `advance` to reach the rehydrate path, gives
-zero — and reverting either call site turns it red. **An assertion about a value that cannot vary
-is a test that cannot fail**, and it is an easy one to write when the mechanism is fresh in mind.
+**And then I did the same thing again, in the same wave.** The fix shipped with `resolve` left
+live, on a written rationale that "the pin is a digest over the ref" — true of the CLI's
+STAND-IN resolver, false of `ResourceStore`, where `resourceDigest` is
+`digest({kind, name, content})`. So a promotion moves the digest, a recompile re-pins the
+existing ref to the NEW one, the frozen map keyed by the old one misses, and the live fallback
+serves the promoted bytes. The freeze held in exactly the case that needed no freeze. A reviewer
+reproduced it through the engine.
+
+**The test had the same disease three times over.** The first draft asserted a frozen object's
+contents were unchanged — which cannot fail. The second counted lookups but used a fixture where
+every ref shares one constant digest, so the genuinely new ref hit the frozen map too and the
+additive fallback the whole design rests on was never called: deleting the fallback kept the
+suite green. And its final clause claimed "reverting either call site turns it red" when
+reverting the rehydrate site left it green, because that fixture's run reaches `succeeded` on the
+first `advance` and a re-attach does no work at all.
+
+**What made the third version real was writing the probe first and watching it fail.** A
+store-shaped fixture — per-ref digests that MOVE with content — reproduced the defect, then the
+fix turned it green, then reverting each call site individually said which one the test actually
+holds. It holds `#applyMutation`. `#rehydrateGraph` has none, and that is now written down
+instead of claimed.
+
+**The pattern across both waves is one habit, not two mistakes: I generalised from a measurement
+to a neighbouring claim.** "The wide substitution breaks 38 tests" became "the narrow one would
+too". "The test goes red when I revert this site" became "either site". Both times the number was
+real and the sentence around it was not. The fix is mechanical and cheap — revert each conjunct
+separately, run it, write down which one moved — and it is exactly what the file's own
+mutation-sweep habit already prescribes for guards.
 
 **Reverses when.** The live fallback is what makes this additive rather than a freeze. If a
 deployment ever needs a mutation to be sealed — no new refs at all, only recombination of what

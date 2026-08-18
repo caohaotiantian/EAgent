@@ -7,6 +7,8 @@
  * the acceptance test drives this and not a simpler graph.
  */
 
+import { digest } from "../../src/canonical.ts";
+import type { Digest } from "../../src/canonical.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import type { EdgeId, NodeId } from "../../src/ids.ts";
@@ -133,16 +135,25 @@ export const SKELETON_TOOLS: Record<string, ToolManifestLite> = {
 };
 
 export function resolver(): ResourceResolver {
+  // A DISTINCT DIGEST PER REF, because a constant one is a fixture that cannot catch a
+  // collapse. Every frozen-document map in the engine is keyed by digest, so one shared
+  // digest makes every ref hit the same entry and a lookup for a ref the run never froze
+  // succeeds anyway — the exact failure such a map exists to prevent. The text stays
+  // uniform; it is the KEYS that have to be able to disagree.
+  // Minted on resolve and remembered, the way a store holds what it has published — so
+  // `document` can answer `undefined` for a pin that did not come from here.
+  const minted = new Set<Digest>();
   return {
     resolve(ref) {
       if (!/^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)) return undefined;
-      return { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" };
+      const pinned = digest({ fixture: "skeleton", ref });
+      minted.add(pinned);
+      return { ref, digest: pinned, channel: "stable" };
     },
-    // ONE DOCUMENT FOR EVERY PIN, because the digest above is constant and a fixture does not
-    // need per-ref fidelity — it needs an agent node to receive WORDS rather than a pointer,
-    // which is the property `#documentFor` refuses without. Only prompt and rubric refs ever
-    // reach here; `function` and `subgraph` pins go through their own hooks.
-    document: () => "Test instructions.",
+    // Only prompt and rubric refs ever reach here; `function` and `subgraph` pins go through
+    // their own hooks. `#documentFor` refuses a node whose prompt has no document, so a
+    // fixture agent node needs WORDS rather than a pointer to run at all.
+    document: (pinned) => (minted.has(pinned) ? "Test instructions." : undefined),
   };
 }
 
