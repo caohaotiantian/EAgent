@@ -556,6 +556,18 @@ export interface RunGraph {
    * what it asks the model is not a graph that runs.
    */
   readonly documents: Readonly<Record<string, string>>;
+  /**
+   * Every child `GraphSpec` this graph can delegate to, keyed by ref, frozen at compile.
+   *
+   * The whole TREE, not just the nodes this spec names: a child's own `subgraph` nodes are
+   * collected too, so nothing consults a resolver once a Task is executing. Freezing only the
+   * top level would move the read one level down rather than remove it — `#compileChild`
+   * compiles the child, and a compile reads refs.
+   *
+   * Only the SPEC. The child is still compiled when it is delegated to, because compiling a
+   * whole tree up front makes a parent pay for a branch it may never take.
+   */
+  readonly subgraphs: Readonly<Record<string, GraphSpec>>;
   readonly expansion: ExpansionBudget;
 }
 

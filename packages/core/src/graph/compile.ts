@@ -137,6 +137,7 @@ export function compile(input: CompileInput): CompileResult {
     terminalNodes: idx.terminalNodes,
     resolutionManifest: manifest,
     documents: resolveDocuments(input, manifest),
+    subgraphs: resolveSubgraphs(input),
     expansion,
   };
 
@@ -157,6 +158,36 @@ function resolveDocuments(input: CompileInput, manifest: readonly ResolvedRef[])
     const text = input.resolver.document?.(pinned.digest);
     if (text !== undefined) out[pinned.ref] = text;
   }
+  return out;
+}
+
+/**
+ * Every child spec reachable from this graph, keyed by ref.
+ *
+ * WALKED RECURSIVELY, because the point is that nothing asks a resolver anything once a Task is
+ * executing — and `Engine.#compileChild` compiles a child, which reads that child's own refs. A
+ * top-level-only map would relocate the read rather than remove it.
+ *
+ * The `seen` set is a cycle guard and the depth bound mirrors the validator's, so a graph the
+ * validator refuses for cycling or nesting too far cannot make this loop. It is not a second
+ * enforcement of either rule: diagnostics are the validator's job and this only declines to
+ * walk further.
+ */
+function resolveSubgraphs(input: CompileInput): Readonly<Record<string, GraphSpec>> {
+  const out: Record<string, GraphSpec> = {};
+  const maxDepth = input.spec.policy?.expansion?.maxDepth ?? DEFAULT_EXPANSION.maxDepth;
+  const walk = (spec: GraphSpec, depth: number): void => {
+    if (depth > maxDepth) return;
+    for (const n of spec.nodes) {
+      const ref = n.subgraph?.ref;
+      if (ref === undefined || Object.hasOwn(out, ref)) continue;
+      const child = input.resolver.subgraph?.(ref);
+      if (child === undefined) continue;
+      out[ref] = child;
+      walk(child, depth + 1);
+    }
+  };
+  walk(input.spec, 1);
   return out;
 }
 

@@ -485,7 +485,23 @@ partiality. **Fix:** make `toLoomError` total and have `LoomError` copy its own 
 construction; the local wrappers in `delivery.ts` say in their docstrings that they should be
 deleted the day it lands.
 
-**A2 · The executor never arms the fencing token, so the store-level fence is dead code.**
+**A2 · The executor never arms the fencing token, so the store-level fence is dead code.
+STALE AS WRITTEN, and RESOLVED 2026-08-18 in the narrower form it had become.** The fence IS
+armed: `#fence` presents the token at all three `#commit` exits and the token is the lease's own
+seq, chosen because a per-process counter cannot fence across processes — worker B starts at 1
+and loses to worker A's 3. The entry below describes the state before that landed and is kept
+because a register that silently rewrites its own history is one nobody can audit.
+
+> **What was actually left was a LYING FIELD.** `task.leased` journaled `++this.#fencing` — the
+> per-process counter — while `task_fence.max_token` compared the seq, and
+> `TaskRecord.lease.fencingToken` folded the counter. Two numbers for one thing, and the
+> projection reported the one nothing enforced. Nothing read it
+> (`grep -arn 'lease\.fencingToken'` was empty), so it misled rather than leaked. The seq IS the
+> token, so the payload no longer carries a second one and the fold reads `e.seq`; `#fencing` is
+> deleted.
+
+**A2 (original entry, kept because the register must not rewrite itself) · The executor never
+arms the fencing token, so the store-level fence is dead code.**
 `StateStore.append` takes `{taskId, fencingToken}` and both stores enforce it against the
 highest token seen; `RunLog.append`/`commit` forward it. `grep -ran fencingToken
 packages/core/src` finds the two stores, `log.ts`, `projection.ts`, and exactly one line of
@@ -671,8 +687,24 @@ the PRODUCT, and nothing in the suite could have caught it, because no test goes
 > can return CONTENT. `subgraph/<name>@stable` needs a published `GraphSpec` exactly as
 > `prompt/<name>@stable` needs published text.
 
-**A24 · A subgraph's child spec is read at RUN time, by REF.** Split out of A23 rather than
-folded into it. `engine.ts`'s `#runSubgraph` calls `this.#resolver.subgraph?.(sub.ref)` while a
+**A24 · A subgraph's child spec is read at RUN time, by REF. RESOLVED 2026-08-18.** The parent's
+compile walks the subgraph tree — same cycle set and depth bound the validator applies — and
+freezes every reachable child spec into `RunGraph.subgraphs`, which `#runSubgraph` now reads.
+The third and last kind of content leaves the run-time path; `grep -an '#resolver\.' engine.ts`
+returns nothing.
+
+> **What deliberately still consults a resolver, and why the obvious extension was wrong.**
+> `#compileChild` keeps `this.#resolver`. Handing it the parent's frozen view instead starves
+> the child — its own `function/…` and `prompt/…` refs are not in the PARENT's manifest, so every
+> one fails `GRAPH015_RESOURCE_NOT_FOUND`; measured, **38 tests**. And it is not the read this
+> entry is about: the rule is that content is read at COMPILE time rather than by an executing
+> Task, and a child's compile IS a compile — it pins the child's refs into the child's own
+> manifest exactly as the parent's compile pinned its own. Widening the parent's manifest to
+> cover the tree would fix it the other way and change what replay compares on every existing
+> journal, which is a bigger decision than this entry.
+
+**A24 (original entry, kept for the reproduction) · A subgraph's child spec is read at RUN time,
+by REF.** Split out of A23 rather than folded into it. `engine.ts`'s `#runSubgraph` calls `this.#resolver.subgraph?.(sub.ref)` while a
 Task is executing, so a promotion between compile and execute swaps the child graph underneath
 a running parent — the defect `resources/functions.ts` records for function bodies and A22
 closed for prompts, still open for the third kind of content. Exposure today is nil: nothing

@@ -3569,3 +3569,42 @@ claim was the design; the code was one function short of it.
 loader, duplicating `readSpec` rather than calling it, because `readSpec` also throws with a
 filename and this path must SKIP. If a third loader appears, that is the moment the two become
 one helper with a `mode` rather than a third copy of the same three predicates.
+
+---
+
+## The third content kind, and the extension that looked obvious and starved the child
+
+A22 froze prompts into the compiled graph; A23 made child graphs publishable; A24 is what was
+left — `#runSubgraph` still asked a resolver for the child SPEC while a Task was executing. The
+parent's compile now walks the subgraph tree and freezes every reachable child into
+`RunGraph.subgraphs`, reusing the cycle set and depth bound the validator already applies so a
+graph it refuses cannot make the collector loop. `grep -an '#resolver\.' engine.ts` is now empty.
+
+**The obvious next step was wrong, and measuring it is the entry.** If the parent freezes the
+tree, surely the child should compile against the frozen view rather than against a live
+resolver? I built that and it failed **38 tests**: a child's own `function/…` and `prompt/…`
+refs are not in the PARENT's manifest, so every one of them came back
+`GRAPH015_RESOURCE_NOT_FOUND`. The parent pinned what the parent names; the child names its own.
+
+Making it work would mean widening the parent's manifest to cover the whole tree — which is
+defensible, and changes what `replay` compares on every journal already written. That is a
+bigger decision than this entry, so what shipped is the narrower true thing: **a child's compile
+is a COMPILE.** The rule was never "no resolver during a run", it is "content is read at compile
+time rather than by an executing Task", and `#compileChild` pins the child's refs into the
+child's own manifest exactly as the parent's compile pinned its own.
+
+**A2 turned out to be stale, and what was left was a field that lied.** The entry says the
+executor never arms the fencing token; it does, at all three `#commit` exits, using the lease's
+seq — a per-process counter cannot fence across processes, because worker B starts at 1 and
+loses to worker A's 3. What remained was that `task.leased` *journaled* the counter while the
+store *enforced* the seq, and `TaskRecord.lease.fencingToken` folded the counter. Two numbers
+for one thing, and the projection reported the one nothing compares.
+
+Nothing read it, so it misled rather than leaked — which is exactly the kind of defect that
+survives, because the failure it causes is somebody believing a number. The seq IS the token, so
+the payload stopped carrying a second one and the fold reads `e.seq`.
+
+**Reverses when.** `RunGraph.subgraphs` holds specs and not compiled children, so a parent still
+pays nothing for a branch it never takes. If eager compilation ever becomes worth it — a
+deployment that wants every delegation validated before the first Task runs — that is the moment
+to reconsider, and the manifest question comes with it.

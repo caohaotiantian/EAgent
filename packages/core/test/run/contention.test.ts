@@ -164,7 +164,7 @@ class Worker {
       [
         {
           type: "task.leased",
-          payload: { workerId: this.id, attempt: r.task.attempt + 1, fencingToken: token },
+          payload: { workerId: this.id, attempt: r.task.attempt + 1 },
           actor: SYSTEM_ACTOR("scheduler"),
           taskId: r.task.taskId,
         },

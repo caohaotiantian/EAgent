@@ -509,7 +509,6 @@ export class Engine {
   readonly #advancing = new Map<RunId, Promise<void>>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
   #commitChain: Promise<unknown> = Promise.resolve();
-  #fencing = 0;
 
   constructor(opts: EngineOptions) {
     this.#store = opts.store;
@@ -1536,7 +1535,7 @@ export class Engine {
             [
               {
                 type: "task.leased",
-                payload: { workerId: this.#workerId, attempt: w.task.attempt + 1, fencingToken: ++this.#fencing },
+                payload: { workerId: this.#workerId, attempt: w.task.attempt + 1 },
                 actor: SYSTEM_ACTOR("scheduler"),
                 taskId: w.task.taskId,
               },
@@ -2405,7 +2404,11 @@ export class Engine {
       return { status: "succeeded", writes: { ...recorded.writes }, usage: { ...ZERO_USAGE } };
     }
 
-    const childSpec = this.#resolver.subgraph?.(sub.ref);
+    // FROM THE COMPILED GRAPH, not from a resolver. The parent froze every child spec it can
+    // reach when it was compiled, so nothing consults a resolver while a Task is executing —
+    // the rule `resources/functions.ts` states for code and A22 established for prompts,
+    // reaching the third and last kind of content.
+    const childSpec = ctx.graph.subgraphs[sub.ref];
     if (childSpec === undefined) {
       throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `subgraph "${sub.ref}" does not resolve to a GraphSpec`);
     }
@@ -2674,6 +2677,16 @@ export class Engine {
     if (hit !== undefined) return hit;
     const compiled = compileOrThrow({
       spec,
+      // THE ENGINE'S RESOLVER, DELIBERATELY, and the reasoning is worth keeping because the
+      // obvious move is the other one. Freezing the parent's view and handing it here starves
+      // the child: its own `function/…` and `prompt/…` refs are not in the PARENT's manifest,
+      // so every one of them fails `GRAPH015_RESOURCE_NOT_FOUND` — measured, 38 tests.
+      //
+      // And it is not the read A24 is about. The rule is that content is read at COMPILE time
+      // rather than by an executing Task, and this IS a compile: it pins the child's refs into
+      // the child's own manifest exactly as the parent's compile pinned its own. What A24
+      // closed is `#runSubgraph` asking a resolver for a SPEC mid-execution; the child's
+      // compile is the next compile, not a run-time content read.
       resolver: this.#resolver,
       tools: this.tools.manifests(),
       tenantCapabilities: this.#policyOpts.granted,

@@ -32,7 +32,7 @@ const TASK = "n@root#0" as TaskId;
 
 const lease = (worker: string, attempt: number): NewEvent => ({
   type: "task.leased",
-  payload: { workerId: worker, attempt, fencingToken: attempt },
+  payload: { workerId: worker, attempt },
   actor: SYSTEM_ACTOR("scheduler"),
   taskId: TASK,
 });

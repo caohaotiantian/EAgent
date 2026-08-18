@@ -709,7 +709,9 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     upsertTask(p, e.taskId, {
       state: "leased",
       attempt: e.payload.attempt,
-      lease: { workerId: e.payload.workerId, at: e.ts, fencingToken: e.payload.fencingToken },
+      // `e.seq`, because the lease's seq IS the token the store enforces. Folding a payload
+      // field here reported a per-process counter that `task_fence.max_token` never compared.
+      lease: { workerId: e.payload.workerId, at: e.ts, fencingToken: e.seq },
     });
     return;
   }

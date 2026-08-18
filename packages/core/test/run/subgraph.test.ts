@@ -164,6 +164,40 @@ test("A GRAPH THAT COMPILES RUNS — a subgraph node no longer throws", async ()
   assert.equal(p.channels["result"], 42, "the child's `doubled` came back as the parent's `result`");
 });
 
+test("THE CHILD SPEC IS FROZEN AT COMPILE — an executing Task asks no resolver for content", async () => {
+  // A24. `#runSubgraph` used to call `this.#resolver.subgraph?.(sub.ref)` while a Task was
+  // running, which is the floating-ref read `resources/functions.ts` records for code and A22
+  // closed for prompts: a promotion between compile and execute swaps the child underneath the
+  // parent. The parent's compile freezes every child spec it can reach.
+  const child = childSpec();
+  const r = rig(child);
+  const graph = compileParent(child);
+  assert.deepEqual(Object.keys(graph.subgraphs), ["graph/double@stable"], "the tree is on the compiled artifact");
+  assert.equal(graph.subgraphs["graph/double@stable"]?.metadata.name, "double");
+
+  // A POISONED RESOLVER for the run: it still `resolve`s refs, because the CHILD's compile
+  // legitimately pins its own — that is the next compile, not a run-time content read — but its
+  // `subgraph()` answers a childless spec that would be refused `GRAPH003_EMPTY`. If the
+  // executor asked it, this run fails. It does not, because the parent froze the real one.
+  const poisoned: ResourceResolver = {
+    ...resolverWith(child),
+    subgraph: () => ({ ...child, nodes: [], edges: [] }),
+  };
+  const engine = new Engine({
+    store: r.store,
+    resolver: poisoned,
+    tools: r.engine.tools,
+    functions: r.engine.functions,
+    models: r.engine.models,
+    now: () => 1_700_000_000_000,
+    policy: { granted: ["pay"], budget: { runUsd: 1 } },
+  });
+  const runId = await engine.submit({ graph, inputs: { total: 21 } });
+  const p = await engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(p.channels["result"], 42, "the child ran, from the frozen spec");
+});
+
 test("A DELEGATED RUN BELONGS TO WHOEVER STARTED THE PARENT", async () => {
   const child = childSpec();
   const r = rig(child);

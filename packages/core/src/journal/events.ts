@@ -168,7 +168,16 @@ export interface EventPayloads {
      */
     readonly binding?: { readonly channel: string; readonly value: unknown };
   };
-  "task.leased": { readonly workerId: string; readonly attempt: number; readonly fencingToken: number };
+  /**
+   * THE FENCING TOKEN IS THIS EVENT'S OWN `seq`, which is why the payload does not carry one.
+   *
+   * It used to, and the number was a per-process counter — so the journal recorded one value
+   * while `task_fence.max_token` compared another, and `TaskRecord.lease.fencingToken` folded
+   * the one nobody enforced. A counter cannot fence across processes anyway: a second worker
+   * starts at 1 and loses to the first's 3. The store's seq is the only monotonic number every
+   * process already shares, so the lease's own seq is the token, and the fold reads `e.seq`.
+   */
+  "task.leased": { readonly workerId: string; readonly attempt: number };
   "task.started": { readonly nodeType: string; readonly attempt: number };
   "task.progress": { readonly chunk: string };
   "task.committed": {
