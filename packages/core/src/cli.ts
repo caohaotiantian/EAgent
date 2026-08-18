@@ -318,9 +318,29 @@ export function openWorkspace(
     true,
   );
 
+  // BUILT BEFORE THE ENGINE, AND HANDED TO IT — which it was not, and the omission cost a
+  // whole node type. `Engine` falls back to `{resolve: () => undefined}` when it is given no
+  // resolver, so every ref lookup on the RUNTIME path answered nothing in the shipped binary
+  // while the compile path (which reads `Workspace.resolver` directly) worked fine. Measured:
+  // a `subgraph` node through `bin/loom` failed `E_RESOURCE_NOT_FOUND: subgraph
+  // "subgraph/child@stable" does not resolve to a GraphSpec`, and `HANDOFF.md`'s "all eight
+  // node types execute" was a statement about the engine with an injected resolver rather
+  // than about the product. The declaration used to sit below this constructor, which is the
+  // entire bug.
+  const resolver: ResourceResolver = {
+    // Without a resource store, refs resolve to a digest of their own name. That is
+    // enough for the compiler's pinning to be structurally correct locally, and it is
+    // replaced by a real ResourceStore the moment one is configured.
+    resolve: (ref) =>
+      RESOURCE_REF.test(ref)
+        ? { ref, digest: `sha256:${Buffer.from(ref).toString("hex").padEnd(64, "0").slice(0, 64)}`, channel: "stable" }
+        : undefined,
+  };
+
   const engine = new Engine({
     store,
     bus,
+    resolver,
     tools,
     functions: new FunctionRegistry(),
     models: modelRegistry,
@@ -337,16 +357,6 @@ export function openWorkspace(
     // and irreversibility classes still force a gate where one is warranted.
     policy: { granted: ["fs:read", "fs:write", "net:fetch"] },
   });
-
-  const resolver: ResourceResolver = {
-    // Without a resource store, refs resolve to a digest of their own name. That is
-    // enough for the compiler's pinning to be structurally correct locally, and it is
-    // replaced by a real ResourceStore the moment one is configured.
-    resolve: (ref) =>
-      RESOURCE_REF.test(ref)
-        ? { ref, digest: `sha256:${Buffer.from(ref).toString("hex").padEnd(64, "0").slice(0, 64)}`, channel: "stable" }
-        : undefined,
-  };
 
   return { root, dataDir, store, engine, bus, resolver, delivery, models, close: () => store.close() };
 }
@@ -1618,7 +1628,18 @@ export async function main(argv: readonly string[]): Promise<number> {
         const graph = loadGraph(ws, requirePositional(args, 0, "a graph file"));
         const runId = await ws.engine.submit({ graph, inputs, ...submitterFlag(args) });
         const p = await ws.engine.advance(runId);
-        process.stdout.write(`${JSON.stringify({ runId, status: p.status, outputs: p.outputs, usage: p.usage }, null, 2)}\n`);
+        // THE ERROR, WHEN THERE IS ONE. A failed run printed `"status": "failed"` and nothing
+        // else, so every carefully-worded refusal in this file — `RoutingAdapter.#resolve`'s
+        // "no route for model X; routed: …" most of all — reached nobody through the door
+        // people actually use. Diagnosing a provider failure meant opening the SQLite journal.
+        // Conditional, so a succeeding run's output is byte-identical to what it was.
+        process.stdout.write(
+          `${JSON.stringify(
+            { runId, status: p.status, outputs: p.outputs, usage: p.usage, ...(p.error === undefined ? {} : { error: p.error }) },
+            null,
+            2,
+          )}\n`,
+        );
         if (p.status === "awaiting_gate") {
           // MOST URGENT FIRST — D7.9 row 5, which this hint can have and `loom gates` cannot.
           // The difference is one fact and it is worth naming, because the two commands print
@@ -1693,7 +1714,9 @@ export async function main(argv: readonly string[]): Promise<number> {
           actor: { kind: "human", subject: subjectFlag(args), via: "cli" },
           idempotencyKey: `cli:${gateId}`,
         });
-        process.stdout.write(`${JSON.stringify({ status: p.status, outputs: p.outputs }, null, 2)}\n`);
+        process.stdout.write(
+          `${JSON.stringify({ status: p.status, outputs: p.outputs, ...(p.error === undefined ? {} : { error: p.error }) }, null, 2)}\n`,
+        );
         return p.status === "failed" ? 1 : 0;
       }
 

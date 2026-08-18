@@ -598,6 +598,32 @@ ROUTING KEY (`engine.ts:2156`), and the system message is the hard-coded
 > — library-as-data, already the named first package — is the same question wearing a
 > different hat. Until then an agent node is a shape, not a capability.
 
+**A23 · A `subgraph` node has never worked in the shipped binary, and the cause is TWO things
+neither of which is visible from the other.** New, 2026-08-18. Reproduced through `bin/loom`
+on a two-graph workspace:
+
+```
+E_RESOURCE_NOT_FOUND: subgraph "subgraph/child@stable" does not resolve to a GraphSpec
+```
+
+`HANDOFF.md` has said "all eight node types execute" since the P1 wave, and that is true of the
+ENGINE — every subgraph test injects its own resolver with a `subgraph()` method. It is false of
+the PRODUCT, and nothing in the suite could have caught it, because no test goes through
+`openWorkspace`.
+
+> **The two causes, and why finding one hides the other.** (1) `openWorkspace` built its
+> resolver AFTER `new Engine({…})` and handed it only to `loadGraph`, so the engine fell back
+> to `{resolve: () => undefined}` — **fixed in this pass**. (2) That stand-in resolver has no
+> `subgraph()` method at all, because it is a PIN resolver: it answers "does this ref exist"
+> and nothing else. `grep -an '#resolver\.' engine.ts` returns exactly one line —
+> `subgraph?.(sub.ref)` — so with either cause standing the call answers `undefined` and the
+> run fails identically. A plan reviewer reported (1) as the reason subgraph nodes are dead
+> and I nearly shipped a test asserting it; the test would have passed before the fix.
+>
+> **What closes it is A22's work**, because both are the same missing thing: a resolver that
+> can return CONTENT. `subgraph/<name>@stable` needs a published `GraphSpec` exactly as
+> `prompt/<name>@stable` needs published text.
+
 **A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
 carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot
 cancel the channel call. Three consequences: each hung POST leaks a pending continuation

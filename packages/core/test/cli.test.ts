@@ -63,6 +63,53 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
   }
 }
 
+test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"failed\"", async () => {
+  // Every refusal written so carefully in `cli.ts` — `RoutingAdapter.#resolve`'s "no route for
+  // model X; routed: …" above all — reached nobody, because `loom run` printed
+  // `{runId, status, outputs, usage}` and stopped there. Diagnosing a provider failure meant
+  // opening the SQLite journal by hand, which is what it took to find a 401 during a smoke
+  // test of this very build.
+  const d = emptyDir();
+  try {
+    const g = join(d.dir, "g.json");
+    writeFileSync(
+      g,
+      JSON.stringify({
+        apiVersion: "loom.dev/v1",
+        kind: "GraphSpec",
+        metadata: { name: "s", project: "p", version: 1 },
+        policy: {
+          posture: "out",
+          budget: { costUsd: 1, tokens: 100, wallMs: 5000 },
+          expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 2, maxLoopIterations: 1 },
+          capabilities: [],
+        },
+        channels: { a: { type: "object", reduce: "replace" }, r: { type: "object", reduce: "replace" } },
+        inputs: ["a"],
+        outputs: ["r"],
+        nodes: [
+          {
+            id: "d",
+            type: "subgraph",
+            reads: ["a"],
+            writes: ["r"],
+            subgraph: { ref: "subgraph/child@stable", inputs: { x: "a" }, outputs: { r: "x" } },
+          },
+        ],
+        edges: [],
+      }),
+    );
+    const r = await run(["run", g, "--workspace", d.dir, "--input", '{"a":{}}']);
+    assert.equal(r.code, 1);
+    const body = JSON.parse(r.out.slice(r.out.indexOf("{"))) as { status: string; error?: { code?: string } };
+    assert.equal(body.status, "failed");
+    assert.ok(body.error !== undefined, "the error reaches stdout, not only the journal");
+    assert.equal(body.error?.code, "E_RESOURCE_NOT_FOUND");
+  } finally {
+    d.dispose();
+  }
+});
+
 test("A RUN CANNOT WRITE TO ITS OWN JOURNAL — the data dir is inside the jail root", async () => {
   // `--workspace` is both the fs jail and the parent of `.loom/journal.db`, and
   // `fs.write` is `reversible_write`, so no gate stands between a model and the run's
