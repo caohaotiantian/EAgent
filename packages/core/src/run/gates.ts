@@ -268,6 +268,33 @@ export class HumanGateBroker {
   }
 
   /**
+   * Drop a gate's non-durable half once the gate is CLOSED.
+   *
+   * Measured before this existed: 6000 gates carrying a 4 KiB payload each held 33.0 MiB in
+   * `#ephemeral` for the life of the process, and nothing ever removed an entry. The journal
+   * is correctly not where that lives — `gate.raised` carries `contentDigest`, not the
+   * payload — so the map is the only holder and a long-lived `loom serve` grew without bound.
+   *
+   * RELEASED ON THE TERMINAL TRANSITION, NEVER EVICTED BY AGE, and the difference is not a
+   * preference. A size cap on this map evicts in insertion order, insertion order is raise
+   * order, and the oldest-raised gate is the one still waiting on a slow human — so the
+   * policy would target exactly the entries still in use. What it would do to them is
+   * already written down one screen away, about a different cause: `GateSweeperOptions.broker`
+   * says a sweep holding no `DeliverySpec` makes `#fireTimeout` "conclude every escalation
+   * chain is exhausted and EXPIRE gates that should have escalated. Silently, and fail-closed."
+   * An evicted live gate also turns `onTimeout: "default_action"` into `fail`, and loses the
+   * SLA a `rehydrate` supplied. A closed gate has none of those futures left.
+   *
+   * Every reader is reached only for an OPEN record — `list` through `openGates`, `listBatches`
+   * through `gateBatchGroups(p, "open")`, and the sweep paths through the open-gate scan — and
+   * `#announceRemainder` reads the NEXT open member rather than the one just closed. `resolve`
+   * does not read this map at all.
+   */
+  #release(gateId: GateId): void {
+    this.#ephemeral.delete(gateId);
+  }
+
+  /**
    * Persist the gate and suspend the run. Returns as soon as it is durable.
    *
    * The caller must NOT hold anything open waiting for this — that is the entire
@@ -502,6 +529,11 @@ export class HumanGateBroker {
       await this.#dispatcher.deliver(log, summary, req.delivery, { tier: 0 });
     }
 
+    // A DEDUPED GATE IS ALREADY CLOSED, so its non-durable half is already dead: the append
+    // above carried `decidedEvent` for it. `#ephemeral` is set before that append — it has to
+    // be, because a gate that turns out to be answerable is only known to be so after
+    // `#inheritable` has run — so this is the one path where the entry is born terminal.
+    if (inherited !== undefined) this.#release(gateId);
     return gateId;
   }
 
@@ -773,6 +805,7 @@ export class HumanGateBroker {
     // legitimately loses to a concurrent writer, and recording a decision that did not
     // land would turn the caller's retry into a silent no-op.
     this.#idempotency.set(idemKey, decision.kind);
+    for (const g of gateIds) this.#release(g);
     return { resolved: true, gateIds };
   }
 
@@ -988,6 +1021,7 @@ export class HumanGateBroker {
     await log.append([decidedEvent(gate, checked, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
 
     await this.#announceRemainder(log, p, gate);
+    this.#release(gate.gateId);
     return { resolved: true };
   }
 
@@ -1733,6 +1767,7 @@ export class HumanGateBroker {
       // `resolve`, deliberately, so a batch whose only announced member was decided by the
       // clock is in exactly the state that method exists for.
       await this.#announceRemainder(log, at, gate);
+      this.#release(gate.gateId);
       return true;
     }
 
@@ -1865,6 +1900,7 @@ export class HumanGateBroker {
         actor: SYSTEM_ACTOR("gate-broker"),
       },
     ]);
+    if (still !== undefined) this.#release(gate.gateId);
     return still !== undefined;
   }
 
