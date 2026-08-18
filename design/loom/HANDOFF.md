@@ -630,9 +630,24 @@ ROUTING KEY (`engine.ts:2156`), and the system message is the hard-coded
 > — library-as-data, already the named first package — is the same question wearing a
 > different hat. Until then an agent node is a shape, not a capability.
 
-**A23 · A `subgraph` node has never worked in the shipped binary, and the cause is TWO things
-neither of which is visible from the other.** New, 2026-08-18. Reproduced through `bin/loom`
-on a two-graph workspace:
+**A23 · A `subgraph` node has never worked in the shipped binary. RESOLVED 2026-08-18.** A
+workspace publishes `resources/subgraph/<name>.json|yaml` and the CLI's resolver serves it, so
+the engine's `resolver.subgraph?.(ref)` finds a `GraphSpec` where it used to find nothing.
+Driven end to end through the rebuilt binary: parent `succeeded`, the child ran, wrote its file,
+and its output mapped back onto the parent's channel. The compiler also recurses into the child
+now, which it could not before — the first attempt was refused `GRAPH003_EMPTY` for a childless
+fixture nothing had ever validated.
+
+> **One half of this entry stays open and is now its own question.** `#runSubgraph` reads
+> `this.#resolver.subgraph?.(sub.ref)` at RUN time, by REF — the floating-ref read A22 went out
+> of its way to avoid for prompts, where the text is frozen into `RunGraph.documents` at
+> compile. Fixing it means carrying child SPECS in the compiled graph too, which is a redesign
+> of subgraph resolution rather than a fix for "the node does not work", so it was deliberately
+> not folded in. **A24.**
+
+**A23 (original entry, kept for the reproduction) · A `subgraph` node has never worked in the
+shipped binary, and the cause is TWO things neither of which is visible from the other.**
+Reproduced through `bin/loom` on a two-graph workspace:
 
 ```
 E_RESOURCE_NOT_FOUND: subgraph "subgraph/child@stable" does not resolve to a GraphSpec
@@ -655,6 +670,15 @@ the PRODUCT, and nothing in the suite could have caught it, because no test goes
 > **What closes it is A22's work**, because both are the same missing thing: a resolver that
 > can return CONTENT. `subgraph/<name>@stable` needs a published `GraphSpec` exactly as
 > `prompt/<name>@stable` needs published text.
+
+**A24 · A subgraph's child spec is read at RUN time, by REF.** Split out of A23 rather than
+folded into it. `engine.ts`'s `#runSubgraph` calls `this.#resolver.subgraph?.(sub.ref)` while a
+Task is executing, so a promotion between compile and execute swaps the child graph underneath
+a running parent — the defect `resources/functions.ts` records for function bodies and A22
+closed for prompts, still open for the third kind of content. Exposure today is nil: nothing
+promotes at run time and the CLI's store is seeded once at boot. The fix is the one A22 used —
+freeze the child spec into `RunGraph` beside `documents` — and it is a redesign of subgraph
+resolution rather than a one-line guard, which is why it is its own entry.
 
 **A5 · A hung `parseCallback` is the one refusal invisible in both sinks.** `CallbackRequest`
 carries no `AbortSignal`, so the HTTP request deadline can abandon the *response* but cannot

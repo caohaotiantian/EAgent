@@ -124,6 +124,59 @@ test("AN UNREADABLE FILE DOES NOT TAKE DOWN EVERY COMMAND", () => {
   }
 });
 
+test("A CHILD GRAPH IS PUBLISHED THE SAME WAY A PROMPT IS — and a subgraph node could not run without it", () => {
+  // A `subgraph` node had never executed through the shipped binary: the engine asks
+  // `resolver.subgraph?.(ref)` and the workspace's stand-in is a PIN resolver with no such
+  // method, so every delegated run failed `E_RESOURCE_NOT_FOUND … does not resolve to a
+  // GraphSpec`. `HANDOFF.md` said "all eight node types execute" — true of the engine, where
+  // every subgraph test injects its own resolver, and false of the product.
+  const w = workspace();
+  try {
+    mkdirSync(join(w.dir, "resources", "subgraph"), { recursive: true });
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "child", project: "d", version: 1 },
+      policy: { posture: "out", expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { x: { type: "object", reduce: "replace" } },
+      inputs: ["x"],
+      outputs: ["x"],
+      nodes: [],
+      edges: [],
+    };
+    writeFileSync(join(w.dir, "resources", "subgraph", "child.json"), JSON.stringify(spec));
+
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      const child = ws.resolver.subgraph?.("subgraph/child@stable");
+      assert.ok(child !== undefined, "the workspace serves the child spec the engine asks for");
+      assert.equal(child?.metadata.name, "child");
+      // A SPEC, NOT ITS TEXT. `document` answers only for string content, so a child graph is
+      // not accidentally deliverable to a model as a prompt.
+      assert.equal(ws.resolver.document?.(ws.resolver.resolve("subgraph/child@stable")!.digest), undefined);
+    } finally {
+      ws.close();
+    }
+  } finally {
+    w.dispose();
+  }
+});
+
+test("A CHILD GRAPH THAT DOES NOT PARSE IS SKIPPED, not thrown", () => {
+  // `openWorkspace` runs for every command, so one malformed child graph would otherwise take
+  // down `compile`, `run`, `gates` and `approve` alike — the same rule the unreadable-file
+  // guard already established one branch over.
+  const w = workspace();
+  try {
+    mkdirSync(join(w.dir, "resources", "subgraph"), { recursive: true });
+    writeFileSync(join(w.dir, "resources", "subgraph", "broken.json"), "{ not json");
+    writeFileSync(join(w.dir, "resources", "prompt", "fine.md"), "still here");
+    assert.equal(documentFor(w.dir, "prompt/fine@stable"), "still here");
+  } finally {
+    w.dispose();
+  }
+});
+
 test("THE SEED DOOR IS NOT A PROMOTION — it lands at @stable without a human, and says why", () => {
   // `publish` lands on `@draft`, and `@stable` needs two promotions the second of which
   // refuses a non-human actor. A boot loader that minted a fake human to walk past that guard

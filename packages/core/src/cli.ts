@@ -355,6 +355,11 @@ export function openWorkspace(
         ? { ref, digest: `sha256:${Buffer.from(ref).toString("hex").padEnd(64, "0").slice(0, 64)}`, channel: "stable" }
         : undefined),
     document: (pinned) => documents.document(pinned),
+    // A CHILD GRAPH IS A DOCUMENT TOO, and its absence is why a `subgraph` node had never run
+    // through this binary: the engine asks `resolver.subgraph?.(ref)` and the stand-in — a PIN
+    // resolver — has no such method, so the call answered `undefined` and every delegated run
+    // failed `E_RESOURCE_NOT_FOUND`.
+    subgraph: (ref) => documents.subgraph(ref),
   };
 
   const engine = new Engine({
@@ -1936,9 +1941,9 @@ const MAX_SUBJECT = 256;
  * A missing directory is not an error: most workspaces have no resources, and the layered
  * resolver above answers for them exactly as it did before this existed.
  */
-function readResources(root: string): readonly { kind: ResourceKind; name: string; content: string }[] {
+function readResources(root: string): readonly { kind: ResourceKind; name: string; content: unknown }[] {
   const base = join(root, "resources");
-  const out: { kind: ResourceKind; name: string; content: string }[] = [];
+  const out: { kind: ResourceKind; name: string; content: unknown }[] = [];
   let kinds: Dirent[];
   try {
     kinds = readdirSync(base, { withFileTypes: true });
@@ -1948,7 +1953,8 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
   for (const kindDir of kinds) {
     if (!kindDir.isDirectory()) continue;
     const kind = kindDir.name;
-    if (!RESOURCE_KINDS.includes(kind)) continue;
+    const isSpec = SPEC_KINDS.includes(kind);
+    if (!isSpec && !TEXT_KINDS.includes(kind)) continue;
     // SORTED, so `@stable` does not depend on filesystem order. `x.md` and `x.txt` both
     // publish `prompt/x`, and `#seed` points `@stable` at whichever landed LAST — which was
     // `readdirSync` order, so which text a model received differed by machine.
@@ -1966,7 +1972,7 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
       // from the absence of a flag.
       if (file.isSymbolicLink() || !file.isFile()) continue;
       const ext = extname(file.name);
-      if (ext !== ".md" && ext !== ".txt") continue;
+      if (!(isSpec ? SPEC_EXT : TEXT_EXT).includes(ext)) continue;
       const name = basename(file.name, ext);
       // A NAME THE REF GRAMMAR CANNOT HOLD IS NOT A RESOURCE. `my prompt.md` would publish
       // `prompt/my prompt@stable` — resolvable through the store and unreachable from any
@@ -1987,14 +1993,37 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
       // sent no instruction at all, from a run that succeeds. That is the degradation the
       // refusal exists to prevent, one step over.
       if (content.trim() === "") continue;
-      out.push({ kind: kind as ResourceKind, name, content });
+      if (!isSpec) {
+        out.push({ kind: kind as ResourceKind, name, content });
+        continue;
+      }
+      // A SPEC THAT DOES NOT PARSE IS SKIPPED, not thrown. Same rule as the unreadable file
+      // above and for the same reason: this runs inside `openWorkspace`, so one malformed
+      // child graph would take down `compile`, `run`, `gates` and `approve` alike.
+      let spec: GraphSpec;
+      try {
+        spec = ext === ".json" ? (JSON.parse(content) as GraphSpec) : (parseYamlSpec(content, { filename: file.name }) as unknown as GraphSpec);
+      } catch {
+        continue;
+      }
+      out.push({ kind: kind as ResourceKind, name, content: spec });
     }
   }
   return out;
 }
 
-/** The kinds a workspace directory may publish. Text documents only — see `readResources`. */
-const RESOURCE_KINDS: readonly string[] = ["prompt", "agent_profile", "skill"];
+/**
+ * The kinds a workspace directory may publish, and what a file of each one holds.
+ *
+ * TEXT kinds are read as-is: a prompt is prose, and `.md` and `.txt` are both right.
+ * SPEC kinds are parsed as a `GraphSpec` with the same reader `loadGraph` uses, so a child
+ * graph is written exactly like a top-level one — the alternative is two spellings of the same
+ * document and a question about which one a `subgraph` node wants.
+ */
+const TEXT_KINDS: readonly string[] = ["prompt", "agent_profile", "skill"];
+const SPEC_KINDS: readonly string[] = ["subgraph", "graph"];
+const TEXT_EXT: readonly string[] = [".md", ".txt"];
+const SPEC_EXT: readonly string[] = [".json", ".yaml", ".yml"];
 
 /** `pathFlag`, for the commands where the path is not optional. */
 function requireFileFlag(args: Args, name: string): string {
