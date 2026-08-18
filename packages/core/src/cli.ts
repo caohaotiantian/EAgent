@@ -53,7 +53,7 @@ import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId } from "./ids.ts";
-import type { HumanActor } from "./journal/events.ts";
+import type { HumanActor, SubmittedBy } from "./journal/events.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -1602,7 +1602,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         // more importantly it must not be diagnosed as something the graph did.
         const inputs = runInputs(args);
         const graph = loadGraph(ws, requirePositional(args, 0, "a graph file"));
-        const runId = await ws.engine.submit({ graph, inputs });
+        const runId = await ws.engine.submit({ graph, inputs, ...submitterFlag(args) });
         const p = await ws.engine.advance(runId);
         process.stdout.write(`${JSON.stringify({ runId, status: p.status, outputs: p.outputs, usage: p.usage }, null, 2)}\n`);
         if (p.status === "awaiting_gate") {
@@ -1803,6 +1803,30 @@ function subjectFlag(args: Args): string {
     );
   }
   return v;
+}
+
+/**
+ * `--as` on `loom run` — WHO this run is submitted for, or nobody.
+ *
+ * It does NOT reuse `subjectFlag`'s default. That one answers "who decided this gate" and
+ * falls back to the literal `cli`, which is honest for a decision the CLI genuinely made.
+ * As an OWNER the same fallback is three separate defects: it journals a human named `cli`
+ * that a graph could then list in `approvers`; it collapses every CLI-submitted run in the
+ * deployment onto one owner, so any credential authenticating as `cli` inherits them all;
+ * and it takes those runs OUT of the permissive unowned set that exists so an upgrade loses
+ * nothing.
+ *
+ * So the absent case records nothing at all. The CLI authenticates nobody — it writes to the
+ * journal directly, and `subjectFlag`'s docstring already states that limit — and inventing a
+ * principal is exactly the synthetic-subject failure the perimeter refuses one door over.
+ * `separationOfDuties` then refuses a gate on such a run rather than enforcing nothing, which
+ * is the loud version of the same fact.
+ *
+ * `method` is `cli` because that IS how identity was established here: it was not.
+ */
+function submitterFlag(args: Args): { submittedBy?: SubmittedBy } {
+  if (args.flags["as"] === undefined) return {};
+  return { submittedBy: { kind: "human", subject: subjectFlag(args), method: "cli" } };
 }
 
 /** `pathFlag`, for the commands where the path is not optional. */

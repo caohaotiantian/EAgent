@@ -52,7 +52,14 @@ const HUMAN = { kind: "human", subject: "u:alice", via: "console" } as const;
 function journal(): JournalEvent[] {
   seq = 0;
   return [
-    ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+    ev("run.submitted", {
+      workflow: "w",
+      graphHash: "h",
+      inputs: {},
+      idempotencyKey: "i",
+      configDigest: "c",
+      submittedBy: { kind: "human", subject: "u:alice", method: "sso" },
+    }),
     ev(
       "policy.decided",
       { effect: "gate", posture: "in", irreversibility: "irreversible", reasons: ["irreversible tool", "system floor on"] },
@@ -128,8 +135,29 @@ test("every kind of accountable act becomes an audit record", () => {
   const records = extractAudit(journal());
   assert.deepEqual(
     records.map((r) => r.kind),
-    ["gate_decision", "policy_change", "policy_change", "operator_command", "agent_action"],
+    ["run_submitted", "gate_decision", "policy_change", "policy_change", "operator_command", "agent_action"],
   );
+});
+
+test("the submission record names the PRINCIPAL, because its actor cannot", () => {
+  const submitted = extractAudit(journal()).find((r) => r.kind === "run_submitted")!;
+  // The row was appended by a system component and says so — that is the honest answer to
+  // "what wrote this", and in the real engine it is `system:control-plane`. Without the
+  // second field the audit projection would answer "who started this run that spent money"
+  // with "the software did".
+  assert.equal(submitted.actor.kind, "system");
+  assert.deepEqual(submitted.principal, { kind: "human", subject: "u:alice", method: "sso" });
+  assert.equal(submitted.decision, "w", "which workflow was started");
+});
+
+test("a run submitted with no recorded principal still audits, and claims nobody", () => {
+  const [first] = extractAudit([
+    ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+  ]);
+  // Absent, not a synthetic name: a journal written before the field existed says nothing
+  // about who started the run, and a placeholder would read like an answer.
+  assert.equal(first?.kind, "run_submitted");
+  assert.equal(first?.principal, undefined);
 });
 
 test("a read-only tool call is NOT an audit record; an irreversible one is", () => {
@@ -183,7 +211,7 @@ test("archiving writes the FULL journal to cold and the audit records to audit",
   const result = await m.archive(RUN, events);
 
   assert.equal(result.events, events.length);
-  assert.equal(result.auditRecords, 5);
+  assert.equal(result.auditRecords, 6);
   assert.ok(result.bytes > 0);
 
   const restored = await m.restore(RUN);

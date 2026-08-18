@@ -42,7 +42,15 @@ import {
   type Seq,
   type TaskId,
 } from "../ids.ts";
-import { SYSTEM_ACTOR, errorRecord, isEvent, type Actor, type HumanActor, type NewEvent } from "../journal/events.ts";
+import {
+  SYSTEM_ACTOR,
+  errorRecord,
+  isEvent,
+  type Actor,
+  type HumanActor,
+  type NewEvent,
+  type SubmittedBy,
+} from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
@@ -179,6 +187,20 @@ export interface SubmitInput {
   readonly runId?: RunId;
   /** Overrides the run budget — a subgraph carves its slice from its parent's. */
   readonly budgetUsd?: number;
+  /**
+   * WHO this run is submitted for, journaled on `run.submitted`.
+   *
+   * OPTIONAL, AND ITS ABSENCE IS THE PERMISSIVE ANSWER, which is worth stating because this
+   * codebase normally refuses that shape. A run with no recorded principal is readable by
+   * every authenticated caller — the deliberate grandfather rule for journals written before
+   * the field existed. Required was the alternative and it breaks every embedder for a
+   * feature they may not use, so the enumeration is held by a test instead:
+   * `test/run/submit-callers.test.ts` pins every `submit(` call site under `src/`.
+   *
+   * The HTTP door always supplies it. `loom run` supplies it only with `--as`, because the
+   * CLI authenticates nobody and inventing a subject is worse than recording none.
+   */
+  readonly submittedBy?: SubmittedBy;
 }
 
 /**
@@ -483,7 +505,10 @@ export class Engine {
           inputs: input.inputs,
           idempotencyKey: input.idempotencyKey ?? runId,
           configDigest: digest(this.#policyOpts),
+          ...(input.submittedBy === undefined ? {} : { submittedBy: input.submittedBy }),
         },
+        // The control plane IS what appended this row, so the envelope stays true and the
+        // principal rides in the payload. See `SubmittedBy`.
         actor: SYSTEM_ACTOR("control-plane"),
       },
       {
@@ -894,9 +919,9 @@ export class Engine {
    *     closed — a state that re-running `cancel` finishes, rather than a half-cancelled
    *     tree that looks finished.
    */
-  async cancel(runId: RunId, reason = "operator"): Promise<RunProjection> {
+  async cancel(runId: RunId, reason = "operator", by: Actor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
     const ctx = this.#require(runId);
-    await this.#cancelTree(runId, reason, new Set());
+    await this.#cancelTree(runId, reason, new Set(), by);
     return (await this.#project(ctx))!;
   }
 
@@ -907,7 +932,7 @@ export class Engine {
    * (`parent~taskId`), so a cycle cannot arise from anything this engine writes — but this
    * walks a journal, and a journal is an input.
    */
-  async #cancelTree(runId: RunId, reason: string, seen: Set<RunId>): Promise<void> {
+  async #cancelTree(runId: RunId, reason: string, seen: Set<RunId>, by: Actor): Promise<void> {
     if (seen.has(runId)) return;
     seen.add(runId);
 
@@ -935,13 +960,16 @@ export class Engine {
     // log says why it stopped and names what stopped it.
     await this.#serialize(() =>
       log.append([
-        { type: "operator.command", payload: { kind: "cancel", args: { reason } }, actor: SYSTEM_ACTOR("operator") },
+        { type: "operator.command", payload: { kind: "cancel", args: { reason } }, actor: by },
       ]),
     );
     ctx?.abort.abort();
 
     for (const child of await childRunsOf(log)) {
-      await this.#cancelTree(child, `the run that delegated to it was cancelled: ${reason}`, seen);
+      // THE SAME actor down the tree. A child cancelled because its parent was is still that
+      // person's act; minting a fresh system actor here would make the cascade anonymous at
+      // exactly the depth where the irreversible work lives.
+      await this.#cancelTree(child, `the run that delegated to it was cancelled: ${reason}`, seen, by);
     }
 
     // Re-projected AFTER the children, because ending them can end this run too: a child
@@ -958,7 +986,7 @@ export class Engine {
         // standing. Answering it afterwards resurrected the run and drove the action the
         // cancel existed to prevent. D6.4 rule 4 says it plainly: gates are cancelled by
         // command, not by signal.
-        ...(p === undefined ? [] : cancelOpenGates(p, `the run was cancelled: ${reason}`, SYSTEM_ACTOR("operator"))),
+        ...(p === undefined ? [] : cancelOpenGates(p, `the run was cancelled: ${reason}`, by)),
         {
           type: "run.cancelled",
           payload: {
@@ -966,7 +994,7 @@ export class Engine {
             unknownEffects: p?.unknownEffects ?? [],
             forced: false,
           },
-          actor: SYSTEM_ACTOR("operator"),
+          actor: by,
         },
       ]),
     );
@@ -987,7 +1015,7 @@ export class Engine {
    * The original journal is never edited; the fold hides `(atSeq, marker)` instead.
    * So a rewind is itself auditable, and a trace still shows what was undone.
    */
-  async rewind(runId: RunId, atSeq: Seq, reason: string): Promise<RunProjection> {
+  async rewind(runId: RunId, atSeq: Seq, reason: string, by: Actor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
     // A rewind reads the log and appends a marker, and needs nothing else from a live
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as
@@ -1207,7 +1235,7 @@ export class Engine {
         {
           type: "checkpoint.restored",
           payload: { checkpointId: `cp_${atSeq}` as never, mode: "rewind", atSeq, reason },
-          actor: SYSTEM_ACTOR("operator"),
+          actor: by,
         },
       ]),
     );
@@ -2239,12 +2267,19 @@ export class Engine {
           { taskId: w.task.taskId },
         ),
       );
+      // THE CHILD INHERITS THE PARENT'S PRINCIPAL. A child run exists only because someone
+      // started the parent, so that person started this too — and the alternatives are both
+      // wrong: a synthetic `(subgraph)` subject would be a name that matches nothing while
+      // reading like one that does, and leaving it absent would make a delegated run
+      // invisible to the very person who caused it. It is also what makes a mirror gate's
+      // inherited exclusion mean the same thing in both runs.
       await this.submit({
         graph: childGraph,
         inputs,
         runId: childRunId,
         workflow: sub.ref,
         ...(slice === undefined ? {} : { budgetUsd: slice }),
+        ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
       });
     } else {
       this.attach(childRunId, childGraph);
@@ -2440,7 +2475,12 @@ export class Engine {
   async #endChildRun(childRunId: RunId, reason: string): Promise<void> {
     const p = await this.projection(childRunId);
     if (p === undefined || isTerminal(p.status)) return;
-    await this.cancel(childRunId, reason);
+    // NOT the human who rejected the mirror, and not `system:operator` either. The rejection
+    // is journaled in the PARENT with its decider; what happened here is that the executor
+    // stopped a delegation the parent refused, and `GateRecord.decidedBy` carries a kind
+    // rather than a subject (`projection.ts`) so the person is not available to name. Saying
+    // `operator` would claim an operator cancelled this run, and nobody did.
+    await this.cancel(childRunId, reason, SYSTEM_ACTOR("executor:subgraph"));
   }
 
   /** Compile a child graph once per ref. The tree is fixed, so the cache never stales. */

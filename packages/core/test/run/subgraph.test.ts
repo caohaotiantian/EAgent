@@ -164,6 +164,26 @@ test("A GRAPH THAT COMPILES RUNS — a subgraph node no longer throws", async ()
   assert.equal(p.channels["result"], 42, "the child's `doubled` came back as the parent's `result`");
 });
 
+test("A DELEGATED RUN BELONGS TO WHOEVER STARTED THE PARENT", async () => {
+  const child = childSpec();
+  const r = rig(child);
+  const runId = await r.engine.submit({
+    graph: compileParent(child),
+    inputs: { total: 21 },
+    submittedBy: { kind: "human", subject: "u:alice", method: "sso" },
+  });
+  await r.engine.advance(runId);
+
+  // A child run exists only because someone started the parent, so that person started this
+  // too. The two alternatives are both worse: a synthetic `(subgraph)` subject would be a
+  // name matching nothing while reading like one that does, and leaving it absent would make
+  // a delegated run — the half where the irreversible work usually lives — invisible to the
+  // very person who caused it, and permissive to everyone else.
+  const childRunId = `${runId}~delegate@root#0` as RunId;
+  const childP = (await r.engine.projection(childRunId))!;
+  assert.deepEqual(childP.submittedBy, { kind: "human", subject: "u:alice", method: "sso" });
+});
+
 test("the channel MAPPING is what crosses the boundary, not the whole child state", async () => {
   const child = childSpec();
   const r = rig(child);

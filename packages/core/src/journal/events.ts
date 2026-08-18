@@ -49,6 +49,36 @@ export type HumanActor = Extract<Actor, { readonly kind: "human" }>;
 
 export const SYSTEM_ACTOR = (component: string): Actor => ({ kind: "system", component });
 
+/**
+ * The principal a run was submitted ON BEHALF OF — not the component that appended the row.
+ *
+ * IT IS PAYLOAD RATHER THAN ENVELOPE, and the split is deliberate. `run.submitted` is written
+ * BY the control plane, so `actor: SYSTEM_ACTOR("control-plane")` is the true answer to "who
+ * appended this"; the submitter is a fact ABOUT the run, the same shape `gate.raised.approvers`
+ * has for the same reason. A cancel is the other way round — the caller causes the event
+ * directly — so that one is journaled on the envelope, and `projection.ts`'s `gate.decided`
+ * arm is the precedent.
+ *
+ * IT IS NOT AN `Actor`. `Actor`'s human arm REQUIRES `via`, a channel a `service` principal
+ * has none of, and `SYSTEM_ACTOR` is single-arg so it cannot carry `method` either. Recording
+ * a service submitter on the envelope would mean widening `Actor` for one caller.
+ *
+ * The three fields are the ones that IDENTIFY. `AuthContext` also carries `via`, `mfa` and
+ * `onBehalfOf`, which describe the request rather than name the principal.
+ *
+ * ABSENT IS A REAL ANSWER and means "nobody was recorded" — a journal written before this
+ * field existed, or an embedder calling `Engine.submit` with no principal to name. It is NOT
+ * a synthetic subject: `(unowned)` would be a name that matches nothing and reads like one
+ * that does.
+ */
+export interface SubmittedBy {
+  readonly kind: "human" | "service";
+  /** Compared exactly against a human actor's `subject`, like an approvers entry. */
+  readonly subject: string;
+  /** How identity was established — an `IdentitySource` name, or `shared-token`. */
+  readonly method: string;
+}
+
 export type TaskStatus = "succeeded" | "failed" | "skipped" | "cancelled";
 
 /** Recorded outcome of an effect. `unknown` is the honest third case (D6.1). */
@@ -86,6 +116,15 @@ export interface EventPayloads {
     readonly inputs: Readonly<Record<string, unknown>>;
     readonly idempotencyKey: string;
     readonly configDigest: string;
+    /**
+     * WHO this run was submitted for. Absent means nobody was recorded — see `SubmittedBy`.
+     *
+     * Optional because every journal written before this field existed lacks it, and a
+     * required field would make those journals unfoldable. The fold takes the FIRST one it
+     * sees, matching the `run_head` column, so a second `run.submitted` cannot rewrite an
+     * owner that a read model has already answered with.
+     */
+    readonly submittedBy?: SubmittedBy;
   };
   "run.compiled": {
     readonly graphHash: string;

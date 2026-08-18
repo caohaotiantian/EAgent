@@ -3037,3 +3037,80 @@ from one that does not exist.
 revisiting: the moment a server worth using offers only Streamable HTTP, the transport seam
 has to exist, and it should be added as a second transport behind the same client rather than
 as a second client.
+
+---
+
+## Who started the run, and who stopped it — and why they live in different places
+
+A4 asked one question — "who started this run that spent money, and who cancelled it" — and
+the answer turned out to need two mechanisms rather than one. Both are journaled; they are
+journaled in different halves of the event, and the split is the decision worth recording.
+
+**The submitter is PAYLOAD.** `run.submitted` is appended BY the control plane on a
+principal's behalf, so `actor: SYSTEM_ACTOR("control-plane")` was never wrong — it is the true
+answer to "what wrote this row". The principal is a fact *about the run*, which is the shape
+`gate.raised.approvers` already has for the same reason. Moving it to the envelope would also
+have meant widening `Actor`: its human arm REQUIRES `via`, a channel a `service` principal has
+none of, and `SYSTEM_ACTOR` is single-arg so it cannot carry `method` either.
+
+**The canceller is ENVELOPE.** A cancel is caused by its caller directly, so the event's own
+`actor` is the honest home, and `projection.ts`'s `gate.decided` arm is the precedent — *"The
+EVENT's actor, not the payload's — there is no actor in the payload and there must not be
+one."* A reviewer read the split as unprincipled and was half right: the representability
+problem exists on both sides, because a *service* cancelling through the API has no `via`
+either, and nothing said what it should be journaled as. It does now. A named service
+principal IS a system component in `Actor`'s vocabulary, so it becomes
+`system:principal:<subject>`. The prefix is load-bearing: without it a deployment could
+configure a service subject called `gate-broker:timeout` and forge that component in the audit
+trail, and `GATE_SYSTEM_ACTORS` holds no `principal:*` so the actor grants nothing anywhere.
+
+**An unidentified caller is still `system:operator`, unchanged.** `(shared-token)` and
+`(unidentified)` describe what the perimeter concluded rather than naming anybody, so
+`principal:(shared-token)` would claim a principal by that name. "An operator did it" is the
+most that can honestly be said, and it is what this path already wrote.
+
+**The fold is first-wins, because a read model that disagrees with itself is worse than one
+that is stale.** `run_head.submitted_by` (next phase) is written on the row-creating INSERT and
+never on the update, copying `first_ts`'s shape so no later append can rewrite an owner. If the
+fold took the LAST `run.submitted` instead, the list route (reading the column) and the detail
+route (reading the fold) would answer differently about who owns a run — in the one field that
+decides access. Reachable from an embedder re-submitting an explicit `runId`.
+
+**`loom run` fabricates nobody, and that is a refusal rather than an omission.** The obvious
+move was to reuse `subjectFlag`, which already exists and already refuses synthetic markers.
+It also defaults to the literal `cli`, and as an *owner* that default is three defects at once:
+it journals a human named `cli` that a graph could then list in `approvers`; it collapses every
+CLI-submitted run in a deployment onto one owner; and it takes those runs out of the permissive
+unowned set that exists so an upgrade loses nothing. So `--as` supplies a principal and its
+absence supplies none. The CLI authenticates nobody — it writes to the journal directly — and
+inventing a principal is exactly the synthetic-subject failure the perimeter refuses one door
+over.
+
+**A delegated run belongs to whoever started the parent.** The child inherits, rather than
+getting a synthetic `(subgraph)` subject or nothing. A synthetic subject would be a name that
+matches nothing while reading like one that does; absent would make the half of a workflow
+where the irreversible work usually lives invisible to the person who caused it and permissive
+to everyone else.
+
+**The audit projection needed a field, not just an arm.** The first version of this was "one
+arm, one `AuditKind` member", and a reviewer showed it could not answer its own question:
+`AuditRecord` carries exactly one identity field, `actor`, and for `run.submitted` that is
+`system:control-plane`. The audit store would have answered "who started this run that spent
+money" with "the software did", which is the one answer an audit trail exists to make
+impossible. `AuditRecord.principal` is the fix, and it is absent on every kind where `actor`
+and the principal coincide.
+
+**The optional field is fail-open, and the mitigation is a registry rather than a type.**
+`SubmitInput.submittedBy` is optional and an absent principal is the PERMISSIVE case, so a
+`submit` call site that forgets it mints a world-readable run with nothing red. The strong fix
+— a required field with an explicit `{kind:"unowned"}` member, so forgetting is a type error —
+was rejected because it breaks every embedder for a feature they may not use.
+`test/run/submit-callers.test.ts` stands in its place: it greps `src/` for `.submit(`, and a
+new door fails it until somebody writes down, in words, who owns the runs that door starts.
+It is the shape `docs-drift.test.ts` already uses for the same kind of question.
+
+**Reverses when.** The registry test is the weak part and it knows it: it proves that every
+call site has been *considered*, not that any of them is right. If a third-party embedder ever
+matters more than the two internal callers, the honest move is the required field with the
+explicit `unowned` member and a major version — at which point the registry test is deleted
+rather than kept as a second, weaker answer.

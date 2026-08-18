@@ -34,7 +34,7 @@ import {
   type Seq,
   type TaskId,
 } from "../ids.ts";
-import { isEvent, type Actor, type ErrorRecord, type JournalEvent } from "../journal/events.ts";
+import { isEvent, type Actor, type ErrorRecord, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import {
   channelValue,
   makeStateView,
@@ -255,6 +255,15 @@ export interface GateRecord {
 export interface RunProjection {
   readonly runId: RunId;
   readonly graphHash: string;
+  /**
+   * The principal this run was submitted for, folded from `run.submitted`.
+   *
+   * ABSENT MEANS NOBODY WAS RECORDED, which is a different statement from "a principal the
+   * reader may not see" — there is no second value for that, because a projection nobody may
+   * read is one nobody is handed. Readers that scope on it must treat absence as the
+   * PERMISSIVE case, matching every journal written before the field existed.
+   */
+  readonly submittedBy?: SubmittedBy;
   readonly status: RunStatus;
   readonly seq: Seq;
   readonly startedAt: number;
@@ -318,6 +327,7 @@ export interface RunProjection {
 interface MutableProjection {
   runId: RunId;
   graphHash: string;
+  submittedBy?: SubmittedBy;
   status: RunStatus;
   seq: Seq;
   startedAt: number;
@@ -493,6 +503,7 @@ function freeze(p: MutableProjection): RunProjection {
     startedEffects: [...p.everStarted].sort(),
     budgetExhausted: p.budgetExhausted,
     fanouts: { ...p.fanouts },
+    ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
     ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
     ...(p.error === undefined ? {} : { error: p.error }),
     ...(p.suspendedReason === undefined ? {} : { suspendedReason: p.suspendedReason }),
@@ -584,6 +595,15 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "run.submitted")) {
     p.graphHash = e.payload.graphHash;
     p.channels = { ...p.channels, ...e.payload.inputs };
+    // FIRST WINS, and the alternative is a read model that disagrees with itself. The
+    // `run_head.submitted_by` column is written on the row-creating INSERT and never on the
+    // update — `first_ts`'s shape — so a second `run.submitted` leaves the column alone. If
+    // the fold took the later value instead, `GET /runs` (the column) and `GET /runs/:id`
+    // (this fold) would answer differently about who owns a run, in a field that decides
+    // access. Reachable from an embedder re-submitting an explicit `runId`.
+    if (p.submittedBy === undefined && e.payload.submittedBy !== undefined) {
+      p.submittedBy = e.payload.submittedBy;
+    }
     return;
   }
   if (isEvent(e, "run.compiled")) {

@@ -566,7 +566,8 @@ shapes, so a single ordered read reconstructs "who did what, when, and why".
 ```ts
 export interface AuditRecord {
   runId: RunId; seq: Seq; ts: number;
-  kind: "gate_decision" | "operator_command" | "policy_change" | "resource_promotion" | "agent_action";
+  kind: "gate_decision" | "operator_command" | "policy_change" | "resource_promotion" | "agent_action"
+      | "run_submitted";
 
   actor:
     | { kind: "human"; subject: string; displayName: string; via: "console"|"slack"|"api"|"cli";
@@ -577,6 +578,12 @@ export interface AuditRecord {
     | { kind: "evolution"; engineVersion: string; candidate: ResourceRef };
 
   subject: { gateId?: GateId; taskId?: TaskId; nodeId?: NodeId; resource?: ResourceRef; scope?: PolicyScope };
+
+  // WHO an act was taken ON BEHALF OF, where that differs from `actor`. `actor` answers "what
+  // appended this row", and for `run.submitted` the honest answer is `system:control-plane` —
+  // the plane wrote it. Absent on every kind where the two coincide; a gate decision's actor
+  // IS its decider.
+  principal?: { kind: "human" | "service"; subject: string; method: string };
 
   decision?: GateDecision;                 // approve | reject | edit{writes} | redirect{take}
   justification?: string;                  // MANDATORY for reject, edit, redirect, and every de-escalation

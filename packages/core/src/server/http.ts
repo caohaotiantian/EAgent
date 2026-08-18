@@ -117,7 +117,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { SubscriberOverflowError, type EventBus } from "../bus.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
 import type { GateId, RunId } from "../ids.ts";
-import type { HumanActor, JournalEvent } from "../journal/events.ts";
+import { SYSTEM_ACTOR, type Actor, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { Engine } from "../run/engine.ts";
@@ -438,6 +438,52 @@ function sourceLabel(source: IdentitySource): string {
  * `(unidentified)` turns the absence of identity into a person, and one that returns
  * `(shared-token)` claims to BE the plane's shared-token service principal.
  */
+/**
+ * The principal a run is journaled as having been submitted for.
+ *
+ * A narrowing, not a rename: `AuthContext` also carries `via`, `mfa` and `onBehalfOf`, which
+ * describe the REQUEST. `SubmittedBy` names the principal and is compared against approvers
+ * lists and matched against a run's owner, so it carries only what identifies.
+ *
+ * A synthetic subject is passed through rather than dropped. `(shared-token)` and
+ * `(unidentified)` are true statements about what the perimeter concluded, and a run owned by
+ * "the shared credential" is a different fact from a run owned by nobody — which is what an
+ * absent `submittedBy` means. Conflating them would make an upgrade look like a wipe.
+ */
+function principalOf(auth: AuthContext): SubmittedBy {
+  return { kind: auth.kind, subject: auth.subject, method: auth.method };
+}
+
+/**
+ * The actor a cancel or a rewind is journaled under — the ENVELOPE, not a payload field.
+ *
+ * A cancel is caused by its caller directly, so the event's own `actor` is the honest home;
+ * `run.submitted` is the other way round and puts its principal in the payload. Three cases:
+ *
+ *   - **a person** ⇒ the human actor, carrying whatever the source vouched for. This is the
+ *     whole point: "who cancelled this run" stops being "the software did";
+ *   - **a named service** ⇒ `system:principal:<subject>`. `Actor` has no service arm, and a
+ *     named service principal IS a system component in its vocabulary. The `principal:`
+ *     prefix cannot collide with a built-in component name, and `GATE_SYSTEM_ACTORS` holds no
+ *     `principal:*`, so this grants nothing anywhere;
+ *   - **nobody identified** — an open plane, or the shared credential — ⇒
+ *     `system:operator`, exactly what this path journaled before. A marker describes what the
+ *     perimeter concluded rather than naming anyone, so `principal:(shared-token)` would
+ *     claim a principal by that name. "An operator did it" is the most that can be said.
+ */
+function commandActor(auth: AuthContext | undefined): Actor {
+  if (auth === undefined) return SYSTEM_ACTOR("operator");
+  if (isSyntheticSubject(auth.subject) || SYNTHETIC_SUBJECTS.includes(auth.subject)) return SYSTEM_ACTOR("operator");
+  if (auth.kind !== "human") return SYSTEM_ACTOR(`principal:${auth.subject}`);
+  return {
+    kind: "human",
+    subject: auth.subject,
+    via: auth.via ?? "api",
+    ...(auth.mfa === undefined ? {} : { mfa: auth.mfa }),
+    ...(auth.onBehalfOf === undefined ? {} : { onBehalfOf: auth.onBehalfOf }),
+  };
+}
+
 function checkedAuth(who: unknown, source: string): AuthContext {
   // A declaration and not a const arrow, so its `never` narrows the flow below: `subject`
   // really is a string after its check, with no cast to say so.
@@ -2138,6 +2184,13 @@ export class ControlPlane {
             inputs: (inputs ?? {}) as Record<string, unknown>,
             workflow: name,
             ...(key === undefined ? {} : { idempotencyKey: key }),
+            // FROM THE CREDENTIAL, NEVER THE BODY — the same rule `#decider` states for the
+            // approver's subject, and for the same reason: this value names who started a
+            // run that will spend money and may take irreversible action. `auth` is never
+            // undefined here; `#serve` answers 401 before routing on any plane that
+            // authenticates at all, and an open plane hands every caller the same principal,
+            // which makes the scope it feeds vacuous rather than wrong.
+            ...(auth === undefined ? {} : { submittedBy: principalOf(auth) }),
           });
           // 202, and the body says exactly what is durable — see the module docstring.
           const accepted = {
@@ -2220,21 +2273,24 @@ export class ControlPlane {
         method: "POST",
         pattern: /^\/runs\/([^/]+)\/commands$/,
         // The one that is not a read: any principal may cancel or rewind any run.
-        handle: async ({ res, params, body }) => {
+        handle: async ({ res, params, body, auth }) => {
           const runId = params[0] as RunId;
           const cmd = await body();
+          // WHO RAN THE COMMAND, on the envelope rather than in the payload, because a
+          // cancel is caused by the caller directly — the split `SubmittedBy` documents.
+          const by = commandActor(auth);
           switch (cmd["kind"]) {
             case "cancel":
               // `checkedReason`, not `cmd.reason ?? "operator"` off a cast — the value is
               // journaled on `operator.command` and quoted into every gate this closes.
-              send(res, 200, summarise(await engine.cancel(runId, checkedReason(cmd["reason"], "operator"))));
+              send(res, 200, summarise(await engine.cancel(runId, checkedReason(cmd["reason"], "operator"), by)));
               return;
             case "rewind": {
               const atSeq: unknown = cmd["atSeq"];
               if (typeof atSeq !== "number") {
                 throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, "rewind requires atSeq");
               }
-              send(res, 200, summarise(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"))));
+              send(res, 200, summarise(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by)));
               return;
             }
             case "advance":

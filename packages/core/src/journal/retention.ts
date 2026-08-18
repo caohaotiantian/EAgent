@@ -29,7 +29,7 @@ import { digest, type Digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import type { GateId, NodeId, RunId, Seq, TaskId } from "../ids.ts";
 import type { Posture } from "../vocab.ts";
-import { isEvent, type Actor, type JournalEvent } from "./events.ts";
+import { isEvent, type Actor, type JournalEvent, type SubmittedBy } from "./events.ts";
 
 // ---------------------------------------------------------------------------
 // Tiers
@@ -109,7 +109,8 @@ export type AuditKind =
   | "operator_command"
   | "policy_change"
   | "resource_promotion"
-  | "agent_action";
+  | "agent_action"
+  | "run_submitted";
 
 export interface AuditRecord {
   readonly runId: RunId;
@@ -123,6 +124,16 @@ export interface AuditRecord {
     readonly nodeId?: NodeId;
     readonly scope?: string;
   };
+  /**
+   * The principal an action was taken ON BEHALF OF, where that differs from `actor`.
+   *
+   * `actor` answers "what appended this row", and for `run.submitted` the honest answer is
+   * `system:control-plane` — the plane wrote it. Without a second field the audit projection
+   * would answer "who started this run that spent money" with "the software did", which is
+   * the one answer an audit trail exists to make impossible. Absent everywhere the two
+   * coincide, which is every other kind: a gate decision's actor IS its decider.
+   */
+  readonly principal?: SubmittedBy;
   readonly decision?: string;
   /** Mandatory for reject, edit, redirect, and every de-escalation. */
   readonly justification?: string;
@@ -197,6 +208,23 @@ export function extractAudit(events: Iterable<JournalEvent>): AuditRecord[] {
         policyReasons: ["rule" in p ? p.rule : "deescalate"],
       });
       posture = p.to;
+      continue;
+    }
+    if (isEvent(e, "run.submitted")) {
+      // WHO STARTED THE RUN, which is the question A4 exists for and the only run-lifecycle
+      // fact worth an audit row: the stops are already covered, because `cancel` and `rewind`
+      // journal their caller on the envelope and arrive here as `operator_command`.
+      out.push({
+        runId: e.runId,
+        seq: e.seq,
+        ts: e.ts,
+        kind: "run_submitted",
+        actor: e.actor,
+        subject: {},
+        ...(e.payload.submittedBy === undefined ? {} : { principal: e.payload.submittedBy }),
+        decision: e.payload.workflow,
+        policyReasons: [],
+      });
       continue;
     }
     if (isEvent(e, "operator.command")) {

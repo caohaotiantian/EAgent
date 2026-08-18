@@ -286,6 +286,7 @@
   "StateView",
   "SubgraphNode",
   "SubmitInput",
+  "SubmittedBy",
   "SubscribeOptions",
   "SubscriberOverflowError",
   "Subscription",
