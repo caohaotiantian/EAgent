@@ -201,10 +201,18 @@ export class SqliteStateStore implements StateStore {
       // clause makes the stamp idempotent, and the re-read takes whatever actually
       // landed — possibly a peer's, possibly a newer one, which the check below then
       // refuses.
+      //
+      // AND IT STAMPS WHAT THE FILE IS, NOT WHAT THIS BUILD IS. An unstamped file is usually
+      // a fresh one — the `CREATE TABLE IF NOT EXISTS` above just made it current — but it
+      // can also be an older journal that lost its `meta` row, and there `IF NOT EXISTS`
+      // no-ops so the tables stay old. Stamping CURRENT there would skip every migration and
+      // leave a file that opens cleanly and fails every append with `no such column`. The
+      // schema is the thing that knows; the stamp only records what a process last concluded.
+      const actual = this.#hasColumn("run_head", "submitted_by") ? SCHEMA_VERSION : 1;
       this.#db
         .prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO NOTHING")
-        .run(String(SCHEMA_VERSION));
-      found = this.#schemaVersion() ?? SCHEMA_VERSION;
+        .run(String(actual));
+      found = this.#schemaVersion() ?? actual;
     }
     if (found > SCHEMA_VERSION) {
       throw err.internal(
@@ -225,7 +233,7 @@ export class SqliteStateStore implements StateStore {
     // workers opening the same v1 file both read `1`, and the loser must find the work
     // already done rather than repeat it. The version is re-read INSIDE the transaction, so
     // the loser sees the winner's stamp and does nothing.
-    if (found < 2) this.#migrateInTransaction(2, "ALTER TABLE run_head ADD COLUMN submitted_by TEXT");
+    if (found < 2) this.#migrateInTransaction(2, () => (this.#hasColumn("run_head", "submitted_by") ? [] : ["ALTER TABLE run_head ADD COLUMN submitted_by TEXT"]));
   }
 
   /**
@@ -236,14 +244,20 @@ export class SqliteStateStore implements StateStore {
    * measured 70 failures out of 84 for; the second read is what makes a peer's completed
    * migration visible before this one repeats it.
    */
-  #migrateInTransaction(to: number, ...statements: readonly string[]): void {
+  #migrateInTransaction(to: number, plan: () => readonly string[]): void {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       if ((this.#schemaVersion() ?? 0) >= to) {
         this.#db.exec("COMMIT");
         return;
       }
-      for (const sql of statements) this.#db.exec(sql);
+      // THE PLAN IS COMPUTED INSIDE THE TRANSACTION, from the TABLE rather than from the
+      // stamp, because the two can disagree. The stamp says what a Loom process last wrote;
+      // the table says what is actually there — and a file whose ALTER landed under a stamp
+      // that did not, or one restored from a partial backup, would otherwise re-run the DDL
+      // and throw `duplicate column name` out of the constructor. Asking the schema makes
+      // each step idempotent on its own terms rather than on a bookkeeping row's.
+      for (const sql of plan()) this.#db.exec(sql);
       this.#db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(to));
       this.#db.exec("COMMIT");
     } catch (e) {
@@ -254,6 +268,12 @@ export class SqliteStateStore implements StateStore {
       }
       throw e;
     }
+  }
+
+  /** Whether a column is already there — asked of the schema, never inferred from the stamp. */
+  #hasColumn(table: string, column: string): boolean {
+    const rows = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { name: string }[];
+    return rows.some((r) => r.name === column);
   }
 
   /** The stamp, or `undefined` on a journal that has never been stamped. */

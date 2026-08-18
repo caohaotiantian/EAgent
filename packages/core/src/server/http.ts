@@ -220,11 +220,10 @@ export interface IdentityRequest {
  * legitimate for submitting runs and reading projections, never a person. The design
  * names this type in D3.17; this is its shape.
  *
- * It answers WHO, and in this implementation nothing else. Two principals with different
- * subjects have identical access to every run in the journal — see "THE LIMIT" in the
- * module docstring. `subject` is an authorization key for exactly one decision, a gate's
- * approvers list; everywhere else it reaches — the run's recorded submitter, the actor on a
- * cancel — it is AUDIT, describing who acted rather than deciding what they may touch.
+ * `subject` DECIDES TWO THINGS and describes the rest: whether a gate's approvers list admits
+ * this caller, and which runs the caller reaches — see "WHAT `auth` DECIDES" in the module
+ * docstring. Everywhere else it lands — the run's recorded submitter, the actor on a cancel —
+ * it is audit, saying who acted rather than what they may touch.
  */
 export interface AuthContext {
   readonly kind: "human" | "service";
@@ -386,6 +385,25 @@ export class BearerTokenIdentity implements IdentitySource {
       const operator = s.operator;
       if (token === "") throw err.validation(CODES.E_CONFIG_INVALID, `identity source "${this.name}": subject "${subject}" has an empty token`);
       if (subject === "") throw err.validation(CODES.E_CONFIG_INVALID, `identity source "${this.name}": a token maps to an empty subject`);
+      // THE SAME TWO CHECKS `checkedAuth` MAKES, made here as well, by the rule the `kind`
+      // refusal below states: a guard remembered in one caller is a guard the next caller
+      // will not have. Without them a subject this seam cannot later accept constructs
+      // fine and then throws `E_CONFIG_INVALID` as a 500 on EVERY request that principal
+      // makes — fail-closed, but diagnosed at 3 a.m. instead of at boot, which is exactly
+      // what the three-door rule exists to prevent.
+      if (subject.length > MAX_IDENTITY_FIELD) {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `identity source "${this.name}": subject of ${subject.length} characters (the limit is ${MAX_IDENTITY_FIELD})`,
+        );
+      }
+      if (isSyntheticSubject(subject) || SYNTHETIC_SUBJECTS.includes(subject)) {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `identity source "${this.name}": "${subject}" is a synthetic marker, not a subject — a parenthesised subject is what the ` +
+            `control plane writes when it could not identify a caller, and no source may claim one.`,
+        );
+      }
       // THE THIRD REFUSED CONFIGURATION, and it is a fail-OPEN rather than an ambiguity.
       // `kind ?? "human"` below is right for an ABSENT field and was also what answered a
       // MISTYPED one, because nothing here could tell them apart — and the value it falls
@@ -645,18 +663,42 @@ function mustAuth(auth: AuthContext | undefined): AuthContext {
 }
 
 /**
- * Whether a recorded owner names ANYBODY.
+ * Who a run belongs to — THREE answers, because two of them must not be the same one.
  *
- * Two ways a run has no owner and they must answer the same: nothing was recorded (a journal
- * written before ownership existed, an embedder with no principal to name, `loom run` without
- * `--as`), or what was recorded is a MARKER. The perimeter writes `(shared-token)` and
- * `(unidentified)` to say what it concluded rather than to name a person, so a run "owned" by
- * one is owned by nobody — and if the two answered differently, configuring identities on a
- * plane that had been open would take every historical run out of the permissive set at once
- * and read, to its operator, exactly like a wipe.
+ * `nobody` is permissive and `unreadable` is not, and conflating them is the failure this
+ * codebase has already named twice: *"an empty approvers list is the permissive case, so
+ * 'named nobody' and 'could not read who it names' must never produce the same value."*
+ * A journal is an input — an embedder can append anything, and a corrupt row is a real
+ * shape — so a `submittedBy` whose subject is not a non-empty string is refused rather than
+ * read as "unowned", which would make a malformed row world-readable.
+ *
+ * A SYNTHETIC SUBJECT IS A REAL OWNER, and an earlier version of this got it backwards.
+ * `(shared-token)` and `(unidentified)` describe what the perimeter concluded rather than
+ * naming a person, which made "treat them as nobody" look right — and on a MIXED plane it is
+ * an escalation: every run the CI service submits with the shared token becomes readable and
+ * **cancellable** by every human credential. Measured before the fix, on exactly the
+ * arrangement this file documents as supported. Reading them as owners costs nothing where
+ * they are minted, because there the whole deployment presents the same marker: on an open
+ * plane every caller IS `(unidentified)`, and a sole shared token is an operator anyway. What
+ * it costs is the upgrade — a plane that was open, then given identities, keeps those runs
+ * for its operators only — and that is the right side to be wrong on, because the alternative
+ * is a live cross-principal write.
+ *
+ * Runs with NO recorded principal keep the permissive rule they were promised: every journal
+ * written before ownership existed is in that set, and it only ever shrinks.
  */
-function ownedByNobody(owner: string | undefined): boolean {
-  return owner === undefined || isSyntheticSubject(owner) || SYNTHETIC_SUBJECTS.includes(owner);
+type Owner =
+  | { readonly kind: "nobody" }
+  | { readonly kind: "unreadable" }
+  | { readonly kind: "subject"; readonly subject: string };
+
+function ownerOf(p: RunProjection): Owner {
+  const by: unknown = p.submittedBy;
+  if (by === undefined || by === null) return { kind: "nobody" };
+  // Total reads: the type says `SubmittedBy`, and the value came out of a fold over a journal.
+  const subject: unknown = typeof by === "object" ? (by as Record<string, unknown>)["subject"] : undefined;
+  if (typeof subject !== "string" || subject === "") return { kind: "unreadable" };
+  return { kind: "subject", subject };
 }
 
 /**
@@ -670,7 +712,10 @@ function ownedByNobody(owner: string | undefined): boolean {
  */
 function ownsRun(p: RunProjection, auth: AuthContext): boolean {
   if (auth.operator === true) return true;
-  return ownedByNobody(p.submittedBy?.subject) || p.submittedBy?.subject === auth.subject;
+  const owner = ownerOf(p);
+  // `unreadable` falls through to `false`: an owner nobody can read is not an owner nobody
+  // HAS, and only an operator gets past it.
+  return owner.kind === "nobody" || (owner.kind === "subject" && owner.subject === auth.subject);
 }
 
 /**
@@ -692,8 +737,43 @@ function ownsRun(p: RunProjection, auth: AuthContext): boolean {
  */
 function mayReachGates(p: RunProjection, auth: AuthContext): boolean {
   if (ownsRun(p, auth)) return true;
-  return Object.values(p.gates).some((g) => (g.approvers ?? []).includes(auth.subject));
+  // ANY STATE, not only `open`, and that is deliberate rather than an oversight. Restricting
+  // it to open gates was tried and it turns a second approver's 409 into a 404: two people
+  // are named, one decides, and the other — arriving a second later — is told the run does
+  // not exist instead of that the question is already answered. Hiding a real conflict behind
+  // "no such run" is worse than the access it saves, and the access it saves is small:
+  // `visible()` bounds what such a caller can then SEE to the questions naming them, so what
+  // an approver keeps after deciding is a view of the question they themselves answered.
+  return Object.values(p.gates).some((g) => namesApprover(g, auth.subject));
 }
+
+/**
+ * Whether this gate NAMES this subject — a total read of a journal-folded list.
+ *
+ * `approvers` is copied raw out of `gate.raised` by the fold, so its runtime shape is
+ * whatever was appended. `Array.prototype.includes` on a STRING silently substring-matches,
+ * which would admit `u:alice` to a gate naming `u:alice-contractor`, and on a number it
+ * throws. Neither belongs in an authorization test.
+ */
+function namesApprover(g: GateRecord, subject: string): boolean {
+  const approvers: unknown = g.approvers;
+  return Array.isArray(approvers) && approvers.some((a) => a === subject);
+}
+
+/**
+ * How many gates one queue answer may carry, and how far back it may look for them.
+ *
+ * Both are ceilings this file chooses, unlike `pageLimit`, which deliberately imposes none
+ * because "inventing a maximum page size here would be a decision the store's interface
+ * should make". That argument holds for a listing the store can answer from an index; it does
+ * not hold for a route that FOLDS every candidate run, where an unbounded page is an
+ * amplifier available to the lowest-privilege credential the deployment issues.
+ *
+ * The scan bound is the honest half: a question older than `MAX_QUEUE_SCAN` runs is not in
+ * the answer, and the answer says so rather than pretending to be complete.
+ */
+const MAX_QUEUE_GATES = 200;
+const MAX_QUEUE_SCAN = 500;
 
 function principalOf(auth: AuthContext): SubmittedBy {
   return { kind: auth.kind, subject: auth.subject, method: auth.method };
@@ -1334,7 +1414,7 @@ export class ControlPlane {
    * both boot paths need it: `startControlPlane` for the library, `loom serve` for the
    * single binary. It is a fact about CONFIGURATION — no request has to have arrived, and
    * no injected code is consulted to compute it, because both halves were read at
-   * construction. See "THE LIMIT" in the module docstring for what is not scoped.
+   * construction. See "WHAT `auth` DECIDES" in the module docstring.
    */
   readonly distinctPrincipals: number;
   /**
@@ -1486,11 +1566,19 @@ export class ControlPlane {
     // unknown instead. A shared token that is the SOLE credential contributes one, because
     // `#principal` grants it operator by construction; alongside an identity source it
     // contributes none, and neither does an open plane, where scoping is vacuous anyway.
-    const sourceOperators = opts.identity === undefined ? 0 : opts.identity.operators;
+    // VALIDATED THE WAY `principals` IS, three lines up, and off the same captured local.
+    // It is advisory and grants nothing, which is exactly why an unvalidated read is easy to
+    // ship and still wrong: `operators: null` made `null + 0 === 0` and the plane shouted
+    // "NO OPERATOR CREDENTIAL IS CONFIGURED" at a deployment with several, and `"0"` made
+    // `"00"` and suppressed the same diagnostic. A false warning is what `ownershipWarnings`
+    // exists to retire; producing one here would be the defect it was written against.
+    const declaredOps: unknown = source?.operators;
+    const sourceOperators =
+      source === undefined ? 0 : typeof declaredOps === "number" && Number.isInteger(declaredOps) && declaredOps >= 0 ? declaredOps : undefined;
     this.operatorCredentials =
       this.openToEveryCaller || sourceOperators === undefined
         ? undefined
-        : sourceOperators + (token !== undefined && opts.identity === undefined ? 1 : 0);
+        : sourceOperators + (token !== undefined && source === undefined ? 1 : 0);
     // EVERY NAME BELOW IS A FIELD OR A LOCAL, and `logFor` is why that matters rather than
     // being tidiness. It is a closure the constructor builds and `GateCallbackRouter` calls
     // PER REQUEST, from the unauthenticated callback route, to journal a refusal — so
@@ -2320,6 +2408,12 @@ export class ControlPlane {
             // Whether this credential can answer a gate that names approvers — the one
             // thing a UI needs before it draws the button.
             canApproveNamedGates: auth?.kind === "human",
+            // AND WHETHER THIS CREDENTIAL SEES OTHER PEOPLE'S RUNS. Without it a console
+            // cannot tell "you have started nothing" from "you are scoped and somebody else
+            // started everything", and an empty run list is the first thing a new operator
+            // meets. It discloses a property of the caller's OWN credential and nothing
+            // about anyone else's.
+            operator: auth?.operator === true,
             ...(auth?.via === undefined ? {} : { via: auth.via }),
           });
         },
@@ -2483,15 +2577,42 @@ export class ControlPlane {
          * by whoever reaches it, and putting it in every principal's queue would publish its
          * rendered payload, which carries the node's channel values.
          *
-         * THE COST IS A FOLD PER CANDIDATE RUN, bounded by `limit`, which is the same shape
-         * and the same bound `GateSweeper` already pays on a timer. It is not free and it is
-         * not hidden: a caller that wants one run's queue should ask for that run.
+         * THE COST IS A FOLD PER CANDIDATE RUN, and it is NOT the shape `GateSweeper` pays.
+         * An earlier version of this comment said it was, in three places; the sweeper's own
+         * docstring says the opposite — its cost model is incremental, a cursor per run,
+         * "O(Δ), not O(history)", and "a run nobody has written to costs a number comparison
+         * and nothing else". This route has none of that: it folds, and `openGates` re-reads
+         * a run's journal from seq 1 every call. Hence the two hard ceilings above, which
+         * `pageLimit` deliberately does not impose, and the `truncated` flag: an unbounded
+         * page here is an amplifier reachable by the lowest-privilege credential a
+         * deployment issues.
+         *
+         * The reversal is a denormalised open-gate index beside `run_head` — the same move
+         * `submitted_by` already is, one question over — at which point the scan bound and
+         * the truncation flag both go away.
          */
         handle: async ({ res, url, auth }) => {
           const who = mustAuth(auth);
-          const limit = pageLimit(url.searchParams.get("limit"));
+          // BOUNDED BY GATES, AND BY HOW FAR IT SCANS, and both bounds are hard.
+          //
+          // The first version took `pageLimit`, which deliberately imposes no maximum, and
+          // spent it on RUNS: `?limit=9007199254740991` folded the whole journal, on a route
+          // any credential can reach, with no rate limit and a deadline that abandons the
+          // response without cancelling the work. Worse, the bound was the wrong UNIT — a
+          // question addressed to an approver vanished from the only route that can show it
+          // as soon as fifty newer runs existed, which is a denial of oversight in the route
+          // added to keep ownership from denying oversight, and inducible by anyone who can
+          // submit.
+          const want = Math.min(pageLimit(url.searchParams.get("limit")), MAX_QUEUE_GATES);
           const out: unknown[] = [];
-          for (const summary of await store.listRuns(limit)) {
+          let scanned = 0;
+          let truncated = false;
+          for (const summary of await store.listRuns(MAX_QUEUE_SCAN)) {
+            if (out.length >= want) {
+              truncated = true;
+              break;
+            }
+            scanned++;
             const p = await engine.projection(summary.runId);
             if (p === undefined) continue;
             const mine = ownsRun(p, who);
@@ -2499,29 +2620,23 @@ export class ControlPlane {
             // answerable by whoever reaches it, and putting it in everyone's queue would
             // publish its rendered payload — the node's readable channel values — to the whole
             // deployment, which is the disclosure ownership exists to close.
-            const wanted = Object.values(p.gates).filter(
-              (g) => g.state === "open" && (mine || (g.approvers ?? []).includes(who.subject)),
-            );
+            const wanted = Object.values(p.gates).filter((g) => g.state === "open" && (mine || namesApprover(g, who.subject)));
             if (wanted.length === 0) continue;
             // WITH THE RENDERED QUESTION, not just the record. A queue that lists gates
             // without saying what each one asks is a queue people clear rather than read —
-            // and for this route it is worse than that, because `GET /runs/:id` is closed to
-            // a non-owner, so this is the ONLY place the question can reach the person being
-            // asked. Degraded to no payload on a run this process has not attached, exactly
-            // as the per-run route degrades, and for the same reason.
-            const rendered = new Map(
-              (
-                await engine.openGates(summary.runId).catch((e: unknown) => {
-                  if (isLoomError(e) && e.code === CODES.E_RUN_NOT_FOUND) return [];
-                  throw e;
-                })
-              ).map((g) => [g.gateId, g] as const),
-            );
+            // and here it is worse than that, because `GET /runs/:id` is closed to a
+            // non-owner, so this is the ONLY place the question can reach the person being
+            // asked. The rendered half lives in the broker's memory, so a run this process
+            // never attached contributes the record and no payload.
+            const rendered = new Map((await engine.openGates(summary.runId)).map((g) => [g.gateId, g] as const));
             for (const g of wanted) {
               out.push({ runId: summary.runId, ...g, payload: rendered.get(g.gateId)?.payload, deadline: rendered.get(g.gateId)?.deadline });
             }
           }
-          send(res, 200, { gates: out });
+          // SAID OUT LOUD, because a queue that silently drops a question an approver is
+          // waiting on is worse than one that admits it is incomplete. `scanned` is how far
+          // back the walk got; anything older than that is not represented.
+          send(res, 200, { gates: out, truncated: truncated || scanned >= MAX_QUEUE_SCAN, scanned });
         },
       },
 
@@ -2616,13 +2731,17 @@ export class ControlPlane {
           // than read — and for a `subgraph` gate the question is in another run entirely.
           //
           // ONE ERROR IS EXPECTED HERE AND EVERYTHING ELSE IS NOT, and the catch used to
-          // take both. `openGates` throws `E_RUN_NOT_FOUND` when the run is not attached to
-          // this engine, which is the ORDINARY state after a restart — the gates are in the
-          // journal and the rendered payloads were only ever in memory — so degrading to
-          // "no payloads" is the right answer for that one and only that one. A bare
-          // `catch(() => [])` also answered 200 with a payload-less queue when the broker's
-          // own read failed, which is the same list an operator sees on a healthy restarted
-          // process: a failure and a normal condition rendered identically.
+          // take both. A bare `catch(() => [])` answered 200 with a payload-less queue when
+          // the broker's own read failed — the same list an operator sees on a healthy
+          // restarted process, so a failure and a normal condition rendered identically.
+          //
+          // THE CASE IT NAMES IS NO LONGER REACHABLE, and the sentence is kept narrow rather
+          // than deleted because the catch is still the right shape. `openGates` used to
+          // throw `E_RUN_NOT_FOUND` for a run this engine had not attached; `Engine` now
+          // falls back to `#logFor` for exactly that case ("a run this engine holds no
+          // context for is not an unknown run"), so after a restart the gates arrive from
+          // the journal and only the RENDERED payloads are missing, which is what the
+          // ephemeral map being empty already means.
           const detailed = await engine.openGates(runId).catch((e: unknown) => {
             if (isLoomError(e) && e.code === CODES.E_RUN_NOT_FOUND) return [];
             throw e;
@@ -2662,11 +2781,16 @@ export class ControlPlane {
           // The submitter and an operator see the whole queue, because for them the run is
           // the unit; a named approver sees the questions addressed to them, plus the ones
           // addressed to nobody, which anyone reaching this run may already answer.
-          const visible = (g: GateRecord): boolean => {
-            if (ownsRun(p, who)) return true;
-            const approvers = g.approvers ?? [];
-            return approvers.length === 0 || approvers.includes(who.subject);
-          };
+          //
+          // AND AN UNRESTRICTED GATE IS NOT IN A STRANGER'S LIST, which the first version got
+          // the other way round. "A gate that names nobody is answerable by whoever reaches
+          // it" is true about DECIDING and says nothing about publishing: the same commit
+          // enforces the opposite rule one route over, on `GET /gates`, with the argument
+          // that answerable-by-whoever-reaches-it must not mean published-to-everyone. Two
+          // routes over one set of gates must not disagree about who sees them, and the
+          // narrower answer is the right one — a non-owner sees the questions ADDRESSED to
+          // them.
+          const visible = (g: GateRecord): boolean => ownsRun(p, who) || namesApprover(g, who.subject);
           const open = Object.values(p.gates).filter((g) => g.state === "open" && visible(g));
           // Partitioned rather than sorted with a `?? Infinity` key: `Infinity - Infinity` is
           // `NaN`, and a comparator that answers `NaN` for a pair silently discards the whole
@@ -2744,7 +2868,14 @@ export class ControlPlane {
             // success, is the worst shape this endpoint has.
             idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? String(gateId)),
           });
-          send(res, 200, summarise(p));
+          // THE RESPONSE IS SCOPED TOO, and forgetting that made every other check on this
+          // route decorative. `summarise` carries the run's channels, outputs, usage, every
+          // task and every gate — strictly more than `GET /runs/:id`, which answers 404 to
+          // exactly this caller, and strictly more than `GET /runs/:id/gates`, which filters
+          // per gate. An approver who answered one question was handed the whole run as the
+          // reply. A door that refuses a read and then performs it in the response to a write
+          // is not a door.
+          send(res, 200, ownsRun(p, mustAuth(auth)) ? summarise(p) : { runId, gateId, status: p.status, decision: decision.kind });
         },
       },
 
@@ -3501,13 +3632,12 @@ export async function startControlPlane(opts: ControlPlaneOptions, port = 0): Pr
       `[loom] NO IDENTITY SOURCE — gates naming approvers cannot be answered through the API. Affected graphs: ${stranded.join(", ")}`,
     );
   }
-  // THE LIMIT, SAID OUT LOUD to the only person who can weigh it.
+  // WHO CAN SEE WHOSE RUNS, said out loud to the only person who can weigh it.
   //
   // Only when there is more than one principal, because with one there is nobody to be
   // isolated from and a warning that fires when nothing is wrong is a warning operators
-  // learn to skip. It fires on the arrangement that IMPLIES isolation — several
-  // credentials, several names — which is precisely when the absence of scoping is a
-  // surprise rather than a given.
+  // learn to skip. `ownershipWarnings` decides the wording; both boot paths read it, so the
+  // binary cannot contradict the library about a security property.
   for (const line of ownershipWarnings(plane)) console.error(`[loom] ${line}`);
   return { plane, port: bound };
 }

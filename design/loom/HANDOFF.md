@@ -498,9 +498,23 @@ The escape is `operator: true` on an identity entry, refused when malformed at a
 > arrangement as supported — so the unconditional grant would have handed every service a full
 > read of every human's runs, through a fallback nobody configured.
 >
+> **And a SYNTHETIC subject is a real owner — the reverse of what shipped first.** Reading
+> `(shared-token)` as "nobody" made every service-submitted run on a mixed plane readable and
+> **cancellable** by every human credential. Measured, then closed. The permissive set is runs
+> with no recorded principal; a run whose owner cannot be READ is operator-only, because "names
+> nobody" and "could not read who it names" must not answer alike.
+>
 > **What is still not scoped**: gate payloads are redacted per the GRAPH's classification,
 > never per viewer, so two approvers on one gate see the same bytes. The filtering is per
-> GATE, not within one.
+> GATE, not within one. And a caller who can MUTATE a graph can add a node naming themselves
+> as an approver, which under `mayReachGates` opens that run's gate routes to them —
+> `graph:mutate` was already a strong capability and is now slightly stronger.
+>
+> **`GET /gates` is bounded and says so.** At most 200 gates, scanning at most the 500 newest
+> runs, with `truncated` in the response — because the first version spent an uncapped
+> `pageLimit` on RUNS, which both amplified (a fold per run, any credential, no rate limit)
+> and hid: a question addressed to an approver vanished from the only route that shows it as
+> soon as fifty newer runs existed. The reversal is an open-gate index beside `run_head`.
 
 **A4 · Nobody is recorded as having started or stopped a run. RESOLVED 2026-08-18.**
 `run.submitted` carries a `submittedBy` in its PAYLOAD — the control plane really is what

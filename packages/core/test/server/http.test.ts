@@ -1894,7 +1894,17 @@ test("/whoami answers who the credential is, and 401s without one", async () => 
     assert.equal((await fetch(`${r.base}/whoami`)).status, 401);
 
     const lead = await json(await fetch(`${r.base}/whoami`, { headers: { authorization: "Bearer lead-token" } }));
-    assert.deepEqual(lead, { kind: "human", subject: "u:security-lead", method: "bearer-token", canApproveNamedGates: true, via: "console" });
+    // `operator: false` is part of the answer, not an omission: a console cannot otherwise
+    // tell "you have started nothing" from "you are scoped and somebody else started
+    // everything", and an empty run list is the first thing a new operator meets.
+    assert.deepEqual(lead, {
+      kind: "human",
+      subject: "u:security-lead",
+      method: "bearer-token",
+      canApproveNamedGates: true,
+      operator: false,
+      via: "console",
+    });
 
     const service = await json(await fetch(`${r.base}/whoami`, { headers: { authorization: "Bearer shared-service-token" } }));
     assert.equal(service["kind"], "service");
@@ -2149,10 +2159,11 @@ test("a deployment that cannot answer its own graphs is named at boot, by graph"
 // ── what a principal is ALLOWED to do ────────────────────────────────────────
 //
 // Authentication is settled: the credential decides who you are and a body cannot.
-// AUTHORIZATION is a separate question and this control plane answers it with one word —
-// everything. These pin that answer as a DELIBERATE, documented limit rather than an
-// oversight, so that the day someone scopes runs to their submitter they have to come
-// here and say so.
+// AUTHORIZATION used to be answered with one word — everything — and these tests pinned that
+// as a deliberate limit "so that the day someone scopes runs to their submitter they have to
+// come here and say so". This is that day, and this is the saying-so: a run belongs to the
+// principal that submitted it, an operator credential escapes that, and the gate routes carry
+// one extra term because an approver is by construction not the submitter.
 
 test("A RUN IS THE SUBMITTER'S — the four #runs routes 404 for everybody else", async () => {
   // This replaces `EVERY VALID CREDENTIAL IS A FULL OPERATOR CREDENTIAL`, which passed for
@@ -2203,8 +2214,6 @@ test("`operator` IS REFUSED WHEN MALFORMED AT ALL THREE DOORS, not dropped", asy
   // says `"operator": "true"` would silently have NO operators and would discover it when
   // nobody could see anything. A field that grants must not be decided by whether a typo
   // happened to be truthy.
-  const h = harness();
-
   // Door 1 — the constructor an embedder calls.
   assert.throws(
     () => new BearerTokenIdentity({ subjects: [{ token: "t", subject: "u:a", operator: "yes" as unknown as boolean }] }),
@@ -2225,7 +2234,8 @@ test("`operator` IS REFUSED WHEN MALFORMED AT ALL THREE DOORS, not dropped", asy
   } finally {
     await r.close();
   }
-  void h;
+  // Door 3 — `readIdentities`, the file `loom serve --identity-file` parses — is asserted in
+  // `test/cli/cli.test.ts`, where that function lives.
 });
 
 test("THE SHARED TOKEN IS AN OPERATOR ONLY WHEN IT IS THE SOLE CREDENTIAL", async () => {
@@ -2254,6 +2264,77 @@ test("THE SHARED TOKEN IS AN OPERATOR ONLY WHEN IT IS THE SOLE CREDENTIAL", asyn
     assert.equal(((await json(await fetch(`${mixed.base}/runs`, { headers: asShared })))["runs"] as unknown[]).length, 0);
   } finally {
     await mixed.close();
+  }
+});
+
+test("A SYNTHETIC OWNER IS A REAL OWNER — the shared token's runs are not everybody's", async () => {
+  // The first version read `(shared-token)` and `(unidentified)` as "nobody", on the argument
+  // that a marker names no person. On a MIXED plane — the arrangement this file documents as
+  // supported — that is a live escalation, and not only a read: measured before the fix, a
+  // human credential could LIST nothing, read the run 200, and CANCEL it.
+  //
+  // It costs nothing where the markers are minted. On an open plane every caller IS
+  // `(unidentified)`, and a sole shared token is an operator anyway — so both of those
+  // deployments are unchanged. What it costs is the upgrade: a plane that was open and is
+  // then given identities keeps those runs for its operators. That is the right side to be
+  // wrong on.
+  const r = await rig({ token: "s3cret", identity: people() });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer s3cret" });
+    const id = String(runId);
+    await settle(r, id);
+    const asAlice = { authorization: "Bearer alice-token" };
+
+    assert.equal(((await json(await fetch(`${r.base}/runs`, { headers: asAlice })))["runs"] as unknown[]).length, 0, "not listed");
+    assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: asAlice })).status, 404, "…and not readable either");
+    const cancelled = await fetch(`${r.base}/runs/${id}/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...asAlice },
+      body: JSON.stringify({ kind: "cancel", reason: "not mine" }),
+    });
+    assert.equal(cancelled.status, 404, "and CANCELLING it was the sharp end — a cross-principal write, not a read");
+
+    // The credential that submitted it still reaches it, so this is scoping and not a wipe.
+    assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: { authorization: "Bearer s3cret" } })).status, 200);
+  } finally {
+    await r.close();
+  }
+});
+
+test("A RUN WHOSE OWNER CANNOT BE READ IS NOT A RUN NOBODY OWNS", async () => {
+  // "Named nobody" is permissive and "could not read who it names" must never answer the
+  // same way — the rule this codebase has already been bitten by twice, applied to ownership.
+  // A journal is an input: an embedder appends what it likes and a corrupt row is a real
+  // shape, so a `submittedBy` whose subject is not a string is refused rather than read as
+  // unowned, which would make a malformed row world-readable. Before this it also THREW,
+  // out of a shared helper, taking down the cross-run queue for every caller.
+  const r = await rig({ identity: people() });
+  try {
+    const runId = "01JRUNBROKEN000000000000" as RunId;
+    await r.h.store.append({
+      runId,
+      expectedSeq: 0,
+      events: [
+        {
+          type: "run.submitted",
+          payload: {
+            workflow: "w",
+            graphHash: "h",
+            inputs: {},
+            idempotencyKey: "i",
+            configDigest: "c",
+            submittedBy: { kind: "human", subject: 42, method: "embedder" },
+          },
+          actor: { kind: "system", component: "control-plane" },
+        } as never,
+      ],
+    });
+    const asAlice = { authorization: "Bearer alice-token" };
+    assert.equal((await fetch(`${r.base}/runs/${runId}`, { headers: asAlice })).status, 404, "fail closed, not open");
+    const queue = await fetch(`${r.base}/gates`, { headers: asAlice });
+    assert.equal(queue.status, 200, "and one malformed run does not take the whole queue down");
+  } finally {
+    await r.close();
   }
 });
 
@@ -2297,12 +2378,31 @@ test("A NAMED APPROVER REACHES THE GATE ON A RUN THEY DO NOT OWN — deliberatel
 
     const gates = await fetch(`${r.base}/runs/${id}/gates`, { headers: asLead });
     assert.equal(gates.status, 200, "the approver can see the question addressed to them");
-    assert.equal(((await json(gates))["gates"] as unknown[]).length, 1);
+    const listed = (await json(gates))["gates"] as { gateId: string }[];
+    assert.equal(listed.length, 1);
+    const gateId = listed[0]!.gateId;
 
     // AND THE CROSS-RUN QUEUE IS HOW THEY FIND IT, because `GET /runs` will not show them a
     // run they do not own — which is the whole reason this route exists.
     const queue = await json(await fetch(`${r.base}/gates`, { headers: asLead }));
     assert.equal((queue["gates"] as unknown[]).length, 1, "their question, on somebody else's run");
+
+    // AND ANSWERING IT DOES NOT HAND THEM THE RUN. The reply to the write used to be
+    // `summarise(p)` — channels, outputs, usage, every task and every gate — which is
+    // strictly more than the `GET /runs/:id` two lines below refuses to this same caller, and
+    // strictly more than the gate list they just read. A door that refuses a read and then
+    // performs it in the response to a write is not a door.
+    const answered = await fetch(`${r.base}/runs/${id}/gates/${String(gateId)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...asLead },
+      body: JSON.stringify({ decision: { kind: "approve" } }),
+    });
+    assert.equal(answered.status, 200, "the approver may answer");
+    const body = await json(answered);
+    assert.deepEqual(Object.keys(body).sort(), ["decision", "gateId", "runId", "status"]);
+    assert.equal(body["channels"], undefined, "not the run's channels");
+    assert.equal(body["outputs"], undefined, "not its outputs");
+    assert.equal(body["gates"], undefined, "and not the questions asked of other people");
 
     // Not the run, and not the ability to stop it.
     assert.equal((await fetch(`${r.base}/runs/${id}`, { headers: asLead })).status, 404);
@@ -2314,6 +2414,103 @@ test("A NAMED APPROVER REACHES THE GATE ON A RUN THEY DO NOT OWN — deliberatel
     assert.equal(cancelled.status, 404, "an approver may answer a question, not cancel the work behind it");
   } finally {
     await r.close();
+  }
+});
+
+test("THE GATE ROUTES REFUSE A STRANGER, and an UNRESTRICTED gate does not make them one", async () => {
+  // Six mutations of this commit's decisions survived the suite it shipped with. These are
+  // the ones that matter: the door on each gate route, and the rule that "answerable by
+  // whoever reaches it" is about DECIDING and never about being published.
+  const r = await rig({ identity: people(), approvers: ["u:security-lead"] });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const id = String(runId);
+    await settle(r, id);
+    const asCi = { authorization: "Bearer ci-token" }; // owns nothing, named on nothing
+
+    assert.equal((await fetch(`${r.base}/runs/${id}/gates`, { headers: asCi })).status, 404, "the read door");
+    const write = await fetch(`${r.base}/runs/${id}/gates/g_nope`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...asCi },
+      body: JSON.stringify({ decision: { kind: "approve" } }),
+    });
+    // THE ONLY WRITE ROUTE AMONG THE GATE ROUTES, and it had no test at all. 404 before the
+    // body is even parsed, so a stranger cannot tell a real gate id from an invented one.
+    assert.equal(write.status, 404, "the write door");
+  } finally {
+    await r.close();
+  }
+});
+
+test("A ZERO-GATE RUN ADMITS NOBODY THROUGH THE APPROVER TERM — the vacuous-`every` trap", async () => {
+  // `mayReachGates` asks whether SOME gate names the caller. Written as "no gate excludes
+  // them" it would be vacuously TRUE for a run with no gates, handing every authenticated
+  // caller both gate routes on every run that has not gated yet — a run-existence oracle
+  // wearing an authorization check. The run here is cancelled before it reaches its gate, so
+  // its gate map is empty.
+  const r = await rig({ identity: people() });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const id = String(runId);
+    await settle(r, id);
+    await fetch(`${r.base}/runs/${id}/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer alice-token" },
+      body: JSON.stringify({ kind: "cancel", reason: "done" }),
+    });
+    const p = await r.h.engine.projection(runId as never);
+    assert.equal(Object.values(p!.gates).filter((g) => g.state === "open").length, 0, "no OPEN gate to be named on");
+
+    assert.equal((await fetch(`${r.base}/runs/${id}/gates`, { headers: { authorization: "Bearer lead-token" } })).status, 404);
+  } finally {
+    await r.close();
+  }
+});
+
+test("A NAMED APPROVER SEES THE QUESTION ADDRESSED TO THEM, AND NOT THE ONE BESIDE IT", async () => {
+  // The `visible()` filter had no coverage: the fixture graph has one gate, so deleting the
+  // filter outright left the suite green. Two gates, one naming the lead and one naming
+  // nobody, is the smallest shape in which the rule says anything — and the unrestricted one
+  // is the case the first version got backwards, admitting it to every stranger's list on the
+  // argument that anyone may answer it. Anyone may ANSWER it; that is not a reason to hand
+  // its rendered payload, which carries the node's channel values, to the deployment.
+  const spec = twoGateSpec();
+  const named = {
+    ...spec,
+    nodes: spec.nodes.map((n) =>
+      n.id !== "slow" ? n : { ...n, humanGate: { ...n.humanGate!, approval: { mode: "single" as const, approvers: ["u:security-lead"] } } },
+    ),
+  };
+  const h = harness();
+  const plane = new ControlPlane({
+    engine: h.engine,
+    store: h.store,
+    bus: h.bus,
+    graphs: { two: compileSkeleton(named) },
+    identity: people(),
+  });
+  const { port } = await plane.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const res = await fetch(`${base}/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer alice-token" },
+      body: JSON.stringify({ workflow: "two", inputs: { paths: DOCS } }),
+    });
+    const { runId } = (await res.json()) as { runId: string };
+    for (let i = 0; i < 50; i++) {
+      const p = await h.engine.projection(runId as never);
+      if (p !== undefined && Object.values(p.gates).filter((g) => g.state === "open").length >= 2) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const asLead = { authorization: "Bearer lead-token" };
+    const gates = (await json(await fetch(`${base}/runs/${runId}/gates`, { headers: asLead })))["gates"] as { nodeId: string }[];
+    assert.deepEqual(gates.map((g) => g.nodeId), ["slow"], "the one naming them, and not the unrestricted one beside it");
+
+    const owner = (await json(await fetch(`${base}/runs/${runId}/gates`, { headers: { authorization: "Bearer alice-token" } })))["gates"] as unknown[];
+    assert.equal(owner.length, 2, "the submitter sees the whole queue, because for them the run is the unit");
+  } finally {
+    await plane.close();
   }
 });
 
@@ -2421,6 +2618,7 @@ test("AN OPEN PLANE IS UNREACHABLE BY TYPO, and /health, /whoami and the boot lo
       subject: UNIDENTIFIED_SUBJECT,
       method: "open",
       canApproveNamedGates: false,
+      operator: false,
     });
     assert.ok(
       open.lines.some((l) => /NO TOKEN — every caller is authorized/.test(l)),

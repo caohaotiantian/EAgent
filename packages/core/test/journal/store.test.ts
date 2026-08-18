@@ -122,6 +122,58 @@ test("[sqlite] A v1 JOURNAL MIGRATES, AND OPENS AGAIN — the second open is the
   }
 });
 
+test("[sqlite] A HALF-MIGRATED FILE IS NOT A BRICK — the stamp and the table can disagree", async () => {
+  // Two states the stamp alone cannot describe, both of which threw a raw, untyped
+  // ERR_SQLITE_ERROR out of the constructor or out of every append. Gating each step on
+  // `PRAGMA table_info` rather than on the bookkeeping row makes them ordinary.
+  const dir = mkdtempSync(join(tmpdir(), "loom-halfmig-"));
+  try {
+    const v1 = (name: string, meta: string | undefined, withColumn: boolean): string => {
+      const path = join(dir, name);
+      const db = new DatabaseSync(path);
+      db.exec(`
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE journal (
+          run_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, type TEXT NOT NULL,
+          actor TEXT NOT NULL, task_id TEXT, payload TEXT NOT NULL, classification TEXT NOT NULL,
+          PRIMARY KEY (run_id, seq)
+        ) WITHOUT ROWID;
+        CREATE TABLE run_head (
+          run_id TEXT PRIMARY KEY, head_seq INTEGER NOT NULL, first_ts INTEGER NOT NULL, last_ts INTEGER NOT NULL
+          ${withColumn ? ", submitted_by TEXT" : ""}
+        ) WITHOUT ROWID;
+        CREATE TABLE task_fence (
+          run_id TEXT NOT NULL, task_id TEXT NOT NULL, max_token INTEGER NOT NULL, PRIMARY KEY (run_id, task_id)
+        ) WITHOUT ROWID;
+        ${meta === undefined ? "" : `INSERT INTO meta (key, value) VALUES ('schema_version', '${meta}');`}
+      `);
+      db.close();
+      return path;
+    };
+
+    // (1) The ALTER landed, the stamp did not — a partial restore, or a peer killed between
+    // two statements in an older build. Re-running the DDL would be `duplicate column name`.
+    const altered = new SqliteStateStore({ path: v1("altered.db", "1", true) });
+    assert.deepEqual(await altered.listRuns(), []);
+    altered.close();
+
+    // (2) NO STAMP AT ALL, but a v1-shaped table. `CREATE TABLE IF NOT EXISTS` no-ops, so the
+    // bootstrap arm would stamp it CURRENT and every later append would fail with
+    // `no such column: submitted_by` — a file that opens cleanly and cannot be written to.
+    const unstamped = new SqliteStateStore({ path: v1("unstamped.db", undefined, false) });
+    const run = "01JRUNUNSTAMPED0000000000" as RunId;
+    await unstamped.append({
+      runId: run,
+      expectedSeq: 0,
+      events: [{ type: "run.started", payload: { posture: "on" }, actor: SYSTEM_ACTOR("t") }],
+    });
+    assert.equal((await unstamped.listRuns()).length, 1, "it migrated rather than being stamped as already current");
+    unstamped.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("[sqlite] fencing state also survives a restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-fence-"));
   const path = join(dir, "journal.db");

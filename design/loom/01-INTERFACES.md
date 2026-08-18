@@ -1186,11 +1186,23 @@ channel values, in the gate's rendered payload, to every principal. So the test 
 explicit `some` over gates naming the caller, and a run with no gates admits nobody through
 that term rather than being vacuously true.
 
-**A run with no recorded owner is readable by every credential**, and "no owner" includes a
-*synthetic* one: `(shared-token)` and `(unidentified)` describe what the perimeter
-concluded rather than naming a person. Every journal written before ownership existed, and
-every run an embedder or `loom run` starts without naming a principal, is in that set — so
-an upgrade loses nothing, and the permissive set only ever shrinks.
+**A run with no recorded owner is readable by every credential** — every journal written
+before ownership existed, and every run an embedder or `loom run` starts without naming a
+principal. That set only ever shrinks.
+
+**A SYNTHETIC subject is a real owner, not "nobody".** `(shared-token)` and `(unidentified)`
+describe what the perimeter concluded rather than naming a person, which makes "treat them as
+nobody" look right; on a *mixed* plane it is an escalation, and not only a read. Measured: a
+run the CI service submitted with the shared token was invisible in a human's listing and
+both readable and **cancellable** by that human. Reading them as owners costs nothing where
+they are minted — on an open plane every caller *is* `(unidentified)`, and a sole shared token
+is an operator anyway — so both of those deployments are unchanged. It costs the upgrade: a
+plane that was open and is then given identities keeps those runs for its operators.
+
+**"Could not read who it names" is not "names nobody".** A `submittedBy` whose subject is not
+a non-empty string within the identity bound is `unreadable`, and only an operator gets past
+it. A journal is an input; reading a malformed row as unowned would make it world-readable,
+which is the same asymmetry an empty `approvers` list already carries.
 
 **404, never 403**, on every scoped route. "Not yours" and "no such run" are
 indistinguishable, or the refusal itself tells a stranger which run ids are real. The event

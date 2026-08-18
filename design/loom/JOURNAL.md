@@ -3240,3 +3240,63 @@ principals submit.
 and bound `GateSweeper` already pays on a timer, and the console polls it every 4 s. If a
 deployment's journal makes that cost real, the answer is a denormalised open-gate index beside
 `run_head`, not a narrower queue: the queue is what makes an approver able to work at all.
+
+---
+
+## The Phase 2 review, and the rule that shipped backwards for one commit
+
+Two diff reviewers, two lenses. Five blocking findings, all real, all reproduced before being
+fixed. Three are worth keeping.
+
+**A synthetic owner is a REAL owner, and reading it as "nobody" was an escalation.**
+`(shared-token)` and `(unidentified)` describe what the perimeter concluded rather than naming
+a person, which is a good argument for treating them as unowned and a bad conclusion. On a
+MIXED plane — a shared token *and* per-subject identities, which this codebase documents as
+supported — every run the CI service submits is owned by `(shared-token)`, and "unowned" is
+the permissive case. Measured: a human credential listed **zero** runs, read the service's run
+**200**, and **cancelled** it. A cross-principal write, arrived at from a rule written to
+prevent a cross-principal read.
+
+Reading them as owners costs nothing where they are minted, which is what makes it the right
+answer rather than merely the safe one: on an open plane every caller *is* `(unidentified)`,
+and a sole shared token is an operator anyway, so both of those deployments are byte-for-byte
+unchanged. What it costs is the upgrade — a plane that was open and is then given identities
+keeps those runs for its operators — and that is the side to be wrong on.
+
+**And the third answer had to exist.** `nobody` is permissive; `unreadable` is not. A journal
+is an input, so a `submittedBy` whose subject is not a non-empty bounded string is refused
+rather than read as unowned — otherwise a malformed row is world-readable. It also used to
+*throw*, out of a helper shared by every scoped route, which took the cross-run approver queue
+down for the whole deployment on one bad row. Same asymmetry the gate layer already carries for
+an empty `approvers` list, one question over.
+
+**A door that refuses a read and then performs it in the response to a write is not a door.**
+`POST /runs/:id/gates/:gateId` answered `summarise(p)` — channels, outputs, usage, every task
+and every gate — to a named approver who is 404'd on `GET /runs/:id` and gets a per-gate
+filtered list from `GET /runs/:id/gates`. Every other check on that route was decorative while
+it stood. The reply is now scoped like the reads.
+
+**A queue bounded by the wrong UNIT is a denial of the thing it exists for.** `GET /gates` took
+an uncapped `pageLimit` and spent it on RUNS. Two failures at once: `?limit=<huge>` folded the
+whole journal on a route the lowest-privilege credential can reach, and a question addressed to
+an approver vanished as soon as fifty newer runs existed — invisible in the console, with no
+error, in the route added so that ownership would not hide approvals. It is now bounded by
+GATES, with a hard scan ceiling and a `truncated` flag, because a queue that admits it is
+incomplete is worth more than one that silently is.
+
+**Two routes over one set of gates must not disagree about who sees them.** `visible()` on the
+per-run route admitted an unrestricted gate to any caller who reached the run, while `/gates`
+excluded it from every stranger's queue — the same question answered two ways in one commit.
+"Answerable by whoever reaches it" is about DECIDING and says nothing about publishing; the
+narrower answer is the right one at both.
+
+**What the reviewers proved was fine is worth as much as what they broke**: the migration is
+concurrency-safe (144/144 clean opens across 12 concurrent processes), the idempotency slot
+cannot cross principals, 404-never-403 holds on every scoped route with identical bodies, and
+the four `submit` doors are exactly what the registry says.
+
+**Reverses when.** `mayReachGates` admits a named approver in ANY gate state, not only `open`.
+Requiring `open` was tried and it turns a second approver's 409 into a 404 — two people named,
+one decides, the other is told the run does not exist rather than that the question is
+answered. If gate-naming ever becomes attacker-influenced at scale (see `graph:mutate` in the
+HANDOFF), narrow it then and accept the worse conflict diagnostic.

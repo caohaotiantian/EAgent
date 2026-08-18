@@ -202,10 +202,21 @@ export function submitterOf(rows: readonly PreparedEvent[]): string | undefined 
     const by: unknown = (parsed as Record<string, unknown>)["submittedBy"];
     if (typeof by !== "object" || by === null) return undefined;
     const subject: unknown = (by as Record<string, unknown>)["subject"];
-    return typeof subject === "string" && subject !== "" ? subject : undefined;
+    if (typeof subject !== "string" || subject === "") return undefined;
+    // BOUNDED, and refused rather than truncated. The HTTP door caps a subject at the same
+    // size and refuses an over-long one on the stated grounds that injected code writes into
+    // durable rows; an embedder calling `append` directly is the other door, and truncating
+    // here would invent a different person rather than declining to name one. Refusing to
+    // DERIVE is safe in a way refusing to append would not be: the journal still carries what
+    // it was given, and the read model simply declines to claim an owner it cannot vouch for
+    // — which the access rule reads as "unreadable", not as "nobody".
+    return subject.length <= MAX_SUBJECT ? subject : undefined;
   }
   return undefined;
 }
+
+/** Matches `MAX_IDENTITY_FIELD` at the HTTP perimeter; the journal is the same journal. */
+const MAX_SUBJECT = 256;
 
 export function seqConflict(runId: RunId, expected: Seq, actual: Seq): never {
   throw err.conflict(

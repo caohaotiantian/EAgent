@@ -208,8 +208,12 @@ async function loadMine() {
   for (const g of gates) {
     const d = document.createElement("div");
     d.className = "row";
-    d.innerHTML = '<code>' + esc(g.nodeId) + '</code><div class="meta">' + esc(g.runId.slice(0, 12)) +
-      (g.deadline ? ' · due ' + new Date(g.deadline).toISOString().slice(11, 19) : '') + '</div>';
+    // The deadline is journal data and may be anything; new Date(x).toISOString() throws a
+    // RangeError on a non-date, and the try above covers only the fetch — so one bad row
+    // would abort the panel mid-render and leave it half-drawn with no error anywhere.
+    const due = Number.isFinite(g.deadline) ? new Date(g.deadline).toISOString().slice(11, 19) : null;
+    d.innerHTML = '<code>' + esc(g.nodeId) + '</code><div class="meta">' + esc(String(g.runId).slice(0, 12)) +
+      (due ? ' · due ' + due : '') + '</div>';
     const actions = document.createElement("div");
     actions.className = "meta";
     for (const kind of ["approve", "reject"]) {
@@ -287,7 +291,6 @@ async function select(runId) {
   current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "" };
   if (stream) stream.abort();
   await loadRuns();
-loadMine();
 
   const run = await api("/runs/" + runId);
   applySnapshot(run);
@@ -581,8 +584,9 @@ api("/health").then((h) => {
 whoami();
 loadRuns();
 loadGraphs();
-setInterval(loadRuns, 4000);
-setInterval(loadMine, 4000);
+// ONE TICK FOR BOTH, not two timers. Two independent intervals drift into pairs and double
+// the request rate, and the expensive half is /gates — which folds every candidate run.
+setInterval(() => { void loadRuns(); void loadMine(); }, 4000);
 </script>
 </body>
 </html>`;
