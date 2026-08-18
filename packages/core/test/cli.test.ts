@@ -492,7 +492,7 @@ test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between
     mkdirSync(join(d.dir, "resources", "prompt"), { recursive: true });
     writeFileSync(join(d.dir, "resources", "prompt", "act.md"), "Summarise the seed and answer with a verdict.");
 
-    const sent: { model?: unknown; system?: unknown } = {};
+    const sent: { model?: unknown; system?: unknown; body?: string } = {};
     // One non-streaming SSE body, shaped the way the adapter parses it. Nothing leaves the
     // process and the fake key is never presented to anyone.
     const body = [
@@ -506,6 +506,10 @@ test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between
       const parsed = JSON.parse(String(init.body)) as { model?: unknown; system?: unknown };
       sent.model = parsed.model;
       sent.system = parsed.system;
+      // THE WHOLE REQUEST, because asserting on `system` alone proves only half. Re-adding
+      // `prompt: <ref>` to the user message — the other half of the original bug — left all
+      // thirteen tests green when only `system` was captured.
+      sent.body = String(init.body);
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     });
 
@@ -562,7 +566,7 @@ test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between
       // than stringifying the envelope.
       const systemText = JSON.stringify(sent.system);
       assert.match(systemText, /Summarise the seed and answer with a verdict\./);
-      assert.doesNotMatch(systemText, /prompt\\?\/act@stable/, "the ref is not what a model is asked");
+      assert.doesNotMatch(String(sent.body), /prompt\\?\/act@stable/, "the ref appears NOWHERE in the request, not merely outside `system`");
       // The provider reported usage, so the run is priced from real numbers rather than 0.
       assert.equal((p?.usage.inputTokens ?? 0) > 0, true, "usage must come back from the provider");
     } finally {

@@ -87,18 +87,19 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured **2026-08-18 at `cb103e6`**, tree clean, `npm run check` green end to end.
+Measured **2026-08-18 at `994e77e`**, tree clean, `npm run check` green end to end.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1731 pass, 0 fail** | `npm run check` (its test arm) |
-| Test files | 86 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **1741 pass, 0 fail** | `npm run check` (its test arm) |
+| Test files | 87 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 53 | `node scripts/check-zero-dep.mjs` (it prints the count) |
 | Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 481 | `node -e "console.log(require('./scripts/surface.json').length)"` |
 | Public exports, built | re-run it | `npm run typecheck && node scripts/check-surface.mjs` — it reads `dist/`, and the build is `--force`d precisely so this answer cannot come from a stale one |
 | Event types | 52 | `node --test packages/core/test/journal/store.test.ts` (its count is deliberate) |
+| Agent prompts | a graph's `prompt/x@stable` resolves to `resources/prompt/x.md` and reaches the model as its SYSTEM message | `node --test packages/core/test/resources/workspace-documents.test.ts` |
 | Run ownership | every run carries `submittedBy`; the plane scopes on it | `node --test packages/core/test/run/run-ownership.test.ts packages/core/test/run/separation-of-duties.test.ts` |
 | Escalation rules | 10, of which **9 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` pins the one that is not |
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
