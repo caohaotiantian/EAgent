@@ -87,12 +87,12 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured **2026-08-18 at `89c6162`**, tree clean, `npm run check` green end to end.
+Measured **2026-08-18 at `49a8b0d`**, tree clean, `npm run check` green end to end.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1745 pass, 0 fail** | `npm run check` (its test arm) |
+| Tests | **1747 pass, 0 fail** | `npm run check` (its test arm) |
 | Test files | 87 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 53 | `node scripts/check-zero-dep.mjs` (it prints the count) |
 | Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
