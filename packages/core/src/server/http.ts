@@ -1243,6 +1243,8 @@ interface RequestContext {
   readonly res: ServerResponse;
   readonly params: readonly string[];
   readonly url: URL;
+  /** Aborted when this request's deadline fires. See `#withDeadline`. */
+  readonly signal: AbortSignal;
   /**
    * Who the credential says is calling; `undefined` when nothing established anyone.
    *
@@ -1879,7 +1881,7 @@ export class ControlPlane {
       // after `#principal` had already been awaited, which left the one call in the path
       // that can block on a network — an injected `IdentitySource` — outside the bound
       // that exists to stop a request parking a socket forever.
-      await this.#withDeadline(res, url, () => this.#serve(req, res, url));
+      await this.#withDeadline(res, url, (signal) => this.#serve(req, res, url, signal));
     } catch (e) {
       const le = toLoomError(e);
       // `send` is a no-op once anything has been written — mid-stream, or after the
@@ -1890,7 +1892,7 @@ export class ControlPlane {
   }
 
   /** Authenticate, then route. Split out only so the deadline can wrap the whole of it. */
-  async #serve(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  async #serve(req: IncomingMessage, res: ServerResponse, url: URL, signal: AbortSignal): Promise<void> {
     // FIRST, ahead of `#requiresBearer` and `#principal`, and the order is the rule this
     // module already states: nothing a stranger can reach may make the injected
     // `IdentitySource` do work. A cross-site prober is a stranger by definition, so it is
@@ -1932,6 +1934,7 @@ export class ControlPlane {
         res,
         url,
         auth,
+        signal,
         params: match.slice(1),
         body: () => this.#readBody(req),
         raw: () => this.#readRaw(req),
@@ -2139,7 +2142,7 @@ export class ControlPlane {
    * response that is already finished, which `send` tolerates. A decision that lands
    * after its 504 is still journaled; the client simply has to re-read to see it.
    */
-  async #withDeadline(res: ServerResponse, url: URL, run: () => Promise<void>): Promise<void> {
+  async #withDeadline(res: ServerResponse, url: URL, run: (signal: AbortSignal) => Promise<void>): Promise<void> {
     // The 504 below quotes `ms`, so `ms` has to BE the deadline that fired rather than the
     // one that was configured. TWO things make that true and this line used to have only
     // one: the constructor refuses every value `setTimeout` would silently change (see
@@ -2148,7 +2151,13 @@ export class ControlPlane {
     // or a getter — put a number the check had never seen into `setTimeout` and into this
     // message, which is exactly the bug the check exists to prevent, reached around it.
     const ms = this.#requestTimeoutMs ?? 30_000;
+    // THE HANDLER STILL IS NOT CANCELLED — nothing here can force that — but it can now be
+    // TOLD, which is the difference between a decision that lands after its 504 and one that is
+    // refused. `GateCallbackRouter` reads this after a channel's `parseCallback` settles and
+    // declines to apply a decision whose caller has already been told the request failed.
+    const expired = new AbortController();
     const timer = setTimeout(() => {
+      expired.abort();
       // A wire code that `errors.ts` does not declare, written the way the 401 above is
       // written. Promoting it into `CODES` costs a design-document row as well — every
       // declared code must be named by one — and that is a reconciliation this change
@@ -2163,7 +2172,7 @@ export class ControlPlane {
     // Never hold the process open for a deadline that has not fired.
     timer.unref?.();
     try {
-      await run();
+      await run(expired.signal);
     } finally {
       clearTimeout(timer);
     }
@@ -2888,7 +2897,7 @@ export class ControlPlane {
             {
               method: "POST",
               pattern: CALLBACK_PATH,
-              handle: async ({ req, res, params, raw }: RequestContext): Promise<void> => {
+              handle: async ({ req, res, params, raw, signal }: RequestContext): Promise<void> => {
                 // `raw()` and not `body()`: the signature is over the bytes as sent, and
                 // re-serializing a parsed object would verify a string nobody signed.
                 const out = await this.#callbacks!.handle({
@@ -2896,6 +2905,7 @@ export class ControlPlane {
                   channel: safeDecode(params[1]!),
                   body: await raw(),
                   headers: headerMap(req),
+                  signal,
                 });
                 send(res, 200, {
                   gateId: out.gateId,

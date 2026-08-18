@@ -2198,3 +2198,48 @@ test("EVERY FAILURE MODE EXITS TYPED, checked as one statement", async () => {
     assert.equal(e.code, CODES.E_GATE_DELIVERY_FAILED, `wrong code for ${String(e.message)}`);
   }
 });
+
+/**
+ * A DECISION THAT ARRIVES AFTER ITS CALLER WAS TOLD THE REQUEST FAILED IS NOT APPLIED.
+ *
+ * `ControlPlane.#withDeadline` answers 504 and moves on; its own docstring says it cannot cancel
+ * the handler. So a `parseCallback` that hung and then succeeded walked straight into `resolve`
+ * and applied a human's decision minutes after that human had seen the request fail — and,
+ * because every counter and every journal row in `handle` is reached only once `parse` has
+ * settled, the refusal was recorded in NEITHER sink. That is A5's own title, and the half of it
+ * `#withDeadline` did not close.
+ *
+ * The check is on the ROUTER, not on the channel. `CallbackRequest` could have grown an
+ * `AbortSignal` for a channel to honour, but the channel that ships in this binary would have
+ * ignored it and the hole would have stayed open behind a closed register entry. This holds for
+ * code that never cooperates.
+ */
+test("A CALLBACK THAT ANSWERS AFTER THE DEADLINE IS REFUSED, not applied", async () => {
+  const r = await rig();
+  const body = approval(r);
+  const ts = String(Math.floor(NOW / 1000));
+  const send = (signal?: AbortSignal): Promise<unknown> =>
+    r.router.handle({
+      channel: "slack",
+      runId: r.runId,
+      body: Buffer.from(body, "utf8"),
+      headers: { "x-loom-timestamp": ts, "x-loom-signature": r.channel.sign(body, ts) },
+      ...(signal === undefined ? {} : { signal }),
+    });
+
+  const expired = new AbortController();
+  expired.abort();
+
+  await assert.rejects(() => send(expired.signal), /deadline/i, "an expired request must be refused");
+  await stillOpen(r);
+  assert.deepEqual(
+    r.router.refusals(),
+    [{ channel: "slack", reason: "timeout", count: 1 }],
+    "and it must be COUNTED — the hole was that a hung callback appeared in neither sink",
+  );
+
+  // THE SAME BYTES SUCCEED WITHOUT THE SIGNAL, which is what makes the refusal above mean
+  // "the deadline", and not "this request was never going to be accepted".
+  const out = (await send()) as { decision: { kind: string } };
+  assert.equal(out.decision.kind, "approve");
+});

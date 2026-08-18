@@ -266,6 +266,7 @@ export const CALLBACK_REJECTIONS = [
   "not_found",
   "already_resolved",
   "not_authorized",
+  "timeout",
   "internal",
 ] as const;
 
@@ -299,6 +300,15 @@ export function callbackRejection(reason: CallbackRejection, message: string): L
     case "malformed":
     case "run_mismatch":
       return err.validation(CODES.E_PROVIDER_BAD_REQUEST, message, init);
+    case "timeout":
+      // THE DEPLOYMENT RAN OUT OF TIME, NOT THE CALLER, so it is neither a bad request nor a
+      // policy refusal — the work was abandoned, which is what `cancelled` means here.
+      //
+      // Not a new `E_REQUEST_TIMEOUT`: `ControlPlane.#withDeadline` writes that as a bare wire
+      // code for exactly this reason, and its comment says promoting it costs a design-corpus
+      // row because every declared code must be named by one. That reconciliation is not this
+      // change's to own either. The caller has already seen the 504; this is the audit row.
+      return err.cancelled(message, init);
     case "internal":
       return err.internal(CODES.E_INTERNAL, message, init);
   }
@@ -2349,6 +2359,15 @@ export interface CallbackInput {
   readonly runId: RunId;
   readonly body: Uint8Array;
   readonly headers: Readonly<Record<string, string | undefined>>;
+  /**
+   * The REQUEST's deadline, so a decision cannot land after its caller was told it failed.
+   *
+   * Optional because an embedder calling `handle` directly has no deadline to offer, and an
+   * absent signal means "no deadline" rather than "expired". Adding a member to this interface
+   * changes no exported NAME, so `check-surface.mjs` — which pins the name set and nothing else
+   * — neither notices nor needs to.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface CallbackResult {
@@ -2601,6 +2620,24 @@ export class GateCallbackRouter {
         throw error;
       }
       verified = { ok: false, error };
+    }
+
+    // ── 2b. THE DEADLINE, CHECKED WHERE THE ANSWER STOPS BEING WANTED ───────
+    //
+    // `ControlPlane.#withDeadline` answers 504 and moves on; it cannot cancel this handler and
+    // its own docstring says so. So a `parseCallback` that hangs and then succeeds used to walk
+    // straight into `resolve` and apply a human's decision minutes after that human was told the
+    // request had failed — and, because every counter and every journal row below is reached
+    // only once `parse` has settled, the refusal appeared in NEITHER sink.
+    //
+    // Checked HERE rather than by handing the signal to the channel. An `AbortSignal` on
+    // `CallbackRequest` would be a request injected code may honour; this holds for code that
+    // never does, which is the only version that closes the hole. The channel still gets the
+    // signal — it is on `CallbackInput` — so a cooperative one can stop early and reach this
+    // line by throwing instead.
+    if (input.signal?.aborted === true) {
+      this.#count(name, "timeout");
+      throw callbackRejection("timeout", "the request deadline passed before the channel answered");
     }
 
     // ── 3. ADMISSION, FOR DURABILITY ────────────────────────────────────────
