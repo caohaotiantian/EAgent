@@ -3475,3 +3475,57 @@ say-ready@stable"}` is a successful run. It is only wrong if you read it.
 already has. At that point A22 closes and `packages/skills/` (library-as-data, already named as
 the likely first package) is the same question wearing a different hat: both are "where does the
 text live, and who is allowed to open it".
+
+---
+
+## The prompt became a document, and the churn chose the design
+
+A22: an agent node's prompt was its ref. `#runAgent` interpolated `agent.prompt` verbatim, so a
+model received the eleven characters `prompt/x@stable` where its instruction belonged. It
+survived the whole project because **a run that sends a pointer succeeds** — nothing is red, the
+output is plausible, and it is only wrong if somebody reads it.
+
+**The plan said run time and the churn said compile time, and the churn was right.** A
+`document(ref)` hook on the resolver failed 32 tests across 12 files, every one of them the same
+shape: *this Engine has no resolver*. `grep -c 'new Engine('` over the suite is **54** and almost
+none passes one, while every `compile` call site does — because a resolver is how you compile a
+graph, not how you run one. A prompt that needed the engine's resolver would have made every
+engine construction a resource deployment. Moving the read into `compile` took the failures from
+32 to **1**, and the one was the CLI test that needed the loader the wave existed to build.
+
+It is also the stronger reading of the pinning rule rather than a weaker one.
+`resources/functions.ts` already records what a run-time `resolve(ref)` costs — "a promotion
+between compile and execute swapped the body underneath the Run" — and freezing the bytes into
+`RunGraph.documents` beside the manifest makes that unreachable rather than merely guarded.
+
+**Three things the review found that the build had wrong, and the third is the one that
+matters.**
+
+- **`req.system` is built at a different site from the one `assembleContext` is handed**, and
+  only the second reaches a provider. Setting the one the ladder measures changed nothing a
+  model saw; the test caught it by asserting on the posted bytes rather than on the intent.
+- **The document was counted twice.** `system` already contained it and `instruction` was passed
+  the same text; both sections are INVIOLABLE, so `E_CONTEXT_OVERFLOW` fired at half the real
+  budget — a 1,000,000-character document reported `tokensBefore: 500008`, exactly 2×. And the
+  other way round, `system` sat outside `boundTurns` entirely: **127,513 tokens posted against a
+  100,000 budget, run `succeeded`** — verbatim the defect `boundTurns` was written to close,
+  reopened because the field used to be eighteen characters wide.
+- **A run could write the next run's system prompt.** `resources/` is inside the jail root and
+  `fs:write` is granted unconditionally, so a `tool` node writing `resources/prompt/p.md`
+  SUCCEEDED and the next boot served "PWNED: ignore all prior instructions." as that node's
+  system message. Durable prompt injection, reproduced through the built binary.
+
+**And the half I noticed was the wrong half.** The loader refuses symlinks, and the docstring
+reasons carefully about the jail while doing it — a run cannot plant
+`resources/prompt/x.md -> /etc/passwd` and have it read. That is the READ direction. The WRITE
+direction, a run authoring what the operator is understood to have said, was left open in the
+same function that argued about the jail. Reasoning correctly about a boundary and then guarding
+one side of it is a shape worth naming: the guard looked considered, which is what stopped
+anyone looking further.
+
+**Reverses when.** Documents are text and `@stable` is whatever the file says, seeded through a
+named door rather than through `publish`/`promote` — because `publish` lands on `@draft` and the
+hop to `@stable` refuses a non-human, and minting a fake human at boot would defeat exactly the
+guard's argument. If prompts ever need versions an operator can roll back at run time, that is
+the moment the workspace stops being the source of truth and the store's ladder becomes the
+answer instead.

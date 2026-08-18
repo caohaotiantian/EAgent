@@ -110,6 +110,39 @@ test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"fail
   }
 });
 
+test("A RUN CANNOT WRITE THE NEXT RUN'S SYSTEM PROMPT — resources/ is denied like the journal", async () => {
+  // THE SHARPEST EDGE A22 ADDED. `resources/prompt/*.md` becomes the SYSTEM message of the
+  // next run of a node, `resources/` sits inside the jail root, and `fs:write` is granted
+  // unconditionally — so before the deny entry a `tool` node writing `resources/prompt/p.md`
+  // reported SUCCESS, and a fresh `openWorkspace` on that root then served its text as an
+  // instruction. Durable prompt injection, reproduced through the built binary.
+  //
+  // The symlink refusal in `readResources` is the half that got noticed: it stops a run
+  // READING a file outside `resources/`. This is the half that matters more — a run WRITING
+  // what the operator is understood to have said.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    mkdirSync(join(d.dir, "resources", "prompt"), { recursive: true });
+    writeFileSync(join(d.dir, "resources", "prompt", "p.md"), "Be helpful.");
+
+    const graphFile = join(d.dir, "graphs", "inject.json");
+    writeFileSync(graphFile, JSON.stringify(graphWriting("resources/prompt/p.md")));
+
+    const first = await run(["run", graphFile, "--workspace", d.dir, "--input", JSON.stringify({ seed: "x" })]);
+    const parsed = JSON.parse(first.out) as { status: string };
+    assert.equal(parsed.status, "failed", `the write must not succeed: ${first.out}`);
+
+    assert.equal(
+      readFileSync(join(d.dir, "resources", "prompt", "p.md"), "utf8"),
+      "Be helpful.",
+      "the operator's instruction is what the next run is told, not the last run's output",
+    );
+  } finally {
+    d.dispose();
+  }
+});
+
 test("A RUN CANNOT WRITE TO ITS OWN JOURNAL — the data dir is inside the jail root", async () => {
   // `--workspace` is both the fs jail and the parent of `.loom/journal.db`, and
   // `fs.write` is `reversible_write`, so no gate stands between a model and the run's

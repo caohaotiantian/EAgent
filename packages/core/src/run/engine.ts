@@ -73,7 +73,7 @@ import {
   type SequenceIndex,
 } from "./escalation.ts";
 import { validate, type JSONSchema } from "../schema.ts";
-import { assembleContext, boundTurns } from "./context.ts";
+import { assembleContext, boundTurns, estimateTokens } from "./context.ts";
 import {
   foldPartial,
   reduceState,
@@ -2143,8 +2143,12 @@ export class Engine {
         // THE INSTRUCTION GOES IN THE SYSTEM SLOT, which is where a model looks for one and
         // where a multi-line document survives without being JSON-escaped into a field. The
         // node's identity is appended rather than replaced: it is orientation, not the task.
+        // `system` CARRIES THE DOCUMENT AND `instruction` DOES NOT, because `systemPrompt`
+        // already contains it — passing both made the ladder count the same text twice, both
+        // sections INVIOLABLE, so `E_CONTEXT_OVERFLOW` fired at half the real budget.
+        // Measured: a 1,000,000-character document reported `tokensBefore: 500008`, exactly 2×.
         system: systemPrompt,
-        instruction: instructions,
+        instruction: "",
         channels: Object.fromEntries(view.visible.map((c) => [c, view.get(c)])),
         channelSpecs: ctx.graph.spec.channels,
       },
@@ -2173,7 +2177,12 @@ export class Engine {
       // never sent. The fold is in-place because a prefix summarised on turn 3 must stay
       // summarised on turn 4 — re-deriving it every turn would spend a model call per turn
       // to compute the same summary under a different effect key.
-      const bounded = await boundTurns(messages, this.#contextTokens, (text) =>
+      // THE SYSTEM PROMPT IS PART OF WHAT IS SENT, so the transcript's budget is what is left
+      // after it. It used to be eighteen characters — `You are node X.` — and rounding it away
+      // cost nothing; it is now the whole document, and leaving it out reproduced exactly the
+      // defect `boundTurns` exists to close: measured, 127,513 tokens posted against a 100,000
+      // budget, no rung, no `E_CONTEXT_OVERFLOW`, run `succeeded`.
+      const bounded = await boundTurns(messages, Math.max(0, this.#contextTokens - estimateTokens(systemPrompt)), (text) =>
         this.#summarizeEffect(ctx, w, text, turn),
       );
       messages = [...bounded.messages];

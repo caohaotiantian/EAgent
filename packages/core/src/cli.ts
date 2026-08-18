@@ -287,7 +287,17 @@ export function openWorkspace(
   // looking for it.
   const jail = {
     root,
-    deny: [dataDir],
+    // `resources/` JOINS THE DATA DIR, and for a sharper reason than the journal has. Its
+    // files become the SYSTEM PROMPT of the next run, so a workspace that let a run write
+    // there let a run author its own instructions — durable prompt injection, reproduced end
+    // to end: a `tool` node writing `resources/prompt/p.md` succeeded, and the next boot
+    // served "PWNED: ignore all prior instructions." as that node's system message.
+    //
+    // The symlink refusal in `readResources` was the half of this that got noticed. It stops
+    // a run READING `/etc/passwd` through a planted link; it does nothing about a run WRITING
+    // the operator's prompt, which is the half that matters more. Both halves are the same
+    // rule — what a run may not do is decide what the next run is told.
+    deny: [dataDir, join(root, "resources")],
     ...(args.flags["egress"] === undefined ? {} : { egressAllowlist: String(args.flags["egress"]).split(",") }),
     // Both default to absent, and absent means the tool is not registered at all. A run
     // that never names a program cannot run one — see `procExec`, where the allowlist is
@@ -1939,13 +1949,45 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
     if (!kindDir.isDirectory()) continue;
     const kind = kindDir.name;
     if (!RESOURCE_KINDS.includes(kind)) continue;
-    for (const file of readdirSync(join(base, kind), { withFileTypes: true })) {
-      // NOT `isFile()` alone — that answers true for the TARGET of a symlink on some
-      // platforms. `isSymbolicLink()` is asked first and is the refusal.
+    // SORTED, so `@stable` does not depend on filesystem order. `x.md` and `x.txt` both
+    // publish `prompt/x`, and `#seed` points `@stable` at whichever landed LAST — which was
+    // `readdirSync` order, so which text a model received differed by machine.
+    let files: Dirent[];
+    try {
+      files = readdirSync(join(base, kind), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      // `withFileTypes` uses lstat semantics, so a symlink reports `isSymbolicLink()` and NOT
+      // `isFile()` — the second test already refuses one. The first is written anyway because
+      // it states the intent: what must not happen is reading a file OUTSIDE `resources/` and
+      // handing it to a model as a system prompt, and a reader should not have to derive that
+      // from the absence of a flag.
       if (file.isSymbolicLink() || !file.isFile()) continue;
       const ext = extname(file.name);
       if (ext !== ".md" && ext !== ".txt") continue;
-      out.push({ kind: kind as ResourceKind, name: basename(file.name, ext), content: readFileSync(join(base, kind, file.name), "utf8") });
+      const name = basename(file.name, ext);
+      // A NAME THE REF GRAMMAR CANNOT HOLD IS NOT A RESOURCE. `my prompt.md` would publish
+      // `prompt/my prompt@stable` — resolvable through the store and unreachable from any
+      // graph, because `RESOURCE_REF` forbids the space. Silently unused is worse than absent.
+      if (!/^[A-Za-z0-9._-]+$/.test(name)) continue;
+      // ONE UNREADABLE FILE MUST NOT TAKE DOWN EVERY COMMAND. This runs inside
+      // `openWorkspace`, so an EACCES here killed `compile`, `run`, `gates` and `approve`
+      // alike — including the door an approver answers a gate through, for a file that has
+      // nothing to do with them.
+      let content: string;
+      try {
+        content = readFileSync(join(base, kind, file.name), "utf8");
+      } catch {
+        continue;
+      }
+      // AND AN EMPTY FILE IS NOT AN INSTRUCTION. `""` is a string, so it would satisfy the
+      // refusal in `#documentFor` and then take the `instructions === ""` branch — a model
+      // sent no instruction at all, from a run that succeeds. That is the degradation the
+      // refusal exists to prevent, one step over.
+      if (content.trim() === "") continue;
+      out.push({ kind: kind as ResourceKind, name, content });
     }
   }
   return out;
