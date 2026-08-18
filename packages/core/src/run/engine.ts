@@ -228,7 +228,21 @@ export type CommandActor = HumanActor | SystemActor;
  * run may continue past a breached budget or an invalid replay". Without this set,
  * fixing branch-failure containment silently defeats both.
  */
-const RUN_FATAL_CODES: ReadonlySet<string> = new Set([CODES.E_BUDGET_EXHAUSTED, CODES.E_REPLAY_DIVERGENCE]);
+const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
+  CODES.E_BUDGET_EXHAUSTED,
+  CODES.E_REPLAY_DIVERGENCE,
+  // A SUPERVISION REQUIREMENT THAT CANNOT BE MET IS THE SAME CLASS OF FACT, and leaving it
+  // out was a hole with a very quiet shape. A refused `separationOfDuties` gate is an
+  // ordinary failed task, so it takes an `error` edge and a join with `onBranchError: "skip"`
+  // absorbs it: measured, both produce a run that reports **succeeded** with ZERO gates on
+  // the journal. The graph reads "each item is human-approved" and behaves as "nothing was
+  // approved and nobody was asked" — D7.9's worst available failure, reached through ordinary
+  // graph shapes, and worse than a rejection because a rejection at least leaves `gate.raised`
+  // and `gate.decided` behind for an auditor to find. Nothing here is recoverable by routing:
+  // the run cannot be supervised, and continuing past that is the thing the gate exists to
+  // prevent.
+  CODES.E_GATE_REQUIRED,
+]);
 
 interface Wave {
   readonly task: TaskRecord;
@@ -281,8 +295,12 @@ function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
     status: "failed",
     writes: {},
     usage: { ...ZERO_USAGE },
+    // E_GATE_REQUIRED, not E_GATE_NOT_AUTHORIZED, and the difference is what makes this
+    // RUN-fatal rather than task-fatal. The other code says "you may not decide this"; this
+    // one says "this action requires a decision that cannot be obtained", which no error edge
+    // should be able to route around.
     error: err.policy(
-      CODES.E_GATE_NOT_AUTHORIZED,
+      CODES.E_GATE_REQUIRED,
       `node "${node.id}" declares separationOfDuties and cannot be supervised on this run: ${why}`,
       { details: { nodeId: node.id } },
     ),
@@ -296,8 +314,12 @@ function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
  * to name a PERSON, or the gate would be journaled as supervised and enforce nothing.
  */
 function sodRefusal(p: RunProjection, approvers: readonly string[]): string | undefined {
-  const by = p.submittedBy;
-  if (by === undefined) {
+  const by: unknown = p.submittedBy;
+  // TOTAL, like `ownerOf` at the HTTP boundary and for the same reason: the type says
+  // `SubmittedBy` and the value came out of a fold over a journal, which is an input. A bare
+  // `by.kind` on `null`, or `isSyntheticSubject` on a number, exits as a raw `TypeError`
+  // wearing `E_INTERNAL` — fail-closed, but untyped and silent about which node.
+  if (typeof by !== "object" || by === null) {
     return (
       `no principal is recorded as having submitted this run, so there is nobody to exclude. ` +
       `Submit through the API with a credential, or with \`loom run --as <subject>\``
@@ -308,20 +330,33 @@ function sodRefusal(p: RunProjection, approvers: readonly string[]): string | un
   // no human actor can present, which is a gate that reads as supervised and is answerable by
   // everyone including whoever started the run. That is the exact failure this whole block
   // exists to prevent, so it is refused rather than resolved.
-  if (by.kind !== "human" || isSyntheticSubject(by.subject)) {
+  const kind: unknown = (by as Record<string, unknown>)["kind"];
+  const subject: unknown = (by as Record<string, unknown>)["subject"];
+  // AN EMPTY OR UNREADABLE SUBJECT IS A FIFTH PATH TO A TOOTHLESS EXCLUSION, and it was
+  // missing: `excludedApprovers: [""]` is present, journaled, reads as supervised, and bars
+  // nobody. The bound matches the one the perimeter and `submitterOf` both apply — over it,
+  // the read model already declines to derive an owner, so the exclusion would name a subject
+  // no principal can present while the run listed as unowned.
+  if (typeof subject !== "string" || subject.trim() === "" || subject.length > MAX_SUBJECT) {
+    return `the principal recorded on this run does not name anybody readable, so there is nobody to exclude`;
+  }
+  if (kind !== "human" || isSyntheticSubject(subject)) {
     return (
-      `this run was submitted by "${by.subject}" (${by.kind}), which is not a person — excluding it would bar nobody ` +
+      `this run was submitted by "${subject}" (${String(kind)}), which is not a person — excluding it would bar nobody ` +
       `while the gate read as supervised`
     );
   }
   // AND A GATE WHOSE APPROVERS ARE ONLY THE INITIATOR CAN NEVER BE ANSWERED. The compiler
   // cannot see this: `approvers` is static in the spec and the initiator is a runtime fact.
   // `raise` holds both, so it is caught here rather than parked until an SLA it may not have.
-  if (approvers.length > 0 && approvers.every((a) => a === by.subject)) {
-    return `the only approver it names is "${by.subject}", who submitted this run — so nobody could ever answer it`;
+  if (approvers.length > 0 && approvers.every((a) => a === subject)) {
+    return `the only approver it names is "${subject}", who submitted this run — so nobody could ever answer it`;
   }
   return undefined;
 }
+
+/** The same bound `submitterOf` and the HTTP perimeter apply; the journal is the same journal. */
+const MAX_SUBJECT = 256;
 
 /**
  * What a `human_gate` node declared about a gate's LIFECYCLE — when it expires, where it
@@ -4127,7 +4162,9 @@ function gateAuthorizationOf(node: NodeSpec, p: RunProjection): GateAuthorizatio
     // can forget it. `sodRefusal` has already been consulted by the caller — this only turns
     // a satisfied rule into the list `#authorize` will read back out of the journal.
     excludedApprovers:
-      node.humanGate?.approval?.separationOfDuties === true && p.submittedBy !== undefined ? [p.submittedBy.subject] : undefined,
+      node.humanGate?.approval?.separationOfDuties === true && typeof p.submittedBy?.subject === "string"
+        ? [p.submittedBy.subject]
+        : undefined,
     allowEdit: node.writes ?? [],
   };
 }

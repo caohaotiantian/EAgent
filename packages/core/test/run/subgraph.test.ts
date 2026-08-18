@@ -432,6 +432,66 @@ async function parkedOnMirror(child: GraphSpec, spec = parentSpec({}, { result: 
 const openGate = async (r: Rig, runId: RunId) =>
   Object.values((await r.engine.projection(runId))!.gates).find((g) => g.state === "open")!;
 
+test("AND THE CHILD'S SEPARATION OF DUTIES BINDS IT TOO — the same hole, one field over", async () => {
+  // `mirrorAuthorizationOf` inherits the child's approvers because "the mirror is the gate a
+  // human actually answers, and the declaration is one run away from the action it guards".
+  // The exclusion is the same argument and the same hole: without it the run's INITIATOR
+  // approves the parent's mirror, and `executor:subgraph` forwards that approval into a child
+  // gate whose own `excludedApprovers` names them — the rule enforced one run away from where
+  // the decision was made, which is precisely nowhere.
+  //
+  // Measured before this test existed: dropping the inheritance left all 1726 tests green and
+  // the initiator approved the delegated charge.
+  const base = guardedChild();
+  const child: GraphSpec = {
+    ...base,
+    nodes: base.nodes.map((x) =>
+      x.id !== n("approve")
+        ? x
+        : {
+            ...x,
+            humanGate: {
+              ref: "oversight/charge@stable",
+              approval: { mode: "single" as const, approvers: [SECURITY_LEAD, "u:second"], separationOfDuties: true },
+            },
+          },
+    ),
+  };
+  const r = rig(child);
+  // The parent is submitted BY the security lead — who the child also names as an approver.
+  const runId = await r.engine.submit({
+    graph: compileParent(child, parentSpec({}, { result: "receipt" })),
+    inputs: { total: 10 },
+    submittedBy: { kind: "human", subject: SECURITY_LEAD, method: "sso" },
+  });
+  const p = await r.engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
+  const gate = Object.values(p.gates).find((g) => g.state === "open")!;
+  assert.deepEqual(gate.excludedApprovers, [SECURITY_LEAD], "the mirror inherits the rule, not only the list");
+
+  await assert.rejects(
+    () =>
+      r.engine.resolveGate(runId, {
+        gateId: gate.gateId,
+        decision: { kind: "approve" },
+        actor: { kind: "human", subject: SECURITY_LEAD, via: "api" },
+        idempotencyKey: "s",
+      }),
+    /separates duties/,
+    "named on the child's list, and still barred — because they started the run",
+  );
+  assert.deepEqual(r.charges, [], "THE CARD WAS NOT CHARGED");
+
+  // …and the other named approver still gets through, so this narrowed the door.
+  const next = await r.engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:second", via: "api" },
+    idempotencyKey: "t",
+  });
+  assert.notEqual(next.status, "failed");
+});
+
 test("THE CHILD'S APPROVERS BIND THE PARENT'S MIRROR GATE", async () => {
   // The bypass: the child declared `["u:security-lead"]` in front of an irreversible
   // charge, the parent's mirror named nobody, and u:mallory answering the mirror had the

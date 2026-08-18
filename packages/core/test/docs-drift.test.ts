@@ -1060,7 +1060,6 @@ test("every error code errors.ts declares is named by some design document", () 
 const NEVER_RAISED: readonly string[] = [
   "E_ADMISSION_REJECTED", // D6.3 level 1. Nothing admits, so nothing rejects.
   "E_CHECKPOINT_NOT_FOUND",
-  "E_GATE_REQUIRED",
   "E_INSUFFICIENT_COHORT",
   "E_JOIN_TIMEOUT", // D5 join timeouts: the spec field is honoured, the code is not used.
   "E_LEASE_LOST", // the executor arms the fence on all three #commit exits now, and the STORE raises this; nothing in src/ raises it directly.

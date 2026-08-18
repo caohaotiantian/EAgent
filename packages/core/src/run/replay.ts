@@ -377,8 +377,10 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   const engine = new Engine({ ...opts.engine, store: shadow, replay: effects });
 
   // THE RECORDED PRINCIPAL COMES FORWARD, and without it every replay of a run whose graph
-  // declares `separationOfDuties` THROWS at the gate: a shadow run with no initiator cannot
-  // resolve the exclusion, so the raise refuses and `replayRun` fails instead of reporting.
+  // declares `separationOfDuties` DIVERGES: a shadow run with no initiator cannot resolve the
+  // exclusion, so the raise refuses, the task fails, and `compare` reports `match: false` on a
+  // run that was faithfully recorded. Measured both ways — it reports rather than throws, and
+  // a quiet wrong answer is the failure mode this comment used to overstate as a loud one.
   // Note it is not the AUTHORIZATION that needs this — the replayer decides as a system actor
   // and the exclusion arm is humans-only — it is the RAISE. The shadow store is in-memory and
   // reachable by no control plane, so carrying the principal grants nothing.

@@ -3365,3 +3365,62 @@ Quorum and delegation are still compile errors, and both would widen it — a de
 second subject the rule has an opinion about, and `mustStayInGroup` needs the identity resolver
 `approvers` is already waiting on. The list shape is what makes that a widening rather than a
 rewrite.
+
+---
+
+## The Phase 3 review: five holes, and one claim that would not reproduce
+
+**A truthy string is not `true`, and every test in the feature was `=== true`.** So
+`separationOfDuties: "true"` compiled clean, resolved no exclusion, and the initiator approved
+their own run — the exact failure `checkApproval` exists against, reached by declaring the
+rule. Not contrived: the canonical on-disk form is JSON and nothing type-checks it on the way
+in, and YAML 1.2 reads a bare `yes` as the STRING. `checkSla` sixty lines below already makes
+this argument for `onTimeout`; the new code makes it for `separationOfDuties` and for
+`delegation.allowed`, which had the identical hole and where "read as absent" means the
+UNSUPPORTED refusal never fires either.
+
+**The mirror's inherited exclusion was a security control with no test.** Deleting the line
+left all 1726 tests green, and a probe showed what that bought: the initiator approves the
+parent's mirror and `executor:subgraph` forwards the approval into a child gate whose own
+`excludedApprovers` names them — the rule enforced one run away from the decision, which is
+nowhere. It is the same hole `THE CHILD'S APPROVERS BIND THE PARENT'S MIRROR GATE` was written
+against, one field over, and it now has the twin test it should have shipped with.
+
+**Two of the new tests did not test what they were named.** The replay test never called
+`replayRun`; it read the journal and asserted a payload, which is true of a run nobody
+replays. The dedup test started two unrelated runs and compared a field on two gates that
+never meet. Both are rewritten, and both now go red when the mechanism is removed. The second
+one also corrected the claim: within one run and one node the exclusion is constant, so the
+DEDUP half is embedder-only — **batching** is the engine-reachable consumer, because `batchFor`
+asks `sameAuthority` with no `nodeId` term. Two `human_gate` nodes sharing a policy and a
+batching key are merge candidates, and merging across the rule produces one question the
+initiator can never answer.
+
+**Three doors that only the ENGINE kept shut.** `raise` is public: it accepted
+`excludedApprovers: []`, which journals a rule that bars nobody and which `shownGate` renders
+to a human as "these people are barred: nobody" — the thing its own comment says cannot
+happen. And a pre-authorized `defaultAction` let the clock approve what the rule forbids,
+because the humans-only carve-out that makes replay work is a carve-out for `gate-broker:
+timeout` too. Both are refused at the raise now, beside the other "this gate cannot mean what
+it says" checks. The third was the reads: `sodRefusal` took `p.submittedBy` bare, so a journal
+carrying `null` or a numeric subject exited as a raw `TypeError`, and an EMPTY subject
+produced `excludedApprovers: [""]` — present, journaled, and toothless.
+
+**And one claim did not reproduce, which is recorded rather than quietly dropped.** A reviewer
+reported that a refused SoD gate takes an `error` edge and lets the run report `succeeded`
+with no gate on the journal. The fix — `E_GATE_REQUIRED` in `RUN_FATAL_CODES`, beside a
+breached budget and a replay divergence — is right on its own terms and shipped: an action
+that requires a decision nobody can give is not something a graph should route around. But two
+attempts to reproduce the recovery, an error edge to a node writing the graph's output and one
+to a node writing its own channel, both ended `failed` with the recovery node never activated,
+identically with and without the fatal listing. So the test pins what is demonstrable — the
+code, and that NO gate row exists, which is what makes this worse than a rejection — and this
+paragraph is the honest state of the routing claim. **A test that passes for a reason it
+cannot name is the thing this file keeps warning about**, and writing one to close a finding
+would have been the worse of the two mistakes.
+
+**Reverses when.** `E_GATE_REQUIRED` was declared and raised by nothing since the vocabulary
+was written; using it closes one of C2's thirteen and is why the `NEVER_RAISED` registry moved.
+If a graph ever needs to recover from an unsupervisable gate deliberately — a fallback that
+routes to a stricter, non-delegated path — the fatal listing is the line to reconsider, and the
+replacement is a distinct code rather than making this one routable.

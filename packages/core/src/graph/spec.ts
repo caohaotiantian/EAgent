@@ -187,7 +187,9 @@ export interface EvaluatorNode {
  * A delegation chain, declared but not yet implemented.
  *
  * Present so that a graph asking for delegation is REJECTED rather than run as if it
- * had asked for nothing (GRAPH014_APPROVAL_UNSUPPORTED).
+ * had asked for nothing (GRAPH014_APPROVAL_UNSUPPORTED). `separationOfDuties` has since left
+ * that set by being built — support arrives by DELETING a check, which is the whole point of
+ * refusing rather than ignoring.
  */
 export interface DelegationSpec {
   readonly allowed: boolean;
@@ -206,10 +208,11 @@ export interface DelegationSpec {
  * this block was added to fix, so the field names are D7.2's verbatim and moving the
  * block into the Resource later is a relocation rather than a redesign.
  *
- * Only `approvers` is enforced. Everything else is declared here precisely so that it
- * can be REFUSED at compile time: a graph that says `mode: quorum` and silently gets
- * one-approver behaviour is the "looks supervised, is not" failure D7.9 calls the worst
- * one available, and it would be invisible in exactly the place oversight exists for.
+ * `approvers` and `separationOfDuties` are enforced. What is left — `mode` other than
+ * `single`, `k`, and `delegation` — is declared here precisely so that it can be REFUSED at
+ * compile time: a graph that says `mode: quorum` and silently gets one-approver behaviour is
+ * the "looks supervised, is not" failure D7.9 calls the worst one available, and it would be
+ * invisible in exactly the place oversight exists for.
  */
 export interface ApprovalSpec {
   /** Only `single` is implemented. The others compile-error until a wave lands them. */

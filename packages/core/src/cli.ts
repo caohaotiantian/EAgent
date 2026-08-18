@@ -1833,8 +1833,9 @@ function subjectFlag(args: Args): string {
  * So the absent case records nothing at all. The CLI authenticates nobody — it writes to the
  * journal directly, and `subjectFlag`'s docstring already states that limit — and inventing a
  * principal is exactly the synthetic-subject failure the perimeter refuses one door over.
- * When `separationOfDuties` lands it will refuse a gate on such a run rather than enforcing
- * nothing, which is the loud version of the same fact. Today it is still a compile error.
+ * `separationOfDuties` refuses a gate on such a run rather than enforcing nothing, which is
+ * the loud version of the same fact: a graph that asks for supervision cannot be supervised
+ * on a run nobody is recorded as having started.
  *
  * `method` is `cli` because that IS how identity was established here: it was not.
  */

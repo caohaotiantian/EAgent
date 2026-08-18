@@ -1485,6 +1485,30 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // answerable by every authenticated principal but one. That is the same failure the deleted
   // check was written against, one field over, and it IS decidable at compile time because
   // both halves are in the spec.
+  // A BOOLEAN, OR NOTHING. Every test in this function and in the runtime is `=== true`, so a
+  // truthy non-boolean — `"true"`, `"yes"`, `1` — passes silently and the rule is journaled
+  // nowhere: the gate is raised as an ordinary one and the initiator approves their own run.
+  // That is not a contrived shape. The canonical on-disk form is JSON and nothing type-checks
+  // it on the way in, and YAML 1.2 turns a bare `yes` into the STRING "yes" — which is the
+  // identical argument `checkSla` already makes sixty lines below for `onTimeout`.
+  if (a.separationOfDuties !== undefined && typeof a.separationOfDuties !== "boolean") {
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVAL_INVALID",
+      message: `human_gate "${n.id}" declares separationOfDuties ${JSON.stringify(a.separationOfDuties)}, which is not true or false`,
+      at,
+      fix: "write `separationOfDuties: true` — a truthy string would be read as absent and the gate would enforce nothing",
+    });
+  }
+  if (a.delegation !== undefined && a.delegation.allowed !== undefined && typeof a.delegation.allowed !== "boolean") {
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVAL_INVALID",
+      message: `human_gate "${n.id}" declares delegation.allowed ${JSON.stringify(a.delegation.allowed)}, which is not true or false`,
+      at,
+      fix: "write true or false — a truthy string reads as absent, which here means the UNSUPPORTED refusal below never fires",
+    });
+  }
   if (a.separationOfDuties === true && (a.approvers ?? []).length === 0) {
     d.push({
       severity: "error",

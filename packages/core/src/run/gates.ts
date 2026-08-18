@@ -366,6 +366,18 @@ export class HumanGateBroker {
     // which is exactly how a check passes and the write that follows it lands on a journal
     // that has since moved. `commit` refuses instead, and the caller re-reads. An empty
     // journal has no head, so `0` is the seq a first append expects.
+    // AN EMPTY EXCLUSION IS REFUSED AT THE DOOR, because three docstrings say it cannot exist
+    // and only the ENGINE makes that true. `raise` is a public embedder door with no compiler
+    // behind it, and `[]` journals a rule that reads as declared and bars nobody — which
+    // `shownGate` then renders to a human as "these people are barred: nobody". The same
+    // argument `isPositiveWholeMs` makes for `slaMs` one field over.
+    if (req.excludedApprovers !== undefined && req.excludedApprovers.length === 0) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `gate on node "${req.nodeId}" declares an EMPTY excludedApprovers, which reads as a rule and bars nobody. Omit the field instead.`,
+      );
+    }
+
     const raisedEvent: NewEvent = {
       type: "gate.raised",
       payload: {
@@ -1246,6 +1258,26 @@ export class HumanGateBroker {
       );
     }
 
+    // WHAT SEPARATION OF DUTIES DOES NOT COVER, recorded here rather than left to be
+    // rediscovered — the same way `approvers`' own limits are recorded above it. Each is a
+    // door this rule inherits rather than one it opens:
+    //
+    //   - **subject injectivity.** The exclusion is a set of subject STRINGS compared against
+    //     `Actor.subject`. Nothing links two credentials held by one person, so submitting as
+    //     `u:alice-contractor` and approving as `u:alice` satisfies it. That is inherent to
+    //     subject-string identity and is the same limit `approvers` carries.
+    //   - **the signed-callback route** is unauthenticated by design and takes its actor from
+    //     an HMAC-verified body, so a leaked channel secret bypasses this exactly as it
+    //     bypasses `approvers`. Its own pre-check reads only `approvers`, so an SoD refusal
+    //     falls through to a journaled durable refusal rather than the cheap path — safe, and
+    //     it spends the per-run refusal budget.
+    //   - **`loom approve --as`** mints an actor with no authentication at all. Already a
+    //     stated limit of the CLI; this rule does not narrow it.
+    //   - **a pre-authorized `defaultAction`** would let the clock approve what the rule bars.
+    //     Refused at the raise instead — see `assertDefaultActionIsSatisfiable`.
+    //   - **graph mutation.** A caller who may mutate a running graph can add a gate naming
+    //     whoever they like; `graph:mutate` was already a strong capability.
+    //
     // A MIRROR CARRIES APPROVE OR REJECT, AND NOTHING ELSE.
     //
     // Its question lives in another run, and only those two decisions survive the trip:
@@ -3074,6 +3106,27 @@ const MAX_REMINDERS = 8;
  */
 function assertDefaultActionIsSatisfiable(req: GateRequest): void {
   if (req.defaultAction === undefined) return;
+  // A CLOCK IS NOT A PERSON, so it cannot satisfy a rule about WHICH person.
+  //
+  // The exclusion is enforced for `human` actors only, and correctly: the system actors that
+  // reach `#authorize` are the replayer, the dedup inheritor and this timeout, none of which
+  // could be the initiator. But a pre-authorized `defaultAction` turns that carve-out into a
+  // bypass of a different rule — the gate expires and `gate-broker:timeout` approves the
+  // action the graph said one specific person may not sign off. The two declarations are
+  // incompatible rather than merely awkward, so they are refused together at the raise, which
+  // is where every other "this gate cannot mean what it says" lives.
+  //
+  // Engine-unreachable today (`checkSla` refuses `default_action` from a graph and
+  // `scheduleOf` forwards no default), so this guards `raise` and `rehydrate` — the embedder
+  // doors, which is exactly where `assertDefaultActionIsSatisfiable`'s other refusals live.
+  if (req.excludedApprovers !== undefined) {
+    throw err.policy(
+      CODES.E_GATE_NOT_AUTHORIZED,
+      `node "${req.nodeId}" declares both a default action and an approver exclusion: a clock cannot satisfy a rule about which ` +
+        `person decides, so the timeout would approve exactly what the exclusion forbids`,
+      { details: { nodeId: req.nodeId } },
+    );
+  }
   // The same acceptance set the decision itself is held to, asked at the RAISE. A
   // `defaultAction` in no vocabulary is the worst member of the class `gateDecisionOf`
   // exists for: nobody is present when the clock applies it, so a kind that fell through

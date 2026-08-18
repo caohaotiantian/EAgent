@@ -530,10 +530,10 @@ because a marker describes what the perimeter concluded rather than naming anybo
 reached the journal and stopped, so "who rewound this run" was the one A4 fact a configured
 `pruneJournal` could destroy. `test/run/run-ownership.test.ts`, `test/run/submit-callers.test.ts`.
 
-> **The prerequisite it existed to unblock is only half spent.** A3 (scoping) and D7.2's
-> separation of duties both need this and neither is built, so the principal is currently
-> journaled and read by nothing but the audit fold — the shape this repo's own Traps section
-> calls "a capability nothing calls". The two open items below are the callers.
+> **The prerequisite it existed to unblock is fully spent.** A3 (scoping) reads it to decide
+> who may reach a run, and D7.2's separation of duties resolves the gate exclusion from it —
+> both landed, so the principal is journaled AND read, which is what keeps this from being the
+> shape the Traps section calls "a capability nothing calls".
 >
 > **And the field is fail-open by construction**: `SubmitInput.submittedBy` is optional and an
 > absent principal is the PERMISSIVE case, so a `submit` call site that forgets it will mint a
