@@ -2104,7 +2104,7 @@ export class GateSweeper {
     this.#broker = opts.broker;
     this.#bus = opts.bus;
     this.#now = opts.now ?? Date.now;
-    this.#limit = Math.max(1, opts.limit ?? DEFAULT_SWEEP_LIMIT);
+    this.#limit = boundedLimit(opts.limit);
   }
 
   /**
@@ -2244,6 +2244,36 @@ export class GateSweeper {
  * `GateSweeper`'s docstring for what falls outside it.
  */
 const DEFAULT_SWEEP_LIMIT = 500;
+
+/**
+ * `GateSweeperOptions.limit`, refused rather than clamped — the same family as
+ * `PolicyEngineOptions.interventionWindowMs` and `ControlPlaneOptions.requestTimeoutMs`.
+ *
+ * `Math.max(1, …)` looks like a floor and is not one for the values that matter. Measured on
+ * node v24.16.0: `Math.max(1, NaN)` is `NaN`, `Math.max(1, Infinity)` is `Infinity`, and
+ * `Math.max(1, 1.5)` is `1.5`. All three go straight into `listRuns(this.#limit)`, and what a
+ * store does with them is already on record one layer up: SQLite reads `LIMIT -1` as NO LIMIT
+ * and throws `datatype mismatch` on a fraction, while the memory store's `slice(0, n)` answers
+ * differently again. So the number that decides how much of a deployment the SLA sweep can SEE
+ * became either everything, nothing, or a 500.
+ *
+ * A refusal rather than a clamp for the reason `positive` gives in `cli.ts`: a clamp silently
+ * substitutes a number the operator did not choose, and this one decides whether gates expire
+ * at all. An unstartable process beats a sweeper that quietly watches five runs.
+ */
+function boundedLimit(supplied: number | undefined): number {
+  if (supplied === undefined) return DEFAULT_SWEEP_LIMIT;
+  if (!Number.isInteger(supplied) || supplied < 1) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `GateSweeperOptions.limit is ${String(supplied)}, which is not a whole number of runs (1 or more). ` +
+        `It bounds how many runs the SLA sweep can see, so a value a store reads as "no limit" or ` +
+        `refuses outright decides whether gates expire at all`,
+      { details: { limit: supplied } },
+    );
+  }
+  return supplied;
+}
 
 // ---------------------------------------------------------------------------
 // Saturation control — D7.9 rows 2 and 3

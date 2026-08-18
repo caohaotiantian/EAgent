@@ -974,6 +974,19 @@ const MAX_TIMER_MS = 2_147_483_647;
  * maximum string length because `#readBody` ends at `raw.toString("utf8")`, so a cap above
  * it is a cap this process could not honour even if the memory were there.
  */
+/**
+ * Distinct `Idempotency-Key` values one process remembers.
+ *
+ * Read as a duration, not a size: entries land only on a successful submit, so this is
+ * `MAX_IDEMPOTENT_SUBMITS ÷ submissions per minute` — about a day at ten runs a minute, about an
+ * hour at 170. REVERSE IT upward if a deployment submits faster than its clients retry.
+ *
+ * It bounds ENTRIES rather than bytes, and the key is caller-influenced: `idempotencySlot`
+ * includes the raw header, which `node:http` bounds only by its own header limit. So the memory
+ * this caps is a multiple of that limit, not of a small constant.
+ */
+const MAX_IDEMPOTENT_SUBMITS = 10_000;
+
 function boundedCount(v: unknown, where: string, what: string): number | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > BUFFER.MAX_STRING_LENGTH) {
@@ -1274,11 +1287,16 @@ export class ControlPlane {
    * projection and the event stream of a run they did not submit — while their own
    * submission was silently never made. See `idempotencySlot`.
    *
-   * It is process-lifetime and unbounded, which is a stated limit and not a design: one
-   * small entry per distinct key, for the life of the process. Bounding it changes what
-   * "idempotent" means at this boundary — an evicted key stops collapsing, so a slow
-   * retry becomes a second run — and that is a decision with its own test rather than a
-   * line to slip into this one.
+   * BOUNDED, and the bound is a TIME rather than a count however it is spelled. Eviction here
+   * is the one in this pass with a correctness cost: `Engine.submit` mints a fresh `runId` and
+   * nothing anywhere dedups on the key, so this map is the only thing collapsing a retry, and an
+   * evicted key means a second run with whatever side effects the first one had.
+   *
+   * What makes the count safe is that entries are recorded only on SUCCESS, so filling the map
+   * costs `MAX_IDEMPOTENT_SUBMITS` real submissions — each of them the very operation being
+   * deduplicated. Divide by the deployment's submission rate to get the window a retry may
+   * arrive in: at ten runs a minute this is about a day, and a client retrying slower than that
+   * is asking for a second run whatever this map does.
    */
   readonly #idempotency = new Map<string, unknown>();
   readonly #callbacks: GateCallbackRouter | undefined;
@@ -2526,7 +2544,14 @@ export class ControlPlane {
             durable: ["run.submitted", "run.compiled"],
             note: "accepted means this WILL run, not that it HAS run",
           };
-          if (slot !== undefined) this.#idempotency.set(slot, accepted);
+          if (slot !== undefined) {
+            // Insertion order, oldest first, following `GateCallbackRouter.#admitRow`.
+            if (this.#idempotency.size >= MAX_IDEMPOTENT_SUBMITS) {
+              const oldest = this.#idempotency.keys().next();
+              if (oldest.done !== true) this.#idempotency.delete(oldest.value);
+            }
+            this.#idempotency.set(slot, accepted);
+          }
           send(res, 202, accepted);
 
           // Drive it after responding: the client is not made to wait on execution.

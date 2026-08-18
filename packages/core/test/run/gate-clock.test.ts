@@ -31,6 +31,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { CODES, isLoomError } from "../../src/errors.ts";
 import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, HumanGateNode, RunGraph } from "../../src/graph/spec.ts";
 import { newRunId, type EdgeId, type GateId, type NodeId, type RunId, type Seq, type TaskId } from "../../src/ids.ts";
@@ -782,14 +783,37 @@ test("A RUN IS DUE AT ITS EARLIEST DEADLINE, not its latest", async () => {
   assert.equal((await r.engine.projection(runId))!.status, "failed");
 });
 
-test("A LIMIT OF ZERO WOULD SWITCH OFF EVERY SLA, so it is clamped", async () => {
-  // `listRuns(0)` returns nothing, and a tick that considers nothing fires nothing —
-  // silently, forever, for the whole deployment. The floor is what makes a mistyped knob a
-  // slow tick rather than no clock at all.
+test("A LIMIT THE SWEEP CANNOT HONOUR IS REFUSED, not clamped", async () => {
+  // THIS USED TO CLAMP, and the argument for clamping does not survive being checked.
+  //
+  // It read: `listRuns(0)` returns nothing, so `Math.max(1, …)` makes a mistyped knob "a slow
+  // tick rather than no clock at all". But `listRuns` is `ORDER BY run_id DESC LIMIT ?` over
+  // time-ordered ids, so a limit of 1 pins every tick to the single NEWEST run — gates on every
+  // other run never expire, which is no clock at all for all but one of them. The floor bought
+  // the appearance of the guarantee, not the guarantee.
+  //
+  // And it guarded exactly one value. `Math.max(1, NaN)` is `NaN`, `Math.max(1, Infinity)` is
+  // `Infinity`, `Math.max(1, 1.5)` is `1.5` — measured on node v24.16.0 — and all three reach
+  // `listRuns`, where SQLite reads a negative as NO LIMIT and throws `datatype mismatch` on a
+  // fraction while the memory store's `slice` answers differently again.
+  //
+  // So it joins the family `PolicyEngineOptions.interventionWindowMs` and
+  // `ControlPlaneOptions.requestTimeoutMs` are already in, and refuses at construction for the
+  // reason `positive` gives in `cli.ts`: a clamp substitutes a number the operator did not
+  // choose, on a knob that decides whether gates expire at all.
   const r = rig(gatedSpec({ sla: { respondWithinMs: 60_000, onTimeout: "fail" }, delivery: undefined }));
+  for (const limit of [0, -1, 1.5, NaN, Infinity]) {
+    assert.throws(
+      () => new GateSweeper({ store: r.store, broker: r.broker, now: () => r.clock.t, limit }),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
+      `limit ${String(limit)} must be refused`,
+    );
+  }
+
+  // AND A USABLE ONE STILL SWEEPS, so the refusal is not a sweeper that refuses everybody.
   const { gateId } = await park(r);
   r.clock.t += 60_001;
-  const report = await new GateSweeper({ store: r.store, broker: r.broker, now: () => r.clock.t, limit: 0 }).sweep();
+  const report = await new GateSweeper({ store: r.store, broker: r.broker, now: () => r.clock.t, limit: 1 }).sweep();
   assert.equal(report.considered, 1);
   assert.deepEqual(report.fired, [gateId]);
 });
