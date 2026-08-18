@@ -58,7 +58,7 @@ approval:
   approvers:
     - { kind: role,  id: "sre-oncall" }
     - { kind: group, id: "sre-leads" }
-  separationOfDuties: true        # an approver may not be the run's initiator
+  separationOfDuties: true        # an approver may not be the run's initiator — BUILT
   delegation: { allowed: true, maxDepth: 2, mustStayInGroup: true }
 
 # ── how long, and what happens if nobody answers ──
@@ -117,13 +117,29 @@ trust:
 > refuses an entry that is not a subject string. Widening to a union when the resolver
 > exists is additive.
 >
-> **Everything else in the block is refused at compile time, not silently ignored.** `mode`
-> other than `single`, any `k`, `separationOfDuties: true`, and `delegation.allowed: true`
-> are `GRAPH014_APPROVAL_UNSUPPORTED` errors (`graph/validate.ts`). Accepting the block and
+> **`separationOfDuties` IS BUILT, and it arrived exactly the way this paragraph said support
+> would: by deleting a check.** The rule is resolved when the gate is RAISED — from
+> `run.submitted.submittedBy`, the principal A4 journals — and written to
+> `gate.raised.excludedApprovers`, so `HumanGateBroker.#authorize` keeps reading the fold of
+> one event and nothing else. That is what makes it survive a restart, replay unchanged, and
+> stay unavailable to a process that did not raise the gate.
+>
+> It NARROWS `approvers` and does not stand in for one: declared with no approvers it would
+> read as "everybody except one person", so that combination is `GRAPH014_APPROVAL_INCOMPLETE`
+> — a check *added* in the same change that deleted one. And a run that cannot satisfy the
+> rule FAILS at the gate rather than raising one that bars nobody: no principal recorded, a
+> principal that is a service or a perimeter marker rather than a person, or a gate whose only
+> named approver is the initiator. The refusal is decided where the node OUTCOME is
+> constructed rather than thrown from `raise`, because `#commit` runs outside the wave's catch
+> and a throw there leaves the task leased forever — a hang wearing a policy's clothes.
+>
+> **The rest of the block is still refused at compile time, not silently ignored.** `mode`
+> other than `single`, any `k`, and `delegation.allowed: true` are
+> `GRAPH014_APPROVAL_UNSUPPORTED` errors (`graph/validate.ts`). Accepting the block and
 > enforcing only the implemented part would produce a graph that reads as "two of the SRE
 > leads must agree" and behaves as "any one of them", with nothing anywhere saying so —
 > D7.9's closing paragraph names that the worst available failure mode, because it *looks*
-> supervised and is not, so nobody goes looking. Support is added by deleting a check.
+> supervised and is not, so nobody goes looking.
 >
 > **`sla` ships without `escalation` and without `defaultAction`, and both absences are
 > decisions.** `escalation` lives on `delivery`, because escalating means choosing new

@@ -376,7 +376,15 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   const shadow = new MemoryStateStore({ now: opts.engine.now ?? (() => original.startedAt) });
   const engine = new Engine({ ...opts.engine, store: shadow, replay: effects });
 
-  const replayRunId = await engine.submit({ graph: opts.graph, inputs });
+  // THE RECORDED PRINCIPAL COMES FORWARD, and without it every replay of a run whose graph
+  // declares `separationOfDuties` THROWS at the gate: a shadow run with no initiator cannot
+  // resolve the exclusion, so the raise refuses and `replayRun` fails instead of reporting.
+  // Note it is not the AUTHORIZATION that needs this — the replayer decides as a system actor
+  // and the exclusion arm is humans-only — it is the RAISE. The shadow store is in-memory and
+  // reachable by no control plane, so carrying the principal grants nothing.
+  const submittedBy =
+    submitted !== undefined && isEvent(submitted, "run.submitted") ? submitted.payload.submittedBy : undefined;
+  const replayRunId = await engine.submit({ graph: opts.graph, inputs, ...(submittedBy === undefined ? {} : { submittedBy }) });
   let replayed = await engine.advance(replayRunId);
 
   // Serve recorded human decisions the same way effects are served: a gate's answer

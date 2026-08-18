@@ -634,6 +634,7 @@ test("…AND THE RULE IS STRUCTURAL: NOTHING ON THE TARGET IS AN OBJECT THE ENGI
   const containers: { readonly [K in ContainerField]-?: NonNullable<GateSummary[K]> } = {
     payload: { command: "restart" },
     approvers: ["sre-lead"],
+    excludedApprovers: ["u:alice"],
     allowEdit: ["findings"],
     writes: { findings: { note: "ok" } },
     take: ["e1"],

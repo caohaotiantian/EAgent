@@ -54,10 +54,11 @@ const CALLERS: Readonly<Record<string, { readonly sites: number; readonly why: s
   "run/replay.ts": {
     sites: 1,
     why:
-      "supplies NOTHING today, so a replayed run is unowned. That is sound only because the " +
-      "shadow store is in-memory and reachable by no control plane. It stops being sound the " +
-      "moment separationOfDuties lands, because a shadow run with no initiator cannot resolve " +
-      "the exclusions the recorded gate carried — see the plan's D17.",
+      "the shadow run, which carries the RECORDED principal forward. Not for authorization — " +
+      "the replayer decides as a system actor and the exclusion arm is humans-only — but for " +
+      "the RAISE: a shadow run with no initiator cannot resolve a separationOfDuties " +
+      "exclusion, so the raise would refuse and the replay would throw instead of reporting. " +
+      "It grants nothing: the shadow store is in-memory and reachable by no control plane.",
   },
 };
 

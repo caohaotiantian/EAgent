@@ -139,6 +139,8 @@ export interface GateRecord {
   // is not a check.
   /** Subject ids permitted to decide. Absent or empty = the gate named nobody. */
   readonly approvers?: readonly string[];
+  /** Subjects barred from deciding, resolved at raise. See `gate.raised.excludedApprovers`. */
+  readonly excludedApprovers?: readonly string[];
   /** Channels an `edit` may write. Absent = unconstrained; `[]` = none. */
   readonly allowEdit?: readonly string[] | undefined;
   readonly slaMs?: number | undefined;
@@ -783,6 +785,7 @@ function apply(p: MutableProjection, e: JournalEvent): void {
       state: "open",
       tier: 0,
       ...(e.payload.approvers === undefined ? {} : { approvers: e.payload.approvers }),
+      ...(e.payload.excludedApprovers === undefined ? {} : { excludedApprovers: e.payload.excludedApprovers }),
       ...(e.payload.allowEdit === undefined ? {} : { allowEdit: e.payload.allowEdit }),
       ...(e.payload.slaMs === undefined ? {} : { slaMs: e.payload.slaMs }),
       ...(e.payload.deadline === undefined ? {} : { deadline: e.payload.deadline }),

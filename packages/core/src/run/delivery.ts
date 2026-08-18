@@ -2987,6 +2987,7 @@ function shownGate(gate: GateSummary, payload: unknown, contentDigest: string): 
   // READ ONCE EACH. A field read twice need not answer twice the same — `channelName`'s
   // lesson — and each of these is then asked two questions.
   const approvers: readonly string[] | undefined = gate.approvers;
+  const excluded: readonly string[] | undefined = gate.excludedApprovers;
   const allowEdit = gate.allowEdit;
   const take = gate.take;
   const writes = gate.writes;
@@ -3001,6 +3002,13 @@ function shownGate(gate: GateSummary, payload: unknown, contentDigest: string): 
     // reads approvers from the journal — so the cost of the marker is a rendering, and the
     // cost of `[]` was a false statement about who is being asked.
     approvers: approvers === undefined ? [] : (ownedList(approvers) ?? [UNRENDERABLE]),
+    // ABSENT stays absent here, unlike `approvers`, because the two absences say different
+    // things: a gate that names no approvers is asking everyone, and `[]` renders that
+    // truthfully; a gate with no exclusion is not asking anything about exclusion at all, and
+    // `[]` would render as "these people are barred: nobody" — a rule the author never wrote.
+    // Unreadable takes the marker for the same reason it does above: somebody is barred and
+    // we cannot say who.
+    ...(excluded === undefined ? {} : { excludedApprovers: ownedList(excluded) ?? [UNRENDERABLE] }),
     // The same rule the other way up: absent means UNCONSTRAINED here (`GateRecord.allowEdit`
     // — "Absent = unconstrained; `[]` = none"), so an unreadable one may not become absent.
     // `[]` is the narrow answer, and narrowing is the direction a value we could not read is

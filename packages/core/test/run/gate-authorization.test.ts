@@ -759,13 +759,32 @@ test("AN APPROVAL RULE THE RUNTIME DOES NOT APPLY IS REFUSED, NOT IGNORED", () =
     { mode: "all", approvers: ["u:alice"] },
     { mode: "tiered", approvers: ["u:alice"] },
     { mode: "single", k: 2, approvers: ["u:alice"] },
-    { mode: "single", approvers: ["u:alice"], separationOfDuties: true },
     { mode: "single", approvers: ["u:alice"], delegation: { allowed: true, maxDepth: 2 } },
   ]) {
     const hit = diagnose(withApproval(approval)).filter((x) => x.code === "GRAPH014_APPROVAL_UNSUPPORTED");
     assert.ok(hit.length > 0, `${JSON.stringify(approval)} compiled clean`);
     assert.equal(hit[0]!.severity, "error");
   }
+  // `separationOfDuties` LEFT THIS LIST BY BEING BUILT, which is how the docstring says
+  // support arrives: by deleting a check. It is the only one that has.
+  assert.deepEqual(
+    diagnose(withApproval({ mode: "single", approvers: ["u:alice"], separationOfDuties: true })).filter((x) => x.severity === "error"),
+    [],
+  );
+});
+
+test("SEPARATION OF DUTIES NARROWS AN APPROVERS LIST — it does not stand in for one", () => {
+  // The rule bars the initiator. Declared with no approvers it would read as "everybody
+  // except one person" — supervised-looking and answerable by every authenticated principal
+  // but one, which is the same failure the deleted refusal was written against. Unlike that
+  // one this IS decidable at compile time, because both halves are in the spec.
+  const codes = diagnose(withApproval({ separationOfDuties: true })).map((x) => x.code);
+  assert.ok(codes.includes("GRAPH014_APPROVAL_INCOMPLETE"), "declared with no approvers");
+  assert.deepEqual(
+    diagnose(withApproval({ separationOfDuties: true, approvers: ["u:alice"] })).filter((x) => x.severity === "error"),
+    [],
+    "…and with one, it compiles",
+  );
 });
 
 test("declaring a feature and turning it OFF is not an error", () => {

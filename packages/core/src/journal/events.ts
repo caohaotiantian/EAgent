@@ -308,6 +308,23 @@ export interface EventPayloads {
      * all, so every reader refuses it as unknown rather than as unrestricted.
      */
     readonly approvers?: readonly string[];
+    /**
+     * WHO MAY NOT DECIDE THIS GATE, however else they qualify — D7.2's `separationOfDuties`,
+     * RESOLVED at raise rather than evaluated at decide.
+     *
+     * It journals the DECISION, not its inputs, which is the same choice `approvers` makes
+     * and for the same reason: `#authorize` reads the fold of this event and nothing else, so
+     * an exclusion computed later from run state would be an authorization input that can be
+     * silently empty. Resolved once, from the run's recorded initiator, and durable — a
+     * restart cannot lose it and a replay reproduces it.
+     *
+     * ABSENT means the gate declared no such rule. It is never `[]`: a graph that asks for
+     * separation of duties on a run whose initiator is unknown, synthetic, or not a person is
+     * REFUSED at raise rather than raised with an exclusion nobody can match, because a gate
+     * that reads as supervised and enforces nothing is the failure the whole block exists to
+     * prevent.
+     */
+    readonly excludedApprovers?: readonly string[];
     /** Channels an `edit` may write. Absent = unconstrained; `[]` = none at all. */
     readonly allowEdit?: readonly string[];
     /**

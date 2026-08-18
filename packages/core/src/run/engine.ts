@@ -84,6 +84,7 @@ import {
 import {
   ZERO_USAGE,
   addUsage,
+  isSyntheticSubject,
   maxPosture,
   type GateDecision,
   type IrreversibilityClass,
@@ -248,8 +249,78 @@ interface Wave {
 interface GateAuthorization {
   /** Subject ids permitted to decide. Empty = the gate named nobody, which is permissive. */
   readonly approvers: readonly string[];
+  /**
+   * Subjects barred whatever else admits them — separation of duties, RESOLVED.
+   *
+   * REQUIRED, like every other member here, on this type's own argument: forgetting an
+   * authorization field must be a type error rather than a silent widening. `undefined` is a
+   * real value and means "this gate declared no such rule"; it is never `[]`, because a rule
+   * that excludes nobody is a rule the author did not write.
+   */
+  readonly excludedApprovers: readonly string[] | undefined;
   /** Channels an `edit` may write. Always concrete; `[]` means none. */
   readonly allowEdit: readonly string[];
+}
+
+/**
+ * A refused SoD gate, as a failed OUTCOME rather than a throw.
+ *
+ * The distinction is the whole reason this is a function. `#commit` — where `raise` is called
+ * — runs OUTSIDE the try/catch that turns an exception into `{status:"failed"}`; that catch
+ * wraps `#executeTask` only. A throw from the raise path therefore escapes `advance()` with
+ * the task still `leased`, and every later `advance` re-leases it, re-executes, and throws
+ * again: the run never reaches a terminal state and the command answers 500 forever. A hang
+ * dressed as a policy is the one shape a refusal must not take, so the refusal is decided
+ * where the outcome is CONSTRUCTED and travels as an ordinary failure.
+ */
+function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
+  if (node.humanGate?.approval?.separationOfDuties !== true) return undefined;
+  const why = sodRefusal(p, node.humanGate.approval.approvers ?? []);
+  if (why === undefined) return undefined;
+  return {
+    status: "failed",
+    writes: {},
+    usage: { ...ZERO_USAGE },
+    error: err.policy(
+      CODES.E_GATE_NOT_AUTHORIZED,
+      `node "${node.id}" declares separationOfDuties and cannot be supervised on this run: ${why}`,
+      { details: { nodeId: node.id } },
+    ),
+  };
+}
+
+/**
+ * Why a gate declaring separation of duties cannot be raised on this run.
+ *
+ * `undefined` when it can. The three refusals are one rule read three ways: the exclusion has
+ * to name a PERSON, or the gate would be journaled as supervised and enforce nothing.
+ */
+function sodRefusal(p: RunProjection, approvers: readonly string[]): string | undefined {
+  const by = p.submittedBy;
+  if (by === undefined) {
+    return (
+      `no principal is recorded as having submitted this run, so there is nobody to exclude. ` +
+      `Submit through the API with a credential, or with \`loom run --as <subject>\``
+    );
+  }
+  // A SERVICE IS NOT A PERSON, and a marker is not even a service. `(shared-token)` and
+  // `(unidentified)` describe what the perimeter concluded; excluding either bars a subject
+  // no human actor can present, which is a gate that reads as supervised and is answerable by
+  // everyone including whoever started the run. That is the exact failure this whole block
+  // exists to prevent, so it is refused rather than resolved.
+  if (by.kind !== "human" || isSyntheticSubject(by.subject)) {
+    return (
+      `this run was submitted by "${by.subject}" (${by.kind}), which is not a person — excluding it would bar nobody ` +
+      `while the gate read as supervised`
+    );
+  }
+  // AND A GATE WHOSE APPROVERS ARE ONLY THE INITIATOR CAN NEVER BE ANSWERED. The compiler
+  // cannot see this: `approvers` is static in the spec and the initiator is a runtime fact.
+  // `raise` holds both, so it is caught here rather than parked until an SLA it may not have.
+  if (approvers.length > 0 && approvers.every((a) => a === by.subject)) {
+    return `the only approver it names is "${by.subject}", who submitted this run — so nobody could ever answer it`;
+  }
+  return undefined;
 }
 
 /**
@@ -1564,6 +1635,8 @@ export class Engine {
     }
 
     if (decision.effect === "gate") {
+      const refused = sodOn(node, p);
+      if (refused !== undefined) return refused;
       return {
         status: "gate",
         writes: {},
@@ -1571,7 +1644,7 @@ export class Engine {
         gate: {
           policyRef: node.humanGate?.ref ?? `policy:${node.id}`,
           payload: this.#gatePayload(ctx, p, node, task),
-          auth: gateAuthorizationOf(node),
+          auth: gateAuthorizationOf(node, p),
           schedule: scheduleOf(node),
         },
       };
@@ -1642,10 +1715,12 @@ export class Engine {
         return this.#runAgent(ctx, p, w);
       case "evaluator":
         return this.#runEvaluator(ctx, p, w);
-      case "human_gate":
+      case "human_gate": {
         // Reached only when policy did not already gate — i.e. never, since a
         // human_gate node's posture is `in` by definition. Kept explicit so a
         // future posture change cannot silently skip the gate.
+        const refused = sodOn(w.node, p);
+        if (refused !== undefined) return refused;
         return {
           status: "gate",
           writes: {},
@@ -1653,10 +1728,11 @@ export class Engine {
           gate: {
             policyRef: w.node.humanGate?.ref ?? "",
             payload: this.#gatePayload(ctx, p, w.node, w.task),
-            auth: gateAuthorizationOf(w.node),
+            auth: gateAuthorizationOf(w.node, p),
             schedule: scheduleOf(w.node),
           },
         };
+      }
       case "subgraph":
         return this.#runSubgraph(ctx, p, w);
     }
@@ -2823,6 +2899,9 @@ export class Engine {
         payload: outcome.gate!.payload,
         allowEdit: auth.allowEdit,
         ...(auth.approvers.length === 0 ? {} : { approvers: auth.approvers }),
+        // ABSENT stays absent and is never `[]` — a rule that bars nobody is a rule the
+        // author did not write, and `[]` would journal one that reads as declared.
+        ...(auth.excludedApprovers === undefined ? {} : { excludedApprovers: auth.excludedApprovers }),
         ...(sched.slaMs === undefined ? {} : { slaMs: sched.slaMs }),
         ...(sched.onTimeout === undefined ? {} : { onTimeout: sched.onTimeout }),
         ...(sched.delivery === undefined ? {} : { delivery: sched.delivery }),
@@ -4040,9 +4119,15 @@ function oldestOpenGate(p: RunProjection): GateRecord | undefined {
  * which is indistinguishable from "not a mirror at all", and the mirror silently fell
  * back to this node's own rules.
  */
-function gateAuthorizationOf(node: NodeSpec): GateAuthorization {
+function gateAuthorizationOf(node: NodeSpec, p: RunProjection): GateAuthorization {
+  const approvers = node.humanGate?.approval?.approvers ?? [];
   return {
-    approvers: node.humanGate?.approval?.approvers ?? [],
+    approvers,
+    // RESOLVED HERE, in the one place a gate's authorization is computed, so no raise path
+    // can forget it. `sodRefusal` has already been consulted by the caller — this only turns
+    // a satisfied rule into the list `#authorize` will read back out of the journal.
+    excludedApprovers:
+      node.humanGate?.approval?.separationOfDuties === true && p.submittedBy !== undefined ? [p.submittedBy.subject] : undefined,
     allowEdit: node.writes ?? [],
   };
 }
@@ -4104,7 +4189,17 @@ function scheduleOf(node: NodeSpec): GateSchedule {
  * outright, and `[]` is how that reads back out of the journal.
  */
 function mirrorAuthorizationOf(childGate: GateRecord): GateAuthorization {
-  return { approvers: childGate.approvers ?? [], allowEdit: [] };
+  return {
+    approvers: childGate.approvers ?? [],
+    // INHERITED, for the reason the approvers are — and the reason is security rather than
+    // economy. Without it the initiator approves the parent's mirror and `executor:subgraph`
+    // forwards that approval into a child gate that excludes them: the rule is enforced one
+    // run away from where the decision was made, which is exactly the hole the mirror's
+    // approvers inheritance was built to close, one field over. A child run inherits its
+    // parent's principal, so the child's exclusion and the parent's are the same subject.
+    excludedApprovers: childGate.excludedApprovers,
+    allowEdit: [],
+  };
 }
 
 type ParseResult = { ok: true; value: unknown } | { ok: false; errors: readonly string[] };

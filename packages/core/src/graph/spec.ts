@@ -225,7 +225,18 @@ export interface ApprovalSpec {
    * a union, which is additive.
    */
   readonly approvers?: readonly string[];
-  /** An approver may not be the run's initiator. Not implemented. */
+  /**
+   * An approver may not be the run's INITIATOR — the principal on `run.submitted.submittedBy`.
+   *
+   * Resolved once when the gate is raised and journaled on `gate.raised.excludedApprovers`,
+   * so the rule is durable, survives a restart, and replays. It NARROWS `approvers` rather
+   * than standing in for it: a gate declaring this and naming nobody is a compile error
+   * (`GRAPH014_APPROVAL_INCOMPLETE`), because "everybody except one person" is not
+   * supervision.
+   *
+   * A run whose initiator is unrecorded, synthetic, or not a person cannot satisfy it, and
+   * such a run FAILS at the gate rather than raising one that bars nobody.
+   */
   readonly separationOfDuties?: boolean;
   readonly delegation?: DelegationSpec;
 }

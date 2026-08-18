@@ -595,21 +595,25 @@ The compiler runs every rule and returns **all** diagnostics, never just the fir
 > **A code in this table is a *family*; the diagnostic carries the sub-code.** Every
 > `Diagnostic.code` is `GRAPHnnn_REASON`, and `test/docs-drift.test.ts` checks that each
 > `GRAPHnnn` family the compiler can emit appears here — the reason, not the family, is
-> what an author reads. `GRAPH014` currently emits **eight** distinct sub-codes from **ten**
+> what an author reads. `GRAPH014` currently emits **nine** distinct sub-codes from **eleven**
 > call sites — count them with
 > `grep -aoE 'GRAPH014_[A-Z_]+' packages/core/src/graph/validate.ts | sort -u | wc -l`
 > rather than trusting this sentence, which has now been wrong three times. (`grep -c`
-> counts LINES and answers 10, which happens to be the call-site count and is not the same
+> counts LINES and answers 11, which happens to be the call-site count and is not the same
 > question: two sub-codes are pushed from two places each — `GRAPH014_APPROVER_INVALID`
 > once for a non-subject and once for a synthetic marker like `(unidentified)`, and
 > `GRAPH014_DELIVERY_INVALID` once as an error and once as a warning. A count is only as
-> good as the command under it, and 8 + 2 = 10 is the check that this paragraph is
-> internally consistent.) The eight:
+> good as the command under it, and 9 + 2 = 11 is the check that this paragraph is
+> internally consistent.) The nine:
 > `GRAPH014_OVERSIGHT_LOOSENED` (error, and the only one that surfaces as
 > `E_OVERSIGHT_LOOSENED` rather than `E_GRAPH_INVALID`), `GRAPH014_GATE_GATES_NOTHING`
 > (**warning** — a `human_gate` with no non-error outbound edge, so approving it does
 > nothing), `GRAPH014_APPROVAL_UNSUPPORTED` (error — `mode` other than `single`, a `k`,
-> `separationOfDuties`, or `delegation`; see the deviation note in **D7.2**),
+> or `delegation`; see the deviation note in **D7.2**. `separationOfDuties` LEFT this list by
+> being BUILT, which is how that note says support arrives: by deleting a check),
+> `GRAPH014_APPROVAL_INCOMPLETE` (error — `separationOfDuties` with no `approvers`, which
+> would read as "everybody except one person"; the rule NARROWS a list and does not stand in
+> for one),
 > `GRAPH014_APPROVER_INVALID` (error — an approver that is not a subject string, or one
 > that is a marker the perimeter mints rather than a name: `(unidentified)` and
 > `(shared-token)` read as restricted and are satisfied by exactly the callers nobody

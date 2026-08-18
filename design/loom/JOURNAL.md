@@ -3300,3 +3300,68 @@ Requiring `open` was tried and it turns a second approver's 409 into a 404 — t
 one decides, the other is told the run does not exist rather than that the question is
 answered. If gate-naming ever becomes attacker-influenced at scale (see `graph:mutate` in the
 HANDOFF), narrow it then and accept the worse conflict diagnostic.
+
+---
+
+## Separation of duties, and the four ways to a rule that enforces nothing
+
+D7.2 said support for the unimplemented approval modes "is added by deleting a check". This
+is the first time that sentence has been exercised, and what it turned out to mean is: delete
+one check, add a narrower one, and then spend most of the work on the ways the rule can be
+present and toothless.
+
+**The rule is RESOLVED AT RAISE, not evaluated at decide**, and that is the decision the rest
+follows from. `#authorize` reads "`gate`, the FOLD of `gate.raised`, and nothing else" — a
+deliberate invariant, because an authorization input that can be silently empty is a check
+that passes by default, and the broker's memory is empty in every process that did not raise
+the gate. So the exclusion is computed once from `run.submitted.submittedBy` and journaled on
+`gate.raised.excludedApprovers`. It states the DECISION rather than its inputs, which is
+exactly what `approvers` does one field over, and it buys three properties for free: it
+survives a restart, it replays unchanged, and a process that never held the run can still
+enforce it.
+
+**Five builders, and the fifth is the one a reader forgets.** `GateRequest`, the payload, the
+fold, `GateRecord` — and `prospectiveRecord`, the record `#validate` is handed on the dedup
+path. Because the field is optional, omitting it there is silent, and it is precisely the
+bypass: an SoD gate would compare EQUAL to a non-SoD one under `sameAuthority` and inherit its
+decision in the append that raised it, from the person the rule bars. `sameAuthority` gained
+the term, which covers dedup and batching together because both ask it.
+
+**Four refusals, because a gate that reads as supervised and bars nobody is worse than no
+gate at all.** The obvious one is "no principal recorded". The other three are not:
+
+- **a service, or a perimeter marker.** `(shared-token)` and `(unidentified)` name credentials
+  and conclusions, not people; excluding either bars a subject no human actor can present, so
+  the gate is journaled as supervised and answerable by everyone, initiator included.
+- **a gate whose only named approver IS the initiator.** No compile-time check can see this —
+  `approvers` is static in the spec and the initiator is a runtime fact — and `raise` holds
+  both. Without it the run parks on a question nobody can ever answer.
+- **and, at COMPILE time, `separationOfDuties` with no `approvers`**, which would read as
+  "everybody except one person". `GRAPH014_APPROVAL_INCOMPLETE` — a check added in the same
+  change that deleted one, because the rule NARROWS a list and does not stand in for one.
+
+**The refusal is an OUTCOME, never a throw**, and this is the part that would have been a
+production incident. `#commit` — where `raise` is called — runs outside the try/catch that
+turns an exception into `{status:"failed"}`; that catch wraps `#executeTask` alone. A throw
+from the raise path escapes `advance()` with the task still `leased`, and every later
+`advance` re-leases it, re-executes, and throws again: the run never terminates and the
+command answers 500 forever. Caught by a plan reviewer before a line was written, which is the
+argument for reviewing plans.
+
+**The claim door is narrower than the decision door, again.** A claim grants nothing, so the
+exclusion there is not authorization — it is about what a claim SAYS. Letting the one person
+who provably cannot decide hold it tells the approvers that somebody is looking, which is the
+single thing a soft lock must never do falsely.
+
+**And the carve-out that makes replay work is a KIND, not a subject.** The arm fires only for
+`human` actors. A `system` actor reaching it has already passed `isAuthorizedActor`, which
+admits exactly `GATE_SYSTEM_ACTORS` — the replayer, the timeout's default action, the dedup
+inheritor — none of which is a person who could be the initiator. What replay actually needed
+was the recorded principal threaded into the shadow run, and not for authorization: without it
+the RAISE refuses, so `replayRun` throws instead of reporting.
+
+**Reverses when.** The exclusion is a one-element list because the initiator is one principal.
+Quorum and delegation are still compile errors, and both would widen it — a delegate is a
+second subject the rule has an opinion about, and `mustStayInGroup` needs the identity resolver
+`approvers` is already waiting on. The list shape is what makes that a widening rather than a
+rewrite.

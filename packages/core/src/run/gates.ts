@@ -47,6 +47,11 @@ export interface GateRequest {
   /** Rendered server-side, so `contentDigest` pins what the approver actually saw. */
   readonly payload: unknown;
   readonly approvers?: readonly string[];
+  /**
+   * Subjects barred from deciding this gate whatever else admits them — `gate.raised`'s
+   * `excludedApprovers`, already resolved. Authorization, so it is journaled.
+   */
+  readonly excludedApprovers?: readonly string[];
   readonly slaMs?: number;
   readonly onTimeout?: TimeoutAction;
   /** Only permissible when the action is read_only or reversible_write (GRAPH014). */
@@ -369,6 +374,7 @@ export class HumanGateBroker {
         policyRef: req.policyRef,
         contentDigest,
         ...(req.approvers === undefined ? {} : { approvers: req.approvers }),
+        ...(req.excludedApprovers === undefined ? {} : { excludedApprovers: req.excludedApprovers }),
         ...(req.allowEdit === undefined ? {} : { allowEdit: req.allowEdit }),
         // ONE usable value for both, so the journal cannot claim a clock the fold will not
         // read. Writing `req.slaMs` here and a guarded `deadline` beside it would put an
@@ -777,6 +783,7 @@ export class HumanGateBroker {
       deadline,
       onTimeout: req.onTimeout ?? "fail",
       approvers: req.approvers ?? [],
+      ...(req.excludedApprovers === undefined ? {} : { excludedApprovers: req.excludedApprovers }),
       allowEdit: req.allowEdit,
       tier: 0,
       ...(req.mirrorOf === undefined ? {} : { mirrorOf: req.mirrorOf }),
@@ -1113,6 +1120,19 @@ export class HumanGateBroker {
         { details: { gateId: input.gateId, actor: actor.subject } },
       );
     }
+    // AND THE CLAIM DOOR STAYS NARROWER THAN THE DECISION DOOR, which is the rule this
+    // method already follows for approvers and for actor kinds. A claim grants nothing, so
+    // this is not about authorization — it is about what a claim SAYS: "somebody is looking
+    // at this", told to the people who must look. Letting the one person who provably cannot
+    // decide hold the claim tells the approvers they can stand down, which is the one thing
+    // a soft lock must never do.
+    if ((gate.excludedApprovers ?? []).includes(actor.subject)) {
+      throw err.policy(
+        CODES.E_GATE_NOT_AUTHORIZED,
+        `gate "${input.gateId}" separates duties: "${actor.subject}" started this run, so they may not claim it either`,
+        { details: { gateId: input.gateId, actor: actor.subject } },
+      );
+    }
 
     const now = this.#now();
     const held = claimHolder(p, gate, now);
@@ -1197,6 +1217,31 @@ export class HumanGateBroker {
       throw err.policy(
         CODES.E_GATE_NOT_AUTHORIZED,
         `gate "${gate.gateId}" does not name "${actorId(input.actor)}" as an approver`,
+        { details: { gateId: gate.gateId, actor: actorId(input.actor) } },
+      );
+    }
+
+    // SEPARATION OF DUTIES — D7.2, and it is a refusal LAYERED ON TOP of the approvers list
+    // rather than a replacement for it. A subject may be named and still barred; the two
+    // rules answer different questions ("is this your question?" and "is this your own work
+    // you are signing off?"), and a gate that asked for both gets both.
+    //
+    // READ OFF THE GATE, like everything else here. The exclusion was resolved once, at
+    // raise, from the run's recorded initiator and journaled on `gate.raised` — so this stays
+    // a function of the fold, a restart cannot lose it, and a replay reproduces the same
+    // answer. Deriving it here from run state would be an authorization input that can be
+    // silently empty in any process that did not raise the gate.
+    //
+    // HUMANS ONLY, and the carve-out is not a hole. A `system` actor reaching this line has
+    // already passed `isAuthorizedActor`, which admits exactly `GATE_SYSTEM_ACTORS` — the
+    // replayer, the timeout's default action, and the dedup inheritor — none of which is a
+    // person who could be the initiator. Without it, every replay of every SoD gate would
+    // fail here, because the replayer's subject is not in any exclusion and its KIND is what
+    // makes it legitimate.
+    if (input.actor.kind === "human" && (gate.excludedApprovers ?? []).includes(input.actor.subject)) {
+      throw err.policy(
+        CODES.E_GATE_NOT_AUTHORIZED,
+        `gate "${gate.gateId}" separates duties: "${input.actor.subject}" started this run, so they may not approve it`,
         { details: { gateId: gate.gateId, actor: actorId(input.actor) } },
       );
     }
@@ -2168,6 +2213,11 @@ function prospectiveRecord(
     state: "open",
     tier: 0,
     ...(req.approvers === undefined ? {} : { approvers: req.approvers }),
+    // THE FIFTH BUILDER, and the one a reader forgets. This is the record `#validate` is
+    // handed on the dedup path, so a missing exclusion here makes an SoD gate compare EQUAL
+    // to a non-SoD one under `sameAuthority` — and inherit its decision in the append that
+    // raises it, from a person the rule exists to bar.
+    ...(req.excludedApprovers === undefined ? {} : { excludedApprovers: req.excludedApprovers }),
     ...(req.allowEdit === undefined ? {} : { allowEdit: req.allowEdit }),
     ...(req.slaMs === undefined ? {} : { slaMs: req.slaMs }),
     ...(deadline === undefined ? {} : { deadline }),
@@ -2789,6 +2839,12 @@ function sameAuthority(a: GateRecord, b: GateRecord): boolean {
     a.mirrorOf === undefined &&
     b.mirrorOf === undefined &&
     sameSubjects(a.approvers, b.approvers) &&
+    // "IDENTICAL" HAS TO INCLUDE THE EXCLUSION, or inheriting is a bypass — D7.8's rule
+    // about the authorization, applied to the half that says who may NOT decide. Without
+    // this a gate declaring separation of duties inherits a decision made on one that did
+    // not, and vice versa; both consumers of this predicate — dedup's `sameQuestion` and
+    // batching's merge — are covered by the one change.
+    sameSubjects(a.excludedApprovers, b.excludedApprovers) &&
     sameAllowEdit(a.allowEdit, b.allowEdit)
   );
 }

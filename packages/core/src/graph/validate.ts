@@ -1478,8 +1478,21 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
     );
   }
   if (a.k !== undefined) unsupported("declares a quorum k, which only mode: quorum would use", "remove k");
-  if (a.separationOfDuties === true) {
-    unsupported("declares separationOfDuties, which is not enforced", "remove it, or keep the initiator out of `approvers` by hand");
+  // SEPARATION OF DUTIES IS ENFORCED NOW, so the refusal is gone — support arrives by
+  // DELETING a check, exactly as this function's docstring says. What replaces it is narrower
+  // and answers a question the runtime cannot: the rule bars the initiator, so a gate that
+  // names NOBODY would read as "everybody except one person" — supervised-looking, and
+  // answerable by every authenticated principal but one. That is the same failure the deleted
+  // check was written against, one field over, and it IS decidable at compile time because
+  // both halves are in the spec.
+  if (a.separationOfDuties === true && (a.approvers ?? []).length === 0) {
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVAL_INCOMPLETE",
+      message: `human_gate "${n.id}" declares separationOfDuties but names no approvers, so it would exclude one person and admit everyone else`,
+      at,
+      fix: "list the approvers who may decide it — separation of duties narrows that list, it does not stand in for it",
+    });
   }
   if (a.delegation?.allowed === true) {
     unsupported("declares delegation, which is not enforced", "remove it — a delegated approval would be recorded as the delegate's own");
