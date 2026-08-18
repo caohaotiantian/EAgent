@@ -3629,3 +3629,41 @@ than an absolute that a reader will disprove.
 pays nothing for a branch it never takes. If eager compilation ever becomes worth it — a
 deployment that wants every delegation validated before the first Task runs — that is the moment
 to reconsider, and the manifest question comes with it.
+
+---
+
+## Three recompiles, one rule, and a test that counts questions rather than answers
+
+A22 froze prompts, A24 froze the subgraph tree, and A25 was the path both had stepped around:
+a graph that MUTATES recompiles by design, and both sites did it with the live resolver.
+`#applyMutation` runs inside the executing Task that proposed the change; `#rehydrateGraph` runs
+on **every** `advance` of a run that has ever mutated, so one re-resolve became one per turn.
+A `canMutate` agent's own prompt could change underneath it between proposing a node and taking
+its next turn.
+
+**The fix is the rule mutation already follows, applied to content.** `frozenFirst(graph, live)`
+answers `document` and `subgraph` from what the run froze and falls through to the live store for
+anything else — so a mutation may ADD a node naming a ref nothing has seen, and that ref resolves
+once, at the compile that introduces it, while nothing already relied upon can move. Additive-only
+was always the mutation rule; this is the same sentence about bytes instead of nodes.
+
+`resolve` is deliberately not overridden: it returns a pin, the pin is a digest over the ref, and
+a compile that could not pin a new ref could not compile at all.
+
+**One helper at all three sites, and the reason is the previous wave.** `#compileChild` had this
+shape already, spelled inline. I shipped the WIDE substitution there first, measured 38 failures,
+wrote the number into three documents as though it refuted the whole direction, and only a
+reviewer's narrow retry showed the cheap version cost nothing. A shape that has been got wrong
+once is a shape to give a name, so the fourth site cannot re-derive it differently.
+
+**And the test counts questions, not answers.** The first draft asserted that the original
+graph's `documents` still held the original text — which proves nothing, because a frozen object
+cannot change; the test would have passed with the fix reverted. What is actually observable is
+whether a recompile ASKS the live store about a ref the run has already frozen. Counting those
+lookups, driving a real mutation, then a second `advance` to reach the rehydrate path, gives
+zero — and reverting either call site turns it red. **An assertion about a value that cannot vary
+is a test that cannot fail**, and it is an easy one to write when the mechanism is fresh in mind.
+
+**Reverses when.** The live fallback is what makes this additive rather than a freeze. If a
+deployment ever needs a mutation to be sealed — no new refs at all, only recombination of what
+was compiled — that is a different rule and wants a different resolver, not a flag on this one.

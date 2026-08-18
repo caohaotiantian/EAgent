@@ -14,7 +14,7 @@ import { InProcessEventBus } from "../../src/bus.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import { compileMutation, descendantsOf, type GraphMutation } from "../../src/graph/mutate.ts";
 import type { EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../../src/graph/spec.ts";
-import type { ToolManifestLite } from "../../src/graph/validate.ts";
+import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
 import type { EdgeId, NodeId, TaskId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
@@ -323,7 +323,7 @@ interface Rig {
   readonly ran: string[];
 }
 
-function rig(script: MockScript, opts: { granted?: string[]; store?: MemoryStateStore } = {}): Rig {
+function rig(script: MockScript, opts: { granted?: string[]; store?: MemoryStateStore; resolver?: ResourceResolver } = {}): Rig {
   const now = (): number => 1_700_000_000_000;
   const store = opts.store ?? new MemoryStateStore({ now });
   const tools = new ToolRegistry();
@@ -356,7 +356,7 @@ function rig(script: MockScript, opts: { granted?: string[]; store?: MemoryState
     functions,
     models,
     now,
-    resolver: resolver(),
+    resolver: opts.resolver ?? resolver(),
     policy: { granted: opts.granted ?? CAPS, systemFloor: "out" },
   });
   return { engine, store, ran };
@@ -452,6 +452,50 @@ test("a run that restarts mid-flight rebuilds its mutated graph FROM THE JOURNAL
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
   assert.deepEqual(second.ran, ["email.send"], "a node that exists ONLY in the successor graph ran");
   assert.notEqual(p.graphHash, compileBase().graphHash);
+});
+
+test("A MUTATION INHERITS WHAT THE RUN ALREADY FROZE, and only ADDS to it", async () => {
+  // The mutated path was the one place a run still re-resolved content mid-flight.
+  // `#applyMutation` recompiles from inside the executing Task that proposed the change, and
+  // `#rehydrateGraph` recompiles on every later `advance` — both with the live resolver, so a
+  // promotion between the run's compile and its mutation swapped the prompt or the child
+  // underneath it. That is the swap A22 and A24 closed everywhere else.
+  //
+  // The resolver here changes its answer the moment the run starts: whatever the graph compiled
+  // against, every LATER lookup returns "PROMOTED". If the mutation re-resolved, the agent's
+  // own prompt would change under it.
+  // The property is observable directly: after the run's own compile, a recompile must not ASK
+  // the live store about a ref the run already froze. Counting the lookups is the assertion —
+  // asserting on the original graph object would prove nothing, since it cannot change.
+  const asked: string[] = [];
+  let counting = false;
+  const shifting: ResourceResolver = {
+    resolve: (ref) =>
+      /^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)
+        ? { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" }
+        : undefined,
+    document: (pinned) => {
+      if (counting) asked.push(pinned);
+      return "Test instructions.";
+    },
+  };
+
+  const r = rig(PROPOSER, { resolver: shifting });
+  const graph = compileOrThrow({ spec: baseSpec(), resolver: shifting, tools: TOOLS, tenantCapabilities: CAPS });
+  assert.equal(Object.values(graph.documents)[0], "Test instructions.", "the run froze the original");
+
+  counting = true;
+  const runId = await r.engine.submit({ graph, inputs: { seed: "go" } });
+  const p = await r.engine.advance(runId);
+  assert.notEqual(p.status, "failed", JSON.stringify(p.error ?? {}));
+
+  const after = (await r.engine.projection(runId))!;
+  assert.notEqual(after.graphHash, graph.graphHash, "the graph really did mutate");
+
+  // A SECOND advance is the rehydrate path, which recompiles on every advance of a run that has
+  // ever mutated — the site that turned one re-resolve into one per turn.
+  await r.engine.advance(runId);
+  assert.deepEqual(asked, [], "no recompile asked the live store about a ref the run had frozen");
 });
 
 test("a node that did not declare canMutate cannot grant itself the power", async () => {

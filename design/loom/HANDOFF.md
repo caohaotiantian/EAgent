@@ -87,12 +87,12 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured **2026-08-18 at `49a8b0d`**, tree clean, `npm run check` green end to end.
+Measured **2026-08-19 at `ec38574`**, tree clean, `npm run check` green end to end.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1747 pass, 0 fail** | `npm run check` (its test arm) |
+| Tests | **1748 pass, 0 fail** | `npm run check` (its test arm) |
 | Test files | 87 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 53 | `node scripts/check-zero-dep.mjs` (it prints the count) |
 | Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
@@ -726,9 +726,28 @@ promotes at run time and the CLI's store is seeded once at boot. The fix is the 
 freeze the child spec into `RunGraph` beside `documents` — and it is a redesign of subgraph
 resolution rather than a one-line guard, which is why it is its own entry.
 
-**A25 · A MUTATED graph re-resolves its prompts and children from a live resolver, mid-run.**
-New, 2026-08-18, found by a reviewer checking A24's absolute claim rather than by the fix that
-made it. `#applyMutation` recompiles the merged spec and assigns the result to `ctx.graph`, and
+**A25 · A MUTATED graph re-resolves its prompts and children from a live resolver, mid-run.
+RESOLVED 2026-08-19.** All three recompiles that happen while a run is in flight —
+`#compileChild`, `#applyMutation`, `#rehydrateGraph` — now go through one `frozenFirst(graph,
+live)` resolver: content the run already froze answers from the compiled artifact, and only a
+ref nothing has seen reaches the live store. That is exactly what additive-only mutation means,
+which is why the rule fits rather than being bolted on: a mutation may ADD, and what it may not
+do is change an answer the run is already built on.
+
+> **One helper rather than three spreads**, on invariant 6's argument one layer over — the last
+> wave shipped the wide substitution, measured 38 failures, and only a reviewer's narrow retry
+> showed the cheap version worked. A shape that has already been got wrong once is a shape to
+> name.
+>
+> **The test counts LOOKUPS, not values.** Asserting that a graph object's `documents` did not
+> change proves nothing — it cannot. What is observable is whether a recompile ASKS the live
+> store about a ref the run has frozen, and after a mutation plus a second `advance` (the
+> rehydrate path, which recompiles every turn) that count is zero. Reverting either call site
+> turns it red.
+
+**A25 (original entry, kept for the reproduction) · A MUTATED graph re-resolves its prompts and
+children from a live resolver, mid-run.** Found by a reviewer checking A24's absolute claim
+rather than by the fix that made it. `#applyMutation` recompiles the merged spec and assigns the result to `ctx.graph`, and
 `#rehydrateGraph` recompiles on every `advance` of a run that has mutated — both with
 `this.#resolver`. So `resolveDocuments` and `resolveSubgraphs` run again, from the live store,
 while a Task is executing: a `canMutate` agent's graph can have its prompt or its child swapped

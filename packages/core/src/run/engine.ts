@@ -277,6 +277,38 @@ interface GateAuthorization {
 }
 
 /**
+ * A resolver that answers CONTENT from what a run already froze, and everything else live.
+ *
+ * Every recompile that happens while a run is in flight uses this: the child's compile, a
+ * mutation, and the rehydrate that replays a mutation after a restart. All three are compiles —
+ * so they legitimately pin refs — and all three run inside or alongside an executing Task, so a
+ * ref the run has ALREADY resolved must not answer differently the second time.
+ *
+ * ADDITIVE, which is the same rule graph mutation itself follows. A mutation may introduce a
+ * node naming a ref nothing has seen, and that ref has to resolve from somewhere: the live
+ * resolver is behind this one and answers it, once, at the compile that introduces it. What the
+ * live resolver may not do is change an answer the run is already built on.
+ *
+ * `resolve` is deliberately NOT overridden. It returns a pin, the pin is a digest over the ref,
+ * and re-deriving it is both cheap and stable — while a compile that could not pin a new ref
+ * could not compile at all.
+ */
+function frozenFirst(graph: RunGraph, live: ResourceResolver): ResourceResolver {
+  // Built once. `documents` is keyed by REF and `document()` is asked by DIGEST, so the bridge
+  // is the manifest — and walking it per lookup would be a scan per prompt.
+  const byDigest = new Map<string, string>();
+  for (const pinned of graph.resolutionManifest) {
+    const text = graph.documents?.[pinned.ref];
+    if (text !== undefined) byDigest.set(pinned.digest, text);
+  }
+  return {
+    resolve: (ref) => live.resolve(ref),
+    document: (pinned) => byDigest.get(pinned) ?? live.document?.(pinned),
+    subgraph: (ref) => graph.subgraphs?.[ref] ?? live.subgraph?.(ref),
+  };
+}
+
+/**
  * A refused SoD gate, as a failed OUTCOME rather than a throw.
  *
  * The distinction is the whole reason this is a function. `#commit` — where `raise` is called
@@ -1443,7 +1475,10 @@ export class Engine {
 
     const result = compile({
       spec: { ...ctx.graph.spec, nodes: [...ctx.graph.spec.nodes, ...nodes], edges: [...ctx.graph.spec.edges, ...edges] },
-      resolver: this.#resolver,
+      // What this run already froze, then the live store for anything the mutation ADDED. A
+      // rehydrate runs on every `advance` of a run that has ever mutated, so without it a
+      // promotion re-resolved every prompt and child on every turn.
+      resolver: frozenFirst(ctx.graph, this.#resolver),
       tools: this.tools.manifests(),
       tenantCapabilities: this.#policyOpts.granted,
     });
@@ -2697,7 +2732,7 @@ export class Engine {
       // Without it the freeze stops one level down: the GRANDCHILD spec is read from the live
       // resolver while the parent's Task is executing, which is verbatim the swap A24 exists to
       // prevent, and every deep entry `resolveSubgraphs` collected is dead.
-      resolver: { ...this.#resolver, subgraph: (r) => parent.subgraphs[r] ?? this.#resolver.subgraph?.(r) },
+      resolver: frozenFirst(parent, this.#resolver),
       tools: this.tools.manifests(),
       tenantCapabilities: this.#policyOpts.granted,
     });
@@ -3277,7 +3312,10 @@ export class Engine {
       base: ctx.graph,
       mutation,
       budget: { consumedNodes: ctx.addedNodes, expansion: ctx.graph.expansion },
-      resolver: this.#resolver,
+      // A mutation is proposed from INSIDE an executing Task, so this is the sharpest of the
+      // three: without it a `canMutate` agent's own graph re-resolved its prompts and children
+      // from the live store at the moment it proposed a change.
+      resolver: frozenFirst(ctx.graph, this.#resolver),
       tools: this.tools.manifests(),
       ...(this.#policyOpts.systemFloor === undefined ? {} : { systemPostureFloor: this.#policyOpts.systemFloor }),
     });
