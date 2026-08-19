@@ -1641,6 +1641,78 @@ function httpPort(args: Args): number {
  * `unref` so the timer alone never holds the process open: the listening socket is what
  * keeps `serve` alive, and once that is closed the clock must not be the reason we linger.
  */
+/**
+ * Advance runs whose backoff has elapsed. The gate clock's counterpart, and it did not exist.
+ *
+ * `Engine.advance` RETURNS while a Task is in backoff, so something has to come back once the
+ * clock has moved. `loom run` does that for the run it submitted — and nothing did it for a run
+ * submitted over HTTP. Reproduced by a reviewer: a `POST /runs` whose node retries sat `running`
+ * with `attempt 1` eighteen seconds after `retryAfter` elapsed, and moved only when a human
+ * POSTed `{"kind":"advance"}` by hand, once per attempt. `loom serve`'s own banner promises a gate
+ * clock and says nothing about runs, so a deployment following the README's opening line had runs
+ * that hold a leased Task forever with no clock and no notification.
+ *
+ * ONLY RUNS WITH A DUE RETRY, which is what keeps this from fighting whoever else is driving.
+ * A run being actively advanced does not sit with an elapsed `retryAfter`; and if two processes
+ * do collide, the loser writes nothing — every commit compare-and-swaps on the seq the decision
+ * was taken at, which is the same argument `GateSweeper` makes for itself one file over.
+ *
+ * A RUN WHOSE GRAPH THIS PROCESS DOES NOT HOLD IS SKIPPED, not failed. `RunGraph` is not
+ * journaled, so re-attaching means finding the graph whose hash the journal names; a deployment
+ * that has not published it cannot advance that run, and saying nothing is better than failing a
+ * run this process simply cannot see.
+ */
+/** How many runs one run-clock tick folds. The gate sweeper bounds itself for the same reason. */
+const DEFAULT_RUN_CLOCK_LIMIT = 200;
+
+function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop(): void } {
+  let running = false;
+  let failing = false;
+  const tick = (): void => {
+    if (running) return;
+    running = true;
+    void (async () => {
+      const rows = await ws.store.listRuns(limit);
+      const index = graphsByHash(ws);
+      for (const row of rows) {
+        const p = await ws.engine.projection(row.runId);
+        if (p === undefined || p.status !== "running") continue;
+        const due = Object.values(p.tasks).some(
+          (t) => t.state === "ready" && t.retryAfter !== undefined && t.retryAfter <= Date.now(),
+        );
+        if (!due) continue;
+        const wanted = await ws.engine.compiledGraphHash(row.runId);
+        const graph = wanted === undefined ? undefined : index.get(wanted);
+        if (graph === undefined) continue;
+        ws.engine.attach(row.runId, graph);
+        await ws.engine.advance(row.runId);
+      }
+    })().then(
+      () => {
+        if (failing) {
+          failing = false;
+          process.stderr.write("! run clock recovered — backed-off runs are being advanced again\n");
+        }
+      },
+      (e: unknown) => {
+        if (!failing) {
+          failing = true;
+          process.stderr.write(
+            `! RUN CLOCK STOPPED ADVANCING — ${(e as Error).message}\n` +
+              `  Runs whose retry backoff has elapsed will sit until this recovers or a caller POSTs\n` +
+              `  {"kind":"advance"} to them.\n`,
+          );
+        }
+      },
+    ).finally(() => {
+      running = false;
+    });
+  };
+  const timer = setInterval(tick, everyMs);
+  timer.unref();
+  return { stop: () => clearInterval(timer) };
+}
+
 function startGateClock(ws: Workspace, everyMs: number): { readonly everyMs: number; stop(): void } {
   let running = false;
   let failing = false;
@@ -1890,12 +1962,21 @@ export async function main(argv: readonly string[]): Promise<number> {
         const plane = new ControlPlane(opts);
         const { port } = await plane.listen(wanted);
         const clock = startGateClock(ws, everyMs);
+        const runs = startRunClock(ws, everyMs, DEFAULT_RUN_CLOCK_LIMIT);
         announce(plane, ws, opts, clock.everyMs, port);
         // SIGINT IS AN EVENT HANDLER, so nothing above it catches, and its exit code is
         // the only thing a supervisor reads. Both facts live in `serveUntilInterrupt`,
         // which returns what this command should exit with — see its docstring for why a
         // failed shutdown is 1 and not 0 and not 130.
-        return await serveUntilInterrupt(plane, clock);
+        // BOTH CLOCKS STOP. `serveUntilInterrupt` takes one thing to stop, and a second timer
+        // left running is a process that will not exit — the `.unref()` saves it in practice and
+        // relying on that is how the first one would have been missed.
+        return await serveUntilInterrupt(plane, {
+          stop: () => {
+            clock.stop();
+            runs.stop();
+          },
+        });
       }
 
       case "run": {
