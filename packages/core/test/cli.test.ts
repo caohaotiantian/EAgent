@@ -711,3 +711,80 @@ test("AND A SUBSTITUTED GRAPH IS REFUSED — the gate binds what the human was s
     d.dispose();
   }
 });
+
+test("A FUNCTION NODE RUNS — two of eight node types could not, and nothing said so", async () => {
+  // `createFunctionLoader` was the FOURTH capability this repo shipped with no caller, after
+  // `runSandboxed`, `McpClient` and `ResourceStore`: the CLI built a bare `new FunctionRegistry()`
+  // and nothing ever put anything in it, and `"function"` was in neither loadable resource kind,
+  // so `resources/function/*.js` was never read. A graph with a `function` node compiled clean
+  // and failed at run time with `no function registered as "function/x@stable"` — as did every
+  // `evaluator{kind:"assertion"}`, and both shipped example workflows.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "resources", "function"), { recursive: true });
+    writeFileSync(join(d.dir, "resources", "function", "double.js"), '(view) => ({ writes: { doubled: (view.get("amount") ?? 0) * 2 } })');
+
+    const g = join(d.dir, "fn.json");
+    writeFileSync(g, JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "fn", project: "demo", version: 1 },
+      policy: { posture: "out", expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { amount: { type: "number", reduce: "replace" }, doubled: { type: "number", reduce: "replace" } },
+      inputs: ["amount"],
+      outputs: ["doubled"],
+      nodes: [{ id: "d", type: "function", reads: ["amount"], writes: ["doubled"], function: { ref: "function/double@stable" } }],
+      edges: [],
+    }));
+
+    const out = await run(["run", g, "--workspace", d.dir, "--input", JSON.stringify({ amount: 21 })]);
+    const p = JSON.parse(out.out) as { status: string; outputs: Record<string, unknown> };
+    assert.equal(p.status, "succeeded", `a function node must run: ${out.out}`);
+    assert.equal(p.outputs["doubled"], 42);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("A CAPABILITY IS GRANTED EXACTLY WHEN THE OPERATOR REGISTERED THE TOOL FOR IT", async () => {
+  // TWO LISTS, ONE FILE, 830 LINES APART, DISAGREEING BY CONSTRUCTION. The compiler was told the
+  // tenant held `proc:exec` and every `mcp:*`; the PolicyEngine was handed a hardcoded
+  // `["fs:read","fs:write","net:fetch"]`. So `loom compile` said `ok` for a graph naming
+  // `proc.exec` and `loom run` failed it `E_CAP_DENIED` — `--allow-exec` and `--mcp-file` could
+  // never produce a successful call, and the whole sandbox path and the entire MCP client were
+  // unreachable from the deployment.
+  //
+  // Both lists derive from the registry now, which is also the security argument: a tool is
+  // registered only when the operator passed the flag that registers it, so "registered implies
+  // granted" says exactly "the operator asked for this".
+  const d = emptyDir();
+  try {
+    const g = join(d.dir, "exec.json");
+    writeFileSync(g, JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "exec", project: "demo", version: 1 },
+      policy: { posture: "out", capabilities: ["proc:exec"], expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+      inputs: ["seed"],
+      outputs: ["out"],
+      nodes: [{ id: "x", type: "tool", reads: ["seed"], writes: ["out"], tool: { name: "proc.exec", version: "1.0", args: { command: "echo", args: ["hi"] } }, unhandled: true }],
+      edges: [],
+    }));
+
+    // WITHOUT the flag the graph does not compile, which is the honest answer: nothing in this
+    // process can run it. It used to compile `ok` and then be denied at dispatch.
+    await assert.rejects(
+      () => run(["compile", g, "--workspace", d.dir]),
+      /GRAPH017_CAPABILITY_NOT_GRANTED/,
+      "a capability no registered tool provides must not compile",
+    );
+
+    // WITH it, the same graph compiles — and the capability the compiler was told about is the
+    // one the engine enforces.
+    const allowed = await run(["compile", g, "--workspace", d.dir, "--allow-exec", "echo"]);
+    assert.equal(allowed.code, 0, `--allow-exec must make it compile: ${allowed.out}${allowed.err}`);
+  } finally {
+    d.dispose();
+  }
+});

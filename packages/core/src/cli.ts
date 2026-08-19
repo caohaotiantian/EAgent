@@ -58,6 +58,7 @@ import {
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
+import { createFunctionLoader } from "./resources/functions.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId } from "./ids.ts";
@@ -71,6 +72,9 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            humans answer them
                [--sweep-ms 1000]                           how often gate SLAs are checked
   loom compile <graph.json|yaml>                           validate and print diagnostics
+
+  A workspace publishes resources/ by directory: prompt/*.md, function/*.js,
+  subgraph/*.json, and graphs/*.json for the graphs a run can be re-attached from.
   loom run     <graph.json|yaml> [--input JSON] [--as ID]  run to completion or to a gate
                [--budget USD]                              a ceiling for THIS run
   loom gates   <runId>                                     list open gates
@@ -82,6 +86,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
   --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered
                     at all, so a graph naming it fails to compile
+  --grant CAP,CAP   capabilities no TOOL declares — graph:mutate is the one that
+                    matters. Tool capabilities are not grantable here: they come
+                    from what is registered, which is what --allow-exec, --egress
+                    and --mcp-file decide
   --as ID           the subject a decision is JOURNALED under, and matched against a
                     gate's approvers. Defaults to "cli", which no approvers list names —
                     so a gate that names anybody needs this. It ends up in the audit
@@ -214,6 +222,8 @@ interface Workspace {
   readonly engine: Engine;
   readonly bus: InProcessEventBus;
   readonly resolver: ResourceResolver;
+  /** What this process may DO — the one list, derived from what it registered. */
+  readonly granted: readonly string[];
   /** `undefined` when `--channels-file` was not given: no channels, and no callback route. */
   readonly delivery: DeliveryConfig | undefined;
   /** `undefined` when `--models-file` was not given: the mock is the only adapter. */
@@ -391,12 +401,29 @@ export function openWorkspace(
     subgraph: (ref) => documents.subgraph(ref),
   };
 
+  // EVERY PUBLISHED FUNCTION BODY, COMPILED AND REGISTERED.
+  //
+  // `createFunctionLoader` is the fourth capability this repo shipped with no caller, after
+  // `runSandboxed`, `McpClient` and `ResourceStore` — the CLI built a bare `new
+  // FunctionRegistry()` and nothing ever put anything in it. So a graph with a `function` node
+  // compiled clean and failed at run time with `no function registered as "function/x@stable"`,
+  // and both shipped example workflows were unrunnable for the same reason.
+  //
+  // Registered EAGERLY rather than lazily, because `FunctionRegistry.register(ref, body)` is
+  // keyed by ref and the engine looks up by ref: a lazy loader would need a second lookup path
+  // into the same registry, which is the shape that lets two answers disagree. A body that does
+  // not evaluate refuses HERE, at boot, where an operator is watching — not inside a run.
+  const functions = new FunctionRegistry();
+  registerFunctions(documents, functions, root);
+
+  // ONE DERIVATION, USED HERE AND BY THE COMPILER — see `capabilitiesOf`.
+  const granted = capabilitiesOf(tools, grantFlag(args));
   const engine = new Engine({
     store,
     bus,
     resolver,
     tools,
-    functions: new FunctionRegistry(),
+    functions,
     models: modelRegistry,
     // THE ONE REASON THE BROKER IS CONSTRUCTED HERE: a dispatcher. `HumanGateBroker.raise`
     // delivers only when it has one AND the gate's request names channels, so without this
@@ -409,10 +436,10 @@ export function openWorkspace(
     ...(delivery === undefined ? {} : { gates: new HumanGateBroker({ dispatcher: delivery.dispatcher }) }),
     // systemFloor defaults to `on`: everything is observable and interruptible,
     // and irreversibility classes still force a gate where one is warranted.
-    policy: { granted: ["fs:read", "fs:write", "net:fetch"] },
+      policy: { granted },
   });
 
-  return { root, dataDir, store, engine, bus, resolver, delivery, models, close: () => store.close() };
+  return { root, dataDir, store, engine, bus, resolver, granted, delivery, models, close: () => store.close() };
 }
 
 /**
@@ -1225,21 +1252,10 @@ function loadGraph(ws: Workspace, file: string): RunGraph {
     // Every registered MCP tool declares `mcp:<server>`, and a capability the tenant does
     // not hold is a compile error — so a connected server has to appear here or its tools
     // are visible to the compiler and unusable by every graph.
-    tenantCapabilities: [
-      "fs:read",
-      "fs:write",
-      "net:fetch",
-      "proc:exec",
-      // Every registered MCP tool declares `mcp:<server>`, and a capability the tenant does
-      // not hold is a compile error — so a connected server has to appear here or its tools
-      // are visible to the compiler and unusable by every graph. Derived from what is
-      // actually registered rather than from the config file, so the two cannot disagree.
-      ...new Set(
-        Object.values((ws.engine.tools as ToolRegistry).manifests())
-          .flatMap((m) => m.capabilities)
-          .filter((c) => c.startsWith("mcp:")),
-      ),
-    ],
+    // THE SAME LIST THE ENGINE ENFORCES. It used to be a second, longer literal — the compiler
+    // was told the tenant held `proc:exec` and every `mcp:*` while the PolicyEngine was handed
+    // three capabilities — so a graph could compile `ok` and be denied at run time.
+    tenantCapabilities: ws.granted,
   });
   if (!result.ok) {
     for (const d of result.diagnostics) {
@@ -1263,6 +1279,78 @@ function loadGraph(ws: Workspace, file: string): RunGraph {
  *
  * Hash-keyed, no collisions possible: two files with the same hash ARE the same graph.
  */
+/**
+ * What this process may actually DO, derived once from what it registered.
+ *
+ * THERE WERE TWO LISTS AND THEY DISAGREED BY CONSTRUCTION. The compiler was told the tenant held
+ * `proc:exec` and every `mcp:<server>`; the PolicyEngine was handed a hardcoded
+ * `["fs:read","fs:write","net:fetch"]` 830 lines away. So `loom compile` said `ok` for a graph
+ * naming `proc.exec` or an MCP tool, and `loom run` failed it `E_CAP_DENIED` — which meant
+ * `--allow-exec` and `--mcp-file` could never produce a successful call, and the whole
+ * `sandbox/subprocess.ts` path and the entire MCP client were unreachable from the deployment.
+ * Two answers to one question is how they came to disagree; this is the question.
+ *
+ * DERIVED FROM THE REGISTRY, and that is the security argument rather than a convenience. A tool
+ * is registered ONLY when the operator passed the flag that registers it: `proc.exec` needs
+ * `--allow-exec`, `net.fetch` needs `--egress`, MCP tools need `--mcp-file`. So "registered
+ * implies granted" says exactly "the operator asked for this", and a capability nobody asked for
+ * is held by nobody. Widening the grant list can only happen by widening what is registered,
+ * which is a flag an operator types.
+ */
+/**
+ * Compile and register every `function/*` resource the workspace publishes.
+ *
+ * A REFUSAL AT BOOT, NOT INSIDE A RUN. `createFunctionLoader` evaluates the body in a `vm`
+ * context with `SAFE_GLOBALS`, so a syntax error or a body that is not a function is caught here,
+ * where the message reaches an operator's terminal — rather than at the moment a node executes,
+ * halfway through a run that has already spent money.
+ */
+function registerFunctions(store: ResourceStore | undefined, functions: FunctionRegistry, root: string): void {
+  if (store === undefined) return;
+  const loader = createFunctionLoader({ store });
+  for (const version of store.list({ kind: "function" })) {
+    const ref = `function/${version.name}@stable`;
+    try {
+      const body = loader.load(ref);
+      if (body !== undefined) functions.register(ref, body);
+    } catch (e) {
+      // One bad body must not stop the process from serving every other graph — the same rule
+      // `readResources` and `discoverGraphs` already follow — but it is announced, because a
+      // silently absent function is exactly the failure this whole change is about.
+      process.stderr.write(`! skipping ${ref} in ${join(root, "resources", "function")}: ${(e as Error).message}\n`);
+    }
+  }
+}
+
+function capabilitiesOf(tools: ToolRegistry, extra: readonly string[] = []): readonly string[] {
+  return [
+    ...new Set([...Object.values(tools.manifests()).flatMap((m) => m.capabilities), ...extra]),
+  ].sort();
+}
+
+/**
+ * `--grant CAP,CAP` — capabilities no tool declares.
+ *
+ * `graph:mutate` is the one that matters and it was a catch-22: declaring it in a graph is
+ * `GRAPH017_CAPABILITY_NOT_GRANTED` at compile, whose fix text says "grant it to the tenant" —
+ * which no flag could do — and omitting it compiles and then denies at dispatch, AFTER the model
+ * call that proposed the mutation was paid for.
+ *
+ * Deliberately NOT a way to grant a tool capability the process has no tool for: that would be a
+ * grant with nothing behind it, and the registry is the source for those.
+ */
+function grantFlag(args: Args): readonly string[] {
+  const raw = args.flags["grant"];
+  if (raw === undefined) return [];
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw err.validation(CODES.E_CONFIG_INVALID, "--grant needs a comma-separated list of capabilities");
+  }
+  return raw
+    .split(",")
+    .map((c) => c.trim())
+    .filter((c) => c !== "");
+}
+
 function graphsByHash(ws: Workspace): Map<string, RunGraph> {
   const dir = join(ws.root, "graphs");
   const out = new Map<string, RunGraph>();
@@ -2115,7 +2203,7 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
       // from the absence of a flag.
       if (file.isSymbolicLink() || !file.isFile()) continue;
       const ext = extname(file.name);
-      if (!(isSpec ? SPEC_EXT : TEXT_EXT).includes(ext)) continue;
+      if (!extensionsFor(kind).includes(ext)) continue;
       const name = basename(file.name, ext);
       // A NAME THE REF GRAMMAR CANNOT HOLD IS NOT A RESOURCE. `my prompt.md` would publish
       // `prompt/my prompt@stable` — resolvable through the store and unreachable from any
@@ -2170,10 +2258,29 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
  * graph is written exactly like a top-level one — the alternative is two spellings of the same
  * document and a question about which one a `subgraph` node wants.
  */
-const TEXT_KINDS: readonly string[] = ["prompt", "agent_profile", "skill"];
+// `function` is TEXT because a function resource's content IS a JavaScript function expression —
+// `createFunctionLoader` evaluates `(${source})` and takes the completion value. It was in
+// neither list, so `resources/function/*.js` was never read, `createFunctionLoader` had zero
+// callers, and `function` and `evaluator{kind:"assertion"}` — two of eight node types — passed
+// the compiler and could never run.
+const TEXT_KINDS: readonly string[] = ["prompt", "agent_profile", "skill", "function"];
 const SPEC_KINDS: readonly string[] = ["subgraph", "graph"];
 const TEXT_EXT: readonly string[] = [".md", ".txt"];
 const SPEC_EXT: readonly string[] = [".json", ".yaml", ".yml"];
+/**
+ * A function body is CODE, so it gets its own extensions rather than widening `TEXT_EXT`.
+ *
+ * Adding `.js` to the prose list would let `resources/prompt/x.js` publish a system prompt, which
+ * is a different kind of thing wearing the same suffix. Per-kind because the kinds genuinely
+ * differ: `.md` is what a prompt is, `.json` is what a graph is, `.js` is what a function is.
+ */
+const FUNCTION_EXT: readonly string[] = [".js", ".mjs"];
+
+function extensionsFor(kind: string): readonly string[] {
+  if (SPEC_KINDS.includes(kind)) return SPEC_EXT;
+  if (kind === "function") return FUNCTION_EXT;
+  return TEXT_EXT;
+}
 
 /** `pathFlag`, for the commands where the path is not optional. */
 function requireFileFlag(args: Args, name: string): string {
