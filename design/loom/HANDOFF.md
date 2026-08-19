@@ -3,7 +3,8 @@
 State as of **2026-08-15**, branch `loom`, mid-wave — `src/` is being edited by other
 builders as this is written, so the numbers under *Where things stand* are measurements and
 the commands beside them are the fact. The ten hardening waves that used to sit uncommitted
-on top of `5f06c40` are committed (`5451bb2`, `e6cd569`), a fail-open correctness wave sits
+on top of the commit that added this file are committed — as the *hardening pass*, in its code
+half and its docs half — a fail-open correctness wave sits
 on top of them, and a self-audit close-out wave sits on top of that. How many waves is not a
 number worth writing down twice; the entries are countable:
 `grep -ac '^## 2026-08-05 — Hardening —' design/loom/JOURNAL.md` → **10** at the time of
@@ -87,7 +88,7 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured **2026-08-19 at `ec38574`**, tree clean, `npm run check` green end to end.
+Measured **2026-08-19**, tree clean, `npm run check` green end to end.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
@@ -182,14 +183,14 @@ git ls-remote --heads origin loom                      # (empty)
 **What trips the scan, exactly** — measured 2026-08-18, not inferred:
 
 ```
-packages/core/test/run/delivery.test.ts:2455  "https://hooks.slack.invalid/services/TEAM/BOT/tok-not-a-real-token"
-packages/core/test/run/delivery.test.ts:2574  "https://hooks.slack.invalid/services/TEAM/BOT/tok-also-not-real"
+packages/core/test/run/delivery.test.ts:2455  a hooks.slack.com "/services/<T…>/<B…>/<24 chars>" URL
+packages/core/test/run/delivery.test.ts:2574  the same shape with a 16-character tail
 ```
 
-Introduced in `5451bb2`, fixed at HEAD in `abe5678`, and present in the trees of **25 of the
-125 commits**. GitHub's Slack-webhook detector matches on URL SHAPE, not entropy: `T00000000`
+Introduced by the hardening pass, fixed in the test file by *"stop the webhook fixture matching a
+real provider's token grammar"*, and present in the trees of **45 commits**. GitHub's Slack-webhook detector matches on URL SHAPE, not entropy: `T00000000`
 and `XXXX…` satisfy its character classes, and a scanner that could tell a placeholder from a
-live token would be a scanner one `sed` away from useless. That is why `abe5678` broke the
+live token would be a scanner one `sed` away from useless. That is why the fix broke the
 GRAMMAR — an `.invalid` host and the substrings split across template literals — rather than
 changing the characters. **It does not unblock the push, because a scan reads the commits
 being pushed and not the tip.**
@@ -209,14 +210,25 @@ Two ways out:
 
 1. **Allowlist it through GitHub's UI.** The rejection carries a bypass URL. One click, history
    intact, honest about what the string is. This is the cheaper one and it is what I would do.
-2. **Rewrite the 25 commits** — `git filter-repo --replace-text` over the two literals — then
-   push. Safe *specifically because nothing has ever been pushed*. **It has a cost this file
-   did not price before:** every SHA from `5451bb2` onward is renumbered, and the corpus cites
-   `2d4baf1`, `5451bb2`, `5f06c40`, `691df5e`, `cb103e6` and `e6cd569` as load-bearing
-   references. Fix those in the same change or the documentation points at commits that no
-   longer exist.
+2. **Rewrite the history** — `git filter-repo --replace-text` over the two literals — then push.
+   Safe *specifically because nothing has ever been pushed*. **Two corrections to how this was
+   priced here before.** The rewrite is not 25 commits: 45 trees carry the string, and the
+   boundary is the EARLIEST of them, so **74 commits renumber**. And the tip was not clean —
+   this very entry quoted both literals verbatim while explaining them, so the document
+   describing the block reproduced it. **The SHA cost is now paid rather than deferred:** this
+   corpus no longer cites a commit by SHA anywhere. See *Naming commits* below.
 
-`loom-backup-pre-rewrite` tags `30ca621`, so either path is revertible.
+`loom-backup-pre-rewrite` tags the pre-rewrite tip, so either path is revertible.
+
+### Naming commits
+
+**Nothing in `design/` or `CLAUDE.md` cites a git SHA.** They are not stable here: the branch has
+never been pushed, so any commit may still be renumbered by a rewrite, and a corpus that cites
+them acquires a silent dependency on history never moving — which is exactly the dependency that
+made option 2 above expensive. Commits are named by a fragment of their subject instead; find one
+with `git log --oneline --grep='<fragment>'`. Commit MESSAGES still contain SHAs, and that is
+fine: a message is a record of what was true when it was written, not a reference a reader
+follows.
 
 Until one of these happens, **this branch exists on one disk.**
 
@@ -224,16 +236,16 @@ Until one of these happens, **this branch exists on one disk.**
 
 ## What this session changed (2026-08-18)
 
-Seven commits on top of `41ddf39`, closing the register's two oldest security entries and the
+Seven commits on top of the previous handoff, closing the register's two oldest security entries and the
 oversight feature they were the prerequisite for. Reasoning in `JOURNAL.md`; this is the
 inventory. Each phase was reviewed by two independent agents on the committed diff, and every
 blocking finding was reproduced before it was fixed.
 
 | | What | Why it mattered |
 |---|---|---|
-| **A4** `9dbf078` `1e4c171` | `run.submitted.submittedBy`; `cancel`/`rewind` journal their caller; subgraph children inherit; `AuditRecord.principal` | "who started this run that spent money" was unanswerable from the journal |
-| **A3** `b13f117` `026ec55` | runs owned by their submitter; `run_head.submitted_by` + a `1→2` migration; `operator: true`; `GET /gates` | every valid credential was a full operator credential |
-| **SoD** `9bab428` `cb103e6` | `approval.separationOfDuties` enforced — exclusion resolved at raise, journaled on `gate.raised` | it had been a compile error since it was designed |
+| **A4** *journal who submitted a run* + *decide the owner once* | `run.submitted.submittedBy`; `cancel`/`rewind` journal their caller; subgraph children inherit; `AuditRecord.principal` | "who started this run that spent money" was unanswerable from the journal |
+| **A3** *a run belongs to whoever started it* + *a synthetic subject is a real owner* | runs owned by their submitter; `run_head.submitted_by` + a `1→2` migration; `operator: true`; `GET /gates` | every valid credential was a full operator credential |
+| **SoD** *separation of duties, enforced* + *a truthy string is not true* | `approval.separationOfDuties` enforced — exclusion resolved at raise, journaled on `gate.raised` | it had been a compile error since it was designed |
 
 **What the reviews caught, because the pattern is the point.** The migration would have
 bricked every process after the first (`#migrate` stamps only in its bootstrap arm, so an
@@ -867,7 +879,7 @@ the fix correctly does not touch.)*
 | Site | Done | Why not the same as the others |
 |---|---|---|
 | `HumanGateBroker.#ephemeral` | a closed gate's PAYLOAD dropped; its route, SLA and default action kept | a size cap evicts in raise order, so it targets the longest-open gate — the one about to escalate. And **so did releasing the whole entry**: `Engine.rewind` reopens a decided gate by design, so the first version of this fix stripped a LIVE gate's `DeliverySpec` and `#fireTimeout` expired it with a reason that was false. Reproduced by both reviewers independently |
-| `Engine.#childGraphs` | FIFO cap | a pure cache of frozen inputs: eviction costs a recompile and cannot change an answer. Missed by this entry entirely, and `874c6d6` had just widened its key |
+| `Engine.#childGraphs` | FIFO cap | a pure cache of frozen inputs: eviction costs a recompile and cannot change an answer. Missed by this entry entirely, and the commit immediately before had just widened its key |
 | `ControlPlane.#idempotency` | FIFO cap | the one where eviction is a CORRECTNESS cost — nothing dedups on the key, so an evicted entry is a second run. Safe only because entries land on success |
 | `HumanGateBroker.#idempotency` | **left alone, deliberately** | safe against replay — the durable gate-state fold, not the map, is what refuses a repeat — but eviction turns a legitimate Slack redelivery into a durable `gate.callback_rejected` naming a blameless human, plus a bump on the **unresettable** `callbackRefusals` counter |
 | `ResourceStore.#idempotency` | **dropped from scope** | free to fill (the key is set BEFORE the content-address early return), and it is a MISMATCH DETECTOR rather than a dedupe — evicting turns a refusal into a silent accept. Also has no `publish` caller on the serve path |
@@ -2029,8 +2041,8 @@ about the other thirty-odd.
   the audit no such test existed anywhere in the tree; what existed was `skeleton.test.ts`
   row 6 — `store.close()` and a second `Engine` **in the same OS process** — and a clean
   close is, as the last connection in WAL mode, a checkpoint that removes the `-wal`/`-shm`,
-  so the reopen never reads a hot WAL. **The missing test then landed** (`2d4baf1`,
-  2026-08-15) as `restart-crash.test.ts`, D12 is closed, and row 3.1 is now **PROVEN**
+  so the reopen never reads a hot WAL. **The missing test then landed** 2026-08-15
+  as `restart-crash.test.ts`, D12 is closed, and row 3.1 is now **PROVEN**
   citing that path. Note the sequel, because it is the same defect twice: for a day the
   corpus asserted BOTH — 08-PLAN row 6 said proven, 99-DOD said "no such test exists" — and
   the second correction had to be made in a different file from the first. What row 3.1 still
@@ -2150,7 +2162,7 @@ Closing it is a recorded clock effect plus a seeded PRNG in the sandbox context,
 point `ABSENT_CONTEXT_METHODS` in `docs-drift.test.ts` goes red and tells you which
 paragraphs to rewrite. **Do not "fix" this by adding a `ctx.effect` that wraps nothing.**
 
-**D12 · A test now kills a process. CLOSED 2026-08-15 (`2d4baf1`).** This entry read "No test
+**D12 · A test now kills a process. CLOSED 2026-08-15.** This entry read "No test
 kills a process", and it was true until the fixture it describes landed in tree:
 `test/run/restart-crash.test.ts` plus `test/run/restart-crash.child.ts`. The child advances
 the skeleton to its gate and announces `gated` **after** the raising append has returned, so
@@ -2246,8 +2258,8 @@ purpose is to be counted by a program. Adding an export is fine; it just has to 
 deliberate, and re-pinning is a separate commit-worthy act rather than a side effect.
 
 **E2 · Every wave is uncommitted. RESOLVED 2026-08-06 — kept for the one fact worth
-reusing.** The ten hardening waves are `5451bb2` (code + design docs + `surface.json`) and
-`e6cd569` (`JOURNAL.md` + this file). **They could not be split the other way**: the split was
+reusing.** The ten hardening waves are one code commit (code + design docs + `surface.json`) and one docs
+commit (`JOURNAL.md` + this file). **They could not be split the other way**: the split was
 tried before it was asserted, and `docs-drift.test.ts` couples `design/loom/*.md` to `src/`
 — stashing all of `design/loom/` and running the guard fails on `01-INTERFACES.md` not
 documenting `CallbackRequest`/`CallbackDecision`. `JOURNAL.md` is excluded from the guard's

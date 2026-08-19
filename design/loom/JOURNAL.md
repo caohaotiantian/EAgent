@@ -3727,7 +3727,7 @@ proposed: an `AbortSignal` on `CallbackRequest` is a request injected code may h
 channel in the binary would have ignored it.
 
 **The heaviest leak was in neither the entry nor the plan.** `Engine.#childGraphs` holds compiled
-graphs forever, and `874c6d6` — the commit immediately before this wave — had just widened its key
+graphs forever, and the commit immediately before this wave had just widened its key
 a third time. That fix was right and stays; it also multiplied the entries. **A correctness fix
 can have a resource cost, and this pass shipped one without looking.**
 

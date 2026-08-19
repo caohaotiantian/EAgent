@@ -15,8 +15,9 @@ where this file disagrees with the code, the code wins — fix this file.
 
 That is the bar. Correctness of the mechanism serves it and does not substitute for it — a
 framework whose agent nodes can only return `[mock] …` is not a working deployment however
-well-guarded its invariants are. (`--models-file` and the real provider adapters landed in
-`691df5e` for exactly this reason; before it, the binary could not call a model at all.)
+well-guarded its invariants are. (`--models-file` and the real provider adapters landed
+for exactly this reason — `git log --grep='close the self-DoS'` — and before them the binary
+could not call a model at all.)
 
 **The thesis, in one line:** the executable graph is the runtime; an agent loop is one node
 type inside it; every durable fact is an append-only journal entry — so parallelism, human
