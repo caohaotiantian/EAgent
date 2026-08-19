@@ -14,7 +14,7 @@
  */
 
 import type { EdgeId, NodeId } from "../ids.ts";
-import { MULTI_WRITER_SAFE, type ChannelSpec } from "../state/channels.ts";
+import { MULTI_WRITER_SAFE, REDUCER_NAMES, type ChannelSpec } from "../state/channels.ts";
 import {
   CLASSIFICATION_POSTURE_FLOOR,
   CLASS_DEFAULT_POSTURE,
@@ -30,6 +30,7 @@ import {
   DEFAULT_EXPANSION,
   GRAPH_API_VERSION,
   REQUIRED_BLOCK,
+  REQUIRED_FIELDS,
   reachableToolNames,
   type EdgeSpec,
   type ExpansionBudget,
@@ -407,6 +408,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   rule021FanoutHasJoin(spec, idx, d);
   rule009And018Budgets(spec, idx, expansion, d);
   rule010ConcurrentWriters(spec, idx, d);
+  checkToolNames(spec, ctx.tools, d);
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
   rule013Reducers(spec, d);
   rule014And019Oversight(spec, idx, ctx, d);
@@ -455,6 +457,63 @@ function isSafeId(id: unknown): boolean {
 
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
+  // TOP-LEVEL SHAPE, BEFORE ANYTHING ITERATES IT. `spec.inputs` missing produced
+  // `E_INTERNAL: TypeError: spec.inputs is not iterable`, and a missing `metadata` compiled
+  // CLEAN and then failed the run on `Cannot read properties of undefined (reading 'name')` —
+  // a graph the compiler passed and the engine could not start.
+  for (const [field, value] of [
+    ["inputs", spec.inputs],
+    ["outputs", spec.outputs],
+    ["nodes", spec.nodes],
+    ["edges", spec.edges],
+  ] as const) {
+    if (!Array.isArray(value)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_MALFORMED",
+        message: `\`${field}\` must be an array, not ${value === undefined ? "absent" : typeof value}`,
+        fix: `add \`${field}: []\` at the top level`,
+      });
+      return true;
+    }
+  }
+  if (typeof spec.metadata?.name !== "string") {
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: "`metadata.name` is required and must be a string",
+      fix: "add `metadata: { name, project, version }` at the top level",
+    });
+    return true;
+  }
+  if (typeof spec.channels !== "object" || spec.channels === null) {
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: "`channels` must be an object",
+      fix: "add `channels: {}` at the top level",
+    });
+    return true;
+  }
+
+  // A REDUCER NAME THE STATE LAYER DOES NOT KNOW. `step()` has no default arm, so an unknown
+  // reducer silently DROPPED every write to that channel and the run died `E_OUTPUT_MISSING:
+  // run finished without writing any of its declared outputs` — pointing at the output rather
+  // than at the typo three lines above it.
+  for (const [name, ch] of Object.entries(spec.channels)) {
+    const reduce = (ch as { reduce?: unknown }).reduce;
+    if (!REDUCER_NAMES.includes(reduce as never)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_REDUCER",
+        message: `channel "${name}" declares reduce ${JSON.stringify(reduce)}, which is not a reducer`,
+        at: { channel: name },
+        fix: `use one of ${REDUCER_NAMES.join(", ")}`,
+      });
+      fatal = true;
+    }
+  }
+
   if (spec.apiVersion !== GRAPH_API_VERSION) {
     d.push({
       severity: "error",
@@ -524,6 +583,24 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
       fatal = true;
     }
+    // AND THE BLOCK'S OWN REQUIRED FIELDS. `REQUIRED_BLOCK` proves a node HAS an `agent:`; it
+    // says nothing about `agent: {}`. Every one of these used to reach `parseRef(undefined)` and
+    // come back as `E_INTERNAL: TypeError: Cannot read properties of undefined (reading
+    // 'lastIndexOf')`, which tells an author nothing about their graph.
+    for (const [field, holder] of REQUIRED_FIELDS[n.type] ?? []) {
+      const block = n[holder] as Record<string, unknown> | undefined;
+      if (block !== undefined && typeof block[field] !== "string") {
+        d.push({
+          severity: "error",
+          code: "GRAPH020_MISSING_FIELD",
+          message: `node "${n.id}" has a \`${String(holder)}\` block with no \`${field}\``,
+          at: { nodeId: n.id },
+          fix: `add \`${field}:\` to node "${n.id}"'s \`${String(holder)}\` block`,
+        });
+        fatal = true;
+      }
+    }
+
     // Exactly one type block, so a node cannot quietly carry a stale second config.
     const present = Object.values(REQUIRED_BLOCK).filter((k) => n[k] !== undefined);
     if (present.length > 1) {
@@ -1250,6 +1327,44 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
 
 // ── GRAPH011 + GRAPH012 ──────────────────────────────────────────────────────
 
+/**
+ * A `tool` node must name a tool this deployment HAS.
+ *
+ * `fs.raed` compiled `ok`. The run then reached the node, RAISED A GATE — a human was asked to
+ * authorize a tool that does not exist — and failed `E_TOOL_NOT_FOUND` only after the approval.
+ * Asking a person to vouch for something nobody can name is worse than failing.
+ *
+ * A WARNING, NOT AN ERROR, and the distinction is the same one `classFloor` already draws: the
+ * `tools` map is what THIS process registered, and a graph is legitimately compiled against a
+ * partial map — `loom compile` without `--allow-exec` sees no `proc.exec`, and that must remain
+ * a capability diagnostic rather than a spurious "no such tool". An operator who sees this on a
+ * graph they know is fine has learned something real: this process could not run it.
+ */
+function checkToolNames(
+  spec: GraphSpec,
+  tools: Readonly<Record<string, ToolManifestLite>>,
+  d: Diagnostic[],
+): void {
+  const known = Object.keys(tools);
+  if (known.length === 0) return; // No manifest map at all: nothing to check against.
+  for (const n of spec.nodes) {
+    const name = n.tool?.name;
+    if (name === undefined || Object.hasOwn(tools, name)) continue;
+    // The nearest known name, so a typo reads as a typo.
+    const near = known.filter((k) => k.split(".")[0] === name.split(".")[0]);
+    d.push({
+      severity: "warning",
+      code: "GRAPH013_UNKNOWN_TOOL",
+      message: `node "${n.id}" names tool "${name}", which this process has not registered`,
+      at: { nodeId: n.id },
+      fix:
+        near.length > 0
+          ? `did you mean ${near.map((k) => `"${k}"`).join(" or ")}?`
+          : `register it, or check the name against ${known.slice(0, 6).map((k) => `"${k}"`).join(", ")}`,
+    });
+  }
+}
+
 function rule011And012ErrorPaths(
   spec: GraphSpec,
   idx: GraphIndex,
@@ -1942,15 +2057,21 @@ function collectRefs(spec: GraphSpec): { ref: ResourceRef; at: Diagnostic["at"] 
   const out: { ref: ResourceRef; at: Diagnostic["at"] }[] = [];
   for (const n of spec.nodes) {
     const at = { nodeId: n.id };
-    if (n.function) out.push({ ref: n.function.ref, at });
+    // A MISSING REF IS A DIAGNOSTIC, NOT A CRASH. `if (n.agent)` is true for `agent: {}`, and
+    // `parseRef(undefined)` reached `undefined.lastIndexOf` — so the most ordinary authoring
+    // mistake there is, forgetting a required field, came back as
+    // `E_INTERNAL: TypeError: Cannot read properties of undefined (reading 'lastIndexOf')`.
+    // A compiler whose job is to diagnose must not be the thing that throws.
+    const ref = (v: unknown): v is ResourceRef => typeof v === "string";
+    if (n.function && ref(n.function.ref)) out.push({ ref: n.function.ref, at });
     if (n.agent) {
-      out.push({ ref: n.agent.profile, at });
-      out.push({ ref: n.agent.prompt, at });
+      if (ref(n.agent.profile)) out.push({ ref: n.agent.profile, at });
+      if (ref(n.agent.prompt)) out.push({ ref: n.agent.prompt, at });
     }
-    if (n.router?.profile) out.push({ ref: n.router.profile, at });
-    if (n.evaluator) out.push({ ref: n.evaluator.ref, at });
-    if (n.humanGate) out.push({ ref: n.humanGate.ref, at });
-    if (n.subgraph) out.push({ ref: n.subgraph.ref, at });
+    if (n.router?.profile !== undefined && ref(n.router.profile)) out.push({ ref: n.router.profile, at });
+    if (n.evaluator && ref(n.evaluator.ref)) out.push({ ref: n.evaluator.ref, at });
+    if (n.humanGate && ref(n.humanGate.ref)) out.push({ ref: n.humanGate.ref, at });
+    if (n.subgraph && ref(n.subgraph.ref)) out.push({ ref: n.subgraph.ref, at });
   }
   for (const refs of Object.values(spec.hooks ?? {})) {
     for (const ref of refs) out.push({ ref, at: undefined });

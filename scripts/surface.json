@@ -218,6 +218,7 @@
   "REDUCER_NAMES",
   "REPEATED_FAILURE_THRESHOLD",
   "REQUIRED_BLOCK",
+  "REQUIRED_FIELDS",
   "ROOT_BRANCH",
   "Recipient",
   "ReconstructedGraph",

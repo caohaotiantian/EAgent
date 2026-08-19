@@ -583,6 +583,35 @@ export const DEFAULT_EXPANSION: ExpansionBudget = {
 };
 
 /** Which type-specific block each node type requires. Used by GRAPH020. */
+/**
+ * The fields inside a type block that MUST be present, by node type.
+ *
+ * `REQUIRED_BLOCK` proves a node HAS an `agent:`; nothing proved that `agent:` had a `profile`.
+ * So `{"type":"agent","agent":{}}` — forgetting a field, the most ordinary authoring mistake
+ * there is — reached `parseRef(undefined)` in the compiler and came back as
+ * `E_INTERNAL: TypeError: Cannot read properties of undefined (reading 'lastIndexOf')`, which
+ * tells an author nothing about their graph.
+ *
+ * Beside `REQUIRED_BLOCK` rather than in `validate.ts` for the reason that table is here: it is
+ * the runtime enumeration of what a `NodeSpec` means, and two enumerations in two files is how
+ * they come to disagree.
+ */
+export const REQUIRED_FIELDS: Readonly<Partial<Record<NodeType, readonly (readonly [string, keyof NodeSpec])[]>>> = {
+  agent: [
+    ["profile", "agent"],
+    ["prompt", "agent"],
+  ],
+  function: [["ref", "function"]],
+  evaluator: [["ref", "evaluator"]],
+  human_gate: [["ref", "humanGate"]],
+  subgraph: [["ref", "subgraph"]],
+  // `name` ONLY. `ToolNode.version` is declared required by the type and enforced by nothing —
+  // the engine looks a tool up by NAME — and several in-tree graphs omit it. Requiring it here
+  // would be a behaviour change for every such graph, dressed up as a crash fix. Recorded as its
+  // own question rather than answered as a side effect.
+  tool: [["name", "tool"]],
+};
+
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
   function: "function",
   agent: "agent",
