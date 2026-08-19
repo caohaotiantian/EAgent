@@ -85,6 +85,7 @@ import {
   ZERO_USAGE,
   addUsage,
   isSyntheticSubject,
+  isLoosening,
   maxPosture,
   type GateDecision,
   type IrreversibilityClass,
@@ -1017,6 +1018,17 @@ export class Engine {
    */
   async #resolveGateAsSystem(runId: RunId, input: ResolveInput): Promise<RunProjection> {
     const ctx = this.#require(runId);
+    // AN APPROVAL BINDS ITS GRAPH; A REFUSAL DOES NOT NEED TO.
+    //
+    // `approve` is the only decision that makes what comes next EXECUTE, so it is the only one
+    // that must prove the graph is the one the human was shown. `reject` fails the run and
+    // `cancel` ends it — neither runs graph code, and both are what an operator reaches for when
+    // a graph has drifted. Binding them too would leave a drifted run un-approvable,
+    // un-rejectable AND un-cancellable while `GateSweeper`, which needs no attachment at all,
+    // expired it into `run.failed` anyway. The refusal has to leave an exit.
+    //
+    // `edit` and `redirect` continue the run, so they bind like `approve`.
+    if (input.decision.kind !== "reject") await this.#assertBound(ctx, `deciding gate "${input.gateId}"`);
     await this.#gates.resolve(ctx.log, input);
     return this.advance(runId);
   }
@@ -1438,6 +1450,106 @@ export class Engine {
     const ctx = this.#runs.get(runId);
     if (ctx === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached`);
     return ctx;
+  }
+
+  /**
+   * What the journal says this run compiled — the THREE things that identify it.
+   *
+   * Not one. `graphHash` is `digest(spec)` and `compile.ts` says so in as many words, adding the
+   * sentence this method is built on: the manifest "is recorded separately in `run.compiled` so a
+   * re-resolve is visible as its own fact rather than as a different graph." A spec is full of
+   * POINTERS; the bytes behind them live in `documents`/`subgraphs` and are hashed by nothing. So
+   * a run parked on a gate can have its child graph or its system prompt rewritten under it and
+   * recompile to a byte-identical hash — reproduced end to end before this existed.
+   *
+   * The third is the compiled oversight FLOOR. `plans[n].posture` is derived from the registered
+   * tools' `irreversibility`, and `graphHash` excludes plans by design, so the same spec compiled
+   * in a process with no `--mcp-file` yields the same hash with a node's floor dropped from `in`
+   * to `out`. `run.started.posture` is the `max` over `plans` and is journaled, so it is the
+   * recorded floor to refuse going below — invariant 5 composes by `max`, never down.
+   *
+   * Read from the journal rather than the projection because `RunProjection.graphHash` folds
+   * `graph.mutated` to the SUCCESSOR hash, so comparing an authored on-disk graph against it
+   * refuses every run that ever mutated. `#rehydrateGraph` replays the mutations on top of the
+   * authored graph, which is what it is for.
+   */
+  async #compiledIdentity(
+    runId: RunId,
+  ): Promise<{ readonly graphHash: string; readonly manifest: string; readonly posture: Posture } | undefined> {
+    let graphHash: string | undefined;
+    let manifest = "";
+    let posture: Posture | undefined;
+    for await (const ev of this.#store.read(runId, 1)) {
+      if (isEvent(ev, "run.compiled")) {
+        graphHash = ev.payload.graphHash;
+        manifest = manifestKey(ev.payload.resolutionManifest);
+      } else if (isEvent(ev, "run.started")) {
+        posture = ev.payload.posture;
+      }
+      // Everything that identifies the compile is written in the submit append, so there is no
+      // reason to fold the whole journal of a long run to find it.
+      if (graphHash !== undefined && posture !== undefined) break;
+    }
+    if (graphHash === undefined) return undefined;
+    return { graphHash, manifest, posture: posture ?? "out" };
+  }
+
+  /**
+   * The attached graph IS the graph this run compiled, or nothing happens.
+   *
+   * Reproduced before this existed, through the shipped binary: run a graph to its gate, then
+   * `loom approve <run> <gate> --graph OTHER.json`, and the other graph's node ran and wrote.
+   * The gate authorized one graph and a different one executed. No collision and no race —
+   * `--graph` was simply believed.
+   *
+   * REFUSED, NEVER REPAIRED, and the caller is told which of the three moved. Recompiling a
+   * "corrected" graph here would be this engine deciding what a human meant to approve.
+   */
+  async #assertBound(ctx: RunContext, why: string): Promise<void> {
+    const recorded = await this.#compiledIdentity(ctx.runId);
+    // A run with no `run.compiled` cannot be checked, and the permissive branch is NOT inherited
+    // from `replay.ts` — there it means "an older journal, replay what you can", here it would
+    // mean "unverifiable, so allow". A gate is not the place for that default.
+    if (recorded === undefined) {
+      throw err.notFound(
+        CODES.E_RUN_NOT_FOUND,
+        `run ${ctx.runId} has no compile on record, so ${why} cannot be bound to a graph`,
+        { details: { runId: ctx.runId } },
+      );
+    }
+    const mismatch =
+      recorded.graphHash !== ctx.graph.graphHash
+        ? "spec"
+        : recorded.manifest !== manifestKey(ctx.graph.resolutionManifest)
+          ? "resources"
+          : undefined;
+    if (mismatch !== undefined) {
+      throw err.conflict(
+        CODES.E_GRAPH_MISMATCH,
+        mismatch === "spec"
+          ? `the graph supplied for ${why} is not the graph run ${ctx.runId} compiled`
+          : `the graph supplied for ${why} matches run ${ctx.runId}'s spec, but the resources behind its refs have changed since it was compiled`,
+        {
+          details: {
+            runId: ctx.runId,
+            differs: mismatch,
+            expected: recorded.graphHash,
+            actual: ctx.graph.graphHash,
+          },
+        },
+      );
+    }
+    // AND THE FLOOR MAY NOT FALL. Same spec, same resources, a process that registered fewer
+    // tools: `plans` are excluded from the hash, so the oversight floor drops silently.
+    const now = this.#runPosture(ctx.graph);
+    if (isLoosening(recorded.posture, now)) {
+      throw err.policy(
+        CODES.E_GRAPH_MISMATCH,
+        `run ${ctx.runId} was compiled under oversight "${recorded.posture}" and this process computes "${now}" for the same graph — ` +
+          `usually a tool the original process had registered and this one does not`,
+        { details: { runId: ctx.runId, recorded: recorded.posture, computed: now } },
+      );
+    }
   }
 
   #contextFor(runId: RunId, graph: RunGraph, budgetUsd?: number): RunContext {
@@ -4275,6 +4387,22 @@ async function childRunsOf(log: RunLog): Promise<readonly RunId[]> {
  * the two would leave a stopped run with a live gate, which is precisely the state that
  * made the run answerable again.
  */
+
+/**
+ * The manifest as one comparable string.
+ *
+ * A COPY of `replay.ts`'s local `refKey`, deliberately, and the two must stay identical. Both
+ * modules are barrelled through `index.ts`, so exporting a four-line pure function from either
+ * would put it on the pinned public surface — the trade `storeDenyLists` already made in
+ * `resources/store.ts` for the same reason. If one of these changes, change both.
+ */
+function manifestKey(m: readonly { readonly ref: string; readonly digest: string }[]): string {
+  return m
+    .map((r) => `${r.ref}=${r.digest}`)
+    .sort()
+    .join("\n");
+}
+
 function cancelOpenGates(
   p: RunProjection,
   reason: string,

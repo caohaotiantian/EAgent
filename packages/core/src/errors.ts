@@ -310,6 +310,15 @@ export const CODES = {
   E_TOOL_TIMEOUT: "E_TOOL_TIMEOUT",
   E_JOIN_TIMEOUT: "E_JOIN_TIMEOUT",
   E_GATE_EXPIRED: "E_GATE_EXPIRED",
+  /**
+   * The graph offered for a run is not the graph that run compiled.
+   *
+   * Three things can differ and the message says which: the SPEC (`graphHash`), the RESOURCES its
+   * refs resolved to (the journaled `resolutionManifest` — a spec is full of pointers and the
+   * hash covers none of the bytes behind them), or the compiled oversight FLOOR, which `plans`
+   * carries and the hash also excludes.
+   */
+  E_GRAPH_MISMATCH: "E_GRAPH_MISMATCH",
   E_TASK_TIMEOUT: "E_TASK_TIMEOUT",
 
   // cancelled
