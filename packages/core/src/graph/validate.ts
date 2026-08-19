@@ -455,6 +455,14 @@ function isSafeId(id: unknown): boolean {
   return typeof id === "string" && SAFE_ID.test(id);
 }
 
+/**
+ * The largest delay a Node timer holds. A FOURTH local copy, matching `cli.ts`, `providers/http.ts`
+ * and `server/http.ts` — the tree copies a bare constant rather than exporting it, because an
+ * export from a barrelled module lands on the pinned public surface (`store.ts`'s `storeDenyLists`
+ * records the ruling). If one changes, change all four.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
   // TOP-LEVEL SHAPE, BEFORE ANYTHING ITERATES IT. `spec.inputs` missing produced
@@ -628,6 +636,22 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
       fatal = true;
     }
+    // `timeoutMs` IS A TIMER, so it joins the family every other caller-supplied duration is in.
+    // `setTimeout` truncates anything above MAX_TIMER_MS to ONE MILLISECOND, so an out-of-range
+    // deadline is not a loose one — it is a node that fails instantly.
+    for (const [field, value] of [["timeoutMs", n.timeoutMs]] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value <= 0 || value > MAX_TIMER_MS)) {
+        d.push({
+          severity: "error",
+          code: "GRAPH003_MALFORMED",
+          message: `node "${n.id}" declares ${field} ${String(value)}, which is not a whole number of milliseconds a timer can hold (1…${MAX_TIMER_MS})`,
+          at: { nodeId: n.id },
+          fix: `a value above ${MAX_TIMER_MS} is truncated to 1ms by every Node timer, so it would become its own opposite`,
+        });
+        fatal = true;
+      }
+    }
+
     // AND THE BLOCK'S OWN REQUIRED FIELDS. `REQUIRED_BLOCK` proves a node HAS an `agent:`; it
     // says nothing about `agent: {}`. Every one of these used to reach `parseRef(undefined)` and
     // come back as `E_INTERNAL: TypeError: Cannot read properties of undefined (reading

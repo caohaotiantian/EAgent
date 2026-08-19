@@ -1973,8 +1973,86 @@ export class Engine {
    * about `#invokeTool`: a check applied per-caller is a check that the next node type
    * forgets. A future body cannot opt out of this one without editing the wrapper.
    */
+  /**
+   * `NodeSpec.timeoutMs`, which was in the schema and enforced by nothing.
+   *
+   * `grep -an timeoutMs` over the executor and the scheduler returned NO MATCHES: a node could
+   * declare a two-minute limit and a hanging tool held its Task forever. `builtin/authoring.ts`
+   * sets `timeoutMs: 120_000` and got nothing for it, and `E_TASK_TIMEOUT` sat in the test
+   * suite's `NEVER_RAISED` list — a declared code with no thrower.
+   *
+   * HERE, WRAPPING `#dispatchBody`, for the reason its sibling `#dispatch` already gives about
+   * undeclared writes: "a check applied per-caller is a check that the next node type forgets."
+   * One wrapper covers agent, tool, function, router, join, evaluator, subgraph and gate at once,
+   * and a future node type cannot opt out without editing it.
+   *
+   * WHAT THIS DOES AND DOES NOT DO. The Task fails on time — that is the contract `timeoutMs`
+   * offers and the one "a hanging tool hangs the task forever" complains about. The BODY is not
+   * cancelled: it keeps running against an outcome nobody will read, exactly as
+   * `ControlPlane.#withDeadline` says of its own handlers, because injected code that ignores a
+   * signal cannot be stopped from outside.
+   *
+   * The composed signal is built and aborted here so the cooperative half can be threaded next —
+   * a model stream, `runSandboxed` and `net.fetch` all already take one, and each `#run*` method
+   * would have to accept it instead of reading `ctx.abort.signal`. Left out of this change
+   * deliberately: it touches every node type, and the race is what makes the deadline REAL.
+   */
+  async #withNodeDeadline(
+    ctx: RunContext,
+    w: Wave,
+    body: () => Promise<NodeOutcome> | NodeOutcome,
+  ): Promise<NodeOutcome> {
+    const ms = w.node.timeoutMs;
+    if (ms === undefined) return body();
+
+    const timer = new AbortController();
+    const onRunAbort = (): void => timer.abort(ctx.abort.signal.reason);
+    ctx.abort.signal.addEventListener("abort", onRunAbort, { once: true });
+    // NOT `unref`'d, and the difference from every other timer in this codebase is the point.
+    // A gate clock or a request deadline is background work that must not hold a process open;
+    // THIS timer is the thing that produces the Task's outcome. An unref'd timer does not keep the
+    // event loop alive, and neither does a body that never settles — so when a hanging node is a
+    // process's only pending work, node exits before the deadline can fire. Measured on the exact
+    // shape: `Promise.race([never, unrefTimeout(300)])` printed nothing and exited **13**
+    // ("unsettled top-level await"); the same race with a ref'd timer caught the deadline and
+    // exited 0. That is `loom run` on a graph with one hanging node, dying silently.
+    //
+    // THE SUITE DOES NOT PIN THIS, and the comment says so rather than implying otherwise:
+    // `node --test` keeps the loop alive on its own, so `node-timeout.test.ts` passes with the
+    // `unref` restored — measured. It was found because the test hung for an unrelated reason
+    // (releasing the fixture's tool before `execute` had assigned the release), and looking at
+    // the timer to explain that turned up a defect the hang was not evidence of.
+    //
+    // It cannot outlive the node: `clearTimeout` is in the `finally` below.
+    const handle = setTimeout(() => timer.abort(), ms);
+    try {
+      return await Promise.race([
+        Promise.resolve(body()),
+        new Promise<NodeOutcome>((_resolve, reject) => {
+          timer.signal.addEventListener(
+            "abort",
+            () => {
+              // A RUN-LEVEL CANCEL IS NOT A TIMEOUT, and reporting one as the other would tell an
+              // operator their node was too slow when in fact they stopped it.
+              if (ctx.abort.signal.aborted) return;
+              reject(
+                err.timeout(CODES.E_TASK_TIMEOUT, `node "${w.node.id}" exceeded its timeoutMs of ${ms}ms`, {
+                  details: { node: w.node.id, timeoutMs: ms },
+                }),
+              );
+            },
+            { once: true },
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(handle);
+      ctx.abort.signal.removeEventListener("abort", onRunAbort);
+    }
+  }
+
   async #dispatch(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
-    const outcome = await this.#dispatchBody(ctx, p, w);
+    const outcome = await this.#withNodeDeadline(ctx, w, () => this.#dispatchBody(ctx, p, w));
     const declared = new Set(w.node.writes ?? []);
     const stray = Object.keys(outcome.writes).filter((c) => !declared.has(c));
     if (stray.length === 0) return outcome;
