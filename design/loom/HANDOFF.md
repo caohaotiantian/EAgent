@@ -1970,6 +1970,18 @@ knob shipped first and this entry exists rather than the knob quietly standing i
 query. Until then: size `limit` above the number of runs a deployment creates within the
 longest SLA it declares.
 
+**B10 · A `function` body cannot signal a RETRYABLE failure, so `retry` is unreachable for
+function nodes.** Every throw out of the `vm` context is classified `E_INTERNAL` with
+`retryable: false` — only the three classes in `errors.ts`'s `RETRYABLE` set (`exhausted`,
+`unavailable`, `timeout`) schedule a backoff, and a body has no way to construct one: `SAFE_GLOBALS`
+does not expose `err`, and a plain object with `class`/`retryable` properties is not read.
+Measured through the binary: a body throwing `{class:"unavailable", retryable:true}` produced
+`E_INTERNAL … retryable: false` and the run failed on the first attempt. **Consequence for
+testing, which is how it was found:** the `running`-after-backoff state cannot be produced offline
+through the CLI at all, so W10's drive loop and exit-code fix are pinned at ENGINE level and the
+CLI-level test says so rather than pretending. Fixing it means a sanctioned way for a body to
+raise a classified error — which is a seam decision, not a patch.
+
 **B5 · `NodeSpec.timeoutMs` is in the schema and enforced by nothing.** A node with a
 declared timeout runs as long as it likes; `E_TASK_TIMEOUT` is declared and unraisable.
 

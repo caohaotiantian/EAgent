@@ -788,3 +788,34 @@ test("A CAPABILITY IS GRANTED EXACTLY WHEN THE OPERATOR REGISTERED THE TOOL FOR 
     d.dispose();
   }
 });
+
+test("`loom run`'s EXIT CODE MEANS WHAT A SUPERVISOR READS IT AS", async () => {
+  // It was `return p.status === "failed" ? 1 : 0`, so every status but `failed` exited 0 —
+  // including `running`, which is what a Task left in backoff produces. A CI script reading the
+  // exit code saw a green run for work that had not happened.
+  //
+  // THE `running` CASE ITSELF IS NOT TESTED HERE AND CANNOT BE, offline: producing one needs a
+  // RETRYABLE failure, and a `function` body cannot signal one — every throw out of the vm is
+  // classified `E_INTERNAL` with `retryable: false`, so a `retry` policy on a function node is
+  // unreachable. That is a real gap in its own right (register B-series), and it is why the
+  // first version of this test passed with BOTH fixes reverted. What is pinned here is the rest
+  // of the mapping, which is reachable and was equally wrong to leave implicit.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    writeFileSync(join(d.dir, "graphs", "gated.json"), JSON.stringify(gatedGraph("after-gate.txt")));
+
+    // A run that parks on a gate did what it was asked to and is waiting on a person: 0.
+    const gated = await run(["run", join(d.dir, "graphs", "gated.json"), "--workspace", d.dir, "--input", JSON.stringify({ note: "x" })]);
+    assert.equal(JSON.parse(gated.out.slice(0, gated.out.lastIndexOf("}") + 1)).status, "awaiting_gate");
+    assert.equal(gated.code, 0, "awaiting a human is not a failure");
+
+    // A run that fails is 1, and its error reaches the operator.
+    writeFileSync(join(d.dir, "graphs", "boom.json"), JSON.stringify(graphWriting("../escape.txt")));
+    const failed = await run(["run", join(d.dir, "graphs", "boom.json"), "--workspace", d.dir, "--input", JSON.stringify({ seed: "x" })]);
+    assert.equal(JSON.parse(failed.out.slice(0, failed.out.lastIndexOf("}") + 1)).status, "failed");
+    assert.equal(failed.code, 1);
+  } finally {
+    d.dispose();
+  }
+});

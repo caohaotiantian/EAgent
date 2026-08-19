@@ -58,6 +58,7 @@ import {
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
+import type { RunProjection, TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
@@ -1351,6 +1352,41 @@ function grantFlag(args: Args): readonly string[] {
     .filter((c) => c !== "");
 }
 
+/** How many times `loom run` will wait out a backoff before giving up and saying so. */
+const MAX_BACKOFF_WAITS = 64;
+
+/**
+ * Advance until the run reaches a terminal state, a gate, or stops making progress.
+ *
+ * `Engine.advance` RETURNS while a Task is in backoff — its own comment says "so the caller can
+ * advance again once the clock has moved" — and no caller did. `loom run` called it exactly once,
+ * so a retryable failure left the run `running` forever: the journal ended at
+ * `task.retry_scheduled` / `task.ready` and never moved again, and the command exited 0. There is
+ * no `loom advance`, and `loom serve` starts a gate clock but no run clock, so nothing anywhere
+ * in the product finished that run.
+ *
+ * The wait is REAL TIME because the backoff is: `retryAfter` is a wall-clock instant the engine
+ * journaled, and a run's own retry policy bounds how many there can be. The cap is a backstop
+ * against a graph whose retries never exhaust, and it reports rather than looping — a command
+ * that hangs is indistinguishable from one that is working.
+ */
+async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): Promise<RunProjection> {
+  let p = first;
+  for (let waited = 0; waited < MAX_BACKOFF_WAITS; waited++) {
+    if (p.status !== "running") return p;
+    const wake = (Object.values(p.tasks) as TaskRecord[])
+      .filter((t) => t.state === "ready" && t.retryAfter !== undefined)
+      .reduce<number | undefined>((min, t) => (min === undefined || (t.retryAfter ?? 0) < min ? t.retryAfter : min), undefined);
+    // Running with nothing to wait for is not backoff — it is a run this process cannot move,
+    // and saying so beats spinning on `advance`.
+    if (wake === undefined) return p;
+    await new Promise((r) => setTimeout(r, Math.max(0, wake - Date.now())));
+    p = await ws.engine.advance(runId);
+  }
+  process.stderr.write(`! run ${runId} was still retrying after ${MAX_BACKOFF_WAITS} waits; giving up on it here\n`);
+  return p;
+}
+
 function graphsByHash(ws: Workspace): Map<string, RunGraph> {
   const dir = join(ws.root, "graphs");
   const out = new Map<string, RunGraph>();
@@ -1847,7 +1883,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           ...submitterFlag(args),
           ...(budgetUsd === undefined ? {} : { budgetUsd }),
         });
-        const p = await ws.engine.advance(runId);
+        const p = await driveToRest(ws, runId, await ws.engine.advance(runId));
         // THE ERROR, WHEN THERE IS ONE. A failed run printed `"status": "failed"` and nothing
         // else, so every carefully-worded refusal in this file — `RoutingAdapter.#resolve`'s
         // "no route for model X; routed: …" most of all — reached nobody through the door
@@ -1877,7 +1913,19 @@ export async function main(argv: readonly string[]): Promise<number> {
             );
           }
         }
-        return p.status === "failed" ? 1 : 0;
+        // 0 MEANS WHAT YOU ASKED FOR HAPPENED, and `running` is not that. This returned 0 for
+        // any status but `failed`, so a run left mid-flight — a Task still in backoff, a crash,
+        // a budget pause — reported SUCCESS to whatever read the exit code. A CI script saw a
+        // green run for work that never happened. `awaiting_gate` is a success: the run did
+        // exactly what it was asked to do and is waiting on a person.
+        if (p.status === "succeeded" || p.status === "awaiting_gate") return 0;
+        if (p.status !== "failed" && p.status !== "cancelled") {
+          process.stderr.write(
+            `! run ${runId} is still ${p.status} — it did not reach a terminal state or a gate. ` +
+              `Resume it with: loom run ... (the journal is durable) or inspect it with loom trace ${runId}\n`,
+          );
+        }
+        return 1;
       }
 
       case "gates": {
