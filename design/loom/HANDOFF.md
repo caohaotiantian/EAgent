@@ -175,62 +175,58 @@ and it is the only thing standing between "the binary works" and "a binary worke
 (`github.com/caohaotiantian/EAgent`); `origin/loom` does not.
 
 ```
-git rev-parse --abbrev-ref --symbolic-full-name @{u}   # fatal: no upstream configured
-git log --oneline --branches --not --remotes | wc -l   # 125
-git ls-remote --heads origin loom                      # (empty)
+git rev-parse --abbrev-ref --symbolic-full-name @{u}   # origin/loom
+git ls-remote --heads origin loom                      # present
 ```
 
-**What trips the scan, exactly** — measured 2026-08-18, not inferred:
+**RESOLVED 2026-08-19 by option 2 — the branch is pushed.** `git filter-repo --replace-text` over
+the two literals, scoped `--refs loom` so the already-published `init` kept every SHA, then
+`git push -u origin loom` went through with no rejection. The scan is satisfied because it reads
+the commits being pushed, and none of them carries the string any more.
 
-```
-packages/core/test/run/delivery.test.ts:2455  a hooks.slack.com "/services/<T…>/<B…>/<24 chars>" URL
-packages/core/test/run/delivery.test.ts:2574  the same shape with a 16-character tail
-```
+**What tripped it, and why the tip being "fixed" was not enough.** Two Slack webhook URLs in
+`packages/core/test/run/delivery.test.ts` — `/services/<T…>/<B…>/<24 chars>` and the same shape
+with a 16-character tail. GitHub's detector matches URL SHAPE, not entropy: `T00000000` and
+`XXXX…` satisfy its character classes, and a scanner that could tell a placeholder from a live
+token would be a scanner one `sed` away from useless. The test file had already been fixed by
+breaking the GRAMMAR — an `.invalid` host, the substrings split across template literals — and it
+made no difference, because 45 commits still carried the old bytes in their trees.
 
-Introduced by the hardening pass, fixed in the test file by *"stop the webhook fixture matching a
-real provider's token grammar"*, and present in the trees of **45 commits**. GitHub's Slack-webhook detector matches on URL SHAPE, not entropy: `T00000000`
-and `XXXX…` satisfy its character classes, and a scanner that could tell a placeholder from a
-live token would be a scanner one `sed` away from useless. That is why the fix broke the
-GRAMMAR — an `.invalid` host and the substrings split across template literals — rather than
-changing the characters. **It does not unblock the push, because a scan reads the commits
-being pushed and not the tip.**
+**Three things this cost more than it was priced at, all worth keeping.**
 
-**`--force` does not help and it is worth knowing why.** It overrides ref-update rules;
-push protection rejects at the content layer before the ref is considered. `origin/loom`
-does not exist, so there is nothing to force over.
+1. **The rewrite was 74 commits, not 25.** 45 trees carry the string; the boundary is the
+   EARLIEST of them, so everything after renumbers.
+2. **The tip was not clean either.** This very entry quoted both literals verbatim while
+   explaining them — the document describing the block reproduced it, and would have failed the
+   push after a perfect history rewrite. It describes their shape now.
+3. **The corpus cited 15 commits the rewrite renumbered.** Those citations were removed FIRST, in
+   a commit of their own, so the rewrite orphaned nothing. See *Naming commits*.
 
-**The rest of the history is clean, checked rather than assumed.** All 825 blobs reachable
-from this branch were scanned for the usual provider shapes. Three other hits, all in tests,
-none of which should fire: `AKIAIOSFODNN7EXAMPLE` (AWS's own documentation example, which
-GitHub allowlists), a four-byte `BEGIN RSA PRIVATE KEY` stub, and `xoxb-2024-loom-bot-token`
-(real bot tokens are `xoxb-<digits>-<digits>-<24+ alnum>`). `.env` and `.env.glm` exist in the
-working tree and were **never tracked**.
+**`--force` was never the answer and it is worth knowing why.** It overrides ref-update rules;
+push protection rejects at the content layer before the ref is considered.
 
-Two ways out:
+**The rest of the history was clean, checked rather than assumed.** All 825 blobs reachable from
+this branch were scanned for the usual provider shapes. Three other hits, all in tests, none of
+which fired: `AKIAIOSFODNN7EXAMPLE` (AWS's own documentation example, which GitHub allowlists), a
+four-byte `BEGIN RSA PRIVATE KEY` stub, and `xoxb-2024-loom-bot-token` (real bot tokens are
+`xoxb-<digits>-<digits>-<24+ alnum>`). `.env` and `.env.glm` exist in the working tree and were
+**never tracked**.
 
-1. **Allowlist it through GitHub's UI.** The rejection carries a bypass URL. One click, history
-   intact, honest about what the string is. This is the cheaper one and it is what I would do.
-2. **Rewrite the history** — `git filter-repo --replace-text` over the two literals — then push.
-   Safe *specifically because nothing has ever been pushed*. **Two corrections to how this was
-   priced here before.** The rewrite is not 25 commits: 45 trees carry the string, and the
-   boundary is the EARLIEST of them, so **74 commits renumber**. And the tip was not clean —
-   this very entry quoted both literals verbatim while explaining them, so the document
-   describing the block reproduced it. **The SHA cost is now paid rather than deferred:** this
-   corpus no longer cites a commit by SHA anywhere. See *Naming commits* below.
-
-`loom-backup-pre-rewrite` tags the pre-rewrite tip, so either path is revertible.
+`loom-backup-pre-rewrite` and `loom-pre-rewrite-20260819` tag the pre-rewrite tip, and a full
+`--all` bundle was taken before the rewrite, so it stays revertible.
 
 ### Naming commits
 
-**Nothing in `design/` or `CLAUDE.md` cites a git SHA.** They are not stable here: the branch has
-never been pushed, so any commit may still be renumbered by a rewrite, and a corpus that cites
-them acquires a silent dependency on history never moving — which is exactly the dependency that
-made option 2 above expensive. Commits are named by a fragment of their subject instead; find one
+**Nothing in `design/` or `CLAUDE.md` cites a git SHA.** The rule outlived the rewrite that
+prompted it: a corpus that cites SHAs acquires a silent dependency on history never moving, and
+that dependency is what made the rewrite above expensive to price. Commits are named by a fragment of their subject instead; find one
 with `git log --oneline --grep='<fragment>'`. Commit MESSAGES still contain SHAs, and that is
 fine: a message is a record of what was true when it was written, not a reference a reader
 follows.
 
-Until one of these happens, **this branch exists on one disk.**
+**The branch no longer exists on one disk.** That sentence stood here for four days and was the
+single most consequential line in this file; it is kept, struck, because the risk it names comes
+back the moment a wave stops pushing.
 
 ---
 
