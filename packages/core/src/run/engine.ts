@@ -679,7 +679,27 @@ export class Engine {
 
   async submit(input: SubmitInput): Promise<RunId> {
     const runId = input.runId ?? newRunId(this.#now());
-    const ctx = this.#contextFor(runId, input.graph, input.budgetUsd);
+    // THE GRAPH'S OWN BUDGET IS A CEILING, NOT A COMMENT. `spec.policy.budget.costUsd` was read
+    // by `graph/validate.ts` alone — a compile-time FEASIBILITY check that the declared per-node
+    // budgets fit inside it — and by nothing at run time. So a graph could declare
+    // `budget.costUsd: 0.000001`, compile clean, and spend without limit: measured alongside the
+    // unbounded-loop defect, a run with that exact declaration spent ~$0.11 of mock cost and
+    // never stopped.
+    //
+    // A GRAPH MAY ONLY LOWER, NEVER RAISE, and getting that backwards is the first thing this
+    // change did. The deployment's own `policy.budget.runUsd` is a ceiling an operator set; a
+    // graph is a document the deployment ran, so letting its declaration REPLACE that ceiling
+    // would let any graph vote itself more money. Three sources, and the smallest present one
+    // wins: the deployment's cap, the caller's allotment (a subgraph carving a slice from its
+    // parent), and the graph's own declaration.
+    const budgetUsd = minDefined(
+      input.budgetUsd,
+      input.graph.spec.policy?.budget?.costUsd,
+      // Included so `min` cannot silently raise the deployment's ceiling when the other two are
+      // larger — `#contextFor` overwrites `runUsd` with whatever it is handed.
+      this.#policyOpts.budget?.runUsd,
+    );
+    const ctx = this.#contextFor(runId, input.graph, budgetUsd);
 
     // Durable at ACK: run.submitted + the compiled graph + the manifest. NOT any
     // execution — a 202 means "this WILL run", never "this HAS run".
@@ -4454,6 +4474,14 @@ async function childRunsOf(log: RunLog): Promise<readonly RunId[]> {
  * would put it on the pinned public surface — the trade `storeDenyLists` already made in
  * `resources/store.ts` for the same reason. If one of these changes, change both.
  */
+
+/** The smallest of the numbers that are present, or `undefined` when none are. */
+function minDefined(...values: readonly (number | undefined)[]): number | undefined {
+  let best: number | undefined;
+  for (const v of values) if (v !== undefined && (best === undefined || v < best)) best = v;
+  return best;
+}
+
 function manifestKey(m: readonly { readonly ref: string; readonly digest: string }[]): string {
   return m
     .map((r) => `${r.ref}=${r.digest}`)

@@ -72,6 +72,7 @@ const USAGE = `loom — graph-native multi-agent orchestration
                [--sweep-ms 1000]                           how often gate SLAs are checked
   loom compile <graph.json|yaml>                           validate and print diagnostics
   loom run     <graph.json|yaml> [--input JSON] [--as ID]  run to completion or to a gate
+               [--budget USD]                              a ceiling for THIS run
   loom gates   <runId>                                     list open gates
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
@@ -997,6 +998,31 @@ const MAX_TIMER_MS = 2_147_483_647;
  * exemption whose justification is a claim about how a different file happens to use the
  * value today; and a signature replay window wider than three weeks is not a window.
  */
+/**
+ * `--budget USD`, refused rather than clamped — the same family as every other caller-supplied
+ * number in this file.
+ *
+ * NOT `positive`, which demands a whole number of MILLISECONDS: a budget is dollars and is
+ * fractional by nature, so `--budget 0.50` would have been refused by it and `--budget 1e400`
+ * accepted by nothing. `NaN` is the case that matters, because every comparison against it is
+ * false — so a budget of `NaN` is not a loose cap, it is no cap, while the run reports a budget.
+ *
+ * It composes by MIN with the graph's own `policy.budget.costUsd` and the deployment's
+ * `policy.budget.runUsd`, so this flag can only ever lower a ceiling.
+ */
+function budgetFlag(args: Args): number | undefined {
+  const raw = args.flags["budget"];
+  if (raw === undefined) return undefined;
+  const n = typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n <= 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--budget must be a positive number of US dollars, not ${typeof raw === "string" ? `"${raw}"` : String(raw)}`,
+    );
+  }
+  return n;
+}
+
 function positive(v: unknown, where: string, refuse: (why: string) => never): number {
   if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) refuse(`${where} must be a positive whole number of milliseconds`);
   if (v > MAX_TIMER_MS) {
@@ -1695,7 +1721,16 @@ export async function main(argv: readonly string[]): Promise<number> {
         // more importantly it must not be diagnosed as something the graph did.
         const inputs = runInputs(args);
         const graph = loadGraph(ws, requirePositional(args, 0, "a graph file"));
-        const runId = await ws.engine.submit({ graph, inputs, ...submitterFlag(args) });
+        // `--budget` composes by MIN with the graph's own declaration and the deployment's cap —
+        // it can only ever lower. `positive` for the reason it exists: a budget of `NaN` compares
+        // false against everything, so it is not a loose cap, it is no cap.
+        const budgetUsd = budgetFlag(args);
+        const runId = await ws.engine.submit({
+          graph,
+          inputs,
+          ...submitterFlag(args),
+          ...(budgetUsd === undefined ? {} : { budgetUsd }),
+        });
         const p = await ws.engine.advance(runId);
         // THE ERROR, WHEN THERE IS ONE. A failed run printed `"status": "failed"` and nothing
         // else, so every carefully-worded refusal in this file — `RoutingAdapter.#resolve`'s
