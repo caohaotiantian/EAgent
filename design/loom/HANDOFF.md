@@ -230,6 +230,60 @@ back the moment a wave stops pushing.
 
 ---
 
+## Wave 6 — the gate binds its graph (2026-08-19)
+
+**The product's headline feature did not mean what it said.** Reproduced through the shipped
+binary: run a graph to its gate, then `loom approve <run> <gate> --graph OTHER.json`, and OTHER's
+node ran and wrote. The gate authorized one graph and a different one executed. No collision and
+no race — `--graph` was simply believed, because `attach` is `#contextFor(runId, graph)` and
+nothing else.
+
+| Phase | What | Commit subject |
+|---|---|---|
+| 1 | `graphs/` joins the tool jail; the index is sorted and collision-loud | *a run cannot write another run's graph* |
+| 2 | An approval binds spec + resources + oversight floor | *an approval binds the graph the human was shown* |
+| 3 | A fresh process finds the graph by journaled hash; HTTP attaches on demand | *a fresh process finds the graph a run compiled* |
+| 4 | The hint prints what works; `--as`, `--graph`, `--egress` documented | *the binary prints a command that works* |
+
+**Three things are bound, and the first version of this fix bound only one.** `compile.ts` says
+"the hash covers the SPEC ONLY", and a spec is full of POINTERS. A reviewer edited
+`resources/subgraph/child.json` while a run was parked, approved **with the same graph file**, and
+the swapped child ran under a byte-identical hash. `replay.ts` already binds the manifest for
+exactly this reason and documents this exact attack — and the plan cited the line range
+*containing* that check as "precedent, and it is exact" while dropping it. The third is the
+compiled oversight FLOOR: `plans` are excluded from the hash too, so the same spec compiled in a
+process registering fewer tools yields the same hash with a node's posture dropped from `in` to
+`out`. Each conjunct is mutation-tested; dropping any one turns exactly one test red.
+
+**`reject` is exempt, deliberately.** Approve, edit and redirect continue the run; reject fails it
+and cancel ends it, and neither runs graph code. Binding them too would leave a drifted run
+un-approvable, un-rejectable AND un-cancellable while `GateSweeper` — which needs no attachment —
+expired it into `run.failed` anyway. **A refusal has to leave an exit.**
+
+**The worst finding was about the wave, not in it.** A plan reviewer attacking phase 3 found that
+`<workspace>/graphs/` was NOT in the tool jail, and `discoverGraphs` keyed by `metadata.name` over
+an unsorted `readdirSync` with last-writer-wins. A run holds `fs:write` unconditionally, so it
+could plant `graphs/zz-planted.json` and **evict the operator's real graph from the index** — after
+which a gate on a run using it cannot be answered while the sweeper expires it. **One run could
+strip oversight from another**, which is a bigger hole than the prompt-injection one next door:
+that case changes what a model is told, this changes whether a human is asked at all. Phase 1
+closed it before phase 3 could build on it.
+
+**Still open, recorded rather than closed:**
+
+- **`cancel` depends on a graph being findable.** It runs no graph code and is exactly what an
+  operator reaches for when a graph has drifted, but `Engine.cancel` goes through `#require` like
+  the rest. Making it journal-only is its own change.
+- **Child/subgraph runs are not re-attachable.** A child's `RunGraph` comes from the parent's
+  frozen `subgraphs` map, never from `graphs/`, so a child gate stays unanswerable after a
+  restart.
+- **`main` throws for `approve`** rather than returning a code; the binary's top-level catch is
+  what an operator sees, while `loom run` catches per command.
+- **`attach` on a live run is a no-op** — `#contextFor` returns the existing context — so the
+  substitution only ever existed ACROSS processes. Which is precisely what `loom approve` is.
+
+---
+
 ## What this session changed (2026-08-18)
 
 Seven commits on top of the previous handoff, closing the register's two oldest security entries and the

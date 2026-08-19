@@ -73,11 +73,18 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom compile <graph.json|yaml>                           validate and print diagnostics
   loom run     <graph.json|yaml> [--input JSON] [--as ID]  run to completion or to a gate
   loom gates   <runId>                                     list open gates
-  loom approve <runId> <gateId> [--reject REASON]          resolve a gate
+  loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
+               [--graph <graph.json|yaml>]                  override the graph lookup
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
 
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
+  --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered
+                    at all, so a graph naming it fails to compile
+  --as ID           the subject a decision is JOURNALED under, and matched against a
+                    gate's approvers. Defaults to "cli", which no approvers list names —
+                    so a gate that names anybody needs this. It ends up in the audit
+                    record as the person who approved
   --data-dir  DIR   journal location (default: <workspace>/.loom). Off limits to the
                     fs tools wherever it is put, including inside the workspace.
   --models-file F   which providers to call, and which model each ModelRequest.model
@@ -1710,7 +1717,13 @@ export async function main(argv: readonly string[]): Promise<number> {
           // so the same call raises `E_RUN_NOT_FOUND` and it is left with the projection — see
           // the note there. Two doors onto one queue, and only one of them can reach the rank.
           for (const g of await ws.engine.openGates(runId)) {
-            process.stdout.write(`gate ${g.gateId} on node ${g.nodeId} — loom approve ${runId} ${g.gateId}\n`);
+            // THE HINT PRINTS WHAT ACTUALLY WORKS. It used to omit `--as`, so following it
+            // verbatim failed `E_GATE_NOT_AUTHORIZED` on any gate with approvers — the subject
+            // defaults to "cli", which no approvers list names. It also used to need `--graph`,
+            // which the workspace lookup now supplies.
+            process.stdout.write(
+              `gate ${g.gateId} on node ${g.nodeId} — loom approve ${runId} ${g.gateId} --as YOUR_ID\n`,
+            );
           }
         }
         return p.status === "failed" ? 1 : 0;
