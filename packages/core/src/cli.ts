@@ -309,7 +309,16 @@ export function openWorkspace(
     // a run READING `/etc/passwd` through a planted link; it does nothing about a run WRITING
     // the operator's prompt, which is the half that matters more. Both halves are the same
     // rule — what a run may not do is decide what the next run is told.
-    deny: [dataDir, join(root, "resources")],
+    //
+    // AND `graphs/` IS THE SAME RULE ONE STEP OVER, which this list did not cover. A run holds
+    // `fs:write` unconditionally (see the grant below), and `discoverGraphs` reads this directory
+    // to build the index a `serve` process answers gates from. Reproduced: a run writes
+    // `graphs/zz-planted.json` whose `metadata.name` collides with the operator's, and the real
+    // graph is EVICTED from the index — after which a gate on a run using it cannot be answered,
+    // while `GateSweeper` needs no attachment and expires it into `run.failed`. A run could strip
+    // oversight from other runs. "What a run may not do is decide what the next run is told" and
+    // "…what the next run IS" are one sentence.
+    deny: [dataDir, join(root, "resources"), join(root, "graphs")],
     ...(args.flags["egress"] === undefined ? {} : { egressAllowlist: String(args.flags["egress"]).split(",") }),
     // Both default to absent, and absent means the tool is not registered at all. A run
     // that never names a program cannot run one — see `procExec`, where the allowlist is
@@ -1214,11 +1223,27 @@ function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
   const dir = join(ws.root, "graphs");
   const out: Record<string, RunGraph> = {};
   if (!existsSync(dir)) return out;
-  for (const file of readdirSync(dir)) {
+  // SORTED, for the reason `readResources` already gives about itself: `readdirSync` order is
+  // filesystem-dependent, so which graph won a name collision differed by machine — and so did
+  // whether a deployment could answer a gate at all. Defence in depth behind the deny entry
+  // above, which is what actually closes the planting attack.
+  for (const file of readdirSync(dir).sort()) {
     if (!/\.(json|ya?ml)$/i.test(file)) continue;
     try {
       const graph = loadGraph(ws, join(dir, file));
-      out[graph.spec.metadata.name] = graph;
+      const name = graph.spec.metadata.name;
+      // A COLLISION IS LOUD, and the FIRST one wins. It used to be last-writer-wins in directory
+      // order, silently, which made this index a place one file could evict another from.
+      const prior = out[name];
+      if (prior !== undefined) {
+        if (prior.graphHash !== graph.graphHash) {
+          process.stderr.write(
+            `! two graphs in ${dir} declare metadata.name "${name}" and differ; keeping the first\n`,
+          );
+        }
+        continue;
+      }
+      out[name] = graph;
     } catch (e) {
       // One malformed graph must not stop the server from serving the others.
       process.stderr.write(`! skipping ${basename(file)}: ${(e as Error).message}\n`);

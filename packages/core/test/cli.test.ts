@@ -110,6 +110,43 @@ test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"fail
   }
 });
 
+test("A RUN CANNOT WRITE ANOTHER RUN'S GRAPH — graphs/ is denied for the same reason", async () => {
+  // THE SAME RULE ONE STEP OVER, and this list did not cover it. `discoverGraphs` reads
+  // `graphs/` to build the index a `serve` process answers gates from, `fs:write` is granted
+  // unconditionally, and the index was keyed by `metadata.name` over an UNSORTED `readdirSync`
+  // with last-writer-wins. So a run could plant `graphs/zz-planted.json` colliding with the
+  // operator's real graph and EVICT it — after which a gate on a run using that graph cannot be
+  // answered, while `GateSweeper` needs no attachment and expires it into `run.failed`.
+  //
+  // One run stripping oversight from another is a bigger hole than the prompt one next door,
+  // because the prompt case changes what a model is told and this changes whether a human is
+  // asked at all.
+  //
+  // `discoverGraphs` was hardened at the same time — sorted, first-wins, and a differing name
+  // collision announced on stderr — but that is defence in depth for OPERATOR error, not for this
+  // attack: the deny entry closes it at the source. The hardening has no test because
+  // `discoverGraphs` runs only inside `serve`, which blocks, and this file has no non-blocking
+  // door onto it. Saying so beats a test that starts a server to read one warning.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    writeFileSync(join(d.dir, "graphs", "payroll.json"), JSON.stringify(graphWriting("unused.txt")));
+
+    const graphFile = join(d.dir, "graphs", "plant.json");
+    writeFileSync(graphFile, JSON.stringify(graphWriting("graphs/payroll.json")));
+
+    const first = await run(["run", graphFile, "--workspace", d.dir, "--input", JSON.stringify({ seed: "x" })]);
+    assert.equal((JSON.parse(first.out) as { status: string }).status, "failed", `the write must not succeed: ${first.out}`);
+    assert.equal(
+      JSON.parse(readFileSync(join(d.dir, "graphs", "payroll.json"), "utf8")).metadata.name,
+      "clobber",
+      "the operator's graph is untouched",
+    );
+  } finally {
+    d.dispose();
+  }
+});
+
 test("A RUN CANNOT WRITE THE NEXT RUN'S SYSTEM PROMPT — resources/ is denied like the journal", async () => {
   // THE SHARPEST EDGE A22 ADDED. `resources/prompt/*.md` becomes the SYSTEM message of the
   // next run of a node, `resources/` sits inside the jail root, and `fs:write` is granted
