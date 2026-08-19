@@ -3659,8 +3659,48 @@ export class Engine {
     return { values: pick(reduced.state, reduced.channels), channels: reduced.channels, branchCount: 1, skipped: 0 };
   }
 
+  /**
+   * May this loop edge be taken again?
+   *
+   * ONE ANSWER FOR BOTH ENTRANCES. The `switch` below derives its own edges and a router hands
+   * them over ready-made, and only the first consulted the bound — so the same edge was bounded
+   * or unbounded depending on which node named it. Two answers to one question is how they come
+   * to disagree; this is the question.
+   *
+   * NO GRAPH-LEVEL BACKSTOP IS ADDED HERE, and that is a correction to what this fix first did.
+   * `expansion.maxLoopIterations` genuinely has no runtime reader — but it needs none, because
+   * the COMPILER already refuses a loop edge with no `maxIterations` (`GRAPH006_UNBOUNDED_LOOP`)
+   * and no `until` (`GRAPH006_NO_STOP_RULE`). Reading the graph ceiling here would be a fallback
+   * for a shape that cannot compile.
+   *
+   * Which makes what shipped worse rather than better: the compiler enforced a bound and the
+   * executor ignored it. "Compiles, then fails at run time" is what this project's compile stage
+   * exists to prevent, and this was its inversion — compiles, then runs FOREVER.
+   */
+  #loopMayContinue(ctx: RunContext, e: EdgeSpec, w: Wave, scope: Record<string, unknown>): boolean {
+    const done = e.until !== undefined && evaluate(this.#expr(ctx, e.until), scope) === true;
+    return !done && w.task.iteration + 1 < (e.maxIterations ?? 1);
+  }
+
   #edgesToTake(ctx: RunContext, p: RunProjection, w: Wave, outcome: NodeOutcome): readonly EdgeId[] {
-    if (outcome.take !== undefined) return outcome.take;
+    // A NAMED EDGE STILL OBEYS ITS OWN BOUND, and this line used to return before the `loop` arm
+    // below could say otherwise. A `router` ALWAYS produces a `take`, so a loop edge whose source
+    // is a router — the canonical `verify → replan` shape — had no bound of any kind: not
+    // `until`, not `maxIterations`, and not `expansion.maxLoopIterations`, which has no runtime
+    // reader at all. Measured before this: `maxIterations: 3` and a graph budget of $0.000001
+    // reached iteration 3,625 in 25 seconds — 3,626 model calls, 43,512 journal rows, a 17.7 MB
+    // journal — and was still going when it was killed. Pointed at a paid provider that is
+    // unbounded spend with no ceiling anywhere.
+    //
+    // Filtering rather than ignoring `take`: a router's choice is still what SELECTS the edge.
+    // What it may not do is re-enter a loop the loop itself has declared finished.
+    if (outcome.take !== undefined) {
+      const scope = { ...scopeFor(p, ctx.graph.spec.channels, w.task.branch), ...outcome.writes };
+      return outcome.take.filter((id) => {
+        const e = ctx.index.edgeById.get(id);
+        return e === undefined || e.kind !== "loop" || this.#loopMayContinue(ctx, e, w, scope);
+      });
+    }
 
     const scope = { ...scopeFor(p, ctx.graph.spec.channels, w.task.branch), ...outcome.writes };
     const out: EdgeId[] = [];
@@ -3671,9 +3711,7 @@ export class Engine {
         case "compensation":
           break;
         case "loop": {
-          const done = e.until !== undefined && evaluate(this.#expr(ctx, e.until), scope) === true;
-          const exhausted = w.task.iteration + 1 >= (e.maxIterations ?? 1);
-          if (!done && !exhausted) out.push(e.id);
+          if (this.#loopMayContinue(ctx, e, w, scope)) out.push(e.id);
           break;
         }
         case "conditional": {
