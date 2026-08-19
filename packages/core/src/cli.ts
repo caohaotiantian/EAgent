@@ -1252,6 +1252,34 @@ function loadGraph(ws: Workspace, file: string): RunGraph {
   return result.graph;
 }
 
+/**
+ * Every graph in the workspace, keyed by the thing a run is looked up BY.
+ *
+ * `discoverGraphs` keys by `metadata.name` and keeps the first of a collision, which is right for
+ * `submit by name` and wrong here: `metadata.version` is part of `GraphSpec`, so keeping
+ * `payroll-v1.json` beside `payroll-v2.json` is the ordinary shape — and under a name-keyed
+ * lookup the second one's runs became permanently un-approvable, with a warning that named
+ * neither the run nor `--graph`. Reproduced by a reviewer.
+ *
+ * Hash-keyed, no collisions possible: two files with the same hash ARE the same graph.
+ */
+function graphsByHash(ws: Workspace): Map<string, RunGraph> {
+  const dir = join(ws.root, "graphs");
+  const out = new Map<string, RunGraph>();
+  if (!existsSync(dir)) return out;
+  for (const file of readdirSync(dir).sort()) {
+    if (!/\.(json|ya?ml)$/i.test(file)) continue;
+    try {
+      const graph = loadGraph(ws, join(dir, file));
+      if (!out.has(graph.graphHash)) out.set(graph.graphHash, graph);
+    } catch {
+      // A graph this process cannot compile is not a graph it can attach. The refusal the
+      // operator sees names the run, not this file — see the message below.
+    }
+  }
+  return out;
+}
+
 function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
   const dir = join(ws.root, "graphs");
   const out: Record<string, RunGraph> = {};
@@ -1822,8 +1850,23 @@ export async function main(argv: readonly string[]): Promise<number> {
         } else {
           const wanted = await ws.engine.compiledGraphHash(runId);
           if (wanted !== undefined) {
-            const found = Object.values(discoverGraphs(ws)).find((g) => g.graphHash === wanted);
-            if (found !== undefined) ws.engine.attach(runId, found);
+            const index = graphsByHash(ws);
+            const found = index.get(wanted);
+            if (found !== undefined) {
+              ws.engine.attach(runId, found);
+            } else {
+              // NAMING THE FIX, because "is not attached" named none. An operator who has just
+              // been told to run this command needs to know that the graph is what is missing,
+              // not the run.
+              throw err.notFound(
+                CODES.E_RUN_NOT_FOUND,
+                `run ${runId} compiled graph ${wanted}, and no graph in ${join(ws.root, "graphs")} has that hash ` +
+                  `(${index.size} searched). Publish the graph this run used, or pass --graph explicitly. ` +
+                  `A graph that has been EDITED since the run started no longer matches, which is the point — ` +
+                  `restore it, or use \`loom approve --reject\` … or cancel the run`,
+                { details: { runId, graphHash: wanted, searched: index.size } },
+              );
+            }
           }
         }
         const p = await ws.engine.resolveGate(runId, {

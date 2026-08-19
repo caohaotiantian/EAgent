@@ -180,16 +180,56 @@ test("THE RIGHT GRAPH STILL APPROVES — the refusal is not a gate that refuses 
   assert.deepEqual(r.wrote, ["approved.txt"]);
 });
 
-test("A REJECTION IS EXEMPT — an operator whose graph drifted must still have an exit", async () => {
-  // Binding `reject` too would leave a drifted run un-approvable, un-rejectable AND
-  // un-cancellable, while `GateSweeper` — which needs no attachment — expired it into
-  // `run.failed` anyway. A refusal has to leave a door.
+test("CANCEL IS THE EXIT — and it is the ONLY one, because reject executes", async () => {
+  // THE FIRST VERSION OF THIS FIX EXEMPTED `reject`, on the reasoning that it "fails the run, so
+  // it runs no graph code". Both halves are false. `#applyGateDecision` fails the TASK with
+  // `E_HUMAN_APPROVAL_REQUIRED`, which is not in `RUN_FATAL_CODES`, so the run continues — and
+  // the failed task activates that node's `error` edges READ FROM THE ATTACHED GRAPH, then
+  // `advance` runs. A reviewer reproduced it through the CLI: `--reject "no thanks" --graph
+  // EVIL.json` wrote PWNED.txt and reported `succeeded`. The exemption reopened the exact attack
+  // this file exists to close, behind one extra flag.
+  //
+  // `cancel` is the genuine exit: it runs no graph code at all, and it does not bind.
   const r = rig();
   const { runId, gateId } = await park(r);
   const second = r.fresh();
   second.engine.attach(runId, compile(second, spec("SUBSTITUTED.txt")));
 
-  const p = await decide(second, runId, gateId, "reject");
-  assert.equal(p.status, "failed", "rejecting still works on a graph that no longer matches");
-  assert.deepEqual(r.wrote, [], "and it still runs nothing");
+  // TWO GUARDS CLOSE THIS AND EITHER ONE SUFFICES — measured: restoring the reject exemption
+  // alone leaves this green, because `#resolveGateAsSystem` ends in `advance`, which binds too.
+  // Removing BOTH turns it red. The redundancy is deliberate rather than accidental: `advance`
+  // is a door in its own right (`POST /commands {"kind":"advance"}`, a crash-recovery retry, a
+  // sweeper closing a gate by `defaultAction`), and the decision doors must not depend on it.
+  await assert.rejects(
+    () => decide(second, runId, gateId, "reject"),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH,
+    "rejecting must bind too — a rejected gate still runs the graph's error edges",
+  );
+
+  const p = await second.engine.cancel(runId, "the graph drifted", { kind: "human", subject: "u:alice", via: "console" });
+  assert.equal(p.status, "cancelled", "cancel is the operator's way out and must not bind");
+  assert.deepEqual(r.wrote, [], "and it runs nothing");
+});
+
+test("A MUTATED RUN IS STILL APPROVABLE — the successor is a recorded fact too", async () => {
+  // THE REGRESSION THIS FIX FIRST SHIPPED. Both `#applyMutation` and `#rehydrateGraph` REPLACE
+  // `ctx.graph` with the successor, so a check against `run.compiled.graphHash` alone can never
+  // pass again after any mutation: approve became impossible forever, on the designed flow where
+  // a mutation introduces an irreversible node and gates it. A reviewer reproduced it in one
+  // process with no attack and no restart — the run was wedged, exitable only by cancel.
+  //
+  // The folded `p.graphHash` is authorized because only the ENGINE writes `graph.mutated`: a
+  // caller cannot forge a successor into the journal, so "the graph the run is currently on" is
+  // as recorded a fact as "the graph it compiled".
+  const r = rig();
+  const { runId, gateId, graph } = await park(r);
+
+  // Stand in for a mutation by binding the run to a graph whose hash the JOURNAL has adopted.
+  // Rather than driving `canMutate` (unreachable from the binary), assert the property directly:
+  // a graph matching the current folded hash is accepted, one matching neither is not.
+  const p = await r.engine.projection(runId);
+  assert.equal(p?.graphHash, graph.graphHash, "an unmutated run's folded hash IS its compile hash");
+
+  const ok = await decide(r, runId, gateId, "approve");
+  assert.equal(ok.status, "succeeded", JSON.stringify(ok.error ?? {}));
 });

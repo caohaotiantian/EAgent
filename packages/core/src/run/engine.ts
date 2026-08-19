@@ -767,6 +767,20 @@ export class Engine {
       if (folded !== undefined && isTerminal(folded.status)) return folded;
       throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
     }
+    // BOUND BEFORE ANYTHING RUNS, and after the terminal fallback above so polling a finished
+    // run still answers rather than 404ing.
+    //
+    // `advance` is a door onto execution in its own right and it was unguarded: `POST
+    // /runs/:id/commands {"kind":"advance"}` reaches it — the code's own 202 message tells an
+    // operator to use it to retry — as do a crash leaving a run non-terminal and `GateSweeper`
+    // closing a gate by `defaultAction`, which appends `gate.decided` and defers execution to
+    // exactly here. Guarding the gate doors and leaving this one open guards the room and not
+    // the house.
+    //
+    // BEFORE `#rehydrateGraph`, deliberately: rehydration REPLACES `ctx.graph` with the journal's
+    // successor, so checking after it would be checking the engine's own work rather than what
+    // the caller attached.
+    await this.#assertBound(ctx, `advancing run ${runId}`, { requireRecord: false });
     await this.#rehydrateGraph(ctx);
 
     for (;;) {
@@ -1027,6 +1041,9 @@ export class Engine {
       );
     }
     const ctx = this.#require(runId);
+    // The higher-consequence sibling of `resolveGate`: it closes N gates at once and then
+    // advances. Guarding one and not the other is the shape invariant 6 exists to prevent.
+    await this.#assertBound(ctx, `deciding gate batch "${input.batchId}"`);
     await this.#gates.resolveBatch(ctx.log, input);
     return this.advance(runId);
   }
@@ -1038,17 +1055,17 @@ export class Engine {
    */
   async #resolveGateAsSystem(runId: RunId, input: ResolveInput): Promise<RunProjection> {
     const ctx = this.#require(runId);
-    // AN APPROVAL BINDS ITS GRAPH; A REFUSAL DOES NOT NEED TO.
+    // EVERY DECISION BINDS, INCLUDING `reject`, and exempting it was a hole the size of the one
+    // this method exists to close. The exemption's stated reason — "reject fails the run, so it
+    // runs no graph code" — is false twice over: `#applyGateDecision` fails the TASK with
+    // `E_HUMAN_APPROVAL_REQUIRED`, which is not in `RUN_FATAL_CODES`, so the run continues and
+    // the failed task activates that node's `error` edges READ FROM THE ATTACHED GRAPH, and then
+    // `advance` runs. Reproduced through the CLI: `--reject "no thanks" --graph EVIL.json`
+    // wrote `PWNED.txt` and reported `succeeded`.
     //
-    // `approve` is the only decision that makes what comes next EXECUTE, so it is the only one
-    // that must prove the graph is the one the human was shown. `reject` fails the run and
-    // `cancel` ends it — neither runs graph code, and both are what an operator reaches for when
-    // a graph has drifted. Binding them too would leave a drifted run un-approvable,
-    // un-rejectable AND un-cancellable while `GateSweeper`, which needs no attachment at all,
-    // expired it into `run.failed` anyway. The refusal has to leave an exit.
-    //
-    // `edit` and `redirect` continue the run, so they bind like `approve`.
-    if (input.decision.kind !== "reject") await this.#assertBound(ctx, `deciding gate "${input.gateId}"`);
+    // The operator's exit is `cancel`, which genuinely runs no graph code and genuinely does not
+    // bind. The reject exemption bought nothing `cancel` did not already provide.
+    await this.#assertBound(ctx, `deciding gate "${input.gateId}"`);
     await this.#gates.resolve(ctx.log, input);
     return this.advance(runId);
   }
@@ -1545,24 +1562,48 @@ export class Engine {
    * REFUSED, NEVER REPAIRED, and the caller is told which of the three moved. Recompiling a
    * "corrected" graph here would be this engine deciding what a human meant to approve.
    */
-  async #assertBound(ctx: RunContext, why: string): Promise<void> {
+  async #assertBound(ctx: RunContext, why: string, opts: { readonly requireRecord: boolean } = { requireRecord: true }): Promise<void> {
     const recorded = await this.#compiledIdentity(ctx.runId);
-    // A run with no `run.compiled` cannot be checked, and the permissive branch is NOT inherited
-    // from `replay.ts` — there it means "an older journal, replay what you can", here it would
-    // mean "unverifiable, so allow". A gate is not the place for that default.
+    // A run with no `run.compiled` cannot be checked, and what to do about that DIFFERS BY DOOR.
+    //
+    // On a decision door it is a refusal: `replay.ts` treats a missing record as "an older
+    // journal, replay what you can", and inheriting that here would mean "unverifiable, so
+    // allow". A gate is not the place for that default.
+    //
+    // On `advance` it is not, because a journal with no compile is a MALFORMED run rather than
+    // an unverifiable one, and the executor already diagnoses it far better than this could — a
+    // partially-written child log gets "awaiting a gate it does not have", which this refusal
+    // preempted with a flat `E_RUN_NOT_FOUND`. Every real run carries `run.compiled` from
+    // `submit`, so nothing that could execute reaches the lenient branch.
     if (recorded === undefined) {
+      if (!opts.requireRecord) return;
       throw err.notFound(
         CODES.E_RUN_NOT_FOUND,
         `run ${ctx.runId} has no compile on record, so ${why} cannot be bound to a graph`,
         { details: { runId: ctx.runId } },
       );
     }
-    const mismatch =
-      recorded.graphHash !== ctx.graph.graphHash
-        ? "spec"
-        : recorded.manifest !== manifestKey(ctx.graph.resolutionManifest)
-          ? "resources"
-          : undefined;
+    // TWO HASHES ARE AUTHORIZED, and binding only the first was a regression that wedged every
+    // run that mutates. Both `#applyMutation` and `#rehydrateGraph` REPLACE `ctx.graph` with the
+    // successor, so after any mutation `ctx.graph.graphHash` can never equal
+    // `run.compiled.graphHash` again — approve became impossible forever, on the designed flow
+    // where a mutation introduces an irreversible node and gates it. Reproduced in one process
+    // with no attack and no restart.
+    //
+    // The folded `p.graphHash` is authoritative for that case because only the ENGINE writes
+    // `graph.mutated`: a caller cannot forge a successor into the journal. So "the graph the run
+    // is currently on" is as recorded a fact as "the graph the run compiled".
+    const current = (await this.#project(ctx))?.graphHash;
+    const isCompiled = recorded.graphHash === ctx.graph.graphHash;
+    const isCurrent = current !== undefined && current === ctx.graph.graphHash;
+    const mismatch = !isCompiled && !isCurrent
+      ? "spec"
+      : // The manifest is journaled on `run.compiled` alone, so it can only be checked against
+        // the compiled graph. A successor carries no recorded manifest to compare — an honest
+        // gap, narrowed by mutation being unreachable from the shipped binary today.
+        isCompiled && recorded.manifest !== manifestKey(ctx.graph.resolutionManifest)
+        ? "resources"
+        : undefined;
     if (mismatch !== undefined) {
       throw err.conflict(
         CODES.E_GRAPH_MISMATCH,

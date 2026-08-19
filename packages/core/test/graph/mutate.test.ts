@@ -580,4 +580,21 @@ test("a mutation that adds an irreversible node forces a gate before it runs", a
 
   assert.equal(p.status, "awaiting_gate", "a graph that GREW a send-email step stops for a human");
   assert.deepEqual(r.ran, [], "and the send has not happened yet");
+
+  // AND THE HUMAN CAN ACTUALLY ANSWER IT. This test used to park here and stop, which is how a
+  // regression hid: `#assertBound` compared the attached graph against `run.compiled.graphHash`,
+  // while `#applyMutation` had already REPLACED `ctx.graph` with the successor — so after any
+  // mutation the two could never agree and approve was impossible forever. The designed flow is
+  // exactly this one: a mutation introduces an irreversible node and gates it. The run was
+  // wedged, exitable only by cancel. Caught by a reviewer, in one process, with no attack.
+  const open = await r.engine.openGates(runId);
+  assert.equal(open.length, 1, "one gate to answer");
+  const after = await r.engine.resolveGate(runId, {
+    gateId: open[0]!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "approve-the-mutation",
+  });
+  assert.notEqual(after.status, "awaiting_gate", `the gate must be answerable: ${JSON.stringify(after.error ?? {})}`);
+  assert.deepEqual(r.ran, ["email.send"], "and the irreversible tool the mutation added is what ran");
 });
