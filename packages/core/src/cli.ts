@@ -1760,9 +1760,24 @@ export async function main(argv: readonly string[]): Promise<number> {
         const runId = requirePositional(args, 0, "a runId") as RunId;
         const gateId = requirePositional(args, 1, "a gateId") as GateId;
         const reject = args.flags["reject"];
-        // The graph must be re-attached: the RunGraph is not itself journaled (its
-        // hash is), so a fresh process needs to be told which graph this run used.
-        if (args.flags["graph"] !== undefined) ws.engine.attach(runId, loadGraph(ws, requireFileFlag(args, "graph")));
+        // THE GRAPH IS FOUND, NOT DEMANDED. `RunGraph` is not journaled — its hash is — so a
+        // fresh process must be told which graph this run used, and it used to be told with a
+        // `--graph` flag that appeared in no usage text, no error message, and not in the hint
+        // `loom run` itself prints. The command the binary told an operator to type could not
+        // work. Now the workspace's own `graphs/` directory is searched for the hash the journal
+        // records, and `--graph` remains as an explicit override.
+        //
+        // Attaching the WRONG graph is not a risk this lookup carries: `resolveGate` refuses any
+        // graph that is not the one the run compiled, down to the resources its refs resolved to.
+        if (args.flags["graph"] !== undefined) {
+          ws.engine.attach(runId, loadGraph(ws, requireFileFlag(args, "graph")));
+        } else {
+          const wanted = await ws.engine.compiledGraphHash(runId);
+          if (wanted !== undefined) {
+            const found = Object.values(discoverGraphs(ws)).find((g) => g.graphHash === wanted);
+            if (found !== undefined) ws.engine.attach(runId, found);
+          }
+        }
         const p = await ws.engine.resolveGate(runId, {
           gateId,
           // `--reject` with no value stays legal and IS the decision: rejecting without

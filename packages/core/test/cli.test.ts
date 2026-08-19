@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { CODES, isLoomError } from "../src/errors.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +25,24 @@ function emptyDir(): { dir: string; dispose: () => void } {
 }
 
 /** A graph whose only node writes wherever the caller says. */
+/** A graph that parks on a gate, then writes. The shape the approve tests need. */
+function gatedGraph(path: string): Record<string, unknown> {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "gated", project: "demo", version: 1 },
+    policy: { posture: "on", capabilities: ["fs:write"], expansion: { maxNodes: 8, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { note: { type: "string", reduce: "replace" }, written: { type: "object", reduce: "replace" } },
+    inputs: ["note"],
+    outputs: ["written"],
+    nodes: [
+      { id: "approve", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/ship@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+      { id: "write", type: "tool", reads: ["note"], writes: ["written"], tool: { name: "fs.write", version: "1.0", args: { path, body: "${note}" } } },
+    ],
+    edges: [{ id: "e1", from: "approve", to: "write", kind: "seq" }],
+  };
+}
+
 function graphWriting(path: string): Record<string, unknown> {
   return {
     apiVersion: "loom.dev/v1",
@@ -633,6 +652,61 @@ test("A GRAPH'S AGENT NODE IS ANSWERED BY A REAL ADAPTER — the segment between
     } finally {
       ws.close();
     }
+  } finally {
+    d.dispose();
+  }
+});
+
+test("A FRESH PROCESS APPROVES WITHOUT --graph — the command the binary prints now works", async () => {
+  // `loom run` has always printed `— loom approve <runId> <gateId>`, and that exact command
+  // returned `E_RUN_NOT_FOUND: … is not attached`. `RunGraph` is not journaled (its hash is), so
+  // a fresh process had to be TOLD which graph the run used, through a `--graph` flag that
+  // appeared in no usage text, no error message, and not in the hint itself. The binary told an
+  // operator to type a command that could not work.
+  //
+  // Now the workspace's own `graphs/` directory is searched for the hash the journal records.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    writeFileSync(join(d.dir, "graphs", "g.json"), JSON.stringify(gatedGraph("after-gate.txt")));
+
+    const first = await run(["run", join(d.dir, "graphs", "g.json"), "--workspace", d.dir, "--input", JSON.stringify({ note: "ship it" })]);
+    const hint = first.out.trim().split("\n").pop() ?? "";
+    const runId = /loom approve (\S+) (\S+)/.exec(hint)?.[1];
+    const gateId = /loom approve (\S+) (\S+)/.exec(hint)?.[2];
+    assert.ok(runId !== undefined && gateId !== undefined, `expected an approve hint, got: ${hint}`);
+
+    const approved = await run(["approve", runId, gateId, "--workspace", d.dir, "--as", "u:alice"]);
+    assert.equal(approved.code, 0, `approve must succeed without --graph: ${approved.err}`);
+    assert.equal(readFileSync(join(d.dir, "after-gate.txt"), "utf8"), "ship it", "the gated action ran");
+  } finally {
+    d.dispose();
+  }
+});
+
+test("AND A SUBSTITUTED GRAPH IS REFUSED — the gate binds what the human was shown", async () => {
+  // Reproduced through the built binary before this landed: approve run A while passing graph B,
+  // and B's node ran and wrote. `--graph` was simply believed.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    writeFileSync(join(d.dir, "graphs", "g.json"), JSON.stringify(gatedGraph("after-gate.txt")));
+    writeFileSync(join(d.dir, "graphs", "b.json"), JSON.stringify(gatedGraph("SUBSTITUTED.txt")));
+
+    const first = await run(["run", join(d.dir, "graphs", "g.json"), "--workspace", d.dir, "--input", JSON.stringify({ note: "n" })]);
+    const hint = first.out.trim().split("\n").pop() ?? "";
+    const m = /loom approve (\S+) (\S+)/.exec(hint);
+    assert.ok(m !== null, `expected an approve hint, got: ${hint}`);
+
+    // `main` THROWS here rather than returning a code — the binary's top-level catch is what
+    // turns it into `E_GRAPH_MISMATCH: …` and exit 1, which is what an operator sees. `loom run`
+    // catches per-command and prints; `approve` does not. Worth knowing, not worth changing here.
+    await assert.rejects(
+      () => run(["approve", m[1]!, m[2]!, "--workspace", d.dir, "--as", "u:alice", "--graph", join(d.dir, "graphs", "b.json")]),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH,
+      "a substituted graph must be refused",
+    );
+    assert.equal(existsSync(join(d.dir, "SUBSTITUTED.txt")), false, "and nothing may have executed");
   } finally {
     d.dispose();
   }

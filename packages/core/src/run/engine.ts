@@ -1082,6 +1082,26 @@ export class Engine {
    * `leased` in the log. This method exists only to bind the RunGraph, which is not
    * itself journaled (its hash is).
    */
+  /**
+   * The `graphHash` this run COMPILED, so a fresh process can find the graph again.
+   *
+   * `RunGraph` is not journaled — its hash is — so re-attaching means "find the graph whose hash
+   * this is". A caller holds the candidates (files in a workspace, the graphs a server was
+   * given); this answers which one it is looking for. `undefined` means no compile on record.
+   *
+   * NOT `RunProjection.graphHash`, which folds `graph.mutated` to the SUCCESSOR hash: a caller
+   * matching an authored on-disk graph against that would find nothing for every run that ever
+   * mutated. `#rehydrateGraph` replays the mutations on top of the authored graph.
+   *
+   * Answering this is not permission to run anything. Whatever the caller attaches is still
+   * checked against all three recorded facts before a decision may continue the run — see
+   * `#assertBound`. This method exists so an honest caller can succeed, not so a dishonest one
+   * can be trusted.
+   */
+  async compiledGraphHash(runId: RunId): Promise<string | undefined> {
+    return (await this.#compiledIdentity(runId))?.graphHash;
+  }
+
   attach(runId: RunId, graph: RunGraph): void {
     this.#contextFor(runId, graph);
   }

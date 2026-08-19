@@ -2160,6 +2160,34 @@ export class ControlPlane {
    * response that is already finished, which `send` tolerates. A decision that lands
    * after its 504 is still journaled; the client simply has to re-read to see it.
    */
+
+  /**
+   * Bind a run to the graph it compiled, using the graphs this plane was given.
+   *
+   * WHY THIS EXISTS: `Engine` methods that decide a gate or move a run require the run to be
+   * ATTACHED, and this plane never attached anything — only `cli.ts` did, behind a `--graph`
+   * flag. So a `serve` process could LIST every open gate on a run it did not submit and answer
+   * none of them, while `GateSweeper` — which needs no attachment at all — went on expiring those
+   * same gates into `run.failed`. After any restart or deploy, every open gate was visible,
+   * unanswerable, and still on a clock.
+   *
+   * ONLY ON WRITE PATHS, AND ONLY AFTER AUTHORIZATION. Attaching costs a `RunContext` that
+   * `#retire` frees only when the run ends, so doing it on a read route would let anyone holding
+   * the lowest-privilege credential grow this process's memory by listing runs. The read routes
+   * already work unattached — `projection` and `openGates` both fall back to the journal.
+   *
+   * A MISS IS NOT AN ERROR HERE. It leaves the run unattached and the caller gets the same
+   * `E_RUN_NOT_FOUND` it would have got before, which is the honest answer: this deployment does
+   * not hold that graph. And attaching the WRONG graph is not a risk this carries — `Engine`
+   * refuses any graph that is not the one the run compiled, resources included.
+   */
+  async #bindFromIndex(runId: RunId): Promise<void> {
+    const wanted = await this.#engine.compiledGraphHash(runId);
+    if (wanted === undefined) return;
+    const found = Object.values(this.#graphs).find((g) => g.graphHash === wanted);
+    if (found !== undefined) this.#engine.attach(runId, found);
+  }
+
   async #withDeadline(res: ServerResponse, url: URL, run: (signal: AbortSignal) => Promise<void>): Promise<void> {
     // The 504 below quotes `ms`, so `ms` has to BE the deadline that fired rather than the
     // one that was configured. TWO things make that true and this line used to have only
@@ -2729,6 +2757,16 @@ export class ControlPlane {
           // WHO RAN THE COMMAND, on the envelope rather than in the payload, because a
           // cancel is caused by the caller directly — the split `SubmittedBy` documents.
           const by = commandActor(auth);
+          // Bound before dispatch: `cancel`, `rewind` and `advance` all require the run to be
+          // attached, and this plane attached nothing until now. A miss still 404s, which is the
+          // honest answer — this deployment does not hold that graph.
+          //
+          // NOTE, and it is an open gap rather than a choice: `cancel` is the one command that
+          // should never depend on a graph being findable. It runs no graph code, and it is what
+          // an operator reaches for when a graph has drifted — but `Engine.cancel` goes through
+          // `#require` like the rest, so a run whose graph is absent from this index still cannot
+          // be stopped through this door. Making `cancel` journal-only is its own change.
+          await this.#bindFromIndex(runId);
           switch (cmd["kind"]) {
             case "cancel":
               // `checkedReason`, not `cmd.reason ?? "operator"` off a cast — the value is
@@ -2882,6 +2920,10 @@ export class ControlPlane {
 
           const actor = this.#decider(auth, claimed);
           if (actor.subject === UNIDENTIFIED_SUBJECT) await this.#refuseUnidentifiedApproval(runId, gateId, auth);
+
+          // AFTER `mayReachGates` above and after the decision is checked, so nothing a stranger
+          // sends makes this process go looking for a graph.
+          await this.#bindFromIndex(runId);
 
           const p = await engine.resolveGate(runId, {
             gateId,
