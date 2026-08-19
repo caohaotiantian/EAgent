@@ -109,3 +109,41 @@ test("A TOOL THIS PROCESS DOES NOT HAVE IS FLAGGED — a human was being asked t
   assert.ok(r.codes.includes("GRAPH013_UNKNOWN_TOOL"), r.codes.join(", "));
   assert.equal(r.ok, true, "a partial tool map must not make a graph unbuildable");
 });
+
+test("EVERY NODE TYPE'S BLOCK IS CHECKED — `Partial` let two of them through", () => {
+  // The first version of `REQUIRED_FIELDS` was a `Partial<Record<NodeType, …>>`, and the omission
+  // it permitted is what shipped: `router` and `join` had no entry, so `join: {}` still crashed
+  // the compiler (`join5.branches is not iterable`) and `router: {}` compiled `ok` and crashed
+  // the RUN. A total `Record` forces every type to be looked at.
+  //
+  // `evaluator.kind` is the sharpest of them, and its absence was not a crash: it fell through to
+  // the `rubric` arm and made a PAID MODEL CALL where the author had written an assertion.
+  const cases: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["join", { id: "n", type: "join", reads: ["a"], writes: ["a"], join: {} }],
+    ["router", { id: "n", type: "router", reads: ["a"], writes: ["a"], router: {} }],
+    ["evaluator without kind", { id: "n", type: "evaluator", reads: ["a"], writes: ["a"], evaluator: { ref: "r/x@stable", threshold: 0 } }],
+  ];
+  for (const [label, node] of cases) {
+    const r = diagnose((d) => {
+      d["nodes"] = [node];
+    });
+    assert.equal(r.ok, false, `${label} must not compile`);
+    assert.ok(r.codes.includes("GRAPH020_MISSING_FIELD"), `${label}: got ${r.codes.join(", ")}`);
+  }
+});
+
+test("CALLER DATA INSIDE THE ARRAYS IS CHECKED TOO", () => {
+  // `edges: [null]` reached `e.id`; `hooks: {beforeNode: 42}` reached `for (const ref of 42)` —
+  // the latter five lines under guards this file had already grown for the same class, and in
+  // TWO places, since `compile.ts`'s manifest walk iterates hooks as well.
+  for (const [label, mutate] of [
+    ["edges[0] null", (d: Record<string, unknown>) => { d["edges"] = [null]; }],
+    ["nodes[0] number", (d: Record<string, unknown>) => { d["nodes"] = [42]; }],
+    ["inputs[0] number", (d: Record<string, unknown>) => { d["inputs"] = [42]; }],
+    ["hooks not a list", (d: Record<string, unknown>) => { d["hooks"] = { beforeNode: 42 }; }],
+  ] as const) {
+    const r = diagnose(mutate);
+    assert.equal(r.ok, false, `${label} must not compile`);
+    assert.ok(r.codes.includes("GRAPH003_MALFORMED"), `${label}: got ${r.codes.join(", ")}`);
+  }
+});

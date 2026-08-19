@@ -20,7 +20,8 @@ import { join } from "node:path";
 
 import { McpClient, createBoundedLineReader } from "../../src/mcp/client.ts";
 import { mcpToolName, mcpTools } from "../../src/mcp/tools.ts";
-import { connectMcp, openWorkspace, parseArgs, readMcpServers } from "../../src/cli.ts";
+import { openWorkspace, parseArgs, readMcpServers, startMcp } from "../../src/cli.ts";
+import { compile } from "../../src/graph/compile.ts";
 
 function serverFile(body: string): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "loom-mcp-"));
@@ -227,16 +228,45 @@ test("A GRAPH COMPILES AGAINST A DISCOVERED MCP TOOL — the ordering that keeps
   const cfg = join(d, "mcp.json");
   writeFileSync(cfg, JSON.stringify({ servers: [{ name: "demo", command: process.execPath, args: [s.path] }] }));
 
-  const ws = openWorkspace(parseArgs(["compile", "--workspace", d]));
+  // STARTED BEFORE THE WORKSPACE. The grant list is derived inside `openWorkspace`, so a tool
+  // registered after it returns is a tool whose capability nobody holds — which is exactly what
+  // shipped: `mcp:demo` was absent from both `tenantCapabilities` and the engine's grant, and a
+  // graph naming an MCP tool failed to COMPILE with GRAPH017_CAPABILITY_NOT_GRANTED.
   let clients: readonly McpClient[] = [];
+  clients = await startMcp(readMcpServers(cfg));
+  const ws = openWorkspace(parseArgs(["compile", "--workspace", d]), process.env, undefined, clients);
   try {
-    clients = await connectMcp(ws, readMcpServers(cfg));
-    // Registered into the engine's registry, which is what `loadGraph` compiles against —
-    // so the tool is inside `reachableToolNames` and the posture floor sees it. Registering
-    // after the compile would defeat invariant 5 by ordering rather than by argument.
     const manifests = ws.engine.tools.manifests();
     assert.ok(mcpToolName("demo", "echo") in manifests, "the discovered tool must be registered before any compile");
     assert.equal(manifests[mcpToolName("demo", "echo")]!.irreversibility, "irreversible");
+
+    // AND A GRAPH THAT USES IT COMPILES. This test asserted only that the tool APPEARED in the
+    // registry, which is why it stayed green through a defect that made every MCP graph
+    // unbuildable — the capability is what was missing, not the tool.
+    const spec = {
+        apiVersion: "loom.dev/v1",
+        kind: "GraphSpec",
+        metadata: { name: "usesmcp", project: "probe", version: 1 },
+        policy: { posture: "out", capabilities: [`mcp:demo`], expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+        channels: { a: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+        inputs: ["a"],
+        outputs: ["out"],
+        nodes: [
+          { id: "p", type: "tool", reads: ["a"], writes: ["out"], tool: { name: mcpToolName("demo", "echo"), version: "1.0", args: {} }, unhandled: true },
+        ],
+      edges: [],
+    };
+    const r = compile({
+      spec: spec as never,
+      resolver: ws.resolver,
+      tools: ws.engine.tools.manifests(),
+      tenantCapabilities: ws.granted,
+    });
+    assert.equal(
+      r.ok,
+      true,
+      `a graph naming an MCP tool must compile: ${(r.diagnostics ?? []).map((x) => `${x.code}: ${x.message}`).join("; ")}`,
+    );
   } finally {
     for (const c of clients) c.close();
     ws.close();

@@ -16,7 +16,7 @@ loom serve                            # console + API on :8787, from an empty di
 | | |
 |---|---|
 | **Graph compiler** | 22 validation rules, aggregated diagnostics with suggested fixes, resource pinning |
-| **Executor** | Parallel fan-out, branch-ordered joins, bounded loops, retries. Six node types run: tool, agent, router, join, human_gate, subgraph |
+| **Executor** | Parallel fan-out, branch-ordered joins, bounded loops, retries. All eight node types run: tool, agent, router, join, human_gate, subgraph, function, evaluator |
 | **Durability** | Append-only journal on `node:sqlite`. A run SUSPENDED on a human gate survives `kill -9` and resumes in another process |
 | **Human oversight** | Three postures by configuration alone; gates are rows, so a suspended run holds zero worker slots. An approval binds the graph it was shown — spec, resolved resources and oversight floor |
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
@@ -30,11 +30,12 @@ Stated because a framework that overstates itself costs its user a day finding o
 
 | | |
 |---|---|
-| **`function` / `evaluator{assertion}` nodes** | They run — see `resources/function/*.js` — but a body cannot raise a RETRYABLE error, so a `retry` policy on one is inert |
+| **`retry` on a function or evaluator node** | Inert. A body cannot raise a RETRYABLE error — every throw out of the `vm` is classified `E_INTERNAL`, so the backoff never schedules |
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | Declared, validated, pinned into the manifest, never invoked |
 | **`timeoutMs`** | In the schema on nodes and joins, enforced by nothing. A hanging tool hangs the task |
-| **Crash mid-effect** | The journal survives, but a run killed while a Task was leased has no recovery door: `cancel` and `advance` both need the graph re-attached |
+| **Retries under `loom serve`** | `loom run` waits out a backoff and finishes the run; the server does not. A run that retries under `serve` sits until something POSTs `advance` |
+| **Crash mid-effect** | The journal survives and `POST /runs/:id/commands {"kind":"advance"}` will move the run on — once per attempt, by hand. There is no clock that does it for you, and `cancel` needs the graph findable |
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
 
 ## Try it

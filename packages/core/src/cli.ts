@@ -88,9 +88,9 @@ const USAGE = `loom — graph-native multi-agent orchestration
   --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered
                     at all, so a graph naming it fails to compile
   --grant CAP,CAP   capabilities no TOOL declares — graph:mutate is the one that
-                    matters. Tool capabilities are not grantable here: they come
-                    from what is registered, which is what --allow-exec, --egress
-                    and --mcp-file decide
+                    matters. A tool capability here is REFUSED, not ignored: they
+                    come from what is registered, which is what --allow-exec,
+                    --egress and --mcp-file decide
   --as ID           the subject a decision is JOURNALED under, and matched against a
                     gate's approvers. Defaults to "cli", which no approvers list names —
                     so a gate that names anybody needs this. It ends up in the audit
@@ -253,6 +253,18 @@ export function openWorkspace(
   args: Args,
   env: Readonly<Record<string, string | undefined>> = process.env,
   fetchImpl?: HttpOptions["fetch"],
+  /**
+   * MCP servers already STARTED, so their tools are registered before the grant list is derived.
+   *
+   * This parameter exists because the ordering is the whole bug. The grant list is a snapshot
+   * taken here — `PolicyEngine` stores it and `Engine` builds one per run from the same array —
+   * so a tool registered after this function returns is a tool whose capability nobody holds.
+   * MCP used to be connected in `main` AFTER `openWorkspace`, which meant `mcp:<server>` was
+   * absent from both `tenantCapabilities` and the engine's grant: a graph naming an MCP tool
+   * failed to COMPILE, and W8's claim to have unbricked MCP was false. Reproduced against a real
+   * stdio server by a reviewer.
+   */
+  mcp: readonly McpClient[] = [],
 ): Workspace {
   // BEFORE ANYTHING IS CREATED OR OPENED. A malformed channels file is a refusal to start,
   // and a refusal that has already made a directory and opened a SQLite handle is a
@@ -418,6 +430,10 @@ export function openWorkspace(
   registerFunctions(documents, functions, root);
 
   // ONE DERIVATION, USED HERE AND BY THE COMPILER — see `capabilitiesOf`.
+  // MCP TOOLS BEFORE THE GRANT IS DERIVED. Connecting the server IS the grant — that is W8's
+  // whole argument — and it only holds if the registration happens first.
+  for (const client of mcp) for (const t of mcpTools(client)) tools.register(t);
+
   const granted = capabilitiesOf(tools, grantFlag(args));
   const engine = new Engine({
     store,
@@ -1224,7 +1240,7 @@ export function readMcpServers(file: string): readonly McpClientOptions[] {
  * A server that fails to start is fatal, not skipped. Skipping produces a run whose graph
  * compiled against tools that are not there, which fails later and further away.
  */
-export async function connectMcp(ws: Workspace, servers: readonly McpClientOptions[]): Promise<readonly McpClient[]> {
+export async function startMcp(servers: readonly McpClientOptions[]): Promise<readonly McpClient[]> {
   const clients: McpClient[] = [];
   for (const opts of servers) {
     const client = new McpClient(opts);
@@ -1239,7 +1255,6 @@ export async function connectMcp(ws: Workspace, servers: readonly McpClientOptio
       );
     }
     clients.push(client);
-    for (const t of mcpTools(client)) ws.engine.tools.register(t);
   }
   return clients;
 }
@@ -1324,9 +1339,24 @@ function registerFunctions(store: ResourceStore | undefined, functions: Function
 }
 
 function capabilitiesOf(tools: ToolRegistry, extra: readonly string[] = []): readonly string[] {
-  return [
-    ...new Set([...Object.values(tools.manifests()).flatMap((m) => m.capabilities), ...extra]),
-  ].sort();
+  const fromTools = Object.values(tools.manifests()).flatMap((m) => m.capabilities);
+  // `--grant` MAY NOT NAME A TOOL CAPABILITY, which its own docstring already promised and
+  // nothing enforced. `--grant proc:exec` without `--allow-exec` compiled `ok`, the run then
+  // RAISED A GATE — a human asked to authorize `proc.exec` — and failed `E_TOOL_NOT_FOUND` after
+  // the approval. That is verbatim the defect this function is named for, reopened by the flag
+  // that shipped alongside it. A capability with no tool behind it is a grant that authorizes
+  // nothing and misleads everything.
+  const tooling = new Set(fromTools);
+  const overreach = extra.filter((c) => tooling.has(c) || /^(fs|net|proc|mcp):/.test(c));
+  if (overreach.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--grant cannot grant tool capabilities (${overreach.join(", ")}): they come from what is REGISTERED, ` +
+        `which --allow-exec, --egress and --mcp-file decide. Granting one with no tool behind it asks a human ` +
+        `to authorize something nothing can run`,
+    );
+  }
+  return [...new Set([...fromTools, ...extra])].sort();
 }
 
 /**
@@ -1838,11 +1868,11 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0;
   }
 
-  const ws = openWorkspace(args);
-  // BEFORE the switch, so every command that compiles a graph sees the discovered tools.
-  // `connectMcp` explains why the ordering is the load-bearing part.
-  const mcp =
-    args.flags["mcp-file"] === undefined ? [] : await connectMcp(ws, readMcpServers(requireFileFlag(args, "mcp-file")));
+  // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
+  // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
+  // parameter.
+  const mcp = args.flags["mcp-file"] === undefined ? [] : await startMcp(readMcpServers(requireFileFlag(args, "mcp-file")));
+  const ws = openWorkspace(args, process.env, undefined, mcp);
   try {
     switch (args.command) {
       case "compile": {
@@ -1922,7 +1952,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         if (p.status !== "failed" && p.status !== "cancelled") {
           process.stderr.write(
             `! run ${runId} is still ${p.status} — it did not reach a terminal state or a gate. ` +
-              `Resume it with: loom run ... (the journal is durable) or inspect it with loom trace ${runId}\n`,
+              `Its journal is durable; inspect it with: loom trace ${runId} --graph <the graph file>\n`,
           );
         }
         return 1;

@@ -11,8 +11,10 @@
  * `node:vm` does not isolate untrusted code — a fresh context is a scoping mechanism, not
  * a security boundary, and everyone who has tried to use it as one has been wrong. What
  * it buys here is real but narrow: a body sees a small, explicit set of globals instead
- * of the host's, so a `function` resource cannot reach `process.env` or `fetch` by
- * accident.
+ * of the host's — THAT CONTEXT'S OWN copies of them, which is the part that took a second
+ * attempt. Seeding the context with the host's `Object` handed over the host's `Function` with
+ * it, and `Object.constructor("return globalThis")()` walked straight back out to `process.env`
+ * and `fetch`. See `safeGlobals`.
  *
  * **Untrusted code belongs in the subprocess sandbox** (`sandbox/subprocess.ts`), behind
  * a tool manifest and a capability. `function` resources are assumption A13 — trusted
@@ -104,25 +106,51 @@ export interface FunctionLoaderOptions {
   readonly compileTimeoutMs?: number;
 }
 
-const SAFE_GLOBALS: Readonly<Record<string, unknown>> = {
-  JSON,
-  Math,
-  Number,
-  String,
-  Boolean,
-  Array,
-  Object,
-  Date: undefined,
-  Error,
-  TypeError,
-  RangeError,
-  isNaN,
-  isFinite,
-  parseInt,
-  parseFloat,
-  encodeURIComponent,
-  decodeURIComponent,
-};
+/**
+ * The globals a body sees — built from the CONTEXT'S OWN intrinsics, never the host's.
+ *
+ * Handing over the host `Object` hands over the host `Function`: `Object.constructor` IS it, so
+ * `Object.constructor("return globalThis")()` returned the host global and from there
+ * `process.env` and `fetch`. Measured — a body printed a real `ANTHROPIC_API_KEY` — which made
+ * this module's own claim that a body "cannot reach `process.env` or `fetch` by accident" false
+ * for every name in the list below.
+ *
+ * `vm.createContext` gives the new context its own intrinsics, so reading them back out of it
+ * closes the bridge: the body still gets `JSON`, `Math` and the rest, and they are that context's
+ * copies. A `vm` context is STILL not a security boundary and this does not make it one — it
+ * makes the narrow claim this module actually makes ("a small explicit set of globals instead of
+ * the host's") true rather than aspirational.
+ *
+ * `Math` is exposed whole, which leaves `Math.random()` reachable while `Date` is deliberately
+ * removed for determinism. That asymmetry is real, is invariant 4's known gap, and is not closed
+ * here: a body using it diverges on replay, and replay DETECTS it (`match: false`) rather than
+ * serving a wrong answer.
+ */
+const SAFE_GLOBAL_NAMES = [
+  "JSON",
+  "Math",
+  "Number",
+  "String",
+  "Boolean",
+  "Array",
+  "Object",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "isNaN",
+  "isFinite",
+  "parseInt",
+  "parseFloat",
+  "encodeURIComponent",
+  "decodeURIComponent",
+] as const;
+
+function safeGlobals(context: object): Record<string, unknown> {
+  const own = vm.runInContext(`({ ${SAFE_GLOBAL_NAMES.join(", ")} })`, context) as Record<string, unknown>;
+  // `Date` is removed rather than copied: a body that reads the wall clock makes its own replay
+  // non-deterministic, and the journal has no effect key for it.
+  return { ...own, Date: undefined };
+}
 
 export interface FunctionLoader {
   /**
@@ -155,7 +183,10 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
     const hit = cache.get(digest);
     if (hit !== undefined) return hit;
 
-    const context = vm.createContext({ ...SAFE_GLOBALS, ...opts.globals });
+    // The context is created EMPTY, then given its own intrinsics back plus whatever the
+    // embedder injected. Seeding it with host objects is what opened the bridge.
+    const context = vm.createContext({});
+    Object.assign(context, safeGlobals(context), opts.globals);
     let value: unknown;
     try {
       // The resource's content IS a function expression. No `module.exports` ceremony,

@@ -220,7 +220,12 @@ function resolveManifest(input: CompileInput): readonly ResolvedRef[] {
     push(n.humanGate?.ref);
     push(n.subgraph?.ref);
   }
-  for (const refs of Object.values(input.spec.hooks ?? {})) for (const ref of refs) push(ref);
+  // Guarded like `collectRefs`'s copy: `hooks: {beforeNode: 42}` is caller data, and iterating it
+  // returned `E_INTERNAL: TypeError: refs is not iterable` from the compiler. The VALIDATOR
+  // refuses that shape, but this runs on the manifest path and must not crash on the way there.
+  for (const refs of Object.values(input.spec.hooks ?? {})) {
+    if (Array.isArray(refs)) for (const ref of refs) push(ref);
+  }
 
   return [...seen.values()].sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
 }

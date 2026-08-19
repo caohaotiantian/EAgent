@@ -45,7 +45,9 @@ function spec(kind: "function" | "evaluator"): GraphSpec {
     writes: ["mine"],
   };
   if (kind === "function") node["function"] = { ref: "function/act@stable" };
-  else node["evaluator"] = { ref: "function/act@stable", threshold: 0 };
+  // `kind` is REQUIRED and its absence used to fall through to the `rubric` arm — a paid model
+  // call where the author wrote an assertion.
+  else node["evaluator"] = { kind: "assertion", ref: "function/act@stable", threshold: 0 };
 
   return {
     apiVersion: "loom.dev/v1",

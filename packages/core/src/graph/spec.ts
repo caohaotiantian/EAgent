@@ -596,20 +596,44 @@ export const DEFAULT_EXPANSION: ExpansionBudget = {
  * the runtime enumeration of what a `NodeSpec` means, and two enumerations in two files is how
  * they come to disagree.
  */
-export const REQUIRED_FIELDS: Readonly<Partial<Record<NodeType, readonly (readonly [string, keyof NodeSpec])[]>>> = {
+/**
+ * NOT `Partial`, deliberately. The first version was, and the omission it permitted is exactly
+ * what shipped: `router` and `join` had no entry, so `join: {}` still crashed the compiler
+ * (`join5.branches is not iterable`) and `router: {}` compiled `ok` and crashed the RUN. A total
+ * `Record` forces every node type to be looked at, and the ones with nothing to require say so
+ * with an empty list rather than by absence.
+ */
+export const REQUIRED_FIELDS: Readonly<Record<NodeType, readonly (readonly [string, keyof NodeSpec, "string" | "array"])[]>> = {
   agent: [
-    ["profile", "agent"],
-    ["prompt", "agent"],
+    ["profile", "agent", "string"],
+    ["prompt", "agent", "string"],
   ],
-  function: [["ref", "function"]],
-  evaluator: [["ref", "evaluator"]],
-  human_gate: [["ref", "humanGate"]],
-  subgraph: [["ref", "subgraph"]],
+  function: [["ref", "function", "string"]],
+  // `kind` too, and its absence was not a crash but something worse: an `evaluator` with no
+  // `kind` fell through to the `rubric` arm and made a PAID MODEL CALL where the author had
+  // written an assertion. Measured: 24 input tokens billed for a graph that names no model.
+  evaluator: [
+    ["ref", "evaluator", "string"],
+    ["kind", "evaluator", "string"],
+  ],
+  human_gate: [["ref", "humanGate", "string"]],
+  subgraph: [["ref", "subgraph", "string"]],
+  router: [
+    ["mode", "router", "string"],
+    ["cases", "router", "array"],
+    ["fallbackEdge", "router", "string"],
+  ],
+  join: [
+    ["branches", "join", "array"],
+    ["mode", "join", "string"],
+    ["onBranchError", "join", "string"],
+  ],
+
   // `name` ONLY. `ToolNode.version` is declared required by the type and enforced by nothing —
   // the engine looks a tool up by NAME — and several in-tree graphs omit it. Requiring it here
   // would be a behaviour change for every such graph, dressed up as a crash fix. Recorded as its
   // own question rather than answered as a side effect.
-  tool: [["name", "tool"]],
+  tool: [["name", "tool", "string"]],
 };
 
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {

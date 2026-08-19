@@ -40,7 +40,7 @@ function spec(over: { maxIterations?: number; maxLoopIterations?: number }): Gra
     outputs: ["n"],
     nodes: [
       { id: "step", type: "function", reads: ["n"], writes: ["n"], function: { ref: "function/bump@stable" } },
-      { id: "again", type: "router", reads: ["n"], writes: [], router: { mode: "expression", cases: [{ when: "true", take: ["back"] }] } },
+      { id: "again", type: "router", reads: ["n"], writes: [], router: { mode: "expression", cases: [{ when: "true", take: ["back"] }], fallbackEdge: "back" } },
     ],
     edges: [
       { id: "fwd", from: "step", to: "again", kind: "seq" },

@@ -486,6 +486,51 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     });
     return true;
   }
+  // AND THE ELEMENTS, not just the arrays. `edges: [null]` reached `e.id` and crashed; a node
+  // that is not an object does the same one loop over.
+  for (const [field, list] of [
+    ["nodes", spec.nodes],
+    ["edges", spec.edges],
+  ] as const) {
+    const bad = list.findIndex((x) => typeof x !== "object" || x === null);
+    if (bad !== -1) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_MALFORMED",
+        message: `\`${field}[${bad}]\` is ${list[bad] === null ? "null" : typeof list[bad]}, not an object`,
+        fix: `remove it, or give it the shape the other ${field} have`,
+      });
+      return true;
+    }
+  }
+  for (const [field, list] of [
+    ["inputs", spec.inputs],
+    ["outputs", spec.outputs],
+  ] as const) {
+    const bad = list.findIndex((x) => typeof x !== "string");
+    if (bad !== -1) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_MALFORMED",
+        message: `\`${field}[${bad}]\` is ${typeof list[bad]}, not a channel name`,
+        fix: `${field} is a list of channel names`,
+      });
+      return true;
+    }
+  }
+  // `hooks` is a map of ref LISTS. `{beforeNode: 42}` crashed both the validator and the
+  // compiler's manifest walk.
+  for (const [when, refs] of Object.entries(spec.hooks ?? {})) {
+    if (!Array.isArray(refs)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_MALFORMED",
+        message: `\`hooks.${when}\` must be a list of resource refs, not ${refs === null ? "null" : typeof refs}`,
+        fix: `hooks.${when}: ["hook/name@stable"]`,
+      });
+      return true;
+    }
+  }
   if (typeof spec.channels !== "object" || spec.channels === null) {
     d.push({
       severity: "error",
@@ -587,13 +632,17 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // says nothing about `agent: {}`. Every one of these used to reach `parseRef(undefined)` and
     // come back as `E_INTERNAL: TypeError: Cannot read properties of undefined (reading
     // 'lastIndexOf')`, which tells an author nothing about their graph.
-    for (const [field, holder] of REQUIRED_FIELDS[n.type] ?? []) {
+    for (const [field, holder, shape] of REQUIRED_FIELDS[n.type] ?? []) {
       const block = n[holder] as Record<string, unknown> | undefined;
-      if (block !== undefined && typeof block[field] !== "string") {
+      const value = block?.[field];
+      const bad = shape === "array" ? !Array.isArray(value) : typeof value !== "string";
+      if (block !== undefined && bad) {
         d.push({
           severity: "error",
           code: "GRAPH020_MISSING_FIELD",
-          message: `node "${n.id}" has a \`${String(holder)}\` block with no \`${field}\``,
+          message: `node "${n.id}" has a \`${String(holder)}\` block whose \`${field}\` is ${
+            value === undefined ? "missing" : `not ${shape === "array" ? "an array" : "a string"}`
+          }`,
           at: { nodeId: n.id },
           fix: `add \`${field}:\` to node "${n.id}"'s \`${String(holder)}\` block`,
         });
@@ -2073,8 +2122,12 @@ function collectRefs(spec: GraphSpec): { ref: ResourceRef; at: Diagnostic["at"] 
     if (n.humanGate && ref(n.humanGate.ref)) out.push({ ref: n.humanGate.ref, at });
     if (n.subgraph && ref(n.subgraph.ref)) out.push({ ref: n.subgraph.ref, at });
   }
+  // `hooks` is caller data too. `{beforeNode: 42}` reached `for (const ref of 42)` and returned
+  // `E_INTERNAL: TypeError: refs is not iterable` — five lines under the guards this function
+  // already grew for the same class of mistake.
   for (const refs of Object.values(spec.hooks ?? {})) {
-    for (const ref of refs) out.push({ ref, at: undefined });
+    if (!Array.isArray(refs)) continue;
+    for (const r of refs) if (typeof r === "string") out.push({ ref: r as ResourceRef, at: undefined });
   }
   return out;
 }

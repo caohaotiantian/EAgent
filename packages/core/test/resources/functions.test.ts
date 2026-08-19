@@ -407,3 +407,29 @@ test("a graph naming a function nobody published still fails LOUDLY", async () =
     (e: unknown) => (e as { code: string }).code === "E_RESOURCE_NOT_FOUND",
   );
 });
+
+test("A BODY CANNOT WALK BACK OUT TO THE HOST THROUGH ITS OWN GLOBALS", () => {
+  // `SAFE_GLOBALS` used to seed the context with the HOST's intrinsics, and handing over the
+  // host `Object` hands over the host `Function`: `Object.constructor` IS it. A reviewer
+  // measured a body printing a real `ANTHROPIC_API_KEY` out of `process.env` through
+  // `Object.constructor("return globalThis")()`, which made this module's own claim — that a
+  // body "cannot reach `process.env` or `fetch` by accident" — false for every name it listed.
+  //
+  // A `vm` context is still not a security boundary and this does not make it one. It makes the
+  // narrow claim the module actually makes true.
+  const store = new ResourceStore({
+    seed: [
+      {
+        kind: "function",
+        name: "escape",
+        content: '(view) => ({ writes: { got: typeof Object.constructor("return globalThis")().process } })',
+      },
+    ],
+  });
+  const loader = createFunctionLoader({ store });
+  const body = loader.load("function/escape@stable");
+  assert.ok(body !== undefined);
+
+  const out = body!({ get: () => undefined } as never, {} as never) as { writes: { got: string } };
+  assert.equal(out.writes.got, "undefined", "a body must not reach the host's `process`");
+});
