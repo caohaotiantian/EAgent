@@ -99,8 +99,12 @@ export interface AgentNode {
    * May this node propose new nodes at runtime (D5.7)?
    *
    * Declared on the NODE, not inferred from the model's output — otherwise a model
-   * could grant itself the ability by emitting the right shape. Still gated by the
-   * `graph:mutate` capability at dispatch.
+   * could grant itself the ability by emitting the right shape. Gated TWICE: the compiler
+   * refuses a graph declaring `graph:mutate` that the tenant does not hold
+   * (`GRAPH017_CAPABILITY_NOT_GRANTED`), and `#applyMutation` asks `PolicyEngine` again at
+   * dispatch. `loom --grant graph:mutate` is how a deployment comes to hold it — before that
+   * flag existed, declaring it was a compile error and omitting it was a run-time denial after
+   * the model call had been paid for.
    */
   readonly canMutate?: boolean;
 }

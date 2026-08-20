@@ -15,9 +15,11 @@
  * built so that "we do not know" resolves to asking a human.
  *
  * The consequence is worth stating plainly rather than discovering: an agent node that can
- * reach an MCP tool has a posture floor of `in`, so it cannot run one unattended. A graph
- * that wants unattended MCP use puts the call on a `tool` node — which CAN suspend and be
- * approved — rather than inside an agent turn. An operator who knows a particular server is
+ * reach an MCP tool has a posture floor of `in`, so it cannot run one unattended. BOTH node
+ * types are approvable — this used to say a graph wanting unattended MCP use had to put the
+ * call on a `tool` node "rather than inside an agent turn", and that stopped being true: an
+ * agent node now gates at the NODE, before the model runs, and carries the approval through the
+ * turn. Neither runs an MCP tool without a human; both can be answered. An operator who knows a particular server is
  * read-only can say so by declaring the manifest themselves; there is deliberately no flag
  * that says "trust every server".
  */

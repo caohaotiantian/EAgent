@@ -84,6 +84,7 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
 
+  --help            print this and exit — also "loom help", and valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
   --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered at
                     all: a graph naming it still COMPILES (GRAPH013 is a warning) and

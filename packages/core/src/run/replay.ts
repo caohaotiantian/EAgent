@@ -269,6 +269,14 @@ export interface ReplayReport {
    * count against `match`; which one it was is answered by `graph.match` beside it.
    */
   readonly unservedEffects: readonly string[];
+  /**
+   * No RECORDED effect had an unrecorded outcome.
+   *
+   * NOT "nothing ran live", which is how it reads and how it was read. `function` and
+   * assertion bodies compute no effect key, so they never appear in `unknownOutcomes` and
+   * `hermetic` stays true while they re-execute — measured alongside `match: false` on a body
+   * calling `Math.random()`. See this module's header.
+   */
   readonly hermetic: boolean;
   /**
    * The graph the journal was produced by, against the graph this replay ran.
