@@ -819,3 +819,40 @@ test("`loom run`'s EXIT CODE MEANS WHAT A SUPERVISOR READS IT AS", async () => {
     d.dispose();
   }
 });
+
+test("AN UNPRICED ROUTE IS NAMED AT BOOT — a budget cannot bind against a cost of zero", async () => {
+  // `priceOf` returns 0 for a model outside its adapter's table, and a budget compares against a
+  // number: a run on an unpriced model spends without limit while journaling `costUsd: 0`. That
+  // became sharper when a graph's `policy.budget.costUsd` was made a real ceiling — a ceiling
+  // nothing ever approaches is not a ceiling.
+  //
+  // Named per ROUTE, because a deployment usually prices some and not others, and "some model
+  // somewhere is free" is not actionable.
+  const d = emptyDir();
+  try {
+    const models = join(d.dir, "models.json");
+    writeFileSync(models, JSON.stringify({
+      adapters: [{ provider: "openai", baseUrl: "http://127.0.0.1:9/v1", prices: { "gpt-5": { input: 1.25, output: 10 } } }],
+      routes: {
+        "agent_profile/priced@stable": { adapter: "openai", model: "gpt-5" },
+        "agent_profile/free@stable": { adapter: "openai", model: "some-local-model" },
+      },
+    }));
+
+    const ws = openWorkspace(parseArgs(["compile", "--workspace", d.dir, "--models-file", models]), {
+      ...process.env,
+      OPENAI_API_KEY: "x",
+    });
+    try {
+      assert.deepEqual(
+        ws.models?.unpriced,
+        ["agent_profile/free@stable → openai/some-local-model"],
+        "exactly the route with no price, and not the one that has one",
+      );
+    } finally {
+      ws.close();
+    }
+  } finally {
+    d.dispose();
+  }
+});

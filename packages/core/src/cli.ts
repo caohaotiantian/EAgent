@@ -703,6 +703,8 @@ export interface ModelConfig {
   readonly adapters: readonly string[];
   /** Declared route keys, for the boot line and for the router's own error message. */
   readonly routes: readonly string[];
+  /** Routes whose model has no price, so every call on them costs a journaled `0`. */
+  readonly unpriced: readonly string[];
   readonly file: string;
 }
 
@@ -874,6 +876,15 @@ export function readModels(
     adapter: new RoutingAdapter(adapters, routes, path),
     adapters: [...adapters.keys()],
     routes: [...routes.keys()],
+    // WHICH ROUTES COST NOTHING, computed here because this is where both halves are in hand.
+    // A model outside the adapter's price table prices at ZERO — `priceOf` returns 0 for an
+    // unknown id — and a budget compares against a number, so a run on an unpriced model spends
+    // without limit while reporting `costUsd: 0`. That matters more since a graph's declared
+    // `policy.budget.costUsd` became a real ceiling: the ceiling is unreachable if nothing ever
+    // approaches it. Probed with a million tokens each way, which is the unit the tables use.
+    unpriced: [...routes.entries()]
+      .filter(([, r]) => adapters.get(r.adapter)?.priceOf(r.model, { inputTokens: 1e6, outputTokens: 1e6 }) === 0)
+      .map(([key, r]) => `${key} → ${r.adapter}/${r.model}`),
     file: path,
   };
 }
@@ -1815,6 +1826,14 @@ function announce(plane: ControlPlane, ws: Workspace, opts: ControlPlaneOptions,
   // The plane's own posture, not a third derivation of it: `openToEveryCaller` is
   // what `/health` reports and what `#principal` admits on, so this line cannot
   // promise a perimeter the running process does not have.
+  if (models !== undefined && models.unpriced.length > 0) {
+    process.stderr.write(
+      `! NO PRICE FOR ${models.unpriced.length} ROUTE${models.unpriced.length === 1 ? "" : "S"} — every call on ${models.unpriced.length === 1 ? "it" : "them"} is journaled as costing 0,\n` +
+        `  so a graph's policy.budget.costUsd and --budget cannot bind and /health reports a spend that did not happen:\n` +
+        models.unpriced.map((r) => `    ${r}\n`).join("") +
+        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter in ${models.file}\n`,
+    );
+  }
   if (plane.openToEveryCaller) {
     process.stderr.write("! NO TOKEN — every caller is authorized\n");
   }

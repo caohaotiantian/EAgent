@@ -3516,6 +3516,30 @@ export class Engine {
     }
 
     const events: NewEvent[] = [...mutationEvents];
+
+    // `checkpoint: "before"` WAS A SILENT NO-OP. The arm below tested `"after" || "both"` only, so
+    // a node declaring `"before"` got nothing — including the human_gate node of BOTH shipped
+    // workflows (`workflows/incident-triage.ts`, `builtin/authoring.ts`), which is the node an
+    // author most wants a rewind target in front of.
+    //
+    // FIRST IN THE APPEND, which is what "before" means here: checkpoints are written at commit
+    // time, so a marker pushed ahead of this node's `state.reduced` names the state as it was
+    // BEFORE its writes landed. The `after` arm below names the state once they have.
+    if (w.node.checkpoint === "before" || w.node.checkpoint === "both") {
+      events.push({
+        type: "checkpoint.created",
+        payload: {
+          // Distinct from the `after` id, or `both` would write one marker twice and a reader
+          // could not tell which side of the node it names.
+          checkpointId: `cp_${w.task.taskId}_before` as never,
+          atSeq: p.seq + events.length,
+          kind: "auto",
+          openTasks: tasksInState(p, "ready", "leased").length,
+        },
+        actor: SYSTEM_ACTOR("executor"),
+        taskId: w.task.taskId,
+      });
+    }
     const take = outcome.status === "failed" ? this.#errorEdges(ctx, w) : this.#edgesToTake(ctx, p, w, outcome);
 
     if (outcome.status === "failed") {
