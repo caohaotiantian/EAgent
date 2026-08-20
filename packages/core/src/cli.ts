@@ -1685,6 +1685,7 @@ function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop():
         const graph = wanted === undefined ? undefined : index.get(wanted);
         if (graph === undefined) continue;
         ws.engine.attach(row.runId, graph);
+        await ws.engine.rehydrateGates(row.runId);
         await ws.engine.advance(row.runId);
       }
     })().then(
@@ -2101,6 +2102,10 @@ export async function main(argv: readonly string[]): Promise<number> {
             const found = index.get(wanted);
             if (found !== undefined) {
               ws.engine.attach(runId, found);
+              // AND RE-ARM ITS CLOCK. Attaching binds the graph; it does not restore the gate's
+              // non-durable half, and without that a sweep in this process would expire gates
+              // that should have escalated — with a journaled reason that is false.
+              await ws.engine.rehydrateGates(runId);
             } else {
               // NAMING THE FIX, because "is not attached" named none. An operator who has just
               // been told to run this command needs to know that the graph is what is missing,

@@ -101,6 +101,7 @@ import {
   type GateBatch,
   type GateSummary,
   type GateSweeperOptions,
+  type GateRequest,
   type ResolveBatchInput,
   type ResolveInput,
   type SweepReport,
@@ -1141,6 +1142,56 @@ export class Engine {
 
   attach(runId: RunId, graph: RunGraph): void {
     this.#contextFor(runId, graph);
+  }
+
+  /**
+   * Re-arm the SLA clock of every gate this run has open. Called after `attach`.
+   *
+   * A gate's non-durable half — its `DeliverySpec`, its reminder schedule, its escalation
+   * chain, its pre-authorized default action — lives in the broker that raised it, and a fresh
+   * process has none of it. `GateSweeperOptions.broker` already says what that costs: a sweep
+   * holding no delivery spec makes `#fireTimeout` "conclude every escalation chain is exhausted
+   * and EXPIRE gates that should have escalated. Silently, and fail-closed." So a `loom serve`
+   * restart disarmed every reminder and every tier, and the gates it then expired carried the
+   * journaled reason "exhausted its escalation chain with no decision" — which was FALSE.
+   *
+   * `HumanGateBroker.rehydrate` exists for exactly this and had ZERO callers — the fifth
+   * capability this repo shipped with none, after `runSandboxed`, `McpClient`, `ResourceStore`
+   * and `createFunctionLoader`. It had none because until a run could be re-attached from its
+   * journaled graph hash there was no reliable way for a fresh process to HAVE the node, and
+   * the node is where the schedule comes from: `scheduleOf` is a pure function of it.
+   *
+   * WHAT COMES BACK AND WHAT DOES NOT. The route, the clock, the reminders and the default
+   * action are all node declarations, so they are exactly what they were. The rendered PAYLOAD
+   * is not — it was built by the Task that raised the gate and is not journaled — so a
+   * rehydrated gate shows an approver its content digest and no body. `#summaryOf` already
+   * takes it as absent, because a process that did not raise the gate never had one.
+   */
+  async rehydrateGates(runId: RunId): Promise<number> {
+    const ctx = this.#require(runId);
+    const p = await this.#project(ctx);
+    if (p === undefined) return 0;
+    let armed = 0;
+    for (const gate of openGates(p)) {
+      const node = ctx.index.byId.get(gate.nodeId);
+      if (node?.humanGate === undefined) continue;
+      const sched = scheduleOf(node);
+      this.#gates.rehydrate(gate.gateId, {
+        runId,
+        taskId: gate.taskId,
+        nodeId: gate.nodeId,
+        policyRef: gate.policyRef,
+        // NOT RECOVERABLE, and absent rather than faked. What a human was shown was rendered by
+        // a Task in another process; `contentDigest` on the record is what pins it.
+        payload: undefined,
+        ...(sched.slaMs === undefined ? {} : { slaMs: sched.slaMs }),
+        ...(sched.onTimeout === undefined ? {} : { onTimeout: sched.onTimeout }),
+        ...(sched.delivery === undefined ? {} : { delivery: sched.delivery }),
+        ...(sched.reminders === undefined ? {} : { reminders: sched.reminders }),
+      } as GateRequest);
+      armed += 1;
+    }
+    return armed;
   }
 
   /**

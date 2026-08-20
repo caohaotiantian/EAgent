@@ -1364,9 +1364,23 @@ async function serving(
   // alone and fails in the suite is the worst shape a flake comes in. `clock:` is the last
   // thing written to stdout, and a stream delivers in order, so seeing it means the whole
   // block has landed.
-  await until(() => out.includes("  clock:"), `loom serve never finished booting. stdout:\n${out}\nstderr:\n${err}`);
-  const bound = /loom listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(out);
-  if (bound?.[1] === undefined) throw new Error(`could not read the bound port from:\n${out}`);
+  // REAPED ON EVERY FAILURE PATH, and that is not defensive tidiness. `stop()` is on the value
+  // this function RETURNS, so anything that throws before the return leaves the child running
+  // forever — a `loom serve` holding a temp workspace with nobody left who knows its pid.
+  //
+  // Found the expensive way: one such orphan, 2h14m old, made `subprocess.test.ts`'s
+  // "A CHILD THAT OUTLIVES SIGKILL" test wait on it — 5s alone became 917s in the suite, and
+  // `npm test` went from 9s to 923s. A leaked process does not fail a test; it taxes every later
+  // run, on a machine, silently.
+  let bound: RegExpExecArray | null = null;
+  try {
+    await until(() => out.includes("  clock:"), `loom serve never finished booting. stdout:\n${out}\nstderr:\n${err}`);
+    bound = /loom listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(out);
+    if (bound?.[1] === undefined) throw new Error(`could not read the bound port from:\n${out}`);
+  } catch (e) {
+    child.kill("SIGKILL");
+    throw e;
+  }
   return {
     get out() {
       return out;

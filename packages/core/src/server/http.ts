@@ -2185,7 +2185,12 @@ export class ControlPlane {
     const wanted = await this.#engine.compiledGraphHash(runId);
     if (wanted === undefined) return;
     const found = Object.values(this.#graphs).find((g) => g.graphHash === wanted);
-    if (found !== undefined) this.#engine.attach(runId, found);
+    if (found === undefined) return;
+    this.#engine.attach(runId, found);
+    // AND RE-ARM THE GATE CLOCK. `attach` binds the graph and restores nothing else, so a
+    // restarted plane's sweeper held no `DeliverySpec` for any gate and expired the ones that
+    // should have escalated — "exhausted its escalation chain with no decision", which was false.
+    await this.#engine.rehydrateGates(runId);
   }
 
   async #withDeadline(res: ServerResponse, url: URL, run: (signal: AbortSignal) => Promise<void>): Promise<void> {
