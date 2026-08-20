@@ -402,6 +402,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   rule002Terminals(spec, idx, d);
   rule004Expressions(spec, idx, channelTypes, d);
   rule005Dataflow(spec, idx, d);
+  rule005RouterEdges(spec, idx, d);
   rule006Cycles(spec, idx, channelTypes, d);
   rule007Fanout(spec, expansion, d);
   rule008Joins(spec, idx, d);
@@ -833,6 +834,42 @@ function rule004Expressions(
     // compiled clean and then really decided the branch — the exact thing
     // `GRAPH004_UNDECLARED_READ` exists to make impossible.
     for (const c of n.router?.cases ?? []) check(c.when, { nodeId: n.id }, n.id);
+  }
+}
+
+/**
+ * A router may only route along its OWN edges.
+ *
+ * `#activate` looks an edge id up in the whole graph's edge table, so a `take` naming another
+ * node's edge activated that node's target and jumped everything in between — a human gate
+ * included. Reproduced through the shipped binary on a graph that compiled `ok`: a router case
+ * naming the GATE's outbound edge ran the guarded `fs.write` with no gate raised, exit 0.
+ *
+ * The executor refuses it now (`E_ROUTE_INVALID`), and this refuses it EARLIER, which is where a
+ * graph defect belongs: the run never starts, so nothing has been spent when the author is told.
+ * The same rule already existed for a human's `redirect` and for nothing else.
+ */
+function rule005RouterEdges(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
+  for (const n of spec.nodes) {
+    if (n.router === undefined) continue;
+    const outbound = (idx.outbound.get(n.id) ?? []).map((e) => String(e.id));
+    const named = [
+      ...(n.router.cases ?? []).flatMap((c) => (Array.isArray(c.take) ? c.take.map(String) : [])),
+      ...(typeof n.router.fallbackEdge === "string" ? [n.router.fallbackEdge] : []),
+    ];
+    for (const id of [...new Set(named)]) {
+      if (outbound.includes(id)) continue;
+      d.push({
+        severity: "error",
+        code: "GRAPH005_ROUTE_NOT_OWN_EDGE",
+        message: `router "${n.id}" names edge "${id}", which does not leave it`,
+        at: { nodeId: n.id },
+        fix:
+          outbound.length === 0
+            ? `node "${n.id}" has no outgoing edges — a router needs at least one`
+            : `use one of ${outbound.map((e) => `"${e}"`).join(", ")}; routing along another node's edge would jump whatever sits between`,
+      });
+    }
   }
 }
 

@@ -2112,8 +2112,54 @@ export class Engine {
     }
   }
 
+  /**
+   * A `take` naming an edge that does not leave this node, as a failed outcome.
+   *
+   * Failed rather than thrown: the redirect path this mirrors returns a failed `NodeOutcome`, so
+   * the refusal is journaled as the Task's error and the run ends the way every other node-level
+   * refusal ends. Throwing from `#edgesToTake` — which is called from inside `#commit` — rejected
+   * `advance` instead, leaving the caller with an exception where a run projection belonged.
+   */
+  #strayRoute(ctx: RunContext, w: Wave, outcome: NodeOutcome): NodeOutcome | undefined {
+    if (outcome.take === undefined) return undefined;
+    const outbound = (ctx.index.outbound.get(w.node.id) ?? []).map((e) => e.id);
+    const invented = outcome.take.filter((id) => !outbound.includes(id));
+    if (invented.length === 0) return undefined;
+    return {
+      status: "failed",
+      writes: {},
+      usage: outcome.usage,
+      error: err.policy(
+        CODES.E_ROUTE_INVALID,
+        `node "${w.node.id}" selected ${invented.map((i) => `"${i}"`).join(", ")}, which ${
+          invented.length === 1 ? "is not an outgoing edge" : "are not outgoing edges"
+        } of it — a node may only route along its own edges`,
+        { details: { node: w.node.id, take: outcome.take, declared: outbound } },
+      ),
+    };
+  }
+
   async #dispatch(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
     const outcome = await this.#withNodeDeadline(ctx, w, () => this.#dispatchBody(ctx, p, w));
+
+    // AN UNDECLARED ROUTE IS THE SAME CLASS AS AN UNDECLARED WRITE, and this wrapper is where
+    // that class is refused — for the reason the check below already gives: "a check applied
+    // per-caller is a check that the next node type forgets."
+    //
+    // `#activate` looks an edge id up in the WHOLE graph's edge table, so a `take` naming an edge
+    // belonging to another node activated that node's target and jumped everything between — a
+    // HUMAN GATE included. Reproduced through the shipped binary on a graph that compiled `ok`: a
+    // router case naming the gate's outbound edge ran the guarded `fs.write` with no gate raised,
+    // `"status": "succeeded"`, exit 0; a `function` body returning the same `take` — from a
+    // resource file the compiler cannot see — did it too, and `loom trace` said `conformance: ok`.
+    //
+    // The rule already existed for the THIRD producer: `#applyGateDecision` validates a human's
+    // `redirect` against the node's outbound edges, and its comment describes this exact bug. The
+    // router and function producers never got it. `rule005RouterEdges` now refuses the static
+    // half at compile; this is the half no static check can reach.
+    const strayEdge = this.#strayRoute(ctx, w, outcome);
+    if (strayEdge !== undefined) return strayEdge;
+
     const declared = new Set(w.node.writes ?? []);
     const stray = Object.keys(outcome.writes).filter((c) => !declared.has(c));
     if (stray.length === 0) return outcome;
@@ -3920,6 +3966,8 @@ export class Engine {
     // What it may not do is re-enter a loop the loop itself has declared finished.
     if (outcome.take !== undefined) {
       const scope = { ...scopeFor(p, ctx.graph.spec.channels, w.task.branch), ...outcome.writes };
+      // Route confinement is checked in `#dispatch`, where an invalid one becomes a FAILED TASK
+      // rather than a throw out of `#commit` — see `#strayRoute`.
       return outcome.take.filter((id) => {
         const e = ctx.index.edgeById.get(id);
         return e === undefined || e.kind !== "loop" || this.#loopMayContinue(ctx, e, w, scope);
