@@ -287,6 +287,33 @@ export interface ReplayReport {
   }[];
 }
 
+/**
+ * The refs whose pinned digest differs between two manifests, as `ref (was … now …)`.
+ *
+ * The whole manifest is the wrong thing to print: a run pinning forty resources and one moved
+ * prompt should name the prompt. Absent and added refs are named too — a ref the replay resolves
+ * and the run did not is as much a difference as one whose bytes moved.
+ */
+function short(digest: string): string {
+  return digest === "(absent)" || digest === "(added)" ? digest : `${digest.slice(0, 17)}…`;
+}
+
+function describeRefDrift(
+  recorded: readonly { readonly ref: string; readonly digest: string }[],
+  replayed: readonly { readonly ref: string; readonly digest: string }[],
+): { ref: string; was: string; now: string }[] {
+  const was = new Map(recorded.map((r) => [r.ref, r.digest] as const));
+  const now = new Map(replayed.map((r) => [r.ref, r.digest] as const));
+  const out: { ref: string; was: string; now: string }[] = [];
+  for (const [ref, digest] of was) {
+    const current = now.get(ref);
+    if (current === undefined) out.push({ ref, was: digest, now: "(absent)" });
+    else if (current !== digest) out.push({ ref, was: digest, now: current });
+  }
+  for (const [ref, digest] of now) if (!was.has(ref)) out.push({ ref, was: "(added)", now: digest });
+  return out;
+}
+
 export interface ReplayOptions {
   readonly store: StateStore;
   readonly runId: RunId;
@@ -436,7 +463,23 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   // untouched by whether a binding held.
   let seq = frames.length;
   if (!graphBound && opts.onGraphChange !== "allow") {
-    frames.push({ seq: seq++, kind: "graph.bound", match: false, expected: recordedGraph, actual: opts.graph.graphHash });
+    // WHICH CONJUNCT MOVED, because reporting the graph hash for a RESOURCE change printed the
+    // same string twice. `graphBound` is `specBound && refsBound`, and `loom replay`'s only
+    // output for a frame is `expected … got …` — so editing `resources/prompt/p.md` produced
+    // `✗ graph.bound : expected sha256:aaf236…, got sha256:aaf236…`, two identical hashes and no
+    // hint that the manifest was the thing that changed. A diagnostic that shows a difference
+    // where there is none sends its reader to look at the wrong artifact.
+    const specMoved = recordedGraph !== "" && recordedGraph !== opts.graph.graphHash;
+    // The frame is rendered by `loom replay` as `expected X, got Y`, so both halves have to be
+    // the two things that DIFFER — and for a resource change the graph hash is not one of them.
+    const drift = specMoved ? undefined : describeRefDrift(recordedRefs, opts.graph.resolutionManifest);
+    frames.push({
+      seq: seq++,
+      kind: "graph.bound",
+      match: false,
+      expected: drift === undefined ? recordedGraph : drift.map((r) => `${r.ref}=${short(r.was)}`).join(", "),
+      actual: drift === undefined ? opts.graph.graphHash : drift.map((r) => `${r.ref}=${short(r.now)}`).join(", "),
+    });
   }
   for (const r of rebound) {
     frames.push({ seq: seq++, kind: "effect.rebound", match: false, expected: r.recorded, actual: r.replayed });

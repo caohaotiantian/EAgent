@@ -1970,6 +1970,22 @@ knob shipped first and this entry exists rather than the knob quietly standing i
 query. Until then: size `limit` above the number of runs a deployment creates within the
 longest SLA it declares.
 
+**B11 · `function` and `evaluator{assertion}` bodies RE-EXECUTE during replay.** `#runFunction`
+and the assertion arm compute no effect key and never consult `#replay`, so a replay re-runs them
+rather than serving a recorded result. **Narrower than it sounds, and the narrowing is the reason
+it is recorded rather than fixed:** after the vm-intrinsics fix a body cannot reach `process`,
+`fetch` or the host at all, so on the CLI path its re-execution is pure — except `Math.random()`,
+which `SAFE_GLOBALS` leaves reachable while deliberately removing `Date`. A body using it
+diverges, and replay **detects** that (`match: false`) rather than serving a wrong answer. An
+embedder passing `opts.globals` can hand a body a host object, and that IS a live side effect on
+replay.
+
+Fixing it properly means giving a function body an effect key and journaling its output — a
+journal schema change and a decision about whether local computation is an "effect" at all, which
+`design/loom/`'s four kinds (`model`, `tool`, `subgraph`, `summarize`) currently say it is not.
+Not a patch. **Reverses when** an embedder relies on `opts.globals`, or when `Math` is narrowed
+the way `Date` already is.
+
 **B10 · A `function` body cannot signal a RETRYABLE failure, so `retry` is unreachable for
 function nodes.** Every throw out of the `vm` context is classified `E_INTERNAL` with
 `retryable: false` — only the three classes in `errors.ts`'s `RETRYABLE` set (`exhausted`,

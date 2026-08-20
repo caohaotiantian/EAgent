@@ -2147,7 +2147,18 @@ export async function main(argv: readonly string[]): Promise<number> {
           store: ws.store,
           runId,
           graph,
-          engine: { tools: ws.engine.tools, functions: ws.engine.functions, models: ws.engine.models },
+          engine: {
+            tools: ws.engine.tools,
+            functions: ws.engine.functions,
+            models: ws.engine.models,
+            // THE RUN'S OWN POLICY, not the engine's default. `EngineOptions.policy` defaults to
+            // `granted: ["*"]`, and this call passed none — so a replay held every capability
+            // whatever the original run held. A run whose tool was DENIED replayed ALLOWED, and
+            // `compare` then reported `match: false` about the RUN when the replayer was what
+            // differed. A harness that answers a different question than the one asked is worse
+            // than one that fails.
+            policy: { granted: ws.granted },
+          },
         });
         for (const f of report.frames.filter((x) => !x.match)) {
           process.stderr.write(`✗ ${f.kind} ${f.taskId ?? ""}: expected ${f.expected}, got ${f.actual}\n`);
