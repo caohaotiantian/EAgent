@@ -85,8 +85,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
 
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
-  --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered
-                    at all, so a graph naming it fails to compile
+  --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered at
+                    all: a graph naming it still COMPILES (GRAPH013 is a warning) and
+                    fails at the node with E_TOOL_NOT_FOUND. It fails to compile only if
+                    it also declares the net:fetch capability — GRAPH017
   --grant CAP,CAP   capabilities no TOOL declares — graph:mutate is the one that
                     matters. A tool capability here is REFUSED, not ignored: they
                     come from what is registered, which is what --allow-exec,
@@ -103,13 +105,21 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     stored in it. Accepted by every command, not just serve.
   --allow-exec P,P  programs proc.exec may run, matched EXACTLY by name — not as a
                     prefix, not as a path. Without it the tool is not registered and
-                    the run cannot execute anything. This list is the whole boundary:
-                    a child process does its own open(), so allow-listing a shell
-                    dissolves the fs jail rather than narrowing it.
+                    the run cannot execute anything. It is the whole CONTAINMENT
+                    boundary — a child does its own open(), so allow-listing a shell
+                    dissolves the fs jail rather than narrowing it — but not the whole
+                    boundary: proc.exec is irreversible, so the graph must also hold
+                    proc:exec and every call GATES. A tool node suspends for a human;
+                    inside an agent turn it is refused outright.
   --exec-env  N,N   environment variable NAMES proc.exec passes to the child. Default
                     is an empty environment, because this process holds API keys.
-  --mcp-file  F     MCP servers to connect, as
-                    {"servers":[{"name":"docs","command":"npx","args":["-y","@scope/srv"]}]}.
+  --mcp-file  F     MCP servers to connect, as {"servers":[{"name":"docs",
+                    "command":"npx","args":["-y","@scope/srv"],
+                    "envAllow":["PATH","HOME"]}]}.
+                    THE CHILD ENVIRONMENT IS EMPTY UNLESS envAllow NAMES VARIABLES.
+                    Unlike proc.exec there is no base allow-list, so without PATH the
+                    command is not even found — "spawn npx ENOENT". This example carried
+                    no envAllow and could not start.
                     Connected BEFORE any graph compiles, so discovered tools are inside the
                     posture floor. EVERY MCP tool is irreversible and therefore gates:
                     tools/list cannot say whether a tool reads a file or wires money, and
@@ -2080,22 +2090,22 @@ export async function main(argv: readonly string[]): Promise<number> {
               `Check the id and \`--workspace\` (the journal being read is ${ws.root}).`,
           );
         }
-        // JOURNAL ORDER, AND IT IS NOT THE QUEUE'S — stated rather than left to be
-        // discovered, because `GET /runs/:id/gates` answers this same question most urgent
-        // first (D7.9 row 5) and two doors onto one queue disagreeing is exactly the shape
-        // the comment above is about. The cause is not an oversight here: `gateQueueOrder`
-        // is reachable only through `HumanGateBroker.list`, which needs a `RunLog` from an
-        // engine that has ATTACHED the run — and a fresh CLI process has attached nothing,
-        // so `Engine.openGates` raises `E_RUN_NOT_FOUND`. Measured on a two-gate run folded
-        // in a second process: `projection` answers, `openGates` throws.
+        // MOST URGENT FIRST — the same order `GET /runs/:id/gates` answers with (D7.9 row 5),
+        // because two doors onto one queue disagreeing is exactly the shape the comment above
+        // is about.
         //
-        // **The fix is one export, not a second sort.** `gateQueueOrder` is a pure function
-        // of the projection — no clock, no engine — so `run/gates.ts` exporting it (or
-        // `list` growing a projection-shaped overload) orders this command, `summarise`'s
-        // `gates`, and every future reader in one place. Re-implementing the rank here would
-        // be the second ranking function, which agrees on the day it is written.
-        const open = Object.values(p.gates).filter((g) => g.state === "open");
-        process.stdout.write(`${JSON.stringify(open, null, 2)}\n`);
+        // This used to print JOURNAL order, and the comment justifying that described behaviour
+        // which no longer exists: it said `gateQueueOrder` was reachable only through an engine
+        // that had ATTACHED the run, "so `Engine.openGates` raises `E_RUN_NOT_FOUND`". It does
+        // not — it falls back to `#logFor` and says so in its own docstring, because "a run this
+        // engine holds no context for is not an unknown run: a gate is a ROW". Measured on a
+        // two-gate run folded in a second process: `openGates` → ["urgent","slow"], the
+        // projection → ["slow","urgent"], nothing thrown. The prescribed "fix is one export" was
+        // for a problem that had already gone away.
+        //
+        // The projection above stays: it is what answers E_RUN_NOT_FOUND, and it is the SET.
+        // This is only the ORDER.
+        process.stdout.write(`${JSON.stringify(await ws.engine.openGates(runId), null, 2)}\n`);
         return 0;
       }
 

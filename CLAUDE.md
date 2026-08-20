@@ -106,8 +106,12 @@ A file is not vendored until it satisfies the invariants. In particular:
    `process.argv[2] ?? "packages/core"` and CI passes no argument, so it keeps scanning
    core alone. Other packages may carry dependencies; core may not, and core may not
    import them.
-2. **The journal is the only authoritative durable state.** `runs`, `tasks`,
-   `human_gates`, `checkpoints` are derived read models, rebuildable by folding.
+2. **The journal is the only authoritative durable state.** `runs`, `tasks` and
+   `human_gates` are derived read models, rebuildable by folding. (`checkpoints` was in
+   this list and there is no such read model: `checkpoint.created` is written by one site
+   and read only by `telemetry/spans.ts`, and `rewind` targets a raw `Seq`, never a
+   `CheckpointId`. Naming a read model that does not exist is the same defect this
+   invariant is about, one level up.)
    Never write a read model without appending the event that justifies it.
 3. **`TaskId` is derived, never random** (`nodeId@branchPath#iteration`). Same for
    effect keys. A random id silently breaks replay.

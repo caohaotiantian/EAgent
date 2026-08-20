@@ -1,9 +1,19 @@
 /**
  * Deterministic replay.
  *
- * Replay re-executes the graph with every effect served from the journal. It makes
- * NO network calls and produces NO side effects — a tool's `execute` is never
- * reached. If replay needs an effect the journal does not contain, that is
+ * Replay re-executes the graph with every RECORDED effect served from the journal — the four
+ * kinds `model`, `tool`, `subgraph` and `summarize`. It makes no network calls and no tool's
+ * `execute` is ever reached; an effect the journal does not contain is `E_REPLAY_DIVERGENCE`, a
+ * loud failure rather than a quiet live call.
+ *
+ * IT IS NOT SIDE-EFFECT-FREE, and this said it was. `function` and `evaluator{assertion}` bodies
+ * compute no effect key, never consult `ReplayEffects`, and RE-EXECUTE. On the CLI path that is
+ * narrow — the `vm` context cannot reach `process` or `fetch` — but `SAFE_GLOBALS` leaves
+ * `Math.random()` reachable while deliberately removing `Date`, so a body using it diverges.
+ * Measured through the binary: `✗ state.reduced : expected {"out":"0.534…"}, got {"out":"0.108…"}`,
+ * `match: false`. Replay REPORTS that rather than serving a wrong answer. An embedder passing
+ * `opts.globals`, or registering a body directly on `FunctionRegistry`, gets a genuine live side
+ * effect. See `design/loom/HANDOFF.md` B11. If replay needs an effect the journal does not contain, that is
  * `E_REPLAY_DIVERGENCE`, a loud failure, never a silent live call.
  *
  * Three uses, one mechanism: debugging (step a run), regression evaluation (D10

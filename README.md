@@ -22,7 +22,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 1775 tests, offline, no API key; zero-dep and public-surface guards |
+| **Gates** | `npm run check` — 1790 tests, offline, no API key; zero-dep and public-surface guards |
 
 ## What does not work yet
 
@@ -31,6 +31,7 @@ Stated because a framework that overstates itself costs its user a day finding o
 | | |
 |---|---|
 | **`retry` on a function or evaluator node** | Inert. A body cannot raise a RETRYABLE error — every throw out of the `vm` is classified `E_INTERNAL`, so the backoff never schedules |
+| **`Math.random()` in a function body** | Unrecorded. `Date` is stripped from the `vm` globals and `Math` is not, and there is no effect key for it — a body that calls it replays as a divergence rather than being served |
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | Declared, validated, pinned into the manifest, never invoked |
 | **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever |

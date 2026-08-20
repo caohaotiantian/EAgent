@@ -1113,14 +1113,6 @@ export class Engine {
   }
 
   /**
-   * Re-attach a run after a process restart.
-   *
-   * There is deliberately nothing to restore: the projection is a fold, open gates
-   * are rows, and incomplete Tasks are re-leased because their state is `ready` or
-   * `leased` in the log. This method exists only to bind the RunGraph, which is not
-   * itself journaled (its hash is).
-   */
-  /**
    * The `graphHash` this run COMPILED, so a fresh process can find the graph again.
    *
    * `RunGraph` is not journaled — its hash is — so re-attaching means "find the graph whose hash
@@ -1140,6 +1132,24 @@ export class Engine {
     return (await this.#compiledIdentity(runId))?.graphHash;
   }
 
+  /**
+   * Bind a RunGraph to a run — after a restart, or before driving one this process did not submit.
+   *
+   * THE DURABLE HALF NEEDS NOTHING: the projection is a fold, open gates are rows, and incomplete
+   * Tasks are re-leased because their state is `ready` or `leased` in the log. What this binds is
+   * the `RunGraph`, which is not itself journaled (its hash is).
+   *
+   * TWO EPHEMERAL HALVES ARE NOT COVERED HERE, and this docstring used to say there were none —
+   * "there is deliberately nothing to restore", which stopped being true and then, worse, stopped
+   * being ATTACHED to this method at all: a later edit inserted `compiledGraphHash` between the
+   * comment and the declaration, so JSDoc bound it to the wrong symbol and `attach` had none.
+   *
+   *   - The gate broker's non-durable half — route, SLA, reminders, escalation chain. Call
+   *     `rehydrateGates` immediately after this, as all three re-attach doors do; an unrehydrated
+   *     gate is expired by the sweep with a journaled reason that is false.
+   *   - Oversight and spend, re-seeded from the journal by `#advanceSerially` on the first path
+   *     that holds a projection — this method is synchronous and has none.
+   */
   attach(runId: RunId, graph: RunGraph): void {
     this.#contextFor(runId, graph);
   }

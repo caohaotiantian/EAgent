@@ -1,5 +1,5 @@
 /**
- * Compile-time validation: GRAPH001–GRAPH020.
+ * Compile-time validation: GRAPH000–GRAPH021.
  *
  * Every rule runs and every diagnostic is returned. Failing on the first error would
  * make authoring a 60-node graph a 60-round-trip exercise, and the compiler is meant

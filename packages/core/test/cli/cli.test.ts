@@ -234,17 +234,18 @@ const TWO_GATES = {
   ],
 };
 
-test("`loom run`'s GATE HINT IS RANKED AND `loom gates` IS NOT — one queue, two doors, one fact between them", async () => {
-  // D7.9 row 5's rank lives in `gateQueueOrder`, reachable only through
-  // `HumanGateBroker.list`, which needs a `RunLog` from an engine that has ATTACHED the run.
-  // `loom run` submitted this run, so its engine holds it and `openGates` is the ranked
-  // queue. `loom gates` is a FRESH process that has attached nothing, so the same call raises
-  // `E_RUN_NOT_FOUND` and the command is left folding the projection — journal order.
+test("BOTH DOORS ONTO THE GATE QUEUE AGREE — `loom run`'s hint and `loom gates`", async () => {
+  // THEY USED TO DISAGREE, and the reason given for it had already stopped being true. The
+  // claim was that D7.9 row 5's rank lives in `gateQueueOrder`, reachable only through an
+  // engine that had ATTACHED the run — "so a fresh `loom gates` raises `E_RUN_NOT_FOUND` and
+  // is left folding the projection". `Engine.openGates` falls back to `#logFor` and says so in
+  // its own docstring: "a run this engine holds no context for is not an unknown run: a gate is
+  // a ROW". Measured on this fixture in a second process: `openGates` → ["urgent","slow"], the
+  // projection → ["slow","urgent"], nothing thrown.
   //
-  // Both halves are asserted because the second is a KNOWN limit (HANDOFF B8) rather than an
-  // oversight, and a limit nobody drives is one that quietly becomes a bug in either
-  // direction: the day `gateQueueOrder` is exported, this test says exactly which line to
-  // change.
+  // This test's previous form asserted the disagreement and carried its own escape hatch — "if
+  // this fails because it is now ranked, delete B8 and this assertion together". It did, and
+  // they are.
   const d = emptyDir();
   try {
     mkdirSync(join(d.dir, "graphs"), { recursive: true });
@@ -259,18 +260,14 @@ test("`loom run`'s GATE HINT IS RANKED AND `loom gates` IS NOT — one queue, tw
     assert.equal(parsed.status, "awaiting_gate");
 
     const hinted = [...r.out.matchAll(/gate \S+ on node (\S+)/g)].map((m) => m[1]);
-    assert.deepEqual(hinted, ["urgent", "slow"], "the hint printed journal order, not the queue's");
+    assert.deepEqual(hinted, ["urgent", "slow"], "most urgent first — the hint is the ranked queue");
 
     // The other door, a fresh process over the same journal.
     const listed = await run(["gates", parsed.runId, "--workspace", d.dir]);
     assert.equal(listed.code, 0);
     const nodes = (JSON.parse(listed.out) as { nodeId: string }[]).map((g) => g.nodeId);
-    assert.deepEqual(nodes.sort(), ["slow", "urgent"], "the SET is complete either way — the limit is about order alone");
-    assert.deepEqual(
-      (JSON.parse(listed.out) as { nodeId: string }[]).map((g) => g.nodeId),
-      ["slow", "urgent"],
-      "journal order, as B8 says — if this fails because it is now ranked, delete B8 and this assertion together",
-    );
+    assert.deepEqual([...nodes].sort(), ["slow", "urgent"], "the SET is complete");
+    assert.deepEqual(nodes, hinted, "and the ORDER is the same one the hint printed — one queue, one answer");
   } finally {
     d.dispose();
   }

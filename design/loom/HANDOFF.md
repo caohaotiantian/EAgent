@@ -88,16 +88,16 @@ first, and what will bite you.**
 
 ## Where things stand
 
-Measured **2026-08-19**, tree clean, `npm run check` green end to end.
+Measured **2026-08-20**, tree clean, `npm run check` green end to end.
 Re-run the command in the right-hand column rather than trusting the left.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1748 pass, 0 fail** | `npm run check` (its test arm) |
-| Test files | 87 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **1790 pass, 0 fail** | `npm run check` (its test arm) |
+| Test files | 99 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 53 | `node scripts/check-zero-dep.mjs` (it prints the count) |
 | Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
-| Public exports, pinned | 481 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, pinned | 482 | `node -e "console.log(require('./scripts/surface.json').length)"` |
 | Public exports, built | re-run it | `npm run typecheck && node scripts/check-surface.mjs` — it reads `dist/`, and the build is `--force`d precisely so this answer cannot come from a stale one |
 | Event types | 52 | `node --test packages/core/test/journal/store.test.ts` (its count is deliberate) |
 | Agent prompts | a graph's `prompt/x@stable` resolves to `resources/prompt/x.md` and reaches the model as its SYSTEM message; `resources/subgraph/x.json` publishes a child graph | `node --test packages/core/test/resources/workspace-documents.test.ts` |
@@ -2063,7 +2063,11 @@ keep whatever state they last had after a cancel, and the `task.cancelled` arm o
 is unreachable. Each is a decision someone must take: append it, or delete it from
 `EVENT_TYPES` and from the paragraphs that promise it.
 
-**C2 · Thirteen error codes are declared and raised by nothing.** Pinned in `NEVER_RAISED`.
+**C2 · Eleven error codes are declared and raised by nothing.** Pinned in `NEVER_RAISED`, whose
+membership the guard checks as EXACT — so this number is a measurement, not a claim, and it moves
+when a code gains a thrower. It read "thirteen" while the registry held twelve, and then eleven
+once `E_TASK_TIMEOUT` gained one. Count it rather than quoting it:
+`grep -acE '^  "E_' packages/core/test/docs-drift.test.ts`.
 A `retry.onlyIf` written against any of them can never fire. `E_ADMISSION_REJECTED` heads a
 three-level admission design with nothing under it; `E_LEASE_LOST` is A2; `E_TASK_TIMEOUT` is
 B5.

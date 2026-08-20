@@ -437,6 +437,14 @@ export interface NodeSpec {
   readonly policy?: NodePolicy;
   readonly retry?: RetryPolicy;
   readonly timeoutMs?: number;
+  /**
+   * Rewind markers this node writes.
+   *
+   * `before` is appended AHEAD of the node's `state.reduced` — the state as it was — and `after`
+   * once its writes have landed; `both` writes each, under distinct ids so a reader can tell
+   * which side of the node a marker names. `before` was accepted and silently ignored until
+   * 2026-08, including on the gate node of both shipped workflows.
+   */
   readonly checkpoint?: "none" | "before" | "after" | "both";
   /** Suppresses GRAPH011 for a node whose failure is intentionally unhandled. */
   readonly unhandled?: boolean;

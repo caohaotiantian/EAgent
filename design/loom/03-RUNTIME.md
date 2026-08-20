@@ -168,8 +168,11 @@ worker until drained. That is precisely the production symptom this system exist
 > are no per-class pools and no token buckets, and the DWRR loop above cannot live at this
 > seam at all: cross-tenant and cross-run fairness need a scheduler that sees more than one
 > run, which is the coordinator G3 defers. `LeasedScheduler` adds lease-awareness and
-> reclaim for two workers and passes the same conformance suite, so the *swap* is exercised
-> — the *fairness* is not. Recorded honestly as G3's second debt in `99-DOD.md`; do not
+> reclaim for two workers and passes the same conformance suite, so the *seam* is exercised
+> — but only by calling `select` directly. `Engine.advance` returns or finishes when the ready
+> set is empty and consults the scheduler only after, so the reclaim of an EXPIRED lease — the
+> one thing `InProcessScheduler` cannot do, and by construction never `ready` — is unreachable
+> through the executor. The *fairness* is not exercised either. Recorded honestly as G3's second debt in `99-DOD.md`; do not
 > read the guarantee table above as describing v1.
 
 ---
