@@ -81,6 +81,7 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom gates   <runId>                                     list open gates
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
+  loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
 
@@ -2144,8 +2145,10 @@ export async function main(argv: readonly string[]): Promise<number> {
                 CODES.E_RUN_NOT_FOUND,
                 `run ${runId} compiled graph ${wanted}, and no graph in ${join(ws.root, "graphs")} has that hash ` +
                   `(${index.size} searched). Publish the graph this run used, or pass --graph explicitly. ` +
-                  `A graph that has been EDITED since the run started no longer matches, which is the point — ` +
-                  `restore it, or use \`loom approve --reject\` … or cancel the run`,
+                  `A graph EDITED since the run started no longer matches, which is the point — the approver ` +
+                  `approved those bytes. Restore them to answer the gate, or \`loom cancel ${runId} --as ID\` ` +
+                  `to stop the run, which needs no graph. NOT --reject: a rejected gate runs the graph's ` +
+                  `error edges, so it binds like an approval does`,
                 { details: { runId, graphHash: wanted, searched: index.size } },
               );
             }
@@ -2168,6 +2171,25 @@ export async function main(argv: readonly string[]): Promise<number> {
           `${JSON.stringify({ status: p.status, outputs: p.outputs, ...(p.error === undefined ? {} : { error: p.error }) }, null, 2)}\n`,
         );
         return p.status === "failed" ? 1 : 0;
+      }
+
+      case "cancel": {
+        // THE ONE EXIT THAT NEEDS NO GRAPH, and it was reachable only over HTTP. `approve` binds
+        // the graph the human was shown and `reject` binds too — a rejected gate runs the graph's
+        // error edges — so an operator whose graph had drifted had nothing left, while the
+        // refusal text told them to cancel a run through a command that did not exist.
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const raw = args.flags["reason"];
+        // `String(true)` for a bare `--reason` would journal the four letters "true" as an
+        // operator's stated reason — the same slip `--as` and `--token` already guard against.
+        const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
+        const p = await ws.engine.cancel(runId, reason, {
+          kind: "human",
+          subject: subjectFlag(args),
+          via: "cli",
+        });
+        process.stdout.write(`${JSON.stringify({ runId, status: p.status }, null, 2)}\n`);
+        return 0;
       }
 
       case "replay": {

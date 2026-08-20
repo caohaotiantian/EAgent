@@ -2766,11 +2766,12 @@ export class ControlPlane {
           // attached, and this plane attached nothing until now. A miss still 404s, which is the
           // honest answer — this deployment does not hold that graph.
           //
-          // NOTE, and it is an open gap rather than a choice: `cancel` is the one command that
-          // should never depend on a graph being findable. It runs no graph code, and it is what
-          // an operator reaches for when a graph has drifted — but `Engine.cancel` goes through
-          // `#require` like the rest, so a run whose graph is absent from this index still cannot
-          // be stopped through this door. Making `cancel` journal-only is its own change.
+          // `cancel` NO LONGER DEPENDS ON THE LOOKUP, which was the gap this note used to record.
+          // It runs no graph code — `#cancelTree` is "a projection and two appends" — and it is
+          // what an operator reaches for when a graph has drifted, so `Engine.cancel` folds the
+          // journal itself now rather than going through `#require`. The bind below still runs,
+          // because `rewind` and `advance` genuinely need the graph; a miss leaves cancel working
+          // and those two answering 404, which is the honest split.
           await this.#bindFromIndex(runId);
           switch (cmd["kind"]) {
             case "cancel":

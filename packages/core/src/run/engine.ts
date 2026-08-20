@@ -1236,9 +1236,26 @@ export class Engine {
    *     tree that looks finished.
    */
   async cancel(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
-    const ctx = this.#require(runId);
+    // NO ATTACHMENT REQUIRED, and this used to demand one. `#cancelTree` already says why it does
+    // not need a graph — "it is a projection and two appends" — but `#require` sat in front of it
+    // and refused any run this process had not bound.
+    //
+    // That made a stranded run inescapable. Edit a graph by one byte while a run is parked on a
+    // gate and the hash no longer matches, so `approve` refuses (correctly — the approver
+    // approved THOSE bytes) and `reject` refuses too, because a rejected gate runs the graph's
+    // error edges. Cancel was the one exit that needs no graph at all, and it was shut for the
+    // same reason as the two that do. Measured: all three returned `E_RUN_NOT_FOUND`, and the
+    // refusal text named `--reject` and `cancel` as the ways out.
+    //
+    // A run with no journal is still not found — that is a different answer from "not attached",
+    // and the one a caller asking about a nonexistent run should get.
+    const known = await this.projection(runId);
+    if (known === undefined) {
+      throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`, { details: { runId } });
+    }
     await this.#cancelTree(runId, reason, new Set(), by);
-    return (await this.#project(ctx))!;
+    const ctx = this.#runs.get(runId);
+    return ctx === undefined ? (await this.projection(runId))! : (await this.#project(ctx))!;
   }
 
   /**

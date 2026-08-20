@@ -35,7 +35,7 @@ Stated because a framework that overstates itself costs its user a day finding o
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | Declared, validated, pinned into the manifest, never invoked |
 | **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever |
-| **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased, and `cancel` needs the graph findable |
+| **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no reclaim path |
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
 
 ## Try it

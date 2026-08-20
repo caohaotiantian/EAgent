@@ -856,3 +856,46 @@ test("AN UNPRICED ROUTE IS NAMED AT BOOT — a budget cannot bind against a cost
     d.dispose();
   }
 });
+
+test("A DRIFTED GRAPH STRANDS NOTHING — cancel is the exit and it needs no graph", async () => {
+  // Edit a graph by one byte while a run is parked and the hash no longer matches, so `approve`
+  // refuses — correctly, the approver approved THOSE bytes — and `reject` refuses too, because a
+  // rejected gate runs the graph's error edges and binds like an approval does.
+  //
+  // That left nothing. `Engine.cancel` went through `#require` like the rest, so the one exit
+  // needing no graph was shut for the same reason as the two that do, and the refusal text named
+  // `--reject` and `cancel` as the ways out when neither was reachable — `loom cancel` was not
+  // even a command.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    const g = join(d.dir, "graphs", "gated.json");
+    writeFileSync(g, JSON.stringify(gatedGraph("after-gate.txt")));
+
+    const first = await run(["run", g, "--workspace", d.dir, "--input", JSON.stringify({ note: "n" })]);
+    const m = /loom approve (\S+) (\S+)/.exec(first.out.trim().split("\n").pop() ?? "");
+    assert.ok(m !== null, first.out);
+
+    // ONE BYTE. The spec is otherwise identical and the graph still compiles.
+    const drifted = JSON.parse(readFileSync(g, "utf8")) as { metadata: { version: number } };
+    drifted.metadata.version = 2;
+    writeFileSync(g, JSON.stringify(drifted));
+
+    let refused: string | undefined;
+    try {
+      const r = await run(["approve", m[1]!, m[2]!, "--workspace", d.dir, "--as", "u:alice"]);
+      refused = r.code === 0 ? undefined : `${r.err}${r.out}`;
+    } catch (e) {
+      refused = (e as Error).message;
+    }
+    assert.ok(refused !== undefined, "approve must refuse a drifted graph — it did not");
+    assert.match(refused, /no graph in .* has that hash|E_GRAPH_MISMATCH/, refused);
+
+    const cancelled = await run(["cancel", m[1]!, "--workspace", d.dir, "--as", "u:alice", "--reason", "drifted"]);
+    assert.equal(cancelled.code, 0, `cancel must work with no graph: ${cancelled.err}`);
+    assert.equal(JSON.parse(cancelled.out).status, "cancelled");
+    assert.equal(existsSync(join(d.dir, "after-gate.txt")), false, "and the guarded action never ran");
+  } finally {
+    d.dispose();
+  }
+});
