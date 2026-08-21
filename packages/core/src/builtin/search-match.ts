@@ -8,7 +8,7 @@
  * dissolves the filesystem jail rather than narrowing it. These do the same work in Node,
  * inside the jail, with no allowlist entry required.
  *
- * VENDORED from EAgent `src/extensions/search.ts` @ tag `eagent-v1` — `globToRegExp` and the
+ * FORKED from `packages/eagent/src/extensions/search.ts` (same repo) — `globToRegExp` and the
  * traversal — with two changes that are not stylistic:
  *
  *  1. **The deny-list reaches the walk.** EAgent has no notion of one; Loom's jail root
@@ -23,6 +23,11 @@
  * The traversal is name-sorted, so results are stable across platforms and across runs —
  * `readdir` order is not, and an agent diffing two runs of the same graph would otherwise
  * see phantom changes.
+ *
+ * A FORK RATHER THAN AN IMPORT, and it stays one. `@loom/core` has zero runtime dependencies
+ * and may not import a sibling package (invariant 1), and `build:binary` bundles core's entry
+ * alone — so an import here would put the capability outside the single binary that IS the
+ * deployment. The original is now in this repo, so the two can be diffed rather than trusted.
  */
 
 import { type Dirent, readdirSync } from "node:fs";

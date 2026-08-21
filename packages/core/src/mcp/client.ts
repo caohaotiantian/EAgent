@@ -18,8 +18,13 @@
  * error result rather than a crash. The server is a different program written by somebody
  * else; the only thing its enumeration proves is what it *claims*.
  *
- * VENDORED IN PART from EAgent `src/extensions/mcp.ts` @ tag `eagent-v1` — the bounded line
+ * FORKED IN PART from `packages/eagent/src/extensions/mcp.ts` (same repo) — the bounded line
  * reader below is its design, unchanged, because it gets the one property that matters right.
+ *
+ * A FORK RATHER THAN AN IMPORT, and it stays one. `@loom/core` has zero runtime dependencies
+ * and may not import a sibling package (invariant 1), and `build:binary` bundles core's entry
+ * alone — so an import here would put the capability outside the single binary that IS the
+ * deployment. The original is now in this repo, so the two can be diffed rather than trusted.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";

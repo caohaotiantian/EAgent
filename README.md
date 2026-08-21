@@ -22,7 +22,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy. A provider that ignores `stream: true` fails loudly rather than reporting an empty success |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 1806 tests, offline, no API key; zero-dep and public-surface guards |
+| **Gates** | `npm run check` — 3347 tests across both packages, offline, no API key; zero-dep and public-surface guards |
 
 ## What does not work yet
 
@@ -137,30 +137,38 @@ for the evidence, line by line.
 
 ```
 design/loom/       the architecture + implementation journal
-packages/core/     the engine — zero runtime dependencies
+packages/core/     the Loom engine — zero runtime dependencies
   src/graph/         compiler, expression language, validation
   src/run/           executor, scheduler, policy, gates, replay
   src/journal/       append-only store (memory + SQLite)
   src/providers/     Anthropic, OpenAI, fallback chains, cassettes
   src/server/        control plane + embedded console
   src/security/      redaction, SecretValue
+packages/eagent/   EAgent — the agent kernel and its 65 extensions
 scripts/           CI guards and the binary build
-../eagent-ref      EAgent v1, read-only reference worktree
 ```
 
-## The archive
+## EAgent, the predecessor — now a package here
 
-EAgent v1 is frozen and remains fully readable:
+EAgent is the harness Loom grew out of: a minimalist agent kernel with an excellent extension
+surface. It is **in this repository**, at `packages/eagent/`, and is developed here.
+
+```bash
+npm run eagent            # its CLI
+npm run check             # one gate covers both packages
+```
+
+It was conformed to Loom's toolchain on the way in — `.ts` import specifiers, no parameter
+properties, no `tsx` loader — so both suites run under the same `node --test`. It keeps its own
+dependencies (`jiti`); only `@loom/core` is bound by the zero-dependency rule, and core does not
+import it.
+
+`loom` is an **orphan branch** that shares no history with `init` by design. `init`, tagged
+`eagent-v1`, is where EAgent's own history stayed:
 
 ```bash
 git show eagent-v1                    # the annotated archive tag
 git worktree add ../eagent-ref init   # read it side-by-side
 ```
 
-`loom` is an **orphan branch** — it shares no history with `init` by design, and nothing in Loom
-*imports* or *depends on* EAgent at build or run time: `@loom/core` has zero runtime
-dependencies and EAgent is not one of them.
-
-Loom does **vendor** from EAgent's source, which is a different thing: a handful of files are
-copies, fixed on the way in to satisfy Loom's invariants, each carrying a provenance header
-naming its source path and the `eagent-v1` tag (`grep -ran 'VENDORED' packages/core/src/`).
+That worktree is historical reference only. EAgent is edited at `packages/eagent/`, not there.

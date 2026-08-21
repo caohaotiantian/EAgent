@@ -3933,3 +3933,53 @@ mechanism.**
 and a channel overwritten by trusted data stays tainted. Both are the fail-safe direction, and
 the remedy today is per-action approval. If that becomes noise, the answer is declassification
 with a journaled justification — not a narrower producer set.
+
+## EAgent stops being a vendoring source and becomes `packages/eagent`
+
+The maintainer's call: **not a vendor — a monorepo, all development tracked here.** EAgent's
+403 files moved in as a fresh copy (its own history stays readable on `init`, tagged
+`eagent-v1`), and `../eagent-ref` demoted from "the vendoring source" to historical reference.
+
+**Conformed, not just copied**, which was the whole cost of the move. EAgent ran on `tsx`; Loom
+runs `node --test` over `.ts` directly. Three mechanical classes, all of them forced by Node 24
+type stripping rather than by taste:
+
+- **1032 relative import specifiers** rewritten `.js` → `.ts`. Every one was verified to have a
+  real `.ts` target before rewriting; **zero were skipped**, which is the check that would have
+  caught a genuine `.js` reference being clobbered.
+- **20 TypeScript parameter properties** hoisted to fields — `erasableSyntaxOnly` forbids them.
+  Assignments go after `super()` where there is one (`CapabilityError` has one).
+- **The `--import tsx` spawns** dropped from five sites, one of them in `src/`
+  (`self-improve.ts` builds the eval-runner command). Type stripping replaces the loader.
+
+**`jiti` stays**, and noticing that mattered: invariant 1 is scoped to `packages/core`, so a
+sibling package carrying dependencies breaks nothing. The plan had budgeted for deleting the
+package-extension loader, and that turned out to be work nobody needed.
+
+**Four failures out of 1542 were real findings rather than conversion damage**, and all four
+were the same shape: **a test locating its own package's source through `process.cwd()`**. That
+worked only because the suite happened to run from the package root; from the monorepo root it
+resolves one level too high. `kernel-surface`, `self`, `extension` and `packages` all did it —
+the last one via `DEFINE_PATH`, which builds a fixture's import statement from cwd. **I nearly
+"fixed" `src/extensions/packages.ts` for this**, because the failure surfaced as jiti failing to
+load an extension and the loader does seed itself from `process.cwd()`. It was the test. Getting
+the actual error instead of the plausible one is what separated them.
+
+**The kernel LOC guard fired, and was raised by exactly six.** Hoisting three parameter
+properties out of `kernel/` costs 2 lines each. The ceiling moved 2335 → 2342 with the
+derivation written into the test, because a budget raised without one is a budget that stops
+meaning anything. It still bites on the next real addition.
+
+**And one Loom guard was coupled to the package list by accident.** `toolchain-gate.test.ts`
+built its replica by copying the root `tsconfig.json`; the moment that referenced a package the
+replica lacked, `tsc -b` failed there for a reason having nothing to do with what the guard
+tests. It writes its own reference list now.
+
+The three files core FORKED from EAgent stay forks — core is zero-dep and cannot import a
+sibling, and `build:binary` bundles core's entry alone. Their headers now name the in-repo
+original, so the copies can be diffed rather than trusted.
+
+**Reverses when** someone wants one toolchain rather than two: EAgent's tsconfig still turns off
+`exactOptionalPropertyTypes`, `noPropertyAccessFromIndexSignature` and `noImplicitReturns`.
+Turning them on is a migration of 28k LOC and was deliberately not bundled with the move — if
+the import had broken something, nobody could have told which change did it.

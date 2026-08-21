@@ -95,36 +95,46 @@ gates, replay, and observability are one mechanism.
 
 ```
 design/loom/       architecture (D1–D14) + HANDOFF.md + REGISTER.md + JOURNAL.md
-packages/core/     the engine. zero runtime deps. src/ + test/
+packages/core/     the Loom engine. ZERO runtime deps. src/ + test/
+packages/eagent/   EAgent — the agent kernel + 65 extensions. May carry deps (it has `jiti`)
 scripts/           CI guards (zero-dep, public surface) + the SEA build
 .agent/<task>/     per-task working state (gitignored); plan.md is the re-entry point
-../eagent-ref      EAgent v1, read-only reference worktree — the vendoring source
+../eagent-ref      a worktree on the frozen `init` branch. Historical reference ONLY —
+                   EAgent is developed HERE now, not there
 ```
 
-**`packages/core` is still the only package**, and that is a decision rather than a stage.
-`build:binary` bundles `packages/core/dist/cli.js` **only**, so a capability living in another
-package is absent from the single binary — and the single binary is the deployment. The rule:
-**zero-dep capability → `packages/core/src/`; a package only when something genuinely needs a
-dependency.** Everything vendored so far needed none — `fs.edit`/`fs.glob`/`fs.grep` are pure
-Node, `proc.exec` wraps the sandbox already in core, and the MCP client is newline-JSON over
-`node:child_process`. `packages/skills/` (library/recipes/prompts as data) is still the likely
-first real package, and is not built.
+**Two packages, and the split is a rule rather than a stage.** `build:binary` bundles
+`packages/core/dist/cli.js` **only**, so a capability living in another package is absent from
+the single binary — and the single binary is the Loom deployment. Hence: **a zero-dep capability
+Loom needs goes in `packages/core/src/`; a package exists when something genuinely needs
+dependencies or is its own product.** `packages/eagent` is the second kind: it is EAgent, it
+ships its own CLI, and it carries `jiti`. `packages/core` may not import it, and does not.
 
-**Adding a package is a four-file transaction**, and skipping any part re-creates a trap this
-project has already hit: root `tsconfig.json` `references`, the package's own `tsconfig.json` +
-`tsconfig.test.json`, and the root `typecheck` script — which today hardcodes
-`tsc -p packages/core/tsconfig.test.json`. `npm test` globs `packages/*/test/` and so *runs* a
-new package's tests automatically, but under Node's type-stripping that executes them without
-type-checking. A new package whose test config is not wired is a package whose tests are
+`packages/skills/` (library/recipes/prompts as data) is still the likely third, and is not built.
+
+**Adding a package is a four-file transaction**, and adding `packages/eagent` exercised every
+part of it: root `tsconfig.json` `references`, the package's own `tsconfig.json` +
+`tsconfig.test.json`, and the root `typecheck` script, which names each test config
+explicitly. `npm test` globs `packages/*/test/` and so *runs* a new package's tests
+automatically, but under Node's type-stripping that executes them WITHOUT type-checking — so a
+package whose test config is not named in `typecheck` is a package whose tests are
 untypechecked while appearing to pass.
+
+One more thing the import found, worth knowing before you add the third package: a guard can
+couple itself to the package list by accident. `toolchain-gate.test.ts` built its throwaway
+replica by COPYING the root `tsconfig.json`, so the moment that file referenced a package the
+replica did not contain, `tsc -b` failed there for a reason unrelated to what the guard tests.
+It now writes its own reference list.
 
 ## Commands
 
 ```bash
 npm run check       # typecheck + test + both guards. THE gate.
 npm test            # tests only
-npx tsc -p packages/core/tsconfig.test.json   # read-only typecheck, safe under concurrency
+npx tsc -p packages/core/tsconfig.test.json     # read-only typecheck, safe under concurrency
+npx tsc -p packages/eagent/tsconfig.test.json  # ...and the other package
 node --test packages/core/test/<file>          # one suite
+node --test "packages/eagent/test/**/*.test.ts"   # EAgent's suite alone
 npm run build:binary                           # bin/loom; fails if any node_modules input appears
 node scripts/check-surface.mjs --write         # re-pin the public surface, then commit surface.json
 ```
@@ -153,37 +163,37 @@ or a bare `tsc -b`** — concurrent `tsc -b` races on emit. Use the read-only ty
 - **`exactOptionalPropertyTypes` is on.** `foo?: T` and `foo: T | undefined` differ; build
   objects conditionally rather than assigning `undefined`.
 
-## EAgent — predecessor, and a source
+## EAgent — in this repo, and developed here
 
-**EAgent** is the maintainer's prior agent harness, frozen at tag `eagent-v1` on branch `init`,
-readable at `../eagent-ref` (a git worktree). 28k LOC: a 2.3k-LOC kernel and 21k LOC across 65
-extensions. Loom vendors from its source; `init` stays frozen. Vendored files are copies, fixed
-on the way in, carrying a provenance header naming source path and tag.
+**EAgent** is the maintainer's prior agent harness: a ~2.3k-LOC kernel plus 65 extensions,
+1541 tests. It lives at **`packages/eagent/`** and is developed here. `init` (tag `eagent-v1`)
+and the `../eagent-ref` worktree are frozen history, not the source of truth — do not edit
+there, and do not treat a difference between the two as drift to reconcile.
 
-**Loom's loop stays. EAgent's loop is not vendored** — it is ~320 lines over a `Message[]`, which
-`Engine.#runAgent` already is, with journaling, budget reservation, replay and containment that
-EAgent's loop does not have. Parallel tool waves are deliberately **not** ported: Loom derives
-tool ordinals from array position so they stay replayable, and tool-level parallelism is what the
-graph is for.
+**It was conformed to Loom's toolchain on the way in**, which is why it runs under the same
+gate: 1032 relative import specifiers rewritten `.js` → `.ts`, 20 TypeScript parameter
+properties hoisted to fields (`erasableSyntaxOnly` forbids them), and the `--import tsx`
+spawns dropped — Node 24's native type stripping replaces the loader. Its tsconfig extends
+`tsconfig.base.json` but turns OFF three flags EAgent predates
+(`exactOptionalPropertyTypes`, `noPropertyAccessFromIndexSignature`, `noImplicitReturns`).
+Turning those on is a migration somebody may choose to do; it is not required for the gate.
 
-**The intake rule.** An extension is *redundant* if the engine already provides its guarantee
-**durably** — the journal, `PolicyEngine`, `EventBus`, subgraph nodes, oversight and retry
-already cover checkpointing, cost, budget, tracing, sub-agents and recovery. What is *additive*
-is what touches the world, and the guards over it.
+**What the two share, and what they must not.** `packages/core` holds three files FORKED from
+EAgent — `builtin/edit-match.ts`, `builtin/search-match.ts`, `mcp/client.ts`. They stay forks:
+core has zero runtime dependencies and may not import a sibling package (invariant 1), and
+`build:binary` bundles core's entry alone, so an import would put the capability outside the
+binary. Each names its in-repo origin, so the two copies can now be diffed instead of trusted.
 
-**What has already been taken**: `fs.edit`, `fs.glob`, `fs.grep`, `proc.exec`, and an MCP client
-(`src/mcp/`). The gaps the survey named are closed; what remains unvendored is listed in HANDOFF
-§6. Two seams were considered and refuted before vendoring was chosen — a hosted kernel injecting
-adapters into EAgent's four registries (refuted four ways: `ctx.effect` does not exist, the
-registries carry `#private` fields so no structural adapter can be passed, `@eagent/core` is not
-installable, and `#dispatch` is a hard-coded switch), and a subprocess (sound, but the SEA binary
-cannot ship EAgent, making it a two-binary deployment, and Loom could not gate EAgent's
-individual tool calls). Do not re-propose either without reading why they failed.
+**Loom's loop is not EAgent's, and neither replaces the other.** EAgent's loop is ~320 lines
+over a `Message[]`; `Engine.#runAgent` is the same shape with journaling, budget reservation,
+replay and containment that EAgent's does not have. Parallel tool waves are deliberately absent
+from Loom: it derives tool ordinals from array position so they stay replayable, and
+tool-level parallelism is what the graph is for.
 
-**Non-negotiable at intake:** exactly ONE `.execute(` path (inv 6 — EAgent has three; the two
-drifted ones are deleted, not ported); no `jiti`, no `ExtensionHost` (runtime `import()` of
-arbitrary code is not something Loom does); no parameter properties or `.ts` specifiers in the
-wrong direction; no `Date.now()`/`Math.random()` on a recorded path (inv 4); tools declare
+**If you move code from `packages/eagent` into `packages/core`,** it must satisfy the
+invariants first: exactly ONE `.execute(` path (inv 6 — EAgent has three); no `jiti` and no
+`ExtensionHost`, because runtime `import()` of arbitrary code is not something core does; no
+parameter properties; no `Date.now()`/`Math.random()` on a recorded path (inv 4); tools declare
 `version`, `irreversibility`, `idempotent`; and capability → posture, never a private grant
 (inv 5 — EAgent's `CapabilityManager.grant()` auto-allows *before* consulting anything, and its
 core tools grant `fs:read` **and `fs:write`** unconditionally at activation).

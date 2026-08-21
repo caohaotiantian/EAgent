@@ -14,11 +14,16 @@
  * span far larger than what was asked for is `disproportionate`. Both are refusals, not
  * best-effort guesses — the tool reports them and changes nothing.
  *
- * VENDORED from EAgent `src/extensions/lib/edit-match.ts` @ tag `eagent-v1`, unchanged
+ * FORKED from `packages/eagent/src/extensions/lib/edit-match.ts` (same repo), unchanged
  * except for this docstring and the explicit `undefined` guards Loom's
  * `noUncheckedIndexedAccess` requires. It was chosen first of the whole 21k-LOC extension
  * tree because it is pure: zero imports, zero clock, zero randomness, so it carries none of
  * the invariant problems the rest of that tree does.
+ *
+ * A FORK RATHER THAN AN IMPORT, and it stays one. `@loom/core` has zero runtime dependencies
+ * and may not import a sibling package (invariant 1), and `build:binary` bundles core's entry
+ * alone — so an import here would put the capability outside the single binary that IS the
+ * deployment. The original is now in this repo, so the two can be diffed rather than trusted.
  */
 
 export type EditMatch =

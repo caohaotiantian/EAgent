@@ -28,15 +28,15 @@ Measured **2026-08-21**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **1806 pass, 0 fail** | `npm run check` (its test arm) |
-| Test files | 100 | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
-| Source files | 53 | `node scripts/check-zero-dep.mjs` (it prints the count) |
-| Runtime dependencies | **0** | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
+| Tests | **3347 pass, 0 fail** (Loom 1806 + EAgent 1541) | `npm run check` (its test arm) |
+| Test files | 231 (100 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Source files | 53 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
+| Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 484 | `node -e "console.log(require('./scripts/surface.json').length)"` |
 | Escalation rules | 10, and **all 10 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` is empty |
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
-| Typecheck | clean | `npx tsc -p packages/core/tsconfig.test.json` |
+| Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
 
 **The `Source files` row is the only one that cannot rot**, because its command is a guard that
 runs in CI: if it disagrees with the tree, the build stops. That is the difference between a
@@ -158,10 +158,15 @@ for reasons, not forgotten.
   addressed (`boundTurns` handles the transcript; `assembleContext` still never receives it).
 - **The surface guard counts exported NAMES, not members.** A new public method on an
   already-exported class is invisible to it.
-- **Not vendored from EAgent** (survey: TAKE 20 · DROP-redundant 30 · DROP-scope 7 · MERGE 8):
-  `library/` as data with ONE frontmatter parser instead of EAgent's four; `codeact`;
-  `checkpoint` (git-stash based, a real delta over per-file `fs.restore`); `limits`' output
-  spill; `memory`'s retrieval half — the only thing that would populate `retrieved`.
+- **EAgent is now `packages/eagent/`, not a vendoring source.** What has NOT been moved into
+  `packages/core` — and would have to satisfy the invariants first — is `library/` as data with
+  ONE frontmatter parser instead of EAgent's four, `codeact`, `checkpoint` (git-stash based, a
+  real delta over per-file `fs.restore`), `limits`' output spill, and `memory`'s retrieval half,
+  which is the only thing that would populate `retrieved`. None of it is urgent now that the
+  code is in the tree and readable.
+- **EAgent's tsconfig relaxes three flags Loom sets** (`exactOptionalPropertyTypes`,
+  `noPropertyAccessFromIndexSignature`, `noImplicitReturns`). Turning them on is a migration
+  somebody may choose; the gate does not require it.
 
 ---
 
