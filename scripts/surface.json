@@ -411,6 +411,7 @@
   "mcpTools",
   "measureCohort",
   "messageTokens",
+  "modelFrames",
   "newCheckpointId",
   "newGateId",
   "newRunId",

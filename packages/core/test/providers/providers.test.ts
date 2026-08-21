@@ -560,3 +560,48 @@ test("a changed prompt is a cassette miss", async () => {
   await assert.rejects(() => collect(replay.stream({ ...REQ, system: "different" })));
   assert.notEqual(requestKey(REQ), requestKey({ ...REQ, system: "different" }));
 });
+
+test("A PROVIDER THAT IGNORES `stream: true` FAILS LOUDLY — it used to answer with nothing", async () => {
+  // Both adapters send `stream: true` unconditionally. A server that ignores it and answers with
+  // an ordinary `chat.completion` body produced ZERO frames, so the adapter built a `done` event
+  // with empty text and the RUN REPORTED SUCCEEDED with "" as the model's answer. Measured
+  // through the binary against a stub gateway: `"outputs": {"a": ""}`, exit 0 — and the journaled
+  // usage was the local ESTIMATE rather than the tokens the server reported, so the ledger
+  // carried a plausible cost for a call that returned nothing.
+  //
+  // That is the path `baseUrl` exists for — LiteLLM, vLLM, a corporate gateway — while Anthropic
+  // and OpenAI proper stream correctly, so it failed only for the deployments least able to
+  // diagnose it.
+  const json = JSON.stringify({
+    id: "chatcmpl-1",
+    object: "chat.completion",
+    choices: [{ index: 0, message: { role: "assistant", content: "STUB-ANSWER" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1000, completion_tokens: 2000 },
+  });
+  const fetchFn = async (): Promise<Response> =>
+    new Response(json, { status: 200, headers: { "content-type": "application/json" } });
+
+  const a = new OpenAIAdapter({ apiKey: "k", fetch: fetchFn, sleep: async () => undefined });
+  await assert.rejects(
+    () => collect(a.stream(REQ, ac())),
+    (e: unknown) => {
+      assert.ok(isLoomError(e), String(e));
+      assert.equal(e.code, CODES.E_PROVIDER_TRANSPORT);
+      // The server's own content type, because it is the first thing an operator needs.
+      assert.match(e.message, /application\/json/);
+      return true;
+    },
+    "a non-streaming answer must not become an empty successful turn",
+  );
+});
+
+test("AND `sse` ITSELF IS UNCHANGED — a general reader may legitimately yield nothing", async () => {
+  // THE CHECKS LIVE IN `modelFrames`, NOT IN `sse`, and that split is the point. `sse` is a
+  // published export and a general SSE reader: handed a stream of comments it correctly yields
+  // nothing, and it is not its business what a caller wanted. Putting the model-call rules inside
+  // it broke three existing tests whose fixtures read plain `Response`s — which is how the split
+  // was found. A model call wants an ANSWER; SSE does not.
+  const frames = [];
+  for await (const f of sse(new Response(`: keepalive\n\n`), ac())) frames.push(f);
+  assert.deepEqual(frames, [], "a comment-only stream is empty, not an error");
+});

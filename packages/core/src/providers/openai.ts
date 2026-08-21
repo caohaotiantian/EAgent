@@ -18,7 +18,7 @@ import type {
   ModelToolCall,
   ToolSpec,
 } from "../run/registry.ts";
-import { normalizeTransport, postJson, sse, type HttpOptions } from "./http.ts";
+import { normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
 import { round6, roughTokens } from "./anthropic.ts";
 
 export interface OpenAIOptions extends HttpOptions {
@@ -69,7 +69,7 @@ export class OpenAIAdapter implements ModelAdapter {
     let outputTokens = 0;
 
     try {
-      for await (const frame of sse(res, signal)) {
+      for await (const frame of modelFrames(res, signal)) {
         if (frame.data === "" || frame.data === "[DONE]") continue;
         const chunk = JSON.parse(frame.data) as OpenAIChunk;
 

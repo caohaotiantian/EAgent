@@ -31,7 +31,7 @@ import type {
   ModelToolCall,
   ToolSpec,
 } from "../run/registry.ts";
-import { normalizeTransport, postJson, sse, type HttpOptions } from "./http.ts";
+import { normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
 
 export interface AnthropicOptions extends HttpOptions {
   readonly apiKey: string;
@@ -87,7 +87,7 @@ export class AnthropicAdapter implements ModelAdapter {
     let closed = false;
 
     try {
-      for await (const frame of sse(res, signal)) {
+      for await (const frame of modelFrames(res, signal)) {
         if (frame.data === "" || frame.data === "[DONE]") continue;
         const ev = JSON.parse(frame.data) as AnthropicEvent;
 

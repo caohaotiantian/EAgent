@@ -599,6 +599,49 @@ export async function* sse(res: Response, signal: AbortSignal): AsyncIterable<Ss
   }
 }
 
+/**
+ * `sse`, plus the two rules a MODEL CALL adds to it.
+ *
+ * `sse` is a general SSE reader and a published export: given a stream of comments it correctly
+ * yields nothing, and it is not its business what a caller wanted. A model call wants an ANSWER,
+ * and that is where this sits.
+ *
+ * BOTH ADAPTERS SEND `stream: true` UNCONDITIONALLY. A server that ignores it and answers with an
+ * ordinary `chat.completion` body produced ZERO frames, so the adapter built a `done` event with
+ * empty text and the run reported SUCCEEDED with `""` as the model's answer. Measured through the
+ * binary against a stub gateway: `"outputs": {"a": ""}`, exit 0 — and the journaled usage was the
+ * local ESTIMATE rather than the 1000/2000 the server reported, so the ledger carried a plausible
+ * cost for a call that returned nothing. That is the path `baseUrl` exists for — LiteLLM, vLLM, a
+ * corporate gateway — while Anthropic and OpenAI proper stream correctly, so it failed only for
+ * the deployments least able to diagnose it.
+ *
+ * REFUSED RATHER THAN PARSED. The defect is not "we cannot read this shape", it is that a
+ * zero-frame stream became a successful turn; naming that costs one check and no second parser.
+ * REVERSES when a deployment's gateway cannot be configured to stream — the message carries the
+ * server's own content type, which is the diagnostic a parser would have had to produce anyway.
+ *
+ * HERE RATHER THAN IN EACH ADAPTER, because a check applied per-caller is a check the next caller
+ * forgets — the rule `Engine.#dispatch` already states about undeclared writes.
+ */
+export async function* modelFrames(res: Response, signal: AbortSignal): AsyncIterable<SseFrame> {
+  const declared = res.headers.get("content-type");
+  let yielded = 0;
+  for await (const frame of sse(res, signal)) {
+    yielded += 1;
+    yield frame;
+  }
+  if (yielded === 0) {
+    throw err.unavailable(
+      CODES.E_PROVIDER_TRANSPORT,
+      `provider answered a streaming request with no frames${
+        declared === null ? " and no content-type" : ` (content-type "${declared}")`
+      } — it did not stream, so there is no answer to record. Point this route at an endpoint that ` +
+        `streams, or configure the gateway to`,
+      { details: { contentType: declared, status: res.status } },
+    );
+  }
+}
+
 function parseFrame(raw: string): SseFrame | undefined {
   let event: string | undefined;
   const data: string[] = [];
