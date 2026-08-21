@@ -20,9 +20,9 @@ loom serve                            # console + API on :8787, from an empty di
 | **Durability** | Append-only journal on `node:sqlite`. A run SUSPENDED on a human gate survives `kill -9` and resumes in another process |
 | **Human oversight** | Three postures by configuration alone; gates are rows, so a suspended run holds zero worker slots. An approval binds the graph it was shown — spec, resolved resources and oversight floor |
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
-| **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
+| **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy. A provider that ignores `stream: true` fails loudly rather than reporting an empty success |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 1790 tests, offline, no API key; zero-dep and public-surface guards |
+| **Gates** | `npm run check` — 1806 tests, offline, no API key; zero-dep and public-surface guards |
 
 ## What does not work yet
 
@@ -37,6 +37,13 @@ Stated because a framework that overstates itself costs its user a day finding o
 | **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever |
 | **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no reclaim path |
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
+| **A `function` body that loops forever** | Cannot be stopped. `vm`'s real timeout is applied when the body is COMPILED, not when it runs, and a node deadline is a `Promise.race` on the same thread — so `loom run` hangs with no output and needs `kill -9`. Node `timeoutMs` does bound every other node type |
+| **`rewind`** | Rewinding to a node's own declared checkpoint wedges the run: the task stays leased and the next `advance` fails. Only a `task.ready` boundary works, and `rewind` never self-advances |
+| **`onBudgetExhausted: "gate"`** | Compiles, and fails the run exactly as `"fail"` does — the escalation it raises applies to decisions that no longer happen. `"degrade"` is read by nothing |
+| **Declarative fallback chains** | `FallbackAdapter` is written and tested; nothing constructs one, and a `--models-file` route cannot express a chain |
+| **`EdgeSpec.codes`** | The error-edge code filter has no reader, so every error edge is a catch-all whatever it declares. `RetryPolicy.onlyIf` IS read, which makes the asymmetry easy to trip over |
+| **`loom compile` against a missing resource** | Reports `ok`. A ref that merely *looks* like a ref is pinned to a digest of its own name; the failure arrives at run time, loudly, instead of at compile |
+| **Replay of a run a human de-escalated** | Diverges. Replay never re-applies `policy.deescalated`, so the replayed run has no ceiling and gates where the original did not |
 
 ## Try it
 
@@ -150,5 +157,10 @@ git show eagent-v1                    # the annotated archive tag
 git worktree add ../eagent-ref init   # read it side-by-side
 ```
 
-`loom` is an **orphan branch** — it shares no history with `init` by design. Nothing in
-Loom imports, vendors, or depends on EAgent code; EAgent is a reference text.
+`loom` is an **orphan branch** — it shares no history with `init` by design, and nothing in Loom
+*imports* or *depends on* EAgent at build or run time: `@loom/core` has zero runtime
+dependencies and EAgent is not one of them.
+
+Loom does **vendor** from EAgent's source, which is a different thing: a handful of files are
+copies, fixed on the way in to satisfy Loom's invariants, each carrying a provenance header
+naming its source path and the `eagent-v1` tag (`grep -ran 'VENDORED' packages/core/src/`).

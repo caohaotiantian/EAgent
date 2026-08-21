@@ -33,15 +33,17 @@ Read in order. Each file carries the `D<n>` headings from the brief verbatim.
 | [`08-PLAN.md`](08-PLAN.md) | **D13** · **D14** | Risk register, the walking skeleton, ordered milestones to v1, the assumption register, the open questions |
 | [`JOURNAL.md`](JOURNAL.md) | Implementation log | Append-only. Milestone status board, decisions taken while building, and the bugs that changed the design |
 | [`99-DOD.md`](99-DOD.md) | Definition of Done | Every checklist item, the section that discharges it, and whether the **code proves it** |
+| [`HANDOFF.md`](HANDOFF.md) | **Re-entry point** | Where things stand, what is left, how to work here, and the traps. Read this first |
+| [`REGISTER.md`](REGISTER.md) | Defect archive | Entries `A1`…`E8` with their reproductions. Grep it |
 
 ## Conventions
 
 - `HANDOFF.md` — **start here.** Where things stand, what is left, and what will bite you.
-- `REGISTER.md` — the defect archive behind it, entries `A1`…`E8`. **Grep it, do not read it**;
-  many entries are RESOLVED and kept so the next reader can tell "this was fixed" from "this was
-  never true".
-  Its **Known issues** section is the register of what is currently wrong, unwired or
-  unverified, with the command that established each entry. Delete an entry when you fix it.
+  Its *What is left* section is the working queue, and every entry there was verified against
+  `src/` rather than recalled.
+- `REGISTER.md` — the defect archive behind it, entries `A1`…`E8`, each with the command or
+  reproduction that established it. **Grep it, do not read it.** Many entries are RESOLVED and
+  kept deliberately, so a reader can tell "this was fixed" from "this was never true".
 - `ASSUMPTION:` — an underspecified point resolved by fiat. All collected in **D14**.
 - `DEFERRED-v2` — explicitly outside the 6–8 week v1, each with a one-line
   justification. All collected in **D13**.
