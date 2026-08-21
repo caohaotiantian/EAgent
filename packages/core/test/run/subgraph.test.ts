@@ -1050,3 +1050,29 @@ test("a subgraph mapping a channel the child never declares is a COMPILE error",
   assert.equal(r.ok, false);
   assert.ok(r.ok || r.diagnostics.some((d) => d.code === "GRAPH016_BAD_MAPPING"));
 });
+
+test("E8 — A SUBGRAPH'S OUTPUT IS UNTRUSTED, so the parent cannot charge on it un-gated", async () => {
+  // THE BOUNDARY LAUNDERS. The child is a separate `RunId` and therefore a separate
+  // `RunContext` with its own taint set, so whatever it learned never reached the parent: a
+  // child that fetched untrusted text and mapped it out through `sub.outputs` handed the
+  // parent a channel that looked clean, and the parent's irreversible node ran on it.
+  //
+  // The parent is de-escalated to `on`, because that is the only posture where E8 can be
+  // observed at all — an untainted irreversible node computes to `in` on its class alone.
+  const child = childSpec();
+  const withCharge = parentSpec({
+    nodes: [
+      ...parentSpec().nodes,
+      { id: n("charge"), type: "tool", reads: ["result"], writes: ["note"], tool: { name: "pay.charge", version: "1.0", args: { amount: 1 } }, unhandled: true },
+    ],
+    edges: [{ id: e("go"), from: n("delegate"), to: n("charge"), kind: "seq" as const }],
+  });
+
+  const r = rig(child);
+  const runId = await r.engine.submit({ graph: compileParent(child, withCharge), inputs: { total: 21 } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "watching", { kind: "human", id: "u:alice" });
+  const p = await r.engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `the parent must gate on the child's output: ${p.status}`);
+  assert.deepEqual(r.charges, [], "and nothing was charged");
+});

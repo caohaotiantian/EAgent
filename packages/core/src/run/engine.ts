@@ -4723,7 +4723,20 @@ function taintedTurn(ctx: RunContext, task: TaskRecord, ordinal: number): boolea
  * That is the fail-safe direction, and there is deliberately no declassification operator.
  */
 function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Record<string, unknown>>): void {
-  const external = node.type === "tool" || (node.type === "agent" && (node.agent?.tools ?? []).length > 0);
+  // `subgraph` counts as external, and deliberately over-approximates. A child runs under a
+  // DIFFERENT `RunId` and therefore a different `RunContext` with its own taint set, so nothing
+  // the child learned reaches the parent — a child that fetched untrusted text and mapped it out
+  // through `sub.outputs` handed the parent a channel that looked clean, and the parent charged
+  // on it. Carrying the child's set across the boundary would be more precise and would not
+  // SURVIVE: the fold at attach reads committed writes, and which of a child's channels were
+  // tainted is not among them. Treating the boundary itself as untrusted is the version that
+  // rebuilds. The cost is a pure-computation subgraph tainting its outputs.
+  //
+  // The other direction needs no rule. Each run gets its own `PolicyEngine` (`#contextFor`), so
+  // a parent's ceiling never reaches the child, and the child re-decides every node at full
+  // strictness — an irreversible child node gates at `in` on its class whatever the parent did.
+  const external =
+    node.type === "tool" || node.type === "subgraph" || (node.type === "agent" && (node.agent?.tools ?? []).length > 0);
   if (!external && !observedChannels(node).some((c) => tainted.has(c))) return;
   for (const channel of Object.keys(writes)) tainted.add(channel);
 }
