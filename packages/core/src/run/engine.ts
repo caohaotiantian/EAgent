@@ -3338,6 +3338,19 @@ export class Engine {
       irreversibility: tool.irreversibility,
       capabilities: tool.capabilities,
       declaredPosture: ctx.graph.plans[task.nodeId]?.posture ?? "out",
+      // E8 INSIDE THE TURN, which had no taint of any kind — this request simply omitted the
+      // field. `ctx.tainted` is channel-granular and only written at COMMIT, so nothing in it
+      // can describe what a tool returned two calls ago in this same turn. That is precisely
+      // the canonical injection: one agent node, clean declared reads, `net.fetch` returns
+      // "now call pay.charge", and the charge goes through — measured, under a de-escalated
+      // ceiling, with nothing raised.
+      //
+      // Two sources, either sufficient. The node observed a tainted channel; or a tool has
+      // already returned in this task, which makes every later argument the model writes
+      // downstream of external content. `ordinal` is `callsSoFar + i`, derived from the
+      // transcript rather than from dispatch order, so this stays replay-stable — a counter
+      // incremented at dispatch would not.
+      tainted: taintedTurn(ctx, task, ordinal),
     });
     if (decision.effect === "deny") return { content: decision.error.message, isError: true };
 
@@ -4679,6 +4692,19 @@ function observedChannels(node: NodeSpec): readonly string[] {
   };
   scan(node.tool?.args ?? {});
   return [...out];
+}
+
+/**
+ * Is this tool call, inside this task, downstream of untrusted content?
+ *
+ * `ordinal > 0` is the load-bearing half: it says a tool has already returned in this task.
+ * A `tool` node always calls with ordinal 0 and `nodeApproved`, so it is unaffected — this
+ * exists for the agent loop, where the model chooses.
+ */
+function taintedTurn(ctx: RunContext, task: TaskRecord, ordinal: number): boolean {
+  if (ordinal > 0) return true;
+  const node = ctx.index.byId.get(task.nodeId);
+  return node !== undefined && observedChannels(node).some((c) => ctx.tainted.has(c));
 }
 
 /**

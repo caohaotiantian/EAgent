@@ -410,6 +410,58 @@ test("E8 — TAINT OUTLIVES A HUMAN DE-ESCALATION; the class default does not", 
   assert.deepEqual(r.ran, [], "and the charge has not happened");
 });
 
+test("E8 — A TOOL RESULT TAINTS THE REST OF ITS OWN AGENT TURN", async () => {
+  // THE CANONICAL PROMPT INJECTION, and the shape none of the channel-level machinery can
+  // see: one agent node, declared reads clean, both tools its own. `net.fetch` returns text
+  // telling the model to charge, and the model does. `ctx.tainted` is written at COMMIT, so
+  // at the moment of the charge there is no committed write anywhere to have tainted.
+  //
+  // The node itself gates at `in` on its reachable-tool floor, so the exposure is exactly the
+  // de-escalated case E8 exists for — hence the ceiling here.
+  const injected: MockScript = (_req, turn) =>
+    turn === 0
+      ? { toolCalls: [{ id: "c1", name: "net.fetch", arguments: {} }], finishReason: "tool_use" }
+      : turn === 1
+        ? { toolCalls: [{ id: "c2", name: "pay.charge", arguments: {} }], finishReason: "tool_use" }
+        : { text: JSON.stringify({ ok: true }), finishReason: "stop" };
+
+  const oneNode = spec({
+    nodes: [
+      {
+        id: n("act"),
+        type: "agent",
+        reads: ["goal"],
+        writes: ["notes"],
+        agent: { profile: "agent_profile/g@stable", prompt: "prompt/g@stable", maxTurns: 4, tools: ["net.fetch", "pay.charge"], outputSchema: { type: "object" } },
+      },
+    ],
+    edges: [],
+    outputs: ["notes"],
+  });
+
+  const r = rig(injected, { sleep: async () => {} });
+  const runId = await r.engine.submit({ graph: compileEsc(oneNode), inputs: { goal: "x" } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "watching", { kind: "human", id: "u:alice" });
+  await r.engine.advance(runId);
+
+  // `net.fetch` is registered with its own `execute`, so `ran` records the CHARGE alone —
+  // which is the only thing in question. Before this, it read `["pay.charge"]`.
+  assert.deepEqual(r.ran, [], "the fetch is fine; the charge downstream of it is not");
+
+  // AND THE REFUSAL IS JOURNALED. An agent turn cannot suspend — the transcript is in memory,
+  // so a gate raised here could not be answered after a restart — so `gate` becomes a refusal
+  // the model is told about. Asserting the journal is what separates "refused" from "the model
+  // happened not to ask".
+  const reasons: string[] = [];
+  for await (const ev of r.store.read(runId, 1)) {
+    if (ev.type === "policy.decided") reasons.push(JSON.stringify(ev.payload));
+  }
+  assert.ok(
+    reasons.some((x) => x.includes("an agent turn cannot raise a gate") && x.includes("(E8)")),
+    `the charge must be refused FOR TAINT: ${reasons.join(" | ")}`,
+  );
+});
+
 test("E8 — TAINT SURVIVES A PROCESS RESTART", async () => {
   // THE THIRD EPHEMERAL HALF. `attach`'s docstring enumerates two things a fresh process does
   // not carry; `ctx.tainted` was a third, and the only one an authorization decision reads.
