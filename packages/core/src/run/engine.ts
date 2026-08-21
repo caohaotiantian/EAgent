@@ -108,7 +108,7 @@ import {
   type TimeoutAction,
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
-import { PolicyEngine, classificationOf, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
+import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -926,7 +926,9 @@ export class Engine {
    *
    * A separate method from anything that tightens, on purpose: the signature alone
    * rejects an agent, the deny-list rejects the evolution engine, and the ceiling it
-   * sets can never take a hard-to-undo action below `on` — someone stays watching.
+   * sets can never take a hard-to-undo action below `on` — someone stays watching. It
+   * does not cover one that untrusted tool output is feeding: E8 holds that at `in`, so
+   * lowering the ceiling is a judgement about what was visible when it was made.
    */
   async deescalate(
     runId: RunId,
@@ -1936,19 +1938,28 @@ export class Engine {
       return this.#dispatch(ctx, p, w);
     }
 
+    // E8. A channel a tool wrote carries output from outside the system, and feeding that
+    // into a hard-to-undo action is the prompt-injection path. The bit was already being
+    // computed and passed; what was missing is the FIRING SITE every other rule in D7.7's
+    // table has. Raised before the decision it must bind, not at commit like E4/E5, because
+    // the evidence — an upstream task's writes — is already durable by the time we get here.
+    // `escalate` is idempotent on re-raise, so a node decided repeatedly journals one event.
+    const irreversibility = this.#irreversibilityOf(node);
+    const tainted = (node.reads ?? []).some((r) => ctx.tainted.has(r));
+    if (tainted && isHardToUndo(irreversibility)) {
+      this.#escalate(ctx, "taint", node.id, { reads: (node.reads ?? []).filter((r) => ctx.tainted.has(r)) });
+    }
+
     const decision = ctx.policy.decide({
       runId: ctx.runId,
       nodeId: node.id,
       taskId: task.taskId,
       kind: node.tool === undefined ? "node" : "tool",
-      irreversibility: this.#irreversibilityOf(node),
+      irreversibility,
       capabilities: this.#capabilitiesOf(node),
       declaredPosture: ctx.graph.plans[node.id]?.posture ?? "out",
       dataClassification: [classificationOf(spec.channels, [...(node.reads ?? []), ...(node.writes ?? [])])],
-      // E8. A channel a tool wrote carries output from outside the system. Feeding that
-      // into a hard-to-undo action is the prompt-injection path, and the policy layer
-      // already knows what to do with the bit — it was just never being told.
-      tainted: (node.reads ?? []).some((r) => ctx.tainted.has(r)),
+      tainted,
     });
 
     await this.#serialize(() =>

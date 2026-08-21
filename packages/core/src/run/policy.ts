@@ -171,6 +171,17 @@ const DEFAULT_WINDOWS: Readonly<Record<IrreversibilityClass, number>> = {
 const MAX_TIMER_MS = 2_147_483_647;
 
 /**
+ * The two classes a human may NOT de-escalate to `out`, and the two E8 guards.
+ *
+ * Named because the same pair drives the hard floor and the taint rule, and they were
+ * written out longhand in both places — which is how one of them could quietly become
+ * the identity without the other noticing.
+ */
+export function isHardToUndo(c: IrreversibilityClass): boolean {
+  return c === "irreversible" || c === "externally_visible";
+}
+
+/**
  * The interruption window, refused rather than clamped — and refused in BOTH directions,
  * because the two wrong answers fail differently and both are silent.
  *
@@ -278,6 +289,9 @@ export class PolicyEngine {
       reasons.push(`capability "${cap}" granted`);
     }
 
+    if (req.tainted === true && isHardToUndo(req.irreversibility)) {
+      reasons.push(`tainted input feeding an ${req.irreversibility} action (E8)`);
+    }
     const posture = this.effectivePosture(req);
     reasons.push(`effective posture ${posture}`);
 
@@ -298,18 +312,15 @@ export class PolicyEngine {
     const dataFloor = maxPosture(
       ...(req.dataClassification ?? []).map((c) => CLASSIFICATION_POSTURE_FLOOR[c]),
     );
-    // Taint bump (D6.8 §3): untrusted tool output feeding an irreversible action
-    // raises oversight one level, automatically.
-    const taintBump: Posture =
-      req.tainted === true && (req.irreversibility === "irreversible" || req.irreversibility === "externally_visible")
-        ? "in"
-        : "out";
-
+    // WHERE TAINT IS *NOT* READ. A bump on this floor is arithmetically dead: it can only
+    // raise a hard-to-undo action, and `CLASS_DEFAULT_POSTURE` already puts exactly those
+    // at `in` in this same `max`. It was written here, it was the identity for every input,
+    // and E8 therefore did nothing for the whole life of the mechanism. Taint is read at
+    // the ceiling instead — the one place it can change an answer. See below.
     const floor = maxPosture(
       this.#systemFloor,
       CLASS_DEFAULT_POSTURE[req.irreversibility],
       dataFloor,
-      taintBump,
       req.declaredPosture,
       this.#escalations.get(`run:${req.runId}`) ?? "out",
       this.#escalations.get(`node:${req.runId}/${req.nodeId}`) ?? "out",
@@ -325,10 +336,15 @@ export class PolicyEngine {
 
     // THE HARD FLOOR. A human may lower a hard-to-undo action to `on` — someone is
     // still watching and can interrupt — but never to `out`, where nobody is.
-    const clamped =
-      req.irreversibility === "irreversible" || req.irreversibility === "externally_visible"
-        ? maxPosture(ceiling, "on")
-        : ceiling;
+    //
+    // TAINT RAISES THAT FLOOR TO `in` (E8). A de-escalation is a judgement about what the
+    // human could see when they made it; untrusted tool output arriving afterwards and
+    // feeding a hard-to-undo action is new information they have NOT seen, so the earlier
+    // "let this run on-the-loop" no longer covers this action and they are asked again.
+    // That is what D7.7's "cleared by: human" means for this rule.
+    const clamped = isHardToUndo(req.irreversibility)
+      ? maxPosture(ceiling, req.tainted === true ? "in" : "on")
+      : ceiling;
 
     return postureRank(clamped) < postureRank(floor) ? clamped : floor;
   }

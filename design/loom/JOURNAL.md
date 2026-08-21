@@ -3839,3 +3839,47 @@ Unadvertised improvement worth recording: the fallback chain now fails over corr
 `done` event used to set `committed = true`, so a non-streaming primary OWNED the turn and no
 failover happened. Zero frames means zero events, `committed` stays false, and the chain falls
 through.
+
+## E8 was the identity function for the entire life of the mechanism
+
+The taint rule — untrusted tool output feeding a hard-to-undo action, invariant 5's E8 —
+never changed a single answer. Two independent reasons, either alone sufficient:
+
+`taintBump` returned `"in"` exactly when the action's class was `irreversible` or
+`externally_visible`, and `CLASS_DEFAULT_POSTURE` already puts those two at `"in"` in the
+**same** `maxPosture(...)` call. It was arithmetically dead the day it was written. And it
+was computed *before* the ceiling clamp, so in the one case where it could have mattered — a
+human having de-escalated to `on` — the clamp lowered it back regardless. Probed against
+`dist/`, all eight rows read `SAME`.
+
+Meanwhile the producer was live and correct: `#recordEvidence` taints channels a tool wrote,
+and the decision site computed the bit and passed it under a comment reading "the policy
+layer already knows what to do with the bit — it was just never being told." The comment had
+it exactly backwards. That is the shape worth remembering: a *producer* wired to an inert
+*consumer* reads, from either end, like a working mechanism.
+
+**Taint is not a term in `posture_default`.** It is a floor under the human ceiling. A
+de-escalation is a judgement about what its author could see when they made it; untrusted
+content arriving afterwards is new information they have not seen, so the earlier "let this
+run on-the-loop" stops covering that action and they are asked again — which is what D7.7's
+"cleared by: human" always meant for this row. `04-OVERSIGHT.md`'s equation now says so.
+Untainted, the hard floor stays `on`: the fix must not read as "irreversible always gates",
+or it would delete de-escalation for the case it exists for. That control is a test.
+
+E8 also had no firing site — 9 of 10 rules had one — so nothing was ever journaled. It now
+raises before the decision it must bind, not at commit like E4/E5, because the evidence is an
+upstream task's writes and is already durable.
+
+**The repo's own guard caught this and the excuse dismissed it.** `RULES_NEVER_RAISED` pinned
+`taint` with a `why` asserting the behaviour existed compositionally and was recorded in
+`policy.decided`'s reasons. Both clauses false. A `why` on that list is a claim about running
+code; this one was never run. The list is now empty and the reasons string is now real.
+
+**Reverses when** someone wants a de-escalation to survive taint — i.e. an operator who has
+seen the untrusted content and still wants `on`. Today they must call `deescalate` again after
+the gate. If that becomes routine, the answer is a ceiling that records *what* was seen, not
+weakening the floor.
+
+Cost: one new public export, `isHardToUndo`. The two-class test drove the hard floor and the
+taint rule and was written longhand in both, which is how one of them became the identity
+without the other noticing.

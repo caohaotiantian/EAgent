@@ -480,10 +480,19 @@ calls it, and combined with the data classification of the channels involved.
 posture_default(action) = max(
     class_default(tool.irreversibility),
     classification_floor(channels read ∪ written),   # pii ⇒ at least `on`; secret_ref ⇒ `in`
-    taint_bump(if reads a tainted channel and class ≥ irreversible)   # D6.8 §3
 )
 effective(action) = max(posture_default, system, tenant, workflow, node, tool, runtime escalations)
+final(action)     = min(effective, human_ceiling) but never below hard_floor(action)
+hard_floor(action) = `in` if action is tainted and hard-to-undo     # E8, D6.8 §3
+                     `on` if action is hard-to-undo
+                     `out` otherwise
 ```
+
+**Taint is not a term in `posture_default`.** It was written as one and that made it the
+identity: a taint bump raises exactly the two classes `class_default` already puts at `in`,
+entering the same `max`. The only place it can change an answer is the hard floor under a
+human ceiling — the prompt-injection case, where someone lowered oversight before the
+untrusted content existed. That is where E8 lives.
 
 Because every term enters through `max`, **no single declaration can weaken the result.**
 That is the asymmetry rule expressed as arithmetic rather than as a policy people must

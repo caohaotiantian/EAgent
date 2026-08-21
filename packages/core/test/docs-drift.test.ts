@@ -1231,14 +1231,18 @@ test("every unappended event type is one this file can name a reason for", () =>
  *   - `usage` was going on the list as an eleventh rule, and is not a rule at all — the
  *     name was picked up from a different object literal in the same file.
  *
- * The table has ten entries and exactly one of them has no caller.
+ * A THIRD near-miss, and the reason this list is now empty. `taint` was pinned here with the
+ * reason "the behaviour exists and this rule is a redundant second expression of it:
+ * PolicyEngine.decide bumps a tainted irreversible or externally_visible action to `in`
+ * compositionally". Both clauses were false. The bump was the identity for every input — it
+ * raised only the two classes `CLASS_DEFAULT_POSTURE` already put at `in`, in the same `max` —
+ * and it was computed before the ceiling clamp, where a human de-escalation lowered it back to
+ * `on` regardless. So the guard DID catch the gap and the excuse dismissed it. A `why` on this
+ * list is a claim about running code, and this one was never run.
+ *
+ * The table has ten entries and every one of them has a caller.
  */
-const RULES_NEVER_RAISED: readonly { readonly id: string; readonly why: string }[] = [
-  {
-    id: "taint",
-    why: "the behaviour exists and this rule is a redundant second expression of it: PolicyEngine.decide bumps a tainted irreversible or externally_visible action to `in` compositionally and records it in policy.decided's reasons, which is stronger than a one-shot escalation because no caller can forget it",
-  },
-];
+const RULES_NEVER_RAISED: readonly { readonly id: string; readonly why: string }[] = [];
 
 test("EVERY ESCALATION RULE IS RAISED SOMEWHERE, except the ones pinned here", () => {
   // A rule is raised if its id appears as a STRING LITERAL anywhere in `src/` outside the

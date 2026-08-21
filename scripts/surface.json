@@ -395,6 +395,7 @@
   "isChainExhausted",
   "isEvent",
   "isGolden",
+  "isHardToUndo",
   "isLoomError",
   "isLoosening",
   "isLowConfidence",

@@ -371,6 +371,68 @@ test("E8 — TAINTED TOOL OUTPUT FEEDING AN IRREVERSIBLE ACTION GATES", async ()
   assert.equal(p.status, "awaiting_gate");
   assert.equal(Object.values(p.gates).find((g) => g.state === "open")?.nodeId, "charge");
   assert.deepEqual(r.ran, [], "and the charge has not happened");
+
+  // THE ASSERTION THAT MAKES THIS TEST ABOUT TAINT. `pay.charge` is `irreversible`, so it
+  // gates on its class alone and every line above passes with E8 deleted — which is how the
+  // rule stayed inert under a covering test. The escalation event is the part only taint
+  // can produce.
+  const fired = await escalations(r.store, runId);
+  assert.ok(fired.some((f) => f.startsWith("taint")), `E8 must actually fire: ${fired.join(", ")}`);
+  assert.match(fired.find((f) => f.startsWith("taint"))!, /"reads":\["notes"\]/, "naming the channel that carried it");
+});
+
+test("E8 — TAINT OUTLIVES A HUMAN DE-ESCALATION; the class default does not", async () => {
+  // THE PROMPT-INJECTION PATH, and the only case where taint can change an answer at all.
+  // On the floor a taint bump is arithmetically dead: it raises exactly the two classes
+  // `CLASS_DEFAULT_POSTURE` already puts at `in`. So the mechanism is only ever observable
+  // once a human has lowered the ceiling — and there it was defeated by the hard floor,
+  // which clamped to `on` whatever the taint said. Untainted, `on` is right: someone is
+  // watching. Tainted, the human lowered it without having seen the untrusted content that
+  // now feeds the charge, so they are asked again.
+  const withCharge = spec({
+    nodes: [
+      ...spec().nodes.filter((x) => x.id === "gather"),
+      { id: n("charge"), type: "tool", reads: ["notes"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
+    ],
+    edges: [{ id: e("go"), from: n("gather"), to: n("charge"), kind: "seq" }],
+  });
+
+  const r = rig(ANSWER);
+  const runId = await r.engine.submit({ graph: compileEsc(withCharge), inputs: { goal: "x" } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "watching this one myself", {
+    kind: "human",
+    id: "u:alice",
+  });
+  const p = await r.engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `a de-escalated run must still gate a TAINTED charge: ${p.status}`);
+  assert.deepEqual(r.ran, [], "and the charge has not happened");
+});
+
+test("E8 — an UNTAINTED irreversible action still honours the de-escalation", async () => {
+  // The control, and the reason the fix is at the ceiling rather than a blanket `in`. The
+  // same node, the same class, the same lowered ceiling — reading an INPUT channel no tool
+  // wrote. Nothing untrusted is in play, so "let this run on-the-loop" still means what the
+  // human said it meant. Without this, the fix would read as "irreversible always gates" and
+  // would have deleted de-escalation for the case it exists for.
+  const clean = spec({
+    nodes: [
+      { id: n("charge"), type: "tool", reads: ["goal"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
+    ],
+    edges: [],
+  });
+
+  const r = rig(ANSWER);
+  const runId = await r.engine.submit({ graph: compileEsc(clean), inputs: { goal: "x" } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "watching this one myself", {
+    kind: "human",
+    id: "u:alice",
+  });
+  const p = await r.engine.advance(runId);
+
+  assert.equal(p.status, "succeeded", `${p.status}: ${JSON.stringify(p.error ?? {})}`);
+  assert.deepEqual(r.ran, ["pay.charge"], "the charge runs under the human's watch");
+  assert.deepEqual((await escalations(r.store, runId)).filter((x) => x.startsWith("taint")), [], "and E8 stays silent");
 });
 
 test("E4 — three failures on one node escalate it", async () => {
