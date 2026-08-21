@@ -35,7 +35,7 @@ Measured **2026-08-21**, tree clean, `npm run check` green end to end.
 | Public exports, pinned | 484 | `node -e "console.log(require('./scripts/surface.json').length)"` |
 | Escalation rules | 10, and **all 10 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` is empty |
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
-| Commits on `loom` | 145, **31 unpushed** | `git log --oneline origin/loom..HEAD \| wc -l` |
+| Commits on `loom` | 147, **33 unpushed** | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean | `npx tsc -p packages/core/tsconfig.test.json` |
 
 **The `Source files` row is the only one that cannot rot**, because its command is a guard that
@@ -167,7 +167,7 @@ for reasons, not forgotten.
 
 ## The one thing that needs a human
 
-**Pushing.** `origin/loom` exists and the branch is published, but **31 commits are unpushed**
+**Pushing.** `origin/loom` exists and the branch is published, but **33 commits are unpushed**
 and the assistant cannot push them. Run:
 
 ```bash
