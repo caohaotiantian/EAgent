@@ -406,6 +406,106 @@ test("E8 — TAINT OUTLIVES A HUMAN DE-ESCALATION; the class default does not", 
   const p = await r.engine.advance(runId);
 
   assert.equal(p.status, "awaiting_gate", `a de-escalated run must still gate a TAINTED charge: ${p.status}`);
+  assert.equal(Object.values(p.gates).find((g) => g.state === "open")?.nodeId, "charge", "and it is the CHARGE that gated");
+  assert.deepEqual(r.ran, [], "and the charge has not happened");
+});
+
+test("E8 — TAINT SURVIVES A PROCESS RESTART", async () => {
+  // THE THIRD EPHEMERAL HALF. `attach`'s docstring enumerates two things a fresh process does
+  // not carry; `ctx.tainted` was a third, and the only one an authorization decision reads.
+  // Same journal, same graph, same human decisions — only a process boundary between the
+  // tainting write and the charge — and the charge ran.
+  //
+  // The ceiling is the control built into the test: it is restored (that fix already landed),
+  // so process 2 is genuinely at `on`. If taint were also restored the charge must gate; if it
+  // is not, `on` lets an irreversible action through, which is the whole defect.
+  const shared = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const proc = (): Rig => rig(ANSWER, { store: shared, bus: new InProcessEventBus({ store: shared }), sleep: async () => {} });
+
+  const graph = compileEsc(
+    spec({
+      nodes: [
+        ...spec().nodes.filter((x) => x.id === "gather"),
+        { id: n("ask"), type: "human_gate", reads: ["goal"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+        { id: n("charge"), type: "tool", reads: ["notes"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
+      ],
+      edges: [
+        { id: e("go"), from: n("gather"), to: n("ask"), kind: "seq" },
+        { id: e("go2"), from: n("ask"), to: n("charge"), kind: "seq" },
+      ],
+    }),
+  );
+
+  const first = proc();
+  const runId = await first.engine.submit({ graph, inputs: { goal: "x" } });
+  await first.engine.deescalate(runId, `run:${runId}`, "on", "watching", { kind: "human", id: "u:alice" });
+  const parked = await first.engine.advance(runId);
+  assert.equal(parked.status, "awaiting_gate", "process 1 parks on the unrelated gate");
+
+  // THE RESTART.
+  const second = proc();
+  second.engine.attach(runId, graph);
+  const gateId = Object.values(parked.gates).find((g) => g.state === "open")!.gateId;
+  await second.engine.resolveGate(runId, { gateId, decision: { kind: "approve" }, actor: { kind: "human", subject: "u:alice", via: "console" }, idempotencyKey: "k1" });
+  const p = await second.engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `the charge must still gate after a restart: ${p.status}`);
+  assert.deepEqual(second.ran, [], "and the charge has not happened");
+});
+
+test("E8 — TAINT SURVIVES A LAUNDERING HOP through a node that calls no tools", async () => {
+  // `#recordEvidence` asked "did this node call tools", but propagation needs "did this node
+  // READ tainted data". So every node that is not a tool cleared the bit on everything it
+  // wrote, and `function` / `agent`-with-`tools: []` are the ordinary shapes that do it: a
+  // normalizer, a summariser. Reproduced running the charge with nothing raised.
+  const laundered = spec({
+    nodes: [
+      ...spec().nodes.filter((x) => x.id === "gather"),
+      { id: n("mid"), type: "function", reads: ["notes"], writes: ["verdict"], function: { ref: "function/mid@stable" } },
+      { id: n("charge"), type: "tool", reads: ["verdict"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
+    ],
+    edges: [
+      { id: e("go"), from: n("gather"), to: n("mid"), kind: "seq" },
+      { id: e("go2"), from: n("mid"), to: n("charge"), kind: "seq" },
+    ],
+  });
+
+  const r = rig(ANSWER, { sleep: async () => {} });
+  r.functions.register("function/mid@stable", (view) => ({ writes: { verdict: { copied: view.get("notes") } } }));
+  const runId = await r.engine.submit({ graph: compileEsc(laundered), inputs: { goal: "x" } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "watching", { kind: "human", id: "u:alice" });
+  const p = await r.engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `the copy is still untrusted: ${p.status}`);
+  assert.deepEqual(r.ran, [], "and the charge has not happened");
+});
+
+test("E8 — A TAINTED CHANNEL INTERPOLATED INTO `tool.args` COUNTS AS A READ", async () => {
+  // `reads` is not the read set. `#runToolNode` resolves `tool.args` against the WHOLE scope,
+  // and `GRAPH004_UNDECLARED_READ` does not cover `tool.args` — so dropping the channel from
+  // `reads` and templating it into an argument put the untrusted bytes directly into an
+  // irreversible tool's arguments with E8 checking a set that no longer mentioned them.
+  const smuggled = spec({
+    nodes: [
+      ...spec().nodes.filter((x) => x.id === "gather"),
+      {
+        id: n("charge"),
+        type: "tool",
+        reads: ["goal"],
+        writes: ["done"],
+        tool: { name: "pay.charge", version: "1.0", args: { memo: "${notes.text}" } },
+        unhandled: true,
+      },
+    ],
+    edges: [{ id: e("go"), from: n("gather"), to: n("charge"), kind: "seq" }],
+  });
+
+  const r = rig(ANSWER, { sleep: async () => {} });
+  const runId = await r.engine.submit({ graph: compileEsc(smuggled), inputs: { goal: "x" } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "watching", { kind: "human", id: "u:alice" });
+  const p = await r.engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `an argument is a read: ${p.status}`);
   assert.deepEqual(r.ran, [], "and the charge has not happened");
 });
 
@@ -422,7 +522,9 @@ test("E8 — an UNTAINTED irreversible action still honours the de-escalation", 
     edges: [],
   });
 
-  const r = rig(ANSWER);
+  // `sleep` injected: an untainted `irreversible` action at `on` takes a real intervention
+  // hold, and this file is not the place to spend five seconds proving the clock works.
+  const r = rig(ANSWER, { sleep: async () => {} });
   const runId = await r.engine.submit({ graph: compileEsc(clean), inputs: { goal: "x" } });
   await r.engine.deescalate(runId, `run:${runId}`, "on", "watching this one myself", {
     kind: "human",

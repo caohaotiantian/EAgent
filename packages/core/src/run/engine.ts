@@ -33,6 +33,7 @@ import {
   effectKey,
   encodeBranch,
   newRunId,
+  parseTaskId,
   taskId as makeTaskId,
   type BranchCoordinate,
   type EdgeId,
@@ -672,6 +673,24 @@ export class Engine {
     ctx.policy.escalate(scopeOf(rule, ctx.runId, nodeId), rule.to, detail === undefined ? id : `${id} ${JSON.stringify(detail)}`);
   }
 
+  /**
+   * Re-derive the taint set from committed writes.
+   *
+   * The same `applyTaint` the live path uses, over the journal in seq order. That is only
+   * sound because taint is monotonic and never cleared: replaying the writes forward reaches
+   * the state the original process held, with no ordering subtleties to get wrong. A node
+   * missing from the index — the graph was mutated out from under a committed task — is
+   * skipped rather than guessed at.
+   */
+  async #restoreTaint(ctx: RunContext): Promise<void> {
+    for await (const ev of this.#store.read(ctx.runId, 1 as Seq)) {
+      if (ev.type !== "task.committed" || ev.taskId === undefined) continue;
+      const node = ctx.index.byId.get(parseTaskId(ev.taskId).nodeId);
+      if (node === undefined) continue;
+      applyTaint(ctx.tainted, node, (ev.payload as { writes?: Record<string, unknown> }).writes ?? {});
+    }
+  }
+
   get replaying(): boolean {
     return this.#replay !== undefined;
   }
@@ -799,6 +818,16 @@ export class Engine {
       if (!ctx.policySeeded) {
         ctx.policySeeded = true;
         ctx.policy.restore({ escalations: p.escalations, ceilings: p.ceilings, spentUsd: p.usage.costUsd });
+        // AND THE TAINT SET, which was the third ephemeral half and the security-load-bearing
+        // one. It lived only in `ctx.tainted`, so a crash, a deploy or a `loom serve` restart
+        // between the tainting write and the hard-to-undo action deleted E8 silently — measured,
+        // on two Engines over one journal with identical human decisions: the charge ran.
+        //
+        // The durable `policy.escalated{rule:"taint"}` event cannot stand in for this. It enters
+        // the FLOOR, where `CLASS_DEFAULT_POSTURE` already pins both hard classes at `in`, and
+        // the ceiling clamp is applied after — so restoring the event changes no answer. Only
+        // the set does, which is exactly what invariant 2 means by "rebuildable by folding".
+        await this.#restoreTaint(ctx);
       }
       // NOT RETIRED HERE, and the attempt is recorded because it looks obviously right.
       //
@@ -1945,9 +1974,9 @@ export class Engine {
     // the evidence — an upstream task's writes — is already durable by the time we get here.
     // `escalate` is idempotent on re-raise, so a node decided repeatedly journals one event.
     const irreversibility = this.#irreversibilityOf(node);
-    const tainted = (node.reads ?? []).some((r) => ctx.tainted.has(r));
+    const tainted = observedChannels(node).some((r) => ctx.tainted.has(r));
     if (tainted && isHardToUndo(irreversibility)) {
-      this.#escalate(ctx, "taint", node.id, { reads: (node.reads ?? []).filter((r) => ctx.tainted.has(r)) });
+      this.#escalate(ctx, "taint", node.id, { reads: observedChannels(node).filter((r) => ctx.tainted.has(r)) });
     }
 
     const decision = ctx.policy.decide({
@@ -3867,10 +3896,8 @@ export class Engine {
     // cheap tasks, without any single reservation reaching it.
     this.#checkBudgetWarning(ctx);
 
-    // E8's evidence: a channel a TOOL wrote holds output from outside the system.
-    if (w.node.type === "tool" || (w.node.type === "agent" && (w.node.agent?.tools ?? []).length > 0)) {
-      for (const channel of Object.keys(outcome.writes)) ctx.tainted.add(channel);
-    }
+    // E8's evidence.
+    applyTaint(ctx.tainted, w.node, outcome.writes);
 
     // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
     // does not accumulate into an escalation.
@@ -4617,6 +4644,64 @@ function stateAtPrefix(p: RunProjection, branch: BranchCoordinate): Record<strin
 }
 
 /** `${channel}` and `${channel.path}` substitution in tool arguments. */
+/**
+ * Channels a node can OBSERVE — which is not `node.reads`.
+ *
+ * `#runToolNode` resolves `tool.args` against `scopeFor(...)`, the WHOLE channel scope, so a
+ * template may name a channel the node never declared. Reading taint off `reads` alone was a
+ * one-token bypass: drop the channel from `reads`, interpolate it into `args`, and the
+ * untrusted bytes reach an irreversible tool's arguments with nothing raised. Reproduced on a
+ * graph that compiled clean.
+ *
+ * STATIC on purpose. The same function has to answer for a node running now and for a node
+ * whose commit is being re-folded out of the journal at attach, where no scope exists. Making
+ * it a pure function of the NodeSpec is what lets the live rule and the rebuild be one rule.
+ *
+ * `${a.b}` names channel `a`; only the root segment is a channel. Not covered: a `router`'s
+ * `when` expression, which reads the scope through the expression evaluator rather than through
+ * a template — control-flow taint, a different question from feeding an action.
+ */
+function observedChannels(node: NodeSpec): readonly string[] {
+  const out = new Set<string>(node.reads ?? []);
+  const scan = (v: unknown): void => {
+    if (typeof v === "string") {
+      for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
+        const root = m[1]!.trim().split(".")[0];
+        if (root !== undefined && root !== "") out.add(root);
+      }
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) scan(x);
+      return;
+    }
+    if (v !== null && typeof v === "object") for (const x of Object.values(v)) scan(x);
+  };
+  scan(node.tool?.args ?? {});
+  return [...out];
+}
+
+/**
+ * THE taint rule, and the only place it is written.
+ *
+ * Two ways a node's writes carry untrusted content, and the second was missing entirely:
+ * the node fetched it (an external producer), or the node OBSERVED it and passed it on. With
+ * only the first half, any node that is not a tool laundered taint away — a `function` node
+ * doing `clean = copy(notes)`, or an `agent` declaring `tools: []` and relaying its input, both
+ * reproduced running an irreversible charge under a de-escalated ceiling with nothing raised.
+ * Those are ordinary graph shapes: a normalizer, a summariser.
+ *
+ * Monotonic and never cleared, so folding it forward from seq 1 gives the same answer as
+ * running it live — which is what makes the rebuild at attach honest rather than approximate.
+ * The cost is over-gating: a tainted channel later overwritten by trusted data stays tainted.
+ * That is the fail-safe direction, and there is deliberately no declassification operator.
+ */
+function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Record<string, unknown>>): void {
+  const external = node.type === "tool" || (node.type === "agent" && (node.agent?.tools ?? []).length > 0);
+  if (!external && !observedChannels(node).some((c) => tainted.has(c))) return;
+  for (const channel of Object.keys(writes)) tainted.add(channel);
+}
+
 function resolveArgs(args: Readonly<Record<string, unknown>>, scope: Readonly<Record<string, unknown>>): Record<string, unknown> {
   const sub = (v: unknown): unknown => {
     if (typeof v === "string") {
