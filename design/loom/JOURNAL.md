@@ -3798,3 +3798,44 @@ mistyped knob "a slow tick rather than no clock at all". `listRuns` is `ORDER BY
 LIMIT ?` over time-ordered ids, so a limit of 1 pins every tick to the newest run and every other
 run loses its clock entirely. The floor bought the appearance of the guarantee. **Reverses when**
 someone shows a deployment where refusing at construction is worse than sweeping one run.
+
+
+## 2026-08-21 · A provider that ignores `stream: true`
+
+Both adapters send `stream: true` unconditionally, and a gateway that answers with an ordinary
+`chat.completion` body produced ZERO frames — so the adapter built a `done` event with empty text
+and the run reported SUCCEEDED with `""` as the model's answer. Measured through the binary:
+`"outputs": {"a": ""}`, exit 0, and the journaled usage was the local ESTIMATE rather than the
+1000/2000 the server reported, so the ledger carried a plausible cost for a call that returned
+nothing — a number that feeds the budget ladder and the cohort baseline.
+
+**Refused rather than parsed.** The defect is not "we cannot read this shape", it is that a
+zero-frame stream became a successful turn. **Reverses when** a deployment's gateway cannot be
+configured to stream; the message carries the server's own content type, which is the diagnostic a
+parser would have had to produce anyway.
+
+**The rules live in `modelFrames`, not in `sse`, and finding that out is the useful part.** The
+plan graded this Standard on the claim that `sse` is internal. It is a pinned export, so tightening
+it would have been a published-contract change and therefore Deep — a depth call made on a fact I
+had not checked. Building it surfaced the same error independently: the checks inside `sse` broke
+three existing tests whose fixtures read plain `Response`s, one of which asserts that a
+comment-only stream yields nothing. That is correct SSE behaviour a general reader must keep, and
+a model call wanting an ANSWER is a different rule. The split is better than the plan; it was right
+by accident.
+
+**Half the plan was dropped on contact.** The declared-content-type check went: the zero-frame rule
+catches every case it would have, the content type is in that message anyway, and a strict header
+check refuses honest servers that omit it.
+
+**And one review finding could not be reproduced.** A reviewer measured `modelFrames` turning a
+cancel into a retryable `E_PROVIDER_TRANSPORT` — the exact hazard `anthropic.ts` guards against
+eighty lines away. I could not reach that branch on either adapter: `sse` checks `signal.aborted`
+at the top of its own loop and throws `cancelled` first, measured on a stream that aborts and
+closes mid-read. The guard stays, because the ordering it protects is one `sse` edit away from
+being real. The TEST for it does not: it passed with the guard removed, which makes it a test that
+cannot fail, and the comment says so instead. **Reverses when** someone reproduces the branch.
+
+Unadvertised improvement worth recording: the fallback chain now fails over correctly. The empty
+`done` event used to set `committed = true`, so a non-streaming primary OWNED the turn and no
+failover happened. Zero frames means zero events, `committed` stays false, and the chain falls
+through.

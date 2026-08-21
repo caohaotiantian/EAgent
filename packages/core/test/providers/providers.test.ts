@@ -605,3 +605,25 @@ test("AND `sse` ITSELF IS UNCHANGED — a general reader may legitimately yield 
   for await (const f of sse(new Response(`: keepalive\n\n`), ac())) frames.push(f);
   assert.deepEqual(frames, [], "a comment-only stream is empty, not an error");
 });
+
+test("BOTH ADAPTERS REFUSE A NON-STREAM — the wrapper is the one place, so neither can miss it", async () => {
+  // The OpenAI half was covered; the Anthropic path through `modelFrames` was not, and it is the
+  // adapter that already carried a competing check of its own.
+  const json = JSON.stringify({ id: "x", choices: [{ message: { content: "STUB" } }] });
+  const fetchFn = async (): Promise<Response> =>
+    new Response(json, { status: 200, headers: { "content-type": "application/json" } });
+
+  for (const [name, adapter] of [
+    ["openai", new OpenAIAdapter({ apiKey: "k", fetch: fetchFn, sleep: async () => undefined })],
+    ["anthropic", new AnthropicAdapter({ apiKey: "k", fetch: fetchFn, sleep: async () => undefined })],
+  ] as const) {
+    await assert.rejects(
+      () => collect(adapter.stream(REQ, ac())),
+      (e: unknown) => {
+        assert.ok(isLoomError(e), `${name}: ${String(e)}`);
+        assert.equal(e.code, CODES.E_PROVIDER_TRANSPORT, name);
+        return true;
+      },
+    );
+  }
+});

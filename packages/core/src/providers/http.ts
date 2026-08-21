@@ -600,7 +600,7 @@ export async function* sse(res: Response, signal: AbortSignal): AsyncIterable<Ss
 }
 
 /**
- * `sse`, plus the two rules a MODEL CALL adds to it.
+ * `sse`, plus the rule a MODEL CALL adds to it.
  *
  * `sse` is a general SSE reader and a published export: given a stream of comments it correctly
  * yields nothing, and it is not its business what a caller wanted. A model call wants an ANSWER,
@@ -622,6 +622,12 @@ export async function* sse(res: Response, signal: AbortSignal): AsyncIterable<Ss
  *
  * HERE RATHER THAN IN EACH ADAPTER, because a check applied per-caller is a check the next caller
  * forgets — the rule `Engine.#dispatch` already states about undeclared writes.
+ *
+ * WHAT IT DOES NOT COVER, so nobody reads it as more than it is. It keys on frame COUNT, not on
+ * whether an answer arrived: a gateway that sends `data: [DONE]` alone, or nothing but `data:`
+ * keepalives, yields frames and still produces an empty completion. One keepalive away from the
+ * case above is still a silent empty success. Covering that means each adapter deciding what an
+ * EMPTY ANSWER is, which is a different question from whether anything was said at all.
  */
 export async function* modelFrames(res: Response, signal: AbortSignal): AsyncIterable<SseFrame> {
   const declared = res.headers.get("content-type");
@@ -631,12 +637,27 @@ export async function* modelFrames(res: Response, signal: AbortSignal): AsyncIte
     yield frame;
   }
   if (yielded === 0) {
+    // A CANCEL IS NOT A TRANSPORT FAULT. A cancelled run tears its own socket down, so the body
+    // can read as simply ended and zero frames arrive — reporting that as `unavailable` would put
+    // it in `RETRYABLE` and, as `anthropic.ts` says eighty lines from here about the identical
+    // distinction, "hands the retry ladder a licence to re-run what a person stopped". It would
+    // also walk past `NEVER_FALL_THROUGH`, which lists `E_CANCELLED` precisely so a stopped run
+    // cannot be re-tried against a second vendor.
+    //
+    // BELT AND BRACES, AND SAID SO RATHER THAN OVERSOLD. A reviewer reported reaching this branch
+    // with `aborted` true; I could not reproduce it on either adapter, because `sse` checks
+    // `signal.aborted` at the top of its own read loop and throws `cancelled` first — measured on
+    // a stream that aborts and closes mid-read, which yields `E_CANCELLED` with this line present
+    // or absent. So there is no test for it: a test that cannot fail is worse than none. The line
+    // stays because the ordering it guards is one `sse` edit away from being real, and because
+    // `modelFrames` must not be the second producer of a rule the first one already states.
+    if (signal.aborted) throw err.cancelled("model stream cancelled before any frame arrived");
     throw err.unavailable(
       CODES.E_PROVIDER_TRANSPORT,
       `provider answered a streaming request with no frames${
         declared === null ? " and no content-type" : ` (content-type "${declared}")`
-      } — it did not stream, so there is no answer to record. Point this route at an endpoint that ` +
-        `streams, or configure the gateway to`,
+      } — nothing was streamed, so there is no answer to record. If this endpoint ignores ` +
+        `\`stream: true\`, point the route at one that streams or configure the gateway to do so.`,
       { details: { contentType: declared, status: res.status } },
     );
   }
