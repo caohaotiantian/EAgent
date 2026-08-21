@@ -1440,6 +1440,41 @@ async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): P
   return p;
 }
 
+/**
+ * What this process will actually do to a model call, said where the operator will read it.
+ *
+ * IT LIVED ONLY IN `serve`'s BANNER. `loom run` — the door a first-time user goes through, and the
+ * one CI drives — printed NOTHING: a graph full of agent nodes returned `"[mock] {…}"`, exit 0,
+ * stderr empty. CLAUDE.md names that exact outcome as the anti-goal: "a framework whose agent
+ * nodes can only return `[mock] …` is not a working deployment."
+ *
+ * Second-order, and the reason the unpriced warning travels with it: the mock fabricates a cost,
+ * and that number is appended to the journal and feeds `PolicyEngine`'s spend, the budget ladder
+ * and the cohort baseline. A run that called no provider still moves the numbers a later run is
+ * judged against.
+ *
+ * On stderr, never stdout: `loom run` prints a JSON document there and a caller pipes it.
+ */
+function warnAboutModels(models: ModelConfig | undefined, command: string): void {
+  if (models === undefined) {
+    process.stderr.write(
+      `! NO MODEL ADAPTER — the only registered adapter is the offline mock, so every agent node and every rubric\n` +
+        `  evaluator returns canned text. Runs will look successful.\n` +
+        `  fix: loom ${command} --models-file <file> with {"adapters":[{"provider":"anthropic"}],"routes":{…}}\n`,
+    );
+    return;
+  }
+  if (models.unpriced.length > 0) {
+    const n = models.unpriced.length;
+    process.stderr.write(
+      `! NO PRICE FOR ${n} ROUTE${n === 1 ? "" : "S"} — every call on ${n === 1 ? "it" : "them"} is journaled as costing 0,\n` +
+        `  so a graph's policy.budget.costUsd and --budget cannot bind and /health reports a spend that did not happen:\n` +
+        models.unpriced.map((r) => `    ${r}\n`).join("") +
+        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter in ${models.file}\n`,
+    );
+  }
+}
+
 function graphsByHash(ws: Workspace): Map<string, RunGraph> {
   const dir = join(ws.root, "graphs");
   const out = new Map<string, RunGraph>();
@@ -1828,24 +1863,11 @@ function announce(plane: ControlPlane, ws: Workspace, opts: ControlPlaneOptions,
   process.stdout.write(
     `  models: ${models === undefined ? "(mock only — every agent node answers \"[mock] …\")" : `${models.adapters.join(", ")} via ${models.file}`}\n`,
   );
-  if (models === undefined) {
-    process.stderr.write(
-      `! NO MODEL ADAPTER — the only registered adapter is the offline mock, so every agent node and every rubric\n` +
-        `  evaluator returns canned text. Runs will look successful.\n` +
-        `  fix: loom serve --models-file <file> with {"adapters":[{"provider":"anthropic"}],"routes":{…}}\n`,
-    );
-  }
+  warnAboutModels(models, "serve");
   // The plane's own posture, not a third derivation of it: `openToEveryCaller` is
   // what `/health` reports and what `#principal` admits on, so this line cannot
   // promise a perimeter the running process does not have.
-  if (models !== undefined && models.unpriced.length > 0) {
-    process.stderr.write(
-      `! NO PRICE FOR ${models.unpriced.length} ROUTE${models.unpriced.length === 1 ? "" : "S"} — every call on ${models.unpriced.length === 1 ? "it" : "them"} is journaled as costing 0,\n` +
-        `  so a graph's policy.budget.costUsd and --budget cannot bind and /health reports a spend that did not happen:\n` +
-        models.unpriced.map((r) => `    ${r}\n`).join("") +
-        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter in ${models.file}\n`,
-    );
-  }
+
   if (plane.openToEveryCaller) {
     process.stderr.write("! NO TOKEN — every caller is authorized\n");
   }
@@ -2019,6 +2041,12 @@ export async function main(argv: readonly string[]): Promise<number> {
         // `--budget` composes by MIN with the graph's own declaration and the deployment's cap —
         // it can only ever lower. `positive` for the reason it exists: a budget of `NaN` compares
         // false against everything, so it is not a loose cap, it is no cap.
+        // SAID BEFORE THE RUN, and only when this graph will actually reach a model. A tool-only
+        // graph is not mocked and warning about it would be noise — the kind that teaches an
+        // operator to stop reading stderr, which is where the honest lines live.
+        if (graph.spec.nodes.some((n) => n.type === "agent" || n.evaluator?.kind === "rubric")) {
+          warnAboutModels(ws.models, "run");
+        }
         const budgetUsd = budgetFlag(args);
         const runId = await ws.engine.submit({
           graph,

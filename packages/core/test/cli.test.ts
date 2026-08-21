@@ -899,3 +899,43 @@ test("A DRIFTED GRAPH STRANDS NOTHING — cancel is the exit and it needs no gra
     d.dispose();
   }
 });
+
+test("`loom run` SAYS WHEN THE MOCK ANSWERED — the warning lived only in serve's banner", async () => {
+  // CLAUDE.md names this exact outcome as the anti-goal: "a framework whose agent nodes can only
+  // return `[mock] …` is not a working deployment." The warning existed and was good, and
+  // `announce` — its only caller — runs in `case "serve"` alone. `loom run`, the door a first-time
+  // user goes through and the one CI drives, printed NOTHING: `"[mock] {…}"`, exit 0, stderr empty
+  // at zero bytes.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "resources", "prompt"), { recursive: true });
+    writeFileSync(join(d.dir, "resources", "prompt", "p.md"), "Answer.");
+
+    const agent = join(d.dir, "agent.json");
+    writeFileSync(agent, JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "ag", project: "demo", version: 1 },
+      policy: { posture: "out", expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { q: { type: "string", reduce: "replace" }, a: { type: "string", reduce: "replace" } },
+      inputs: ["q"],
+      outputs: ["a"],
+      nodes: [{ id: "ask", type: "agent", reads: ["q"], writes: ["a"], agent: { profile: "agent_profile/x@stable", prompt: "prompt/p@stable" } }],
+      edges: [],
+    }));
+
+    const mocked = await run(["run", agent, "--workspace", d.dir, "--input", JSON.stringify({ q: "hi" })]);
+    assert.match(mocked.err, /NO MODEL ADAPTER/, `an agent run with no adapter must say so: ${JSON.stringify(mocked.err)}`);
+    assert.match(mocked.out, /\[mock\]/, "and the canned answer is what it is warning about");
+
+    // AND A TOOL-ONLY GRAPH STAYS QUIET. A graph that reaches no model is not mocked, and warning
+    // about it would be the kind of noise that teaches an operator to stop reading stderr — which
+    // is where every honest line in this binary lives.
+    const toolOnly = join(d.dir, "tool.json");
+    writeFileSync(toolOnly, JSON.stringify(graphWriting("o.txt")));
+    const quiet = await run(["run", toolOnly, "--workspace", d.dir, "--input", JSON.stringify({ seed: "x" })]);
+    assert.doesNotMatch(quiet.err, /NO MODEL ADAPTER/, `a graph reaching no model must not warn: ${quiet.err}`);
+  } finally {
+    d.dispose();
+  }
+});
