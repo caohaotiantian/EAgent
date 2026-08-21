@@ -1,0 +1,17 @@
+{
+  "input": "track this multi-step work",
+  "mockScript": [
+    {
+      "toolCalls": [
+        {
+          "name": "todowrite",
+          "arguments": {
+            "todos": [{ "content": "do the thing", "status": "in_progress", "priority": "high" }]
+          }
+        }
+      ]
+    },
+    { "text": "done" }
+  ],
+  "expect": { "tools": ["todowrite"], "order": "exact" }
+}

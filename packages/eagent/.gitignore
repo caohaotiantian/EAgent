@@ -1,0 +1,17 @@
+node_modules/
+dist/
+tui/node_modules/
+tui/dist/
+bin/
+*.log
+.eagent/
+.e2e-artifacts/
+.DS_Store
+.env
+.env.*
+!.env.example
+tui/tsconfig.tsbuildinfo
+
+# Ephemeral per-task plan (three-loop-workflow skill)
+.agent/
+.claude/

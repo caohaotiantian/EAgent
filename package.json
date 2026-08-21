@@ -11,14 +11,15 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc -b --force --pretty && tsc -p packages/core/tsconfig.test.json --pretty",
-    "typecheck:fast": "tsc -b --pretty && tsc -p packages/core/tsconfig.test.json --pretty",
+    "typecheck": "tsc -b --force --pretty && tsc -p packages/core/tsconfig.test.json --pretty && tsc -p packages/eagent/tsconfig.test.json --pretty",
+    "typecheck:fast": "tsc -b --pretty && tsc -p packages/core/tsconfig.test.json --pretty && tsc -p packages/eagent/tsconfig.test.json --pretty",
     "test": "node --test \"packages/*/test/**/*.test.ts\"",
     "test:watch": "node --test --watch \"packages/*/test/**/*.test.ts\"",
     "build": "tsc -b --force",
     "check": "npm run typecheck && npm test && node scripts/check-zero-dep.mjs && node scripts/check-surface.mjs",
     "build:binary": "npm run build && node scripts/build-binary.mjs",
-    "loom": "node packages/core/dist/cli.js"
+    "loom": "node packages/core/dist/cli.js",
+    "eagent": "node packages/eagent/src/cli.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

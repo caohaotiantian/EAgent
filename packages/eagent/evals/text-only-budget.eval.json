@@ -1,0 +1,5 @@
+{
+  "input": "just talk to me, no tools",
+  "mockScript": [{ "text": "a friendly plain-text reply with no tools at all" }],
+  "expect": { "finishReason": "end_turn", "noToolErrors": true, "maxTokens": 100000 }
+}

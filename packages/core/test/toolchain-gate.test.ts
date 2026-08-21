@@ -95,7 +95,12 @@ function replica(): string {
   const root = mkdtempSync(join(tmpdir(), "loom-toolchain-gate-"));
   mkdirSync(join(root, "packages", "core", "src"), { recursive: true });
   copyFileSync(join(REPO, "tsconfig.base.json"), join(root, "tsconfig.base.json"));
-  copyFileSync(join(REPO, "tsconfig.json"), join(root, "tsconfig.json"));
+  // The replica declares its OWN reference list rather than copying the repo's. Copying it
+  // coupled this guard to how many packages the monorepo happens to have — adding
+  // `packages/eagent` made `tsc -b` fail here on a missing referenced project, which says
+  // nothing about the thing under test. What is under test is whether `tsc -b` re-emits
+  // `dist/` for a project whose sources are older than its output.
+  writeFileSync(join(root, "tsconfig.json"), '{"files":[],"references":[{"path":"./packages/core"}]}\n');
   copyFileSync(join(REPO, "packages", "core", "tsconfig.json"), join(root, "packages", "core", "tsconfig.json"));
   writeFileSync(join(root, "package.json"), '{"name":"replica","private":true,"type":"module","workspaces":["packages/*"]}\n');
   writeFileSync(join(root, "packages", "core", "package.json"), '{"name":"@replica/core","private":true,"type":"module"}\n');
