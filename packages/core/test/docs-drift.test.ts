@@ -1569,18 +1569,18 @@ const ABSENT_CONTEXT_METHODS: ReadonlyArray<{
       "the effect boundary is INSIDE `Engine` — `effectKey(taskId, kind, ordinal)` from ids.ts, with kinds " +
       "model/tool/subgraph/summarize — and is not reachable from a node body at all. 00-OVERVIEW and 08-PLAN " +
       "used to INSTRUCT authors to call it in 00-OVERVIEW and 08-PLAN, which was the defect rather than a " +
-      "caveat; both sentences are corrected, so the row is down to HANDOFF D11, which names it only to record " +
+      "caveat; both sentences are corrected, so the row is down to REGISTER D11, which names it only to record " +
       "the gap. Delete this row when D11's gap closes",
-    namedIn: ["HANDOFF.md"],
+    namedIn: ["REGISTER.md"],
   },
   {
     method: "random",
     why:
       "no seeded PRNG exists. `effect.started` declares a `random` kind nothing appends, and `SAFE_GLOBALS` " +
       "passes `Math` through whole, so `Math.random()` runs unrecorded inside a function resource while the " +
-      "sanctioned alternative does not exist. D9.5 row 5 and HANDOFF D11 name it to SAY so, which is a record " +
+      "sanctioned alternative does not exist. D9.5 row 5 and REGISTER D11 name it to SAY so, which is a record " +
       "rather than an instruction; 08-PLAN R4 used to name it as a mitigation and no longer does",
-    namedIn: ["05-RESOURCES-OBSERVABILITY.md", "HANDOFF.md"],
+    namedIn: ["05-RESOURCES-OBSERVABILITY.md", "REGISTER.md"],
   },
 ];
 

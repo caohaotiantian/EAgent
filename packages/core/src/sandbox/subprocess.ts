@@ -203,7 +203,7 @@ const REAP_DEADLINE_MS = 5000;
  * itself. A copy lives in every module that BOUNDS a caller-supplied delay;
  * `grep -ran 'MAX_TIMER_MS' packages/core/src` finds those, and it is a list of the
  * modules that got it right rather than a list of the modules that hand a timer a number
- * — HANDOFF A12 names the ones still missing. A module that reaches `setTimeout` with a
+ * — REGISTER A12 names the ones still missing. A module that reaches `setTimeout` with a
  * caller's value and does not appear in that grep is a defect, not an exemption. They are
  * copies rather than one export because a platform fact does not belong on the pinned
  * public surface.

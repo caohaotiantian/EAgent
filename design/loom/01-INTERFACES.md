@@ -1060,7 +1060,7 @@ export interface RunEventStream extends Versioned {
 // the rest of the run. The live tail is now floored on the resumed seq, which is 0 whenever
 // the client was given a snapshot. The client NEVER silently misses events — with ONE window
 // where the implementation does not yet keep that promise, reproduced and recorded as
-// HANDOFF A20: `#streamEvents` takes its baseline and THEN subscribes, so an event appended
+// REGISTER A20: `#streamEvents` takes its baseline and THEN subscribes, so an event appended
 // between the two reaches neither. `EventBus.replayThenTail` exists for exactly that ordering.
 
 /** ③ Edge L2→L3. */

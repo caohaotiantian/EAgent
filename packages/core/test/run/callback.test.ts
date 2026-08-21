@@ -1710,7 +1710,7 @@ test("an empty callback secret is a configuration error, not a channel that acce
     (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
   );
   // AND SO IS A SECRET THAT IS NOT A STRING, which is the same refusal read through the
-  // hole `http.ts`'s bearer token was found in (HANDOFF E8): the empty check is `=== ""`,
+  // hole `http.ts`'s bearer token was found in (REGISTER E8): the empty check is `=== ""`,
   // and `[]`, `null` and `0` are not `""`. `createHmac` refuses them at SIGNING time
   // instead — inside `parseCallback`, where the router turns the throw into `internal`,
   // counts it, and journals nothing. So the deployment gets a channel that publishes an
@@ -1896,7 +1896,7 @@ test("A TIMEOUT NO TIMER CAN HOLD IS REFUSED, INSTEAD OF BECOMING ONE MILLISECON
   // number — aborted the fetch 0 ms after the call and produced `webhook did not answer
   // within 2147483648ms`, a message that is its own counterexample, while the outcome is the
   // one the delivery subsystem exists to prevent: nobody is ever told about the gate.
-  // HANDOFF A12 records the reproduction and names this constructor as the fix site; the
+  // REGISTER A12 records the reproduction and names this constructor as the fix site; the
   // read stays inside the try instead, because *NOTHING RUNS ABOVE THE TRY* pins that a
   // config value that cannot be read is a delivery failure and not an unstartable process.
   //

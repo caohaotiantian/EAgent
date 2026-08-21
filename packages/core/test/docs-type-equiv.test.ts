@@ -7,7 +7,7 @@
  * inside of a declaration: a document can say `readonly atSeq: Seq` while the code says
  * `atSeq?: number`, and every name-level guard in the repo stays green.
  *
- * That is the drift class `HANDOFF.md` records over and over, and it is the one this file
+ * That is the drift class `REGISTER.md` records over and over, and it is the one this file
  * closes. For every `export interface` in a fenced `ts` block, the member set is compared
  * against the same-named declaration in `packages/core/src`:
  *

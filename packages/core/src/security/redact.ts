@@ -1084,7 +1084,7 @@ export function redactPayload(
  * **WHAT "TOTAL" NAMES HERE, SPELLED OUT, BECAUSE THE LAST WAVE WROTE IT AS A PROPERTY OF
  * TWO ARGUMENTS AND IT WAS A PROPERTY OF FOUR READS.** "Both arguments of `redactAttributes`
  * are now total" stood in this file, in `05-RESOURCES-OBSERVABILITY.md` D9.2 and in
- * `HANDOFF`'s A18 while two of the reads behind it still threw, and the two survivors were
+ * `REGISTER`'s A18 while two of the reads behind it still threw, and the two survivors were
  * both SIBLINGS of the reads that had just been fixed — the shape test one line above the
  * `try` it was reasoned about, and the walk of a value one level below the enumeration that
  * was wrapped. The property this function now has, and the only one worth writing down, is:

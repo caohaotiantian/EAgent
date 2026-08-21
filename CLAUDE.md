@@ -133,7 +133,7 @@ A file is not vendored until it satisfies the invariants. In particular:
    is *outside* it (`FunctionContext.now` is the injected clock passed straight
    through, appending nothing), and `Math` reaches a `function` resource whole, so
    `Math.random()` runs unrecorded while `Date` is `undefined`. `effect.started`
-   declares `clock` and `random` kinds that nothing appends. See HANDOFF D11.
+   declares `clock` and `random` kinds that nothing appends. See REGISTER D11.
 5. **Oversight posture composes by `max` over `out < on < in`.** Nothing may lower a
    posture except an explicit human `deescalate` call. An `agent` node's floor is the
    `max` over every tool it can REACH (`reachableToolNames`), not over the one it

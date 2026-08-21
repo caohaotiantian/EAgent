@@ -36,7 +36,10 @@ Read in order. Each file carries the `D<n>` headings from the brief verbatim.
 
 ## Conventions
 
-- `HANDOFF.md` — **start here.** What is left, what to read first, and what will bite you.
+- `HANDOFF.md` — **start here.** Where things stand, what is left, and what will bite you.
+- `REGISTER.md` — the defect archive behind it, entries `A1`…`E8`. **Grep it, do not read it**;
+  many entries are RESOLVED and kept so the next reader can tell "this was fixed" from "this was
+  never true".
   Its **Known issues** section is the register of what is currently wrong, unwired or
   unverified, with the command that established each entry. Delete an entry when you fix it.
 - `ASSUMPTION:` — an underspecified point resolved by fiat. All collected in **D14**.

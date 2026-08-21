@@ -1528,7 +1528,7 @@ export class SignedWebhookChannel extends WebhookChannel {
   constructor(opts: SignedWebhookChannelOptions) {
     super(opts);
     // NOT A STRING IS THE SAME REFUSAL AS EMPTY, and the check was `=== ""` alone — the hole
-    // `http.ts`'s bearer token was found in (HANDOFF E8), one perimeter over: `null`, `0` and
+    // `http.ts`'s bearer token was found in (REGISTER E8), one perimeter over: `null`, `0` and
     // `[]` are none of them `""`. `createHmac` refuses them at SIGNING time instead, inside
     // `parseCallback`, where the router turns the throw into `internal`, counts it and
     // journals nothing — so a deployment publishes an answer address and refuses every

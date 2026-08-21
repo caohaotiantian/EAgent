@@ -1248,7 +1248,7 @@ test("A taskId THAT IS null OR EMPTY IS NO taskId — one SHARED span is worse t
 });
 
 test("`taskId: \"\"` IS APPENDABLE ON BOTH STORES — the claim this fold used to lean on instead of deciding", async () => {
-  // HANDOFF A17's second measured fact reads "`taskId: \"\"` is deliberately never appended",
+  // REGISTER A17's second measured fact reads "`taskId: \"\"` is deliberately never appended",
   // and `spans.ts`'s `tid` comment leaned on the same sentence to present its own guard as
   // agreement with the engine rather than as a decision. Neither is true. `run/gates.ts`
   // strips the id at `#commitForOpenGate` and at `resolveBatch`'s lead, and NOT at `raise`
@@ -1488,7 +1488,7 @@ test("`shouldExport` DOES NOT THROW FOR ANY POLICY — its own `NOT A THROW` had
   //   policy = a revoked Proxy        ⇒ TypeError: Cannot perform 'get' on a revoked proxy
   //
   // THE SCOPE IS THE POLICY AND NOT THE JOURNAL. `events` is the run's own log, and its
-  // partial reads are HANDOFF A18's one deliberate decision rather than twelve edits; this
+  // partial reads are REGISTER A18's one deliberate decision rather than twelve edits; this
   // claim is about the argument a DEPLOYMENT supplies, which is what the paragraph above is
   // about.
   const journal = [ev(1, "task.progress", { chunk: "x" }, { taskId: null })];
@@ -1529,7 +1529,7 @@ test("`shouldExport` DOES NOT THROW FOR ANY POLICY — its own `NOT A THROW` had
   // THE LIMIT, HELD EXECUTABLE, on the `A Proxy DEFEATS THE SHAPE TEST` pattern: the claim is
   // about `policy` and NOT about `events`, and a sentence nobody can fail cannot be trusted to
   // stay narrow. `events` is the run's own journal and its reads are bare here exactly as they
-  // are throughout `spansFrom` (HANDOFF A18 — one decision, not twelve edits). Measured: 82
+  // are throughout `spansFrom` (REGISTER A18 — one decision, not twelve edits). Measured: 82
   // hostile policies × honest journals threw 0; the same policies against a `Proxy` over an
   // array threw on every one that reached the loop.
   const hostileJournal = new Proxy([] as JournalEvent[], {

@@ -2872,7 +2872,7 @@ export class ControlPlane {
           const open = Object.values(p.gates).filter((g) => g.state === "open" && visible(g));
           // Partitioned rather than sorted with a `?? Infinity` key: `Infinity - Infinity` is
           // `NaN`, and a comparator that answers `NaN` for a pair silently discards the whole
-          // ordering — the same inconsistent-comparator bug HANDOFF A18 measured in
+          // ordering — the same inconsistent-comparator bug REGISTER A18 measured in
           // `spansFrom`'s `startTime` sort. Ranked gates in the queue's order, then the rest
           // in journal order, and each gate is emitted exactly once.
           const byId = new Map(detailed.map((g) => [g.gateId, g]));
@@ -3146,7 +3146,7 @@ export class ControlPlane {
    * to, and not on the id it ASKED with. They are the same number on the replay branch and
    * they are not the same number anywhere else. The rule generalises past this defect: a
    * caller-supplied value that has been VALIDATED must be consumed through the validation's
-   * output, never through a second read of the input — which is HANDOFF A12's sweep, and it is
+   * output, never through a second read of the input — which is REGISTER A12's sweep, and it is
    * the rule `telemetry/spans.ts`'s `shouldExport` writes out for `ratio`. This function
    * applied it at one of its two use sites.
    *
@@ -3420,7 +3420,7 @@ async function drained(res: ServerResponse): Promise<void> {
  * it was sent. `Number()` accepts a great deal more than that and answers with a perfectly
  * ordinary in-range integer for most of it — see `#streamEvents`' docstring for the row of
  * measurements. `NaN` loses every comparison in `resumable`, which is the one place in this
- * codebase where that is the wanted behaviour rather than the bug (HANDOFF A12), and the
+ * codebase where that is the wanted behaviour rather than the bug (REGISTER A12), and the
  * caller therefore gets the snapshot branch: a baseline it can SEE it received.
  *
  * No length cap: an absurd run of digits parses to a number far above `head` or past
@@ -3438,7 +3438,7 @@ function seqIn(raw: string): number {
  * THROWS on a value with no primitive conversion — `Object.create(null)` is one — and the
  * one caller of this function is a `.catch` on a promise nobody awaits, where the only
  * backstop is that caller's own `try`, and reaching it means the operator is told NOTHING
- * about a run that was accepted 202 and never started. See HANDOFF A1.
+ * about a run that was accepted 202 and never started. See REGISTER A1.
  *
  * **THIS DOCSTRING CLAIMED TOTALITY AND THE COUNTEREXAMPLE WAS THE FUNCTION'S OWN FIRST
  * BRANCH.** It read `if (isLoomError(e)) return \`${e.code}: ${e.message}\`;` outside the

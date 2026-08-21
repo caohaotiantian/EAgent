@@ -210,7 +210,7 @@ const ATTRIBUTE_CLASSES: Readonly<Record<string, Classification>> = Object.assig
  *
  * `digestOf` and nothing else: a span id is a pure function of the run id and the
  * coordinates of the thing it names. Nothing here is keyed, and nothing here should be —
- * a run id is not a secret (see HANDOFF A13's "checked and NOT this defect" list) and a
+ * a run id is not a secret (see REGISTER A13's "checked and NOT this defect" list) and a
  * keyed span id would be a *different* id in a deployment that rotated its key, which is
  * the one property a span id may not have.
  */
@@ -642,7 +642,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
           // only if `taskId` is a getter that answers differently the second time, and a
           // journal event is JSON: `frozenClone` and both stores' row maps produce data
           // properties. So this buys nothing today and states the rule the sweep behind
-          // HANDOFF A12 asks of every value read twice — the span id above is derived from
+          // REGISTER A12 asks of every value read twice — the span id above is derived from
           // the first read, and an attribute that could disagree with the id it is filed
           // under would be the wrong kind of cheap.
           "task.id": tid,
@@ -885,7 +885,7 @@ function idText(v: unknown): string {
  * **THE READS IN THIS FILE THAT ARE STILL BARE, NAMED RATHER THAN FIXED**, because the
  * sentence above is worth only as much as this list:
  *
- *   - `spansFrom`'s twelve journal reads — HANDOFF A18, deliberately loud, and one decision
+ *   - `spansFrom`'s twelve journal reads — REGISTER A18, deliberately loud, and one decision
  *     rather than twelve edits;
  *   - `conformsToGraph`'s `spec.nodes` / `spec.edges` — a `GraphSpec` this repo compiled;
  *   - `conformsToGraph`'s `reconstructed.nodes` / `.edges`. Its `unreadableSpans` — the
@@ -1427,7 +1427,7 @@ function warnUnusableHeadRatio(ratio: unknown): void {
  * being read generously: **no value of `policy` — including `null`, a primitive, a revoked
  * `Proxy`, or a record whose every trap throws — makes this function throw.** `events` is NOT
  * in that claim. It is the run's own journal, `e.type` and `e.payload` are read bare here as
- * they are throughout `spansFrom`, and making them total is HANDOFF A18's single deliberate
+ * they are throughout `spansFrom`, and making them total is REGISTER A18's single deliberate
  * decision rather than an edit to smuggle in beside a config fix.
  */
 export function shouldExport(events: readonly JournalEvent[], policy: SamplingPolicy): boolean {

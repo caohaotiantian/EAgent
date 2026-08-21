@@ -774,7 +774,7 @@ test("A NON-ERROR REJECTION FROM advance() IS STILL REPORTED, and reporting it d
   // The reporter is the LAST frame — it runs inside a `.catch` on a promise nobody awaits,
   // so anything it throws is an unhandled rejection and the process. `toLoomError` is not
   // safe to call here: it does `String(e)`, which throws on a value with no primitive
-  // conversion (HANDOFF A1), and that is precisely the value an injected engine can reject
+  // conversion (REGISTER A1), and that is precisely the value an injected engine can reject
   // with. So does a template over an `Error` whose `message` is a throwing getter — which
   // passes `instanceof Error` and every other test available. All four shapes go through
   // the one line, and each must still produce a report rather than only a survival.
