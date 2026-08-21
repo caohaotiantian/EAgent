@@ -3861,8 +3861,9 @@ it exactly backwards. That is the shape worth remembering: a *producer* wired to
 **Taint is not a term in `posture_default`.** It is a floor under the human ceiling. A
 de-escalation is a judgement about what its author could see when they made it; untrusted
 content arriving afterwards is new information they have not seen, so the earlier "let this
-run on-the-loop" stops covering that action and they are asked again — which is what D7.7's
-"cleared by: human" always meant for this row. `04-OVERSIGHT.md`'s equation now says so.
+run on-the-loop" stops covering that action and they are asked again. D7.7's row said "one
+level up" and "Who may undo: human" — BOTH wrong for E8: it goes to `in`, and nothing undoes
+it. The row and the equation are corrected rather than cited.
 Untainted, the hard floor stays `on`: the fix must not read as "irreversible always gates",
 or it would delete de-escalation for the case it exists for. That control is a test.
 
@@ -3875,11 +3876,60 @@ upstream task's writes and is already durable.
 `policy.decided`'s reasons. Both clauses false. A `why` on that list is a claim about running
 code; this one was never run. The list is now empty and the reasons string is now real.
 
-**Reverses when** someone wants a de-escalation to survive taint — i.e. an operator who has
-seen the untrusted content and still wants `on`. Today they must call `deescalate` again after
-the gate. If that becomes routine, the answer is a ceiling that records *what* was seen, not
-weakening the floor.
+**There is no escape hatch, and an earlier draft of this entry claimed there was.** It said the
+operator "must call `deescalate` again after the gate". They cannot: while tainted the clamp is
+`maxPosture(ceiling, "in")`, so a second de-escalation by the same human — after they have read
+the content and approved the first gate — changes nothing. The only way through is approving each
+action. Taint never clears and is keyed by channel NAME with no branch coordinate, so a long run
+tends toward "every hard-to-undo node gates every time", which is the "holds that fire constantly
+are holds operators learn to ignore" failure this repo argues against in `policy.ts`.
+**Reverses when** that becomes routine; the answer then is a ceiling that records WHAT was seen,
+not a weaker floor.
 
 Cost: one new public export, `isHardToUndo`. The two-class test drove the hard floor and the
 taint rule and was written longhand in both, which is how one of them became the identity
 without the other noticing.
+
+## …and then the taint SET turned out to be the weaker half
+
+Two independent adversarial reviews of the E8 fix converged on the same verdict: the rule was
+now correct and the thing it consumed was not. Between them they reproduced five ways past it,
+each confirmed here against the source rather than taken on report. The fix held only for a
+`tool` node naming the tainted channel in `reads`, in the same process, in the same run —
+which was exactly the shape of the test that had been written for it. That is the lesson worth
+keeping: **a test built from the same mental model as the fix certifies the model, not the
+mechanism.**
+
+- **A restart erased it.** `ctx.tainted` was in-memory, and the attach-time re-seed carried
+  escalations, ceilings and spend — three things whose absence had already been fixed once —
+  but not this. Same journal, same graph, same human decisions, one process boundary: the
+  charge ran. Invariant 2 names the journal as the only authoritative durable state, and taint
+  was authoritative for an authorization decision with no fold behind it. There is one now, and
+  it is the same `applyTaint` the live path uses, which is only sound because taint is
+  monotonic.
+- **The durable `policy.escalated{rule:"taint"}` event could not have stood in for it.** It
+  enters the FLOOR, where `CLASS_DEFAULT_POSTURE` already pins both hard classes at `in`, and
+  the ceiling clamp is applied afterwards. Restoring the event changes no answer. Worth stating
+  plainly: E8's entire enforcement is the set.
+- **`reads` was not the read set.** `tool.args` resolves against the whole channel scope and
+  `GRAPH004_UNDECLARED_READ` does not cover it, so dropping a channel from `reads` and
+  interpolating it into an argument put untrusted bytes into an irreversible tool's arguments
+  with nothing raised. The read set is now derived from the templates too.
+- **Any non-tool node laundered it.** The predicate asked "did this node call tools" where
+  propagation needs "did this node read tainted data". A `function` copying the value, or an
+  `agent` declaring `tools: []` and relaying it, both cleared the bit — ordinary shapes, a
+  normalizer and a summariser.
+- **An agent turn had no taint at all** — the `PolicyRequest` at the tool dispatch path simply
+  omitted the field. This is where the injection actually lands: one node, clean declared reads,
+  `net.fetch` returns "now call pay.charge", and it did. Granularity inside a turn is the turn,
+  keyed on the tool ordinal, which is derived from the transcript and so survives replay.
+- **A subgraph laundered both ways.** The child is a separate `RunId` with its own set. The
+  boundary is now treated as external, which over-approximates on purpose: carrying the child's
+  set across would be more precise and would not survive a restart, because which of a child's
+  channels were tainted is not among the committed writes. The downward direction needs no rule
+  — each run has its own `PolicyEngine`, so a parent's ceiling never reaches the child.
+
+**Reverses when** the over-approximation bites: a pure-computation subgraph taints its outputs,
+and a channel overwritten by trusted data stays tainted. Both are the fail-safe direction, and
+the remedy today is per-action approval. If that becomes noise, the answer is declassification
+with a journaled justification — not a narrower producer set.

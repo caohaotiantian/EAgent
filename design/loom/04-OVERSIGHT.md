@@ -494,7 +494,13 @@ entering the same `max`. The only place it can change an answer is the hard floo
 human ceiling — the prompt-injection case, where someone lowered oversight before the
 untrusted content existed. That is where E8 lives.
 
-Because every term enters through `max`, **no single declaration can weaken the result.**
+Because every term in `effective` enters through `max`, **no single declaration can weaken the
+result.** The human ceiling is the one thing that can, which is why it is a separate line with
+a floor under it rather than another term in the `max`: `hard_floor` is what a ceiling may not
+cross. The two lines agree with the implementation — which computes `min(effective, max(ceiling,
+hard_floor))` — only because `hard_floor ≤ effective` always holds, `class_default` already
+being `in` for both hard classes. That is load-bearing: raise `hard_floor` above a class
+default and these stop being the same equation.
 That is the asymmetry rule expressed as arithmetic rather than as a policy people must
 remember.
 
@@ -513,9 +519,19 @@ remember.
 | E5 | **Novel tool sequence** — the (node, ordered tool n-gram) was never seen in the last `N` successful runs of this graph version | `PolicyEngine` against the trajectory index | `out → on` | node | `policy.escalated{rule:"novel_sequence", ngram}` | human |
 | E6 | Policy violation attempt (capability denied, sandbox kill, egress block) | policy / sandbox | `* → in` | run | `policy.escalated{rule:"violation"}` | human |
 | E7 | Anomaly: run cost, token, or wall-clock > p99 of the last 100 runs of this graph version | scheduler metrics | `out → on` | run | `policy.escalated{rule:"anomaly", metric, z}` | human |
-| E8 | Tainted channel feeding an `irreversible` action | taint propagation (**D6.8**) | one level up | node | `policy.escalated{rule:"taint"}` | human |
+| E8 | Tainted channel feeding an `irreversible` **or `externally_visible`** action | taint propagation (**D6.8**) | `* → in`, **and it raises the hard floor** | node | `policy.escalated{rule:"taint"}` | nobody — see below |
 | E9 | Operator interrupt during an `on` hold | `OversightController` | `on → in` | run | `policy.escalated{rule:"operator"}` | the same operator, explicitly |
 | E10 | Graph mutation introduces an `irreversible` node | `compileMutation` | `* → in` **for that node** | node | `policy.escalated{rule:"mutation"}` | human |
+
+**E8 is the one row nothing undoes, and that is deliberate.** Every other escalation here is
+lifted by a human `deescalate`. E8 is not: it raises the *hard floor* (D7.6), which is the
+bound a ceiling may not cross, so a second de-escalation by the same operator changes nothing.
+The remedy is per-action — approve the gate — and it is asked again the next time the tainted
+channel feeds a hard-to-undo node. That is intended: a de-escalation is a judgement about what
+its author could see when they made it, and untrusted content arriving afterwards is new
+information. It is also the row most likely to become a hold operators learn to ignore, since
+taint never clears; if that happens, the fix is a ceiling that records *what was seen*, not a
+weaker floor.
 
 **What approval means.** On a `human_gate` node, approving COMPLETES it — that node's
 entire job is to be the decision. On any other node type there is work behind the gate,
@@ -546,7 +562,7 @@ against a second vendor, which is a different mechanism and changes no posture.
 | # | Path | Required authority | Additional requirement | Journal |
 |---|---|---|---|---|
 | D1 | Operator lowers posture for one run | `oversight:loosen` **and** run-scoped RBAC | free-text justification, non-empty | `policy.deescalated{scope:"run", justification, actor}` |
-| **D1a** | **THE HARD FLOOR (implementation, M8).** A ceiling may lower an `irreversible` or `externally_visible` action to `on` — never to `out` | — | clamped in `PolicyEngine.effectivePosture`, not by review | — |
+| **D1a** | **THE HARD FLOOR (implementation, M8).** A ceiling may lower an `irreversible` or `externally_visible` action to `on` — never to `out`, and never below `in` while the action is **tainted** (E8) | — | clamped in `PolicyEngine.effectivePosture`, not by review | — |
 | D2 | Operator lowers a workflow's declared floor | `oversight:loosen` + `workflow:admin` | a change to the versioned OversightPolicy Resource → normal promotion pipeline | `resource.promoted` + `policy.deescalated` |
 | D3 | Trust tier auto-approves a class | `oversight:loosen`, **enabled once by a human**, bounded scope, revocable | ≥ 50 consecutive approvals, 0 rejects, 0 edits, within one (tenant, tool, node) | `policy.deescalated{scope:"trust_tier"}` + 5 % sampled post-hoc review |
 | D4 | Evolution engine lowers anything | **impossible** | — | — |
@@ -558,7 +574,9 @@ against a second vendor, which is a different mechanism and changes no posture.
 > and the intervention window in D4 deviation 5 could never fire. A human ceiling is
 > therefore a separate clamp applied after the `max` fold. It is the only thing in the
 > system that can lower a posture, it is human-only, it requires a justification, and
-> for hard-to-undo actions it is clamped at `on` — someone stays watching.
+> for hard-to-undo actions it is clamped at `on` — someone stays watching. When the action is
+> TAINTED the clamp is `in` instead: the operator lowered it without having seen the untrusted
+> content that now feeds it.
 
 ### The asymmetry rule — two independent enforcement points
 

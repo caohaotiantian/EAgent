@@ -2899,6 +2899,42 @@ as missing from the code; they were on `ToolManifestLite`, and the guard did not
 `extends`. The finding read exactly like drift in the code. Fix the guard before filing the
 finding.
 
+## Open, found while hardening E8 — recorded, not fixed
+
+Each of these was reproduced or confirmed in the source during the taint work and deliberately
+left out of it. None blocks the deployment bar.
+
+- **T1 — a `router`'s `when` reads the scope through the expression evaluator, not through a
+  `${}` template, so `observedChannels` cannot see it.** A router branching on tainted data is
+  control-flow taint, a different question from feeding an action, and the branch it picks is
+  bounded by `GRAPH005_ROUTE_NOT_OWN_EDGE`. Fix needs the expression parser to report its free
+  variables.
+- **T2 — `reads` is still not enforced as the read set.** `GRAPH004_UNDECLARED_READ` covers
+  edge `when`/`until` and router cases but never `tool.args`, so a template may name any
+  channel. Taint now derives the wider set, but every OTHER consumer of `reads` still trusts a
+  field the engine does not hold anyone to. The hygiene fix is a compile rule refusing a
+  template outside `reads`; it breaks every shipped graph that does this today, so it is an
+  announced change, not a drive-by.
+- **T3 — same-wave ordering.** Taint is added at commit, so a node decided in the SAME wave as
+  its tainter sees none. Needs an under-constrained graph (a reader with no edge from the
+  writer) and nothing refuses one.
+- **T4 — replay cannot exercise any de-escalated run.** `replayRun` never re-applies
+  `policy.deescalated`, so a replayed run has no ceiling and every hard-to-undo action computes
+  to `in`. Reproduced with a graph containing NO taint at all: the replay raises a gate the
+  recorded run never decided and throws. Pre-existing and taint-independent, but it means E8's
+  entire observable domain — which only exists under a ceiling — is un-replayable, so "a replay
+  that reproduces" does not currently hold for de-escalated runs.
+- **T5 — `evolution/trajectory.ts` matches escalation rules by exact string.**
+  `e.payload.rule === "violation"` is dead: `#escalate` appends the detail, so the journaled
+  value is `violation {"capability":…}`. The E8 firing site adopts the same pattern
+  (`taint {"reads":[…]}`), so any future consumer matching on `rule` inherits the bug. The
+  journal should carry `rule` and `detail` as separate fields.
+- **T6 — `reachableToolNames` does not descend into a `subgraph`.** A subgraph node is
+  therefore classified `read_only` however irreversible its child is. Not currently a hole —
+  each run has its own `PolicyEngine`, so the child re-decides every node at full strictness
+  with no inherited ceiling — but invariant 5's "max over every tool it can REACH" is not what
+  the code computes.
+
 ## The one habit worth keeping
 
 Every wave of this build found defects by running a *new shape* of thing, not by adding tests

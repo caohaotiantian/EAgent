@@ -957,7 +957,10 @@ export class Engine {
    * rejects an agent, the deny-list rejects the evolution engine, and the ceiling it
    * sets can never take a hard-to-undo action below `on` — someone stays watching. It
    * does not cover one that untrusted tool output is feeding: E8 holds that at `in`, so
-   * lowering the ceiling is a judgement about what was visible when it was made.
+   * lowering the ceiling is a judgement about what was visible when it was made. That holds
+   * across a restart, a laundering hop, a `tool.args` template and a subgraph boundary; it
+   * does NOT cover a `router` choosing a branch from tainted data, which is control-flow
+   * taint and a different question.
    */
   async deescalate(
     runId: RunId,
@@ -1970,8 +1973,9 @@ export class Engine {
     // E8. A channel a tool wrote carries output from outside the system, and feeding that
     // into a hard-to-undo action is the prompt-injection path. The bit was already being
     // computed and passed; what was missing is the FIRING SITE every other rule in D7.7's
-    // table has. Raised before the decision it must bind, not at commit like E4/E5, because
-    // the evidence — an upstream task's writes — is already durable by the time we get here.
+    // table has. Raised before the decision it must bind, not at commit like E4/E5, because the
+    // evidence is an upstream task's committed writes — durable, and re-folded into `ctx.tainted`
+    // at attach, so a fresh process reaches the same answer.
     // `escalate` is idempotent on re-raise, so a node decided repeatedly journals one event.
     const irreversibility = this.#irreversibilityOf(node);
     const tainted = observedChannels(node).some((r) => ctx.tainted.has(r));

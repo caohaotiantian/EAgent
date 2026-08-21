@@ -443,11 +443,27 @@ to be careful":
    them. This is the load-bearing mechanism: an injection can make a model *ask* for
    `k8s.delete`, and the request is rejected before dispatch because the node never
    declared it.
-3. **Taint propagation.** A channel written from untrusted output carries `tainted: true`.
-   A node that reads a tainted channel **and** performs an action classified
-   `irreversible` or `externally_visible` has its posture escalated one level
-   automatically (`out→on`, `on→in`). Tightening is automatic; the asymmetry rule (**D7**)
-   guarantees nothing can undo it.
+3. **Taint propagation.** A channel carries taint when an external producer wrote it — a
+   `tool` node, an `agent` that had tools, or a `subgraph` (whose child runs where the
+   parent cannot see) — **or** when the node that wrote it observed a tainted channel. That
+   second clause is propagation proper; with only the first, any `function` or tool-less
+   `agent` laundered the taint away by copying the value.
+
+   A node that observes a tainted channel **and** performs an action classified
+   `irreversible` or `externally_visible` is held at `in`. Not "one level up": for those two
+   classes the class default is already `in`, so a relative bump is the identity and changes
+   no answer. What taint actually does is raise the **hard floor** under a human ceiling, so
+   an operator's earlier de-escalation stops covering that action. See D7.6.
+
+   "Observes" is not `node.reads`: a `tool.args` template resolves against the whole channel
+   scope, so the read set includes every channel a template names. Inside an agent turn the
+   granularity is the turn, not the channel — once any tool has returned, later hard-to-undo
+   calls in that task are tainted, because the model's arguments are downstream of whatever
+   came back.
+
+   Taint is monotonic and is never cleared; there is no declassification operator. Tightening
+   is automatic and the asymmetry rule (**D7**) guarantees nothing can undo it — the remedy is
+   approving the action, per action.
 
 ---
 

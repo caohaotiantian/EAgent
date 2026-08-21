@@ -1218,7 +1218,7 @@ test("every unappended event type is one this file can name a reason for", () =>
  *
  * The same shape as `NEVER_RAISED` one level up, applied to a different vocabulary, and for
  * the same reason: a declared-but-never-raised rule reads, from any single file, exactly
- * like a rule that works. `escalation.ts` is a table of eleven and D7 presents them as the
+ * like a rule that works. `escalation.ts` is a table of ten and D7 presents them as the
  * oversight ladder, so an operator reading D7 expects a posture bump this system will never
  * perform.
  *

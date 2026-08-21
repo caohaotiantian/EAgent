@@ -173,9 +173,11 @@ const MAX_TIMER_MS = 2_147_483_647;
 /**
  * The two classes a human may NOT de-escalate to `out`, and the two E8 guards.
  *
- * Named because the same pair drives the hard floor and the taint rule, and they were
- * written out longhand in both places — which is how one of them could quietly become
- * the identity without the other noticing.
+ * Named because the same pair drives the hard floor and the taint rule, and they were written
+ * out longhand in both — which is how one of them could quietly become the identity without
+ * the other noticing. Five more sites still spell it out (`graph/mutate.ts`, twice in
+ * `graph/validate.ts`, `telemetry/spans.ts`, `run/engine.ts`); they are not converted because
+ * `graph/` importing from `run/` inverts the layering, and that is the worse trade.
  */
 export function isHardToUndo(c: IrreversibilityClass): boolean {
   return c === "irreversible" || c === "externally_visible";
