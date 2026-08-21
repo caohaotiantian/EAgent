@@ -2003,7 +2003,7 @@ export class Engine {
             payload: {
               effect: decision.effect,
               posture: decision.effect === "deny" ? "in" : decision.posture,
-              irreversibility: this.#irreversibilityOf(node),
+              irreversibility: irreversibility,
               reasons: decision.reasons,
             },
             actor: SYSTEM_ACTOR("policy"),
@@ -2031,7 +2031,7 @@ export class Engine {
               type: "action.pending",
               payload: {
                 nodeId: node.id,
-                irreversibility: this.#irreversibilityOf(node),
+                irreversibility: irreversibility,
                 windowMs: decision.holdMs,
                 ...(node.tool === undefined ? {} : { toolName: node.tool.name }),
               },
