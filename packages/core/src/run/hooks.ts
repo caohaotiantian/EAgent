@@ -54,6 +54,23 @@ export const HOOK_POINTS = [
 export type HookPoint = (typeof HOOK_POINTS)[number];
 
 /**
+ * The points the engine actually DISPATCHES.
+ *
+ * `HOOK_POINTS` is the design's full list; this is what is built. The compiler refuses a graph
+ * naming a point outside this set, because "declared, pinned, and never invoked" is the exact
+ * defect the bus was written to close — narrowing it from any string to one of nine did not
+ * close it, it just made the silence better spelled. Wiring a point means adding it here, and
+ * `test/run/hooks.test.ts` asserts the two lists explain their difference.
+ */
+export const WIRED_POINTS: ReadonlySet<HookPoint> = new Set<HookPoint>([
+  "preModel",
+  "postModel",
+  "preTool",
+  "postTool",
+  "onComplete",
+]);
+
+/**
  * Points that cannot change anything.
  *
  * Kept as data rather than as a convention, because "is this one allowed to mutate?" is asked

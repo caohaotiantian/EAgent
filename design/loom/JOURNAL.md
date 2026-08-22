@@ -4211,3 +4211,41 @@ the gate is what noticed: *"6 rules; deleting one needs a reason in the journal,
 **Reverses when** the todo list stops shrinking. A promise nobody keeps is worth less than an
 honest "no relation", and the right move then is to demote the entries rather than let the number
 sit there.
+
+## Four more hook points, and the honest way to have five of nine
+
+`HOOK_POINTS` declared nine and the engine dispatched one. Narrowing the compiler from "any
+string" to "one of nine" had NOT closed the declared-and-never-invoked defect — it just spelled
+the silence better: a graph could name `preModel`, compile clean, have its ref resolved and its
+digest pinned, and nothing would fire.
+
+So the built set is now data. `WIRED_POINTS` is what the engine dispatches, the compiler refuses
+anything outside it (`GRAPH003_UNWIRED_HOOK_POINT`, distinct from "unknown" so the message can
+say *why*), and a test walks all nine asserting compile-ok exactly matches wired. The two lists
+cannot quietly disagree, and wiring a point is one line plus the dispatch.
+
+Wired this pass: **`preModel`**, **`postModel`**, **`postTool`**, **`onComplete`** — joining
+`preTool`. Left unwired and refused at compile: `prePlan`, `preNode`, `onError`, `onGate`.
+
+**Where each one sits is the whole design, and two of the four moved once I wrote the test.**
+
+- `preModel` runs before the ESTIMATE, so the reservation prices the request that will actually
+  be sent. Filtering after would price a request nobody made — the same error `assembleContext`'s
+  discarded `system` made one layer up.
+- `postModel` and `postTool` run BEFORE their journal append, deliberately. A filter that redacts
+  a secret out of a result *after* the result is durable has redacted nothing. It also means
+  replay serves the filtered value instead of re-running the hook, which is the more
+  deterministic half.
+- `onComplete` is the one observer: it runs after the terminal event is durable, cannot change
+  anything, and a throw is contained — the run is already over, so failing it would report a
+  failure that did not happen. Nothing is journaled, because `hook.applied{changed:true}` would
+  be false for something that changed nothing.
+
+**And one lie fell out of wiring `preModel`.** `model.called` journaled `req.model` — the
+pre-filter value. A hook that reroutes a model would have made the journal record a call to a
+model nobody made, in the event an operator reads to answer "what did this cost and where did it
+go". It records `shaped.model` now.
+
+**Reverses when** the remaining four are wired: delete their compile refusal in the same change
+that adds their dispatch, never before. A point accepted by the compiler and ignored by the
+engine is the defect this whole file exists to close.

@@ -23,8 +23,8 @@ import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { HookRegistry, type HookBody } from "../../src/run/hooks.ts";
-import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { HOOK_POINTS, HookRegistry, WIRED_POINTS, type HookBody } from "../../src/run/hooks.ts";
+import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import type { RunId } from "../../src/ids.ts";
 import { resolver } from "./skeleton.ts";
 
@@ -239,4 +239,121 @@ test("A GRAPH WITH NO HOOKS REGISTERED RUNS UNCHANGED — the bus is optional", 
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
   assert.deepEqual(r.saw, [{ body: "plain" }], "the tool receives its declared arguments");
   assert.deepEqual(await applied(r.store, runId), [], "and nothing is journaled");
+});
+
+// ── the other wired points ───────────────────────────────────────────────────
+
+test("EVERY POINT THE COMPILER ACCEPTS IS A POINT THE ENGINE DISPATCHES", () => {
+  // `HOOK_POINTS` is the design's nine; `WIRED_POINTS` is what is built. Narrowing the compiler
+  // from "any string" to "one of nine" did not close the declared-and-never-invoked defect — it
+  // just spelled the silence better. The compiler refuses an unwired point, so the two lists can
+  // never quietly disagree.
+  for (const point of HOOK_POINTS) {
+    const r = compile({ spec: spec(point), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] });
+    const wired = WIRED_POINTS.has(point);
+    assert.equal(r.ok, wired, `${point}: wired=${String(wired)} but compile ok=${String(r.ok)}`);
+    if (!wired) {
+      assert.ok(
+        (r.diagnostics ?? []).some((d) => d.code === "GRAPH003_UNWIRED_HOOK_POINT"),
+        `${point} must be refused as UNWIRED, not as unknown`,
+      );
+    }
+  }
+});
+
+test("`preModel` rewrites the request that is ESTIMATED and SENT", async () => {
+  const seen: string[] = [];
+  const models = new ModelRegistry();
+  models.register(
+    new MockModelAdapter({
+      script: (req) => {
+        seen.push(req.system);
+        return { text: JSON.stringify({ ok: true }), finishReason: "stop" };
+      },
+    }),
+    true,
+  );
+  const hooks = new HookRegistry();
+  hooks.register("hook/guard@stable", (input) => ({ ...(input as object), system: "REWRITTEN" }));
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions: new FunctionRegistry(),
+    models,
+    hooks,
+    now: () => NOW,
+    sleep: async () => {},
+    resolver: resolver(),
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 10 } },
+  });
+  const agentSpec = {
+    ...spec("preModel"),
+    nodes: [
+      {
+        id: "ask",
+        type: "agent",
+        reads: ["note"],
+        writes: ["out"],
+        agent: { profile: "agent_profile/x@stable", prompt: "prompt/p@stable", maxTurns: 2, outputSchema: { type: "object" } },
+      },
+    ],
+  } as unknown as GraphSpec;
+  const runId = await engine.submit({
+    graph: compileOrThrow({ spec: agentSpec, resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] }),
+    inputs: { note: "x" },
+  });
+  const p = await engine.advance(runId);
+
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.deepEqual(seen, ["REWRITTEN"], "the provider must receive the FILTERED request");
+
+  // And the journal must record the model that was actually called, not the pre-filter one.
+  const applied = [];
+  for await (const ev of store.read(runId, 1)) if (ev.type === "hook.applied") applied.push(ev.payload);
+  assert.deepEqual(applied, [{ ref: "hook/guard@stable", point: "preModel", changed: true }]);
+});
+
+test("`postTool` rewrites the result before it becomes durable", async () => {
+  const r = rig();
+  const hooks = new HookRegistry();
+  hooks.register("hook/redact@stable", (input) => ({ ...(input as object), content: "[redacted]" }));
+  const store = new MemoryStateStore({ now: () => NOW });
+  const tools = new ToolRegistry();
+  tools.register({
+    name: "demo.write",
+    version: "1.0",
+    description: "d",
+    capabilities: ["fs:write"],
+    irreversibility: "reversible_write",
+    idempotent: false,
+    parameters: { type: "object", properties: { body: { type: "string" } } },
+    execute: () => ({ content: "SECRET", writes: { out: { ran: true } } }),
+  } as ToolDefinition);
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions: new FunctionRegistry(),
+    models: new ModelRegistry(),
+    hooks,
+    now: () => NOW,
+    sleep: async () => {},
+    policy: { granted: ["fs:write"], systemFloor: "out", budget: { runUsd: 1 } },
+  });
+  const s = { ...spec("postTool"), hooks: { postTool: ["hook/redact@stable"] } } as unknown as GraphSpec;
+  const runId = await engine.submit({
+    graph: compileOrThrow({ spec: s, resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] }),
+    inputs: { note: "x" },
+  });
+  await engine.advance(runId);
+
+  let journalled = "";
+  for await (const ev of store.read(runId, 1)) {
+    if (ev.type === "effect.completed") journalled = JSON.stringify(ev.payload);
+  }
+  assert.ok(!journalled.includes("SECRET"), `the unredacted result must never become durable: ${journalled}`);
+  assert.ok(journalled.includes("[redacted]"), journalled);
+  void r;
 });

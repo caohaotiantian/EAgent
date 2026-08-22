@@ -110,7 +110,7 @@ import {
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
-import { HookRegistry, narrowToolDecision, runFilters, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
+import { HookRegistry, narrowToolDecision, runFilters, runObservers, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -711,6 +711,28 @@ export class Engine {
     if (this.#hooks === undefined) return [];
     const refs = ctx.graph.spec.hooks?.[point];
     return refs === undefined || refs.length === 0 ? [] : this.#hooks.resolve(refs);
+  }
+
+  /**
+   * Run a value-threading filter point and journal whatever changed.
+   *
+   * The default merge REPLACES, which is what a value point wants: `preModel` hands back a
+   * request, `postTool` a result. A DECISION point supplies its own merge instead — see
+   * `narrowToolDecision`, which is what makes "once blocked, stays blocked" true regardless of
+   * hook order. Returns the input untouched when no hook is registered, so a deployment with no
+   * extensions runs exactly as it did before the bus existed.
+   */
+  async #filterHook<T>(ctx: RunContext, task: TaskRecord, point: HookPoint, value: T): Promise<T> {
+    const hooks = this.#hooksFor(ctx, point);
+    if (hooks.length === 0) return value;
+    const out = await runFilters<T>(hooks, value, {
+      point,
+      runId: ctx.runId,
+      taskId: task.taskId,
+      signal: ctx.abort.signal,
+    });
+    await this.#journalHooks(ctx, task, point, out.changedBy);
+    return out.value;
   }
 
   /**
@@ -2763,12 +2785,17 @@ export class Engine {
         tools: toolSpecs,
       };
 
+      // `preModel` — the request a filter returns is the one that is ESTIMATED, RESERVED and
+      // SENT, in that order. Rewriting after the reservation would price a request nobody made,
+      // which is the same error `assembleContext`'s discarded `system` used to make one layer up.
+      const shaped = await this.#filterHook(ctx, w.task, "preModel", req);
+
       let recordedProvider = "replay";
       let reservation;
       try {
         // A replay makes no call, so it reserves nothing. Estimating against a provider
         // that is not there would be inventing a cost for work that never happens.
-        reservation = ctx.policy.reserve(`node:${w.node.id}`, adapter?.estimateOf(req) ?? 0);
+        reservation = ctx.policy.reserve(`node:${w.node.id}`, adapter?.estimateOf(shaped) ?? 0);
         // Checked at RESERVE as well as at commit. Under reserve-worst-case, committed
         // exposure peaks at the reservation and falls back when `settle` credits the
         // real cost — so a check only at commit sees the trough and never fires. "80%
@@ -2827,7 +2854,7 @@ export class Engine {
           finish = rec.result.finishReason;
           turnUsage = rec.result.usage;
         } else {
-          for await (const ev of adapter!.stream(req, ctx.abort.signal)) {
+          for await (const ev of adapter!.stream(shaped, ctx.abort.signal)) {
             if (ev.type === "done") {
               assistant = ev.message;
               finish = ev.finishReason;
@@ -2850,6 +2877,11 @@ export class Engine {
       ctx.policy.settle(reservation, turnUsage.costUsd);
       usage = addUsage(usage, turnUsage);
 
+      // `postModel` — BEFORE the append, so the journal records what the filter produced and
+      // replay serves that rather than re-running the hook. A redaction that happened after the
+      // write would leave the unredacted text durable, which is the opposite of the point.
+      if (assistant !== undefined) assistant = await this.#filterHook(ctx, w.task, "postModel", assistant);
+
       await this.#serialize(() =>
         ctx.log.append(
           [
@@ -2860,7 +2892,9 @@ export class Engine {
               payload: {
                 key,
                 provider: adapter?.provider ?? recordedProvider,
-                model: req.model,
+                // `shaped`, not `req`: a `preModel` filter may have rewritten the model, and
+                // journaling the pre-filter value records a call nobody made.
+                model: shaped.model,
                 finishReason: finish,
                 usage: turnUsage,
               },
@@ -3546,6 +3580,12 @@ export class Engine {
       );
       return { content: le.message, isError: true };
     }
+
+    // `postTool` — before the append, for the same reason `postModel` is: a filter that redacts
+    // a secret out of a tool result after the result is durable has redacted nothing. This is
+    // also where an output-size projection would live, since the journal keeps the whole thing
+    // and only the transcript needs bounding.
+    result = await this.#filterHook(ctx, task, "postTool", result);
 
     await this.#serialize(() =>
       ctx.log.append(
@@ -4591,6 +4631,19 @@ export class Engine {
         },
       ]),
     );
+
+    // `onComplete` — the one OBSERVER. It runs after the terminal event is durable, cannot change
+    // anything, and a throw is contained: the run is already over, so failing it would report a
+    // failure that did not happen. Nothing here is journaled, because an observer that changed
+    // nothing has nothing to record — `hook.applied{changed:true}` would be false.
+    const watchers = this.#hooksFor(ctx, "onComplete");
+    if (watchers.length > 0) {
+      await runObservers(watchers, { run: p }, {
+        point: "onComplete",
+        runId: ctx.runId,
+        signal: ctx.abort.signal,
+      });
+    }
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
