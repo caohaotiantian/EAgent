@@ -4091,3 +4091,44 @@ body the capability inv 4 closes); dsh's fail-open hook arm and its `permission:
 auto-approval for child agents (a private grant, inv 5); dsh's deny-pattern env scrubbing (ours
 is an allow-list — do not regress it while taking the sandbox half); mutation testing as a gate
 (neither reference has it, and a slower `npm run check` is a gate people stop running).
+
+## `auditRun` — nothing read the journal back
+
+Invariant 2 makes the journal the only authoritative durable state, and nothing checked that the
+authoritative state was internally consistent. The nearest thing, `conformsToGraph`, is
+set-membership plus a hash — which is exactly why it printed `ok` straight through the
+human-gate bypass (`git log --grep='may only route along its own edges'`): **every id in the
+bypass was declared.** Membership was never the question. The question is whether the ids stand
+in the right relation, and a relation is a property of a SEQUENCE, so no single call site can
+hold it. A writer knows it is appending `effect.completed`; it cannot know whether anything ever
+appended the matching `started`, or whether a second completion already used that key.
+
+Eight rules, each with a fixture that trips it and one that does not, each mutation-tested:
+removing any one rule turns exactly one test red and nothing else.
+
+**Two deliberate departures from the proposal that produced this.**
+
+*It is offline and pure, not a listener.* deepseek-harness registers checkers on live dispatch.
+For us that puts a throwing auditor on the durable write path — invariant 2's own failure mode —
+and our `EventBus` is explicitly lossy under backpressure (invariant 8), so a listener-based
+auditor would report violations that are really dropped deliveries.
+
+*It returns a report, not a `Violation[]`.* The sketch proposed the bare array. A checker that
+could not run a rule and returns an empty array is indistinguishable from one that ran it and
+found nothing — the defect class this repo keeps rediscovering. `checked` and `skipped[]` are
+part of the answer, with a reason on every skip. Two rules are gated on the run being TERMINAL,
+because an open gate and an unsettled reservation are CORRECT in a live run, and a guard that
+cries wolf on correct code gets switched off, which costs more than it ever caught.
+
+**Validated against real journals before being believed.** Four run shapes — tool, agent, gated,
+router — audited clean, 0 violations. That is the property that matters more than the rules: a
+first version that fired on healthy runs would have been switched off within a day.
+
+`loom audit <runId> [--graph <file>]` exits non-zero on a violation. `--graph` is optional and
+its absence is REPORTED, because the original compiled graph is not in the journal — only its
+hash is — so edge ownership cannot be derived from events alone.
+
+**Reverses when** a rule fires on a healthy run: fix the rule or delete it the same day. The
+follow-on is the `EVENT_TYPES` exhaustiveness gate — 52 types each either named by a rule or
+carrying an explicit "no relation" excuse — which is what stops the rule set decaying as the
+vocabulary grows.

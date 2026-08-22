@@ -60,6 +60,7 @@ import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
 import type { RunProjection, TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
+import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId } from "./ids.ts";
@@ -84,6 +85,7 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
+  loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
 
   --help            print this and exit — also "loom help", and valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
@@ -2260,6 +2262,30 @@ export async function main(argv: readonly string[]): Promise<number> {
         const conformance = conformsToGraph(reconstructGraph(spans), graph.spec, graph.graphHash);
         process.stdout.write(`\nconformance: ${conformance.ok ? "ok" : JSON.stringify(conformance)}\n`);
         return conformance.ok ? 0 : 1;
+      }
+
+      // READ THE JOURNAL BACK. `trace` answers "what happened"; this answers "does the record
+      // hold together". They are different questions and the second had no asker: span
+      // conformance is set-membership plus a hash, which is why it reported `ok` through the
+      // gate bypass — every id in the bypass was declared. `--graph` is optional and its absence
+      // is REPORTED rather than assumed away, because the edge-ownership rule needs it.
+      case "audit": {
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const events = [];
+        for await (const e of ws.store.read(runId, 1)) events.push(e);
+        const edgeSource: Record<string, string> = {};
+        const gf = args.flags["graph"];
+        if (typeof gf === "string") {
+          for (const e of loadGraph(ws, gf).spec.edges) edgeSource[e.id] = e.from;
+        }
+        const report = auditRun(events, { edgeSource });
+        for (const v of report.violations) process.stdout.write(`✗ ${v.rule} @seq ${v.seq}: ${v.detail}\n`);
+        for (const s of report.skipped) process.stdout.write(`· not checked — ${s.rule}: ${s.why}\n`);
+        process.stdout.write(
+          `\n${report.violations.length === 0 ? "ok" : `${report.violations.length} violation(s)`}` +
+            ` — ${report.checked.length} rule(s) checked, ${report.skipped.length} skipped\n`,
+        );
+        return report.violations.length === 0 ? 0 : 1;
       }
 
       default:
