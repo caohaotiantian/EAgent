@@ -627,3 +627,28 @@ test("BOTH ADAPTERS REFUSE A NON-STREAM — the wrapper is the one place, so nei
     );
   }
 });
+
+// ── a truncated turn is not a tool call ──────────────────────────────────────
+
+/**
+ * `finishReason` was overridden to `tool_use` whenever ANY tool call was parsed, which erased
+ * `max_tokens` — and a tool call whose argument JSON was cut mid-stream is debris, not a
+ * request. `safeJson` turns the unparseable remainder into `{}`, so the engine dispatched the
+ * tool with EMPTY arguments and reported a clean `tool_use`. `fs.write` with `{}` is not a
+ * smaller version of the intended write.
+ */
+test("OPENAI: a `max_tokens` turn keeps that reason and drops its partial tool calls", async () => {
+  const f = sseFetch([
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"fs.write","arguments":"{\\"path\\":\\"a"}}]}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+    "data: [DONE]",
+  ]);
+  const a = new OpenAIAdapter({ apiKey: "k", fetch: f.fetch });
+  const events: ModelEvent[] = [];
+  for await (const ev of a.stream(REQ, new AbortController().signal)) events.push(ev);
+
+  const done = events.find((e) => e.type === "done");
+  assert.ok(done && done.type === "done");
+  assert.equal(done.finishReason, "max_tokens", "the truncation must survive");
+  assert.equal(done.message.toolCalls, undefined, "a half-streamed call must NOT be dispatched");
+});

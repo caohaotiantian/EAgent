@@ -299,7 +299,7 @@ export type ModelEvent =
 export interface ModelAdapter {
   readonly provider: string;
   stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
-  priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number;
+  priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number;
   /** Worst-case cost of a request, for the budget reservation (D6.5). */
   estimateOf(req: ModelRequest): number;
 }

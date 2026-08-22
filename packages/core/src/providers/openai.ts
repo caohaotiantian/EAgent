@@ -25,7 +25,7 @@ export interface OpenAIOptions extends HttpOptions {
   readonly apiKey: string;
   /** Any OpenAI-compatible endpoint. Default is OpenAI itself. */
   readonly baseUrl?: string;
-  readonly prices?: Readonly<Record<string, { input: number; output: number }>>;
+  readonly prices?: Readonly<Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>>;
   readonly defaultMaxTokens?: number;
   readonly provider?: string;
 }
@@ -110,12 +110,21 @@ export class OpenAIAdapter implements ModelAdapter {
       costUsd: this.priceOf(req.model, { inputTokens, outputTokens }),
       wallMs: 0,
     };
+    // A TRUNCATED TURN IS NOT A TOOL CALL. `finishReason` was overridden to `tool_use` whenever
+    // any tool call was parsed, which erased `max_tokens` — and a tool call whose argument JSON
+    // was cut mid-stream is debris, not a request: the parser turns unparseable arguments into
+    // `{}`, so the engine dispatched the tool with EMPTY arguments and called it a clean
+    // `tool_use`. `fs.write` with `{}` is not a smaller version of the intended write.
+    //
+    // So a truncated turn keeps `max_tokens` and drops its partial calls. The node then fails
+    // its schema check with a real reason instead of half-executing.
+    const truncated = finishReason === "max_tokens";
     const message: Message = {
       role: "assistant",
       content: text,
-      ...(toolCalls.length === 0 ? {} : { toolCalls }),
+      ...(toolCalls.length === 0 || truncated ? {} : { toolCalls }),
     };
-    yield { type: "done", message, finishReason: toolCalls.length > 0 ? "tool_use" : finishReason, usage };
+    yield { type: "done", message, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
   }
 
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {

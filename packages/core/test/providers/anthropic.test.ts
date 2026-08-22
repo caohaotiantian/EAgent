@@ -174,3 +174,54 @@ test("malformed tool arguments do not crash a stream that ended properly", async
   assert.deepEqual(done.message.toolCalls?.[0]?.arguments, {});
   assert.equal(done.finishReason, "tool_use");
 });
+
+/**
+ * A TRUNCATED TURN IS NOT A TOOL CALL.
+ *
+ * `finishReason` was overridden to `tool_use` whenever any tool call was parsed, which erased
+ * `max_tokens`. A call whose argument JSON was cut mid-stream is debris, not a request — and
+ * the parser turns the unparseable remainder into `{}`, so the engine dispatched the tool with
+ * EMPTY arguments and called it a clean `tool_use`. `fs.write` with `{}` is not a smaller
+ * version of the intended write.
+ *
+ * The malformed-JSON case one screen up is deliberately NOT this: there the provider said
+ * `tool_use` and meant it, and `{}` is the honest reading of a broken argument. Here the
+ * provider said it ran out of room.
+ */
+test("a `max_tokens` turn keeps that reason and drops its partial tool calls", async () => {
+  const frames = [
+    START,
+    `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"fs.write"}}`,
+    `data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"a"}}`,
+    `data: {"type":"content_block_stop","index":0}`,
+    `data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":3}}`,
+    MESSAGE_STOP,
+  ];
+  const done = (await collect(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(frames) }).stream(REQ, ac()))).at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type !== "done") return;
+  assert.equal(done.finishReason, "max_tokens", "the truncation must survive");
+  assert.equal(done.message.toolCalls, undefined, "a half-streamed call must NOT be dispatched");
+});
+
+/**
+ * CACHED TOKENS WERE CAPTURED AND NEVER PRICED.
+ *
+ * The adapter has always read `cache_read_input_tokens`/`cache_creation_input_tokens` off the
+ * wire and put them on the `UsageRecord`. `priceOf`'s parameter named two fields, so it could
+ * not see them, and every cached turn settled at the plain input rate — wrong in the cheap
+ * direction for a read and the expensive one for a write. A budget compares against that number.
+ */
+test("cache read and cache write are PRICED, not just counted", () => {
+  const a = new AnthropicAdapter({ apiKey: "k", prices: { m: { input: 10, output: 20, cacheRead: 1, cacheWrite: 12.5 } } });
+
+  assert.equal(a.priceOf("m", { inputTokens: 1e6, outputTokens: 0 }), 10, "the plain input rate is unchanged");
+  assert.equal(a.priceOf("m", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1e6 }), 1, "a cache READ is priced at its own rate");
+  assert.equal(a.priceOf("m", { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 1e6 }), 12.5, "a cache WRITE costs MORE than input");
+});
+
+test("a table row with no cache rates falls back to the input rate, which is the old behaviour", () => {
+  // An operator who has not priced their cache is not silently handed a free one.
+  const a = new AnthropicAdapter({ apiKey: "k", prices: { m: { input: 10, output: 20 } } });
+  assert.equal(a.priceOf("m", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1e6 }), 10);
+});

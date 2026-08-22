@@ -38,14 +38,14 @@ export interface AnthropicOptions extends HttpOptions {
   readonly baseUrl?: string;
   readonly version?: string;
   /** USD per million tokens, per model. Pinned by config, never guessed at runtime. */
-  readonly prices?: Readonly<Record<string, { input: number; output: number }>>;
+  readonly prices?: Readonly<Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>>;
   readonly defaultMaxTokens?: number;
 }
 
-const DEFAULT_PRICES: Record<string, { input: number; output: number }> = {
-  "claude-opus-5": { input: 15, output: 75 },
-  "claude-sonnet-5": { input: 3, output: 15 },
-  "claude-haiku-4-5-20251001": { input: 0.8, output: 4 },
+const DEFAULT_PRICES: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }> = {
+  "claude-opus-5": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  "claude-haiku-4-5-20251001": { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
 };
 
 export class AnthropicAdapter implements ModelAdapter {
@@ -183,23 +183,54 @@ export class AnthropicAdapter implements ModelAdapter {
     const usage: UsageRecord = {
       inputTokens,
       outputTokens,
-      costUsd: this.priceOf(req.model, { inputTokens, outputTokens }),
+      costUsd: this.priceOf(req.model, {
+        inputTokens,
+        outputTokens,
+        ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+        ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+      }),
       wallMs: 0,
       ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
       ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
     };
+    // A TRUNCATED TURN IS NOT A TOOL CALL. `finishReason` was overridden to `tool_use` whenever
+    // any tool call was parsed, which erased `max_tokens` — and a tool call whose argument JSON
+    // was cut mid-stream is debris, not a request: the parser turns unparseable arguments into
+    // `{}`, so the engine dispatched the tool with EMPTY arguments and called it a clean
+    // `tool_use`. `fs.write` with `{}` is not a smaller version of the intended write.
+    //
+    // So a truncated turn keeps `max_tokens` and drops its partial calls. The node then fails
+    // its schema check with a real reason instead of half-executing.
+    const truncated = finishReason === "max_tokens";
     const message: Message = {
       role: "assistant",
       content: text,
-      ...(toolCalls.length === 0 ? {} : { toolCalls }),
+      ...(toolCalls.length === 0 || truncated ? {} : { toolCalls }),
     };
-    yield { type: "done", message, finishReason: toolCalls.length > 0 ? "tool_use" : finishReason, usage };
+    yield { type: "done", message, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
   }
 
-  priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
+  /**
+   * Cached tokens are priced when the table says so, and were captured and thrown away before.
+   *
+   * The adapter has always READ `cache_read_input_tokens`/`cache_creation_input_tokens` off the
+   * wire and put them on the `UsageRecord`; `priceOf` could not see them, because its parameter
+   * named two fields. So every cached turn settled at the full input rate — the ledger was
+   * wrong in the SAFE direction for a read (cache read is ~10x cheaper) and the UNSAFE one for
+   * a write (cache creation costs ~1.25x input), and a budget compares against that number.
+   *
+   * A table row without the cache rates falls back to the input rate, which is the old
+   * behaviour exactly: an operator who has not priced their cache is not silently given one.
+   */
+  priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number {
     const p = this.#opts.prices?.[model] ?? DEFAULT_PRICES[model];
     if (p === undefined) return 0;
-    return round6((usage.inputTokens / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output);
+    return round6(
+      (usage.inputTokens / 1e6) * p.input +
+        (usage.outputTokens / 1e6) * p.output +
+        ((usage.cacheReadTokens ?? 0) / 1e6) * (p.cacheRead ?? p.input) +
+        ((usage.cacheWriteTokens ?? 0) / 1e6) * (p.cacheWrite ?? p.input),
+    );
   }
 
   estimateOf(req: ModelRequest): number {
