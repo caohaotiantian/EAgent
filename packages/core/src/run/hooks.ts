@@ -68,6 +68,7 @@ export const WIRED_POINTS: ReadonlySet<HookPoint> = new Set<HookPoint>([
   "preTool",
   "postTool",
   "onError",
+  "onGate",
   "onComplete",
 ]);
 
@@ -131,6 +132,47 @@ export function narrowErrorDecision(prev: ErrorDecision, raw: unknown): ErrorDec
   const proposed = typeof r["afterMs"] === "number" && Number.isFinite(r["afterMs"]) ? r["afterMs"] : undefined;
   const afterMs = proposed === undefined ? prev.afterMs : Math.max(prev.afterMs ?? 0, proposed);
   return { ...(retry === undefined ? {} : { retry }), ...(afterMs === undefined ? {} : { afterMs }) };
+}
+
+/**
+ * The THREE fields of a gate a hook may touch, and the reason it is only three.
+ *
+ * A `GateRequest` carries authority: `approvers` says who may decide, `defaultAction` is a
+ * pre-authorised decision, `onTimeout` says what happens when nobody answers. An extension that
+ * could add an approver would be granting authority, which is invariant 5's asymmetry inverted —
+ * so those fields are not reachable from here at all, rather than validated and refused.
+ *
+ * What is left is genuinely useful and cannot grant anything:
+ *   - `payload` is what the human SEES. Enriching it is pure information gain, and
+ *     `contentDigest` is computed after this runs, so the digest pins what they actually saw.
+ *   - `excludedApprovers` only ever gains members: barring one more subject is a narrowing, and
+ *     separation of duties is enforced against this list.
+ *   - `allowEdit` only ever loses them: shrinking what an `edit` decision may write is a
+ *     narrowing, and an empty result is a gate whose edits touch nothing.
+ */
+export interface GateView {
+  readonly payload: unknown;
+  readonly excludedApprovers?: readonly string[];
+  readonly allowEdit?: readonly string[];
+}
+
+/** Union the exclusions, intersect the editable channels, take the payload as given. */
+export function narrowGateRequest(prev: GateView, raw: unknown): GateView {
+  if (raw === null || typeof raw !== "object") return prev;
+  const r = raw as Record<string, unknown>;
+  const strs = (v: unknown): readonly string[] | undefined =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+
+  const added = strs(r["excludedApprovers"]);
+  const excluded = added === undefined ? prev.excludedApprovers : [...new Set([...(prev.excludedApprovers ?? []), ...added])];
+  const kept = strs(r["allowEdit"]);
+  const allowEdit = kept === undefined ? prev.allowEdit : (prev.allowEdit ?? []).filter((c) => kept.includes(c));
+
+  return {
+    payload: "payload" in r ? r["payload"] : prev.payload,
+    ...(excluded === undefined ? {} : { excludedApprovers: excluded }),
+    ...(allowEdit === undefined ? {} : { allowEdit }),
+  };
 }
 
 export type HookBody = (input: unknown, ctx: HookContext) => Promise<unknown> | unknown;

@@ -110,7 +110,7 @@ import {
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
-import { HookRegistry, narrowErrorDecision, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
+import { HookRegistry, narrowErrorDecision, narrowGateRequest, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type GateView, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -3695,17 +3695,54 @@ export class Engine {
       // because `exactOptionalPropertyTypes` makes an explicit `undefined` a different
       // thing from an absent field, and `raise` reads absence as "no clock".
       const sched = outcome.gate!.schedule ?? {};
+
+      // `onGate` — the human's view, narrowed. Only `payload`, `excludedApprovers` and
+      // `allowEdit` are reachable: `approvers`, `defaultAction` and `onTimeout` carry AUTHORITY,
+      // and an extension that could add an approver would be granting it. Runs before `raise`,
+      // so `contentDigest` pins the payload the approver actually sees.
+      //
+      // Journaled through `ctx.log` directly rather than `#journalHooks`, which goes through
+      // `#serialize`: this code path is already on that chain and awaiting a second entry from
+      // inside one deadlocks — measured on `onError`.
+      const gateHooks = this.#hooksFor(ctx, "onGate");
+      let view: GateView = {
+        payload: outcome.gate!.payload,
+        ...(auth.excludedApprovers === undefined ? {} : { excludedApprovers: auth.excludedApprovers }),
+        ...(auth.allowEdit === undefined ? {} : { allowEdit: auth.allowEdit }),
+      };
+      if (gateHooks.length > 0) {
+        const out = await runFilters<GateView>(
+          gateHooks,
+          view,
+          { point: "onGate", runId: ctx.runId, taskId: w.task.taskId, signal: ctx.abort.signal },
+          () => false,
+          narrowGateRequest,
+        );
+        view = out.value;
+        if (out.changedBy.length > 0) {
+          await ctx.log.append(
+            out.changedBy.map((ref) => ({
+              type: "hook.applied" as const,
+              payload: { ref, point: "onGate" as const, changed: true },
+              actor: SYSTEM_ACTOR("executor"),
+              taskId: w.task.taskId,
+            })),
+            { taskId: w.task.taskId },
+          );
+        }
+      }
+
       await this.#gates.raise(ctx.log, {
         runId: ctx.runId,
         taskId: w.task.taskId,
         nodeId: w.node.id,
         policyRef: outcome.gate!.policyRef,
-        payload: outcome.gate!.payload,
-        allowEdit: auth.allowEdit,
+        payload: view.payload,
+        allowEdit: view.allowEdit ?? auth.allowEdit,
         ...(auth.approvers.length === 0 ? {} : { approvers: auth.approvers }),
         // ABSENT stays absent and is never `[]` — a rule that bars nobody is a rule the
         // author did not write, and `[]` would journal one that reads as declared.
-        ...(auth.excludedApprovers === undefined ? {} : { excludedApprovers: auth.excludedApprovers }),
+        ...(view.excludedApprovers === undefined ? {} : { excludedApprovers: view.excludedApprovers }),
         ...(sched.slaMs === undefined ? {} : { slaMs: sched.slaMs }),
         ...(sched.onTimeout === undefined ? {} : { onTimeout: sched.onTimeout }),
         ...(sched.delivery === undefined ? {} : { delivery: sched.delivery }),

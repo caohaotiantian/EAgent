@@ -23,7 +23,7 @@ import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { HOOK_POINTS, HookRegistry, WIRED_POINTS, narrowErrorDecision, type HookBody } from "../../src/run/hooks.ts";
+import { HOOK_POINTS, HookRegistry, WIRED_POINTS, narrowErrorDecision, narrowGateRequest, type HookBody } from "../../src/run/hooks.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import type { RunId } from "../../src/ids.ts";
 import { resolver } from "./skeleton.ts";
@@ -474,4 +474,98 @@ test("narrowErrorDecision NARROWS ONLY — suppression composes, resurrection do
   // Junk is ignored rather than trusted.
   assert.deepEqual(narrowErrorDecision({ retry: true, afterMs: 100 }, null), { retry: true, afterMs: 100 });
   assert.deepEqual(narrowErrorDecision({ retry: true, afterMs: 100 }, { afterMs: Number.NaN }), { retry: true, afterMs: 100 });
+});
+
+// ── onGate ───────────────────────────────────────────────────────────────────
+
+test("narrowGateRequest — exclusions only GROW, editable channels only SHRINK", () => {
+  // A gate carries authority. `approvers`, `defaultAction` and `onTimeout` are not reachable
+  // from a hook at all, rather than reachable and validated — an extension that could add an
+  // approver would be granting authority, which is invariant 5's asymmetry inverted.
+  const base = { payload: { a: 1 }, excludedApprovers: ["u:alice"], allowEdit: ["notes", "plan"] };
+
+  assert.deepEqual(
+    narrowGateRequest(base, { excludedApprovers: ["u:bob"] }).excludedApprovers,
+    ["u:alice", "u:bob"],
+    "barring one more subject is a narrowing",
+  );
+  assert.deepEqual(
+    narrowGateRequest(base, { excludedApprovers: [] }).excludedApprovers,
+    ["u:alice"],
+    "a hook cannot UN-bar someone by handing back a shorter list",
+  );
+  assert.deepEqual(
+    narrowGateRequest(base, { allowEdit: ["notes"] }).allowEdit,
+    ["notes"],
+    "shrinking what an edit may write is a narrowing",
+  );
+  assert.deepEqual(
+    narrowGateRequest(base, { allowEdit: ["notes", "plan", "secrets"] }).allowEdit,
+    ["notes", "plan"],
+    "and a channel the gate never allowed cannot be added",
+  );
+
+  // Authority fields are not in `GateView`, so a hook returning them changes nothing.
+  const forged = narrowGateRequest(base, { approvers: ["u:attacker"], defaultAction: "approve", onTimeout: "default_action" });
+  assert.deepEqual(forged.excludedApprovers, ["u:alice"]);
+  assert.deepEqual(Object.keys(forged).sort(), ["allowEdit", "excludedApprovers", "payload"]);
+});
+
+test("`onGate` ENRICHES WHAT THE HUMAN SEES, and the digest pins the enriched payload", async () => {
+  // `gate.raised` carries `contentDigest`, not the payload — deliberately, so the record pins
+  // what the approver saw without duplicating it. So the observable proof that the enrichment
+  // reached the human is that the DIGEST MOVED: it is computed inside `raise`, after this hook.
+  const gateSpec = (point: string) =>
+    ({
+      ...spec(point),
+      policy: { posture: "on", expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      nodes: [
+        {
+          id: "approve",
+          type: "human_gate",
+          reads: ["note"],
+          writes: ["out"],
+          humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } },
+        },
+      ],
+    }) as unknown as GraphSpec;
+
+  const run = async (body?: HookBody): Promise<{ digest: string; applied: string[] }> => {
+    const hooks = new HookRegistry();
+    if (body !== undefined) hooks.register("hook/guard@stable", body);
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools: new ToolRegistry(),
+      functions: new FunctionRegistry(),
+      models: new ModelRegistry(),
+      hooks,
+      now: () => NOW,
+      sleep: async () => {},
+      policy: { granted: [], systemFloor: "out", budget: { runUsd: 1 } },
+    });
+    const runId = await engine.submit({
+      graph: compileOrThrow({ spec: gateSpec("onGate"), resolver: resolver(), tools: {}, tenantCapabilities: [] }),
+      inputs: { note: "x" },
+    });
+    const p = await engine.advance(runId);
+    assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
+    const open = Object.values(p.gates).find((g) => g.state === "open");
+    assert.ok(open, "a gate must be open");
+    const applied: string[] = [];
+    for await (const ev of store.read(runId, 1)) {
+      if (ev.type === "hook.applied") applied.push((ev.payload as { point: string }).point);
+    }
+    return { digest: String(open.contentDigest), applied };
+  };
+
+  const plain = await run();
+  const enriched = await run((input) => ({
+    payload: { ...((input as { payload: object }).payload as object), risk: "high" },
+  }));
+
+  assert.deepEqual(plain.applied, [], "no hook, nothing journaled");
+  assert.deepEqual(enriched.applied, ["onGate"], "the enrichment is journaled as onGate");
+  assert.notEqual(enriched.digest, plain.digest, "the digest must pin the ENRICHED payload, not the original");
 });

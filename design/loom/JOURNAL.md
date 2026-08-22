@@ -4290,3 +4290,39 @@ distinction that mattered.
 
 Wired: `preModel`, `postModel`, `preTool`, `postTool`, `onError`, `onComplete`. Refused at
 compile until built: `prePlan`, `preNode`, `onGate`.
+
+## `onGate` — seven of nine, and the point where "narrowing" needed the most thought
+
+A gate is the one place where a hook could grant AUTHORITY rather than merely change a value, so
+this point is defined by what it cannot reach. `approvers` says who may decide, `defaultAction`
+is a pre-authorised decision, `onTimeout` says what happens when nobody answers — none of the
+three is in `GateView` at all. Not reachable-and-validated: **not reachable**. A hook returning
+`{approvers: ["u:attacker"]}` is not refused, it is structurally incapable of being read, which
+is the difference between a check somebody can forget and a shape nobody can express.
+
+Three fields remain, and each is a narrowing or pure information gain:
+
+- **`payload`** — what the human SEES. Enriching it is the useful case (attach a risk score, a
+  diff, an incident link) and grants nothing. `contentDigest` is computed inside `raise`, AFTER
+  this hook, so the digest pins what the approver actually saw rather than what the node
+  originally rendered.
+- **`excludedApprovers`** — union only. Barring one more subject narrows; a shorter list handed
+  back cannot un-bar anyone.
+- **`allowEdit`** — intersection only. Shrinking what an `edit` decision may write narrows; a
+  channel the gate never allowed cannot be added.
+
+**Two things worth recording about the build rather than the design.**
+
+The deadlock from `onError` generalises: this path is on the commit chain too, so the
+`hook.applied` rows go through `ctx.log.append` directly — which is what `raise` itself does
+five lines later. `#journalHooks` is now the wrong tool anywhere inside `#commit`, and only the
+two points outside it (`preTool`, `preModel`/`postModel`/`postTool`) may use it.
+
+And the first test asserted the wrong thing: it looked for the enriched payload in the gate
+RECORD, which deliberately carries `contentDigest` and not the payload. The observable proof is
+that the digest MOVED — same graph, same inputs, hook versus no hook — which is a stronger
+assertion than the one I set out to write, because it checks the pinning rather than the
+plumbing.
+
+Wired: `preModel`, `postModel`, `preTool`, `postTool`, `onError`, `onGate`, `onComplete`.
+Refused at compile until built: `prePlan`, `preNode`.
