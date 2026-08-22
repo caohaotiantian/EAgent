@@ -4694,3 +4694,36 @@ filter should key on what they can see — and now it is written down instead of
 Zero blast radius: nothing in `src/` or `test/` declared `codes`, only the schema in
 `02-EXECUTION-GRAPH.md`. Two of the audit's defects remain: `rewind` wedging a run, and
 `loom compile` fabricating resource pins.
+
+## A rewind reported success having undone the work and not redone it
+
+`rewind` is the only recovery command, and it was worse than the register said. The register
+called it a wedge — `E_OUTPUT_MISSING` on the next advance. Reproduced, it is quieter than that.
+
+A node's declared `checkpoint: "before"` lands BETWEEN that node's `task.leased` and its
+`task.committed` by construction. Rewinding to it suppresses the commit and leaves the lease, so
+the fold shows a task held by a worker whose work no longer exists — and `#advanceSerially`
+leases only tasks in state `ready`. Measured on a one-node graph:
+
+    rewind to the node's own checkpoint  →  task "leased", run "running"
+    advance                             →  "succeeded", n = 0
+
+`n` is the output channel and `0` is its INPUT value. `advance` found nothing runnable, walked
+to `#finish`, and appended a second `run.completed`. **Not a wedge — a run that says it did the
+work and did not**, which is the worse of the two and the reason the register's description
+mattered less than the reproduction.
+
+A lease the rewind undid is not a lease. `rewind` now appends `task.ready` for every task left
+`leased`, so the task is runnable again and the node actually re-runs: `n = 1`. That is also what
+makes `checkpoint: "before"` mean anything — the checkpoint a node declares is precisely the one
+that strands its own lease.
+
+**The auditor did not catch it, and now does.** `task.leased-is-resolved`: a task left `leased`
+on a run that COMPLETED is work the run reported as done and never did. Gated on `run.completed`,
+because a cancelled or failed run legitimately abandons an in-flight lease.
+
+**And the rule caught a fixture on its way in — the fourth time.** The retry regression fixture
+leased for attempt 2 and never committed, which no engine emits. Fixed the fixture, not the rule.
+The tally is now: a journal with no submission, commits with no lease, a subgraph child id no
+engine mints, and this. **Every hand-built fixture drifts from what the engine writes; the drift
+is invisible until a rule looks at that part of the shape, and the rule is right every time.**

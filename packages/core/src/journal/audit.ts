@@ -47,6 +47,7 @@ export const AUDIT_RULES = [
   "gate.decision-has-a-raise",
   "task.committed-once",
   "task.leased-precedes-commit",
+  "task.leased-is-resolved",
   "run.submitted-is-first-and-once",
   "call-pairs-with-its-effect",
   "gate.raise-has-a-decision",
@@ -148,6 +149,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const raisedGates = new Set<string>();
   const commits = new Map<string, number>();
   const leased = new Set<string>();
+  const openLeases = new Map<string, number>();
   const decidedTasks = new Set<string>();
   const reducedTasks = new Set<string>();
   const rootWriters = new Map<string, { seq: number; channels: string }>();
@@ -327,9 +329,15 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         break;
       }
       case "task.leased": {
-        if (e.taskId !== undefined) leased.add(String(e.taskId));
+        if (e.taskId !== undefined) {
+          leased.add(String(e.taskId));
+          openLeases.set(String(e.taskId), seq);
+        }
         break;
       }
+      case "task.failed":
+        if (e.taskId !== undefined) openLeases.delete(String(e.taskId));
+        break;
       case "run.submitted":
         submissions.push(seq);
         break;
@@ -398,6 +406,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           add("task.committed-once", seq, `task "${tid}" committed at seq ${String(before)} and again here`);
         }
         commits.set(tid, seq);
+        openLeases.delete(tid);
         // A ROOT-BRANCH task reduces its writes immediately; one inside a fan-out holds them
         // until its join, which is why this asks only about `root`.
         const wrote = Object.keys((p["writes"] ?? {}) as Record<string, unknown>);
@@ -454,6 +463,20 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   }
 
   if (completed) {
+    // A LEASE THE RUN NEVER RESOLVED. `#advanceSerially` leases only tasks in state `ready`, so
+    // a task left `leased` on a run that COMPLETED is work the run reported as done and never
+    // did. Reproduced: a rewind whose checkpoint sat between a task's lease and its commit
+    // suppressed the commit and left the lease, and the run re-completed with its output channel
+    // back at the INPUT value — `succeeded`, having done nothing.
+    //
+    // `run.completed` only: a cancelled or failed run legitimately abandons an in-flight lease.
+    // EVIDENCE IS "a lease existed and the run completed", not "a violation was found". Recording
+    // it inside the loop below made a clean run report the rule as never checked — which is the
+    // distinction this report exists to keep.
+    if (leased.size > 0) saw.add("task.leased-is-resolved");
+    for (const [tid, seq] of openLeases) {
+      add("task.leased-is-resolved", seq, `task "${tid}" was leased and the run completed without committing or failing it`);
+    }
     for (const [child, seq] of childStarts) {
       saw.add("subgraph.start-and-completion-pair");
       add("subgraph.start-and-completion-pair", seq, `subgraph "${child}" started and the parent completed without recording its end`);

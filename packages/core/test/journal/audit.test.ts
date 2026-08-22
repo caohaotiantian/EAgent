@@ -108,6 +108,9 @@ test("REGRESSION: a RETRY re-uses the key by design and must audit clean", () =>
     ev("task.leased", { attempt: 2 }, { taskId: "ask@root#0" }),
     ev("effect.started", { key: "ask@root#0:model:0", kind: "model", attempt: 2 }),
     ev("effect.completed", { key: "ask@root#0:model:0", result: {}, resultDigest: "d" }),
+    // A real retry COMMITS on the attempt that succeeds. Leaving this out made the fixture a run
+    // the engine cannot produce — and `task.leased-is-resolved` caught it, correctly.
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 2 }, { taskId: "ask@root#0" }),
     DONE(),
   ]);
   assert.deepEqual(rulesHit(evs), [], "a successful retry is not a double completion");
@@ -501,4 +504,32 @@ test("hook.applied-ref-is-declared — an extension that was not installed chang
   const r = auditRun(evs);
   assert.deepEqual(r.violations, []);
   assert.ok(!r.checked.includes("hook.applied-ref-is-declared"));
+});
+
+test("task.leased-is-resolved — work the run reported as done and never did", () => {
+  // Reproduced from a real defect: a rewind whose checkpoint sat between a task's lease and its
+  // commit suppressed the commit and left the lease, so `#advanceSerially` — which leases only
+  // `ready` tasks — never re-ran it, and the run re-completed with its output channel back at
+  // the INPUT value.
+  const stranded = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "one@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(stranded), ["task.leased-is-resolved"]);
+
+  const failedInstead = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "one@root#0" }),
+    ev("task.failed", { error: { code: "E_TOOL_SOURCE_UNAVAILABLE" }, attempt: 1 }, { taskId: "one@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(failedInstead), [], "a task that FAILED resolved its lease");
+
+  // A run that did not COMPLETE may legitimately abandon an in-flight lease.
+  seq = 0;
+  const cancelled = [
+    ev("run.submitted", {}),
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "one@root#0" }),
+    ev("run.cancelled", { reason: "operator" }),
+  ];
+  assert.deepEqual(rulesHit(cancelled), [], "a cancelled run is not in violation for stopping");
 });

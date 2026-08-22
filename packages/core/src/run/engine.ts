@@ -1739,6 +1739,36 @@ export class Engine {
     // a rewind has just invalidated everything that cursor knew; `projection` folds from
     // seq 1 and works with or without a context. Rewind is rare by construction, so paying
     // a whole fold here buys the ability to rewind a run this engine no longer holds.
+    const rewound = (await this.projection(runId))!;
+
+    // A LEASE THE REWIND UNDID IS NOT A LEASE. The `task.leased` that put a task into `leased`
+    // can sit BELOW the checkpoint while the `task.committed` that ended it sits above — so the
+    // fold shows a task held by a worker whose work no longer exists, and `#advanceSerially`
+    // leases only tasks in state `ready`. The task was therefore never re-run.
+    //
+    // Measured on a one-node graph with `checkpoint: "before"`, rewinding to its own checkpoint:
+    // the task stayed `leased`, `advance` found nothing runnable, walked to `#finish`, and
+    // appended a SECOND `run.completed` — reporting `succeeded` with the output channel back at
+    // its INPUT value. Not a wedge: a run that says it did the work and did not. Re-arming the
+    // lease is what makes `checkpoint: "before"` mean anything, since the checkpoint a node
+    // declares lands between its lease and its commit by construction.
+    const stranded = Object.values(rewound.tasks).filter((task) => task.state === "leased");
+    if (stranded.length === 0) return rewound;
+
+    await this.#serialize(() =>
+      ctx.log.append(
+        stranded.map((task) => ({
+          type: "task.ready" as const,
+          payload: {
+            nodeId: task.nodeId,
+            branchPath: encodeBranch(task.branch),
+            edgesIn: [...(task.edgesIn ?? [])],
+          },
+          actor: SYSTEM_ACTOR("scheduler"),
+          taskId: task.taskId,
+        })),
+      ),
+    );
     return (await this.projection(runId))!;
   }
 

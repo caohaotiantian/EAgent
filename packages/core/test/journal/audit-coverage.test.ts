@@ -71,7 +71,6 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   "run.resumed": { kind: "no-relation", why: "a resume with no prior suspend is legal: a fresh process attaching a live run appends one" },
   "run.failed": { kind: "no-relation", why: "a terminal marker; the auditor reads its ABSENCE (via run.completed) to decide whether `eventually` rules apply" },
   "run.cancelled": { kind: "no-relation", why: "terminal marker, same as run.failed" },
-  "task.failed": { kind: "no-relation", why: "a failure is a legal outcome at any point; the retry that may follow is constrained by attempt, not by this" },
   "task.retry_scheduled": { kind: "no-relation", why: "advisory: the lease that follows is what actually re-runs the task" },
   "task.progress": { kind: "no-relation", why: "free-form progress text from a tool; constrains nothing" },
   "action.pending": { kind: "no-relation", why: "an intervention-window marker; the hold either elapses or is interrupted, and both are legal" },
@@ -142,5 +141,5 @@ test("THE `todo` LIST MUST NOT GROW", () => {
   // not cost a test edit. Adding a todo is how a rule set decays quietly, and that has to fail.
   const todos = Object.entries(EXCUSED).filter(([, e]) => e.kind === "todo").length;
   assert.ok(todos <= 5, `${todos} event types are marked todo; it was 15 when this gate was written, 5 now, and may only shrink`);
-  assert.ok(AUDIT_RULES.length >= 18, `${AUDIT_RULES.length} rules; deleting one needs a reason in the journal, not a quiet edit`);
+  assert.ok(AUDIT_RULES.length >= 19, `${AUDIT_RULES.length} rules; deleting one needs a reason in the journal, not a quiet edit`);
 });
