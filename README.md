@@ -20,7 +20,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Durability** | Append-only journal on `node:sqlite`. A run SUSPENDED on a human gate survives `kill -9` and resumes in another process |
 | **Human oversight** | Three postures by configuration alone; gates are rows, so a suspended run holds zero worker slots. An approval binds the graph it was shown — spec, resolved resources and oversight floor |
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
-| **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy. A provider that ignores `stream: true` fails loudly rather than reporting an empty success |
+| **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains in `--models-file`. A provider that ignores `stream: true` fails loudly rather than reporting an empty success |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
 | **Gates** | `npm run check` — 3347 tests across both packages, offline, no API key; zero-dep and public-surface guards |
 
@@ -40,7 +40,6 @@ Stated because a framework that overstates itself costs its user a day finding o
 
 | **`rewind`** | Rewinding to a node's own declared checkpoint wedges the run: the task stays leased and the next `advance` fails. Only a `task.ready` boundary works, and `rewind` never self-advances |
 | **`onBudgetExhausted: "gate"` / `"degrade"`** | Compile errors, deliberately. `gate` used to compile and then fail exactly as `"fail"` does, having promised a human; building it needs a way to raise a budget mid-run, and there is none |
-| **Declarative fallback chains** | `FallbackAdapter` is written and tested; nothing constructs one, and a `--models-file` route cannot express a chain |
 | **`EdgeSpec.codes`** | The error-edge code filter has no reader, so every error edge is a catch-all whatever it declares. `RetryPolicy.onlyIf` IS read, which makes the asymmetry easy to trip over |
 | **`loom compile` against a missing resource** | Reports `ok`. A ref that merely *looks* like a ref is pinned to a digest of its own name; the failure arrives at run time, loudly, instead of at compile |
 | **Replay of a run a human de-escalated** | Diverges. Replay never re-applies `policy.deescalated`, so the replayed run has no ceiling and gates where the original did not |

@@ -939,3 +939,110 @@ test("`loom run` SAYS WHEN THE MOCK ANSWERED — the warning lived only in serve
     d.dispose();
   }
 });
+
+// ── declarative fallback chains ──────────────────────────────────────────────
+
+const CHAIN = {
+  adapters: [
+    { provider: "anthropic", name: "big" },
+    { provider: "anthropic", name: "small" },
+  ],
+  routes: {
+    "agent_profile/summarizer@stable": {
+      adapter: "big",
+      model: "claude-opus-5",
+      fallback: [{ adapter: "small", model: "claude-haiku-4-5-20251001", when: ["E_PROVIDER_RATE_LIMIT"] }],
+    },
+  },
+};
+
+test("A RATE-LIMITED PRIMARY FALLS THROUGH TO THE TIER THE FILE NAMED", async () => {
+  // `FallbackAdapter` has been written and tested since the provider layer landed, and
+  // `grep -ran 'new FallbackAdapter' src/` returned NOTHING — a route row could name one adapter
+  // and no more, so the capability README advertises on its front page was real and unreachable.
+  const d = emptyDir();
+  try {
+    const seen: string[] = [];
+    const cfg = readModels(modelsFile(d.dir, CHAIN), FAKE_ENV, async (_url, init) => {
+      const body = JSON.parse(String(init.body)) as { model: string };
+      seen.push(body.model);
+      // The PRIMARY is rate-limited; the tier answers.
+      if (body.model === "claude-opus-5") return new Response("{}", { status: 429 });
+      return new Response(
+        [
+          'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+          'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+          'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+          "data: {\"type\":\"message_stop\"}",
+        ].map((f) => `${f}\n\n`).join(""),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    const events = [];
+    for await (const ev of cfg.adapter.stream(
+      { model: "agent_profile/summarizer@stable", system: "s", messages: [{ role: "user", content: "hi" }], tools: [] },
+      new AbortController().signal,
+    )) {
+      events.push(ev);
+    }
+
+    assert.ok(seen.includes("claude-opus-5"), `the primary must be tried first: ${seen.join(", ")}`);
+    assert.ok(seen.includes("claude-haiku-4-5-20251001"), `the declared tier must answer: ${seen.join(", ")}`);
+    assert.ok(events.some((e) => e.type === "done"), "and the caller gets a completed turn");
+  } finally {
+    d.dispose();
+  }
+});
+
+test("AN UNDECLARED FALLBACK ADAPTER IS REFUSED, not skipped", () => {
+  // A skipped tier is a chain that reads as resilience and has none — the same rule the adapter
+  // rows already make about an unknown provider.
+  const d = emptyDir();
+  try {
+    const bad = {
+      adapters: [{ provider: "anthropic", name: "big" }],
+      routes: { k: { adapter: "big", model: "m", fallback: [{ adapter: "ghost", model: "m2" }] } },
+    };
+    assert.throws(() => readModels(modelsFile(d.dir, bad), FAKE_ENV), /ghost/, "the file must be refused by name");
+  } finally {
+    d.dispose();
+  }
+});
+
+test("A CHAIN THAT WOULD EVADE A CONTENT FILTER FAILS TO BUILD", () => {
+  // `FallbackAdapter` refuses a policy-class code AT CONSTRUCTION, because trying a second vendor
+  // after a content filter declined is evasion rather than resilience. Wiring the chain through
+  // the models file must not lose that refusal — it is the guard most likely to be dropped in a
+  // port, since it looks like defensive typing until you read why it is there.
+  const d = emptyDir();
+  try {
+    const evasive = {
+      adapters: [{ provider: "anthropic", name: "a" }, { provider: "anthropic", name: "b" }],
+      routes: { k: { adapter: "a", model: "m", fallback: [{ adapter: "b", model: "m2", when: ["E_CONTENT_FILTERED"] }] } },
+    };
+    assert.throws(() => readModels(modelsFile(d.dir, evasive), FAKE_ENV), /E_CONTENT_FILTERED|content/i);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("AN UNPRICED FALLBACK TIER IS REPORTED — a chain spends when it falls through", () => {
+  // The pricing check read only the model a route NAMES. A chain whose tier is unpriced spends
+  // without limit the moment it falls through, and reports `costUsd: 0` for it.
+  const d = emptyDir();
+  try {
+    const chain = {
+      adapters: [{ provider: "anthropic", name: "big" }, { provider: "anthropic", name: "small" }],
+      routes: { k: { adapter: "big", model: "claude-opus-5", fallback: [{ adapter: "small", model: "some-unpriced-model" }] } },
+    };
+    const cfg = readModels(modelsFile(d.dir, chain), FAKE_ENV);
+    assert.ok(
+      cfg.unpriced.some((u) => u.includes("some-unpriced-model")),
+      `the unpriced TIER must be named: ${cfg.unpriced.join(", ")}`,
+    );
+    assert.ok(!cfg.unpriced.some((u) => u.includes("claude-opus-5")), "and the priced primary must not be");
+  } finally {
+    d.dispose();
+  }
+});

@@ -4642,3 +4642,31 @@ with the reason. A shared compile fixture and the corpus's only end-to-end examp
 `gate`, and `docs-examples` failed until they said `fail` — a design document whose example
 cannot compile is drift, and the guard treats it as such. Each failure was the change being
 measured rather than a cost of making it.
+
+## Declarative fallback chains, which the front page promised and nothing constructed
+
+`FallbackAdapter` has been written and fully tested since the provider layer landed, and
+`grep -ran 'new FallbackAdapter' packages/core/src/` returned NOTHING. A models-file route row
+could name one adapter and no more, so the capability README advertises — on the row a reader
+consults before pointing this at a provider — was real and unreachable.
+
+A route row takes an optional `fallback` list now, and the chain becomes a SYNTHETIC ADAPTER the
+route points at, so `RoutingAdapter` is untouched: it still maps one key to one adapter, and the
+fanning-out happens a layer down where `FallbackAdapter` already lives.
+
+**Three refusals came with it, and one of them is the guard most likely to be lost in a port.**
+An undeclared tier adapter is refused rather than skipped — a skipped tier is a chain that reads
+as resilience and has none, which is the rule the adapter rows already make about an unknown
+provider. A malformed `when` is refused. And `FallbackAdapter` refuses a policy-class code AT
+CONSTRUCTION, because trying a second vendor after a content filter declined is evasion rather
+than resilience — wiring the chain through a config file must not lose that, so the construction
+refusal is re-raised naming the file and the row, and a test pins it. It looks like defensive
+typing until you read why it is there, which is exactly why it needed a test at this layer.
+
+**And the pricing check had the same hole one tier down.** `unpriced` read only the model a route
+NAMES, so a chain whose fallback is unpriced spends without limit the moment it falls through and
+reports `costUsd: 0` for it. It walks every tier now.
+
+The README row is gone and the front-page claim is true. That leaves three of the audit's
+defects: `rewind` wedging a run, `loom compile` fabricating resource pins, and `EdgeSpec.codes`
+having no reader.

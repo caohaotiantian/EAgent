@@ -60,6 +60,7 @@ import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
 import type { RunProjection, TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
+import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
@@ -865,6 +866,8 @@ export function readModels(
   });
 
   const routes = new Map<string, Route>();
+  /** routeKey → every (adapter, model) it can reach, primary first. Only the pricing check reads it. */
+  const chainTiers = new Map<string, { adapter: string; model: string }[]>();
   const routeRows = root.routes;
   if (typeof routeRows !== "object" || routeRows === null || Array.isArray(routeRows)) {
     refuse(`"routes" must be an object mapping each ModelRequest.model the engine sends to {"adapter":…,"model":…}`);
@@ -877,7 +880,58 @@ export function readModels(
     if (!adapters.has(adapter)) {
       refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
     }
-    routes.set(key, { adapter, model: nonEmpty(row["model"], `${where} "model"`, refuse) });
+    const model = nonEmpty(row["model"], `${where} "model"`, refuse);
+
+    // DECLARATIVE FALLBACK CHAINS, which the README promised and nothing constructed.
+    // `FallbackAdapter` has been written and tested since the provider layer landed;
+    // `grep -ran 'new FallbackAdapter' src/` returned nothing, and a route row could only ever
+    // name one adapter, so the capability was real and unreachable — on the row a reader
+    // consults before pointing this at a provider.
+    //
+    // The chain becomes a SYNTHETIC ADAPTER and the route points at it, so `RoutingAdapter` is
+    // untouched: it still maps one key to one adapter, and the fanning-out happens a layer down
+    // where `FallbackAdapter` already refuses a policy-class code at construction.
+    const rawTiers = row["fallback"];
+    if (rawTiers !== undefined) {
+      if (!Array.isArray(rawTiers) || rawTiers.length === 0) {
+        refuse(`${where} "fallback" must be a non-empty list of {"adapter":…,"model":…,"when":[…]}`);
+      }
+      const tiers = (rawTiers as unknown[]).map((rawTier, i) => {
+        const at = `${where} fallback[${String(i)}]`;
+        const tier = rawTier as Record<string, unknown> | null;
+        if (typeof tier !== "object" || tier === null || Array.isArray(tier)) refuse(`${at} is not an object`);
+        const name = nonEmpty(tier["adapter"], `${at} "adapter"`, refuse);
+        // REFUSED, not skipped — the same rule the adapter rows make, for the same reason: a
+        // skipped tier is a chain that looks like resilience and has none.
+        if (!adapters.has(name)) {
+          refuse(`${at} names adapter "${name}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
+        }
+        const when = tier["when"];
+        if (when !== undefined && !(Array.isArray(when) && when.every((c) => typeof c === "string"))) {
+          refuse(`${at} "when" must be a list of normalized error codes, e.g. ["E_PROVIDER_RATE_LIMIT"]`);
+        }
+        return {
+          adapter: adapters.get(name)!,
+          model: nonEmpty(tier["model"], `${at} "model"`, refuse),
+          ...(when === undefined ? {} : { when: when as readonly string[] }),
+        };
+      });
+      chainTiers.set(key, [{ adapter, model }, ...(rawTiers as Record<string, unknown>[]).map((tr, i) => ({ adapter: String(tr["adapter"]), model: String(tr["model"] ?? `?${String(i)}`) }))]);
+      const chainName = `chain(${key})`;
+      try {
+        adapters.set(chainName, new FallbackAdapter({ provider: chainName, primary: { adapter: adapters.get(adapter)!, model }, fallback: tiers }));
+      } catch (e) {
+        // `FallbackAdapter` refuses a chain naming a policy-class code AT CONSTRUCTION —
+        // retrying a content filter elsewhere is evasion, not resilience. Re-raised naming the
+        // file and the row, exactly as an adapter's own construction refusal is.
+        if (isLoomError(e)) refuse(`${where} "fallback": ${e.message}`);
+        throw e;
+      }
+      routes.set(key, { adapter: chainName, model });
+      continue;
+    }
+
+    routes.set(key, { adapter, model });
   }
   if (routes.size === 0) {
     refuse(
@@ -896,9 +950,15 @@ export function readModels(
     // without limit while reporting `costUsd: 0`. That matters more since a graph's declared
     // `policy.budget.costUsd` became a real ceiling: the ceiling is unreachable if nothing ever
     // approaches it. Probed with a million tokens each way, which is the unit the tables use.
-    unpriced: [...routes.entries()]
-      .filter(([, r]) => adapters.get(r.adapter)?.priceOf(r.model, { inputTokens: 1e6, outputTokens: 1e6 }) === 0)
-      .map(([key, r]) => `${key} → ${r.adapter}/${r.model}`),
+    // EVERY TIER, not just the one a route names. A chain whose fallback is unpriced spends
+    // without limit the moment it falls through, and the run reports `costUsd: 0` for it —
+    // which is the same hole this check exists to close, one tier down.
+    unpriced: [...routes.entries()].flatMap(([key, r]) => {
+      const reach = chainTiers.get(key) ?? [{ adapter: r.adapter, model: r.model }];
+      return reach
+        .filter((t) => adapters.get(t.adapter)?.priceOf(t.model, { inputTokens: 1e6, outputTokens: 1e6 }) === 0)
+        .map((t) => `${key} → ${t.adapter}/${t.model}`);
+    }),
     file: path,
   };
 }
