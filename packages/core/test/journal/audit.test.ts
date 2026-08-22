@@ -190,3 +190,36 @@ test("A MALFORMED JOURNAL IS DIAGNOSED, NOT CRASHED ON", () => {
   assert.ok(Array.isArray(r.violations), "it returns a report rather than throwing");
   assert.deepEqual(rulesHit(evs), ["policy.deescalation-is-human"], "a missing actor is not human");
 });
+
+test("gate.decision-has-a-raise — a forged approval passes every other rule clean", () => {
+  // The mirror of `effect.completion-has-a-start`, and the direction that matters for security.
+  // `gates.ts` spends hundreds of lines making a decision-without-a-raise impossible at the door;
+  // nothing read the record back to confirm the door held.
+  const forged = fixture(() => [ev("gate.decided", { gateId: "g9", decision: "approve" }, { actor: HUMAN }), DONE()]);
+  assert.deepEqual(rulesHit(forged), ["gate.decision-has-a-raise"]);
+
+  const real = fixture(() => [
+    ev("gate.raised", { gateId: "g9", nodeId: "n" }),
+    ev("gate.decided", { gateId: "g9", decision: "approve" }, { actor: HUMAN }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(real), []);
+});
+
+test("task.committed-once — the double-commit the seq-CAS exists to prevent", () => {
+  const twice = fixture(() => [
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(twice), ["task.committed-once"]);
+
+  // A loop iteration and a fan-out branch each mint a DIFFERENT TaskId, so these are not doubles.
+  const legal = fixture(() => [
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#1" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root/e0[1]#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(legal), [], "different taskIds are different tasks");
+});

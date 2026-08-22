@@ -4175,3 +4175,39 @@ retry, rewind, partial failure — before the rule is worth anything.
 The follow-on is unchanged: the `EVENT_TYPES` exhaustiveness gate — 52 types each either named by
 a rule or carrying an explicit "no relation" excuse — which is what stops the rule set decaying
 as the vocabulary grows, and which would have caught the two dead rules at birth.
+
+## The exhaustiveness gate — what stops a rule set decaying quietly
+
+Two of `auditRun`'s first eight rules were built on event types nothing appends. The information
+that would have caught it at birth was already in this repo: `docs-drift.test.ts` pins those types
+in a never-appended registry. **Nothing connected the two.** This is that connection.
+
+`test/journal/audit-coverage.test.ts` asserts that each of the 52 `EVENT_TYPES` is either
+constrained by a rule or excused in writing, that nothing is both, and that no excuse names a type
+the vocabulary has dropped. The constrained set is read from `audit.ts`'s SOURCE — the `case`
+labels it actually branches on — because a hand-maintained "types my rules read" list is a second
+copy that drifts the moment somebody edits one and not the other, which is the exact failure the
+file exists to prevent.
+
+Four kinds of excuse, and the split is the useful part: **never-appended** (7, cross-checked
+against the other registry so the two cannot disagree), **indirect** (1 — `checkpoint.restored`,
+consumed by `suppressedRanges`, which is the strongest constraint here since it decides what the
+auditor can see at all), **no-relation** (17 claims that can be argued with), and **todo** (15
+promises somebody has to keep). The todo list may shrink and not grow.
+
+**Writing the excuses was the point, and it produced two rules.** Working through the list made it
+obvious that `gate.decided` had no mirror — a forged approval row appended by a second writer
+passed every rule clean, which is the security-relevant direction and exactly the shape
+`effect.completion-has-a-start` catches for effects. And `task.committed` twice for one TaskId —
+the double-commit the seq-CAS and the fencing token exist to prevent — had no reader either. Both
+are rules now; both were found by being made to say, in prose, why an event needed no rule.
+
+**Three things this session proved about the gate rather than asserted.** Its own excuse check
+caught a shrug I wrote ("the mirror of the above", 24 characters). Breaking the source scanner
+fails loudly instead of silently reporting everything unconstrained — the failure that would
+otherwise read like work. And when a stray `git checkout` reverted the two new rules mid-session,
+the gate is what noticed: *"6 rules; deleting one needs a reason in the journal, not a quiet edit."*
+
+**Reverses when** the todo list stops shrinking. A promise nobody keeps is worth less than an
+honest "no relation", and the right move then is to demote the entries rather than let the number
+sit there.

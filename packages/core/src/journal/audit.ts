@@ -44,6 +44,8 @@ export const AUDIT_RULES = [
   "effect.completed-once-per-attempt",
   "policy.deescalation-is-human",
   "gate.raised-is-resolved",
+  "gate.decision-has-a-raise",
+  "task.committed-once",
   "edge.taken-belongs-to-its-node",
 ] as const;
 
@@ -125,6 +127,8 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const startedAttempt = new Map<string, number>();
   const completions = new Map<string, number>();
   const openGates = new Map<string, number>();
+  const raisedGates = new Set<string>();
+  const commits = new Map<string, number>();
 
   for (const e of live) {
     const seq = Number(e.seq);
@@ -190,6 +194,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         if (id !== undefined) {
           saw.add("gate.raised-is-resolved");
           openGates.set(id, seq);
+          raisedGates.add(id);
         }
         break;
       }
@@ -202,14 +207,34 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         const many = Array.isArray(p["gateIds"]) ? (p["gateIds"] as unknown[]) : [];
         for (const id of [...(one === undefined ? [] : [one]), ...many]) {
           const s = str(id);
-          if (s !== undefined) openGates.delete(s);
+          if (s === undefined) continue;
+          saw.add("gate.decision-has-a-raise");
+          // THE MIRROR OF `effect.completion-has-a-start`, and the direction that matters for
+          // security: a forged approval row appended by a second writer passes every other rule
+          // clean. `gates.ts` spends hundreds of lines making this impossible at the door;
+          // nothing read the record back to confirm the door held.
+          if (!raisedGates.has(s)) {
+            add("gate.decision-has-a-raise", seq, `${e.type} for gate "${s}", which was never raised in this run`);
+          }
+          openGates.delete(s);
         }
         break;
       }
       case "task.committed": {
         const tid = e.taskId === undefined ? undefined : String(e.taskId);
         const take = Array.isArray(p["take"]) ? (p["take"] as unknown[]) : [];
-        if (tid === undefined || opts.edgeSource === undefined) break;
+        if (tid === undefined) break;
+        saw.add("task.committed-once");
+        // The double-commit the seq-CAS and the fencing token exist to prevent. A loop iteration
+        // and a fan-out branch each mint a DIFFERENT TaskId (`nodeId@branchPath#iteration`), so
+        // one taskId committing twice is not a legal shape — once a rewind's undone history is
+        // filtered out, which is why this reads `live` rather than the raw log.
+        const before = commits.get(tid);
+        if (before !== undefined) {
+          add("task.committed-once", seq, `task "${tid}" committed at seq ${String(before)} and again here`);
+        }
+        commits.set(tid, seq);
+        if (opts.edgeSource === undefined) break;
         const owner = nodeOf(tid);
         for (const raw of take) {
           const edge = str(raw);
