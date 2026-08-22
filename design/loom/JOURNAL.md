@@ -4798,3 +4798,72 @@ silently out of that index and the approver was told `E_RUN_NOT_FOUND`: "no grap
 has that hash … restore them to answer the gate" — about bytes nobody changed. Scoped, the same
 deletion produces `E_GRAPH_MISMATCH{differs: "resources"}`, which is true, and restoring the file
 makes the gate answerable again. Both halves are mutation-tested against the same test.
+
+---
+
+## D5 — the compiler was never the problem
+
+*Reversal condition: when `agent_profile` resources carry a real profile document, or an
+`OversightPolicy` resolver seam exists, that kind leaves `NAME_ONLY_KINDS` in the same change
+that builds the reader. A kind that has become a document and is still on the list is a graph
+that compiles and cannot run.*
+
+`loom compile` said `ok` for a graph naming `agent_profile/does-not-exist@stable` and
+`prompt/also-missing@stable`. The register called it a compiler gap and prescribed adding an
+`oversight` resource kind. Both were wrong.
+
+`rule015Resources` has raised `GRAPH015_RESOURCE_NOT_FOUND` **as an error** since long before
+this. It could not fire because `openWorkspace`'s resolver answered every syntactically valid ref
+with a fabricated pin:
+
+    oversight/deploy@stable  →  sha256:6f76657273696768742f6465706c6f7940737461626c65000…
+
+which is the ref, hex-encoded, and decodes back to itself. **A digest derived from the ref
+carries nothing `graphHash` does not already carry**, so it bound nothing and proved nothing —
+and `spec.ts`'s claim that a pinned `humanGate.ref` "proves a policy EXISTS and pins its bytes"
+was false against the fabricator. Deleting the fallback is one line.
+
+**The real question was the second one, and the answer is not the one the register proposed.**
+Of the seven ref-bearing fields, two name kinds whose content nothing in `src/` reads:
+
+- `agent_profile` — a ROUTING KEY. `#runAgent` passes it straight through as
+  `ModelRequest.model`; `--models-file`'s `routes` table maps it. `cli.ts` already stated the
+  reversal.
+- `oversight` — a POLICY LABEL. `humanGate.ref` becomes `policyRef`, which gates batch by;
+  D7.2's blocks are inline on the node for exactly that reason. 04-OVERSIGHT.md already stated
+  the reversal.
+
+Publishing `oversight` as a resource kind — the register's prescription — would have made every
+gated graph carry a JSON file with no schema and no reader: the fifth caller-less capability,
+one wave after finding the fourth. `NAME_ONLY_KINDS` says instead that **a ref which becomes a
+document must exist and a ref which is a key need not**, names both entries, carries both
+reversal conditions, and is gated against growth.
+
+**Measured before choosing, and the measurement was the whole decision.** A probe appended every
+ref for which `resolver.resolve()` returned `undefined` across all 1888 Loom tests: zero. Every
+in-tree resolver answers everything, so the diagnostic could not break a test — and could not be
+caught by one either, which is why the new suite builds workspaces that genuinely lack a ref.
+Removing the fabrication then failed 15 tests; exempting the two key kinds took it to 6, and
+every one of those six was a fixture leaning on the fabrication:
+
+- a "failed run prints its error" fixture that reached run time only because a missing
+  `subgraph` ref compiled. Now a PUBLISHED function body that does not evaluate — resolves,
+  compiles, and raises the same `E_RESOURCE_NOT_FOUND` from `FunctionRegistry.require`.
+- two that asserted the fabrication directly ("an unpublished ref still pins"). One of them,
+  "A SPEC FILE THAT PARSES TO SOMETHING THAT IS NOT A SPEC IS NOT PUBLISHED", could finally
+  assert its own title: those files do not publish, where before the strongest available check
+  was that their fabricated pin served no document.
+
+**And it found a swallow that predates all of it.** `graphsByHash` — the index an approver's
+gate is answered through — caught every compile failure per file and dropped it in silence, so
+the operator got "no graph in `graphs/` has that hash (N searched)": true, useless, and pointing
+at the one directory that was fine. It now returns what it could not build, and the refusal names
+the file and the reason. Any compile failure had this; a deleted hook body is only how it
+surfaced.
+
+**A test that could not fail, caught by mutation.** The gate keeping `NAME_ONLY_KINDS` from
+growing also requires each entry to carry its reversal condition — first written as a COUNT of
+the word "reversal" in the docstring. Three mentions minus one still cleared a threshold of two,
+so deleting an entry's condition left it green. The unit is the bullet, not the file, and the
+last bullet has to stop at the end of the list rather than running into the closing paragraph —
+which is the second version of the same mistake, found the same way.

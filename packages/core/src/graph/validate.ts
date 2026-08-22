@@ -2225,11 +2225,56 @@ function collectRefs(spec: GraphSpec): { ref: ResourceRef; at: Diagnostic["at"] 
   return out;
 }
 
+/**
+ * KINDS WHOSE CONTENT NOTHING READS, so a ref of that kind resolving to nothing is not an error.
+ *
+ * This is not a courtesy list. Every OTHER kind a graph can name becomes a document the run
+ * needs — a `prompt` reaches `#documentFor`, a `function` and a `hook` are compiled bodies, a
+ * `subgraph` is a child spec — and a ref that names none of those is a run that will fail. These
+ * two are different in kind rather than in degree: they are KEYS.
+ *
+ *   `agent_profile` — the routing key. `#runAgent` passes `agent.profile` straight through as
+ *     `ModelRequest.model`, and the deployment's `--models-file` `routes` table is what maps it
+ *     to a real model id. `cli.ts` states the reversal: "when `agent_profile` resources carry a
+ *     real profile document and something resolves one into a model id, the `routes` table is
+ *     what gets deleted."
+ *   `oversight` — the policy label. `humanGate.ref` becomes `policyRef`, which gates BATCH by
+ *     and `resolveGate` matches on, and nothing resolves its content: D7.2's blocks are inline
+ *     on the node for exactly that reason (`ApprovalSpec`'s docstring). 04-OVERSIGHT.md states
+ *     the reversal: "a resolver seam exists that hands a validated `OversightPolicy` document to
+ *     the compiler and the broker."
+ *
+ * When either reversal lands, delete its entry here IN THE SAME CHANGE. A kind that has become a
+ * document and is still on this list is a graph that compiles and cannot run.
+ *
+ * A published resource of these kinds still resolves and still pins — this only says that its
+ * ABSENCE is not a diagnosis.
+ */
+const NAME_ONLY_KINDS: readonly string[] = ["agent_profile", "oversight"];
+
+/** Where a workspace would publish this ref. The extension is the kind's, not one list for all. */
+function publishAt(ref: string): string {
+  const kind = ref.slice(0, ref.indexOf("/"));
+  const name = ref.slice(ref.indexOf("/") + 1).split("@")[0] ?? "name";
+  const ext =
+    kind === "function" || kind === "hook" ? ".js" : kind === "subgraph" || kind === "graph" ? ".json" : ".md";
+  return `publish it — a workspace serves resources/${kind}/${name}${ext} — or correct the ref`;
+}
+
 function rule015Resources(spec: GraphSpec, resolver: ResourceResolver, d: Diagnostic[]): void {
   for (const { ref, at } of collectRefs(spec)) {
     const resolved = resolver.resolve(ref);
     if (resolved === undefined) {
-      const base = { severity: "error" as const, code: "GRAPH015_RESOURCE_NOT_FOUND", message: `resource "${ref}" does not resolve` };
+      if (NAME_ONLY_KINDS.includes(ref.slice(0, ref.indexOf("/")))) continue;
+      // A `fix` NAMING THE FILE, because this became the diagnostic an author hits most the
+      // moment the CLI stopped fabricating a pin for every syntactically valid ref, and
+      // "does not resolve" answers none of "resolve where, to what, put it where".
+      const base = {
+        severity: "error" as const,
+        code: "GRAPH015_RESOURCE_NOT_FOUND",
+        message: `resource "${ref}" does not resolve`,
+        fix: publishAt(ref),
+      };
       d.push(at === undefined ? base : { ...base, at });
       continue;
     }

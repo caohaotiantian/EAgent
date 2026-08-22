@@ -203,18 +203,42 @@ test("A WORKSPACE PUBLISHES resources/hook/*.js, and the SHIPPED ENGINE DISPATCH
 });
 
 test("a hook the workspace does NOT publish is REFUSED at compile, not skipped at run", async () => {
+  // THE COMPILER answers this one: an unpublished ref resolves to nothing, and GRAPH015 has
+  // refused that since before the hook bus existed. It could not fire while the workspace
+  // resolver fabricated a pin for any syntactically valid ref — which is the whole of D5.
   const w = workspace();
   try {
     const file = seed(w.dir);
     rmSync(join(w.dir, "resources", "hook", "memo.js"));
     for (const verb of ["compile", "run"]) {
+      const errs: string[] = [];
       await assert.rejects(
-        () => cli([verb, file, "--workspace", w.dir]),
-        (e: unknown) =>
-          isLoomError(e) && e.code === CODES.E_RESOURCE_NOT_FOUND && /preNode: hook\/memo@stable/.test(e.message),
+        () => cli([verb, file, "--workspace", w.dir]).catch((e) => { errs.push(String(e)); throw e; }),
+        (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_INVALID,
         `\`loom ${verb}\` must refuse a graph whose hook has no body`,
       );
     }
+  } finally {
+    w.dispose();
+  }
+});
+
+test("a hook that is PUBLISHED but does not evaluate is refused too — by the registry, not the compiler", async () => {
+  // The two guards cover different failures and neither subsumes the other. A body that does
+  // not parse IS published, so it resolves and GRAPH015 is satisfied; `registerHooks` then
+  // fails to compile it, warns on stderr, and registers nothing — leaving exactly the
+  // declared-and-silent hook this whole mechanism exists to prevent. `requireHookBodies`
+  // reads the REGISTRY, so it is the one that sees this.
+  const w = workspace();
+  try {
+    const file = seed(w.dir);
+    writeFileSync(join(w.dir, "resources", "hook", "memo.js"), "function (input, ctx) { return {");
+    await assert.rejects(
+      () => cli(["compile", file, "--workspace", w.dir]),
+      (e: unknown) =>
+        isLoomError(e) && e.code === CODES.E_RESOURCE_NOT_FOUND && /preNode: hook\/memo@stable/.test(e.message),
+      "a published hook body that does not evaluate must not compile `ok`",
+    );
   } finally {
     w.dispose();
   }
@@ -228,7 +252,7 @@ test("a hook published as PROSE is not published at all — .md is not a filter"
     writeFileSync(join(w.dir, "resources", "hook", "memo.md"), MEMO);
     await assert.rejects(
       () => cli(["compile", file, "--workspace", w.dir]),
-      (e: unknown) => isLoomError(e) && e.code === CODES.E_RESOURCE_NOT_FOUND,
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_INVALID,
       "a .md under resources/hook/ must not become a hook body",
     );
   } finally {
@@ -267,19 +291,20 @@ const GATED = {
   edges: [{ id: "e1", from: "g", to: "f", kind: "seq" }],
 };
 
-test("DELETING A HOOK BODY UNDER A LIVE GATE SAYS WHAT HAPPENED", async () => {
-  // The refusal above is right when a graph is being INTRODUCED and wrong when one is being
-  // matched back to a run that already exists — so `graphsByHash` does not run it.
+test("DELETING A HOOK BODY UNDER A LIVE GATE NAMES THE FILE, not just the run", async () => {
+  // The approver's message is the thing under test, and it has been wrong twice.
   //
-  // What SHOULD stop the approval is the graph-binding rule, and it does: a deleted hook body
-  // changes what the ref resolves to, so the resolution manifest no longer matches the one
-  // `run.compiled` recorded, and `#assertBound` refuses. That is the designed behaviour — the
-  // approver approved those bytes — and restoring the file restores the gate.
+  // With the workspace resolver fabricating pins, a deleted hook body changed what the ref
+  // resolved to, so `#assertBound` refused with E_GRAPH_MISMATCH{differs:"resources"} — true,
+  // but it named no file, and its `details` printed the same spec hash twice.
   //
-  // The difference this test pins is WHICH refusal the operator gets. With the check running in
-  // `graphsByHash`, the graph is swallowed out of the index and the message is E_RUN_NOT_FOUND:
-  // "no graph in graphs/ has that hash … restore them to answer the gate" — about bytes nobody
-  // changed, pointing at the one file that is fine.
+  // With the fabrication gone the ref resolves to NOTHING, GRAPH015 refuses the graph, and it
+  // drops out of `graphsByHash` — which used to swallow every compile failure in silence and
+  // tell the approver "no graph in graphs/ has that hash (N searched)". True, useless, and
+  // pointing at the one directory that is fine.
+  //
+  // What must reach them is the ref. Any compile failure had this problem; the hook is how it
+  // was found.
   const w = workspace();
   try {
     mkdirSync(join(w.dir, "graphs"), { recursive: true });
@@ -296,25 +321,21 @@ test("DELETING A HOOK BODY UNDER A LIVE GATE SAYS WHAT HAPPENED", async () => {
     const listed = await cli(["gates", summary.runId, "--workspace", w.dir]);
     const gateId = (JSON.parse(listed.out) as { gateId: string }[])[0]!.gateId;
 
-    // The gate is answerable while the extension is there.
+    // The extension is gone. The run is not.
     rmSync(join(w.dir, "resources", "hook", "noop.js"));
 
     await assert.rejects(
       () => cli(["approve", summary.runId, gateId, "--workspace", w.dir, "--as", "u:alice"]),
       (e: unknown) => {
         assert.ok(isLoomError(e), String(e));
-        assert.equal(e.code, CODES.E_GRAPH_MISMATCH, "not E_RUN_NOT_FOUND: the run and the graph are both there");
-        const d = e.details as { differs: string; expected: string; actual: string };
-        assert.equal(d.differs, "resources");
-        // The pair reported must be the pair that differs. This used to print the two SPEC
-        // hashes, which are EQUAL on this branch by construction — the same string twice, under
-        // a message saying they had changed.
-        assert.notEqual(d.expected, d.actual, "an error about a difference must report values that differ");
+        assert.match(e.message, /would not compile/, "the index must say what it could not build");
+        assert.match(e.message, /gated\.json/, "and name the graph file");
+        assert.deepEqual((e.details as { failed?: readonly string[] }).failed?.length, 1);
         return true;
       },
     );
 
-    // And putting it back makes the gate answerable again — the binding rule, not a dead end.
+    // And putting it back makes the gate answerable again — a refusal, not a dead end.
     writeFileSync(join(w.dir, "resources", "hook", "noop.js"), NOOP);
     const approved = await cli(["approve", summary.runId, gateId, "--workspace", w.dir, "--as", "u:alice"]);
     assert.equal(approved.code, 0, approved.err);

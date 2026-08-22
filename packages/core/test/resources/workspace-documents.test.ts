@@ -40,12 +40,14 @@ test("a published prompt reaches a graph, and an unpublished ref reaches nothing
   try {
     writeFileSync(join(w.dir, "resources", "prompt", "greet.md"), "Say hello.");
     assert.equal(documentFor(w.dir, "prompt/greet@stable"), "Say hello.");
-    // Still PINS — the layered resolver falls through, so a graph with no documents compiles
-    // exactly as it did before any of this existed.
+    // AND AN UNPUBLISHED ONE RESOLVES TO NOTHING. It used to resolve to a fabricated pin —
+    // `sha256:${hex(ref)}`, which decodes back to the ref — so `loom compile` said `ok` for a
+    // graph naming a prompt that did not exist, and the run then failed E_RESOURCE_NOT_FOUND
+    // inside `#documentFor`. A digest derived from the ref carries nothing `graphHash` does not
+    // already carry, so removing it lost no binding and gained GRAPH015_RESOURCE_NOT_FOUND.
     const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
     try {
-      assert.ok(ws.resolver.resolve("prompt/absent@stable") !== undefined, "an unpublished ref still pins");
-      assert.equal(ws.resolver.document?.(ws.resolver.resolve("prompt/absent@stable")!.digest), undefined);
+      assert.equal(ws.resolver.resolve("prompt/absent@stable"), undefined, "an unpublished ref must resolve to NOTHING");
     } finally {
       ws.close();
     }
@@ -185,8 +187,11 @@ test("A SPEC FILE THAT PARSES TO SOMETHING THAT IS NOT A SPEC IS NOT PUBLISHED",
     try {
       for (const name of ["nul", "num", "arr", "str"]) {
         assert.equal(ws.resolver.subgraph?.(`subgraph/${name}@stable`), undefined, `${name} must not be a child graph`);
-        const pinned = ws.resolver.resolve(`subgraph/${name}@stable`);
-        assert.equal(ws.resolver.document?.(pinned!.digest), undefined, `${name} must not be deliverable as a prompt`);
+        // NOT PUBLISHED AT ALL, which is what this test is named for and what it could not
+        // assert until the resolver stopped fabricating pins. It used to answer every
+        // syntactically valid ref with `sha256:${hex(ref)}`, so the strongest available check
+        // was "the pin serves no document" — true, and one step weaker than the truth.
+        assert.equal(ws.resolver.resolve(`subgraph/${name}@stable`), undefined, `${name} must not resolve at all`);
       }
     } finally {
       ws.close();

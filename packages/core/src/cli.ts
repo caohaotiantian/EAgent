@@ -420,11 +420,7 @@ export function openWorkspace(
   const resolver: ResourceResolver = {
     // Without a published document, refs resolve to a digest of their own name. That is
     // enough for the compiler's pinning to be structurally correct locally.
-    resolve: (ref) =>
-      documents.resolve(ref) ??
-      (RESOURCE_REF.test(ref)
-        ? { ref, digest: `sha256:${Buffer.from(ref).toString("hex").padEnd(64, "0").slice(0, 64)}`, channel: "stable" }
-        : undefined),
+    resolve: (ref) => documents.resolve(ref),
     document: (pinned) => documents.document(pinned),
     // A CHILD GRAPH IS A DOCUMENT TOO, and its absence is why a `subgraph` node had never run
     // through this binary: the engine asks `resolver.subgraph?.(ref)` and the stand-in — a PIN
@@ -1617,23 +1613,39 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
   }
 }
 
-function graphsByHash(ws: Workspace): Map<string, RunGraph> {
+/**
+ * THE INDEX, AND WHAT IT COULD NOT BUILD.
+ *
+ * A graph this process cannot compile is not a graph it can attach — so the failure is caught
+ * per file, and for a long time that was ALL it was: caught and dropped. The approver then hit
+ * "no graph in graphs/ has that hash (N searched)", which is true and useless, because the graph
+ * IS in that directory and the reason it did not count is the one thing the message omitted.
+ *
+ * Reproduced with a hook: publish `resources/hook/noop.js`, run a gated graph that declares it,
+ * delete the file. The ref stops resolving, GRAPH015 refuses the graph, it drops out of this
+ * index, and the operator is told the RUN cannot be found — pointed at `graphs/`, which is fine,
+ * and away from `resources/hook/`, which is not. Any compile failure has always done this; the
+ * hook is only how it was found.
+ *
+ * So the failures come back with the index and the caller says them.
+ */
+function graphsByHash(ws: Workspace): { index: Map<string, RunGraph>; failed: readonly string[] } {
   const dir = join(ws.root, "graphs");
-  const out = new Map<string, RunGraph>();
-  if (!existsSync(dir)) return out;
+  const index = new Map<string, RunGraph>();
+  const failed: string[] = [];
+  if (!existsSync(dir)) return { index, failed };
   for (const file of readdirSync(dir).sort()) {
     if (!/\.(json|ya?ml)$/i.test(file)) continue;
     try {
       // `false`: every caller of this function is re-attaching a graph to a run that already
       // exists — the run clock, and the door an approver answers a gate through.
       const graph = loadGraph(ws, join(dir, file), false);
-      if (!out.has(graph.graphHash)) out.set(graph.graphHash, graph);
-    } catch {
-      // A graph this process cannot compile is not a graph it can attach. The refusal the
-      // operator sees names the run, not this file — see the message below.
+      if (!index.has(graph.graphHash)) index.set(graph.graphHash, graph);
+    } catch (e) {
+      failed.push(`${file}: ${(e as Error).message}`);
     }
   }
-  return out;
+  return { index, failed };
 }
 
 function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
@@ -1875,7 +1887,7 @@ function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop():
     running = true;
     void (async () => {
       const rows = await ws.store.listRuns(limit);
-      const index = graphsByHash(ws);
+      const { index } = graphsByHash(ws);
       for (const row of rows) {
         const p = await ws.engine.projection(row.runId);
         if (p === undefined || p.status !== "running") continue;
@@ -2301,7 +2313,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         } else {
           const wanted = await ws.engine.compiledGraphHash(runId);
           if (wanted !== undefined) {
-            const index = graphsByHash(ws);
+            const { index, failed } = graphsByHash(ws);
             const found = index.get(wanted);
             if (found !== undefined) {
               ws.engine.attach(runId, found);
@@ -2316,12 +2328,13 @@ export async function main(argv: readonly string[]): Promise<number> {
               throw err.notFound(
                 CODES.E_RUN_NOT_FOUND,
                 `run ${runId} compiled graph ${wanted}, and no graph in ${join(ws.root, "graphs")} has that hash ` +
-                  `(${index.size} searched). Publish the graph this run used, or pass --graph explicitly. ` +
+                  `(${index.size} searched${failed.length === 0 ? "" : `; ${failed.length} would not compile — ${failed.join("; ")}`}). ` +
+                  `Publish the graph this run used, or pass --graph explicitly. ` +
                   `A graph EDITED since the run started no longer matches, which is the point — the approver ` +
                   `approved those bytes. Restore them to answer the gate, or \`loom cancel ${runId} --as ID\` ` +
                   `to stop the run, which needs no graph. NOT --reject: a rejected gate runs the graph's ` +
                   `error edges, so it binds like an approval does`,
-                { details: { runId, graphHash: wanted, searched: index.size } },
+                { details: { runId, graphHash: wanted, searched: index.size, ...(failed.length === 0 ? {} : { failed }) } },
               );
             }
           }

@@ -88,8 +88,21 @@ test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"fail
   // `{runId, status, outputs, usage}` and stopped there. Diagnosing a provider failure meant
   // opening the SQLite journal by hand, which is what it took to find a 401 during a smoke
   // test of this very build.
+  // THE RUN HAS TO REACH THE ENGINE for this to be about `loom run`'s output at all. This
+  // fixture used to name `subgraph/child@stable` and publish nothing, which reached run time
+  // only because the workspace resolver fabricated a pin for any syntactically valid ref — so
+  // the graph compiled, the run started, and the executor found no child. With the fabrication
+  // gone that is a COMPILE error (GRAPH015) and nothing is printed, because nothing ran.
+  //
+  // A PUBLISHED function body that does not evaluate keeps the same failure and survives the
+  // fix: the file exists, so the ref resolves and the graph compiles; `registerFunctions`
+  // cannot compile it, warns on stderr and registers nothing; and `FunctionRegistry.require`
+  // raises the same E_RESOURCE_NOT_FOUND at run time. Compile-clean, run-failed, which is the
+  // shape this test needs.
   const d = emptyDir();
   try {
+    mkdirSync(join(d.dir, "resources", "function"), { recursive: true });
+    writeFileSync(join(d.dir, "resources", "function", "broken.js"), "function (view) { return {");
     const g = join(d.dir, "g.json");
     writeFileSync(
       g,
@@ -106,15 +119,7 @@ test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"fail
         channels: { a: { type: "object", reduce: "replace" }, r: { type: "object", reduce: "replace" } },
         inputs: ["a"],
         outputs: ["r"],
-        nodes: [
-          {
-            id: "d",
-            type: "subgraph",
-            reads: ["a"],
-            writes: ["r"],
-            subgraph: { ref: "subgraph/child@stable", inputs: { x: "a" }, outputs: { r: "x" } },
-          },
-        ],
+        nodes: [{ id: "d", type: "function", reads: ["a"], writes: ["r"], function: { ref: "function/broken@stable" } }],
         edges: [],
       }),
     );
