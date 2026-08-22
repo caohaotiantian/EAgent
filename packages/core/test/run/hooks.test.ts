@@ -23,7 +23,7 @@ import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { HOOK_POINTS, HookRegistry, WIRED_POINTS, narrowErrorDecision, narrowGateRequest, type HookBody } from "../../src/run/hooks.ts";
+import { HOOK_POINTS, HookRegistry, WIRED_POINTS, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, type HookBody } from "../../src/run/hooks.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import type { RunId } from "../../src/ids.ts";
 import { resolver } from "./skeleton.ts";
@@ -568,4 +568,120 @@ test("`onGate` ENRICHES WHAT THE HUMAN SEES, and the digest pins the enriched pa
   assert.deepEqual(plain.applied, [], "no hook, nothing journaled");
   assert.deepEqual(enriched.applied, ["onGate"], "the enrichment is journaled as onGate");
   assert.notEqual(enriched.digest, plain.digest, "the digest must pin the ENRICHED payload, not the original");
+});
+
+// ── preNode ──────────────────────────────────────────────────────────────────
+
+test("narrowNodeDecision — skipping composes, un-skipping does not", () => {
+  assert.deepEqual(narrowNodeDecision({}, { skip: true, reason: "cached" }), { skip: true, reason: "cached" });
+  assert.deepEqual(
+    narrowNodeDecision({ skip: true }, { skip: false }),
+    { skip: true },
+    "a later hook cannot un-skip what an earlier one skipped",
+  );
+  assert.deepEqual(
+    narrowNodeDecision({ skip: true, overrideWrites: { a: 1 } }, { overrideWrites: { b: 2 } }).overrideWrites,
+    { a: 1, b: 2 },
+    "writes merge across hooks",
+  );
+  assert.deepEqual(narrowNodeDecision({ skip: true }, "junk"), { skip: true }, "junk is ignored, not trusted");
+});
+
+test("`preNode` SKIPS a node and supplies its answer — and only its DECLARED channels", async () => {
+  // The memoisation case. `out` is declared; `smuggled` is not, and a hook cannot write a channel
+  // the node was never going to touch — route confinement's rule applied to state.
+  let ran = 0;
+  const tools = new ToolRegistry();
+  tools.register({
+    name: "demo.write",
+    version: "1.0",
+    description: "d",
+    capabilities: ["fs:write"],
+    irreversibility: "reversible_write",
+    idempotent: false,
+    parameters: { type: "object", properties: { body: { type: "string" } } },
+    execute: () => {
+      ran += 1;
+      return { content: "ok", writes: { out: { ran: true } } };
+    },
+  } as ToolDefinition);
+  const hooks = new HookRegistry();
+  hooks.register("hook/guard@stable", () => ({
+    skip: true,
+    reason: "cached",
+    overrideWrites: { out: { cached: true }, smuggled: "nope" },
+  }));
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions: new FunctionRegistry(),
+    models: new ModelRegistry(),
+    hooks,
+    now: () => NOW,
+    sleep: async () => {},
+    policy: { granted: ["fs:write"], systemFloor: "out", budget: { runUsd: 1 } },
+  });
+  const runId = await engine.submit({
+    graph: compileOrThrow({ spec: spec("preNode"), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] }),
+    inputs: { note: "x" },
+  });
+  const p = await engine.advance(runId);
+
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(ran, 0, "the node body must not have run");
+  assert.deepEqual(p.channels["out"], { cached: true }, "the hook's answer stands in for it");
+  assert.equal(p.channels["smuggled"], undefined, "an undeclared channel must NOT be writable by a hook");
+});
+
+test("A SKIPPING HOOK DOES NOT DEFEAT A GATE — policy stops the run before `preNode` is reached", async () => {
+  // WHAT THIS PROVES, precisely: on the ordinary path a `human_gate` has posture `in`, so
+  // `#executeTask`'s policy decision raises the gate and returns BEFORE `#dispatch` — and
+  // `preNode` lives inside `#dispatch`. The containment here is structural, not the explicit
+  // check, and deleting that check does not turn this test red. I found that by deleting it.
+  //
+  // The check is still load-bearing, on a path this test does not reach: a settled MIRROR gate
+  // returns `this.#dispatch(...)` directly (`engine.ts`, `settled.mirrorOf !== undefined`), so
+  // `#preNode` CAN see a `human_gate` in a subgraph delegation. Skipping the node whose entire
+  // job is to be a human decision would be the bypass this repo already closed once from the
+  // routing side, so it is refused before the hook's decision is even read.
+  const hooks = new HookRegistry();
+  hooks.register("hook/guard@stable", () => ({ skip: true, reason: "trust me" }));
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions: new FunctionRegistry(),
+    models: new ModelRegistry(),
+    hooks,
+    now: () => NOW,
+    sleep: async () => {},
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 1 } },
+  });
+  const gateSpec = {
+    ...spec("preNode"),
+    policy: { posture: "on", expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+    nodes: [
+      {
+        id: "approve",
+        type: "human_gate",
+        reads: ["note"],
+        writes: ["out"],
+        humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } },
+      },
+    ],
+  } as unknown as GraphSpec;
+  const runId = await engine.submit({
+    graph: compileOrThrow({ spec: gateSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] }),
+    inputs: { note: "x" },
+  });
+  const p = await engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `the gate must still stop the run: ${p.status}`);
+  assert.ok(
+    Object.values(p.gates).some((g) => g.state === "open"),
+    "and a human must still be asked",
+  );
 });

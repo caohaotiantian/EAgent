@@ -4326,3 +4326,40 @@ plumbing.
 
 Wired: `preModel`, `postModel`, `preTool`, `postTool`, `onError`, `onGate`, `onComplete`.
 Refused at compile until built: `prePlan`, `preNode`.
+
+## `preNode` — eight of nine, and `overrideWrites` earns its way back
+
+`preNode` lets a hook skip a node and supply its answer. The canonical use is memoisation:
+recognise the work is already done, skip the body, hand back the result — strictly LESS action,
+no model call, no tool, no spend, which is why it narrows even though it produces state.
+
+`NodeDecision.overrideWrites` was removed from `03-RUNTIME.md` two waves ago precisely because
+it was described and unbuilt. It is back with two containments, both in the engine because both
+need the node:
+
+- **`overrideWrites` is confined to the channels the node DECLARED it writes.** A hook cannot
+  write a channel the node was never going to touch — route confinement's rule applied to state
+  instead of edges. Measured: a hook returning `{out: …, smuggled: …}` on a node declaring only
+  `out` writes `out` and nothing else.
+- **A `human_gate` may never be skipped**, refused before the decision is even read.
+
+**And the second containment is where the test lied — again, and I caught it the same way.**
+Deleting the `human_gate` check turned NO test red. On the ordinary path a gate has posture `in`,
+so `#executeTask`'s policy decision raises it and returns before `#dispatch` is ever called, and
+`preNode` lives inside `#dispatch`. The containment my test observed was structural; the explicit
+check was invisible to it.
+
+The check is not dead, though, and that mattered to establish rather than assume: a settled
+MIRROR gate returns `this.#dispatch(...)` directly, so `#preNode` CAN see a `human_gate` in a
+subgraph delegation. The test is renamed for the property it actually proves and says which path
+it does not reach, and the check stays with the reason written next to it.
+
+**Three iterations, three tests that passed for the wrong reason** — `onError`'s resurrection
+guard, `onGate`'s payload assertion, and this one. All three were found by mutation, not by
+review, and none would have been found by re-reading the test. The habit worth keeping is not
+"write better tests"; it is **delete the mechanism and watch what survives**, because a test that
+survives its own subject was never testing it.
+
+Wired: `preModel`, `postModel`, `preNode`, `preTool`, `postTool`, `onError`, `onGate`,
+`onComplete`. One left: `prePlan`, which is the hardest — a rewritten spec must recompile and
+re-pin, and that collides with the graph-binding rule an approval depends on.

@@ -496,9 +496,13 @@ inspects returns nothing, and `undefined` means "no opinion" — the common case
 would force every inspecting hook to restate a decision it does not have, and a hook restating a
 default is a hook that can get the default wrong.
 
-`NodeDecision.overrideWrites` belongs to `preNode`, which is not wired yet; it returns when that
-point does. A member described here and absent from `run/hooks.ts` is the drift
-`test/docs-type-equiv.test.ts` fails on, deliberately.
+`NodeDecision.overrideWrites` is back, because `preNode` is wired and it is what makes skipping
+useful: a memoisation hook recognises the work is already done, skips the body and supplies the
+answer — strictly LESS action, no model call, no tool, no spend. Two containments, both in the
+engine because both need the node: a `human_gate` may never be skipped (skipping the node whose
+whole job is to be a human decision is the gate bypass from a new direction, and it is refused
+before the decision is read), and `overrideWrites` is confined to the channels the node DECLARED
+it writes — route confinement's rule applied to state instead of edges.
 
 **`ErrorDecision` lost two fields on contact with the asymmetry rule, and both losses are the
 rule working.** `downshiftModel` would substitute a model for the next attempt — that is state
@@ -515,7 +519,7 @@ policy already said no, so it cannot resurrect a retry by any route — which ma
 policy refuses one for a NON-IDEMPOTENT tool that may already have done its work.
 export type Observer<In>    = (input: In) => void;
 
-export interface NodeDecision  { skip?: boolean; reason?: string }
+export interface NodeDecision  { skip?: boolean; reason?: string; overrideWrites?: ChannelWrites }
 export interface ToolDecision  { block?: boolean; reason?: string; args?: unknown }   // args may be rewritten
 export interface ErrorDecision { retry?: boolean; afterMs?: number }
 ```

@@ -110,7 +110,7 @@ import {
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
-import { HookRegistry, narrowErrorDecision, narrowGateRequest, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type GateView, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
+import { HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type GateView, type HookPoint, type NodeDecision, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -738,6 +738,41 @@ export class Engine {
       retry: { afterMs: Math.max(policyRetry.afterMs, out.value.afterMs ?? 0), code: policyRetry.code },
       changedBy: out.changedBy,
     };
+  }
+
+  /**
+   * `preNode`: let a hook skip this node and supply its answer, or return `undefined` to run it.
+   *
+   * TWO CONTAINMENTS, and both need the node, which is why they are here rather than in the
+   * merge. A `human_gate` may NEVER be skipped — skipping the node whose entire job is to be a
+   * human decision is the gate bypass reached from a new direction, and it is refused before the
+   * decision is even read. And `overrideWrites` is confined to the channels the node DECLARED it
+   * writes: a hook cannot write a channel the node was never going to touch, which is route
+   * confinement's rule applied to state instead of edges.
+   */
+  async #preNode(ctx: RunContext, w: Wave): Promise<NodeOutcome | undefined> {
+    const hooks = this.#hooksFor(ctx, "preNode");
+    if (hooks.length === 0) return undefined;
+    // Refused before the hooks run, not after: there is no decision a `human_gate` could return
+    // that would be safe to honour, so asking is the wrong shape.
+    if (w.node.type === "human_gate") return undefined;
+
+    const out = await runFilters<NodeDecision>(
+      hooks,
+      {},
+      { point: "preNode", runId: ctx.runId, taskId: w.task.taskId, signal: ctx.abort.signal },
+      (v) => v.skip === true,
+      narrowNodeDecision,
+    );
+    await this.#journalHooks(ctx, w.task, "preNode", out.changedBy);
+    if (out.value.skip !== true) return undefined;
+
+    const declared = new Set(w.node.writes ?? []);
+    const writes: Record<string, unknown> = {};
+    for (const [channel, value] of Object.entries(out.value.overrideWrites ?? {})) {
+      if (declared.has(channel)) writes[channel] = value;
+    }
+    return { status: "succeeded", writes, usage: { ...ZERO_USAGE } };
   }
 
   /**
@@ -2295,6 +2330,13 @@ export class Engine {
   }
 
   async #dispatch(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
+    // `preNode` — BEFORE the deadline wrapper, because a skip should cost nothing, and AFTER the
+    // policy decision in `#executeTask`, because a node that policy gated must still gate. The
+    // canonical use is memoisation: recognise the work is already done, skip the body, supply the
+    // answer. That is strictly less action — no model call, no tool, no spend.
+    const skipped = await this.#preNode(ctx, w);
+    if (skipped !== undefined) return skipped;
+
     const outcome = await this.#withNodeDeadline(ctx, w, () => this.#dispatchBody(ctx, p, w));
 
     // AN UNDECLARED ROUTE IS THE SAME CLASS AS AN UNDECLARED WRITE, and this wrapper is where

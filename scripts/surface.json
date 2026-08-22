@@ -436,6 +436,7 @@
   "modelFrames",
   "narrowErrorDecision",
   "narrowGateRequest",
+  "narrowNodeDecision",
   "narrowToolDecision",
   "newCheckpointId",
   "newGateId",

@@ -70,6 +70,7 @@ export const WIRED_POINTS: ReadonlySet<HookPoint> = new Set<HookPoint>([
   "onError",
   "onGate",
   "onComplete",
+  "preNode",
 ]);
 
 /**
@@ -100,10 +101,40 @@ export interface ToolDecision {
   readonly args?: Readonly<Record<string, unknown>>;
 }
 
-/** `preNode`. `skip` is terminal. */
+/**
+ * `preNode`. `skip` is terminal, and `overrideWrites` is what makes skipping useful.
+ *
+ * The canonical use is memoisation: a hook recognises that this node's work has already been
+ * done, skips the body, and supplies the answer. That is strictly LESS action — no model call,
+ * no tool, no spend — which is why it narrows even though it produces state.
+ *
+ * Two containments make it safe, and both live in the engine because both need the node: a hook
+ * may not skip a `human_gate` (that is a gate bypass by another route), and `overrideWrites` is
+ * confined to the channels the node DECLARED it writes — the same containment as route
+ * confinement, one noun over.
+ */
 export interface NodeDecision {
   readonly skip?: boolean;
   readonly reason?: string;
+  readonly overrideWrites?: Readonly<Record<string, unknown>>;
+}
+
+/** Skipping composes; un-skipping does not. Writes merge, later hook wins per channel. */
+export function narrowNodeDecision(prev: NodeDecision, raw: unknown): NodeDecision {
+  if (raw === null || typeof raw !== "object") return prev;
+  const r = raw as Record<string, unknown>;
+  const skip = prev.skip === true || r["skip"] === true;
+  const reason = typeof r["reason"] === "string" ? r["reason"] : prev.reason;
+  const proposed =
+    r["overrideWrites"] !== null && typeof r["overrideWrites"] === "object" && !Array.isArray(r["overrideWrites"])
+      ? (r["overrideWrites"] as Record<string, unknown>)
+      : undefined;
+  const overrideWrites = proposed === undefined ? prev.overrideWrites : { ...(prev.overrideWrites ?? {}), ...proposed };
+  return {
+    ...(skip ? { skip: true } : {}),
+    ...(reason === undefined ? {} : { reason }),
+    ...(overrideWrites === undefined ? {} : { overrideWrites }),
+  };
 }
 
 /**
