@@ -4573,3 +4573,45 @@ now, and without one the rule is skipped rather than guessed at.
 none of them would have caught anything this repo has actually shipped. Writing them would grow
 the rule count without growing the guarantee, and a rule set padded with the cheap ones is harder
 to trust than a short one where every entry earned its place.
+
+## The arguments were the hole, and the globals fix had not closed them
+
+This module records its own worst finding: `SAFE_GLOBALS` seeded the vm context with the HOST's
+intrinsics, so `Object.constructor("return globalThis")()` reached the host global, and a
+reviewer measured a body printing a real `ANTHROPIC_API_KEY` out of `process.env`. That was
+fixed by rebuilding the globals out of the context's own intrinsics, and the docstring says the
+fix made the module's claim "true rather than aspirational".
+
+**It was still false.** The body was then CALLED with the host's `view` and `ctx`, and a host
+object hands over the host `Function` exactly as a host `Object` does. Measured, today, before
+any change:
+
+    view.constructor.constructor("return globalThis")().process   → object
+    ctx.constructor.constructor(…)                                → object
+    view.get.constructor(…)                                       → object
+    ctx.now.constructor(…)                                        → object
+    ({}).constructor.constructor(…)                               → undefined   ← the globals fix, working
+
+The last line is the point. The context isolation is sound; **the arguments walked around it.**
+Same escape, same words in the docstring, a different door — and the door nobody guarded was the
+one every single function body goes through.
+
+`view` and `ctx` are rebuilt INSIDE the context now, from a JSON payload, so only strings and
+numbers cross. The allow-list and own-property checks mirror `makeStateView` exactly, including
+the reason the second is not redundant: `reads: ["constructor"]` compiles with a warning, so an
+allow-list alone would answer with `Object`. Values coming BACK need no such care — an object
+built inside the context carries that context's intrinsics, which is exactly why the fifth probe
+reads `undefined`.
+
+**And the same change fixed the hang, because they were the same defect seen twice.** Calling the
+body from the host meant `vm`'s own timeout — the only thing that can terminate synchronous
+execution — did not apply, so `while (true) {}` in a `function` resource hung `loom run` with no
+output until it was killed, while `#withNodeDeadline`'s `Promise.race` sat on the same blocked
+thread. The call happens inside the context now, so the timeout applies to the synchronous part
+and the node deadline still bounds the async part. Two mechanisms because there are two failure
+modes, and the README row claiming the hang is gone.
+
+**The mutation test proved it by hanging.** Reverting to the host-argument call made the spinning
+body run forever and took the command with it — which is the defect, reproduced, as the cost of
+checking. Worth the two minutes: a fix for a hang that cannot be shown to hang without it is a
+fix nobody can check.

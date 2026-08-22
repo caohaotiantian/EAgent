@@ -102,8 +102,18 @@ export interface FunctionLoaderOptions {
    * round numbers is not useful; nothing that reaches the host is.
    */
   readonly globals?: Readonly<Record<string, unknown>>;
-  /** Bound on COMPILING the body, not on running it. Node timeouts bound the run. */
+  /** Bound on COMPILING the body. */
   readonly compileTimeoutMs?: number;
+  /**
+   * Bound on RUNNING the synchronous part of a body, in ms (default 30s).
+   *
+   * `Engine.#withNodeDeadline` is a `Promise.race` on the same thread, so it cannot interrupt a
+   * body that never yields: `while (true) {}` in a `function` resource hung `loom run` with no
+   * output until it was killed. `vm`'s own timeout CAN terminate synchronous execution, and it
+   * only applies while the call is on the stack — so this bounds the sync part and the node
+   * deadline bounds the async part. Two mechanisms because there are two failure modes.
+   */
+  readonly callTimeoutMs?: number;
 }
 
 /**
@@ -175,9 +185,68 @@ export interface FunctionLoader {
  * leaving the constructor reachable here would be an inconsistent seam. A body that needs
  * the time takes it from `ctx.now`, which is injected and recorded.
  */
+/**
+ * THE ARGUMENTS WERE THE HOLE, and the globals fix did not close them.
+ *
+ * `safeGlobals` rebuilds the body's globals out of the context's own intrinsics, so
+ * `Object.constructor("return globalThis")()` inside a body reaches the CONTEXT's global and not
+ * the host's — measured, `typeof globalThis.process` is `undefined` that way. But the body was
+ * then CALLED with the host's `view` and `ctx`, and a host object hands over the host `Function`
+ * exactly as a host `Object` does. Measured, all four paths reached the real `process`:
+ *
+ *     view.constructor.constructor("return globalThis")().process   → object
+ *     ctx.constructor.constructor(…)                                → object
+ *     view.get.constructor(…)                                       → object
+ *     ctx.now.constructor(…)                                        → object
+ *
+ * So the module's own recorded finding — "a body printed a real ANTHROPIC_API_KEY" — was
+ * reproducible again through the door nobody guarded. The globals were closed; the arguments
+ * were the same escape one argument over.
+ *
+ * This bridge rebuilds `view` and `ctx` INSIDE the context from a JSON payload, so only strings
+ * and numbers cross. `hasOwnProperty` is taken from the context's own `Object`, and the
+ * allow-list plus own-property check mirror `makeStateView` exactly — including the reason the
+ * second check is not redundant: `reads: ["constructor"]` compiles with a warning, so an
+ * allow-list alone would answer with `Object`.
+ *
+ * Values coming BACK need no such care: an object built inside the context carries that
+ * context's intrinsics, which is why `({}).constructor.constructor(…)` in a body reaches
+ * nothing. `intoHostRealm` rebuilds them anyway, for the prototype reason described below.
+ */
+const ARGUMENT_BRIDGE = `
+(function () {
+  var has = Object.prototype.hasOwnProperty;
+  globalThis.__loomInvoke = function (payload) {
+    var p = JSON.parse(payload);
+    var allowed = {};
+    for (var i = 0; i < p.visible.length; i++) allowed[p.visible[i]] = true;
+    var slice = p.slice;
+    var view = {
+      get: function (c) {
+        return has.call(allowed, c) && has.call(slice, c) ? slice[c] : undefined;
+      },
+      require: function (c) {
+        if (!has.call(allowed, c)) throw new Error('E_CHANNEL_UNDECLARED: channel "' + c + '" is not in this node\\'s declared reads');
+        if (!has.call(slice, c)) throw new Error('E_CHANNEL_UNDECLARED: channel "' + c + '" has no value yet');
+        return slice[c];
+      },
+      hash: p.hash,
+      visible: p.visible,
+    };
+    var ctx = {
+      taskId: p.taskId,
+      now: function () { return p.now; },
+      signal: { aborted: p.aborted },
+    };
+    return globalThis.__loomBody(view, ctx);
+  };
+})();
+`;
+
 export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoader {
   const cache = new Map<Digest, FunctionBody>();
   const timeout = opts.compileTimeoutMs ?? 1000;
+  const callTimeout = opts.callTimeoutMs ?? 30_000;
 
   const compile = (digest: Digest, source: string, label: string): FunctionBody => {
     const hit = cache.get(digest);
@@ -190,8 +259,11 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
     let value: unknown;
     try {
       // The resource's content IS a function expression. No `module.exports` ceremony,
-      // no wrapper to get wrong — the completion value is the body.
-      value = vm.runInContext(`(${source})`, context, { timeout, filename: label });
+      // no wrapper to get wrong — the completion value is the body. It is KEPT IN THE CONTEXT
+      // rather than handed back, because the call now happens in there too.
+      vm.runInContext(`globalThis.__loomBody = (${source});`, context, { timeout, filename: label });
+      vm.runInContext(ARGUMENT_BRIDGE, context, { timeout, filename: `${label} (bridge)` });
+      value = (context as { __loomBody?: unknown }).__loomBody;
     } catch (e) {
       throw err.validation(
         CODES.E_RESOURCE_INVALID,
@@ -216,8 +288,28 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
     // Rebuilding on the way out makes a loaded body indistinguishable from a registered
     // one, and it enforces at the cheapest possible seam what channel values must be
     // anyway: plain JSON-shaped data.
-    const fn = value as FunctionBody;
-    const body: FunctionBody = (view, callCtx) => intoHostRealm(fn(view, callCtx)) as ReturnType<FunctionBody>;
+    const body: FunctionBody = (view, callCtx) => {
+      // ONLY STRINGS AND NUMBERS CROSS. Everything the body sees is rebuilt from this payload
+      // INSIDE the context, so no host object is ever in its reach.
+      const slice: Record<string, unknown> = {};
+      for (const name of view.visible) {
+        const v = view.get(name);
+        if (v !== undefined) slice[name] = v;
+      }
+      const payload = JSON.stringify({
+        slice,
+        visible: [...view.visible],
+        hash: String(view.hash),
+        taskId: String(callCtx.taskId),
+        now: callCtx.now(),
+        aborted: callCtx.signal.aborted,
+      });
+      const out = vm.runInContext(`__loomInvoke(${JSON.stringify(payload)})`, context, {
+        timeout: callTimeout,
+        filename: label,
+      });
+      return intoHostRealm(out) as ReturnType<FunctionBody>;
+    };
     cache.set(digest, body);
     return body;
   };

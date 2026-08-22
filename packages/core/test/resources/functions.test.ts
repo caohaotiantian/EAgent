@@ -430,6 +430,61 @@ test("A BODY CANNOT WALK BACK OUT TO THE HOST THROUGH ITS OWN GLOBALS", () => {
   const body = loader.load("function/escape@stable");
   assert.ok(body !== undefined);
 
-  const out = body!({ get: () => undefined } as never, {} as never) as { writes: { got: string } };
+  const out = body!(view({}), ctx()) as { writes: { got: string } };
   assert.equal(out.writes.got, "undefined", "a body must not reach the host's `process`");
+});
+
+test("...NOR THROUGH ITS ARGUMENTS, which is the same escape one door over", () => {
+  // The globals fix closed `Object.constructor(…)` and left the ARGUMENTS open: the body was
+  // called with the HOST's `view` and `ctx`, and a host object hands over the host `Function`
+  // exactly as a host `Object` does. All four paths below reached the real `process` — the
+  // module's own recorded finding, reproducible again through the door nobody guarded.
+  //
+  // `view` and `ctx` are rebuilt INSIDE the context now, from a JSON payload, so only strings
+  // and numbers cross.
+  const probe = `(view, ctx) => {
+    const out = {};
+    const reach = (f) => { try { return typeof f().process; } catch (e) { return "blocked"; } };
+    out.viaView = reach(() => view.constructor.constructor("return globalThis")());
+    out.viaCtx = reach(() => ctx.constructor.constructor("return globalThis")());
+    out.viaGet = reach(() => view.get.constructor("return globalThis")());
+    out.viaNow = reach(() => ctx.now.constructor("return globalThis")());
+    return { writes: { got: JSON.stringify(out) } };
+  }`;
+  const store = new ResourceStore({ seed: [{ kind: "function", name: "argescape", content: probe }] });
+  const body = createFunctionLoader({ store }).load("function/argescape@stable")!;
+  const got = JSON.parse((body(view({ amount: 1 }), ctx()) as { writes: { got: string } }).writes.got) as Record<string, string>;
+
+  for (const [path, reached] of Object.entries(got)) {
+    assert.notEqual(reached, "object", `${path} reached the host's \`process\``);
+  }
+});
+
+test("and the body still SEES its channels through the rebuilt view", () => {
+  // The control. Closing the bridge must not have closed the door the view exists to open —
+  // an argument surface that is safe and empty would pass the test above and be useless.
+  const store = new ResourceStore({
+    seed: [
+      {
+        kind: "function",
+        name: "reads",
+        content: '(view, ctx) => ({ writes: { doubled: view.require("amount") * 2, seen: view.visible.length, t: typeof ctx.taskId } })',
+      },
+    ],
+  });
+  const body = createFunctionLoader({ store }).load("function/reads@stable")!;
+  const out = body(view({ amount: 21 }), ctx()) as { writes: Record<string, unknown> };
+  assert.equal(out.writes["doubled"], 42, "require() must still read a declared channel");
+  assert.equal(out.writes["t"], "string", "and the taskId still arrives");
+  assert.ok(Number(out.writes["seen"]) >= 1, "and `visible` is populated");
+});
+
+test("A SYNCHRONOUS BODY THAT NEVER RETURNS IS TERMINATED, not left to hang", () => {
+  // `Engine.#withNodeDeadline` is a `Promise.race` on the same thread, so its timer cannot fire
+  // while a `while (true) {}` holds the loop: `loom run` produced no output and needed `kill -9`.
+  // `vm`'s own timeout CAN terminate synchronous execution, and the call now happens inside the
+  // context so it applies.
+  const store = new ResourceStore({ seed: [{ kind: "function", name: "spin", content: "(view) => { for (;;) {} }" }] });
+  const body = createFunctionLoader({ store, callTimeoutMs: 50 }).load("function/spin@stable")!;
+  assert.throws(() => body(view({}), ctx()), /timed out|Script execution/i, "the run must end, not freeze");
 });

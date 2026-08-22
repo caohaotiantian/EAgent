@@ -37,7 +37,7 @@ Stated because a framework that overstates itself costs its user a day finding o
 | **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever |
 | **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no reclaim path |
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
-| **A `function` body that loops forever** | Cannot be stopped. `vm`'s real timeout is applied when the body is COMPILED, not when it runs, and a node deadline is a `Promise.race` on the same thread — so `loom run` hangs with no output and needs `kill -9`. Node `timeoutMs` does bound every other node type |
+
 | **`rewind`** | Rewinding to a node's own declared checkpoint wedges the run: the task stays leased and the next `advance` fails. Only a `task.ready` boundary works, and `rewind` never self-advances |
 | **`onBudgetExhausted: "gate"`** | Compiles, and fails the run exactly as `"fail"` does — the escalation it raises applies to decisions that no longer happen. `"degrade"` is read by nothing |
 | **Declarative fallback chains** | `FallbackAdapter` is written and tested; nothing constructs one, and a `--models-file` route cannot express a chain |
