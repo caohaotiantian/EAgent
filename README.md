@@ -40,7 +40,6 @@ Stated because a framework that overstates itself costs its user a day finding o
 
 | **`rewind`** | Rewinding to a node's own declared checkpoint wedges the run: the task stays leased and the next `advance` fails. Only a `task.ready` boundary works, and `rewind` never self-advances |
 | **`onBudgetExhausted: "gate"` / `"degrade"`** | Compile errors, deliberately. `gate` used to compile and then fail exactly as `"fail"` does, having promised a human; building it needs a way to raise a budget mid-run, and there is none |
-| **`EdgeSpec.codes`** | The error-edge code filter has no reader, so every error edge is a catch-all whatever it declares. `RetryPolicy.onlyIf` IS read, which makes the asymmetry easy to trip over |
 | **`loom compile` against a missing resource** | Reports `ok`. A ref that merely *looks* like a ref is pinned to a digest of its own name; the failure arrives at run time, loudly, instead of at compile |
 | **Replay of a run a human de-escalated** | Diverges. Replay never re-applies `policy.deescalated`, so the replayed run has no ceiling and gates where the original did not |
 

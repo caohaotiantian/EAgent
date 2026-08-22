@@ -3910,7 +3910,7 @@ export class Engine {
         taskId: w.task.taskId,
       });
     }
-    const take = outcome.status === "failed" ? this.#errorEdges(ctx, w) : this.#edgesToTake(ctx, p, w, outcome);
+    const take = outcome.status === "failed" ? this.#errorEdges(ctx, w, outcome.error?.code) : this.#edgesToTake(ctx, p, w, outcome);
 
     if (outcome.status === "failed") {
       events.push({
@@ -4312,8 +4312,24 @@ export class Engine {
     return out;
   }
 
-  #errorEdges(ctx: RunContext, w: Wave): readonly EdgeId[] {
-    return (ctx.index.outbound.get(w.node.id) ?? []).filter((e) => e.kind === "error").map((e) => e.id);
+  /**
+   * The error edges that HANDLE this failure — not every error edge the node has.
+   *
+   * `EdgeSpec.codes` restricts an error edge to a set of normalized codes and had ZERO readers:
+   * this filtered on `kind` alone, so every error edge was a catch-all whatever it declared. The
+   * asymmetry is what makes it a trap rather than a gap — `RetryPolicy.onlyIf` IS read
+   * (`policy.onlyIf.includes(error.code)`), so an author who learned that code-filtering works
+   * for retry reasonably assumes it works here, declares `codes: ["E_PROVIDER_UNAVAILABLE"]` on
+   * a compensation edge, and gets that edge for a validation failure too.
+   *
+   * An edge with no `codes` stays a catch-all. When nothing matches, the take is empty and the
+   * failure is unhandled — which is the honest answer: the graph declared handlers, and none of
+   * them was for this.
+   */
+  #errorEdges(ctx: RunContext, w: Wave, code: string | undefined): readonly EdgeId[] {
+    return (ctx.index.outbound.get(w.node.id) ?? [])
+      .filter((e) => e.kind === "error" && (e.codes === undefined || (code !== undefined && e.codes.includes(code))))
+      .map((e) => e.id);
   }
 
   #activate(

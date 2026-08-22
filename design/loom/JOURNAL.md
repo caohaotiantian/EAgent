@@ -4670,3 +4670,27 @@ reports `costUsd: 0` for it. It walks every tier now.
 The README row is gone and the front-page claim is true. That leaves three of the audit's
 defects: `rewind` wedging a run, `loom compile` fabricating resource pins, and `EdgeSpec.codes`
 having no reader.
+
+## `EdgeSpec.codes` — a filter with no reader, next to one that works
+
+Every error edge was a catch-all whatever it declared: `#errorEdges` filtered on `kind` alone
+and `codes` had ZERO readers. It reads them now — an edge with no `codes` stays a catch-all, and
+when nothing matches the take is empty and the failure is unhandled, which is the honest answer:
+the graph declared handlers and none of them was for this.
+
+**The asymmetry is what made it a trap rather than a gap.** `RetryPolicy.onlyIf` IS read —
+`policy.onlyIf.includes(error.code)` — so an author who learns that code-filtering works for
+retry reasonably assumes it works for error edges, declares
+`codes: ["E_PROVIDER_UNAVAILABLE"]` on a compensating edge, and silently gets that edge for a
+validation failure too. Two fields, one behaviour each, and only one of them the documented one.
+
+**And writing the test found the thing that would have made the feature confusing.** The code an
+edge must declare is the NORMALIZED one, not the one the tool threw: `#invokeTool` maps a tool's
+failure onto the taxonomy, so a thrown `E_PROVIDER_UNAVAILABLE` reaches the journal as
+`E_TOOL_SOURCE_UNAVAILABLE`. My first test asserted the raw code and failed. Matching what
+`task.failed` records is the right choice — an author reads the code off `loom trace`, so the
+filter should key on what they can see — and now it is written down instead of discovered.
+
+Zero blast radius: nothing in `src/` or `test/` declared `codes`, only the schema in
+`02-EXECUTION-GRAPH.md`. Two of the audit's defects remain: `rewind` wedging a run, and
+`loom compile` fabricating resource pins.
