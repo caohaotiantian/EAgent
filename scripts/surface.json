@@ -433,6 +433,7 @@
   "measureCohort",
   "messageTokens",
   "modelFrames",
+  "narrowErrorDecision",
   "narrowToolDecision",
   "newCheckpointId",
   "newGateId",

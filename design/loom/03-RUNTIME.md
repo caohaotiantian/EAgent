@@ -496,15 +496,28 @@ inspects returns nothing, and `undefined` means "no opinion" — the common case
 would force every inspecting hook to restate a decision it does not have, and a hook restating a
 default is a hook that can get the default wrong.
 
-`NodeDecision.overrideWrites` and `ErrorDecision.downshiftModel` were in this block and are not
-in the code: they belong to `preNode` and `onError`, which are not wired yet. They return when
-those points do. A member described here and absent from `run/hooks.ts` is the drift
+`NodeDecision.overrideWrites` belongs to `preNode`, which is not wired yet; it returns when that
+point does. A member described here and absent from `run/hooks.ts` is the drift
 `test/docs-type-equiv.test.ts` fails on, deliberately.
+
+**`ErrorDecision` lost two fields on contact with the asymmetry rule, and both losses are the
+rule working.** `downshiftModel` would substitute a model for the next attempt — that is state
+which must survive to the retry, so it belongs in `task.retry_scheduled`'s payload, and a
+vocabulary change is a bigger decision than a hook field. `take` would let a hook choose which
+edge the run leaves by on failure, which is ROUTING: a node may only take its own edges
+(`GRAPH005_ROUTE_NOT_OWN_EDGE`, and the runtime half at `#edgesToTake`), and a hook-supplied
+`take` would have to pass the same confinement check or reopen the gate bypass from a new
+direction. Neither is refused forever; both are refused until they are built with their guard.
+
+What survives narrows and nothing widens: `retry: false` suppresses a retry the policy allowed,
+`retry: true` is ignored, and `afterMs` may only lengthen. The hook is not consulted when the
+policy already said no, so it cannot resurrect a retry by any route — which matters because the
+policy refuses one for a NON-IDEMPOTENT tool that may already have done its work.
 export type Observer<In>    = (input: In) => void;
 
 export interface NodeDecision  { skip?: boolean; reason?: string }
 export interface ToolDecision  { block?: boolean; reason?: string; args?: unknown }   // args may be rewritten
-export interface ErrorDecision { retry?: boolean; afterMs?: number; take?: string[] }
+export interface ErrorDecision { retry?: boolean; afterMs?: number }
 ```
 
 | Rule | Reason |

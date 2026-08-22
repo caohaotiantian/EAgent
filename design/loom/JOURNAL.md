@@ -4249,3 +4249,44 @@ go". It records `shaped.model` now.
 **Reverses when** the remaining four are wired: delete their compile refusal in the same change
 that adds their dispatch, never before. A point accepted by the compiler and ignored by the
 engine is the defect this whole file exists to close.
+
+## `onError` — six of nine, and a deadlock the first draft walked straight into
+
+`onError` lets an extension SUPPRESS a retry the policy allowed, or LENGTHEN its backoff. A
+circuit breaker and a cost guard are the obvious uses; both are narrowings, and nothing here
+widens.
+
+**The containment is structural, not a merge function.** `#narrowRetry` is reached only when
+`#retryDecision` already said yes, so a hook cannot resurrect a retry by any route — which
+matters because the policy refuses one for a NON-IDEMPOTENT tool that may already have done its
+work in the sandbox. An extension able to override that refusal would be the most dangerous
+thing on this bus. `retry: true` is additionally ignored by `narrowErrorDecision`, and a shorter
+`afterMs` is clamped to the policy's, so a hook cannot hammer a failing provider harder either.
+
+**Two fields the design promised did not survive contact with the asymmetry rule**, and both
+refusals are the rule working rather than scope-cutting. `downshiftModel` substitutes a model
+for the NEXT attempt — that is state which must survive the retry, so it belongs in
+`task.retry_scheduled`'s payload, and a vocabulary change is a bigger decision than a hook
+field. `take` would let a hook choose which edge the run leaves by on failure, which is
+ROUTING — a node may only take its own edges, and a hook-supplied `take` would have to pass the
+same confinement check or reopen the gate bypass from a new direction. `03-RUNTIME.md` records
+both, and `docs-type-equiv` is what made me write it down rather than quietly ship a smaller
+interface.
+
+**The first draft deadlocked, and the mechanism is worth knowing.** `#journalHooks` goes through
+`#serialize`, which chains onto `#commitChain`. The retry path is already ON that chain, so
+awaiting a second entry from inside one waits for itself: the run hung on the first `advance`
+with the tool already called. The fix is better than a workaround — the hook's `hook.applied`
+rows now ride the SAME `ctx.log.commit` batch as the decision they explain, so the decision and
+its reason become durable together or neither does.
+
+**And a test that passed for the wrong reason.** "`onError` CANNOT RESURRECT a retry" was
+vacuous: allowing widening in `narrowErrorDecision` killed no test, because the hook is never
+consulted once the policy refuses. The structural property is the stronger one and the test is
+renamed for it; the merge is now asserted directly against `narrowErrorDecision`, where
+widening, shrinking a backoff, and junk input each turn it red. **A run-level test cannot
+distinguish "the merge refused it" from "the hook was never asked"** — which is exactly the
+distinction that mattered.
+
+Wired: `preModel`, `postModel`, `preTool`, `postTool`, `onError`, `onComplete`. Refused at
+compile until built: `prePlan`, `preNode`, `onGate`.

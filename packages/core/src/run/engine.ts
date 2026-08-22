@@ -110,7 +110,7 @@ import {
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
-import { HookRegistry, narrowToolDecision, runFilters, runObservers, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
+import { HookRegistry, narrowErrorDecision, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -711,6 +711,33 @@ export class Engine {
     if (this.#hooks === undefined) return [];
     const refs = ctx.graph.spec.hooks?.[point];
     return refs === undefined || refs.length === 0 ? [] : this.#hooks.resolve(refs);
+  }
+
+  /**
+   * Let `onError` hooks NARROW a retry the policy allowed: suppress it, or lengthen its backoff.
+   *
+   * Returns `undefined` when a hook suppressed it, which is the same answer `#retryDecision`
+   * gives for "no retry" — so the caller has one shape to handle and cannot forget the hook path.
+   */
+  async #narrowRetry(
+    ctx: RunContext,
+    w: Wave,
+    policyRetry: { afterMs: number; code: string },
+  ): Promise<{ retry?: { afterMs: number; code: string }; changedBy: readonly string[] }> {
+    const hooks = this.#hooksFor(ctx, "onError");
+    if (hooks.length === 0) return { retry: policyRetry, changedBy: [] };
+    const out = await runFilters<ErrorDecision>(
+      hooks,
+      { retry: true, afterMs: policyRetry.afterMs },
+      { point: "onError", runId: ctx.runId, taskId: w.task.taskId, signal: ctx.abort.signal },
+      (v) => v.retry === false,
+      narrowErrorDecision,
+    );
+    if (out.value.retry === false) return { changedBy: out.changedBy };
+    return {
+      retry: { afterMs: Math.max(policyRetry.afterMs, out.value.afterMs ?? 0), code: policyRetry.code },
+      changedBy: out.changedBy,
+    };
   }
 
   /**
@@ -3702,12 +3729,32 @@ export class Engine {
     // A retryable failure with attempts left is rescheduled instead of committed.
     // The slot is released during the backoff, so a retry storm costs queue depth
     // rather than concurrency (D6.3 level 3).
+    let suppressionRows: readonly NewEvent[] = [];
     if (outcome.status === "failed") {
-      const retry = this.#retryDecision(ctx, p, w, outcome);
+      const policyRetry = this.#retryDecision(ctx, p, w, outcome);
+      // `onError` — consulted ONLY when the policy already said yes, so a hook can suppress a
+      // retry but never resurrect one. Re-running a non-idempotent tool that already reached its
+      // sandbox is the case `#retryDecision` refuses on purpose, and an extension able to
+      // override that refusal would be the most dangerous thing on this bus.
+      const narrowed = policyRetry === undefined ? { changedBy: [] } : await this.#narrowRetry(ctx, w, policyRetry);
+      const retry = narrowed.retry;
+      // THE HOOK'S RECORD RIDES THE SAME BATCH AS ITS EFFECT, and it has to. `#journalHooks`
+      // goes through `#serialize`, which chains onto `#commitChain` — and this code path is
+      // already ON that chain, so awaiting a second entry from inside one deadlocks. The first
+      // draft did exactly that and hung on the first `advance` with the tool already called.
+      // Committing them together is also the better answer: the decision and the reason for it
+      // become durable in one write, or neither does.
+      const hookRows = narrowed.changedBy.map((ref) => ({
+        type: "hook.applied" as const,
+        payload: { ref, point: "onError" as const, changed: true },
+        actor: SYSTEM_ACTOR("executor"),
+        taskId: w.task.taskId,
+      }));
       if (retry !== undefined) {
         await ctx.log.commit(
           p.seq,
           [
+            ...hookRows,
             {
               type: "task.retry_scheduled",
               payload: { attempt: w.task.attempt + 1, afterMs: retry.afterMs, code: retry.code },
@@ -3726,6 +3773,8 @@ export class Engine {
         ctx.leases.delete(w.task.taskId);
         return;
       }
+      // Suppressed. The rows still have to land, so they lead the events this failure commits.
+      suppressionRows = hookRows;
     }
 
     // A proposed mutation is validated BEFORE anything it adds can run, by the same
@@ -3756,7 +3805,7 @@ export class Engine {
       mutationEvents.push(...applied.events);
     }
 
-    const events: NewEvent[] = [...mutationEvents];
+    const events: NewEvent[] = [...suppressionRows, ...mutationEvents];
 
     // `checkpoint: "before"` WAS A SILENT NO-OP. The arm below tested `"after" || "both"` only, so
     // a node declaring `"before"` got nothing — including the human_gate node of BOTH shipped

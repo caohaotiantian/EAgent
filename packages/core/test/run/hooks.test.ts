@@ -23,7 +23,7 @@ import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { HOOK_POINTS, HookRegistry, WIRED_POINTS, type HookBody } from "../../src/run/hooks.ts";
+import { HOOK_POINTS, HookRegistry, WIRED_POINTS, narrowErrorDecision, type HookBody } from "../../src/run/hooks.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import type { RunId } from "../../src/ids.ts";
 import { resolver } from "./skeleton.ts";
@@ -356,4 +356,122 @@ test("`postTool` rewrites the result before it becomes durable", async () => {
   assert.ok(!journalled.includes("SECRET"), `the unredacted result must never become durable: ${journalled}`);
   assert.ok(journalled.includes("[redacted]"), journalled);
   void r;
+});
+
+// ── onError ──────────────────────────────────────────────────────────────────
+
+/** A tool that always fails retryably, on a node whose policy allows 2 attempts. */
+function flakyRig(hookBody?: HookBody): { engine: Engine; store: MemoryStateStore; calls: () => number; clock: { t: number } } {
+  let n = 0;
+  // A MOVABLE CLOCK. A retry sets `retryAfter = now + backoffMs`, and `advance` will not lease a
+  // task that is still backing off — so a frozen clock plus any backoff spins forever. The first
+  // draft of this test hung on exactly that.
+  const clock = { t: NOW };
+  const tools = new ToolRegistry();
+  tools.register({
+    name: "demo.write",
+    version: "1.0",
+    description: "d",
+    capabilities: ["fs:write"],
+    irreversibility: "reversible_write",
+    idempotent: true,
+    parameters: { type: "object", properties: { body: { type: "string" } } },
+    execute: () => {
+      n += 1;
+      throw Object.assign(new Error("blip"), { code: "E_PROVIDER_UNAVAILABLE", class: "unavailable", retryable: true });
+    },
+  } as ToolDefinition);
+  const hooks = new HookRegistry();
+  if (hookBody !== undefined) hooks.register("hook/guard@stable", hookBody);
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions: new FunctionRegistry(),
+    models: new ModelRegistry(),
+    hooks,
+    now: () => clock.t,
+    sleep: async () => {},
+    policy: { granted: ["fs:write"], systemFloor: "out", budget: { runUsd: 1 } },
+  });
+  return { engine, store, calls: () => n, clock };
+}
+
+function retrySpec(): GraphSpec {
+  const s = spec("onError") as unknown as { nodes: Record<string, unknown>[] };
+  s.nodes[0]!["retry"] = { maxAttempts: 3, backoffMs: 1 };
+  return s as unknown as GraphSpec;
+}
+
+async function drain(r: { engine: Engine; clock: { t: number } }, runId: RunId): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    const p = await r.engine.advance(runId);
+    if (p.status === "succeeded" || p.status === "failed") return;
+    r.clock.t += 60_000; // past any backoff, so the next advance can lease
+  }
+}
+
+test("`onError` CAN SUPPRESS a retry the policy allowed", async () => {
+  const withHook = flakyRig(() => ({ retry: false }));
+  const g = compileOrThrow({ spec: retrySpec(), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] });
+  const runId = await withHook.engine.submit({ graph: g, inputs: { note: "x" } });
+  await drain(withHook, runId);
+
+  const bare = flakyRig();
+  const runId2 = await bare.engine.submit({
+    graph: compileOrThrow({ spec: retrySpec(), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] }),
+    inputs: { note: "x" },
+  });
+  await drain(bare, runId2);
+
+  assert.ok(bare.calls() > 1, `the control must actually retry: ${String(bare.calls())} call(s)`);
+  assert.equal(withHook.calls(), 1, "a circuit breaker stops the retry after the first failure");
+});
+
+test("`onError` IS NOT CONSULTED once the policy has refused — containment is structural", async () => {
+  // The stronger of the two guarantees, and the one that does not depend on a merge function
+  // being right: `#narrowRetry` is only reached when `#retryDecision` already said yes, so a
+  // hook cannot resurrect a retry by any route. Re-running a non-idempotent tool that already
+  // reached its sandbox is the case the policy refuses on purpose.
+  //
+  // The MERGE half — that `retry: true` is ignored even where the hook IS consulted — is
+  // asserted directly against `narrowErrorDecision` below, because a run-level test cannot
+  // distinguish "the merge refused it" from "the hook was never asked".
+  const forced = flakyRig(() => ({ retry: true, afterMs: 0 }));
+  const g = compileOrThrow({ spec: retrySpec(), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] });
+  const runId = await forced.engine.submit({ graph: g, inputs: { note: "x" } });
+  await drain(forced, runId);
+
+  const bare = flakyRig();
+  const runId2 = await bare.engine.submit({
+    graph: compileOrThrow({ spec: retrySpec(), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] }),
+    inputs: { note: "x" },
+  });
+  await drain(bare, runId2);
+
+  assert.equal(forced.calls(), bare.calls(), "a hook asking for more retries gets exactly the policy's count");
+});
+
+test("narrowErrorDecision NARROWS ONLY — suppression composes, resurrection does not", () => {
+  // The merge, asserted where it can actually be observed. `retry: true` from a hook must not
+  // turn a suppression back on, whatever order the hooks ran in.
+  assert.deepEqual(narrowErrorDecision({ retry: true, afterMs: 100 }, { retry: false }), { retry: false, afterMs: 100 });
+  assert.deepEqual(
+    narrowErrorDecision({ retry: false, afterMs: 100 }, { retry: true }),
+    { retry: false, afterMs: 100 },
+    "a later hook cannot un-suppress an earlier one",
+  );
+
+  // Backoff may only grow: a hook that wants to hammer a failing provider harder is ignored.
+  assert.deepEqual(narrowErrorDecision({ retry: true, afterMs: 100 }, { afterMs: 5000 }), { retry: true, afterMs: 5000 });
+  assert.deepEqual(
+    narrowErrorDecision({ retry: true, afterMs: 5000 }, { afterMs: 1 }),
+    { retry: true, afterMs: 5000 },
+    "a SHORTER backoff is clamped to the policy's",
+  );
+
+  // Junk is ignored rather than trusted.
+  assert.deepEqual(narrowErrorDecision({ retry: true, afterMs: 100 }, null), { retry: true, afterMs: 100 });
+  assert.deepEqual(narrowErrorDecision({ retry: true, afterMs: 100 }, { afterMs: Number.NaN }), { retry: true, afterMs: 100 });
 });

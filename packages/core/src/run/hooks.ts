@@ -67,6 +67,7 @@ export const WIRED_POINTS: ReadonlySet<HookPoint> = new Set<HookPoint>([
   "postModel",
   "preTool",
   "postTool",
+  "onError",
   "onComplete",
 ]);
 
@@ -104,11 +105,32 @@ export interface NodeDecision {
   readonly reason?: string;
 }
 
-/** `onError`. `retry` is terminal in the sense that it settles the question. */
+/**
+ * `onError`. What a hook may do to a retry the POLICY already allowed.
+ *
+ * Both fields narrow and neither widens, which is rule 2 applied to failure handling:
+ * `retry: false` suppresses a retry the policy would have taken (a circuit breaker, a cost
+ * guard); `retry: true` is IGNORED, because forcing one would let an extension re-run a
+ * non-idempotent tool that already reached its sandbox — the case `#retryDecision` refuses on
+ * purpose and the most dangerous thing a hook could ask for. `afterMs` may only LENGTHEN the
+ * backoff; a shorter one is clamped to the policy's.
+ *
+ * The hook is not consulted at all when the policy already said no, so it cannot resurrect a
+ * retry by any route.
+ */
 export interface ErrorDecision {
   readonly retry?: boolean;
   readonly afterMs?: number;
-  readonly take?: readonly string[];
+}
+
+/** The merge for `onError`: suppression composes, resurrection does not, backoff only grows. */
+export function narrowErrorDecision(prev: ErrorDecision, raw: unknown): ErrorDecision {
+  if (raw === null || typeof raw !== "object") return prev;
+  const r = raw as Record<string, unknown>;
+  const retry = prev.retry === false || r["retry"] === false ? false : prev.retry;
+  const proposed = typeof r["afterMs"] === "number" && Number.isFinite(r["afterMs"]) ? r["afterMs"] : undefined;
+  const afterMs = proposed === undefined ? prev.afterMs : Math.max(prev.afterMs ?? 0, proposed);
+  return { ...(retry === undefined ? {} : { retry }), ...(afterMs === undefined ? {} : { afterMs }) };
 }
 
 export type HookBody = (input: unknown, ctx: HookContext) => Promise<unknown> | unknown;
