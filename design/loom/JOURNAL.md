@@ -4543,3 +4543,33 @@ actually writes, and the drift is invisible until a rule looks at that part of t
 The fix each time is to make the fixture realistic rather than to weaken the rule, and the reason
 is worth stating: a fixture is a claim about what the engine produces. When a rule contradicts
 one, exactly one of them is wrong about the engine — and the engine is checkable.
+
+## Posture monotonicity and an unlisted extension — the last two high-value rules
+
+Todo 7 → 5, eighteen rules.
+
+**`policy.escalation-only-raises`** checks invariant 5's tightening half from the record.
+`PolicyEngine.escalate` computes `max(from, to)` and returns WITHOUT firing when that equals
+`from`, so a journalled escalation strictly raises BY CONSTRUCTION — and nothing verified the
+construction held. Two properties: each event raises, and escalations CHAIN per scope, because
+`from` is that scope's current value. A gap in the chain means a second writer. Node scopes and
+the run scope keep separate ladders, which the test pins so the rule cannot be tightened into
+firing on ordinary node escalation.
+
+Validated on a REAL escalating journal rather than a fixture: a tool needing an ungranted
+capability produces `E6 violation, out → in`, audits clean, and the rule reports as `checked` —
+which matters because the nine sweep shapes escalate nothing, so this rule had no evidence in any
+of them and would have looked "validated" while never running.
+
+**`hook.applied-ref-is-declared`** closes the extension surface's own audit gap. A hook is a
+pinned resource NAMED BY THE GRAPH, so a `hook.applied` citing a ref the graph never declared at
+that point is an extension that reached the run some other way. It needs the graph — like
+`edgeSource`, the declared hooks are not in the journal — so `loom audit --graph` supplies both
+now, and without one the rule is skipped rather than guessed at.
+
+**This is the end of the high-value list.** Five todos remain and all five are thin:
+`run.started` ordering, `task.ready` before lease, `fanout.planned` width bounds,
+`gate.escalated` tier monotonicity, `graph.mutated` added-edge scope. Each is a real relation and
+none of them would have caught anything this repo has actually shipped. Writing them would grow
+the rule count without growing the guarantee, and a rule set padded with the cheap ones is harder
+to trust than a short one where every entry earned its place.

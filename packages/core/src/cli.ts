@@ -2283,11 +2283,18 @@ export async function main(argv: readonly string[]): Promise<number> {
         // every lookup missed, nothing was examined, and the report claimed the rule had been
         // checked — the one rule that catches the gate bypass this module was built for.
         const gf = pathFlag(args, "graph");
-        const edgeSource =
-          gf === undefined
-            ? undefined
-            : Object.fromEntries(loadGraph(ws, gf).spec.edges.map((e) => [e.id, e.from] as const));
-        const report = auditRun(events, edgeSource === undefined ? {} : { edgeSource });
+        const loaded = gf === undefined ? undefined : loadGraph(ws, gf);
+        const report = auditRun(
+          events,
+          loaded === undefined
+            ? {}
+            : {
+                edgeSource: Object.fromEntries(loaded.spec.edges.map((e) => [e.id, e.from] as const)),
+                // The graph's declared hooks, so `hook.applied` naming a ref it never declared is
+                // an extension that reached the run some other way.
+                hookRefs: loaded.spec.hooks ?? {},
+              },
+        );
         for (const v of report.violations) process.stdout.write(`✗ ${v.rule} @seq ${v.seq}: ${v.detail}\n`);
         for (const s of report.skipped) process.stdout.write(`· not checked — ${s.rule}: ${s.why}\n`);
         process.stdout.write(

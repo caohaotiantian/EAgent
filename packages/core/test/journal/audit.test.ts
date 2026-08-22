@@ -446,3 +446,59 @@ test("subgraph.child-id-is-derived — invariant 3, read back out of the journal
   ]);
   assert.deepEqual(rulesHit(random), ["subgraph.child-id-is-derived"]);
 });
+
+test("policy.escalation-only-raises — a posture lowered through the tightening door", () => {
+  // `PolicyEngine.escalate` computes `max(from, to)` and returns WITHOUT firing when that equals
+  // `from`, so a journalled escalation strictly raises by construction.
+  const lowered = fixture(() => [
+    ev("policy.escalated", { rule: "taint", from: "in", to: "on", scope: "run:r" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(lowered), ["policy.escalation-only-raises"]);
+
+  const flat = fixture(() => [ev("policy.escalated", { rule: "taint", from: "on", to: "on", scope: "run:r" }), DONE()]);
+  assert.deepEqual(rulesHit(flat), ["policy.escalation-only-raises"], "an escalation that changes nothing is never fired");
+
+  const raised = fixture(() => [
+    ev("policy.escalated", { rule: "violation", from: "out", to: "on", scope: "run:r" }),
+    ev("policy.escalated", { rule: "taint", from: "on", to: "in", scope: "run:r" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(raised), [], "and a real ladder chains out -> on -> in");
+});
+
+test("...and escalations CHAIN per scope — a gap means a second writer", () => {
+  const gap = fixture(() => [
+    ev("policy.escalated", { rule: "violation", from: "out", to: "on", scope: "run:r" }),
+    ev("policy.escalated", { rule: "taint", from: "out", to: "in", scope: "run:r" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(gap), ["policy.escalation-only-raises"]);
+
+  // A DIFFERENT scope keeps its own ladder — node scopes and the run scope do not interleave.
+  const scoped = fixture(() => [
+    ev("policy.escalated", { rule: "violation", from: "out", to: "on", scope: "run:r" }),
+    ev("policy.escalated", { rule: "taint", from: "out", to: "in", scope: "node:r/pay" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(scoped), []);
+});
+
+test("hook.applied-ref-is-declared — an extension that was not installed changed something", () => {
+  const evs = fixture(() => [
+    ev("hook.applied", { ref: "hook/ghost@stable", point: "preTool", changed: true }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(evs, { hookRefs: { preTool: ["hook/guard@stable"] } }), ["hook.applied-ref-is-declared"]);
+  assert.deepEqual(rulesHit(evs, { hookRefs: { preTool: ["hook/ghost@stable"] } }), [], "a declared hook is fine");
+  assert.deepEqual(
+    rulesHit(evs, { hookRefs: { postTool: ["hook/ghost@stable"] } }),
+    ["hook.applied-ref-is-declared"],
+    "declared at a DIFFERENT point does not license it here",
+  );
+
+  // With no graph the rule is skipped, never guessed at — the same discipline as edgeSource.
+  const r = auditRun(evs);
+  assert.deepEqual(r.violations, []);
+  assert.ok(!r.checked.includes("hook.applied-ref-is-declared"));
+});

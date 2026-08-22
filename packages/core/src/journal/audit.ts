@@ -52,6 +52,8 @@ export const AUDIT_RULES = [
   "gate.raise-has-a-decision",
   "subgraph.start-and-completion-pair",
   "subgraph.child-id-is-derived",
+  "policy.escalation-only-raises",
+  "hook.applied-ref-is-declared",
   "state.chain-is-unbroken",
   "state.root-writes-are-reduced",
   "edge.taken-belongs-to-its-node",
@@ -84,7 +86,14 @@ export interface AuditOptions {
    * the rule had been checked.
    */
   readonly edgeSource?: Readonly<Record<string, string>>;
+  /**
+   * The hook refs the graph DECLARED, per point. Required by `hook.applied-ref-is-declared` for
+   * the same reason `edgeSource` is required by its rule: the graph is not in the journal.
+   */
+  readonly hookRefs?: Readonly<Record<string, readonly string[]>>;
 }
+
+const POSTURE_RANK: Readonly<Record<string, number>> = { out: 0, on: 1, in: 2 };
 
 /** Total reads. A journal this cannot parse is exactly the journal it exists to diagnose. */
 function obj(v: unknown): Record<string, unknown> | undefined {
@@ -144,6 +153,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const rootWriters = new Map<string, { seq: number; channels: string }>();
   let lastAfter: string | undefined;
   const childStarts = new Map<string, number>();
+  const escalatedTo = new Map<string, string>();
   const submissions: number[] = [];
 
   for (const e of live) {
@@ -262,6 +272,44 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
             add("state.chain-is-unbroken", seq, `this reduction starts at ${before.slice(0, 20)}… but the last one ended at ${lastAfter.slice(0, 20)}…`);
           }
           lastAfter = after;
+        }
+        break;
+      }
+      case "policy.escalated": {
+        const from = str(p["from"]);
+        const to = str(p["to"]);
+        const scope = str(p["scope"]);
+        if (from === undefined || to === undefined || scope === undefined) break;
+        saw.add("policy.escalation-only-raises");
+        // `PolicyEngine.escalate` computes `max(from, to)` and returns WITHOUT firing when that
+        // equals `from`, so a journalled escalation strictly raises by construction. An event
+        // that does not is a posture lowered through the tightening door — invariant 5 inverted.
+        const a = POSTURE_RANK[from];
+        const b = POSTURE_RANK[to];
+        if (a === undefined || b === undefined) {
+          add("policy.escalation-only-raises", seq, `escalation names a posture that is not out/on/in: ${from} -> ${to}`);
+        } else if (b <= a) {
+          add("policy.escalation-only-raises", seq, `escalation went ${from} -> ${to} in scope "${scope}", which does not raise`);
+        }
+        // And they CHAIN per scope: `from` is that scope's current value, so a later escalation
+        // starting somewhere other than where the last one ended means a second writer.
+        const prev = escalatedTo.get(scope);
+        if (prev !== undefined && prev !== from) {
+          add("policy.escalation-only-raises", seq, `scope "${scope}" was last escalated to "${prev}" but this one starts from "${from}"`);
+        }
+        escalatedTo.set(scope, to);
+        break;
+      }
+      case "hook.applied": {
+        const ref = str(p["ref"]);
+        const point = str(p["point"]);
+        if (ref === undefined || point === undefined || opts.hookRefs === undefined) break;
+        saw.add("hook.applied-ref-is-declared");
+        // AN EXTENSION THAT WAS NOT INSTALLED CHANGED SOMETHING. Hooks are pinned resources named
+        // by the graph, so a `hook.applied` naming a ref the graph never declared at that point
+        // is an extension that reached the run some other way.
+        if (!(opts.hookRefs[point] ?? []).includes(ref)) {
+          add("hook.applied-ref-is-declared", seq, `hook "${ref}" changed a value at ${point}, and the graph declares no such hook there`);
         }
         break;
       }
@@ -416,6 +464,9 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   } else if (saw.has("gate.raised-is-resolved")) {
     unrunnable.set("gate.raised-is-resolved", "the run did not complete; an open or abandoned gate is legal on a failed, cancelled or live run");
     saw.delete("gate.raised-is-resolved");
+  }
+  if (opts.hookRefs === undefined) {
+    unrunnable.set("hook.applied-ref-is-declared", "no hookRefs supplied: the graph's declared hooks are not in the journal, only the refs that fired");
   }
   if (opts.edgeSource === undefined) {
     unrunnable.set("edge.taken-belongs-to-its-node", "no edgeSource supplied: the compiled graph is not in the journal, only its hash");
