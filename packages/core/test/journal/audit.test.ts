@@ -356,3 +356,48 @@ test("...and a MIRROR gate is keyed on the TASK, not on the decision being a gat
   ]);
   assert.deepEqual(rulesHit(mirror), []);
 });
+
+test("state.chain-is-unbroken — every reduction starts where the last one finished", () => {
+  // `state.reduced` carries the channel-state hash either side of it. A break means a write went
+  // missing between them, a second writer interleaved, or a reduction was computed against a
+  // projection that had already moved.
+  const broken = fixture(() => [
+    ev("state.reduced", { channels: ["a"], values: {}, branchCount: 1, skipped: 0, degraded: false, stateHashBefore: "h0", stateHashAfter: "h1" }),
+    ev("state.reduced", { channels: ["b"], values: {}, branchCount: 1, skipped: 0, degraded: false, stateHashBefore: "hX", stateHashAfter: "h2" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(broken), ["state.chain-is-unbroken"]);
+
+  const chained = fixture(() => [
+    ev("state.reduced", { channels: ["a"], values: {}, branchCount: 1, skipped: 0, degraded: false, stateHashBefore: "h0", stateHashAfter: "h1" }),
+    ev("state.reduced", { channels: ["b"], values: {}, branchCount: 1, skipped: 0, degraded: false, stateHashBefore: "h1", stateHashAfter: "h2" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(chained), []);
+});
+
+test("state.root-writes-are-reduced — and a FAN-OUT branch is allowed to hold its writes", () => {
+  // A root-branch task reduces immediately; one inside a fan-out holds until its join. A rule
+  // that could not tell them apart would fire on every parallel branch this engine runs.
+  const lost = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: { out: 1 }, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(lost), ["state.root-writes-are-reduced"]);
+
+  const held = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root/e0[0]#0" }),
+    ev("task.committed", { status: "succeeded", writes: { out: 1 }, take: [], usage: {}, attempt: 1 }, { taskId: "w@root/e0[0]#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(held), [], "a branch holds its writes for the join — that is not a loss");
+
+  const reduced = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: { out: 1 }, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    ev("state.reduced", { channels: ["out"], values: { out: 1 }, branchCount: 1, skipped: 0, degraded: false, stateHashBefore: "h0", stateHashAfter: "h1" }, { taskId: "w@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(reduced), []);
+});

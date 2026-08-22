@@ -4489,3 +4489,29 @@ reason".
 The lesson generalises past this file: **a mutation that changes behaviour AND breaks the program
 proves nothing.** A harness needs to assert its edit was surgical — that it matched, and that the
 suite fails on assertions rather than exceptions — or it is measuring its own bugs.
+
+## The state hash chain, and the rule that had to know about fan-out
+
+Two rules, todo 10 → 9, fourteen rules total.
+
+**`state.chain-is-unbroken`** is the stronger and was not on the todo list — it fell out of
+reading the payload. `state.reduced` carries `stateHashBefore` and `stateHashAfter`, so every
+reduction must start where the last one finished. A break means a write went missing between
+them, a second writer interleaved, or a reduction was computed against a projection that had
+already moved. Nothing had ever compared the two halves of a field the engine has always written.
+
+**`state.root-writes-are-reduced`** is the one from the list, and the naive version of it is
+WRONG. The engine's own comment says why: *"a join emits its fold; a root-branch Task reduces its
+own writes immediately; a Task inside a fan-out holds them until its join."* A rule asserting
+"committed writes are followed by a reduction" fires on every parallel branch this engine runs.
+It asks only about `root`-branch tasks, and a branch-coordinate task holding its writes is
+explicitly tested as legal.
+
+**Both candidates were probed against real journals BEFORE either was written** — fan-out,
+linear, and loop, checking the hash chain and the root-reduction property separately. Fan-out
+produced three reductions and zero chain breaks, which is what made the chain rule safe to write
+at all. Then the full nine-shape sweep: zero violations.
+
+That ordering is now the habit: read the payload, form two candidate rules, run both against real
+journals as a probe, and only then implement the one that survives. Four iterations ago I would
+have written the naive rule, shipped it, and had a reviewer find it firing on every fan-out.

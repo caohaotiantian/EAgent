@@ -88,7 +88,6 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   "run.started": { kind: "todo", why: "must follow run.submitted and precede any task event" },
   "task.ready": { kind: "todo", why: "a task must be ready before it is leased, and leased before it commits" },
   "fanout.planned": { kind: "todo", why: "the planned width should bound the branch coordinates that actually appear" },
-  "state.reduced": { kind: "todo", why: "every channel in a committed task's writes should appear in the reduction that follows" },
   "policy.escalated": { kind: "todo", why: "posture is monotone within a scope except across policy.deescalated; nothing checks it" },
   "gate.escalated": { kind: "todo", why: "tiers should be non-decreasing per gate, and bounded by the declared escalation chain" },
   "graph.mutated": { kind: "todo", why: "an added edge should be the only kind a later take may name that the compiled graph does not" },
@@ -146,6 +145,6 @@ test("THE `todo` LIST MUST NOT GROW", () => {
   // A floor, not an equality: writing a rule and deleting its todo is ordinary work and should
   // not cost a test edit. Adding a todo is how a rule set decays quietly, and that has to fail.
   const todos = Object.entries(EXCUSED).filter(([, e]) => e.kind === "todo").length;
-  assert.ok(todos <= 10, `${todos} event types are marked todo; it was 15 when this gate was written, 10 now, and may only shrink`);
-  assert.ok(AUDIT_RULES.length >= 12, `${AUDIT_RULES.length} rules; deleting one needs a reason in the journal, not a quiet edit`);
+  assert.ok(todos <= 9, `${todos} event types are marked todo; it was 15 when this gate was written, 9 now, and may only shrink`);
+  assert.ok(AUDIT_RULES.length >= 14, `${AUDIT_RULES.length} rules; deleting one needs a reason in the journal, not a quiet edit`);
 });

@@ -50,6 +50,8 @@ export const AUDIT_RULES = [
   "run.submitted-is-first-and-once",
   "call-pairs-with-its-effect",
   "gate.raise-has-a-decision",
+  "state.chain-is-unbroken",
+  "state.root-writes-are-reduced",
   "edge.taken-belongs-to-its-node",
 ] as const;
 
@@ -136,6 +138,9 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const commits = new Map<string, number>();
   const leased = new Set<string>();
   const decidedTasks = new Set<string>();
+  const reducedTasks = new Set<string>();
+  const rootWriters = new Map<string, { seq: number; channels: string }>();
+  let lastAfter: string | undefined;
   const submissions: number[] = [];
 
   for (const e of live) {
@@ -208,6 +213,25 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
             seq,
             `${e.type} for "${key}", whose effect declared kind "${String(startedKind.get(key))}" rather than "${want}"`,
           );
+        }
+        break;
+      }
+      case "state.reduced": {
+        if (e.taskId !== undefined) reducedTasks.add(String(e.taskId));
+        const before = str(p["stateHashBefore"]);
+        const after = str(p["stateHashAfter"]);
+        if (before !== undefined && after !== undefined) {
+          saw.add("state.chain-is-unbroken");
+          // EVERY REDUCTION STARTS WHERE THE LAST ONE FINISHED. `state.reduced` carries the hash
+          // of the channel state either side of it, and a break means a write went missing
+          // between them, or a second writer interleaved, or a reduction was computed against a
+          // projection that had already moved. Fan-out safe, measured: two branches and a join
+          // produce three reductions and no break, because a branch HOLDS its writes until the
+          // join folds them.
+          if (lastAfter !== undefined && lastAfter !== before) {
+            add("state.chain-is-unbroken", seq, `this reduction starts at ${before.slice(0, 20)}… but the last one ended at ${lastAfter.slice(0, 20)}…`);
+          }
+          lastAfter = after;
         }
         break;
       }
@@ -296,6 +320,13 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           add("task.committed-once", seq, `task "${tid}" committed at seq ${String(before)} and again here`);
         }
         commits.set(tid, seq);
+        // A ROOT-BRANCH task reduces its writes immediately; one inside a fan-out holds them
+        // until its join, which is why this asks only about `root`.
+        const wrote = Object.keys((p["writes"] ?? {}) as Record<string, unknown>);
+        const at = tid.indexOf("@");
+        const hash = tid.lastIndexOf("#");
+        const branch = at < 0 || hash < at ? "" : tid.slice(at + 1, hash);
+        if (wrote.length > 0 && branch === "root") rootWriters.set(tid, { seq, channels: wrote.join(", ") });
         if (opts.edgeSource === undefined) break;
         const owner = nodeOf(tid);
         for (const raw of take) {
@@ -335,6 +366,13 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     }
   } else {
     unrunnable.set("run.submitted-is-first-and-once", "this journal does not begin at seq 1, so the submission is legitimately absent from it");
+  }
+
+  for (const [tid, w] of rootWriters) {
+    saw.add("state.root-writes-are-reduced");
+    if (!reducedTasks.has(tid)) {
+      add("state.root-writes-are-reduced", w.seq, `root-branch task "${tid}" committed writes (${w.channels}) that no state.reduced ever applied`);
+    }
   }
 
   if (completed) {
