@@ -150,7 +150,7 @@ for reasons, not forgotten.
 |---|---|
 | **Browser paint at 500 nodes** | Timing the paint needs a headless browser, which the zero-dep rule keeps out of `@loom/core`. Measure it in a separate package — do not add the dependency here |
 | **Scheduler-tick telemetry** | The span DL-1 named as its reversal metric is emitted nowhere. The runnable substitute the journal already carries is `task.leased.ts − task.ready.ts` per Task |
-| **The guard stack cannot be vendored from EAgent** | `secret-guard` and `bash-policy` need **argument-level inspection before dispatch**, and `PolicyEngine.decide` never looks at args; `irreversibility` is static per tool, so "this `git` invocation is read-only but that one force-pushes" has no home. The shape that works is to **split the tool**: a `read_only`-declaring variant whose `execute` REFUSES any argv it cannot prove read-only. Refusing is always permitted; lowering never is |
+| **EAgent's guard stack cannot move into `packages/core` as-is** | `secret-guard` and `bash-policy` need **argument-level inspection before dispatch**, and `PolicyEngine.decide` never looks at args; `irreversibility` is static per tool, so "this `git` invocation is read-only but that one force-pushes" has no home. The shape that works is to **split the tool**: a `read_only`-declaring variant whose `execute` REFUSES any argv it cannot prove read-only. Refusing is always permitted; lowering never is |
 
 ### 6 · Smaller known gaps
 

@@ -20,11 +20,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/caohaotiantian/eagent.git"
+    "url": "git+https://github.com/caohaotiantian/EAgent.git",
+    "directory": "packages/eagent"
   },
-  "homepage": "https://github.com/caohaotiantian/eagent#readme",
+  "homepage": "https://github.com/caohaotiantian/EAgent/tree/loom/packages/eagent#readme",
   "bugs": {
-    "url": "https://github.com/caohaotiantian/eagent/issues"
+    "url": "https://github.com/caohaotiantian/EAgent/issues"
   },
   "bin": {
     "eagent-headless": "./dist/cli.js",
@@ -56,7 +57,13 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -b --force"
+    "build": "tsc -b --force",
+    "build:binary": "node scripts/build-binary.mjs",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "eval": "node src/eval-runner.ts evals",
+    "dev": "node src/cli.ts",
+    "serve": "node src/server.ts"
   },
   "dependencies": {
     "jiti": "^2.4.2"

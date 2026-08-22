@@ -5,8 +5,9 @@
 ## What EAgent taught us
 
 EAgent is a good kernel with a structural limit. The limit is not a missing feature; it
-is *where orchestration state lives*. Every row below is evidence from the frozen tree
-(`git worktree add ../eagent-ref init`), not opinion.
+is *where orchestration state lives*. Every row below is evidence from the code, not opinion —
+read it at `packages/eagent/`, which is where EAgent now lives and is developed. (The rows were
+first written against the frozen pre-monorepo tree, tag `eagent-v1` on branch `init`.)
 
 | # | What EAgent does | Evidence | Consequence in production | What Loom does instead |
 |---|---|---|---|---|

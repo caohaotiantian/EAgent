@@ -6,8 +6,9 @@
 > *proves* versus what remains designed.
 > **Target:** a working single-node deployment in **6–8 weeks** by a small team, with
 > the distributed path open but unbuilt.
-> **Predecessor:** EAgent, frozen at tag `eagent-v1` on branch `init`. Reference, not
-> dependency. `git worktree add ../eagent-ref init`.
+> **Predecessor:** EAgent — now `packages/eagent/` in this repo and developed here, no longer
+> a dependency of `@loom/core` and never imported by it. The frozen pre-monorepo tree is tag
+> `eagent-v1` on branch `init`.
 
 ## The one-sentence thesis
 

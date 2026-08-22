@@ -1,7 +1,13 @@
-# CLAUDE.md
+# CLAUDE.md — `packages/eagent`
 
-Orientation for an AI agent working in this repository. **The code is the source
+Orientation for an AI agent working in **this package**. **The code is the source
 of truth**; where this file and the code disagree, the code wins — fix this file.
+
+> **This is one package inside the Loom monorepo.** The repository root's `CLAUDE.md` is the
+> project guide and governs the gate, the invariants and the commit rules; this file covers
+> EAgent specifically. EAgent moved here from its own repository on 2026-08-21 and is developed
+> here — the `init` branch (tag `eagent-v1`) and the `../eagent-ref` worktree are frozen history,
+> not the source of truth.
 
 <!-- Anchor map (read by the three-loop-workflow skill; maps a role to this file's heading) -->
 - _repo-workflow_       → "## Working here"
@@ -11,7 +17,7 @@ of truth**; where this file and the code disagree, the code wins — fix this fi
 
 ## Two packages
 
-- **`@eagent/core`** (repo root) — the engine: kernel, providers, extensions, the
+- **`@eagent/core`** (this directory) — the engine: kernel, providers, extensions, the
   HTTP host, and the headless `eagent-headless` CLI. Zero runtime deps but `jiti`.
 - **`eagent`** (`tui/`) — the installable product: the interactive Ink + React
   TUI, which owns the `eagent` command and depends on `@eagent/core`.
@@ -81,15 +87,22 @@ provider stream throws pre-first-event).
 ## Key commands
 
 ```bash
-npm test          # node:test via tsx; runs offline against MockProvider (no API key)
-npm run typecheck # tsc --noEmit   (alias: npm run lint)
-npm run build     # tsc -> dist/
-npm run build:binary # esbuild+Node-SEA -> a single standalone bin/eagent (posix; needs npx)
-npm run dev       # node --import tsx src/cli.ts     (headless: --eval / piped stdin)
-npm --prefix tui run dev   # the interactive TUI (Ink + React)
-npm --prefix tui test      # the TUI suite (also gated in CI)
-npm run serve     # node --import tsx src/server.ts  (HTTP host)
-npm run eval      # offline evals-as-CI gate — runs evals/*.eval.json, exits non-zero on failure
+# Run these FROM THE REPOSITORY ROOT — the gate is the monorepo's, not this package's.
+npm run check     # THE gate: typechecks + BOTH packages' suites + Loom's guards
+npm test          # both suites, offline against MockProvider (no API key)
+npm run eagent    # this package's headless CLI  (--eval / piped stdin)
+
+# Scoped to this package — from the root, `npm --prefix packages/eagent run <script>`:
+npm --prefix packages/eagent test          # EAgent's suite alone
+npm --prefix packages/eagent run typecheck # src + test, read-only
+npm --prefix packages/eagent run eval      # offline evals-as-CI gate (exits non-zero on failure)
+npm --prefix packages/eagent run dev       # headless CLI
+npm --prefix packages/eagent run serve     # the HTTP host
+npm --prefix packages/eagent run build:binary   # esbuild + Node-SEA -> bin/eagent
+npm --prefix packages/eagent/tui run dev   # the interactive TUI (Ink + React)
+
+# THERE IS NO `tsx` ANY MORE. Node 24 strips types natively and every relative import
+# specifier in this package says `.ts`, so `node --test` runs the source directly.
 ```
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a
@@ -188,11 +201,15 @@ install`). A command that writes without that call bypasses the security model.
   required by `module: NodeNext` and `verbatimModuleSyntax`.
 - **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
   `noImplicitOverride`, `noFallthroughCasesInSwitch` are all on. No `any`
-  cop-outs; model the types. Note: the build `tsconfig.json` excludes `test/` and
-  `examples/`, and `npm test` runs via `tsx` (transpile-only) — so neither
-  `typecheck` (src-only) nor `test` type-checks test files. **`npm run typecheck:test`**
-  (a separate `noEmit` `tsconfig.test.json` inheriting every strict flag) type-checks
-  `test/` + `src/` and is a CI gate; `examples/` remains unchecked.
+  cop-outs; model the types. The build `tsconfig.json` covers `src/` only;
+  `tsconfig.test.json` covers `src/` + `test/` and **the root `typecheck` script names it
+  explicitly**, so test files ARE type-checked here — that was not true before the move, and
+  a stale note saying otherwise is how a real type error gets waved off as an editor
+  false positive. `examples/` remains unchecked.
+
+  This package's tsconfig extends the monorepo's `tsconfig.base.json` but turns OFF three
+  flags EAgent predates: `exactOptionalPropertyTypes`, `noPropertyAccessFromIndexSignature`,
+  `noImplicitReturns`. Turning them on is a migration, not a bug fix.
 - **Zero runtime dependencies in the engine (except `jiti`).** The kernel,
   providers, extensions, server, and CLI-engine — everything the SEA `bin/eagent`
   bundles — stay zero-runtime-dep: providers use the global `fetch`; nothing pulls
@@ -202,7 +219,7 @@ install`). A command that writes without that call bypasses the security model.
   as its own package deps — not engine runtime deps, not under root `test/`. The
   dependency arrow points ONE way: `tui/` depends on `@eagent/core`, never the
   reverse, which is what keeps a library consumer from downloading React.
-- **Tests use `node:test` run via `tsx`**, and must run offline. Every extension
+- **Tests use `node:test`, run directly by `node --test`**, and must run offline. Every extension
   is capability-gated and ships with tests.
 - **Capabilities are the security vocabulary.** Privileged tools declare
   `capabilities: [...]` (e.g. `fs:read`, `shell:exec`) and the dispatcher
