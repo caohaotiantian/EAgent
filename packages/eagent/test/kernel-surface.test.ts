@@ -96,7 +96,13 @@ test("the kernel source stays small", async () => {
   // assignment: +2 lines each, three of them in the kernel (`capabilities.ts` x1,
   // `store.ts` x2) = +6. Measured 2341 after the conversion. This is a syntax tax, not creep;
   // the guard still bites on the next real addition.
-  assert.ok(lines < 2342, `kernel is ${lines} lines; keep the core minimal (ceiling 2342)`);
+  // RAISED AGAIN 2342 -> 2350, +7 measured, for one guard: teardown was not TOTAL. Every
+  // registration an extension makes is tracked and disposed, but the `api` object outlived it,
+  // so a captured handle in a timer could register after `/unload` — untracked, permanent, and
+  // attributable to no id. `live` + `alive()` in `extension.ts` makes a stale handle throw.
+  // Written compactly on purpose: the first draft cost +14 and this ceiling was raised
+  // yesterday. A budget raised twice in two days without shrinking the change is not a budget.
+  assert.ok(lines < 2350, `kernel is ${lines} lines; keep the core minimal (ceiling 2350)`);
 });
 
 /** The stable member set of the object handed to every extension at activation. */

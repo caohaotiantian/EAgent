@@ -4035,3 +4035,59 @@ catch — and describing an unbuilt field is the same defect as an uninvoked hoo
 
 **Reverses when** a host needs ambient hooks that outlive a graph. It should not: that is a
 plugin system, and this repo's answer to one is `packages/eagent`.
+
+## What two reference harnesses were worth, measured rather than admired
+
+Six parallel readers over `earendil-works/pi` and `deepseek-ai/deepseek-harness` (both MIT, tips
+days old), then a synthesiser told to verify the top claims against OUR code before ranking. 54
+findings, 45 nominally actionable. The synthesis is worth more than the list, in three ways.
+
+**It caught a reader being confidently wrong about us, which is the failure mode that matters.**
+Two findings claimed we have no argument-level guard stage — that `#invokeTool` "has no stage
+between the decision and `tool.execute`" and that argument policy "can only be expressed by
+writing a whole second tool". That was true when the readers started and false when they
+finished: the hook bus landed mid-run. The synthesiser opened the file and said so. **A reader
+claiming we lack something we shipped is the most damaging error available here**, because it
+buys a rebuild of what exists.
+
+**And I rejected one of its own recommendations for the same reason.** It ranked
+`bash-policy`'s `fallthrough: "allow"` default as a posture inversion — "every other boundary in
+this repo fails closed". It is not a boundary. `shell:exec` is the gate; `bash-policy` is a
+refinement layer on top of it that ships deliberately no-op, and defaulting it to `deny` would
+break every shell command the moment someone activates it. "Fail closed" applies to the thing
+that IS the gate. The finding read the default and not the docstring three lines above it.
+
+**Two live defects were real, cheap, and ours alone** — neither is an idea borrowed from either
+repo, they are things reading someone else's provider code made visible in ours:
+
+- **A truncated turn was reported as a clean tool call.** Both adapters ended with
+  `finishReason: toolCalls.length > 0 ? "tool_use" : finishReason`, so `max_tokens` was ERASED
+  whenever any call had been parsed — and a call whose argument JSON was cut mid-stream is
+  debris: the parser turns the unparseable remainder into `{}`, so the engine dispatched the
+  tool with EMPTY arguments. `fs.write` with `{}` is not a smaller version of the intended
+  write. A truncated turn now keeps its reason and drops its partial calls.
+- **Cached tokens were captured and never priced.** The adapter has always read
+  `cache_read_input_tokens`/`cache_creation_input_tokens` and put them on the `UsageRecord`;
+  `priceOf`'s parameter named two fields, so it could not see them. Every cached turn settled at
+  the plain input rate — cheap-direction wrong for a read, expensive-direction wrong for a write
+  (creation costs ~1.25x input), and a budget compares against that number. A row without cache
+  rates falls back to input, so an operator who has not priced their cache is not handed a free
+  one.
+
+**And one in the kernel: teardown was not total.** Every registration an extension makes is
+tracked and disposed, but the `api` object outlived it — a handle captured in a timer could
+register after `/unload`, untracked, permanent, attributable to no id. `combine` had a second,
+quieter version of the same shape: `disposables.reverse()` is in-place, so a second `dispose()`
+tore down in the ORIGINAL order.
+
+The kernel LOC ceiling fired at +14 and the change was rewritten to +7 rather than the budget
+being raised to fit it. **A ceiling raised twice in two days without shrinking the change is not
+a ceiling.**
+
+**Deliberately NOT taken**, each for a reason that is about our invariants rather than taste:
+workflow-as-JS-in-a-vm (control flow is not derivable from a log, so inv 3 and inv 4 both fail);
+`ctx.effect` as an effect boundary (it is a disposal scope, records nothing, and hands a node
+body the capability inv 4 closes); dsh's fail-open hook arm and its `permission:'allow'`
+auto-approval for child agents (a private grant, inv 5); dsh's deny-pattern env scrubbing (ours
+is an allow-list — do not regress it while taking the sandbox half); mutation testing as a gate
+(neither reference has it, and a slower `npm run check` is a gate people stop running).

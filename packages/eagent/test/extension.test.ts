@@ -235,3 +235,24 @@ test("e.agent resolves to the acting agent during a run and to host.agent at act
   assert.notEqual(actingAtLeaf, parent, "during the fork e.agent resolves to the acting (child) agent, not host.agent");
   assert.equal(rootAtLeaf, parent, "during the fork e.rootAgent resolves to the run-tree root (the parent)");
 });
+
+test("a torn-down extension's API is STALE — teardown is total", async () => {
+  // Every registration is tracked and disposed, but the `api` object outlived the extension: a
+  // captured handle in a timer or a promise could register AFTER `/unload`, and that
+  // registration is untracked — permanent, and attributable to no id.
+  const h = makeHarness();
+  let captured: ExtensionAPI | undefined;
+  await h.host.use("leaky", (e: ExtensionAPI) => {
+    captured = e;
+    return () => {};
+  });
+  assert.ok(captured, "the extension activated");
+
+  await h.host.unload("leaky");
+  assert.throws(
+    () => captured!.registerTool(defineTool({ name: "ghost", description: "d", execute: () => ok("x") })),
+    /torn down/,
+    "a stale handle must not be able to register anything",
+  );
+  assert.equal(h.agent.tools.has("ghost"), false, "and nothing was registered");
+});

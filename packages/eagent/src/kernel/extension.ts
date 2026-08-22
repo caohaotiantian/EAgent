@@ -232,17 +232,22 @@ export class ExtensionHost {
       disposables.push(d);
       return d;
     };
+    // TEARDOWN MUST BE TOTAL. Registrations are tracked and disposed, but the `api` object
+    // outlives the extension: a captured `e` in a timer could register AFTER `/unload`, and that
+    // registration is untracked — permanent, and invisible to the id it came from.
+    let live = true;
+    const alive = (): void => { if (!live) throw new Error(`extension "${spec.id}" is torn down`); };
 
     const store = this.#store.open(spec.id);
     const host = this;
     const api: ExtensionAPI = {
       id: spec.id,
-      registerTool: (tool) => track(host.agent.tools.register(tool)),
-      registerProvider: (provider, opts) => track(host.agent.providers.register(provider, opts)),
-      registerCommand: (command) => track(host.commands.register(command)),
-      on: (event, handler) => track(host.agent.hooks.on(event, handler)),
-      hook: (point, handler) => track(host.agent.hooks.filter(point, handler)),
-      grantCapability: (pattern) => track(host.agent.capabilities.grant(pattern)),
+      registerTool: (tool) => (alive(), track(host.agent.tools.register(tool))),
+      registerProvider: (provider, opts) => (alive(), track(host.agent.providers.register(provider, opts))),
+      registerCommand: (command) => (alive(), track(host.commands.register(command))),
+      on: (event, handler) => (alive(), track(host.agent.hooks.on(event, handler))),
+      hook: (point, handler) => (alive(), track(host.agent.hooks.filter(point, handler))),
+      grantCapability: (pattern) => (alive(), track(host.agent.capabilities.grant(pattern))),
       store,
       config: host.#config,
       log: prefixed(this.#logger, spec.id),
@@ -266,7 +271,8 @@ export class ExtensionHost {
       throw err;
     }
 
-    this.#loaded.set(spec.id, { id: spec.id, origin: spec.origin, teardown: combine(...disposables) });
+    const inner = combine(...disposables);
+    this.#loaded.set(spec.id, { id: spec.id, origin: spec.origin, teardown: { dispose: () => { live = false; inner.dispose(); } } });
   }
 
   private async importFile(path: string): Promise<ActivateFn> {

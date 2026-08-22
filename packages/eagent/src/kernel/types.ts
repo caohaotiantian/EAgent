@@ -361,7 +361,9 @@ export interface Disposable {
 export function combine(...disposables: Disposable[]): Disposable {
   return {
     dispose() {
-      for (const d of disposables.reverse()) {
+      // COPY before reversing: `reverse()` is in-place, so a second `dispose()` would tear
+      // down in the ORIGINAL order. Disposal is supposed to be idempotent, not order-flipping.
+      for (const d of [...disposables].reverse()) {
         try {
           d.dispose();
         } catch {
