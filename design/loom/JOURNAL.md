@@ -4455,3 +4455,37 @@ Nine real journals swept clean again — the four linear shapes plus fan-out, lo
 and child, and a gate approved and resumed. The kind-crossed fixture trips this rule AND
 `effect.kind-matches-its-key` together, which is right: they catch the same disagreement from
 opposite sides, and a fixture that tripped only one would mean one of them had a hole.
+
+## The other half of the oversight record — and a mutation harness that was lying
+
+`gate.raise-has-a-decision`: every `gate.raised` must be preceded by a `policy.decided` for the
+same task. Todo list 11 → 10; twelve rules.
+
+A gate is the OUTPUT of the guard chain and `policy.decided` is the input that produced it — the
+reasons, the posture, the class. A gate raised for a task that never had a decision came from
+somewhere other than the chain, which is the thing invariant 6's single dispatch path exists to
+make impossible. Nothing read that back.
+
+**Keyed on the TASK, not on the decision's effect being `gate`, and a real journal is why.** A
+subgraph delegation raises a MIRROR gate in the parent for a task whose own decision was `allow`
+— the child is what gated. I built the case rather than reasoning about it: parent journal reads
+`policy.decided(allow) → subgraph.started → gate.raised → run.suspended → gate.decided →
+run.resumed`, 0 violations. Keying on `effect === "gate"` would have fired on every delegation
+that gates, which this repo tests and ships.
+
+### The mutation harness was producing false confirmations
+
+The sweep replaced `add("rule"` with `void ("rule"` — and that regex also matched
+`saw.add("rule")`, the line that records EVIDENCE. The result was `saw.void (…)`, a `TypeError`,
+so the tests died of a crash rather than of the rule's absence. **Every "mutation confirmed"
+in this file for a rule that has a `saw.add` was, to that extent, unearned** — the tests did go
+red, but not for the reason claimed, and a rule with no test at all would have looked identical.
+
+Redone with `(?<!saw\.)` and asserting the substitution actually matched something. All twelve
+rules kill 1–2 tests, **zero crashes**. The result stands; the evidence for it did not, and the
+difference matters because "the test went red" is worth nothing without "and for the right
+reason".
+
+The lesson generalises past this file: **a mutation that changes behaviour AND breaks the program
+proves nothing.** A harness needs to assert its edit was surgical — that it matched, and that the
+suite fails on assertions rather than exceptions — or it is measuring its own bugs.

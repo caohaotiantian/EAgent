@@ -49,6 +49,7 @@ export const AUDIT_RULES = [
   "task.leased-precedes-commit",
   "run.submitted-is-first-and-once",
   "call-pairs-with-its-effect",
+  "gate.raise-has-a-decision",
   "edge.taken-belongs-to-its-node",
 ] as const;
 
@@ -134,6 +135,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const raisedGates = new Set<string>();
   const commits = new Map<string, number>();
   const leased = new Set<string>();
+  const decidedTasks = new Set<string>();
   const submissions: number[] = [];
 
   for (const e of live) {
@@ -209,6 +211,9 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         }
         break;
       }
+      case "policy.decided":
+        if (e.taskId !== undefined) decidedTasks.add(String(e.taskId));
+        break;
       case "policy.deescalated": {
         saw.add("policy.deescalation-is-human");
         // Invariant 5: nothing lowers a posture but an explicit HUMAN de-escalation. `Engine`
@@ -228,6 +233,18 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         break;
       case "gate.raised": {
         const id = str(p["gateId"]);
+        // THE OTHER HALF OF THE OVERSIGHT RECORD. A gate is the output of the guard chain, and
+        // `policy.decided` is the input that produced it — the reasons, the posture, the class.
+        // A gate raised for a task that never had a decision is a gate manufactured OUTSIDE the
+        // chain, which is the one thing the chain being single (invariant 6) is supposed to make
+        // impossible. Keyed on the TASK rather than on the effect being `gate`, because a mirror
+        // gate is raised from `#runSubgraph` for a task whose own decision was `allow`.
+        if (e.taskId !== undefined) {
+          saw.add("gate.raise-has-a-decision");
+          if (!decidedTasks.has(String(e.taskId))) {
+            add("gate.raise-has-a-decision", seq, `gate "${id ?? "?"}" was raised for task "${String(e.taskId)}" with no prior policy.decided`);
+          }
+        }
         if (id !== undefined) {
           saw.add("gate.raised-is-resolved");
           openGates.set(id, seq);

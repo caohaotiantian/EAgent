@@ -321,3 +321,38 @@ test("...and the KIND must match the call, not merely exist", () => {
     "both sides of the same disagreement fire, which is correct",
   );
 });
+
+test("gate.raise-has-a-decision — a gate manufactured outside the guard chain", () => {
+  // A gate is the OUTPUT of the guard chain; `policy.decided` is the input that produced it —
+  // the reasons, the posture, the class. A gate raised for a task that never had a decision came
+  // from somewhere other than the chain, which is the thing invariant 6's single dispatch path
+  // is supposed to make impossible.
+  const orphan = fixture(() => [
+    ev("gate.raised", { gateId: "g1", nodeId: "n" }, { taskId: "n@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(orphan).sort(), ["gate.raise-has-a-decision", "gate.raised-is-resolved"]);
+
+  const proper = fixture(() => [
+    ev("policy.decided", { effect: "gate", posture: "in", irreversibility: "irreversible", reasons: [] }, { taskId: "n@root#0" }),
+    ev("gate.raised", { gateId: "g1", nodeId: "n" }, { taskId: "n@root#0" }),
+    ev("gate.decided", { gateId: "g1", decision: "approve" }, { actor: HUMAN }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(proper), []);
+});
+
+test("...and a MIRROR gate is keyed on the TASK, not on the decision being a gate", () => {
+  // A subgraph delegation raises a mirror gate in the PARENT for a task whose own decision was
+  // `allow` — the child is what gated. Keying this rule on `effect === "gate"` would fire on
+  // every delegation that gates, which is a shape this repo tests and ships. Measured against a
+  // real parent journal: policy.decided(allow) → subgraph.started → gate.raised, 0 violations.
+  const mirror = fixture(() => [
+    ev("policy.decided", { effect: "allow", posture: "out", irreversibility: "read_only", reasons: [] }, { taskId: "d@root#0" }),
+    ev("subgraph.started", { childRunId: "run_2", ref: "graph/c@stable" }, { taskId: "d@root#0" }),
+    ev("gate.raised", { gateId: "g1", nodeId: "d", mirrorOf: "gate_child" }, { taskId: "d@root#0" }),
+    ev("gate.decided", { gateId: "g1", decision: "approve" }, { actor: HUMAN }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(mirror), []);
+});
