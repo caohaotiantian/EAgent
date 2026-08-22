@@ -4128,7 +4128,50 @@ first version that fired on healthy runs would have been switched off within a d
 its absence is REPORTED, because the original compiled graph is not in the journal — only its
 hash is — so edge ownership cannot be derived from events alone.
 
-**Reverses when** a rule fires on a healthy run: fix the rule or delete it the same day. The
-follow-on is the `EVENT_TYPES` exhaustiveness gate — 52 types each either named by a rule or
-carrying an explicit "no relation" excuse — which is what stops the rule set decaying as the
-vocabulary grows.
+**Reverses when** a rule fires on a healthy run: fix the rule or delete it the same day.
+
+### …and it did, within the hour. Three of the eight rules fired on healthy runs.
+
+A fresh reviewer ran the real `Engine` over shapes this repo already tests and the auditor
+failed its own reversal condition on day one. Every finding below was reproduced, then verified
+here before acting.
+
+- **`effect.completed-once` fired on every retry.** `ids.ts` says in as many words that the key
+  is "stable across retries (the attempt is deliberately NOT part of it)", so a run that survived
+  one transient blip exited 1. The rule asserted the opposite of the documented contract. It is
+  scoped per ATTEMPT now, using the `attempt` already on `effect.started`.
+- **A rewind was read as live history.** `foldRun` suppresses what a rewind undid; the auditor
+  read raw events, so "approve → rewind → re-approve" — which `gate-lifecycle.test.ts` tests as
+  legal — looked like a double completion. `suppressedRanges` is exported from `projection.ts`
+  and shared rather than copied, because two copies drift.
+- **An SLA expiry was read as unresolved gates.** `HumanGateBroker.#expire` fails the run for the
+  ONE gate that expired and abandons its siblings deliberately. The rule now applies only to a
+  run that COMPLETED.
+
+**And two of the eight rules were built on events nothing writes.**
+`budget.reservation-is-settled` and `task.no-commit-after-cancel` rest on `budget.reserved`,
+`budget.settled` and `task.cancelled` — all three pinned in `docs-drift.test.ts`'s never-appended
+registry, which I could have read first. Deleted, not disabled; they return when the events do.
+
+**The worst one was in the CLI, and it was my headline claim.** The entry above said "`--graph`
+is optional and its absence is REPORTED". `cli.ts` passed `{}` rather than `undefined`, so
+`edgeSource !== undefined` held, every lookup missed, nothing was examined — and the report said
+the rule had been CHECKED. On the one rule that catches the gate bypass this module exists for.
+`loom audit <run>` printed `ok — 8 rule(s) checked, 0 skipped` while examining nothing. **That is
+`conformsToGraph` printing `ok` through the bypass, reproduced one layer up, inside the module
+written to prevent it.**
+
+`checked` now means the rule SAW at least one relevant event. The first version seeded it with
+every rule and only ever removed from it — the exact defect the module's own docstring names,
+shipped inside the module that names it. An empty read is also refused now: auditing a runId that
+does not exist printed `ok` and exited 0.
+
+**The lesson is not "review harder".** Every one of these came from believing a rule was right
+because it was easy to state. The auditor's own validation set was four linear happy paths, and
+the first three non-linear shapes anyone tried all fired. **A checker is only as good as the
+healthy runs it has been proven quiet on**, and that set has to include the awkward ones —
+retry, rewind, partial failure — before the rule is worth anything.
+
+The follow-on is unchanged: the `EVENT_TYPES` exhaustiveness gate — 52 types each either named by
+a rule or carrying an explicit "no relation" excuse — which is what stops the rule set decaying
+as the vocabulary grows, and which would have caught the two dead rules at birth.

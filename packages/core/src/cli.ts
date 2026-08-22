@@ -2273,12 +2273,21 @@ export async function main(argv: readonly string[]): Promise<number> {
         const runId = requirePositional(args, 0, "a runId") as RunId;
         const events = [];
         for await (const e of ws.store.read(runId, 1)) events.push(e);
-        const edgeSource: Record<string, string> = {};
-        const gf = args.flags["graph"];
-        if (typeof gf === "string") {
-          for (const e of loadGraph(ws, gf).spec.edges) edgeSource[e.id] = e.from;
+        // AN EMPTY READ IS NOT A HEALTHY RUN. Auditing a runId that does not exist printed `ok`
+        // and exited 0, which is the same answer a clean run gives.
+        if (events.length === 0) {
+          process.stderr.write(`no journal for run ${runId} in this workspace\n`);
+          return 1;
         }
-        const report = auditRun(events, { edgeSource });
+        // `undefined`, NOT `{}`. Passing an empty map made `edgeSource !== undefined` true, so
+        // every lookup missed, nothing was examined, and the report claimed the rule had been
+        // checked — the one rule that catches the gate bypass this module was built for.
+        const gf = pathFlag(args, "graph");
+        const edgeSource =
+          gf === undefined
+            ? undefined
+            : Object.fromEntries(loadGraph(ws, gf).spec.edges.map((e) => [e.id, e.from] as const));
+        const report = auditRun(events, edgeSource === undefined ? {} : { edgeSource });
         for (const v of report.violations) process.stdout.write(`✗ ${v.rule} @seq ${v.seq}: ${v.detail}\n`);
         for (const s of report.skipped) process.stdout.write(`· not checked — ${s.rule}: ${s.why}\n`);
         process.stdout.write(

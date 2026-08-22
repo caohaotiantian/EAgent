@@ -543,8 +543,14 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
   return p === undefined ? undefined : freeze(p);
 }
 
-/** `(checkpointSeq, markerSeq)` exclusive ranges hidden by a rewind. */
-function suppressedRanges(events: readonly JournalEvent[]): [number, number][] {
+/**
+ * `(checkpointSeq, markerSeq)` exclusive ranges hidden by a rewind.
+ *
+ * Exported because the JOURNAL AUDITOR needs the same answer. It read raw events and so saw
+ * undone history as live — a run that was rewound past an approval and re-approved looked like
+ * a double completion. Two copies of this would drift; one is the point.
+ */
+export function suppressedRanges(events: readonly JournalEvent[]): [number, number][] {
   const out: [number, number][] = [];
   for (const e of events) {
     if (!isEvent(e, "checkpoint.restored") || e.payload.mode !== "rewind") continue;
