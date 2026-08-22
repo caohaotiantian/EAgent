@@ -46,6 +46,8 @@ export const AUDIT_RULES = [
   "gate.raised-is-resolved",
   "gate.decision-has-a-raise",
   "task.committed-once",
+  "task.leased-precedes-commit",
+  "run.submitted-is-first-and-once",
   "edge.taken-belongs-to-its-node",
 ] as const;
 
@@ -129,6 +131,8 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const openGates = new Map<string, number>();
   const raisedGates = new Set<string>();
   const commits = new Map<string, number>();
+  const leased = new Set<string>();
+  const submissions: number[] = [];
 
   for (const e of live) {
     const seq = Number(e.seq);
@@ -189,6 +193,13 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         }
         break;
       }
+      case "task.leased": {
+        if (e.taskId !== undefined) leased.add(String(e.taskId));
+        break;
+      }
+      case "run.submitted":
+        submissions.push(seq);
+        break;
       case "gate.raised": {
         const id = str(p["gateId"]);
         if (id !== undefined) {
@@ -225,6 +236,14 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         const take = Array.isArray(p["take"]) ? (p["take"] as unknown[]) : [];
         if (tid === undefined) break;
         saw.add("task.committed-once");
+        // THE FENCING TOKEN'S ORDERING, read back. The lease's own seq IS the token — the
+        // journal's seq is the only monotonic source every process shares — so a task that
+        // commits without one committed under no token at all, which is the concurrent
+        // double-execution `#serialize` and the compare-and-set exist to prevent.
+        saw.add("task.leased-precedes-commit");
+        if (!leased.has(tid)) {
+          add("task.leased-precedes-commit", seq, `task "${tid}" committed with no prior task.leased — it held no fencing token`);
+        }
         // The double-commit the seq-CAS and the fencing token exist to prevent. A loop iteration
         // and a fan-out branch each mint a DIFFERENT TaskId (`nodeId@branchPath#iteration`), so
         // one taskId committing twice is not a legal shape — once a rewind's undone history is
@@ -254,6 +273,25 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
       default:
         break;
     }
+  }
+
+  // Only when the journal starts at the beginning. `auditRun` takes any array, and a caller
+  // reading from seq 5 has a journal with no submission in it — which is not a defect in the run.
+  const fromStart = live.length > 0 && Number(live[0]!.seq) === 1;
+  if (fromStart) {
+    saw.add("run.submitted-is-first-and-once");
+    if (submissions.length === 0) {
+      add("run.submitted-is-first-and-once", 1, "the journal begins at seq 1 with no run.submitted");
+    } else {
+      if (submissions[0] !== 1) {
+        add("run.submitted-is-first-and-once", submissions[0]!, `run.submitted is at seq ${String(submissions[0])}, not first`);
+      }
+      for (const extra of submissions.slice(1)) {
+        add("run.submitted-is-first-and-once", extra, "a second run.submitted — two writers, or one run submitted twice");
+      }
+    }
+  } else {
+    unrunnable.set("run.submitted-is-first-and-once", "this journal does not begin at seq 1, so the submission is legitimately absent from it");
   }
 
   if (completed) {

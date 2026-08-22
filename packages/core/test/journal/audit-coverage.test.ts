@@ -85,10 +85,8 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   "gate.reminded": { kind: "no-relation", why: "a nudge that resets no clock and no tier; the fold counts rows and that is its whole contract" },
 
   // ── deserves a rule, and does not have one ──────────────────────────────────
-  "run.submitted": { kind: "todo", why: "exactly one per journal, and first: a second submission or an event before it means two writers" },
   "run.started": { kind: "todo", why: "must follow run.submitted and precede any task event" },
   "task.ready": { kind: "todo", why: "a task must be ready before it is leased, and leased before it commits" },
-  "task.leased": { kind: "todo", why: "the lease-before-commit ordering the fencing token exists to enforce" },
   "fanout.planned": { kind: "todo", why: "the planned width should bound the branch coordinates that actually appear" },
   "state.reduced": { kind: "todo", why: "every channel in a committed task's writes should appear in the reduction that follows" },
   "model.called": { kind: "todo", why: "should pair with an effect.started of kind `model` under the same key" },
@@ -151,6 +149,6 @@ test("THE `todo` LIST MUST NOT GROW", () => {
   // A floor, not an equality: writing a rule and deleting its todo is ordinary work and should
   // not cost a test edit. Adding a todo is how a rule set decays quietly, and that has to fail.
   const todos = Object.entries(EXCUSED).filter(([, e]) => e.kind === "todo").length;
-  assert.ok(todos <= 15, `${todos} event types are marked todo; the list was 15 when this gate was written and may only shrink`);
-  assert.ok(AUDIT_RULES.length >= 8, `${AUDIT_RULES.length} rules; deleting one needs a reason in the journal, not a quiet edit`);
+  assert.ok(todos <= 13, `${todos} event types are marked todo; it was 15 when this gate was written, 13 now, and may only shrink`);
+  assert.ok(AUDIT_RULES.length >= 10, `${AUDIT_RULES.length} rules; deleting one needs a reason in the journal, not a quiet edit`);
 });

@@ -4398,3 +4398,37 @@ before it.
 `onGate`, `onComplete`. Every point is dispatched, every filter narrows and none widens, every
 change is journaled as `hook.applied` naming the ref that made it, and a hook is a digest-pinned
 vm-sandboxed resource rather than ambient code. `@loom/core` still has zero runtime dependencies.
+
+## Two more audit rules, and the fixtures were the ones that were wrong
+
+`task.leased-precedes-commit` and `run.submitted-is-first-and-once` — the first two off the
+coverage gate's todo list, which drops 15 → 13.
+
+**The lease rule reads the fencing token back.** The lease's own seq IS the token: the journal's
+seq is the only monotonic source every process shares, so a task that commits with no prior
+`task.leased` committed under no token at all — the concurrent double-execution the
+compare-and-set exists to prevent. Nothing checked it from the record.
+
+**And adding the submission rule turned every existing fixture red at once, correctly.** They
+were hand-built arrays that began at seq 1 with no `run.submitted` — a shape the engine cannot
+produce. The fixtures were wrong, not the rule, so `fixture()` now prepends the submission the
+way a real journal does, and every fixture that commits leases first. **A synthetic journal that
+no engine could emit is not a test of the auditor; it is a test of a run that cannot exist.**
+
+**The partial-journal case is the one that would have bitten in production.** `auditRun` takes
+any array, so a caller reading from seq 5 hands it a tail with no submission in it — not a defect
+in the run. The rule stands down unless the journal starts at seq 1, and says so in `skipped`.
+That is the same shape as the terminal-run guard on the gate rule: an "eventually" or
+"always-first" property is only checkable when you can see the whole thing.
+
+**Validated against real journals before being believed, on five shapes this time** — fan-out
+with a join, a bounded loop, a subgraph (parent AND child journals audited separately), and a
+gate approved then resumed. Zero violations. The previous sweep was four linear shapes; the ones
+added here are the ones that produce branch coordinates, iteration suffixes, a second RunId, and
+a suspend/resume — every axis a TaskId varies along.
+
+**Both rules were then mutation-tested and both were under-tested**: deleting them killed 3 and
+13 tests respectively, but only INCIDENTALLY, because every well-formed fixture exercises them.
+Neither had a fixture that TRIPPED it. Three added — a commit with no lease, a journal with no
+submission, a submission that is not first — plus the partial-journal control. **A rule with only
+negative coverage is a rule you have proved silent, not a rule you have proved works.**

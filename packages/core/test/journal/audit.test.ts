@@ -25,9 +25,18 @@ function ev(type: string, payload: unknown, extra: Record<string, unknown> = {})
   seq += 1;
   return { runId: "run_1", seq, ts: 1_700_000_000_000, type, payload, actor: SYSTEM, classification: "internal", ...extra } as unknown as JournalEvent;
 }
+/**
+ * Every fixture begins the way a real journal does: `run.submitted` at seq 1.
+ *
+ * They did not, and adding `run.submitted-is-first-and-once` made all of them red at once —
+ * correctly. A synthetic journal that starts at seq 1 with no submission is not a shape the
+ * engine can produce, so a fixture shaped like that was testing the auditor against a run that
+ * cannot exist.
+ */
 function fixture(build: () => JournalEvent[]): JournalEvent[] {
   seq = 0;
-  return build();
+  const submitted = ev("run.submitted", { graphHash: "sha256:x", inputs: {} });
+  return [submitted, ...build()];
 }
 const rulesHit = (evs: JournalEvent[], opts = {}): AuditRule[] =>
   [...new Set(auditRun(evs, opts).violations.map((v) => v.rule))].sort();
@@ -49,8 +58,8 @@ test("`checked` means the rule SAW EVIDENCE, not that the switch statement ran",
   assert.deepEqual(r.violations, []);
   assert.deepEqual(
     [...r.checked].sort(),
-    ["effect.completed-once-per-attempt", "effect.completion-has-a-start", "effect.kind-matches-its-key"],
-    "only the three effect rules had anything to look at",
+    ["effect.completed-once-per-attempt", "effect.completion-has-a-start", "effect.kind-matches-its-key", "run.submitted-is-first-and-once"],
+    "the three effect rules, plus the submission rule every real journal gives evidence for",
   );
   const why = new Map(r.skipped.map((s) => [s.rule, s.why]));
   assert.ok(why.has("policy.deescalation-is-human"), "a rule with no evidence is SKIPPED, not checked");
@@ -117,6 +126,7 @@ test("policy.deescalation-is-human — invariant 5, checked against the record",
 
 test("edge.taken-belongs-to-its-node — the gate bypass, expressed as a relation", () => {
   const evs = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "pick@root#0" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: ["e2"], usage: {}, attempt: 1 }, { taskId: "pick@root#0" }),
     DONE(),
   ]);
@@ -183,6 +193,7 @@ test("A MALFORMED JOURNAL IS DIAGNOSED, NOT CRASHED ON", () => {
     ev("effect.started", null),
     ev("gate.batch_decided", { gateIds: 3 }),
     ev("policy.deescalated", { from: "in", to: "on" }, { actor: undefined }),
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "n@root#0" }),
     ev("task.committed", { take: [7, null] }, { taskId: "n@root#0" }),
     DONE(),
   ]);
@@ -208,6 +219,7 @@ test("gate.decision-has-a-raise — a forged approval passes every other rule cl
 
 test("task.committed-once — the double-commit the seq-CAS exists to prevent", () => {
   const twice = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#0" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
     DONE(),
@@ -216,10 +228,63 @@ test("task.committed-once — the double-commit the seq-CAS exists to prevent", 
 
   // A loop iteration and a fan-out branch each mint a DIFFERENT TaskId, so these are not doubles.
   const legal = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#1" }),
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root/e0[1]#0" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#1" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root/e0[1]#0" }),
     DONE(),
   ]);
   assert.deepEqual(rulesHit(legal), [], "different taskIds are different tasks");
+});
+
+test("task.leased-precedes-commit — a commit with no lease held no fencing token", () => {
+  // The lease's own seq IS the token: the journal's seq is the only monotonic source every
+  // process shares, so a task that commits without one committed under no token at all — the
+  // concurrent double-execution the compare-and-set exists to prevent.
+  const unfenced = fixture(() => [
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(unfenced), ["task.leased-precedes-commit"]);
+
+  const fenced = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(fenced), []);
+});
+
+test("run.submitted-is-first-and-once", () => {
+  // `fixture` prepends the submission, so these build the raw array to say otherwise.
+  seq = 0;
+  const noSubmission = [ev("task.ready", { nodeId: "w" }, { taskId: "w@root#0" }), DONE()];
+  assert.deepEqual(rulesHit(noSubmission), ["run.submitted-is-first-and-once"]);
+
+  seq = 0;
+  const late = [ev("task.ready", { nodeId: "w" }, { taskId: "w@root#0" }), ev("run.submitted", {}), DONE()];
+  assert.deepEqual(rulesHit(late), ["run.submitted-is-first-and-once"], "a submission that is not first is two writers");
+
+  const twice = fixture(() => [ev("run.submitted", {}), DONE()]);
+  assert.deepEqual(rulesHit(twice), ["run.submitted-is-first-and-once"], "and one run may not be submitted twice");
+});
+
+test("A PARTIAL JOURNAL IS NOT A MALFORMED ONE — the submission rule stands down", () => {
+  // `auditRun` takes any array. A caller reading from seq 5 has a journal with no submission in
+  // it, which is not a defect in the RUN — and a rule that cannot tell those apart is a rule
+  // that fires on healthy tails.
+  seq = 4;
+  const tail = [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "w@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
+    DONE(),
+  ];
+  const r = auditRun(tail);
+  assert.deepEqual(r.violations, []);
+  assert.ok(
+    r.skipped.some((s) => s.rule === "run.submitted-is-first-and-once" && s.why.includes("seq 1")),
+    "and it says WHY it stood down",
+  );
 });
