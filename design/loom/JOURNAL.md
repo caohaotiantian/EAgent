@@ -4727,3 +4727,74 @@ leased for attempt 2 and never committed, which no engine emits. Fixed the fixtu
 The tally is now: a journal with no submission, commits with no lease, a subgraph child id no
 engine mints, and this. **Every hand-built fixture drifts from what the engine writes; the drift
 is invisible until a rule looks at that part of the shape, and the rule is right every time.**
+
+---
+
+## The extension surface was never reachable through the product
+
+*Reversal condition: if hooks should be ambient plugins rather than pinned Resources, the loader
+goes and `registerHooks` becomes an `import()` — and the pinning rule stops applying to code the
+engine runs, which is the trade.*
+
+`grep -an 'HookRegistry' packages/core/src/ | grep -av run/hooks.ts` returned three lines, all in
+`engine.ts`: one import, one option field, one assignment. **No constructor anywhere.** So
+`Engine.#hooks` was `undefined` on every path the CLI builds, `#hooksFor` answered `[]` at all
+eight points, and the entire hook bus — the thing this project calls its extension surface — did
+nothing through `bin/loom`.
+
+Everything around it existed and looked right from any single file. `graph/validate.ts` refuses
+an unknown point name. `graph/compile.ts` pins every hook ref into the resolution manifest.
+`journal/events.ts` carries `hook.applied`. `resources/store.ts` has `"hook"` in `ResourceKind`.
+`run/hooks.ts` opens by promising a hook "is loaded by the same digest-pinned, vm-sandboxed
+loader that `function` nodes use." Twelve months of scaffolding around an empty middle — which is
+the same shape as `createFunctionLoader`, `runSandboxed`, `McpClient` and `ResourceStore` before
+it. **This is the fifth capability this repo shipped with no caller, and the first one that was
+the headline feature.**
+
+Measured, through the CLI, before and after, on a one-node graph whose `preNode` hook memoises
+the answer as `41`:
+
+    without the registry   →  n = 1     the node's own answer, hook silent
+    with it                →  n = 41    the hook's
+
+**One realm, two bridges.** A hook body is `(input, ctx)`; a function body is `(view, ctx)`. The
+temptation was to fork the loader. `resources/functions.ts` is the file where a live escape was
+found and fixed this month — `view.constructor.constructor("return globalThis")().process`
+reached the host because the globals had been rebuilt from the context's intrinsics and the
+ARGUMENTS had not — and a fork means the next such fix lands in one copy of two. So the hardened
+part moved to `resources/realm.ts` and each caller supplies only the few lines that turn a JSON
+payload into its argument list. Both suites now guard it: seeding the realm with host intrinsics
+turns `functions.test.ts` AND `hook-loader.test.ts` red.
+
+**A declared hook with no body is refused, and that does not contradict the registry's shrug.**
+`HookRegistry.resolve` skips an unregistered ref on purpose — an embedder that did not install an
+optional extension has not written a broken graph. But the CLI's registry is built *from the
+workspace*, so a ref it lacks is a missing FILE. Answering that with a shrug would rebuild the
+declared-and-silent failure one level up, so `requireHookBodies` refuses at compile — before the
+run, before a model call, before spend.
+
+**And a docstring that had been false for a year fell out of writing an honest test.**
+`functions.ts` claimed "two refs resolving to the same bytes share one compiled body."
+`resourceDigest` hashes `{kind, name, content}`, so two NAMES holding identical source are two
+digests and compile twice. The real guarantee is per version — two SELECTORS on one version share
+a body — which is what anything actually depends on. The test that found it was written to assert
+the stronger claim and went red.
+
+**And the acceptance test found a lying error message on the way through.** Deleting a published
+hook body under a live gate correctly refuses the approval — the ref now resolves elsewhere, so
+the resolution manifest no longer matches the one `run.compiled` recorded, and that is the
+graph-binding rule doing exactly its job. But `#assertBound`'s `details` reported
+`expected: recorded.graphHash, actual: ctx.graph.graphHash` on BOTH branches, and on the
+`resources` branch `isCompiled` is true by construction — so the operator was told "the resources
+behind its refs have changed" beneath the same sha256 printed twice. A diagnostic that reads as a
+broken check, pointing at the graph file, which is the one thing that did not change. It now
+reports the manifest pair on that branch.
+
+**One scoping decision, and invariant 5 decided it.** `requireHookBodies` runs when a graph is
+being INTRODUCED — `compile`, `run`, an explicit `--graph`, the server's catalogue — and not in
+`graphsByHash`, which exists so a human can answer a gate on a run already in flight and which
+swallows a compile failure per file. Left unscoped, a deleted extension file made the graph drop
+silently out of that index and the approver was told `E_RUN_NOT_FOUND`: "no graph in `graphs/`
+has that hash … restore them to answer the gate" — about bytes nobody changed. Scoped, the same
+deletion produces `E_GRAPH_MISMATCH{differs: "resources"}`, which is true, and restoring the file
+makes the gate answerable again. Both halves are mutation-tested against the same test.

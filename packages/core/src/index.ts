@@ -52,6 +52,7 @@ export * from "./providers/fallback.ts";
 export * from "./sandbox/subprocess.ts";
 
 export * from "./resources/functions.ts";
+export * from "./resources/hook-loader.ts";
 export * from "./resources/store.ts";
 export * from "./evolution/gate.ts";
 export * from "./evolution/trajectory.ts";

@@ -1882,11 +1882,18 @@ export class Engine {
           ? `the graph supplied for ${why} is not the graph run ${ctx.runId} compiled`
           : `the graph supplied for ${why} matches run ${ctx.runId}'s spec, but the resources behind its refs have changed since it was compiled`,
         {
+          // REPORT THE PAIR THAT ACTUALLY DIFFERS. On the `resources` branch `isCompiled` is
+          // true by construction, so printing the two SPEC hashes printed the same string twice
+          // under a message saying they had changed — a diagnostic that reads as a broken check
+          // and sends the operator to look at the graph file, which is the one thing that did
+          // not change. Found by deleting a published hook body from a workspace with a live
+          // gate: "the resources behind its refs have changed", expected == actual.
           details: {
             runId: ctx.runId,
             differs: mismatch,
-            expected: recorded.graphHash,
-            actual: ctx.graph.graphHash,
+            ...(mismatch === "resources"
+              ? { expected: recorded.manifest, actual: manifestKey(ctx.graph.resolutionManifest) }
+              : { expected: recorded.graphHash, actual: ctx.graph.graphHash }),
           },
         },
       );

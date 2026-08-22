@@ -60,6 +60,8 @@ import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
 import type { RunProjection, TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
+import { createHookLoader } from "./resources/hook-loader.ts";
+import { HookRegistry } from "./run/hooks.ts";
 import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
@@ -238,6 +240,8 @@ interface Workspace {
   readonly engine: Engine;
   readonly bus: InProcessEventBus;
   readonly resolver: ResourceResolver;
+  /** Every hook body this workspace published. Authoritative here: a ref it lacks is a MISSING FILE. */
+  readonly hooks: HookRegistry;
   /** What this process may DO — the one list, derived from what it registered. */
   readonly granted: readonly string[];
   /** `undefined` when `--channels-file` was not given: no channels, and no callback route. */
@@ -444,6 +448,14 @@ export function openWorkspace(
   const functions = new FunctionRegistry();
   registerFunctions(documents, functions, root);
 
+  // EVERY PUBLISHED HOOK BODY, COMPILED AND REGISTERED — and until this line the entire
+  // extension surface was unreachable through the binary. `Engine.#hooks` is `undefined`
+  // when no registry is passed, and no caller passed one, so `#hooksFor` returned `[]` at
+  // all eight points: a graph declaring `hooks: {preTool: [...]}` compiled, validated,
+  // pinned the ref, and ran with the hook never firing.
+  const hooks = new HookRegistry();
+  registerHooks(documents, hooks, root);
+
   // ONE DERIVATION, USED HERE AND BY THE COMPILER — see `capabilitiesOf`.
   // MCP TOOLS BEFORE THE GRANT IS DERIVED. Connecting the server IS the grant — that is W8's
   // whole argument — and it only holds if the registration happens first.
@@ -456,6 +468,7 @@ export function openWorkspace(
     resolver,
     tools,
     functions,
+    hooks,
     models: modelRegistry,
     // THE ONE REASON THE BROKER IS CONSTRUCTED HERE: a dispatcher. `HumanGateBroker.raise`
     // delivers only when it has one AND the gate's request names channels, so without this
@@ -471,7 +484,7 @@ export function openWorkspace(
       policy: { granted },
   });
 
-  return { root, dataDir, store, engine, bus, resolver, granted, delivery, models, close: () => store.close() };
+  return { root, dataDir, store, engine, bus, resolver, hooks, granted, delivery, models, close: () => store.close() };
 }
 
 /**
@@ -1344,7 +1357,20 @@ export async function startMcp(servers: readonly McpClientOptions[]): Promise<re
   return clients;
 }
 
-function loadGraph(ws: Workspace, file: string): RunGraph {
+/**
+ * `introducing` — whether this graph is being brought INTO the deployment, or matched back to a
+ * run that already exists.
+ *
+ * The distinction decides one thing: whether a declared hook with no published body refuses.
+ * Introducing (`compile`, `run`, an explicit `--graph`, the server's catalogue) it must —
+ * that is the whole point. RE-ATTACHING it must not, and the reason is invariant 5 rather than
+ * convenience: `graphsByHash` exists so a human can answer a GATE on a run that is already in
+ * flight, and it swallows a compile failure per file. A refusal there does not surface as "your
+ * hook is missing" — the graph silently drops out of the index and the approver is told the run
+ * cannot be found. Letting a deleted extension file block human oversight of a live run is a
+ * worse failure than the silence this check exists to end, so the check does not run there.
+ */
+function loadGraph(ws: Workspace, file: string, introducing = true): RunGraph {
   const spec = readSpec(file);
   const result = compile({
     spec,
@@ -1366,7 +1392,40 @@ function loadGraph(ws: Workspace, file: string): RunGraph {
     throw result.error;
   }
   for (const d of result.diagnostics) process.stderr.write(`! ${d.code}: ${d.message}\n`);
+  if (introducing) requireHookBodies(ws, result.graph.spec);
   return result.graph;
+}
+
+/**
+ * A DECLARED HOOK WITH NO PUBLISHED BODY IS A REFUSAL HERE, and a skip inside the engine.
+ *
+ * The two rules do not disagree, because the registries are not the same kind of thing.
+ * `HookRegistry.resolve` skips an unknown ref on purpose — an embedder that simply does not
+ * install an optional extension has not written a broken graph. But THIS registry is built from
+ * the workspace, by `registerHooks`, out of `resources/hook/`. A ref it lacks is a MISSING FILE,
+ * and a missing file is exactly the "declared, pinned, and silent" failure the hook bus exists to
+ * end. Answering it with a shrug would rebuild that failure one level up.
+ *
+ * At compile time, so `loom compile` says it — before a run, before a model call, before spend.
+ */
+function requireHookBodies(ws: Workspace, spec: GraphSpec): void {
+  const missing: string[] = [];
+  for (const [point, refs] of Object.entries(spec.hooks ?? {})) {
+    // Guarded like the compiler's own copies: `hooks: {preNode: 42}` is caller data, and the
+    // validator refuses that shape — but this runs on the way there and must not crash first.
+    if (!Array.isArray(refs)) continue;
+    for (const ref of refs) {
+      if (typeof ref !== "string" || ws.hooks.get(ref) !== undefined) continue;
+      missing.push(`${point}: ${ref}`);
+    }
+  }
+  if (missing.length === 0) return;
+  throw err.validation(
+    CODES.E_RESOURCE_NOT_FOUND,
+    `this graph declares ${missing.length} hook(s) this workspace does not publish (${missing.join(", ")}). ` +
+      `Add the body at ${join(ws.root, "resources", "hook")}/<name>.js — a hook that is declared and absent ` +
+      `does not fail, it does NOTHING, which is the failure that cannot be seen from the graph`,
+  );
 }
 
 /**
@@ -1419,6 +1478,27 @@ function registerFunctions(store: ResourceStore | undefined, functions: Function
       // `readResources` and `discoverGraphs` already follow — but it is announced, because a
       // silently absent function is exactly the failure this whole change is about.
       process.stderr.write(`! skipping ${ref} in ${join(root, "resources", "function")}: ${(e as Error).message}\n`);
+    }
+  }
+}
+
+/**
+ * Compile and register every `hook` resource the workspace publishes.
+ *
+ * Same shape as `registerFunctions` and for the same reason: one bad body must not stop the
+ * process from serving every other graph, and it is ANNOUNCED, because a silently absent
+ * extension is the failure this whole change is about.
+ */
+function registerHooks(store: ResourceStore | undefined, hooks: HookRegistry, root: string): void {
+  if (store === undefined) return;
+  const loader = createHookLoader({ store });
+  for (const version of store.list({ kind: "hook" })) {
+    const ref = `hook/${version.name}@stable`;
+    try {
+      const body = loader.load(ref);
+      if (body !== undefined) hooks.register(ref, body);
+    } catch (e) {
+      process.stderr.write(`! skipping ${ref} in ${join(root, "resources", "hook")}: ${(e as Error).message}\n`);
     }
   }
 }
@@ -1544,7 +1624,9 @@ function graphsByHash(ws: Workspace): Map<string, RunGraph> {
   for (const file of readdirSync(dir).sort()) {
     if (!/\.(json|ya?ml)$/i.test(file)) continue;
     try {
-      const graph = loadGraph(ws, join(dir, file));
+      // `false`: every caller of this function is re-attaching a graph to a run that already
+      // exists — the run clock, and the door an approver answers a gate through.
+      const graph = loadGraph(ws, join(dir, file), false);
       if (!out.has(graph.graphHash)) out.set(graph.graphHash, graph);
     } catch {
       // A graph this process cannot compile is not a graph it can attach. The refusal the
@@ -2542,7 +2624,7 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
     if (!kindDir.isDirectory()) continue;
     const kind = kindDir.name;
     const isSpec = SPEC_KINDS.includes(kind);
-    if (!isSpec && !TEXT_KINDS.includes(kind)) continue;
+    if (!isSpec && !TEXT_KINDS.includes(kind) && !CODE_KINDS.includes(kind)) continue;
     // SORTED, so `@stable` does not depend on filesystem order. `x.md` and `x.txt` both
     // publish `prompt/x`, and `#seed` points `@stable` at whichever landed LAST — which was
     // `readdirSync` order, so which text a model received differed by machine.
@@ -2620,7 +2702,7 @@ function readResources(root: string): readonly { kind: ResourceKind; name: strin
 // neither list, so `resources/function/*.js` was never read, `createFunctionLoader` had zero
 // callers, and `function` and `evaluator{kind:"assertion"}` — two of eight node types — passed
 // the compiler and could never run.
-const TEXT_KINDS: readonly string[] = ["prompt", "agent_profile", "skill", "function"];
+const TEXT_KINDS: readonly string[] = ["prompt", "agent_profile", "skill"];
 const SPEC_KINDS: readonly string[] = ["subgraph", "graph"];
 const TEXT_EXT: readonly string[] = [".md", ".txt"];
 const SPEC_EXT: readonly string[] = [".json", ".yaml", ".yml"];
@@ -2631,11 +2713,19 @@ const SPEC_EXT: readonly string[] = [".json", ".yaml", ".yml"];
  * is a different kind of thing wearing the same suffix. Per-kind because the kinds genuinely
  * differ: `.md` is what a prompt is, `.json` is what a graph is, `.js` is what a function is.
  */
-const FUNCTION_EXT: readonly string[] = [".js", ".mjs"];
+const CODE_EXT: readonly string[] = [".js", ".mjs"];
+
+/**
+ * The kinds whose content is SOURCE. `hook` joined `function` here because D8.1 defines it as
+ * "a filter/observer module" — code, not prose — and because the alternative was the same
+ * silence `function` spent a whole release in: the kind existed, the loader existed, and
+ * `readResources` published neither, so nothing could reach either one.
+ */
+const CODE_KINDS: readonly string[] = ["function", "hook"];
 
 function extensionsFor(kind: string): readonly string[] {
   if (SPEC_KINDS.includes(kind)) return SPEC_EXT;
-  if (kind === "function") return FUNCTION_EXT;
+  if (CODE_KINDS.includes(kind)) return CODE_EXT;
   return TEXT_EXT;
 }
 

@@ -23,9 +23,13 @@
  *
  * ## The pinning rule, applied to code
  *
- * Bodies are compiled and cached per DIGEST, not per ref. Two refs resolving to the same
- * bytes share one compiled body, and a ref repointed to new bytes gets a new one — which
- * is the same guarantee the resource layer already gives prompts and profiles.
+ * Bodies are compiled and cached per DIGEST, not per ref: a ref repointed to new bytes gets a
+ * new body, and two SELECTORS on one version (`@stable` and `@v3`, same version) share one.
+ *
+ * NOT "two refs with the same bytes", which this said for a year and is false —
+ * `resourceDigest` hashes `{kind, name, content}`, so two NAMES holding identical source are
+ * two digests and compile twice. Found by a test written for the hook loader against the
+ * stronger claim; the weaker one is the guarantee, and it is the one anything depends on.
  *
  * Caching per digest is not the same claim as *running* the pinned digest, and for a while
  * only the first was true here. `load(ref)` called `store.resolve` — the COMPILE-time half
@@ -49,9 +53,8 @@
  * See design/loom/08-PLAN.md open thread T2, and A13.
  */
 
-import vm from "node:vm";
-
 import { CODES, err } from "../errors.ts";
+import { compileRealm, sourceOf } from "./realm.ts";
 import type { Digest } from "../canonical.ts";
 import type { FunctionBody } from "../run/registry.ts";
 import type { ResourceRef } from "../graph/spec.ts";
@@ -116,52 +119,6 @@ export interface FunctionLoaderOptions {
   readonly callTimeoutMs?: number;
 }
 
-/**
- * The globals a body sees — built from the CONTEXT'S OWN intrinsics, never the host's.
- *
- * Handing over the host `Object` hands over the host `Function`: `Object.constructor` IS it, so
- * `Object.constructor("return globalThis")()` returned the host global and from there
- * `process.env` and `fetch`. Measured — a body printed a real `ANTHROPIC_API_KEY` — which made
- * this module's own claim that a body "cannot reach `process.env` or `fetch` by accident" false
- * for every name in the list below.
- *
- * `vm.createContext` gives the new context its own intrinsics, so reading them back out of it
- * closes the bridge: the body still gets `JSON`, `Math` and the rest, and they are that context's
- * copies. A `vm` context is STILL not a security boundary and this does not make it one — it
- * makes the narrow claim this module actually makes ("a small explicit set of globals instead of
- * the host's") true rather than aspirational.
- *
- * `Math` is exposed whole, which leaves `Math.random()` reachable while `Date` is deliberately
- * removed for determinism. That asymmetry is real, is invariant 4's known gap, and is not closed
- * here: a body using it diverges on replay, and replay DETECTS it (`match: false`) rather than
- * serving a wrong answer.
- */
-const SAFE_GLOBAL_NAMES = [
-  "JSON",
-  "Math",
-  "Number",
-  "String",
-  "Boolean",
-  "Array",
-  "Object",
-  "Error",
-  "TypeError",
-  "RangeError",
-  "isNaN",
-  "isFinite",
-  "parseInt",
-  "parseFloat",
-  "encodeURIComponent",
-  "decodeURIComponent",
-] as const;
-
-function safeGlobals(context: object): Record<string, unknown> {
-  const own = vm.runInContext(`({ ${SAFE_GLOBAL_NAMES.join(", ")} })`, context) as Record<string, unknown>;
-  // `Date` is removed rather than copied: a body that reads the wall clock makes its own replay
-  // non-deterministic, and the journal has no effect key for it.
-  return { ...own, Date: undefined };
-}
-
 export interface FunctionLoader {
   /**
    * Compile the body a ref names, or `undefined` when it names no function.
@@ -211,7 +168,7 @@ export interface FunctionLoader {
  *
  * Values coming BACK need no such care: an object built inside the context carries that
  * context's intrinsics, which is why `({}).constructor.constructor(…)` in a body reaches
- * nothing. `intoHostRealm` rebuilds them anyway, for the prototype reason described below.
+ * nothing. `compileRealm` rebuilds them anyway, for the prototype reason `intoHostRealm` gives.
  */
 const ARGUMENT_BRIDGE = `
 (function () {
@@ -245,70 +202,40 @@ const ARGUMENT_BRIDGE = `
 
 export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoader {
   const cache = new Map<Digest, FunctionBody>();
-  const timeout = opts.compileTimeoutMs ?? 1000;
-  const callTimeout = opts.callTimeoutMs ?? 30_000;
+  const compileTimeoutMs = opts.compileTimeoutMs ?? 1000;
+  const callTimeoutMs = opts.callTimeoutMs ?? 30_000;
 
   const compile = (digest: Digest, source: string, label: string): FunctionBody => {
     const hit = cache.get(digest);
     if (hit !== undefined) return hit;
 
-    // The context is created EMPTY, then given its own intrinsics back plus whatever the
-    // embedder injected. Seeding it with host objects is what opened the bridge.
-    const context = vm.createContext({});
-    Object.assign(context, safeGlobals(context), opts.globals);
-    let value: unknown;
-    try {
-      // The resource's content IS a function expression. No `module.exports` ceremony,
-      // no wrapper to get wrong — the completion value is the body. It is KEPT IN THE CONTEXT
-      // rather than handed back, because the call now happens in there too.
-      vm.runInContext(`globalThis.__loomBody = (${source});`, context, { timeout, filename: label });
-      vm.runInContext(ARGUMENT_BRIDGE, context, { timeout, filename: `${label} (bridge)` });
-      value = (context as { __loomBody?: unknown }).__loomBody;
-    } catch (e) {
-      throw err.validation(
-        CODES.E_RESOURCE_INVALID,
-        `function resource "${label}" did not evaluate: ${(e as Error).message}`,
-        { details: { digest } },
-      );
-    }
-    if (typeof value !== "function") {
-      throw err.validation(
-        CODES.E_RESOURCE_INVALID,
-        `function resource "${label}" evaluated to ${typeof value}, not a function`,
-        { details: { digest } },
-      );
-    }
+    const call = compileRealm({
+      source,
+      label,
+      what: "function",
+      bridge: ARGUMENT_BRIDGE,
+      entry: "__loomInvoke",
+      globals: opts.globals,
+      compileTimeoutMs,
+      callTimeoutMs,
+    });
 
-    // CROSS-REALM. An object literal inside a `vm` context is built from THAT context's
-    // intrinsics, so `{writes: {...}}` coming back has a different `Object.prototype`
-    // than anything in the host. It looks identical, passes `typeof`, and fails
-    // `deepStrictEqual` — and any downstream prototype check would quietly disagree with
-    // itself depending on whether a body was loaded or hand-registered.
-    //
-    // Rebuilding on the way out makes a loaded body indistinguishable from a registered
-    // one, and it enforces at the cheapest possible seam what channel values must be
-    // anyway: plain JSON-shaped data.
     const body: FunctionBody = (view, callCtx) => {
-      // ONLY STRINGS AND NUMBERS CROSS. Everything the body sees is rebuilt from this payload
-      // INSIDE the context, so no host object is ever in its reach.
+      // ONLY JSON CROSSES. Everything the body sees is rebuilt from this payload INSIDE the
+      // context by `ARGUMENT_BRIDGE`, so no host object is ever in its reach.
       const slice: Record<string, unknown> = {};
       for (const name of view.visible) {
         const v = view.get(name);
         if (v !== undefined) slice[name] = v;
       }
-      const payload = JSON.stringify({
+      return call({
         slice,
         visible: [...view.visible],
         hash: String(view.hash),
         taskId: String(callCtx.taskId),
         now: callCtx.now(),
         aborted: callCtx.signal.aborted,
-      });
-      const out = vm.runInContext(`__loomInvoke(${JSON.stringify(payload)})`, context, {
-        timeout: callTimeout,
-        filename: label,
-      });
-      return intoHostRealm(out) as ReturnType<FunctionBody>;
+      }) as ReturnType<FunctionBody>;
     };
     cache.set(digest, body);
     return body;
@@ -330,65 +257,23 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
         }
         const record = opts.store.fetch<unknown>(pinned);
         if (record.kind !== "function") return undefined;
-        return compile(pinned, sourceOf(record.content, ref), ref);
+        return compile(pinned, sourceOf(record.content, ref, "function"), ref);
       }
       const resolved = opts.store.resolve(ref);
       if (resolved === undefined) return undefined;
       const record = opts.store.fetch<unknown>(resolved.digest);
       if (record.kind !== "function") return undefined;
-      return compile(resolved.digest, sourceOf(record.content, ref), ref);
+      return compile(resolved.digest, sourceOf(record.content, ref, "function"), ref);
     },
     loadDigest(digest) {
       const record = opts.store.fetch<unknown>(digest);
       if (record.kind !== "function") {
         throw err.validation(CODES.E_RESOURCE_INVALID, `${digest} is a ${record.kind}, not a function`);
       }
-      return compile(digest, sourceOf(record.content, digest), digest);
+      return compile(digest, sourceOf(record.content, digest, "function"), digest);
     },
     get compiled() {
       return cache.size;
     },
   };
-}
-
-/**
- * Rebuild a value using the HOST's intrinsics.
- *
- * Recursive and structural: primitives pass through, arrays and plain objects are
- * rebuilt, and anything else (a function, a class instance, a cross-realm `Map`) is
- * returned as-is so the canonicalizer can reject it with its own clear message rather
- * than this function silently mangling it into `{}`.
- */
-function intoHostRealm(value: unknown): unknown {
-  if (value === null || typeof value !== "object") return value;
-  // `Array.from`, NOT `.map`: `map` goes through ArraySpeciesCreate, which uses the
-  // ARRAY'S OWN constructor — so mapping a cross-realm array produces another
-  // cross-realm array and the rebuild silently does nothing.
-  if (Array.isArray(value)) return Array.from(value, intoHostRealm);
-  const proto = Object.getPrototypeOf(value) as unknown;
-  // A plain object in ANY realm has either the null prototype or one whose own
-  // constructor is named "Object" — which is what distinguishes it from a Map.
-  const isPlain = proto === null || (proto as { constructor?: { name?: string } })?.constructor?.name === "Object";
-  if (!isPlain) return value;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = intoHostRealm(v);
-  return out;
-}
-
-/**
- * A `function` resource's content is either the source string itself or `{source}`.
- *
- * Both because the store's content is canonical JSON: a bare string round-trips fine, and
- * an object leaves room for metadata later without a migration.
- */
-function sourceOf(content: unknown, label: string): string {
-  if (typeof content === "string") return content;
-  if (content !== null && typeof content === "object") {
-    const s = (content as { source?: unknown }).source;
-    if (typeof s === "string") return s;
-  }
-  throw err.validation(
-    CODES.E_RESOURCE_INVALID,
-    `function resource "${label}" has no source: expected a string or {source: string}`,
-  );
 }

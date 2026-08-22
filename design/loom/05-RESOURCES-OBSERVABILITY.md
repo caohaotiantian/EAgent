@@ -19,7 +19,7 @@
 | `mcp_server` | Transport, endpoint, auth ref, tool-name prefix, trust level | yes | yes | `ToolRegistry` |
 | `knowledge_base` | Index config, embedding model ref, chunking policy, source manifest | yes | index is mutable, **config is not** | `kb.search` tool |
 | `eval_suite` | A frozen set of recorded trajectories + expected outcomes + must-pass flags | yes | **yes — frozen by definition** | **D10** offline gate |
-| `hook` | A filter/observer module implementing **D6.9** signatures | typecheck | yes | executor lifecycle |
+| `hook` | A filter/observer module implementing **D6.9** signatures. Published from `resources/hook/*.js`; loaded by `createHookLoader` into the same `vm` realm as `function` — see D6.9 *Reality* | typecheck | yes | executor lifecycle |
 
 **Artifacts** are not Resources. A Resource is a *design-time input*, versioned and
 promoted; an Artifact is a *run-time output*, content-addressed in the blob store and

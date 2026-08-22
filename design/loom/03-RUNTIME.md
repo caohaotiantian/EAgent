@@ -551,3 +551,51 @@ export interface ErrorDecision { retry?: boolean; afterMs?: number }
 | Every hook invocation that changes a value journals `hook.applied{ref, changed:true}` | A silently-rewriting hook is indistinguishable from a bug |
 | `preTool` **cannot widen** capabilities or lower posture — only narrow or block | The asymmetry rule applies to extensions too |
 | A throwing observer is logged and skipped; a throwing filter fails its Task | EAgent's split, kept: observers are best-effort, filters are load-bearing |
+
+### Reality — how a hook is authored, published and loaded
+
+Everything above was built. **Nothing loaded it**, and that was true for as long as the bus
+existed: `HookRegistry` was constructed nowhere in `packages/core/src/` outside its own module,
+so `Engine.#hooks` was `undefined` on every path the CLI builds and `#hooksFor` answered `[]` at
+all eight points. A graph declaring hooks compiled, validated, pinned its refs into the
+resolution manifest, ran — and the hook never fired. Measured through `bin/loom` on a one-node
+graph whose `preNode` hook memoises the answer as `41`: the run printed the node's own `1`.
+
+A hook is now an ordinary workspace resource, and the shape is the same as a `function`:
+
+```
+<workspace>/resources/hook/audit.js        →  hook/audit@stable
+```
+
+```js
+// resources/hook/audit.js — a preTool filter. The file's content IS a function expression.
+function (input, ctx) {
+  if (input.tool === "fs.write" && String(input.args.path).startsWith("/etc")) {
+    return { block: true, reason: "no writes under /etc" };
+  }
+  return {};            // every field optional: {} means "no opinion"
+}
+```
+
+```json
+{ "hooks": { "preTool": ["hook/audit@stable"] } }
+```
+
+| Fact | Where |
+|---|---|
+| `.js`/`.mjs` only — `hook` is a **code** kind, `resources/hook/x.md` publishes nothing | `CODE_KINDS`, `cli.ts` |
+| Compiled in the same hardened `vm` realm `function` bodies use — one path, two argument bridges | `resources/realm.ts` |
+| A body sees **only JSON**: no engine, no journal, no store, no fetch, no host object | `HOOK_BRIDGE`, `resources/hook-loader.ts` |
+| A declared hook the workspace does not publish is **refused at compile**, not skipped | `requireHookBodies`, `cli.ts` |
+| A bad body refuses at boot, naming its file, and does not stop the other hooks | `registerHooks`, `cli.ts` |
+
+**The refusal and `HookRegistry.resolve`'s silent skip are not in conflict.** The registry skips
+an unregistered ref because an embedder that did not install an optional extension has not
+written a broken graph. The CLI's registry is built *from the workspace*, so a ref it lacks is a
+missing FILE — and answering that with a shrug would rebuild, one level up, exactly the
+declared-and-silent failure this whole mechanism exists to end.
+
+**Still not wired, and stated rather than hidden**: the registry is built once at boot, not per
+run, so `HookLoaderOptions.pins` is unused by the CLI and a promotion between compile and
+execute would swap a hook body underneath a live Run. This is the same open seam
+`FunctionLoaderOptions.pins` documents (T2), reached by a second road.

@@ -24,15 +24,15 @@ known to be wrong, what to do next, and what will bite you.
 
 ## Where things stand
 
-Measured **2026-08-21**, tree clean, `npm run check` green end to end.
+Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3347 pass, 0 fail** (Loom 1806 + EAgent 1541) | `npm run check` (its test arm) |
-| Test files | 231 (100 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
-| Source files | 53 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
+| Tests | **3430 pass, 0 fail, 1 skipped** (Loom 1888 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 237 (106 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
-| Public exports, pinned | 484 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, pinned | 514 | `node -e "console.log(require('./scripts/surface.json').length)"` |
 | Escalation rules | 10, and **all 10 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` is empty |
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
@@ -78,7 +78,7 @@ Ordered by what a fresh session should pick up first. Everything here was verifi
 |---|---|---|
 | **D1** | **A synchronous `function` body cannot be stopped.** `loom run` hangs forever with no output and must be `kill -9`'d, and the docstring says the opposite | `resources/functions.ts` passes `vm`'s real `timeout` at COMPILE only; `Engine.#withNodeDeadline` is a `Promise.race` on the same thread, whose timer cannot fire while a `while(true)` holds it. The fix that exists: call the body THROUGH `vm.runInContext` with a per-call `timeout`, which Node can terminate. Only bounds synchronous bodies — an async one still needs a worker |
 | **D4** | **`onBudgetExhausted: "gate"` compiles clean and does not gate** — it fails the run identically to `"fail"`, and `"degrade"` is read by nothing | `engine.ts` — `if (action === "gate") this.#escalate(…)` raises the ceiling for FUTURE decisions and then returns `failed` unconditionally; the run is already over. The repo's own built-in graph sets it (`builtin/authoring.ts`). This is the "looks supervised, is not" shape that `mode: quorum` is a compile error to avoid |
-| **D5** | **`loom compile` reports `ok` for a graph naming a resource that does not exist** | `cli.ts` fabricates a pin for any ref matching `RESOURCE_REF`, a pure syntax test. The run-time refusal is loud, which is why this is not a blocker — but it defeats the point of a pre-flight compiler. **One change, not two:** the fallback is load-bearing for kinds a workspace cannot publish (`humanGate.ref` names `oversight/…`, absent from `TEXT_KINDS`/`SPEC_KINDS`), so fixing it without adding an `oversight` resource kind breaks every gated graph |
+| **D5** | **`loom compile` reports `ok` for a graph naming a resource that does not exist** | `cli.ts` fabricates a pin for any ref matching `RESOURCE_REF`, a pure syntax test. Reproduced: a graph naming `agent_profile/does-not-exist@stable` and `prompt/also-missing@stable` compiles `ok`. The run-time refusal is loud, which is why this is not a blocker — but it defeats the point of a pre-flight compiler. **The remaining constraint is now exactly one kind.** Of the seven fields a graph can put a ref in, six name kinds a workspace publishes (`function`, `agent_profile`, `prompt`, `subgraph`, and `hook` since the hook loader landed; `evaluator.ref` is a `function` or a `prompt` depending on its `kind`). The seventh is `humanGate.ref`, which names `oversight/…` — a kind `readResources` cannot publish, and which the engine uses ONLY as a label (`policyRef: node.humanGate?.ref`, two sites, never resolved to a document). So the choice is: publish `oversight` as a spec kind and require every ref to resolve, or stop pinning a label into the manifest. The second is smaller and changes `resolutionManifest`, which is part of the graph-binding hash |
 
 ### 2 · Open from the E8 taint hardening
 
@@ -116,7 +116,6 @@ question that the repository cannot answer.
 
 | Item | The question that has to be answered first |
 |---|---|
-| **Hooks** (`REGISTER.md` B6) | Nine points are declared, validated by the compiler and pinned by the resolver, and invoked nowhere. *Which points are load-bearing?* Shipping all nine because they are declared is how a plugin surface becomes permanent |
 | **Compensation** (B9) | A compile-time proof and a rewind refusal exist; `case "compensation": break;` executes nothing. *When does a compensation edge fire* — on task failure, on run failure, on rewind? |
 | **`JoinNode.timeoutMs`** | In the schema, read by nothing. *What does a barrier timeout DO* — fail the join, or fold what arrived? Folding partial evidence for `mode: all` is a semantics change, not a timeout |
 | **B11 — `function`/`evaluator{assertion}` bodies re-execute on replay** | A journal-schema decision: should a function body's output become a journaled effect? That makes replay total and makes every function body a recorded nondeterminism site |
