@@ -32,15 +32,21 @@ import { CODES, err } from "../errors.ts";
 import type { TaskId } from "../ids.ts";
 
 /**
- * The points a graph may name, and the ONLY ones.
+ * The points a graph may name, and the ONLY ones. Every one of them is dispatched.
  *
  * `GraphSpec.hooks` is a `Record<string, …>`, so before this list existed
  * `hooks: {preTolo: […]}` compiled clean and never fired — declared, pinned, resolved, and
- * silent. That is the "looks configured, is not" failure this repo refuses elsewhere by
- * making `mode: quorum` a compile error rather than a silent downgrade.
+ * silent. That is the "looks configured, is not" failure this repo refuses elsewhere by making
+ * `mode: quorum` a compile error rather than a silent downgrade.
+ *
+ * There was briefly a SECOND list, `WIRED_POINTS`, because the design named nine points and the
+ * engine dispatched fewer; the compiler refused the difference so no intermediate state could
+ * lie. It is gone because the difference is gone: eight are built and the ninth, `prePlan`, is
+ * refuted rather than pending (see 03-RUNTIME.md D6.9). `test/run/hooks.test.ts` reads the
+ * engine's SOURCE to check every point here is really dispatched, which is a stronger guarantee
+ * than a hand-kept list and cannot drift from it.
  */
 export const HOOK_POINTS = [
-  "prePlan",
   "preNode",
   "preModel",
   "postModel",
@@ -53,25 +59,6 @@ export const HOOK_POINTS = [
 
 export type HookPoint = (typeof HOOK_POINTS)[number];
 
-/**
- * The points the engine actually DISPATCHES.
- *
- * `HOOK_POINTS` is the design's full list; this is what is built. The compiler refuses a graph
- * naming a point outside this set, because "declared, pinned, and never invoked" is the exact
- * defect the bus was written to close — narrowing it from any string to one of nine did not
- * close it, it just made the silence better spelled. Wiring a point means adding it here, and
- * `test/run/hooks.test.ts` asserts the two lists explain their difference.
- */
-export const WIRED_POINTS: ReadonlySet<HookPoint> = new Set<HookPoint>([
-  "preModel",
-  "postModel",
-  "preTool",
-  "postTool",
-  "onError",
-  "onGate",
-  "onComplete",
-  "preNode",
-]);
 
 /**
  * Points that cannot change anything.

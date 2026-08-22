@@ -16,14 +16,16 @@
  * home, and it runs BEFORE policy so the arguments policy judges are the ones that will execute.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { InProcessEventBus } from "../../src/bus.ts";
 import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { HOOK_POINTS, HookRegistry, WIRED_POINTS, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, type HookBody } from "../../src/run/hooks.ts";
+import { HOOK_POINTS, HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, type HookBody } from "../../src/run/hooks.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import type { RunId } from "../../src/ids.ts";
 import { resolver } from "./skeleton.ts";
@@ -243,22 +245,41 @@ test("A GRAPH WITH NO HOOKS REGISTERED RUNS UNCHANGED — the bus is optional", 
 
 // ── the other wired points ───────────────────────────────────────────────────
 
-test("EVERY POINT THE COMPILER ACCEPTS IS A POINT THE ENGINE DISPATCHES", () => {
-  // `HOOK_POINTS` is the design's nine; `WIRED_POINTS` is what is built. Narrowing the compiler
-  // from "any string" to "one of nine" did not close the declared-and-never-invoked defect — it
-  // just spelled the silence better. The compiler refuses an unwired point, so the two lists can
-  // never quietly disagree.
+test("EVERY POINT THE COMPILER ACCEPTS IS A POINT THE ENGINE REALLY DISPATCHES", () => {
+  // Read from the engine's SOURCE, not from a second hand-kept list. There WAS one —
+  // `WIRED_POINTS` — while the design named nine points and the engine dispatched fewer, and the
+  // compiler refused the difference so no intermediate state could lie. It is gone because the
+  // difference is gone.
+  //
+  // A FLOOR, NOT A PROOF, and worth stating plainly: this asserts the point NAME appears in
+  // `engine.ts`, which a mention in a comment would satisfy. Deleting `preNode`'s dispatch does
+  // not turn it red — its behavioural test does that. What this catches is the case the floor is
+  // for: a point added to `HOOK_POINTS` with no engine code at all, which is how the
+  // declared-and-never-invoked defect comes back.
+  const src = readFileSync(fileURLToPath(new URL("../../src/run/engine.ts", import.meta.url)), "utf8");
+  const undispatched = HOOK_POINTS.filter((point) => !src.includes(`"${point}"`));
+  assert.deepEqual(
+    undispatched,
+    [],
+    "these points compile but the engine never dispatches them — wire them, or take them out of HOOK_POINTS",
+  );
+
+  // The other half: a point the engine dispatches but the compiler refuses would be just as dead.
   for (const point of HOOK_POINTS) {
     const r = compile({ spec: spec(point), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] });
-    const wired = WIRED_POINTS.has(point);
-    assert.equal(r.ok, wired, `${point}: wired=${String(wired)} but compile ok=${String(r.ok)}`);
-    if (!wired) {
-      assert.ok(
-        (r.diagnostics ?? []).some((d) => d.code === "GRAPH003_UNWIRED_HOOK_POINT"),
-        `${point} must be refused as UNWIRED, not as unknown`,
-      );
-    }
+    assert.equal(r.ok, true, `${point}: ${(r.diagnostics ?? []).map((d) => d.code).join(", ")}`);
   }
+});
+
+test("`prePlan` IS NOT A POINT — it is refuted, not pending", () => {
+  // `submit` takes a COMPILED `RunGraph`, so the engine never holds a `GraphSpec` to filter. And
+  // a hook that rewrote one would duplicate `compileMutation` with fewer guarantees: no
+  // additive-only rule, no `graph.mutated` record a restart can rebuild from, and no
+  // `mutation_introduced_irreversible` escalation. See 03-RUNTIME.md D6.9.
+  assert.ok(!(HOOK_POINTS as readonly string[]).includes("prePlan"));
+  const r = compile({ spec: spec("prePlan"), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:write"] });
+  assert.equal(r.ok, false, "a graph naming it must not compile");
+  assert.ok((r.diagnostics ?? []).some((d) => d.code === "GRAPH003_UNKNOWN_HOOK_POINT"), "and it is UNKNOWN, not merely unwired");
 });
 
 test("`preModel` rewrites the request that is ESTIMATED and SENT", async () => {

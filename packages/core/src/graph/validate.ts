@@ -14,7 +14,7 @@
  */
 
 import type { EdgeId, NodeId } from "../ids.ts";
-import { HOOK_POINTS, WIRED_POINTS, isHookPoint } from "../run/hooks.ts";
+import { HOOK_POINTS, isHookPoint } from "../run/hooks.ts";
 import { MULTI_WRITER_SAFE, REDUCER_NAMES, type ChannelSpec } from "../state/channels.ts";
 import {
   CLASSIFICATION_POSTURE_FLOOR,
@@ -549,17 +549,7 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
         severity: "error",
         code: "GRAPH003_UNKNOWN_HOOK_POINT",
         message: `\`hooks.${when}\` names no hook point, so nothing would ever invoke it`,
-        fix: `one of: ${[...WIRED_POINTS].join(", ")}`,
-      });
-    } else if (!WIRED_POINTS.has(when)) {
-      // A REAL POINT THE ENGINE DOES NOT YET DISPATCH. Accepting it would put the graph back
-      // where it started: declared, resolved, digest-pinned — and silent. The design lists nine
-      // (`HOOK_POINTS`); five are built.
-      d.push({
-        severity: "error",
-        code: "GRAPH003_UNWIRED_HOOK_POINT",
-        message: `\`hooks.${when}\` is a designed hook point the engine does not invoke yet, so declaring it would do nothing`,
-        fix: `wired today: ${[...WIRED_POINTS].join(", ")}`,
+        fix: `one of: ${HOOK_POINTS.join(", ")}`,
       });
     }
   }

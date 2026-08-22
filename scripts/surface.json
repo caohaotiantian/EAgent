@@ -343,7 +343,6 @@
   "ValidationContext",
   "ValidationResult",
   "Violation",
-  "WIRED_POINTS",
   "WebhookChannel",
   "WebhookChannelOptions",
   "ZERO_USAGE",

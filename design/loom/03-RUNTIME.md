@@ -476,7 +476,6 @@ thread a value and may veto.
 ```ts
 export interface Hooks {
   // ── filters (intervene) — run in registration order, stop on a terminal value ──
-  prePlan:   Filter<{ spec: GraphSpec;        ctx: RunCtx  }, GraphSpec>;
   preNode:   Filter<{ node: NodeSpec; state: StateView; ctx: TaskCtx }, NodeDecision>;
   preModel:  Filter<{ request: ModelRequest;  ctx: TaskCtx }, ModelRequest>;
   postModel: Filter<{ message: Message; usage: Usage; ctx: TaskCtx }, Message>;
@@ -490,6 +489,18 @@ export interface Hooks {
 }
 
 export type Filter<In, Out> = (input: In) => Promise<Out> | Out;
+
+**`prePlan` was in this list and is REFUTED, not deferred.** Three reasons, each independently
+sufficient. `Engine.submit` takes a COMPILED `RunGraph`, so the engine never holds a `GraphSpec`
+to filter — the point has no home on the inside. A host could filter before compiling, but the
+hooks a graph declares live IN the spec, so it would have to parse, read, filter and only then
+compile, which puts the extension surface outside the bus that governs every other point. And a
+hook that rewrote a spec would duplicate `compileMutation` with strictly fewer guarantees: no
+additive-only rule (`MUT001_NOT_ADDITIVE`), no `graph.mutated` record carrying nodes and edges so
+a restart can rebuild, and no `mutation_introduced_irreversible` escalation for an added
+hard-to-undo node. That is invariant 2's failure mode — a second, weaker answer to a question the
+journal already answers. **A graph that changes itself does it through mutation, which is
+journaled, bounded and escalated.**
 
 **Every field is optional, and that is the contract rather than laxity.** A hook that only
 inspects returns nothing, and `undefined` means "no opinion" — the common case. Required fields

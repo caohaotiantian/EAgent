@@ -4363,3 +4363,38 @@ survives its own subject was never testing it.
 Wired: `preModel`, `postModel`, `preNode`, `preTool`, `postTool`, `onError`, `onGate`,
 `onComplete`. One left: `prePlan`, which is the hardest — a rewritten spec must recompile and
 re-pin, and that collides with the graph-binding rule an approval depends on.
+
+## `prePlan` is refuted, and the hook bus is finished at eight
+
+The design named nine points. Eight are built. The ninth is not pending — it is wrong, and
+saying so is the end of this piece of work rather than a gap in it.
+
+**Three independent reasons, any one sufficient.** `Engine.submit` takes a COMPILED `RunGraph`,
+so the engine never holds a `GraphSpec` to filter — the point has no home on the inside. A host
+could filter before compiling, but the hooks a graph declares live IN the spec, so it would have
+to parse, read, filter and only then compile, putting the extension surface outside the bus that
+governs every other point. And a hook rewriting a spec would duplicate `compileMutation` with
+strictly fewer guarantees: no additive-only rule (`MUT001_NOT_ADDITIVE`), no `graph.mutated`
+record carrying nodes and edges so a restart can rebuild, no `mutation_introduced_irreversible`
+escalation for an added hard-to-undo node. **That is invariant 2's failure mode — a second,
+weaker answer to a question the journal already answers.** A graph that changes itself does it
+through mutation, which is journaled, bounded and escalated.
+
+**So the two lists collapse into one.** `WIRED_POINTS` existed to keep intermediate states
+honest while the design named more points than the engine dispatched, with the compiler refusing
+the difference. The difference is gone, so the second list is gone with it, and
+`GRAPH003_UNWIRED_HOOK_POINT` went too rather than sitting there unreachable — a declared code
+nothing raises is the defect this bus was written to close.
+
+**And the test that replaced it is weaker than I first wrote it.** It scans `engine.ts` for each
+point name, and I claimed that proved dispatch. It does not: deleting `preNode`'s dispatch leaves
+the name in the `runFilters` context object one line down, and the scan stays green. The
+behavioural test is what catches that. The scan is a FLOOR — it catches a point added to
+`HOOK_POINTS` with no engine code at all, which is exactly how declared-and-never-invoked comes
+back — and the comment says so now instead of overclaiming. Found by mutation, like the three
+before it.
+
+**The bus, finished:** `preNode`, `preModel`, `postModel`, `preTool`, `postTool`, `onError`,
+`onGate`, `onComplete`. Every point is dispatched, every filter narrows and none widens, every
+change is journaled as `hook.applied` naming the ref that made it, and a hook is a digest-pinned
+vm-sandboxed resource rather than ambient code. `@loom/core` still has zero runtime dependencies.
