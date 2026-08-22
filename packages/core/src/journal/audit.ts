@@ -50,6 +50,8 @@ export const AUDIT_RULES = [
   "run.submitted-is-first-and-once",
   "call-pairs-with-its-effect",
   "gate.raise-has-a-decision",
+  "subgraph.start-and-completion-pair",
+  "subgraph.child-id-is-derived",
   "state.chain-is-unbroken",
   "state.root-writes-are-reduced",
   "edge.taken-belongs-to-its-node",
@@ -141,6 +143,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const reducedTasks = new Set<string>();
   const rootWriters = new Map<string, { seq: number; channels: string }>();
   let lastAfter: string | undefined;
+  const childStarts = new Map<string, number>();
   const submissions: number[] = [];
 
   for (const e of live) {
@@ -214,6 +217,33 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
             `${e.type} for "${key}", whose effect declared kind "${String(startedKind.get(key))}" rather than "${want}"`,
           );
         }
+        break;
+      }
+      case "subgraph.started": {
+        const child = str(p["childRunId"]);
+        if (child === undefined) break;
+        childStarts.set(child, seq);
+        // INVARIANT 3 READ BACK. `#runSubgraph` derives the child's id as `${runId}~${taskId}`
+        // for the same reason a TaskId is derived: replay and a restart must find the SAME child.
+        // A random id here would break both silently, and nothing compared the journalled id to
+        // the rule that is supposed to have produced it.
+        if (e.taskId !== undefined) {
+          saw.add("subgraph.child-id-is-derived");
+          const want = `${String(e.runId)}~${String(e.taskId)}`;
+          if (child !== want) {
+            add("subgraph.child-id-is-derived", seq, `child run id "${child}" is not the derived "${want}" — replay cannot find it`);
+          }
+        }
+        break;
+      }
+      case "subgraph.completed": {
+        const child = str(p["childRunId"]);
+        if (child === undefined) break;
+        saw.add("subgraph.start-and-completion-pair");
+        if (!childStarts.has(child)) {
+          add("subgraph.start-and-completion-pair", seq, `subgraph.completed for "${child}" with no prior subgraph.started — a child nobody recorded starting`);
+        }
+        childStarts.delete(child);
         break;
       }
       case "state.reduced": {
@@ -376,6 +406,10 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   }
 
   if (completed) {
+    for (const [child, seq] of childStarts) {
+      saw.add("subgraph.start-and-completion-pair");
+      add("subgraph.start-and-completion-pair", seq, `subgraph "${child}" started and the parent completed without recording its end`);
+    }
     for (const [gateId, seq] of openGates) {
       add("gate.raised-is-resolved", seq, `gate "${gateId}" was raised and the run completed without resolving it`);
     }

@@ -4515,3 +4515,31 @@ at all. Then the full nine-shape sweep: zero violations.
 That ordering is now the habit: read the payload, form two candidate rules, run both against real
 journals as a probe, and only then implement the one that survives. Four iterations ago I would
 have written the naive rule, shipped it, and had a reviewer find it firing on every fan-out.
+
+## Subgraph pairing, and invariant 3 read back out of the record
+
+Two rules, todo 9 → 7, sixteen rules.
+
+**`subgraph.start-and-completion-pair`** in both directions: a completion with no start is a
+child nobody recorded starting, and a start with no completion on a run that COMPLETED is a
+delegation whose end was never written. The second half is gated on the parent completing, like
+the gate rule — a suspended parent with a child mid-flight is the normal shape of a delegation,
+not a lost child.
+
+**`subgraph.child-id-is-derived`** is the one worth having. `#runSubgraph` derives the child's
+id as `${runId}~${taskId}` for exactly the reason a TaskId is derived — replay and a restart
+must find the SAME child — and **nothing compared the journalled id against the rule that is
+supposed to have produced it.** That is invariant 3 checked from the record rather than trusted.
+It validated against two real journals before being written, so the format assumption is
+measured rather than assumed.
+
+**And a fixture I wrote two iterations ago was the thing that broke.** The mirror-gate test
+invented `childRunId: "run_2"` with no completion — an id no engine mints, in a shape no engine
+emits. Both new rules fired on it correctly. That is the third time an unrealistic fixture has
+been the failure rather than the rule (`run.submitted` absent, commits without leases, now this),
+and the pattern is the same each time: **a hand-built journal drifts from what the engine
+actually writes, and the drift is invisible until a rule looks at that part of the shape.**
+
+The fix each time is to make the fixture realistic rather than to weaken the rule, and the reason
+is worth stating: a fixture is a claim about what the engine produces. When a rule contradicts
+one, exactly one of them is wrong about the engine — and the engine is checkable.

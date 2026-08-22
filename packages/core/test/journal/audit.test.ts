@@ -349,9 +349,10 @@ test("...and a MIRROR gate is keyed on the TASK, not on the decision being a gat
   // real parent journal: policy.decided(allow) → subgraph.started → gate.raised, 0 violations.
   const mirror = fixture(() => [
     ev("policy.decided", { effect: "allow", posture: "out", irreversibility: "read_only", reasons: [] }, { taskId: "d@root#0" }),
-    ev("subgraph.started", { childRunId: "run_2", ref: "graph/c@stable" }, { taskId: "d@root#0" }),
+    ev("subgraph.started", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", graphHash: "h", budgetUsd: null }, { taskId: "d@root#0" }),
     ev("gate.raised", { gateId: "g1", nodeId: "d", mirrorOf: "gate_child" }, { taskId: "d@root#0" }),
     ev("gate.decided", { gateId: "g1", decision: "approve" }, { actor: HUMAN }),
+    ev("subgraph.completed", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", status: "succeeded", usage: {}, outputs: [] }, { taskId: "d@root#0" }),
     DONE(),
   ]);
   assert.deepEqual(rulesHit(mirror), []);
@@ -400,4 +401,48 @@ test("state.root-writes-are-reduced — and a FAN-OUT branch is allowed to hold 
     DONE(),
   ]);
   assert.deepEqual(rulesHit(reduced), []);
+});
+
+test("subgraph.start-and-completion-pair — both directions", () => {
+  const orphanEnd = fixture(() => [
+    ev("subgraph.completed", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", status: "succeeded", usage: {}, outputs: [] }, { taskId: "d@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(orphanEnd), ["subgraph.start-and-completion-pair"], "a child nobody recorded starting");
+
+  const neverEnded = fixture(() => [
+    ev("subgraph.started", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", graphHash: "h", budgetUsd: null }, { taskId: "d@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(neverEnded), ["subgraph.start-and-completion-pair"], "the parent completed without recording its end");
+
+  const paired = fixture(() => [
+    ev("subgraph.started", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", graphHash: "h", budgetUsd: null }, { taskId: "d@root#0" }),
+    ev("subgraph.completed", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", status: "succeeded", usage: {}, outputs: [] }, { taskId: "d@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(paired), []);
+});
+
+test("A LIVE PARENT MAY HAVE A CHILD STILL RUNNING", () => {
+  // The "eventually" half is gated on the parent having COMPLETED, like the gate rule. A
+  // suspended parent with a child mid-flight is the normal shape of a delegation.
+  seq = 0;
+  const live = [
+    ev("run.submitted", {}),
+    ev("subgraph.started", { childRunId: "run_1~d@root#0", ref: "graph/c@stable", graphHash: "h", budgetUsd: null }, { taskId: "d@root#0" }),
+    ev("run.suspended", {}),
+  ];
+  assert.deepEqual(rulesHit(live), [], "a delegation in flight is not a lost child");
+});
+
+test("subgraph.child-id-is-derived — invariant 3, read back out of the journal", () => {
+  // `#runSubgraph` derives the child's id as `${runId}~${taskId}` so replay and a restart find
+  // the SAME child. A random one would break both silently.
+  const random = fixture(() => [
+    ev("subgraph.started", { childRunId: "run_9f3a1c", ref: "graph/c@stable", graphHash: "h", budgetUsd: null }, { taskId: "d@root#0" }),
+    ev("subgraph.completed", { childRunId: "run_9f3a1c", ref: "graph/c@stable", status: "succeeded", usage: {}, outputs: [] }, { taskId: "d@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(random), ["subgraph.child-id-is-derived"]);
 });
