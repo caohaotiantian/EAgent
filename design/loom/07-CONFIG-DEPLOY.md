@@ -103,7 +103,7 @@ policy:
   budget: { costUsd: 12.0, tokens: 2000000, wallMs: 900000 }
   capabilities: [net:fetch, obs:query, k8s:read, k8s:write]
   expansion: { maxNodes: 64, maxDepth: 3, maxFanout: 25, maxLoopIterations: 3 }
-  onBudgetExhausted: gate
+  onBudgetExhausted: fail   # `gate`/`degrade` are compile errors — designed, not built (D6.5)
 
 # Level 3 — inside a node
 - id: apply_remediation

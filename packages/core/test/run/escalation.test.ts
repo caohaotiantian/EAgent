@@ -24,7 +24,7 @@ import {
 } from "../../src/run/escalation.ts";
 import { postureRank } from "../../src/vocab.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
-import { compileOrThrow } from "../../src/graph/compile.ts";
+import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ToolManifestLite } from "../../src/graph/validate.ts";
 import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
@@ -732,17 +732,32 @@ test("E2 — crossing 80% of the budget escalates ONCE", async () => {
   assert.match(fired[0]!, /"remainingUsd"/, "the journal says how much is left, which is what an operator acts on");
 });
 
-test("E3 — an exhausted budget GATES when the graph asked it to", async () => {
+test("E3 — `onBudgetExhausted: \"gate\"` IS A COMPILE ERROR, because it never gated", () => {
+  // THIS TEST USED TO ASSERT THE ILLUSION. It was called "an exhausted budget GATES when the
+  // graph asked it to" and its message read "'stop, this is expensive' and 'stop' are different
+  // answers" — and it checked only that an ESCALATION EVENT fired. It never checked that a gate
+  // was raised or that the run parked, and neither happened: the engine escalated the ceiling
+  // for decisions this run would never make, then returned `failed` exactly as `fail` does.
+  //
+  // A word that promises a human and delivers a failure is the "looks supervised, is not" shape
+  // this repo refuses at compile everywhere else, so it is refused here too. Implementing it
+  // needs somewhere for the human's answer to GO — a way to raise a budget mid-run — and no such
+  // API exists.
   const gating = spec({ policy: { posture: "out", budget: { costUsd: 1 }, capabilities: CAPS, onBudgetExhausted: "gate" } });
-  const r = rig(ANSWER, { policy: { granted: CAPS, systemFloor: "out", budget: { runUsd: 0.000001 } } });
-  const runId = await r.engine.submit({ graph: compileEsc(gating), inputs: { goal: "x" } });
-  await r.engine.advance(runId);
-
-  const fired = await escalations(r.store, runId);
+  const r = compile({ spec: gating, resolver: resolver(), tools: TOOLS, tenantCapabilities: CAPS });
+  assert.equal(r.ok, false, "a graph asking for a budget gate must not compile");
   assert.ok(
-    fired.some((f) => f.startsWith("budget_exhausted")),
-    `"stop, this is expensive" and "stop" are different answers: ${fired.join(", ")}`,
+    (r.diagnostics ?? []).some((x) => x.code === "GRAPH003_BUDGET_ACTION_UNSUPPORTED"),
+    (r.diagnostics ?? []).map((x) => x.code).join(", "),
   );
+
+  // `degrade` is the same: read by nothing at all.
+  const degrading = spec({ policy: { posture: "out", budget: { costUsd: 1 }, capabilities: CAPS, onBudgetExhausted: "degrade" } });
+  assert.equal(compile({ spec: degrading, resolver: resolver(), tools: TOOLS, tenantCapabilities: CAPS }).ok, false);
+
+  // And the one that IS built still compiles.
+  const failing = spec({ policy: { posture: "out", budget: { costUsd: 1 }, capabilities: CAPS, onBudgetExhausted: "fail" } });
+  assert.equal(compile({ spec: failing, resolver: resolver(), tools: TOOLS, tenantCapabilities: CAPS }).ok, true);
 });
 
 test("E3 — the default is to FAIL, not to gate", async () => {

@@ -39,7 +39,7 @@ Stated because a framework that overstates itself costs its user a day finding o
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
 
 | **`rewind`** | Rewinding to a node's own declared checkpoint wedges the run: the task stays leased and the next `advance` fails. Only a `task.ready` boundary works, and `rewind` never self-advances |
-| **`onBudgetExhausted: "gate"`** | Compiles, and fails the run exactly as `"fail"` does — the escalation it raises applies to decisions that no longer happen. `"degrade"` is read by nothing |
+| **`onBudgetExhausted: "gate"` / `"degrade"`** | Compile errors, deliberately. `gate` used to compile and then fail exactly as `"fail"` does, having promised a human; building it needs a way to raise a budget mid-run, and there is none |
 | **Declarative fallback chains** | `FallbackAdapter` is written and tested; nothing constructs one, and a `--models-file` route cannot express a chain |
 | **`EdgeSpec.codes`** | The error-edge code filter has no reader, so every error edge is a catch-all whatever it declares. `RetryPolicy.onlyIf` IS read, which makes the asymmetry easy to trip over |
 | **`loom compile` against a missing resource** | Reports `ok`. A ref that merely *looks* like a ref is pinned to a digest of its own name; the failure arrives at run time, loudly, instead of at compile |

@@ -4615,3 +4615,30 @@ modes, and the README row claiming the hang is gone.
 body run forever and took the command with it — which is the defect, reproduced, as the cost of
 checking. Worth the two minutes: a fix for a hang that cannot be shown to hang without it is a
 fix nobody can check.
+
+## `onBudgetExhausted: "gate"` promised a human and delivered a failure
+
+D6.5 designs a ladder — warn → degrade → gate → fail. Only `fail` was ever built. `gate`
+compiled clean, escalated the run's ceiling for decisions a dead run would never make, and then
+returned `failed` **exactly as `fail` does**. `degrade` was read by nothing at all. Both are
+compile errors now (`GRAPH003_BUDGET_ACTION_UNSUPPORTED`), which is the treatment
+`approval.mode: quorum` gets and for the identical reason: a graph that reads as supervised and
+behaves otherwise is the worst failure available, because nobody goes looking.
+
+**The test covering it was part of the illusion**, and that is the finding worth keeping. It was
+called *"E3 — an exhausted budget GATES when the graph asked it to"*, its failure message read
+*"'stop, this is expensive' and 'stop' are different answers"* — and it asserted only that an
+ESCALATION EVENT had fired. It never checked that a gate was raised or that the run parked,
+because neither happened. **A test can assert the vocabulary of supervision while the behaviour
+is absent, and its name is not evidence.**
+
+Building `gate` properly needs somewhere for the human's answer to GO — a way to raise a budget
+mid-run — and no such API exists. The refusal is written to be deleted in the same change that
+adds one.
+
+**Three guards caught the blast radius, which is what they are for.** Removing the escalation
+left `budget_exhausted` as a rule nothing raises, and `docs-drift` failed until it was pinned
+with the reason. A shared compile fixture and the corpus's only end-to-end example both declared
+`gate`, and `docs-examples` failed until they said `fail` — a design document whose example
+cannot compile is drift, and the guard treats it as such. Each failure was the change being
+measured rather than a cost of making it.

@@ -91,7 +91,8 @@ export function incidentTriage(): GraphSpec {
       budget: { costUsd: 12.0, tokens: 2_000_000, wallMs: 900_000 },
       expansion: { maxNodes: 256, maxDepth: 3, maxFanout: 25, maxLoopIterations: 3 },
       capabilities: ["net:fetch", "obs:query", "k8s:read", "k8s:write", "chat:post"],
-      onBudgetExhausted: "gate",
+      // `gate` is a compile error — designed, never built. See GRAPH003_BUDGET_ACTION_UNSUPPORTED.
+      onBudgetExhausted: "fail",
     },
     channels: {
       incident: { type: "object", reduce: "replace", classification: "pii" },

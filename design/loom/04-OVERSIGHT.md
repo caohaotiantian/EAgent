@@ -514,7 +514,7 @@ remember.
 |---|---|---|---|---|---|---|
 | E1 | Evaluator `verdict.score < threshold` | `evaluator` node | `out → on` | run | `policy.escalated{rule:"low_confidence"}` | human with `oversight:loosen` |
 | E2 | Budget ≥ 80 % consumed | `PolicyEngine.reserve` | `out → on` | run | `budget.warning` | human |
-| E3 | Budget exhausted, `onBudgetExhausted: gate` | `PolicyEngine` | `* → in` | run | `budget.exhausted` | human |
+| E3 | Budget exhausted, `onBudgetExhausted: gate` — **the trigger is a compile error today, so this rule never fires**; see D6.5 | `PolicyEngine` | `* → in` | run | `budget.exhausted` | human |
 | E4 | ≥ 3 consecutive tool failures on one node | executor counter | `out → on` | node | `policy.escalated{rule:"repeated_failure"}` | human |
 | E5 | **Novel tool sequence** — the (node, ordered tool n-gram) was never seen in the last `N` successful runs of this graph version | `PolicyEngine` against the trajectory index | `out → on` | node | `policy.escalated{rule:"novel_sequence", ngram}` | human |
 | E6 | Policy violation attempt (capability denied, sandbox kill, egress block) | policy / sandbox | `* → in` | run | `policy.escalated{rule:"violation"}` | human |

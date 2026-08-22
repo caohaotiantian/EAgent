@@ -285,7 +285,7 @@ policy:                          # graph-level defaults; merged per D11
   budget:    { costUsd: number, tokens: integer, wallMs: integer }
   expansion: { maxNodes: integer, maxDepth: integer, maxFanout: integer, maxLoopIterations: integer }
   capabilities: [string]         # allowlist; intersected with system + tenant (never widened)
-  onBudgetExhausted: degrade | gate | fail
+  onBudgetExhausted: degrade | gate | fail   # only `fail` is built; the others are refused at compile
 
 channels:
   <name>:
@@ -388,7 +388,7 @@ policy:
   budget: { costUsd: 12.0, tokens: 2000000, wallMs: 900000 }
   expansion: { maxNodes: 64, maxDepth: 3, maxFanout: 25, maxLoopIterations: 3 }
   capabilities: [net:fetch, obs:query, k8s:read, k8s:write, chat:post]
-  onBudgetExhausted: gate
+  onBudgetExhausted: fail   # `gate`/`degrade` are compile errors — designed, not built (D6.5)
 
 channels:
   incident:    { type: object, schema: { $ref: "#/defs/Incident" }, reduce: replace, classification: pii }

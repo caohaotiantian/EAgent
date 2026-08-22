@@ -47,7 +47,8 @@ export function authoringGraph(): GraphSpec {
       budget: { costUsd: 2.0, tokens: 400_000, wallMs: 300_000 },
       expansion: { maxNodes: 16, maxDepth: 1, maxFanout: 2, maxLoopIterations: 3 },
       capabilities: [],
-      onBudgetExhausted: "gate",
+      // `gate` is a compile error: designed, not built. See graph/validate.ts.
+      onBudgetExhausted: "fail",
     },
     channels: {
       goal: { type: "string", reduce: "replace" },

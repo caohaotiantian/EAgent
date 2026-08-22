@@ -2873,10 +2873,11 @@ export class Engine {
       } catch (e) {
         const le = toLoomError(e);
         if (le.code !== CODES.E_BUDGET_EXHAUSTED) throw le;
-        // E3. `gate` means the graph asked for a human rather than a failure when the
-        // money runs out — the difference between "stop, this is expensive" and "stop".
+        // ONLY `fail` REACHES HERE. `gate` and `degrade` are compile errors
+        // (`GRAPH003_BUDGET_ACTION_UNSUPPORTED`): `gate` used to escalate the ceiling for
+        // decisions this run would never make and then fail anyway — the same outcome as
+        // `fail`, reached through a word that promised a human. `degrade` was read by nothing.
         const action = ctx.graph.spec.policy?.onBudgetExhausted ?? "fail";
-        if (action === "gate") this.#escalate(ctx, "budget_exhausted", w.node.id);
         // Run-level, not branch-level: journal it so a join cannot absorb it and so
         // it survives a restart.
         await this.#serialize(() =>

@@ -296,6 +296,15 @@ Reservations are journaled (`budget.reserved` / `budget.settled`), so a crashed 
 reservation is released by the same lease-expiry sweep that re-leases its Task — no
 separate leak-reaper.
 
+> **ONLY `fail` IS BUILT.** `gate` and `degrade` are compile errors
+> (`GRAPH003_BUDGET_ACTION_UNSUPPORTED`), not silent downgrades. `gate` read as "ask a human
+> rather than stop" and did neither: the engine raised the ceiling for decisions the dead run
+> would never make, then returned `failed` exactly as `fail` does — and the test covering it
+> asserted only that the escalation EVENT fired, so the illusion had a passing test. `degrade`
+> was read by nothing. Building `gate` needs somewhere for the human's answer to go, i.e. a way
+> to raise a budget mid-run; there is no such API, and the refusal goes in the same change that
+> adds one.
+
 **Degradation ladder on exhaustion** (declared per graph via `onBudgetExhausted`):
 
 | Rung | Behaviour | Journal |

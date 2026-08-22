@@ -1238,7 +1238,13 @@ test("every unappended event type is one this file can name a reason for", () =>
  *
  * The table has ten entries and every one of them has a caller.
  */
-const RULES_NEVER_RAISED: readonly { readonly id: string; readonly why: string }[] = [];
+const RULES_NEVER_RAISED: readonly { readonly id: string; readonly why: string }[] = [
+  {
+    id: "budget_exhausted",
+    why:
+      "E3's trigger is `onBudgetExhausted: gate`, which is now a COMPILE ERROR — it escalated the ceiling for decisions a dead run would never make and then failed exactly as `fail` does, so the word promised a human and delivered a failure. The rule comes back with the ladder step, which needs a way to raise a budget mid-run before a human's answer has anywhere to go",
+  },
+];
 
 test("EVERY ESCALATION RULE IS RAISED SOMEWHERE, except the ones pinned here", () => {
   // A rule is raised if its id appears as a STRING LITERAL anywhere in `src/` outside the

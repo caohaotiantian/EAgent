@@ -553,6 +553,25 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
     }
   }
+  // A BUDGET LADDER STEP THAT DOES NOT EXIST IS REFUSED, not silently downgraded. D6.5 designs
+  // warn → degrade → gate → fail; only `fail` is built. `gate` read as "ask a human rather than
+  // stop", and the engine escalated the ceiling for decisions that would never happen and then
+  // failed the run anyway — the same outcome as `fail`, reached through a word that promised
+  // supervision. `degrade` is read by nothing at all. This is the treatment `approval.mode:
+  // quorum` gets and for the identical reason: a graph that reads as supervised and behaves
+  // otherwise is the worst failure available, because nobody goes looking.
+  //
+  // Implementing `gate` needs somewhere for the human's answer to GO — a way to raise a budget
+  // mid-run — and no such API exists. Delete this refusal in the same change that adds one.
+  const budgetAction = (spec.policy as { onBudgetExhausted?: unknown } | undefined)?.onBudgetExhausted;
+  if (budgetAction !== undefined && budgetAction !== "fail") {
+    d.push({
+      severity: "error",
+      code: "GRAPH003_BUDGET_ACTION_UNSUPPORTED",
+      message: `\`policy.onBudgetExhausted: "${String(budgetAction)}"\` is designed but not built — the run would fail exactly as \`fail\` does, having promised otherwise`,
+      fix: 'use "fail", which is what the engine does today',
+    });
+  }
   if (typeof spec.channels !== "object" || spec.channels === null) {
     d.push({
       severity: "error",
