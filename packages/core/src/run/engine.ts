@@ -110,6 +110,7 @@ import {
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
+import { HookRegistry, narrowToolDecision, runFilters, type HookPoint, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
 import type { ReplayEffects } from "./replay.ts";
@@ -146,6 +147,12 @@ export interface EngineOptions {
   readonly functions?: FunctionRegistry;
   readonly models?: ModelRegistry;
   readonly gates?: HumanGateBroker;
+  /**
+   * The extension bus. Optional: a deployment with no hooks registered runs exactly as before,
+   * and `GraphSpec.hooks` naming a ref this registry does not hold is skipped rather than
+   * fatal — the compiler already refused an unknown POINT, which is the silent mistake.
+   */
+  readonly hooks?: HookRegistry;
   readonly now?: () => number;
   readonly workerId?: string;
   /** In-flight Tasks per run. Level 2 backpressure: the fan-out edge blocks (D6.3). */
@@ -522,6 +529,7 @@ export class Engine {
   readonly #bus: EventBus | undefined;
   readonly tools: ToolRegistry;
   readonly functions: FunctionRegistry;
+  readonly #hooks: HookRegistry | undefined;
   readonly models: ModelRegistry;
   /**
    * PRIVATE, and that narrowing is structural rather than a convention.
@@ -568,6 +576,7 @@ export class Engine {
     this.#bus = opts.bus;
     this.tools = opts.tools ?? new ToolRegistry();
     this.functions = opts.functions ?? new FunctionRegistry();
+    this.#hooks = opts.hooks;
     this.models = opts.models ?? new ModelRegistry();
     this.#now = opts.now ?? Date.now;
     this.#gates = opts.gates ?? new HumanGateBroker({ now: this.#now });
@@ -689,6 +698,42 @@ export class Engine {
       if (node === undefined) continue;
       applyTaint(ctx.tainted, node, (ev.payload as { writes?: Record<string, unknown> }).writes ?? {});
     }
+  }
+
+  /**
+   * The hooks a graph declared at one point, in declaration order.
+   *
+   * Empty when the deployment registered no `HookRegistry` — hooks are optional, and a graph
+   * that names one an installation does not have is not a broken graph. The compiler already
+   * refused an unknown POINT, which is the mistake that would otherwise be silent.
+   */
+  #hooksFor(ctx: RunContext, point: HookPoint): readonly RegisteredHook[] {
+    if (this.#hooks === undefined) return [];
+    const refs = ctx.graph.spec.hooks?.[point];
+    return refs === undefined || refs.length === 0 ? [] : this.#hooks.resolve(refs);
+  }
+
+  /**
+   * Append one `hook.applied` per hook that CHANGED the value.
+   *
+   * Not one per invocation: a no-op filter on a hot path would flood the journal, and
+   * invariant 8's rule is that telemetry may drop while the journal may not — so the journal
+   * carries the decisions, not the traffic. `hook.applied` has been in `EVENT_TYPES` with no
+   * appender since the vocabulary was written; this is it.
+   */
+  async #journalHooks(ctx: RunContext, task: TaskRecord, point: HookPoint, changedBy: readonly string[]): Promise<void> {
+    if (changedBy.length === 0) return;
+    await this.#serialize(() =>
+      ctx.log.append(
+        changedBy.map((ref) => ({
+          type: "hook.applied" as const,
+          payload: { ref, point, changed: true },
+          actor: SYSTEM_ACTOR("executor"),
+          taskId: task.taskId,
+        })),
+        { taskId: task.taskId },
+      ),
+    );
   }
 
   get replaying(): boolean {
@@ -3333,6 +3378,32 @@ export class Engine {
     const first = validate(tool.parameters, rawArgs);
     if (!first.ok) return { content: `invalid arguments for ${tool.name}:\n- ${first.errors.join("\n- ")}`, isError: true };
 
+    // 1.5 — THE EXTENSION SEAM. `preTool` may BLOCK the call or REWRITE its arguments, and it
+    // runs here — after the schema check, before policy — for two reasons. Rewritten arguments
+    // must be the ones policy judges, or a guard that redacts a secret would be authorising the
+    // unredacted call; and a hook that blocks should cost nothing, so it decides before the
+    // policy engine is asked. It cannot widen anything: policy still runs afterwards and
+    // `narrowToolDecision` reads only `block`/`reason`/`args`, dropping any field a hook
+    // invents. This is also the argument-level policy the register says has "no home" —
+    // `PolicyEngine.decide` authorises on the tool's static class and never sees an argv.
+    let guardedArgs = first.value;
+    const preTool = this.#hooksFor(ctx, "preTool");
+    if (preTool.length > 0) {
+      const out = await runFilters<PreToolState>(
+        preTool,
+        { tool: tool.name, args: (first.value ?? {}) as Record<string, unknown> },
+        { point: "preTool", runId: ctx.runId, taskId: task.taskId, signal: ctx.abort.signal },
+        (v) => v.block === true,
+        narrowToolDecision,
+      );
+      await this.#journalHooks(ctx, task, "preTool", out.changedBy);
+      if (out.value.block === true) {
+        const why = out.value.reason ?? "blocked by a preTool hook";
+        return { content: `"${tool.name}" was blocked before dispatch: ${why}`, isError: true };
+      }
+      guardedArgs = out.value.args;
+    }
+
     // 2 — policy
     const decision = ctx.policy.decide({
       runId: ctx.runId,
@@ -3427,7 +3498,7 @@ export class Engine {
     }
 
     // 3 — re-validate after any rewrite, then execute
-    const final = validate(tool.parameters, first.value);
+    const final = validate(tool.parameters, guardedArgs);
     if (!final.ok) return { content: `invalid arguments after guards:\n- ${final.errors.join("\n- ")}`, isError: true };
 
     const started = this.#now();

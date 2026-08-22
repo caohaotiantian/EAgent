@@ -14,6 +14,7 @@
  */
 
 import type { EdgeId, NodeId } from "../ids.ts";
+import { HOOK_POINTS, isHookPoint } from "../run/hooks.ts";
 import { MULTI_WRITER_SAFE, REDUCER_NAMES, type ChannelSpec } from "../state/channels.ts";
 import {
   CLASSIFICATION_POSTURE_FLOOR,
@@ -538,6 +539,18 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
         fix: `hooks.${when}: ["hook/name@stable"]`,
       });
       return true;
+    }
+    // AN UNKNOWN POINT IS AN ERROR, not a silently dead entry. `hooks` is a `Record<string, …>`,
+    // so before this check `hooks: {preTolo: [...]}` compiled clean, resolved its refs, pinned
+    // them into the manifest — and never fired. Declared, pinned and silent is the shape this
+    // compiler refuses everywhere else.
+    if (!isHookPoint(when)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_HOOK_POINT",
+        message: `\`hooks.${when}\` names no hook point, so nothing would ever invoke it`,
+        fix: `one of: ${HOOK_POINTS.join(", ")}`,
+      });
     }
   }
   if (typeof spec.channels !== "object" || spec.channels === null) {

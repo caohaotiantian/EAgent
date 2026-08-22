@@ -1138,10 +1138,6 @@ const NEVER_APPENDED: readonly { readonly type: string; readonly why: string }[]
     why: "there is no reload path in src/ at all — no SIGHUP handler, no admin endpoint. D11 designs both",
   },
   {
-    type: "hook.applied",
-    why: "hooks are declared in a GraphSpec, validated by the compiler and pinned by the resolver, and then nothing ever invokes one; so a rewriting hook could not be journaled even if it ran",
-  },
-  {
     type: "task.cancelled",
     why: "the same gap as gate.cancelled: cancel() appends run.cancelled only, so in-flight Tasks keep whatever state they last had and the task.cancelled arm of spans.ts is unreachable. D5's cancellation sequence and its join `any` short-circuit both say the executor appends it",
   },
@@ -1426,12 +1422,18 @@ const CHECKED_INTERFACES: readonly string[] = [
   "StateStore (interface)", //       append, read, head, listRuns, close
   "StateView (interface)", //        get, require
   "ToolRegistry (class)", //         register, get, list
-  // And NINE whose doc block declares no method at all — pure data shapes, plus
+  // And TWELVE whose doc block declares no method at all — pure data shapes, plus
   // `ToolDefinition`, which is one and was filed under "contributes method names" while
   // contributing none. They are listed rather than filtered out so that "checked" cannot
   // quietly count them as coverage; the method-name floor below is the number that means
   // something, and none of these moves it.
+  //
+  // The three hook decisions joined this list when the hook bus was built: D6.9 had described
+  // them for as long as it had described the bus, and `run/hooks.ts` gave them counterparts.
   "AuditRecord (interface)",
+  "ErrorDecision (interface)",
+  "NodeDecision (interface)",
+  "ToolDecision (interface)",
   "CallbackDecision (interface)",
   "CallbackRequest (interface)",
   "Diagnostic (interface)",

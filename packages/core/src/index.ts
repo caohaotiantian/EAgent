@@ -31,6 +31,7 @@ export * from "./graph/mutate.ts";
 export * from "./schema.ts";
 export * from "./run/projection.ts";
 export * from "./run/log.ts";
+export * from "./run/hooks.ts";
 export * from "./run/policy.ts";
 export * from "./run/registry.ts";
 export * from "./run/scheduler.ts";

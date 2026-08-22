@@ -490,11 +490,21 @@ export interface Hooks {
 }
 
 export type Filter<In, Out> = (input: In) => Promise<Out> | Out;
+
+**Every field is optional, and that is the contract rather than laxity.** A hook that only
+inspects returns nothing, and `undefined` means "no opinion" — the common case. Required fields
+would force every inspecting hook to restate a decision it does not have, and a hook restating a
+default is a hook that can get the default wrong.
+
+`NodeDecision.overrideWrites` and `ErrorDecision.downshiftModel` were in this block and are not
+in the code: they belong to `preNode` and `onError`, which are not wired yet. They return when
+those points do. A member described here and absent from `run/hooks.ts` is the drift
+`test/docs-type-equiv.test.ts` fails on, deliberately.
 export type Observer<In>    = (input: In) => void;
 
-export interface NodeDecision  { skip: boolean; reason?: string; overrideWrites?: ChannelWrites }
-export interface ToolDecision  { block: boolean; reason?: string; args: unknown }   // args may be rewritten
-export interface ErrorDecision { retry: boolean; afterMs?: number; downshiftModel?: string; take?: string[] }
+export interface NodeDecision  { skip?: boolean; reason?: string }
+export interface ToolDecision  { block?: boolean; reason?: string; args?: unknown }   // args may be rewritten
+export interface ErrorDecision { retry?: boolean; afterMs?: number; take?: string[] }
 ```
 
 | Rule | Reason |

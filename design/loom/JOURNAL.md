@@ -3983,3 +3983,55 @@ original, so the copies can be diffed rather than trusted.
 `exactOptionalPropertyTypes`, `noPropertyAccessFromIndexSignature` and `noImplicitReturns`.
 Turning them on is a migration of 28k LOC and was deliberately not bundled with the move — if
 the import had broken something, nobody could have told which change did it.
+
+## The hook bus — the extension surface that was declared everywhere and invoked nowhere
+
+The maintainer's first principle for this stretch: **unlimited extensibility and the most stable
+kernel, so the agent can keep up with the top ones at any time.** Extensibility is a MECHANISM,
+not a port — you cannot absorb what other harnesses do next by copying what they do now. Loom
+already designed the mechanism in D6.9 and never built it.
+
+Everything except the bus existed. `GraphSpec.hooks` was in the schema and shape-validated; its
+refs were resolved and pinned into the resolution manifest; `hook.applied{ref,point,changed}` was
+in `EVENT_TYPES`; `"hook"` was a `ResourceKind`. So a graph could declare an extension, compile
+it, pin its digest — and nothing ever called it. **That reads, from any single file, exactly like
+a working extension point**, which is this repo's most-repeated failure shape arriving once more.
+
+**A second silence sat inside the first.** The point NAME was an unenumerated `Record<string, …>`
+key, so `hooks: {preTolo: […]}` compiled clean, resolved, pinned, and was quiet forever. It is a
+compile error now (`GRAPH003_UNKNOWN_HOOK_POINT`), with the known points in the `fix` line —
+the same treatment `mode: quorum` gets, and for the same reason.
+
+**And the bus closes a gap the register said had no home.** `PolicyEngine.decide` authorises on
+`{capabilities, irreversibility, dataClassification, tainted}` and never sees an argument, and
+`irreversibility` is static per tool — so "this invocation is read-only but that one force-pushes"
+could not be expressed, which is why EAgent's `bash-policy`/`secret-guard` could not move into
+core. `preTool` sees the tool name and the current arguments and may block or rewrite them. That
+is argument-level policy, and it runs BEFORE the policy engine deliberately: rewritten arguments
+must be the ones policy judges, or a hook that redacts a secret would be authorising the
+unredacted call.
+
+**The first draft of that point was blind and it took writing the test to notice.** It threaded a
+bare `ToolDecision`, so a hook could block but only on faith — it could not see the argv it was
+judging. The threaded value is `PreToolState {tool, args, block?, reason?}` now, and `args` is the
+running value so the second hook in a chain sees the first's rewrite.
+
+**Three rules carry the design, each because its opposite is a bypass.** A hook is a pinned
+Resource, never ambient code — otherwise a hook edit changes what an in-flight run does, which is
+the pinning rule broken from outside. Filters may narrow, never widen: `narrowToolDecision` reads
+only `block`/`reason`/`args` and DROPS anything else, so a hook returning `{block:false,
+posture:"out"}` is ignored rather than refused, and `block` is monotonic. A filter that throws
+fails its Task; an observer that throws is skipped.
+
+**The journal gets the decisions, not the traffic.** `hook.applied` is appended once per hook that
+CHANGED the value, naming which ref did it — an operator needs to know which extension rewrote a
+tool's arguments, not that one of them did. A row per invocation would flood a hot path, and
+invariant 8's rule runs the other way: telemetry may drop, the journal may not.
+
+Wired so far: `preTool`. The other eight points are next; the design's `NodeDecision.overrideWrites`
+and `ErrorDecision.downshiftModel` were removed from D6.9's code block until `preNode` and
+`onError` land, because a member described and absent is the drift `docs-type-equiv` exists to
+catch — and describing an unbuilt field is the same defect as an uninvoked hook, one level down.
+
+**Reverses when** a host needs ambient hooks that outlive a graph. It should not: that is a
+plugin system, and this repo's answer to one is `packages/eagent`.
