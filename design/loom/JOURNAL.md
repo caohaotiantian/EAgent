@@ -4432,3 +4432,26 @@ a suspend/resume — every axis a TaskId varies along.
 Neither had a fixture that TRIPPED it. Three added — a commit with no lease, a journal with no
 submission, a submission that is not first — plus the partial-journal control. **A rule with only
 negative coverage is a rule you have proved silent, not a rule you have proved works.**
+
+## The ledger and the mechanism have to agree
+
+`call-pairs-with-its-effect` — every `model.called`/`tool.called` must sit on an `effect.started`
+with the same key AND the matching kind. Todo list 13 → 11; eleven rules.
+
+The two records serve different readers. `*.called` is the human-legible one — the provider, the
+model, the shape of the arguments — and it is what an operator reads to answer "what did this
+cost and where did it go". `effect.started` is the REPLAYABLE one. They are appended together at
+four sites and nothing checked they stayed together, so **a `*.called` with no effect is a call
+the journal DESCRIBES and replay CANNOT REPRODUCE**: the ledger and the mechanism disagreeing
+about what happened, which is precisely the class `auditRun` exists for.
+
+**Two paths were checked before the rule was written rather than after.** The summariser calls a
+model too — it appends `effect.started{kind:"summarize"}` and no `model.called`, so it cannot
+false-positive. And the model site appends `effect.started` unconditionally, BEFORE the replay
+branch, so a replayed turn carries both records like any other. Neither was obvious from the rule
+statement; both would have been false positives.
+
+Nine real journals swept clean again — the four linear shapes plus fan-out, loop, subgraph parent
+and child, and a gate approved and resumed. The kind-crossed fixture trips this rule AND
+`effect.kind-matches-its-key` together, which is right: they catch the same disagreement from
+opposite sides, and a fixture that tripped only one would mean one of them had a hole.

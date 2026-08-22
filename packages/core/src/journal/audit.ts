@@ -48,6 +48,7 @@ export const AUDIT_RULES = [
   "task.committed-once",
   "task.leased-precedes-commit",
   "run.submitted-is-first-and-once",
+  "call-pairs-with-its-effect",
   "edge.taken-belongs-to-its-node",
 ] as const;
 
@@ -127,6 +128,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const completed = live.some((e) => e.type === "run.completed");
 
   const startedAttempt = new Map<string, number>();
+  const startedKind = new Map<string, string>();
   const completions = new Map<string, number>();
   const openGates = new Map<string, number>();
   const raisedGates = new Set<string>();
@@ -146,6 +148,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         const attempt = typeof p["attempt"] === "number" ? p["attempt"] : 1;
         startedAttempt.set(key, attempt);
         const declared = str(p["kind"]);
+        if (declared !== undefined) startedKind.set(key, declared);
         const inKey = kindOfKey(key);
         if (declared !== undefined && inKey !== undefined) {
           saw.add("effect.kind-matches-its-key");
@@ -180,6 +183,29 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
             add("effect.completed-once-per-attempt", seq, `"${key}" completed twice in attempt ${String(attempt)} (also at seq ${String(prior)})`);
           }
           completions.set(scoped, seq);
+        }
+        break;
+      }
+      // `model.called` and `tool.called` are the human-legible record of an outbound call — the
+      // provider, the model, the arguments' shape. `effect.started` is the REPLAYABLE record of
+      // the same call. They are appended together at four sites and nothing checked they stayed
+      // together: a `*.called` with no effect is a call the journal describes and replay cannot
+      // reproduce, which is the ledger and the mechanism disagreeing about what happened.
+      case "model.called":
+      case "tool.called": {
+        const key = str(p["key"]);
+        if (key === undefined) break;
+        saw.add("call-pairs-with-its-effect");
+        const want = e.type === "model.called" ? "model" : "tool";
+        const started = startedAttempt.has(key);
+        if (!started) {
+          add("call-pairs-with-its-effect", seq, `${e.type} for "${key}" with no effect.started — replay cannot reproduce it`);
+        } else if (startedKind.get(key) !== want) {
+          add(
+            "call-pairs-with-its-effect",
+            seq,
+            `${e.type} for "${key}", whose effect declared kind "${String(startedKind.get(key))}" rather than "${want}"`,
+          );
         }
         break;
       }

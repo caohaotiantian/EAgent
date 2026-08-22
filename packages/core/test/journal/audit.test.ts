@@ -288,3 +288,36 @@ test("A PARTIAL JOURNAL IS NOT A MALFORMED ONE — the submission rule stands do
     "and it says WHY it stood down",
   );
 });
+
+test("call-pairs-with-its-effect — a call the journal describes and replay cannot reproduce", () => {
+  // `model.called`/`tool.called` are the human-legible record of an outbound call; `effect.started`
+  // is the replayable one. They are appended together at four sites, and nothing checked they
+  // stayed together — a `*.called` with no effect is the ledger and the mechanism disagreeing.
+  const orphan = fixture(() => [
+    ev("model.called", { key: "ask@root#0:model:0", provider: "anthropic", model: "m", finishReason: "stop", usage: {} }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(orphan), ["call-pairs-with-its-effect"]);
+
+  const paired = fixture(() => [
+    ev("effect.started", { key: "ask@root#0:model:0", kind: "model", attempt: 1 }),
+    ev("model.called", { key: "ask@root#0:model:0", provider: "anthropic", model: "m", finishReason: "stop", usage: {} }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(paired), []);
+});
+
+test("...and the KIND must match the call, not merely exist", () => {
+  // A `tool.called` sitting on a `model` effect would mean the two records describe different
+  // things under one key — the shape `effect.kind-matches-its-key` catches from the other side.
+  const crossed = fixture(() => [
+    ev("effect.started", { key: "n@root#0:tool:0", kind: "model", attempt: 1 }),
+    ev("tool.called", { key: "n@root#0:tool:0", name: "fs.write" }),
+    DONE(),
+  ]);
+  assert.deepEqual(
+    rulesHit(crossed).sort(),
+    ["call-pairs-with-its-effect", "effect.kind-matches-its-key"],
+    "both sides of the same disagreement fire, which is correct",
+  );
+});
