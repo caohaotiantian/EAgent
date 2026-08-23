@@ -6342,3 +6342,48 @@ arranged.
 here becomes redundant and should be deleted rather than kept as insurance. Do not, however,
 change `spansFrom`'s order to serve this renderer — the waterfall order is what an OTel exporter
 wants, and this command is the one with the unusual requirement.
+
+---
+
+## The fix two waves ago broke the thing it was protecting, and driving the console found it
+
+The console had never been exercised past "returns 200 with a title". Driving it end to end went
+well — list, inspect, gate queue, approve, resume, guarded write, and auth correct on every route
+(the shell and `/health` open, every data endpoint 401 without a token, `/health` disclosing only
+`{ok, auth, identity}`). Then the gate queue answered with a `contentDigest` and no `payload`, on
+a gate the serving process had raised itself.
+
+    t=100ms  payload.state = {"note": "timing probe"}
+    t=200ms  payload.state = {"note": "timing probe"}
+    t=300ms  payload = null
+
+**One gate-clock tick.** `Engine.rehydrateGates` builds its request from the journal, which does
+not carry the rendered payload — it passes `payload: undefined` on purpose, "absent rather than
+faked" — and `HumanGateBroker.rehydrate` replaced the ephemeral entry wholesale. Arming a gate
+whose payload was in memory erased it.
+
+**That was harmless until the wave before last made it reachable.** Fixing cross-process
+escalation meant arming every run in `awaiting_gate` on every tick, which turned a method only
+ever called by a just-started process — one holding no payloads to lose — into one called
+constantly against live gates. The earlier wave's own journal entry says every new enforcement
+point re-opens the reachability argument for the code downstream of it. It re-opened this one and
+nobody looked; the entry named the lesson and the wave did not apply it to its own change.
+
+**What the defect costs is the oversight story itself.** `Engine.openGates`' docstring states the
+stakes exactly: "a gate surfaced without what it is asking about is a gate that gets approved on
+trust, which is the failure mode the whole oversight layer exists to avoid". For one second the
+console showed the note; after that, a digest.
+
+**Fixed in `rehydrate`, not in the caller.** The contract is that method's — its name and its
+docstring both say re-ATTACH — and no caller can know whether another component holds a live
+payload for the gate it is arming. Fixing the caller would have left the trap armed for the next
+one.
+
+**And the whole suite stayed green through all of it.** 3523 tests, none of which raised a gate
+and then armed it in the same process, because before that wave nothing did. **A regression that
+no existing test can see is the ordinary outcome of making a rare path common** — the tests
+encoded the old reachability, which is exactly what the new code changed.
+
+**Reversal condition:** if the rendered payload ever becomes durable — journaled at raise, folded
+by the projection — this merge is dead weight and `rehydrate` can go back to replacing, because
+there would be nothing in memory that the journal could not rebuild.
