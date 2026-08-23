@@ -51,7 +51,10 @@ function advertised(): readonly string[] {
 }
 function read(): readonly string[] {
   const direct = [...SRC.matchAll(/args\.flags\["([a-z-]+)"\]/g)].map((x) => x[1]!);
-  const viaHelper = [...SRC.matchAll(/(?:pathFlag|requireFileFlag|numberFlag|stringFlag)\(args, "([a-z-]+)"/g)].map((x) => x[1]!);
+  // Every accessor that reads a flag. A new one must be added here — which is not a chore but
+  // the gate working: `listFlag` was introduced for `--egress`/`--allow-exec`/`--exec-env` and
+  // this test went red the moment those three stopped being read through `args.flags[…]`.
+  const viaHelper = [...SRC.matchAll(/(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([a-z-]+)"/g)].map((x) => x[1]!);
   return [...new Set([...direct, ...viaHelper])].sort();
 }
 

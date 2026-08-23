@@ -5399,3 +5399,52 @@ test asserted only that `compile nope.json --tokne x` rejected — which it does
 missing file — so deleting the refusal left it green; it now names `E_CONFIG_INVALID` and
 `unknown flag`. And "every real flag is accepted" iterated `KNOWN_FLAGS`, the list under test, so
 dropping a flag from it also dropped it from the loop; it now iterates what USAGE promises.
+
+---
+
+## `String(true)` is `"true"`, and three flags that decide this process's reach had escaped it
+
+*Reversal condition: none. If a fourth list flag appears it goes through `listFlag`; the
+`known-flags` gate makes that visible because a new accessor breaks it until registered.*
+
+`--egress`, `--allow-exec` and `--exec-env` each took a value and each read it as
+`String(args.flags[name]).split(",")`. A flag given with no value parses to `true`, so a bare
+flag became the one-element allowlist `["true"]` — **while still registering the tool it
+enables**:
+
+    loom compile --allow-exec    granted=[…,proc:exec]  tools=[…,proc.exec]
+    loom compile --egress        granted=[…,net:fetch]  tools=[…,net.fetch]
+
+`capabilitiesOf`'s security argument is that "a tool is registered ONLY when the operator passed
+the flag that registers it… so 'registered implies granted' says exactly 'the operator asked for
+this'". A flag with no argument is not that: they asked for something and said nothing about
+what. And `true` is a real executable, so the allowlist was not empty — it was one program nobody
+named.
+
+Six other value-flags already refuse both empty spellings. **These three were the ones that
+define what the process may reach outside itself**, which is the usual shape: the guard exists,
+and the places it did not reach are not random.
+
+`listFlag` refuses `true` and `""`, and refuses a stray comma rather than dropping the blank —
+`--egress a,,b` would otherwise be an allowlist that differs from what was typed with nothing to
+show for it. Read before the jail is built, so a malformed flag refuses before any tool is
+registered.
+
+**The gate from last iteration earned itself immediately.** Introducing `listFlag` moved three
+flags off `args.flags[…]`, and `known-flags.test.ts` went red because its scan of "what the code
+reads" did not know the new accessor. That is the gate working, not a chore — the same edit
+would otherwise have made three advertised flags look unread.
+
+### And the sweep caught two more of my own tests that could not fail
+
+**A bare `assert.throws` is not an assertion about refusing.** Deleting the empty-value guard
+makes `v` be `true`, and `true.split` is not a function — so a TypeError satisfied `throws` just
+as well as the refusal did, and the capability test stayed green. It now names
+`E_CONFIG_INVALID`. **"It threw" is not "it refused"**, and every `assert.throws`/`rejects` in
+this repo that omits a predicate is the same latent hole.
+
+**A test can assert something the behaviour under test does not affect.** "Entries are trimmed"
+asserted that `--egress "a, b"` still registers `net.fetch` — which it does either way, so
+removing `.trim()` left it green. Trimming's only observable consequence is that a
+whitespace-only entry becomes blank and is then caught as a stray comma; the test asserts that
+instead. **Find the consequence, not the restatement.**

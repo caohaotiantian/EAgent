@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3485 pass, 0 fail, 1 skipped** (Loom 1942 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 248 (117 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3489 pass, 0 fail, 1 skipped** (Loom 1946 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 249 (118 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -37,6 +37,12 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
+
+**A sixth sweep — flag VALUES — found the same class one level in.** `--egress`, `--allow-exec`
+and `--exec-env` read their value as `String(flags[name]).split(",")`, so a bare flag became the
+allowlist `["true"]` *while still registering the tool*: `loom compile --allow-exec` granted
+`proc:exec`. `listFlag` refuses the two empty spellings and a stray comma; the other six
+value-flags already refused them.
 
 **A fifth sweep — the CLI flag surface — found the sharpest one yet.** `parseArgs` accepted any
 `--word` and nothing checked the set, so `loom serve --tokne s3cret` started a control plane that

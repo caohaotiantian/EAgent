@@ -417,6 +417,10 @@ export function openWorkspace(
   // "boot from an empty directory". Moving the journal out as well would buy no safety
   // this line does not already give and would hide the run's own history from the person
   // looking for it.
+  // READ BEFORE THE JAIL IS BUILT, so a malformed flag refuses before any tool is registered.
+  const egressHosts = listFlag(args, "egress", "a hostname");
+  const execPrograms = listFlag(args, "allow-exec", "a program name");
+  const execEnvNames = listFlag(args, "exec-env", "an environment variable name");
   const jail = {
     root,
     // `resources/` JOINS THE DATA DIR, and for a sharper reason than the journal has. Its
@@ -439,12 +443,12 @@ export function openWorkspace(
     // oversight from other runs. "What a run may not do is decide what the next run is told" and
     // "…what the next run IS" are one sentence.
     deny: [dataDir, join(root, "resources"), join(root, "graphs")],
-    ...(args.flags["egress"] === undefined ? {} : { egressAllowlist: String(args.flags["egress"]).split(",") }),
+    ...(egressHosts === undefined ? {} : { egressAllowlist: egressHosts }),
     // Both default to absent, and absent means the tool is not registered at all. A run
     // that never names a program cannot run one — see `procExec`, where the allowlist is
     // the entire boundary rather than one check among several.
-    ...(args.flags["allow-exec"] === undefined ? {} : { execAllowlist: String(args.flags["allow-exec"]).split(",") }),
-    ...(args.flags["exec-env"] === undefined ? {} : { execEnvAllow: String(args.flags["exec-env"]).split(",") }),
+    ...(execPrograms === undefined ? {} : { execAllowlist: execPrograms }),
+    ...(execEnvNames === undefined ? {} : { execEnvAllow: execEnvNames }),
   };
   for (const t of builtinTools(jail)) tools.register(t);
   tools.register(fsRestore(jail));
@@ -2548,6 +2552,50 @@ function requirePositional(args: Args, i: number, what: string): string {
   const v = args.positional[i];
   if (v === undefined) throw new Error(`${args.command} requires ${what}`);
   return v;
+}
+
+/**
+ * A COMMA-SEPARATED LIST FLAG, refusing the two ways it arrives empty.
+ *
+ * `--egress`, `--allow-exec` and `--exec-env` each took a value and each read it as
+ * `String(args.flags[name]).split(",")`. A flag given with no value parses to `true`, and
+ * `String(true)` is `"true"` — so a bare flag became the one-element allowlist `["true"]` while
+ * still REGISTERING the tool. Measured:
+ *
+ *     loom compile --allow-exec        granted=[…,proc:exec]  tools=[…,proc.exec]
+ *     loom compile --egress            granted=[…,net:fetch]  tools=[…,net.fetch]
+ *
+ * `capabilitiesOf`'s own security argument is that "a tool is registered ONLY when the operator
+ * passed the flag that registers it… 'registered implies granted' says exactly 'the operator
+ * asked for this'". A flag with no argument is not that: the operator asked for something and
+ * said nothing about what. And `true` is a real executable, so the allowlist was not empty — it
+ * was one program nobody named.
+ *
+ * This is the `String(true)` family `--token`, `--port`, `--input`, `--as`, `--reason` and every
+ * `pathFlag` already refuse. Three flags had escaped it; they are the three that decide what
+ * this process may reach outside itself.
+ */
+function listFlag(args: Args, name: string, what: string): readonly string[] | undefined {
+  const v = args.flags[name];
+  if (v === undefined) return undefined;
+  if (v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--${name} needs ${what}: ${v === "" ? `the one given was empty (\`--${name} "$VAR"\` does this when the variable is unset)` : "the flag was given with no value at all"}. ` +
+        `It would otherwise read as the single entry "true", while still registering the tool the flag enables. ` +
+        `Omit the flag entirely to leave that tool unregistered.`,
+    );
+  }
+  // An entry that is blank after trimming is a stray comma, not a name. Dropping them silently
+  // would let `--egress a,,b` mean something the operator cannot see.
+  const parts = v.split(",").map((x) => x.trim());
+  if (parts.some((x) => x === "")) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--${name} has an empty entry ("${v}") — a stray comma. Every entry must name ${what}.`,
+    );
+  }
+  return parts;
 }
 
 /**
