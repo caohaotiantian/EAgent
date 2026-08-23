@@ -144,9 +144,18 @@ Ordered by what a fresh session should pick up first. Everything here was verifi
 
 ### 1 · Defects — something claims to work and does not
 
-**Empty, and that is a claim to check rather than a state to trust.** Every row this section
-carried has been closed and each was verified against `src/` before its row was deleted, not
-against a memory of having fixed it:
+**One open, found by driving a path rather than reading it. Pick it up first.**
+
+| open | evidence | plan |
+|---|---|---|
+| **A run whose gate EXPIRED cannot be replayed.** `replayRun`'s gate loop serves a recorded `gate.decided` and throws when there is none — but a gate the CLOCK resolved has `gate.timeout` instead, and `onTimeout: "fail"` is the DEFAULT. So every run that ended because nobody answered is unreplayable, which is the set an auditor most wants to re-derive | `loom replay <id> --graph esc2.json` → `E_REPLAY_DIVERGENCE: replay raised a gate … that the recorded run never decided`, exit 1, on a run whose journal reads `gate.raised → gate.escalated → gate.delivered → gate.timeout → run.failed` | `.agent/replay-expired-gate/plan.md` — three decisions recorded, chiefly whether to reproduce the expiry by SWEEPING the shadow gate past its own deadline (re-deriving) or by synthesising the outcome (faking) |
+
+**It is the same shape as the de-escalation gap this repo already closed, and the argument is
+stronger**: that one needed a human to have used a rare lever, this one is what happens when
+nobody does anything at all.
+
+**Everything else here has been closed** and each was verified against `src/` before its row was
+deleted, not against a memory of having fixed it:
 
 | was | closed by | the check that would fail if it regressed |
 |---|---|---|

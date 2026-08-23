@@ -6139,3 +6139,47 @@ this, and which of them did the fix visit?* Three of four is a failure that look
 run — the cost `ControlPlane` explicitly declined per request. If the run count makes that tick
 expensive, the fix is not to drop the arming but to have the sweeper report which runs it could
 not arm, so the degradation is loud rather than silent. A silent unarmed gate is the defect.
+
+---
+
+## A sweep that could not have found the defect that motivated it
+
+Six capabilities in this repo have shipped with an empty or incomplete consumer set, the last
+being `rehydrateGates` at three callers of four. Six is enough to check mechanically, so this
+wave swept every public method of every exported class in `src/` for callers.
+
+**It found four unused accessors and no defect** — `PolicyEngine.escalationsFor` (`#escalations`
+IS consulted in `decide`, at both run and node scope; only the accessor is unused),
+`McpClient.notify`, `BearerTokenIdentity.raw`, `MockModelAdapter.reset`.
+
+**The result worth recording is that the sweep was aimed wrong, and it was aimed wrong by its own
+motivation.** `rehydrateGates` had THREE callers. A caller-COUNT sweep can only find the empty
+set; the defect it was written to generalise was an incomplete one, which no count distinguishes
+from a complete one. The question that finds that class — *which components consume this state,
+and did the fix visit each?* — is a domain question about each mechanism, and there is no grep
+for it. **A mechanical sweep can only answer the question its metric encodes**, and "how many
+callers" does not encode "are they the right ones".
+
+So the wave turned to driving a path instead, and that found one.
+
+## A run whose gate expired cannot be replayed
+
+`replayRun`'s gate loop serves a recorded `gate.decided` and throws `E_REPLAY_DIVERGENCE` when
+there is none. A gate the CLOCK resolved has no decision — it has `gate.timeout` — so a run that
+ended because nobody answered cannot be re-derived. `onTimeout: "fail"` is the DEFAULT, so this
+is not an exotic corner: it is what every unanswered gate does.
+
+**Identical in shape to the de-escalation gap closed a few waves ago**, whose entry reads "an
+audit could not re-derive the runs where a human used the one lever that lowers oversight — which
+are the runs an auditor most wants to re-derive". The argument transfers and strengthens: that
+gap needed a human to have used a rare lever; this one needs nobody to do anything.
+
+**Recorded rather than fixed, deliberately.** Replay is the most correctness-sensitive path here
+and its verdict feeds the D10 promotion gate, and the fix carries a real choice — reproduce the
+expiry by SWEEPING the shadow gate past its own deadline, so the same `GateSweeper` code runs, or
+synthesise the outcome. The second is the shape that reports green for a mechanism that has
+stopped working, which is what `compare`'s own gate-blindness already was once. That decision
+belongs in a turn that starts with it, not at the end of one. `.agent/replay-expired-gate/plan.md`
+carries it, along with two smaller ones: whether the escalation TIER history must be reproduced or
+only the terminal status, and whether `applyCeilings`' raised-gate coordinate still lines up when
+a raise is consumed with no decision.
