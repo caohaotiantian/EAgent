@@ -5228,3 +5228,44 @@ wrong in at a security boundary.
 no ceiling. Measured before a line was written by arming the rule and running the full suite —
 zero failures, because every graph here that declares a list already names what its tools need.
 The enforcement was simply missing.
+
+---
+
+## Three sweeps, no defects, and one gate that was missing anyway
+
+*Reversal condition: the gate goes if `AUDIT_RULES` stops being the rule set — it reads that
+export, so a second registry would make it check the wrong list.*
+
+With the named backlog empty, the method that produced the last three findings — grep a declared
+field, name every consumer, check each — was turned on things nobody had asked about. All three
+came back clean, which is worth writing down precisely because a negative result is the thing
+nobody records and the next session therefore re-derives.
+
+**Policy fields.** Every field of `GraphPolicy`, `NodePolicy` and `NodeSpec` has a consumer
+outside its own declaration. Two looked like suspects and are not: `unhandled` has exactly one
+reference and it is right — a compile-only suppression of `GRAPH011`, documented as such — and
+`concurrencyKey` has zero because it is not declared in `src/` at all, only in the design, under
+`DESIGNED-NOT-BUILT(ToolDefinition.concurrencyKey)`. An unbuilt thing that says so is not drift.
+
+**The marker convention.** `docs-drift.test.ts` already gates every `DESIGNED-NOT-BUILT` and
+`NOT-IN-CODE` marker, including the trap that one inside an HTML comment silences nothing.
+
+**Audit rule coverage.** All 19 rules are tripped by a fixture — measured by instrumenting `add`
+and running the suite.
+
+**The last of those was a measurement with nothing keeping it true**, which is the same decay
+shape `audit-coverage.test.ts` exists to stop one direction of. That file gates: every event TYPE
+is constrained by a rule or excused in writing. Nothing gated the other direction, and the two do
+not imply each other — a rule can exist, branch on a type that IS appended, and still have no
+journal shape any test makes it fire on. Such a rule is indistinguishable from a no-op, and this
+module has shipped two of them.
+
+So the probe became the gate: every `auditRun` call in `audit.test.ts` goes through one recorder,
+and the file's last test asserts every rule in `AUDIT_RULES` was provoked by something above it.
+It also asserts the recorder's own count, because a recorder that stopped recording would
+otherwise report the whole list as untripped and read like nineteen new defects.
+
+*(The rewrite that routed those calls through the recorder replaced `auditRun(` inside the
+recorder's own body, making it call itself. Caught by reading the result instead of trusting the
+patch — the second time this wave a mechanical edit has quietly produced something different
+from what it said.)*

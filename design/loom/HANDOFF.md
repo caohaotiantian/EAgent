@@ -28,7 +28,7 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3472 pass, 0 fail, 1 skipped** (Loom 1929 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Tests | **3473 pass, 0 fail, 1 skipped** (Loom 1930 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
 | Test files | 245 (114 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
@@ -37,6 +37,15 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
+
+**Three sweeps came back clean on 2026-08-23, and the commands are here so the next session
+re-runs them rather than trusting this paragraph.** Every field of `GraphPolicy`/`NodePolicy`/
+`NodeSpec` has a consumer outside its own declaration (`grep -arn '\.<field>\b' packages/core/src/`
+— `unhandled` legitimately has one, a compile-only suppression; `concurrencyKey` has none and is
+not declared in `src/` at all, only in the design under `DESIGNED-NOT-BUILT`). Every
+`DESIGNED-NOT-BUILT`/`NOT-IN-CODE` marker is already gated by `docs-drift.test.ts`. And every
+one of the 19 audit rules has a fixture that trips it — which is now a gate rather than a
+measurement (`audit.test.ts`, last test).
 
 **The `Source files` row is the only one that cannot rot**, because its command is a guard that
 runs in CI: if it disagrees with the tree, the build stops. That is the difference between a

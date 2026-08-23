@@ -38,8 +38,26 @@ function fixture(build: () => JournalEvent[]): JournalEvent[] {
   const submitted = ev("run.submitted", { graphHash: "sha256:x", inputs: {} });
   return [submitted, ...build()];
 }
+/**
+ * EVERY RULE THIS FILE MANAGED TO TRIP, accumulated across the whole file.
+ *
+ * A rule with no fixture that trips it is indistinguishable from a rule that does nothing, and
+ * this module has shipped two of those before — built on event types nothing in `src/` ever
+ * appends, permanently inert, and reported as `checked` on every terminal run.
+ * `audit-coverage.test.ts` gates the other direction (every event TYPE is constrained or
+ * excused); nothing gated this one until the last test in this file.
+ */
+const TRIPPED = new Set<AuditRule>();
+
+/** Every call in this file goes through here, so the accounting cannot miss one. */
+function audit(evs: JournalEvent[], opts: Parameters<typeof auditRun>[1] = {}): ReturnType<typeof auditRun> {
+  const r = auditRun(evs, opts);
+  for (const v of r.violations) TRIPPED.add(v.rule);
+  return r;
+}
+
 const rulesHit = (evs: JournalEvent[], opts = {}): AuditRule[] =>
-  [...new Set(auditRun(evs, opts).violations.map((v) => v.rule))].sort();
+  [...new Set(audit(evs, opts).violations.map((v) => v.rule))].sort();
 
 const DONE = (): JournalEvent => ev("run.completed", { outputs: {}, usage: {} });
 
@@ -54,7 +72,7 @@ test("`checked` means the rule SAW EVIDENCE, not that the switch statement ran",
     ev("effect.completed", { key: "n@root#0:tool:0", result: {}, resultDigest: "d" }),
     DONE(),
   ]);
-  const r = auditRun(evs);
+  const r = audit(evs);
   assert.deepEqual(r.violations, []);
   assert.deepEqual(
     [...r.checked].sort(),
@@ -139,13 +157,13 @@ test("edge.taken-belongs-to-its-node — the gate bypass, expressed as a relatio
   // AN ABSENT GRAPH IS NOT AN EMPTY ONE. The CLI passed `{}`, so every lookup missed, nothing was
   // examined, and the report said the rule had been checked — on the one rule that catches the
   // bug this module exists for.
-  const withoutGraph = auditRun(evs);
+  const withoutGraph = audit(evs);
   assert.deepEqual(withoutGraph.violations, []);
   assert.ok(
     !withoutGraph.checked.includes("edge.taken-belongs-to-its-node"),
     "with no graph the rule must be SKIPPED, never reported as checked",
   );
-  const empty = auditRun(evs, { edgeSource: {} });
+  const empty = audit(evs, { edgeSource: {} });
   assert.ok(!empty.checked.includes("edge.taken-belongs-to-its-node"), "an empty map examines nothing either");
 });
 
@@ -200,7 +218,7 @@ test("A MALFORMED JOURNAL IS DIAGNOSED, NOT CRASHED ON", () => {
     ev("task.committed", { take: [7, null] }, { taskId: "n@root#0" }),
     DONE(),
   ]);
-  const r = auditRun(evs, { edgeSource: { e1: "n" } });
+  const r = audit(evs, { edgeSource: { e1: "n" } });
   assert.ok(Array.isArray(r.violations), "it returns a report rather than throwing");
   assert.deepEqual(rulesHit(evs), ["policy.deescalation-is-human"], "a missing actor is not human");
 });
@@ -284,7 +302,7 @@ test("A PARTIAL JOURNAL IS NOT A MALFORMED ONE — the submission rule stands do
     ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "w@root#0" }),
     DONE(),
   ];
-  const r = auditRun(tail);
+  const r = audit(tail);
   assert.deepEqual(r.violations, []);
   assert.ok(
     r.skipped.some((s) => s.rule === "run.submitted-is-first-and-once" && s.why.includes("seq 1")),
@@ -501,7 +519,7 @@ test("hook.applied-ref-is-declared — an extension that was not installed chang
   );
 
   // With no graph the rule is skipped, never guessed at — the same discipline as edgeSource.
-  const r = auditRun(evs);
+  const r = audit(evs);
   assert.deepEqual(r.violations, []);
   assert.ok(!r.checked.includes("hook.applied-ref-is-declared"));
 });
@@ -532,4 +550,30 @@ test("task.leased-is-resolved — work the run reported as done and never did", 
     ev("run.cancelled", { reason: "operator" }),
   ];
   assert.deepEqual(rulesHit(cancelled), [], "a cancelled run is not in violation for stopping");
+});
+
+// ── and the gate that keeps the rule set honest ─────────────────────────────
+
+test("EVERY AUDIT RULE HAS A FIXTURE THAT TRIPS IT", () => {
+  // `audit-coverage.test.ts` gates one direction: every event TYPE is constrained by a rule or
+  // excused in writing. This is the other, and neither implies the other — a rule can exist,
+  // branch on a type that IS appended, and still have no journal shape in this file that makes
+  // it fire. Such a rule is indistinguishable from one that does nothing, and this module has
+  // shipped two: built on event types nothing in `src/` ever appends, permanently inert, and
+  // reported as `checked` on every terminal run.
+  //
+  // Declared LAST on purpose. `node:test` runs a file's tests in declaration order, so `TRIPPED`
+  // holds what every test above managed to provoke. Running this file with
+  // `--test-name-pattern` will therefore fail it, which is the honest failure: the accounting
+  // is over the whole file or it is over nothing.
+  const never = [...AUDIT_RULES].filter((r) => !TRIPPED.has(r)).sort();
+  assert.deepEqual(
+    never,
+    [],
+    "these rules were never made to fire by any fixture here — write one that trips each, or " +
+      "delete the rule; a rule no test can distinguish from a no-op is not a guard",
+  );
+  // And the accounting itself must not silently break: if `audit()` stopped recording, `never`
+  // would be the whole list and the message above would be the only clue.
+  assert.equal(TRIPPED.size, AUDIT_RULES.length, "the recorder saw a different number of rules than exist");
 });
