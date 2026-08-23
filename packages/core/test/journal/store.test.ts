@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
-import { type Actor, EVENT_TYPES, SYSTEM_ACTOR } from "../../src/journal/events.ts";
+import { type Actor, EVENT_TYPES, type EventType, SYSTEM_ACTOR } from "../../src/journal/events.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import type { RunId, TaskId } from "../../src/ids.ts";
 import { foldRun } from "../../src/run/projection.ts";
@@ -444,11 +444,28 @@ test("[sqlite] the durability knob changes only durability, never behaviour", as
 });
 
 test("EVENT_TYPES matches the EventPayloads key set", () => {
-  // EVENT_TYPES is `as const satisfies readonly EventType[]`, so the compiler already
-  // rejects an entry that is not an EventType. This catches the other direction: a
-  // payload added to the map but forgotten in the runtime list.
+  // EVENT_TYPES is `as const satisfies readonly EventType[]`, so the compiler already rejects
+  // an entry that is NOT an EventType. The other direction — a payload added to the map and
+  // forgotten in the runtime list — is what this test claimed to catch and did not: neither a
+  // duplicate check nor a length of 52 changes when a key is added only to `EventPayloads`.
+  //
+  // Reproduced before fixing. With one extra key in the map and nothing added here, this file
+  // passed 65/0, `audit-coverage.test.ts` passed 3/0, `docs-drift.test.ts` passed 42/0, and
+  // `tsc` exited 0 — so the type was fully appendable to the journal while being exempt from
+  // its audit rule, from the excuse list that exists so an unruled type must be argued for,
+  // from the has-an-appender check, and from D3.10's documented vocabulary. FOUR gates, every
+  // one of them iterating this array, all switched off for that one type by an omission.
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
   assert.equal(EVENT_TYPES.length, 52, "update this count when the vocabulary grows, deliberately");
+
+  // THE MISSING DIRECTION, ENFORCED BY THE COMPILER RATHER THAN COUNTED. `Exclude` is empty
+  // exactly when every `EventPayloads` key appears in the array; when it is not, this fails to
+  // COMPILE and the error names the absent keys, which no runtime scan of a type could do.
+  // Wrapped in tuples so a union does not distribute across the conditional.
+  const exhaustive: [Exclude<EventType, (typeof EVENT_TYPES)[number]>] extends [never]
+    ? true
+    : Exclude<EventType, (typeof EVENT_TYPES)[number]> = true;
+  assert.equal(exhaustive, true);
 });
 
 // ── depth on the durable write path ──────────────────────────────────────────
