@@ -6387,3 +6387,38 @@ encoded the old reachability, which is exactly what the new code changed.
 **Reversal condition:** if the rendered payload ever becomes durable — journaled at raise, folded
 by the projection — this merge is dead weight and `rehydrate` can go back to replacing, because
 there would be nothing in memory that the journal could not rebuild.
+
+---
+
+## Two waves, two regressions, one shape — and the second test was vacuous first
+
+The previous wave found that fixing cross-process escalation had broken gate payloads. This wave
+asked the obvious next question — what else did that batch of fixes make reachable? — and found
+the same shape in the sibling change.
+
+Making `replayRun` sweep, so a run that ended on an expired gate could be re-derived, gave a
+replay a caller of `sweepTimeouts`. That function is also the one that DELIVERS: it escalates
+tiers and calls the dispatcher. `replayRun` spreads `...opts.engine` into the shadow engine and
+the type was `Omit<EngineOptions, "store" | "bus">`, so an embedder replaying with production
+options handed the shadow run their channels. **An audit paged the approver about a run that
+ended days ago.**
+
+**Both regressions have the identical structure**: a fix widened who calls something, and the
+thing called had been safe only because of who used to call it. Neither was visible to the suite,
+because the suite encoded the old reachability. The question that finds them is not "did I break a
+test" but *what did this make reachable that was not before* — and it has to be asked about the
+fix's callees, not its callers.
+
+**The shipped CLI was never affected**, which is the trap in miniature: `loom replay` passes only
+tools, functions, models and policy, so checking the binary would have found nothing. A property
+of one call site is not a property of the function, and this repo's own rule says a rule enforced
+by convention at each call site is not a rule. So the type now excludes `gates` — the compiler
+refuses the ordinary caller — and the construction deletes it anyway, for the caller who casts.
+
+**And the test that proves it was green before it was true.** The first version passed
+immediately, which should have been suspicious and was: the gate spec declared no `delivery`
+block, and `raise` reaches a dispatcher only when a dispatcher AND a delivery spec both exist, so
+the rig could not page under any circumstances. The assertion "nobody was paged" was true of a
+harness with no telephone. It now declares a real delivery block and drives the ORIGINAL run
+through the same channel first, asserting that one DOES page. **A negative assertion needs its
+positive control**, and the cost of skipping it is a test that will never fail.
