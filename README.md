@@ -33,14 +33,14 @@ Stated because a framework that overstates itself costs its user a day finding o
 | **`retry` on a function or evaluator node** | Inert. A body cannot raise a RETRYABLE error — every throw out of the `vm` is classified `E_INTERNAL`, so the backoff never schedules |
 | **`Math.random()` in a function body** | Unrecorded. `Date` is stripped from the `vm` globals and `Math` is not, and there is no effect key for it — a body that calls it replays as a divergence rather than being served |
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
-| **Hooks** | Declared, validated, pinned into the manifest, never invoked |
-| **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever |
-| **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no reclaim path |
+| **Hooks** | **Built.** Publish `resources/hook/<name>.js`, name it under `hooks:` in the graph, and it runs in the same hardened `vm` realm a `function` body does. A declared hook the workspace does not publish is a compile error, not a silent skip |
+| **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever. Declaring one is a compile WARNING rather than an error, because the design states the absence deliberately and what a barrier timeout should DO (fail the join, or fold what arrived) is an open decision |
+| **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased. The one path back is an operator `loom rewind`, which now re-arms the leases it undid; there is no automatic reclaim |
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
 
 | **`onBudgetExhausted: "gate"` / `"degrade"`** | Compile errors, deliberately. `gate` used to compile and then fail exactly as `"fail"` does, having promised a human; building it needs a way to raise a budget mid-run, and there is none |
-| **`loom compile` against a missing resource** | Reports `ok`. A ref that merely *looks* like a ref is pinned to a digest of its own name; the failure arrives at run time, loudly, instead of at compile |
-| **Replay of a run a human de-escalated** | Diverges. Replay never re-applies `policy.deescalated`, so the replayed run has no ceiling and gates where the original did not |
+| **`loom compile` against a missing resource** | **Refuses**, naming the file to write (`GRAPH015`). Two kinds are exempt and say so: `agent_profile` is a routing key the `--models-file` table maps, and `oversight` is a policy label — neither is resolved to a document by anything |
+| **Replay of a run a human de-escalated** | **Reproduces.** A de-escalation is a human input, served from the record like a gate decision and re-keyed onto the shadow run. Replay's verdict also weighs GATES now — it used to score `match: true` for a replay that asked a human a different number of times, or none |
 
 ## Try it
 

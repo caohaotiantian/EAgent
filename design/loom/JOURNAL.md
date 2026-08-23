@@ -5525,3 +5525,43 @@ COPY of the floor comparison, so inverting the real one to `n >= 0` left it gree
 is a named function now and the self-check calls it. **Asserting a restatement of the logic is
 not asserting the logic** — which is what the whole file is about, one level up. Third time this
 wave that the check and the checked have had to be made the same object.
+
+---
+
+## The quickstart works, and the README was three rows behind its own product
+
+*Reversal condition: if the gaps table stops being a table of checkable claims — becomes prose,
+or claims things no probe can reach — the gate's row list is what has to change with it.*
+
+The whole quickstart was run verbatim through `bin/loom`, as a first-time reader would: compile
+`ok`, run wrote `out/copy.txt`, `replay` returned `match: true, hermetic: true`, `trace` returned
+`conformance: ok`, `serve` printed a banner naming every degradation and answered `/health`. Then
+the gated half — the run printed
+
+    gate gate_01… on node approve — loom approve 01… gate_01… --as YOUR_ID
+
+and that command, pasted back in as a separate process, resolved the gate and produced
+`shipped.txt`. **The bar holds through the binary, not just through `node`.**
+
+**What did not hold was the README's account of itself.** Three rows of "What does not work yet"
+described things fixed in this wave:
+
+  - "Hooks — declared, validated, pinned into the manifest, never invoked." Measured through the
+    binary: the `preNode` hook memoised the answer as 41 and the run printed 41.
+  - "`loom compile` against a missing resource — reports `ok`." It refuses, naming the file.
+  - "Replay of a run a human de-escalated — diverges." It reproduces.
+
+**A doc that understates is not safer than one that overstates.** It sends a reader to build a
+workaround for something that works, and every wrong row makes the right ones less believable —
+which matters most in a table whose entire job is to be believed.
+
+Two more rows were true but imprecise: `JoinNode.timeoutMs` is still unread, and declaring one is
+a compile warning now; a Task killed mid-effect still has no automatic reclaim, but `loom rewind`
+re-arms the leases it undid and is the one path back.
+
+`readme-quickstart.test.ts` already pinned the part a machine could check — the README's graphs
+compile. The table above them was gated by nothing, which is why it drifted. `readme-gaps.test.ts`
+probes each checkable row **in both directions**: a row claiming something is BUILT fails if it
+stops working, and a row claiming a GAP fails if the gap closes and nobody updates the row. Each
+probe also asserts the row's own wording, so a row cannot be reworded into a different claim
+without the probe being rewritten with it.
