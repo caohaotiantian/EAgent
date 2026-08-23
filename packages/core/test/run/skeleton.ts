@@ -78,7 +78,9 @@ export function skeletonSpec(over: Partial<GraphSpec> = {}): GraphSpec {
         type: "join",
         reads: ["digests"],
         writes: ["digests"],
-        join: { branches: [n("summarize")], mode: "all", onBranchError: "skip", timeoutMs: 90_000 },
+        // No `timeoutMs`: nothing read it, and it is a compile error now
+        // (`GRAPH008_JOIN_TIMEOUT_UNSUPPORTED`).
+        join: { branches: [n("summarize")], mode: "all", onBranchError: "skip" },
       },
       {
         id: n("merge"),

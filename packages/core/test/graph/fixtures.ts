@@ -138,7 +138,7 @@ export function incidentTriage(): GraphSpec {
         type: "join",
         reads: ["findings"],
         writes: ["findings"],
-        join: { branches: [n("investigate")], mode: "quorum", k: 0.8, onBranchError: "skip", timeoutMs: 180_000 },
+        join: { branches: [n("investigate")], mode: "quorum", k: 0.8, onBranchError: "skip" },
       },
       {
         id: n("hypothesise"),

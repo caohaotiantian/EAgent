@@ -123,11 +123,18 @@ test("D5.5's worked example COMPILES, and its diagnostics are pinned", () => {
 
   // Pinned rather than asserted empty: a worked example is allowed to carry warnings, and
   // pinning the set makes a change in compiler behaviour show up in the commit that causes
-  // it rather than in a reader's confusion six months later.
+  // it rather than in a reader's confusion six months later. It did exactly that for
+  // `GRAPH008_JOIN_TIMEOUT_INERT` — the example declares a `join.timeoutMs`, which the prose
+  // around it already says is enforced by nothing, and the warning made the compiler agree
+  // with the paragraph.
   assert.deepEqual(
-    r.codes.filter((c) => !c.startsWith("GRAPH009")),
+    r.codes.filter((c) => !c.startsWith("GRAPH009") && c !== "GRAPH008_JOIN_TIMEOUT_INERT"),
     [],
     `unexpected diagnostics: ${r.codes.join(", ")}`,
+  );
+  assert.ok(
+    r.codes.includes("GRAPH008_JOIN_TIMEOUT_INERT"),
+    "D5.5's example still declares a join timeout, and the warning that says it does nothing must reach it",
   );
 });
 

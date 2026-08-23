@@ -137,7 +137,11 @@ export function incidentTriageSpec(over: Partial<GraphSpec> = {}): GraphSpec {
         writes: ["findings"],
         // `skip` because one unreachable pod must not lose the other four
         // investigations. The trajectory still records that a branch was skipped.
-        join: { branches: [n("investigate"), n("quarantine")], mode: "all", onBranchError: "skip", timeoutMs: 120_000 },
+        // NO `timeoutMs`. It was declared here as 120_000 and read by nothing — this workflow
+        // said both branches must finish inside two minutes and had no such bound.
+        // `GRAPH008_JOIN_TIMEOUT_UNSUPPORTED` refuses it now; the branches' own node
+        // `timeoutMs` is the bound that is actually enforced.
+        join: { branches: [n("investigate"), n("quarantine")], mode: "all", onBranchError: "skip" },
       },
       {
         id: n("assess"),

@@ -5310,3 +5310,41 @@ otherwise would refuse correct graphs.
 "a code that does not EXIST". The new rule refuses the second, so the placeholder stopped
 compiling and the distinction had to be made. The fixture now uses a real, correctly-spelled code
 that this failure simply does not carry — which is the case an author actually hits.
+
+---
+
+## A barrier timeout that does nothing, and a refusal I nearly took by accident
+
+*Reversal condition: if the corpus ever starts claiming a join deadline exists, the warning stops
+being the right treatment and the argument restarts — `join-timeout-inert.test.ts` asserts the
+three places the design says it does not.*
+
+The node-block sweep found `JoinNode.timeoutMs`: declared, shape-validated as a duration, and
+read by nothing. `grep -arn 'join?\.timeoutMs' packages/core/src/` returns nothing. A graph writes
+`timeoutMs: 120_000` and gets a barrier with no deadline — and the shipped `incident-triage`
+workflow was one of them.
+
+**I made it a compile error, which was wrong, and the measurement said so.** The reasoning looked
+airtight: `router.mode: "model"`, `onBudgetExhausted: "gate"`, `approval.mode: "quorum"` and
+`sla.onTimeout: "default_action"` are each refused for being declared-and-unbuilt, so this should
+be too. Then it broke 24 tests and two of the corpus's own worked examples — and looking at why,
+`02-EXECUTION-GRAPH.md` states in THREE places that `timeoutMs` is enforced by nothing: the node
+table, the field table, and the `mode: all` row ("waits — indefinitely"). The design is not
+drifting. It made a choice, and HANDOFF §3 reserves the decision to change it.
+
+**The distinction the four errors share and this one does not: they SUBSTITUTE.** Each runs
+something semantically different from what the graph says, so accepting one ships a graph that
+reads as supervised and behaves otherwise. `timeoutMs` does nothing at all. That is a smaller
+crime and it has a smaller punishment — a warning, which is what
+`GRAPH019_POSTURE_NO_EFFECT` gets for the same "you declared something that changes nothing".
+
+**What blast radius is for.** I measured it with a grep over four files, got three hits, edited
+those, and found twenty-four failures. The grep that would have answered the question was
+`grep -arn 'onBranchError' … | grep -a timeoutMs` over the whole tree — fourteen sites in ten
+files. **A blast-radius measurement scoped to where you expect the answer is not a measurement.**
+
+The one failure that survived the downgrade was the right one: `docs-examples.test.ts` pins the
+diagnostics of D5.5's worked example, and that example declares a join timeout. Its own comment
+says pinning exists so "a change in compiler behaviour show[s] up in the commit that causes it" —
+which is exactly what it did. The pin now includes the warning and asserts it is present, so the
+compiler and the paragraph next to the example agree.

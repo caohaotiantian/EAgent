@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3477 pass, 0 fail, 1 skipped** (Loom 1934 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 246 (115 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3480 pass, 0 fail, 1 skipped** (Loom 1937 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 247 (116 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -200,7 +200,7 @@ question that the repository cannot answer.
 | Item | The question that has to be answered first |
 |---|---|
 | **Compensation** (B9) | A compile-time proof and a rewind refusal exist; `case "compensation": break;` executes nothing. *When does a compensation edge fire* — on task failure, on run failure, on rewind? |
-| **`JoinNode.timeoutMs`** | In the schema, read by nothing. *What does a barrier timeout DO* — fail the join, or fold what arrived? Folding partial evidence for `mode: all` is a semantics change, not a timeout |
+| **`JoinNode.timeoutMs`** | In the schema, read by nothing — and now WARNED about at compile (`GRAPH008_JOIN_TIMEOUT_INERT`), so an author who never read D5 finds out from the compiler rather than from a barrier that waits forever. The decision itself is untouched: *what does a barrier timeout DO* — fail the join, or fold what arrived? Folding partial evidence for `mode: all` is a semantics change, not a timeout. **A warning and not an error on purpose**: the other four unbuilt mechanisms SUBSTITUTE semantics and are errors; this one does nothing and the design says so in three places, so refusing it would be taking this decision |
 | **B11 — `function`/`evaluator{assertion}` bodies re-execute on replay** | A journal-schema decision: should a function body's output become a journaled effect? That makes replay total and makes every function body a recorded nondeterminism site |
 | **Retention tiering** | `TierManager` is proven by test and has no caller; it needs a durable cold store first |
 | **Quorum, delegation, trust tiers** (D7.9 rows 1, 3, 4) | Deliberate compile errors. **Implementing one means DELETING a check** — delete the refusal and add the enforcement in the same change, or you ship exactly the failure the refusal prevents |
