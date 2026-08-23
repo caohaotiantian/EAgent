@@ -191,6 +191,35 @@ export function normalizeError(status: number, body: string, headers?: Headers):
       details: { status, detail },
     });
   }
+  // 408 and 425 are the two statuses the HTTP spec defines as safe to repeat, so they keep
+  // the retryable class the rest of 4xx is about to lose. Treating them as permanent would be
+  // the same mistake pointing the other way.
+  if (status === 408 || status === 425) {
+    return err.unavailable(CODES.E_PROVIDER_TRANSPORT, `provider did not complete the request (${status})`, {
+      details: { status, detail },
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    });
+  }
+  // EVERY OTHER 4xx IS A STATEMENT ABOUT THE REQUEST, and the next identical request will not
+  // change it. Until this branch existed they fell through to `E_PROVIDER_TRANSPORT`, whose
+  // class is `unavailable` and therefore retryable — and `request()` retries on exactly that
+  // field, so a permanent misconfiguration was re-sent to the attempt cap. Measured through
+  // `bin/loom`: an `openai` adapter whose `baseUrl` omitted `/v1` sent THREE identical POSTs to
+  // a server that 404s, and the run reported `"retryable": true` to anyone reading it.
+  if (status >= 400 && status < 500) {
+    return err.validation(
+      CODES.E_PROVIDER_BAD_REQUEST,
+      status === 404
+        ? // The likely cause, named where it is read. An adapter appends its OWN path to
+          // `baseUrl` — `/v1/messages` for Anthropic, `/chat/completions` for OpenAI, whose
+          // default base already ends in `/v1` — so the two conventions differ and a base
+          // that is right for one 404s on the other.
+          `provider has no endpoint at that URL (404). If this adapter sets "baseUrl", the adapter appends its own path ` +
+          `to it, so a missing or duplicated "/v1" produces exactly this`
+        : `provider rejected the request (${status})`,
+      { details: { status, detail } },
+    );
+  }
   if (status >= 500) {
     return err.unavailable(CODES.E_PROVIDER_OVERLOADED, `provider error (${status})`, { details: { status, detail } });
   }

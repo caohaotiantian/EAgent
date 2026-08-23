@@ -593,7 +593,7 @@ provider-specific:
 | `E_CONTEXT_OVERFLOW` | validation | **no** | only to a larger-window model | 400 context_length |
 | `E_CONTENT_FILTERED` | policy | no | **no** — trying another provider to evade a safety filter is forbidden | 400 content_policy |
 | `E_PROVIDER_AUTH` | policy | no | yes | 401/403 |
-| `E_PROVIDER_BAD_REQUEST` | validation | no | no | 400 schema |
+| `E_PROVIDER_BAD_REQUEST` | validation | no | no | 400 schema, and every other 4xx except 408/425 — a client error does not become true by retrying |
 | `E_PROVIDER_TRANSPORT` | unavailable | yes | yes | ECONNRESET, stream truncation |
 
 ```yaml

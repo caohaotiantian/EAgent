@@ -236,7 +236,12 @@ test("`details.detail` IS SWEPT — it was the one field with no redaction on ei
     [429, "exhausted", CODES.E_PROVIDER_RATE_LIMIT],
     [500, "unavailable", CODES.E_PROVIDER_OVERLOADED],
     [502, "unavailable", CODES.E_PROVIDER_OVERLOADED],
-    [418, "unavailable", CODES.E_PROVIDER_TRANSPORT],
+    // 418 is a 4xx, so it now classifies with the rest of them rather than falling through.
+    [418, "validation", CODES.E_PROVIDER_BAD_REQUEST],
+    // ...and this row keeps the ACTUAL fallthrough covered, which after that change is
+    // reachable only by a non-ok status that is neither 4xx nor 5xx. The row exists so the
+    // sweep is still exercised on every branch, which is what this test is about.
+    [302, "unavailable", CODES.E_PROVIDER_TRANSPORT],
   ] as const) {
     const record = errorRecord(normalizeError(status, body));
     assert.deepEqual(
@@ -361,4 +366,60 @@ test("a non-200 body reaches the journal masked through the same adapter", async
       return true;
     },
   );
+});
+
+// ── a client error does not become true by retrying ──────────────────────────
+
+test("A 4xx IS NOT RETRIED — the classification IS the mechanism, not a second guard", async () => {
+  // `request()` retries on `last.retryable` alone, so this counts fetches rather than
+  // asserting a flag: the flag is only interesting because of what the loop does with it.
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      postJson(
+        "https://api.example.com/chat/completions",
+        { headers: {}, body: {}, signal: ac() },
+        {
+          fetch: async () => {
+            calls++;
+            return new Response("no such endpoint", { status: 404 });
+          },
+          maxAttempts: 3,
+          sleep: async () => undefined,
+        },
+      ),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_PROVIDER_BAD_REQUEST && !e.retryable,
+  );
+  assert.equal(calls, 1, "a 404 was re-sent — before this branch existed it was sent three times");
+});
+
+test("404 NAMES THE LIKELY CAUSE, because the two adapters' baseUrl conventions differ", () => {
+  // Reproduced through `bin/loom`: an `openai` adapter with `baseUrl` missing its `/v1`
+  // 404s, and the message it used to give — "unexpected provider status 404" — named
+  // nothing the operator could act on. The adapter appends its own path, and which path
+  // differs by vendor, so the base that is right for one is wrong for the other.
+  const e = normalizeError(404, "no such endpoint");
+  assert.match(e.message, /baseUrl/);
+  assert.match(e.message, /v1/);
+  assert.equal(e.retryable, false);
+});
+
+test("408 and 425 keep the retryable class the rest of 4xx loses", () => {
+  // The HTTP spec defines exactly these two as safe to repeat. Sweeping them up with the
+  // rest would be the same error pointing the other way.
+  for (const status of [408, 425]) {
+    const e = normalizeError(status, "");
+    assert.equal(e.retryable, true, `${status} must stay retryable`);
+  }
+  for (const status of [404, 405, 410, 413, 415, 451]) {
+    const e = normalizeError(status, "");
+    assert.equal(e.retryable, false, `${status} must not be retryable`);
+    assert.equal(e.code, CODES.E_PROVIDER_BAD_REQUEST, `${status} should classify as a bad request`);
+  }
+  // And the branches that already existed are untouched.
+  assert.equal(normalizeError(429, "").code, CODES.E_PROVIDER_RATE_LIMIT);
+  assert.equal(normalizeError(503, "").code, CODES.E_PROVIDER_OVERLOADED);
+  assert.equal(normalizeError(401, "").code, CODES.E_PROVIDER_AUTH);
+  assert.equal(normalizeError(500, "").code, CODES.E_PROVIDER_OVERLOADED);
+  assert.equal(normalizeError(400, "bad json").code, CODES.E_PROVIDER_BAD_REQUEST);
 });
