@@ -710,10 +710,17 @@ export function reachableToolNames(node: NodeSpec): readonly string[] {
  *
  * `${a.b}` names channel `a`; only the root segment is a channel.
  *
- * NOT COVERED, and named so the boundary can be checked rather than assumed: a `router`'s
- * `when` expression reads the scope through the expression evaluator rather than through a
- * template, so nothing here sees it. That is control-flow influence, a different question from
- * feeding an action, and it is HANDOFF T1.
+ * EXPRESSIONS ARE NOT PARSED HERE, AND DO NOT NEED TO BE — but only because of a coupling in
+ * another file. A `router` case's `when` and an edge's `when`/`until` reach the scope through
+ * the expression evaluator, so nothing below sees them. `GRAPH004_UNDECLARED_READ` refuses any
+ * of them naming a channel outside the owning node's `reads ∪ writes` — it takes the free
+ * variables from `checkExpr(...).refs` — so by the time anything runs, `reads` is already a
+ * superset for exactly the channels an expression can reach.
+ *
+ * Neither half is sufficient alone and neither file said so, which is one relaxed compiler rule
+ * away from taint going quiet with nothing failing. `test/graph/expression-reads.test.ts` is
+ * that missing edge: it reads the ENGINE's source for every `evaluate(this.#expr(…))` site and
+ * fails on one no GRAPH004 check is named for.
  */
 export function observedChannels(node: NodeSpec): readonly string[] {
   const out = new Set<string>(node.reads ?? []);

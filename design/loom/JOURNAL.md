@@ -4990,3 +4990,46 @@ is CONFINEMENT rather than a decision. Widening that would grant a `function` bo
 declared, which is the opposite of what this change is for. The boundary is now a test: a
 router's `when` reads the scope through the expression evaluator and is still not covered (T1),
 asserted rather than described, so the day it changes the test says so.
+
+---
+
+## T1 — the blocker was stale, and the coupling that made it stale was unrecorded
+
+*Reversal condition: if a branch CHOICE ever needs to escalate on untrusted input — if the two
+bounds below stop being enough — this becomes a hole and the boundary argument goes with it.*
+
+T1 said: "a `router`'s `when` reads the scope through the expression evaluator, not a `${}`
+template, so `observedChannels` cannot see it… Needs the expression parser to report free
+variables."
+
+**The parser has always reported them.** `checkExpr(...).refs` returns the free variables and
+`GRAPH004_UNDECLARED_READ` has always used them — a router case's `when` and an edge's
+`when`/`until` are refused unless every channel they name is in the owning node's
+`reads ∪ writes`. Measured: `router reads [], when "untrusted != null"` → `ok=false
+GRAPH004_UNDECLARED_READ`; declare it and it compiles. So the reachability half of T1 does not
+exist. `observedChannels` is blind to expressions and it does not matter, because `reads` is
+already a superset for exactly the channels an expression can reach.
+
+**It does not matter for a reason living in another file, and nothing recorded that.**
+`observedChannels` is in `graph/spec.ts` and said only that it does not cover expressions;
+`rule004Expressions` is in `graph/validate.ts` and does not know anything depends on it. Relax
+GRAPH004, or add a fourth place the engine evaluates an expression, and taint and the
+classification floor go quiet with no test failing. That is the same shape as the audit-rule
+coverage gate: two mechanisms that compose into a guarantee neither one states.
+
+`test/graph/expression-reads.test.ts` is that missing edge. It reads the ENGINE's source for
+every `evaluate(this.#expr(…))` call — three today: `c.when`, `e.until`, `e.when` — and fails on
+any site no GRAPH004 check is named for. Mutation-tested with a fourth site added: red.
+
+**What is actually left, stated so it can be argued with.** A branch CHOICE made from untrusted
+content raises nothing. That is a design boundary rather than a hole because it is bounded twice
+— `GRAPH005_ROUTE_NOT_OWN_EDGE` and its runtime half `E_ROUTE_INVALID` confine a router to edges
+the AUTHOR declared, so untrusted content picks among the graph's own branches and cannot invent
+one; and every target re-decides at full strictness on its own class, so an irreversible node
+still floors at `in` whatever branch reached it. Both bounds are asserted by the same test, so
+the day either goes, the boundary claim fails with it rather than quietly becoming false.
+
+**The pattern across three iterations now.** D5's prescribed fix was wrong, D2's severity was
+understated, and T1's blocker had already been built. **The register is a record of what was
+believed when it was written; the code is what is true.** Reproduce before fixing — and read
+"reproduce" as including "reproduce that the problem still exists".

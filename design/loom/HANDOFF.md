@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3451 pass, 0 fail, 1 skipped** (Loom 1908 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 240 (109 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3456 pass, 0 fail, 1 skipped** (Loom 1913 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 241 (110 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -107,10 +107,19 @@ Each reproduced or confirmed in source during that work and deliberately left ou
 **The numbering has a hole and it stays**: T4 is closed (see the bar table), and renumbering the
 rest would break every reference to them in the journal.
 
-- **T1 — a `router`'s `when` reads the scope through the expression evaluator, not a `${}`
-  template**, so `observedChannels` cannot see it. Control-flow taint, a different question
-  from feeding an action, and the branch is bounded by `GRAPH005_ROUTE_NOT_OWN_EDGE`. Needs the
-  expression parser to report free variables.
+- **T1 — control flow can be influenced by untrusted content, and nothing escalates on it.**
+  **The blocker this entry used to name was stale**: "needs the expression parser to report free
+  variables" — `checkExpr` has always returned `refs`, and `GRAPH004_UNDECLARED_READ` has
+  always used them. So the reachability half does not exist: every expression the engine
+  evaluates (`router.cases[].when`, `edge.when`, `edge.until` — the list, read from the
+  engine's source by `test/graph/expression-reads.test.ts`) is refused unless its channels are
+  in the owning node's `reads ∪ writes`, which makes them visible to `observedChannels` and so
+  to taint and to the classification floor.
+  What is left is the real question and it is a **design boundary, not a hole**: a branch CHOICE
+  made from untrusted data raises nothing. It is bounded twice — `GRAPH005_ROUTE_NOT_OWN_EDGE`
+  plus its runtime half `E_ROUTE_INVALID` confine a router to edges the AUTHOR declared, and
+  every target re-decides at full strictness on its own class. Both bounds are now asserted, so
+  if either goes this stops being a boundary and the test says so.
 - **T2 — `reads` is still not enforced as the read set, but nothing that DECIDES reads it any
   more.** `GRAPH004_UNDECLARED_READ` covers edge `when`/`until` and router cases, never
   `tool.args`, so a template still names a channel `reads` omits and the graph compiles clean.
