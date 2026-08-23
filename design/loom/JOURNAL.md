@@ -6495,3 +6495,39 @@ after it** — a flake gives no second chance to have been watching properly, an
 
 **Reversal condition:** if this recurs and is identified, delete the HANDOFF paragraph rather than
 leaving it as folklore. An unidentified flake recorded forever becomes a thing people work around.
+
+---
+
+## Two of this repo's own sentences disagree, and recoverability settles it
+
+The capability flags are sound and their usage text is accurate — `--egress` genuinely decides
+whether `net.fetch` exists, the allowlist binds, `GRAPH013` warns while `GRAPH017` refuses, and
+`--grant` will not hand out a capability with no tool behind it. All driven through `bin/loom`
+against a local sink rather than read.
+
+What the driving surfaced was a disagreement between two deliberate decisions in this codebase.
+
+`cli.ts` refuses `--grant net:fetch` with nothing registered because "granting one with no tool
+behind it asks a human to authorize something nothing can run". `oversight.test.ts` pins the
+opposite behaviour one layer in — a node naming an unregistered tool GATES — because "the policy
+engine cannot know a tool's class if the tool is not registered, and guessing harmless is the one
+guess that is never safe". So a human is paged, approves, and the run then fails
+`E_TOOL_NOT_FOUND`. Each sentence is right about the thing it is about.
+
+**The change was written, and reverted.** Refusing before the policy decision is not less safe —
+an unregistered tool cannot run either way, so nothing is trading safety for tidiness. The
+argument that decides it is one I did not have until the existing test forced a reason: **a
+suspended run is recoverable and a failed one is not.** An operator whose process was started
+without `--egress` can restart it with the flag; the gate rehydrates and the run continues. Fail
+fast would convert that into a permanent failure to spare one approval.
+
+**The signal to stop was a test failing with a rationale in it.** The suite went red on "an
+UNREGISTERED tool is treated as irreversible — fail closed", and the useful thing was not the
+red — it was that the test carried the WHY. A test that only asserted `awaiting_gate` would have
+read as an incidental pin worth updating; the sentence is what turned a mechanical failure into a
+decision worth deferring to. **Tests that record their reason are how a codebase argues with
+somebody who was not there.**
+
+**Reversal condition:** if gate rehydration ever stops making a suspended run recoverable, the
+argument above collapses and failing fast becomes strictly better. That is the fact to re-check
+before revisiting this, not the aesthetics of the error.

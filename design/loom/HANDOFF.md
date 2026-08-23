@@ -400,6 +400,26 @@ platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than 
 And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
 `200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
+**The capability flags are verified and found sound**, and their usage text is accurate. Driven
+through `bin/loom` against a local sink: without `--egress`, `net.fetch` is unregistered and a
+graph naming it COMPILES with `GRAPH013_UNKNOWN_TOOL` (a warning) but fails to compile with
+`GRAPH017_CAPABILITY_NOT_GRANTED` if it also declares `net:fetch` — both exactly as documented.
+With `--egress 127.0.0.1` and the capability declared it fetches; with `--egress example.com` the
+same run fails `E_TOOL_SOURCE_UNAVAILABLE: egress to "127.0.0.1" is not on the allowlist`, so the
+allowlist binds. `--grant net:fetch` is refused outright, because a tool capability comes from
+what is registered. The default registry is `fs.*` only.
+
+**One tension surfaced and was NOT resolved, deliberately.** A node naming an unregistered tool
+gates before it fails: a human is paged, approves, and only then does the run report
+`E_TOOL_NOT_FOUND`. `oversight.test.ts` pins that on purpose — "the policy engine cannot know a
+tool's class if the tool is not registered, and guessing harmless is the one guess that is never
+safe" — while `cli.ts` refuses `--grant` for a capability with nothing behind it on the opposite
+ground, that it "asks a human to authorize something nothing can run". Both sentences are right
+about different things. **The deciding fact is recoverability**: a suspended run resumes after an
+operator restarts with `--egress` and the gate rehydrates, and a failed run does not. Failing
+fast would trade a recoverable state for a cleaner error. Changing it is a risk-tolerance
+decision, so it stays as it is; the reasoning is here so the next person need not re-derive it.
+
 **The SSE stream is verified and found sound** — the largest reporting surface that had never
 been driven, checked because three of the four findings before it were in what a tool SAYS rather
 than what the system does. `GET /runs/:id/events` replays history from seq 1, resumes gap-free
