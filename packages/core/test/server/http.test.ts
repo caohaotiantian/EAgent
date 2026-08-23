@@ -1614,6 +1614,35 @@ test("an unknown run is 404 with a typed error body", async () => {
   }
 });
 
+test("AN UNKNOWN PATH SAYS SO, AND DOES NOT CLAIM A RUN WAS NOT FOUND", async () => {
+  // The fallthrough answered every unrouted request with `E_RUN_NOT_FOUND` under a message
+  // reading `no route for GET /api/runs` — the message stating one fact and the
+  // machine-readable half stating a different, false one. A client cannot act on the prose.
+  // The two facts want different reactions: an absent run invites another id, an absent
+  // endpoint means this deployment does not implement the call and no id will help.
+  const r = await rig({ token: "s3cret" });
+  const auth = { authorization: "Bearer s3cret" };
+  try {
+    const res = await fetch(`${r.base}/api/runs`, { headers: auth });
+    assert.equal(res.status, 404);
+    assert.equal(((await json(res))["error"] as { code: string }).code, "E_ROUTE_NOT_FOUND");
+
+    // The displaced code must still answer for its OWN fact, or this is a rename wearing a
+    // correction's clothes.
+    const missing = await fetch(`${r.base}/runs/01JNOPE`, { headers: auth });
+    assert.equal(missing.status, 404);
+    assert.equal(((await json(missing))["error"] as { code: string }).code, "E_RUN_NOT_FOUND");
+
+    // AND THE DISTINCTION IS NOT A DISCLOSURE. Routing is decided after the bearer check, so
+    // a caller without the token cannot enumerate which endpoints this deployment has; it is
+    // told 401 for a path that exists and for one that does not, identically.
+    assert.equal((await fetch(`${r.base}/api/runs`)).status, 401);
+    assert.equal((await fetch(`${r.base}/runs/01JNOPE`)).status, 401);
+  } finally {
+    await r.close();
+  }
+});
+
 // ── gates over HTTP ──────────────────────────────────────────────────────────
 
 test("a gate can be listed and resolved through the API", async () => {

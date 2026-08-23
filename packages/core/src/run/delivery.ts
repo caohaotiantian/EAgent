@@ -304,10 +304,9 @@ export function callbackRejection(reason: CallbackRejection, message: string): L
       // THE DEPLOYMENT RAN OUT OF TIME, NOT THE CALLER, so it is neither a bad request nor a
       // policy refusal — the work was abandoned, which is what `cancelled` means here.
       //
-      // Not a new `E_REQUEST_TIMEOUT`: `ControlPlane.#withDeadline` writes that as a bare wire
-      // code for exactly this reason, and its comment says promoting it costs a design-corpus
-      // row because every declared code must be named by one. That reconciliation is not this
-      // change's to own either. The caller has already seen the 504; this is the audit row.
+      // NOT `E_REQUEST_TIMEOUT`, though that code now exists — it is the control plane's own
+      // deadline on an inbound request, and this is a gate delivery giving up on an outbound
+      // one. The caller has already seen its 504; this is the audit row for the abandoned work.
       return err.cancelled(message, init);
     case "internal":
       return err.internal(CODES.E_INTERNAL, message, init);

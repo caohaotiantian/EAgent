@@ -1092,6 +1092,37 @@ test("THE CODES NOTHING RAISES ARE EXACTLY THE ONES PINNED HERE", () => {
   );
 });
 
+test("THE OTHER DIRECTION: EVERY CODE `src/` USES IS A CODE `errors.ts` DECLARES", () => {
+  // The check above asks which declared codes nothing raises. Nothing asked the reverse, and
+  // the reverse is the one that reaches a client: `ControlPlane` writes its refusals as bare
+  // string literals — `send(res, 504, { error: { code: "E_REQUEST_TIMEOUT", … } })` — so a code
+  // that is not in `CODES` at all is still perfectly able to leave the process on the wire.
+  //
+  // `E_REQUEST_TIMEOUT` was exactly that: sent on every request-deadline 504, asserted by two
+  // tests in `server/http.test.ts`, and declared nowhere. Being undeclared, it was invisible to
+  // all three gates that exist to stop precisely this — "every declared code is named by some
+  // design document" never saw it, `NEVER_RAISED` never saw it, and the boundary taxonomy in
+  // `01-INTERFACES.md` has no row for it. A code with no row is, in that document's own words,
+  // "a code somebody has to guess at". `run/delivery.ts` names the situation in a comment and
+  // declines to own the fix; this is the check that makes the next one impossible to defer,
+  // because an undeclared code now fails a test instead of shipping.
+  const used = new Set<string>();
+  for (const file of sourceFiles()) {
+    if (file.endsWith("/errors.ts")) continue; // the declarations are not uses
+    for (const code of matches(stripTsComments(readFileSync(file, "utf8")), CODE_RE)) used.add(code);
+  }
+  // If the scan finds nothing the assertion below is vacuously green, which is how a broken
+  // regex reads as a passing gate.
+  assert.ok(used.size >= 30, `the scan found only ${used.size} codes in src/ — the regex broke, not the vocabulary`);
+
+  const undeclared = [...used].filter((c) => !declaredCodes.has(c)).sort();
+  assert.deepEqual(
+    undeclared,
+    [],
+    "src/ uses an error code that `errors.ts` does not declare — a client can receive it, and no document names it. Declare it in `CODES` and give it a row in the 01-INTERFACES.md taxonomy",
+  );
+});
+
 // ── Event types: declared vs appended ────────────────────────────────────────
 
 /**

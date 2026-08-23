@@ -1884,7 +1884,7 @@ export class ControlPlane {
     if (claimed !== undefined) {
       send(res, 403, {
         error: {
-          code: "E_NOT_AUTHORIZED",
+          code: CODES.E_NOT_AUTHORIZED,
           message:
             `this plane does not answer to Host ${claimed} — a name it does not have is how a rebound DNS record reaches a ` +
             `loopback socket from a web page. Set ControlPlaneOptions.allowedHosts to the names this deployment really has, ` +
@@ -1919,7 +1919,7 @@ export class ControlPlane {
     if (forged !== undefined) {
       send(res, 403, {
         error: {
-          code: "E_NOT_AUTHORIZED",
+          code: CODES.E_NOT_AUTHORIZED,
           message:
             `refused a cross-site request (${forged}). This plane is reachable from the operator's browser, so a page they ` +
             `merely visited could otherwise submit runs and answer gates as them. Open the console by typing its address ` +
@@ -1939,7 +1939,7 @@ export class ControlPlane {
     if (guarded && auth === undefined) {
       // 401 before routing, so an unauthenticated caller cannot even probe which
       // routes exist.
-      send(res, 401, { error: { code: "E_NOT_AUTHORIZED", message: "missing or invalid bearer token" } });
+      send(res, 401, { error: { code: CODES.E_NOT_AUTHORIZED, message: "missing or invalid bearer token" } });
       return;
     }
 
@@ -1959,7 +1959,7 @@ export class ControlPlane {
       });
       return;
     }
-    send(res, 404, { error: { code: "E_RUN_NOT_FOUND", message: `no route for ${req.method} ${url.pathname}` } });
+    send(res, 404, { error: { code: CODES.E_ROUTE_NOT_FOUND, message: `no route for ${req.method} ${url.pathname}` } });
   }
 
   /**
@@ -2215,7 +2215,7 @@ export class ControlPlane {
       // does not own. The status is what a caller branches on either way.
       send(res, 504, {
         error: {
-          code: "E_REQUEST_TIMEOUT",
+          code: CODES.E_REQUEST_TIMEOUT,
           message: `no response for ${url.pathname} within ${ms}ms`,
         },
       });

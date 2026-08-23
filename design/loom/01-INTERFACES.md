@@ -1297,6 +1297,8 @@ falling behind `errors.ts`.
 | `E_COHORT_INVALIDATED` | `evolution/score.ts` | a cohort was measured under different score weights and is being compared anyway — an improvement measured with a different ruler |
 | `E_SUBGRAPH_FAILED` | `run/engine.ts` | a child graph ended in a non-success state. The parent Task fails with the child's status and run id in `details` |
 | `E_OUTPUT_MISSING` | `run/engine.ts` | the run finished having written none of its declared outputs. A path was stranded and the run would otherwise report success |
+| `E_ROUTE_NOT_FOUND` | `server/http.ts` | no handler matched the method and path. Distinct from `E_RUN_NOT_FOUND`: it is the endpoint that is absent, not the run, so retrying with another id cannot help. Reached only after authentication — an unauthenticated caller gets 401 and learns nothing about which routes exist |
+| `E_REQUEST_TIMEOUT` | `server/http.ts` | the control plane abandoned a request at `requestTimeoutMs` and answered 504. A fact about the deployment, not the run: the run it was asking about may still be advancing. It says nothing about whether the work was done, so it is never by itself grounds to retry a write — use the idempotency key |
 | `E_TASK_TIMEOUT` | **nothing yet** | declared for `NodeSpec.timeoutMs`, which the schema carries and no executor path enforces — a node with a timeout runs as long as it likes. Pinned in the never-raised list of `test/docs-drift.test.ts` |
 
 

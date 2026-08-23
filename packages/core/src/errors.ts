@@ -279,6 +279,16 @@ export const CODES = {
   E_GATE_NOT_FOUND: "E_GATE_NOT_FOUND",
   E_CHECKPOINT_NOT_FOUND: "E_CHECKPOINT_NOT_FOUND",
   E_RUN_NOT_FOUND: "E_RUN_NOT_FOUND",
+  /**
+   * The control plane has no route for this method and path.
+   *
+   * NOT `E_RUN_NOT_FOUND`, which this used to answer. The two are different facts for the
+   * only audience that reads a code: "no such run" invites the caller to try another id,
+   * while "no such endpoint" means this deployment does not implement what was asked — the
+   * shape of a version skew, and no id will help. Nothing is leaked by the distinction that
+   * the message did not already print.
+   */
+  E_ROUTE_NOT_FOUND: "E_ROUTE_NOT_FOUND",
 
   // conflict
   E_SEQ_CONFLICT: "E_SEQ_CONFLICT",
@@ -320,6 +330,16 @@ export const CODES = {
    */
   E_GRAPH_MISMATCH: "E_GRAPH_MISMATCH",
   E_TASK_TIMEOUT: "E_TASK_TIMEOUT",
+  /**
+   * The control plane gave up on a request before the handler answered.
+   *
+   * The DEPLOYMENT ran out of time, not the caller and not any one node: `ControlPlane`
+   * bounds every request with `requestTimeoutMs` and answers 504 when it elapses. Distinct
+   * from `E_TASK_TIMEOUT` (a node outrunning `NodeSpec.timeoutMs`) and from `E_TOOL_TIMEOUT`,
+   * both of which are facts about the run — this one says nothing about the run, which may
+   * still be advancing after the socket is answered.
+   */
+  E_REQUEST_TIMEOUT: "E_REQUEST_TIMEOUT",
 
   // cancelled
   E_CANCELLED: "E_CANCELLED",
