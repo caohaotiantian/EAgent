@@ -3057,7 +3057,40 @@ export class Engine {
       try {
         // A replay makes no call, so it reserves nothing. Estimating against a provider
         // that is not there would be inventing a cost for work that never happens.
-        reservation = ctx.policy.reserve(`node:${w.node.id}`, adapter?.estimateOf(shaped) ?? 0);
+        const estimateUsd = adapter?.estimateOf(shaped) ?? 0;
+
+        // THE NODE'S OWN CEILING, and until now a number nothing read. D2 says this loop is
+        // "bounded by `maxTurns` AND node budget, whichever binds first"; the second half was
+        // enforced nowhere. The scope handed to `reserve` is a LABEL — the failure even reads
+        // `"scope": "node:ask"` while `"limit"` is the RUN's — and `PolicyEngine.reserve`
+        // consults `budget.runUsd` alone. Measured through `bin/loom` against a priced local
+        // provider: a node declaring `costUsd: 1.0` spent $16 and the run reported `succeeded`,
+        // while the identical spend under a GRAPH budget of $1.00 failed before the call.
+        //
+        // It is worse than an unread field, because the compiler builds a story around it —
+        // `GRAPH009_UNBOUNDED_NODE` tells the author to ADD this very field to a spending node,
+        // and `GRAPH009_BUDGET_OVERCOMMIT` errors when the numbers do not sum under the graph
+        // budget. The system asked for it, checked its arithmetic, and ignored it.
+        //
+        // Checked against the TASK-LOCAL `usage` — what one execution has accumulated across its
+        // turns — which is the only reading that needs no new durable state: a re-run task gets
+        // its budget again, exactly as `reserve`/`settle` already treat a run. Reserve-worst-case
+        // like the run-level check, so the estimate counts before the call rather than after it.
+        // `subgraph` is deliberately NOT covered: its cost is settled from `childP.usage` after
+        // the child has run, so a cap there would refuse what it could not prevent.
+        const nodeCapUsd = w.node.policy?.budget?.costUsd;
+        if (nodeCapUsd !== undefined && usage.costUsd + estimateUsd > nodeCapUsd + 1e-9) {
+          throw err.exhausted(
+            CODES.E_BUDGET_EXHAUSTED,
+            `node "${w.node.id}" would exceed its $${nodeCapUsd.toFixed(2)} budget ` +
+              `($${usage.costUsd.toFixed(4)} spent by this task, $${estimateUsd.toFixed(4)} estimated for this turn)`,
+            {
+              details: { scope: `node:${w.node.id}`, limit: nodeCapUsd, spent: usage.costUsd, reserved: 0, requested: estimateUsd },
+            },
+          );
+        }
+
+        reservation = ctx.policy.reserve(`node:${w.node.id}`, estimateUsd);
         // Checked at RESERVE as well as at commit. Under reserve-worst-case, committed
         // exposure peaks at the reservation and falls back when `settle` credits the
         // real cost — so a check only at commit sees the trough and never fires. "80%
@@ -3078,7 +3111,14 @@ export class Engine {
             [
               {
                 type: "budget.exhausted",
-                payload: { scope: `run:${ctx.runId}`, limitUsd: ctx.policy.spentUsd + ctx.policy.remainingUsd, action },
+                // THE LIMIT THAT WAS ACTUALLY EXCEEDED, read off the error instead of recomputed.
+                // `spentUsd + remainingUsd` is `Infinity` whenever the deployment set no
+                // `runUsd`, and `canonicalize` refuses a non-finite number on the durable write
+                // path — so the run failed `E_INTERNAL: non-finite number Infinity at limitUsd`
+                // instead of reporting the budget failure it actually had. That was unreachable
+                // while `reserve` was the only thing that could throw here, because a reservation
+                // cannot exceed a limit that does not exist. A node ceiling can, and did.
+                payload: { scope: `run:${ctx.runId}`, limitUsd: exceededLimitUsd(le, ctx.policy.spentUsd), action },
                 actor: SYSTEM_ACTOR("policy"),
                 taskId: w.task.taskId,
               },
@@ -5545,3 +5585,17 @@ function parseOutput(text: string, schema: JSONSchema | undefined): ParseResult 
 }
 
 export type { GateDecision };
+
+/**
+ * The budget ceiling a failure actually hit, in dollars, and always finite.
+ *
+ * Both throw sites put `limit` in `details` — `PolicyEngine.reserve` for the run ceiling and
+ * `#runAgent` for a node's own — so the number is on the error and does not need recomputing
+ * from a `PolicyEngine` whose `remainingUsd` is `Infinity` when no run budget was set. The
+ * fallback is what has been spent, which is finite by construction and is the honest answer
+ * when an error arrives without the field: no ceiling can be named, so name the exposure.
+ */
+function exceededLimitUsd(e: LoomError, spentUsd: number): number {
+  const limit = (e.details as { readonly limit?: unknown } | undefined)?.limit;
+  return typeof limit === "number" && Number.isFinite(limit) ? limit : spentUsd;
+}

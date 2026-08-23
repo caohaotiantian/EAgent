@@ -95,3 +95,64 @@ test("A GRAPH CANNOT VOTE ITSELF MORE MONEY THAN THE DEPLOYMENT ALLOWS", async (
   assert.notEqual(p.status, "succeeded", "the deployment's cap must still bind");
   assert.ok((p.usage?.costUsd ?? 0) < 1, "and nothing may have been spent");
 });
+
+// ── and the node's own ceiling, which was the same defect one level down ─────
+
+/**
+ * `D2` says an `agent` node is "a bounded ReAct loop … Bounded by `maxTurns` AND node budget,
+ * whichever binds first." The second half was enforced by nothing: the scope string handed to
+ * `PolicyEngine.reserve` is a LABEL, and `reserve` consults `budget.runUsd` alone.
+ *
+ * Measured through `bin/loom` against a local provider with prices configured, so the numbers
+ * are exact rather than mock: a node declaring `costUsd: 1.0` spent $16 and the run reported
+ * `succeeded`, while the identical spend under a GRAPH budget of $1.00 failed before the call.
+ *
+ * It was worse than an unread field, because the compiler builds a story around it.
+ * `GRAPH009_UNBOUNDED_NODE` tells the author to ADD this field to a spending node, and
+ * `GRAPH009_BUDGET_OVERCOMMIT` errors when the declared numbers do not sum under the graph
+ * budget. The system asked for it, checked its arithmetic, and then ignored it.
+ */
+function nodeSpec(nodeUsd: number, graphUsd?: number): GraphSpec {
+  const s = spec(graphUsd) as unknown as { nodes: { policy?: unknown }[] };
+  s.nodes[0]!.policy = { budget: { costUsd: nodeUsd } };
+  return s as unknown as GraphSpec;
+}
+
+test("A NODE'S OWN BUDGET BINDS — the deployment allows plenty and the node does not", async () => {
+  const r = rig(1000);
+  const runId = await r.engine.submit({ graph: compile(nodeSpec(0.000001)), inputs: { q: "hi" } });
+  const p = await r.engine.advance(runId);
+  assert.notEqual(p.status, "succeeded", `a node that declared $0.000001 must not spend $1: ${JSON.stringify(p.usage)}`);
+  assert.equal(p.error?.code, "E_BUDGET_EXHAUSTED", JSON.stringify(p.error ?? {}));
+  assert.match(String(p.error?.message ?? ""), /node "ask"/, "the message must name the node, not the run");
+  assert.ok((p.usage?.costUsd ?? 0) < 1, `nothing may have been spent; usage was ${JSON.stringify(p.usage)}`);
+});
+
+test("the same node runs when its own declaration covers the work", async () => {
+  // The refusal must be about the number, not about declaring one at all.
+  const r = rig(1000);
+  const runId = await r.engine.submit({ graph: compile(nodeSpec(50)), inputs: { q: "hi" } });
+  const p = await r.engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+});
+
+test("A NODE CEILING WITH NO RUN BUDGET JOURNALS A FINITE LIMIT", async () => {
+  // The latent half, and it only became reachable when the ceiling above started firing. The
+  // `budget.exhausted` row computed `limitUsd` as `spentUsd + remainingUsd`, and `remainingUsd`
+  // is `Infinity` when the deployment set no `runUsd` — which `canonicalize` refuses on the
+  // durable write path. So the run failed `E_INTERNAL: non-finite number Infinity at limitUsd`
+  // instead of reporting the budget failure it actually had. Unreachable while `reserve` was the
+  // only thing that could throw here, because a reservation cannot exceed a limit that does not
+  // exist; a node ceiling can, and this is the run that found it.
+  const r = rig(); // no runUsd, no graph budget — the node's number is the only ceiling
+  const runId = await r.engine.submit({ graph: compile(nodeSpec(0.000001)), inputs: { q: "hi" } });
+  const p = await r.engine.advance(runId);
+  assert.equal(p.error?.code, "E_BUDGET_EXHAUSTED", `expected the budget failure, got ${JSON.stringify(p.error ?? {})}`);
+
+  const rows = [];
+  for await (const ev of r.store.read(runId, 1)) if (ev.type === "budget.exhausted") rows.push(ev);
+  assert.equal(rows.length, 1, "the budget failure must reach the journal");
+  const limitUsd = (rows[0]!.payload as { readonly limitUsd: number }).limitUsd;
+  assert.ok(Number.isFinite(limitUsd), `limitUsd must be finite, was ${String(limitUsd)}`);
+  assert.equal(limitUsd, 0.000001, "and it must be the ceiling that was actually exceeded");
+});
