@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3466 pass, 0 fail, 1 skipped** (Loom 1923 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 244 (113 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3472 pass, 0 fail, 1 skipped** (Loom 1929 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 245 (114 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -161,7 +161,20 @@ rest would break every reference to them in the journal.
   already gone. `#uncompensatedIrreversible` now follows `subgraph.started.childRunId`,
   depth-bounded. `test/run/rewind-through-subgraph.test.ts`, 5 mutation-verified.
   **Read the surviving half of this entry accordingly**: "not currently a hole" had checked one
-  consumer. `#irreversibilityOf` and `#capabilitiesOf` are the two that remain unaudited.
+  consumer. `#irreversibilityOf` and `#capabilitiesOf` have since been audited: neither is a
+  hole on its own — a child re-decides irreversibility at full strictness, and the child compile
+  gets the same `tenantCapabilities` — but the audit found a THIRD thing next door, below.
+
+- **A graph's `policy.capabilities` is now a CEILING, which is what D5's schema always said.**
+  `capabilities: [string]  # allowlist; intersected with system + tenant (never widened)` — only
+  the upward half was built, so `capabilities: []` permitted everything the tenant did.
+  Measured: a graph declaring the empty list ran `pay.charge` to completion. Enforced now at
+  compile (`GRAPH017_CAPABILITY_NOT_DECLARED`), at run (`PolicyEngineOptions.allowlist`), and
+  ACROSS DELEGATION (`RunContext.grantBound`, narrowed into each child run — the parent's
+  `subgraph` node reaches no tool, so the compile check cannot see that one).
+  **Absent is not empty**: a graph that declares no list has no ceiling. Every graph in this repo
+  that declares one already names what its tools need, checked by arming the rule and running
+  the whole suite before writing it — zero failures.
 
 ### 3 · Mechanism that exists and is wired to nothing
 

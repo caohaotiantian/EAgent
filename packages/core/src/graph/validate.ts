@@ -2407,8 +2407,41 @@ function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, d: Diagnos
   };
 
   check(spec.policy?.capabilities, undefined, "the graph");
+
+  /**
+   * AND THE GRAPH'S OWN ALLOWLIST IS A CEILING, not a request.
+   *
+   * `02-EXECUTION-GRAPH.md` says `capabilities: [string]  # allowlist; intersected with system +
+   * tenant (never widened)`. Only the upward half was built: the list was checked against the
+   * tenant and bounded nothing below it, so `policy: { capabilities: [] }` permitted everything
+   * the tenant did. Measured — a graph declaring the empty list ran `pay.charge` to completion.
+   *
+   * ABSENT IS NOT EMPTY. A graph that declares no list has no ceiling and is unaffected; one
+   * that declares `[]` has asked for nothing. Every graph in this repo that declares a list
+   * already names what its tools need, so this refuses none of them — checked by running the
+   * whole suite with the rule armed before it was written.
+   */
+  const allow = spec.policy?.capabilities;
+  const withinGraph = (needle: string): boolean =>
+    allow === undefined ||
+    allow.some((pattern) => (pattern.endsWith("*") ? needle.startsWith(pattern.slice(0, -1)) : pattern === needle));
+
   for (const n of spec.nodes) {
     check(n.policy?.capabilities, { nodeId: n.id }, `node "${n.id}"`);
+    for (const name of reachableToolNames(n)) {
+      for (const cap of ctx.tools[name]?.capabilities ?? []) {
+        if (withinGraph(cap)) continue;
+        d.push({
+          severity: "error",
+          code: "GRAPH017_CAPABILITY_NOT_DECLARED",
+          message:
+            `tool "${name}" used by node "${n.id}" needs capability "${cap}", which is outside ` +
+            `this graph's declared \`policy.capabilities\``,
+          at: { nodeId: n.id },
+          fix: `add "${cap}" to the graph's policy.capabilities, or stop using "${name}" here`,
+        });
+      }
+    }
     // A tool's own required capabilities must also be within the tenant's grant —
     // capability is delegated downward and can never be manufactured. Every reachable
     // tool counts: an agent whose model may call it needs the grant just as a tool node

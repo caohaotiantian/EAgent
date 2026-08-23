@@ -5177,3 +5177,54 @@ something was broken, but about the SCOPE of it:
 and check each — `grep` for the symbol, then read every call site, which is what turned this one
 up. `#irreversibilityOf` and `#capabilitiesOf` are the two callers of `reachableToolNames` that
 remain unaudited against a subgraph, and the entry now says so.
+
+---
+
+## A graph's capability allowlist bounded nothing
+
+*Reversal condition: none. "Never widened" is the design's own phrase; the code simply had not
+built the downward half.*
+
+Auditing the two remaining `reachableToolNames` consumers against a subgraph — the follow-up T6
+left named — turned up neither a posture hole nor a capability hole in those consumers, and one
+next door that is bigger than both.
+
+`02-EXECUTION-GRAPH.md` D5's schema line:
+
+    capabilities: [string]         # allowlist; intersected with system + tenant (never widened)
+
+`grep -arn 'policy.capabilities' packages/core/src/` returned **three** sites: two in
+`rule017Capabilities` checking the list UPWARD against the tenant, and one reading a NODE's list.
+Nothing narrowed anything by it. Measured, with the tenant holding `pay`:
+
+    graph declares ["pay"]      → succeeded, charged
+    graph declares []           → succeeded, CHARGED
+    graph declares nothing      → succeeded, charged
+    graph declares ["fs:read"]  → COMPILE FAILED (the tenant lacks fs:read)
+
+So the only way to fail was to ask for something the TENANT lacked. An author writing
+`capabilities: []` reads it as "this graph needs nothing" and got one that can move money.
+
+**Three places, because two of them cannot see the third.**
+`GRAPH017_CAPABILITY_NOT_DECLARED` refuses it at compile, where the author is. The
+`PolicyEngine` gets the list as a second bound, because `plans` are outside `graphHash` and
+`attach` is public — a compile-only ceiling is one a graph can walk under, the same argument
+that made the classification floor load-bearing in both places. And `RunContext.grantBound`
+narrows into each child run, because a `subgraph` node reaches no tool and the compile check is
+therefore blind to exactly the delegation case.
+
+**That last one is T6's lesson applied before it could become T6's defect** — a guarantee a
+child escapes is not a guarantee — and the test for it fails if delegation is merely broken, so
+it cannot pass for the wrong reason.
+
+**A second list, not an intersection of patterns.** `granted` may be `["*"]` while the allowlist
+is `["pay"]`, and no single pattern list means "matches both" for every input. Requiring both is
+what the design says and needs no arithmetic. Where narrowing IS needed — a child's list against
+a parent's — the child's is filtered by the parent's, which drops a pattern the parent does not
+match. That under-permits rather than over-permits, and it is the only direction worth being
+wrong in at a security boundary.
+
+**Absent is not empty**, and that is the whole compatibility story: a graph declaring no list has
+no ceiling. Measured before a line was written by arming the rule and running the full suite —
+zero failures, because every graph here that declares a list already names what its tools need.
+The enforcement was simply missing.

@@ -496,6 +496,15 @@ interface RunContext {
   /** Channels written by a tool, i.e. carrying untrusted output. E8's evidence. */
   readonly tainted: Set<string>;
   /**
+   * The capability ceiling in force for this run — this graph's allowlist, narrowed by whatever
+   * a parent already narrowed. `undefined` means no graph in the chain declared one.
+   *
+   * Kept here rather than only inside `PolicyEngine` because a subgraph's child run gets its OWN
+   * engine, and "never widened" has to survive delegation or it means nothing — which is the
+   * shape T6 was: a guarantee that a child escaped.
+   */
+  readonly grantBound: readonly string[] | undefined;
+  /**
    * Channels a node LATER IN THIS WAVE will taint — derived per wave, never durable.
    *
    * `#runWave` executes the whole wave with `Promise.all` and commits afterwards, so every
@@ -2008,12 +2017,30 @@ export class Engine {
     }
   }
 
-  #contextFor(runId: RunId, graph: RunGraph, budgetUsd?: number): RunContext {
+  /**
+   * `inherited` is the ceiling a PARENT run already imposed. A child may narrow it further and
+   * may never widen it — so the effective list is the child's own filtered by the parent's, and
+   * a child that declares nothing simply keeps the parent's.
+   *
+   * Filtering rather than intersecting patterns: a pattern in the child that the parent does not
+   * match is DROPPED, which under-permits rather than over-permits. That is the safe direction
+   * and it is the only one available without pattern arithmetic nobody should have to reason
+   * about at a security boundary.
+   */
+  #contextFor(runId: RunId, graph: RunGraph, budgetUsd?: number, inherited?: readonly string[]): RunContext {
     const existing = this.#runs.get(runId);
     if (existing !== undefined) return existing;
+    const own = graph.spec.policy?.capabilities;
+    const grantBound =
+      own === undefined
+        ? inherited
+        : inherited === undefined
+          ? own
+          : own.filter((c) => inherited.some((p) => (p.endsWith("*") ? c.startsWith(p.slice(0, -1)) : p === c)));
     const ctx: RunContext = {
       runId,
       graph,
+      grantBound,
       index: indexGraph(graph.spec),
       log: new RunLog(runId, {
         store: this.#store,
@@ -2022,6 +2049,7 @@ export class Engine {
       }),
       policy: new PolicyEngine({
         ...this.#policyOpts,
+        ...(grantBound === undefined ? {} : { allowlist: grantBound }),
         ...(budgetUsd === undefined ? {} : { budget: { ...this.#policyOpts.budget, runUsd: budgetUsd } }),
         onEscalate: (rule, from, to, scope, detail) => {
           ctx.escalationWrites.push(
@@ -3281,6 +3309,14 @@ export class Engine {
       // reading like one that does, and leaving it absent would make a delegated run
       // invisible to the very person who caused it. It is also what makes a mirror gate's
       // inherited exclusion mean the same thing in both runs.
+      // THE PARENT'S CEILING TRAVELS, and it has to be built BEFORE `submit` — that is where
+      // the child's `RunContext` is created, and `#contextFor` returns an existing one
+      // untouched, so a bound applied afterwards would apply to nothing.
+      //
+      // "Never widened" has to survive delegation or it means nothing, which is precisely the
+      // shape T6 turned out to be: a guarantee a child escaped. The parent's own `subgraph`
+      // node reaches no tool, so the COMPILE-time check cannot see this one at all.
+      this.#contextFor(childRunId, childGraph, slice, ctx.grantBound);
       await this.submit({
         graph: childGraph,
         inputs,
@@ -3290,6 +3326,9 @@ export class Engine {
         ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
       });
     } else {
+      // THE PARENT'S CEILING TRAVELS on the resume path too — `#contextFor` returns an existing
+      // context untouched, so this only matters when the process is new.
+      this.#contextFor(childRunId, childGraph, undefined, ctx.grantBound);
       this.attach(childRunId, childGraph);
       // ONE HUMAN DECISION, not two. If the parent's gate was answered, that answer was
       // about the child's question — forward it rather than asking again in the child's

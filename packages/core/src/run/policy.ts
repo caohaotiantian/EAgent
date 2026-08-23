@@ -114,6 +114,25 @@ export interface PolicyEngineOptions {
    */
   readonly interventionWindowMs?: Partial<Record<IrreversibilityClass, number>>;
   /** Escalation rules armed for this run. See D7.7 E1–E10 (E11 is declared there and not built). */
+  /**
+   * THE GRAPH'S OWN ALLOWLIST — a ceiling, not a request.
+   *
+   * `02-EXECUTION-GRAPH.md` specifies `capabilities: [string]  # allowlist; intersected with
+   * system + tenant (never widened)`. The code checked it UPWARD against the tenant and
+   * downward against nothing, so `policy: { capabilities: [] }` was not a restriction: measured,
+   * a graph declaring the empty list ran `pay.charge` to completion because the TENANT held
+   * `pay`. An author writing `[]` reads it as "this graph needs nothing" and got one that can
+   * move money.
+   *
+   * A SECOND LIST rather than an intersection of patterns, because `granted` may be `["*"]` and
+   * the allowlist `["pay"]`, and there is no single pattern list that means "matches both" for
+   * every input. Requiring both is exactly the rule the design states and needs no arithmetic.
+   *
+   * `undefined` means the graph declared none, which is not the same as declaring `[]` — the
+   * first is "no ceiling", the second is "nothing". `exactOptionalPropertyTypes` keeps them
+   * distinguishable all the way down.
+   */
+  readonly allowlist?: readonly string[] | undefined;
   readonly onEscalate?: (
     rule: string,
     from: Posture,
@@ -242,6 +261,7 @@ export class PolicyEngine {
   readonly #deniedActors: ReadonlyMap<string, readonly string[]>;
   readonly #systemFloor: Posture;
   readonly #budget: BudgetLimits;
+  readonly #allowlist: readonly string[] | undefined;
   readonly #onEscalate: PolicyEngineOptions["onEscalate"];
 
   /** Runtime escalations, keyed by scope (`run:<id>` or `node:<runId>/<nodeId>`). */
@@ -265,6 +285,7 @@ export class PolicyEngine {
     this.#systemFloor = opts.systemFloor ?? "on";
     this.#budget = opts.budget ?? {};
     this.#windows = boundedWindows(opts.interventionWindowMs);
+    this.#allowlist = opts.allowlist;
     this.#onEscalate = opts.onEscalate;
   }
 
@@ -292,6 +313,20 @@ export class PolicyEngine {
           error: err.policy(CODES.E_CAP_DENIED, `capability "${cap}" is not granted`, {
             details: { capability: cap, nodeId: req.nodeId },
           }),
+        };
+      }
+      // AND WITHIN THE GRAPH'S OWN ALLOWLIST. Checked after the tenant grant, so an operator
+      // reading the reasons sees which of the two bounds refused.
+      if (this.#allowlist !== undefined && !matches(this.#allowlist, cap)) {
+        reasons.push(`capability "${cap}" is outside this graph's declared allowlist`);
+        return {
+          effect: "deny",
+          reasons,
+          error: err.policy(
+            CODES.E_CAP_DENIED,
+            `capability "${cap}" is outside the graph's declared \`policy.capabilities\``,
+            { details: { capability: cap, nodeId: req.nodeId, allowlist: [...this.#allowlist] } },
+          ),
         };
       }
       reasons.push(`capability "${cap}" granted`);
