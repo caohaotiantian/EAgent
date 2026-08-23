@@ -2696,6 +2696,36 @@ export class Engine {
       signal: ctx.abort.signal,
       now: this.#now,
     });
+    // A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT. `FunctionOutcome` is
+    // `{ writes?, take? }`, and it is a TypeScript type — a `resources/function/*.js` author
+    // writes plain JS and never sees it. Both ways of getting it wrong were handled badly:
+    //
+    //   (view) => ({ seen: [x] })   the channel map returned DIRECTLY. `out.writes` is
+    //                               undefined, the task commits `writes: {}`, and the run dies
+    //                               later with `E_OUTPUT_MISSING` naming a channel the body
+    //                               believed it had written. Measured through `bin/loom`.
+    //   (view) => { ... }           no return at all — `out.writes` threw
+    //                               "TypeError: Cannot read properties of undefined (reading
+    //                               'writes')", an internal error shown to a graph author.
+    //
+    // The rule is not a heuristic: an object EVERY key of which is ignored cannot be what the
+    // author meant. `{}` stays legal — a body that writes nothing is ordinary — and extra keys
+    // alongside `writes`/`take` stay legal too, because then the return WAS read.
+    const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }`;
+    if (out === null || typeof out !== "object") {
+      throw err.validation(
+        CODES.E_RESOURCE_INVALID,
+        `function "${w.node.function!.ref}" on node "${w.node.id}" returned ${out === undefined ? "nothing" : String(out)} — ${shape}`,
+      );
+    }
+    const keys = Object.keys(out);
+    if (keys.length > 0 && !("writes" in out) && !("take" in out)) {
+      throw err.validation(
+        CODES.E_RESOURCE_INVALID,
+        `function "${w.node.function!.ref}" on node "${w.node.id}" returned {${keys.join(", ")}}, every key of which is ignored — ${shape}. ` +
+          `Did you mean { writes: { ${keys[0]!}: … } }?`,
+      );
+    }
     return {
       status: "succeeded",
       writes: { ...(out.writes ?? {}) },
