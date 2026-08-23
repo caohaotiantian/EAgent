@@ -49,6 +49,7 @@ import {
   isEvent,
   type Actor,
   type HumanActor,
+  type JournalEvent,
   type NewEvent,
   type SubmittedBy,
   type SystemActor,
@@ -718,6 +719,60 @@ export class Engine {
   #escalate(ctx: RunContext, id: EscalationRuleId, nodeId?: NodeId, detail?: Record<string, unknown>): void {
     const rule = ESCALATION_RULES[id];
     ctx.policy.escalate(scopeOf(rule, ctx.runId, nodeId), rule.to, id, detail);
+  }
+
+
+  /**
+   * The first irreversible call with no compensation in this range — FOLLOWING child runs.
+   *
+   * `tool.called` is appended after the body returned, so it is the record that an action really
+   * happened, and it carries the class the call ran under. Scanning declared tools instead
+   * answers a different question: an `agent` node that merely lists an irreversible tool has not
+   * necessarily invoked it.
+   *
+   * A `subgraph` node's calls are in ANOTHER journal. `subgraph.started` carries the
+   * `childRunId` and the id is derived, so following it is exact rather than a guess — and it
+   * has to be followed, or "the store must not offer a silently-unsafe undo" holds only for
+   * work a graph did without delegating it. HANDOFF T6 recorded the sibling gap in
+   * `reachableToolNames` and judged it "not currently a hole" on the POSTURE argument, which is
+   * sound and is about a different consumer; this one is a hole and was reproduced.
+   *
+   * Depth-bounded and visited-checked. `expansion.maxDepth` already bounds nesting at compile,
+   * so the constant is a backstop against a journal that disagrees with the graph rather than a
+   * policy — a rewind must not become the one path that can recurse forever.
+   */
+  async #uncompensatedIrreversible(
+    events: AsyncIterable<JournalEvent>,
+    runId: RunId,
+    depth: number,
+    seen: Set<RunId> = new Set([runId]),
+  ): Promise<{ name: string; seq: number; irreversibility: string; runId: RunId } | undefined> {
+    if (depth > 16) return undefined;
+    const children: RunId[] = [];
+    for await (const ev of events) {
+      if (ev.type === "subgraph.started") {
+        const child = ev.payload.childRunId;
+        if (!seen.has(child)) {
+          seen.add(child);
+          children.push(child);
+        }
+        continue;
+      }
+      if (ev.type !== "tool.called") continue;
+      const called = ev.payload;
+      if (called.irreversibility !== "irreversible" && called.irreversibility !== "externally_visible") continue;
+      // Fail closed: a tool the registry no longer carries cannot be shown to compensate.
+      if (this.tools.get(called.name)?.compensation === undefined) {
+        return { name: called.name, seq: ev.seq, irreversibility: called.irreversibility, runId };
+      }
+    }
+    // The child ran ENTIRELY inside the window the parent is suppressing — its `subgraph.started`
+    // is in that range — so its own log is scanned from the beginning, not from `atSeq`.
+    for (const child of children) {
+      const hit = await this.#uncompensatedIrreversible(this.#store.read(child, 1 as Seq), child, depth + 1, seen);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
   }
 
   /**
@@ -1750,18 +1805,22 @@ export class Engine {
     // declaration made such a run permanently un-rewindable at every boundary. Scoping to
     // `atSeq` matters for the same reason — only effects the rewind would actually
     // suppress can stand in its way.
-    for await (const ev of ctx.log.read((atSeq + 1) as Seq)) {
-      if (ev.type !== "tool.called") continue;
-      const called = ev.payload;
-      if (called.irreversibility !== "irreversible" && called.irreversibility !== "externally_visible") continue;
-      // Fail closed: a tool the registry no longer carries cannot be shown to compensate.
-      if (this.tools.get(called.name)?.compensation === undefined) {
-        throw err.conflict(
-          CODES.E_RESTORE_ILLEGAL,
-          `cannot rewind to ${atSeq}: "${called.name}" ran at seq ${ev.seq}, is ${called.irreversibility}, and declares no compensation`,
-          { details: { runId, atSeq, seq: ev.seq, tool: called.name } },
-        );
-      }
+    // AND THROUGH ANY CHILD RUN, because a subgraph's work is not in this journal.
+    //
+    // `subgraph.started` is "the only link between them, which is what keeps a parent's journal
+    // the size of the parent rather than of its whole tree" — and that is exactly why a scan of
+    // the parent's own log answers nothing about what a child did. Measured, on the same
+    // irreversible uncompensated tool: run it in the parent and the rewind is refused; delegate
+    // it to a subgraph and the rewind is ALLOWED, with the money already gone.
+    const offending = await this.#uncompensatedIrreversible(ctx.log.read((atSeq + 1) as Seq), runId, 0);
+    if (offending !== undefined) {
+      const where = offending.runId === runId ? "" : ` in child run ${offending.runId}`;
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: "${offending.name}" ran at seq ${offending.seq}${where}, is ` +
+          `${offending.irreversibility}, and declares no compensation`,
+        { details: { runId, atSeq, seq: offending.seq, tool: offending.name, ranIn: offending.runId } },
+      );
     }
 
     await this.#serialize(() =>

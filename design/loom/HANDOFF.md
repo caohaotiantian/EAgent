@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3464 pass, 0 fail, 1 skipped** (Loom 1921 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 243 (112 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3466 pass, 0 fail, 1 skipped** (Loom 1923 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 244 (113 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -150,9 +150,18 @@ rest would break every reference to them in the journal.
   pins it as a SET: every journaled rule must be an id in `ESCALATION_RULES` and must contain
   no space or brace.
 - **T6 — `reachableToolNames` does not descend into a `subgraph`**, so a subgraph node is
-  classified `read_only` however irreversible its child is. Not currently a hole — each run has
-  its own `PolicyEngine`, so the child re-decides at full strictness with no inherited ceiling —
-  but invariant 5's "max over every tool it can REACH" is not what the code computes.
+  classified `read_only` however irreversible its child is, and invariant 5's "max over every
+  tool it can REACH" is not what the code computes. **The POSTURE consumer is still not a
+  hole**, for the reason this entry always gave: each run has its own `PolicyEngine`, so the
+  child re-decides at full strictness with no inherited ceiling.
+  **A second consumer of the same blindness WAS a hole, and is closed.** `rewind` refuses to
+  undo past an irreversible call with no compensation, and it scanned `tool.called` in the run's
+  own journal — where a child's calls are not. Measured: the same uncompensated `pay.charge`
+  refused a rewind when the parent called it and ALLOWED one when a subgraph did, with the money
+  already gone. `#uncompensatedIrreversible` now follows `subgraph.started.childRunId`,
+  depth-bounded. `test/run/rewind-through-subgraph.test.ts`, 5 mutation-verified.
+  **Read the surviving half of this entry accordingly**: "not currently a hole" had checked one
+  consumer. `#irreversibilityOf` and `#capabilitiesOf` are the two that remain unaudited.
 
 ### 3 · Mechanism that exists and is wired to nothing
 

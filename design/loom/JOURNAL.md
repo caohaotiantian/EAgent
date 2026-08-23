@@ -5126,3 +5126,54 @@ fields they are, and the mutation that packs them back turns **twelve** assertio
 this wave's other findings — a `pii` row that was the identity, a fixture whose two nodes were
 in different waves, a gate frame that asserted contents rather than the verdict. Every one of
 them passed, covered the code, and could not have failed.
+
+---
+
+## T6 — "not currently a hole" had checked one consumer
+
+*Reversal condition: if a child run's journal is ever folded into its parent's, the recursion
+becomes a plain scan and goes. `subgraph.started`'s docstring argues against that — keeping the
+parent's journal the size of the parent is the point.*
+
+T6 recorded that `reachableToolNames` does not descend into a `subgraph`, and judged it "not
+currently a hole — each run has its own `PolicyEngine`, so the child re-decides at full
+strictness with no inherited ceiling". That argument is sound. It is about the POSTURE consumer.
+
+**There is another consumer, and it was a hole.** `rewind` refuses to undo past a committed
+irreversible effect with no compensation — "the store must not offer a silently-unsafe undo" —
+by scanning `tool.called` in the run's own journal. A subgraph's calls are in a different one,
+by design: `subgraph.started` "is the only link between them, which is what keeps a parent's
+journal the size of the parent rather than of its whole tree."
+
+Measured, the same irreversible uncompensated `pay.charge` in the same position:
+
+    tool DIRECTLY in the parent   rewind REFUSED (E_RESTORE_ILLEGAL)
+    the same tool via a subgraph  rewind ALLOWED — with the charge already taken
+
+**Delegation was an undo the guarantee did not cover.** `#uncompensatedIrreversible` now follows
+`subgraph.started.childRunId` — derived, so following it is exact rather than a guess —
+depth-bounded and visited-checked, and the refusal names which run the call is recorded in,
+because "which journal" is the one thing an operator cannot guess.
+
+**The blunter fix was available and is worse.** Refusing every rewind past any subgraph would
+have passed the same reproduction while making every pure-computation child permanently
+un-rewindable. A second test pins that the rule is about COMPENSATION and not about subgraphs: a
+child call that declares one is undoable, exactly as the same call in the parent is.
+
+### The pattern, now five for five
+
+Every register entry examined this wave was wrong in the same direction — not about whether
+something was broken, but about the SCOPE of it:
+
+| entry | what it said | what was true |
+|---|---|---|
+| D5 | a compiler gap; add an `oversight` kind | the compiler was right; the CLI fabricated pins, and the prescribed fix would have added a caller-less kind |
+| D2 | rewind wedges | rewind reported SUCCESS having undone the work |
+| T1 | needs the parser to report free variables | it always had, and GRAPH004 always used them |
+| T5 | one consumer matched a rule id wrongly | seven of eight rules were unmatchable |
+| T6 | not currently a hole | not a hole for the consumer that was checked |
+
+**An entry that says "not a hole" has usually only checked one consumer.** Name the consumers
+and check each — `grep` for the symbol, then read every call site, which is what turned this one
+up. `#irreversibilityOf` and `#capabilitiesOf` are the two callers of `reachableToolNames` that
+remain unaudited against a subgraph, and the entry now says so.
