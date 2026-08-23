@@ -6301,3 +6301,44 @@ stranded lease: register defect D2, a run that reported success having undone it
 `task.leased`, so a failed run with no lease still reports the generic reason. If a future edit
 makes it unconditional the second test goes red, and that is the point — a reason that is always
 available is an excuse, not an explanation.
+
+---
+
+## One line, two defects, and the first was hiding the second
+
+`loom trace` had never been run. Its usage line says "print the span tree" and it printed a
+two-level list, because depth was a presence test rather than a walk:
+
+    const depth = s.parentSpanId === undefined ? 0 : 1;
+
+So a `loom.tool` under a `loom.task` under the run rendered as the task's SIBLING, and a
+subgraph's whole interior collapsed onto the run's own column — on the one surface an operator
+reads to find out what caused what.
+
+**The second defect only existed to be seen after the first was fixed.** With every child at one
+indent, order was unremarkable. With real depth, an agent run printed
+
+    loom.task [ok] 28ms
+    loom.run  [ok] 29ms
+
+a child above its own parent. `spansFrom` sorts by `startTime` with a `spanId` tie-break, which
+is right for a waterfall and for an OTel export and is not tree order: a task that starts in its
+run's millisecond can sort ahead of it. The array order is correct and was left alone; the
+RENDERER was assuming it meant something it never claimed to mean.
+
+**A fix that makes a second defect visible is the good case**, and it is worth naming because the
+instinct on seeing the new mess is that the fix broke something. It did not — the flattening had
+been concealing it, the same way `compare`'s gate-blindness concealed which runs replayed and the
+binary depth concealed which spans nested. **A display that loses information cannot show you the
+information it is losing.**
+
+**And the old test passed throughout.** It asserted that `loom.run` and `loom.task` appear in the
+output and that conformance is ok — true under both defects, true after the fix, and true of a
+renderer that printed the two names in either order at any indent. A test that reads a rendering
+must read its SHAPE; matching the words in it is compatible with almost any bug in how they are
+arranged.
+
+**Reversal condition:** if `spansFrom` is ever changed to emit parent-before-child, the grouping
+here becomes redundant and should be deleted rather than kept as insurance. Do not, however,
+change `spansFrom`'s order to serve this renderer — the waterfall order is what an OTel exporter
+wants, and this command is the one with the unusual requirement.
