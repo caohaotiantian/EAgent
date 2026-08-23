@@ -161,6 +161,7 @@ against a memory of having fixed it:
 | **retried client errors** every 4xx except 429/401/403/400/422 was classed `unavailable`, so `request()` re-sent a permanent misconfiguration to the attempt cap | 4xx → `E_PROVIDER_BAD_REQUEST` (validation, not retryable), 408/425 excepted | "A 4xx IS NOT RETRIED" in `providers/http.test.ts` — it counts fetches, because the retry loop reads `retryable` and the count is what that field is FOR |
 | **a node's `policy.budget.costUsd`** bound nothing at run time, while D2 promised it did and `GRAPH009` told authors to add it | `#runAgent` checks the node ceiling against task-local `usage` before reserving | the three tests under "the node's own ceiling" in `run/budget-declared.test.ts` |
 | **`budget.exhausted` could not be written** when no `runUsd` was set — `limitUsd` was `spentUsd + remainingUsd`, and `remainingUsd` is `Infinity` | the row carries the ceiling actually exceeded, read off the error | "A NODE CEILING WITH NO RUN BUDGET JOURNALS A FINITE LIMIT" — same file |
+| **`FunctionNode.cpuBound`** promised a worker thread in TWO design documents and was read by nothing; two such nodes ran exactly serially (1.997×) | `GRAPH019_CPUBOUND_NO_EFFECT` warns, and both documents now say inline | "GRAPH019: cpuBound is declared, read by nothing" in `graph/compile.test.ts` |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until
@@ -250,6 +251,7 @@ question that the repository cannot answer.
 | Item | The question that has to be answered first |
 |---|---|
 | **Compensation** (B9) | A compile-time proof and a rewind refusal exist; `case "compensation": break;` executes nothing. *When does a compensation edge fire* — on task failure, on run failure, on rewind? |
+| **A function worker pool** | `cpuBound` now warns instead of lying, but the capability D2 and D3 described is still absent, and a long function body blocks the event loop — every other task in the wave, and any `loom serve` plane in the process. `node:worker_threads` is a builtin, so invariant 1 is not the obstacle; the sandbox is. `resources/realm.ts` builds a hardened `vm` context per body and bounds each call with `vm.runInContext`'s `timeout`. A worker has to re-establish that context on the other side, marshal the channel view across, and replace the per-call timeout with worker termination. *Does a `cpuBound` body keep the same isolation guarantees, and what bounds it when `vm`'s own timeout no longer applies?* |
 | **`Budget.tokens` and `Budget.wallMs`** | `Budget` declares three dimensions and only `costUsd` binds — the other two are read by NOTHING in `src/` (`PolicyEngine.BudgetLimits` carries `runUsd` and `tenantUsd` alone), at graph level and node level alike, while fixtures cheerfully declare `tokens: 2_000_000, wallMs: 900_000`. Found immediately after `costUsd` was made to bind, which is the point: **read the closed row above as being about ONE of three fields.** The question each needs is different. `tokens`: `estimateOf` returns USD and there is no token estimator, so a token ceiling can only be checked against tokens already spent — it would bind from turn 2, not before turn 1, which is a different guarantee from the one `costUsd` gives and has to be chosen deliberately. `wallMs`: node `timeoutMs` is enforced and already does this job, so the question is whether `budget.wallMs` should exist at all rather than how to implement it |
 | **`JoinNode.timeoutMs`** | In the schema, read by nothing — and now WARNED about at compile (`GRAPH008_JOIN_TIMEOUT_INERT`), so an author who never read D5 finds out from the compiler rather than from a barrier that waits forever. The decision itself is untouched: *what does a barrier timeout DO* — fail the join, or fold what arrived? Folding partial evidence for `mode: all` is a semantics change, not a timeout. **A warning and not an error on purpose**: the other four unbuilt mechanisms SUBSTITUTE semantics and are errors; this one does nothing and the design says so in three places, so refusing it would be taking this decision |
 | **B11 — `function`/`evaluator{assertion}` bodies re-execute on replay** | A journal-schema decision: should a function body's output become a journaled effect? That makes replay total and makes every function body a recorded nondeterminism site |
@@ -290,6 +292,19 @@ for reasons, not forgotten.
   `loom rewind` is not just a verb: `atSeq` has to be discoverable, and no verb prints journal
   seqs today — `audit` prints violations, `trace` prints spans. That is the design question
   attached to it, and it is why this is recorded rather than built.
+
+- **The spec-field sweep has been run once; here is its whole answer, so it is not re-run blindly.**
+  Every field of every `interface` in `graph/spec.ts` — 137 — was checked for a reader outside
+  `graph/`. **11 had none.** Six are correct as they stand: `NodeSpec.unhandled` (a compile-time
+  GRAPH011 suppression), `ExpansionBudget.maxFanout` (enforced statically, capping edge
+  `maxWidth`), `GraphSpec.apiVersion` and `RunGraph.terminalNodes` (compile-time), and
+  `RetryPolicy.jitter`, which `engine.ts` deliberately does not apply — "the delay must be a pure
+  function of (policy, attempt) or replay diverges". Three were already reserved in §3
+  (`EdgeSpec.compensates`, `ApprovalSpec.delegation`, `DelegationSpec.mustStayInGroup`).
+  `FunctionNode.cpuBound` is fixed above. That leaves **`NodePlan.inboundEdges`**, computed by
+  `compile.ts` and read by nobody — cost rather than a lie, and the only one still open.
+  **`RetryPolicy.jitter` is the one worth a second look**: the reason it is unapplied is sound,
+  but the field is still public, accepted, and inert, which is what `GRAPH019` now exists for.
 
 - **A `subgraph` node's `policy.budget.costUsd` still binds nothing, and that is structural.**
   The agent loop now enforces its node ceiling, but a subgraph's cost is settled from

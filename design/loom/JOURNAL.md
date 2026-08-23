@@ -6058,3 +6058,44 @@ budget failure it had. **It was unreachable for a reason that was itself the bug
 cannot exceed a limit that does not exist, so the only thing that could throw there never threw
 in that configuration. Every new enforcement point is a new reachability argument for the code
 downstream of it, and that code was written when the argument was different.
+
+---
+
+## The spec-field sweep: 137 fields, 11 without a runtime reader, one that lied
+
+Four findings in a row shared a shape — `join.timeoutMs`, `onBudgetExhausted`, a node's
+`budget.costUsd`, then `budget.tokens`/`wallMs` — all declared, shape-validated, and read by
+nothing when the graph actually ran. Four is enough to stop finding them one at a time, so every
+field of every interface in `graph/spec.ts` was checked for a reader outside `graph/`.
+
+**The sweep's value is as much in the nine it cleared as in the one it caught.** Six fields with
+no runtime reader are correct: a compile-time suppression flag, a bound enforced statically
+because it IS static, two compiled-graph fields, and `RetryPolicy.jitter`, which the engine
+deliberately does not apply — "the delay must be a pure function of (policy, attempt) or replay
+diverges", which is a real argument and a good one. Three more were already reserved as product
+decisions. **"Read by nothing at run time" is a question, not a verdict**, and a sweep that
+reported all 11 as defects would have been wrong about nine of them.
+
+`FunctionNode.cpuBound` was the one that could not be explained, and it is the worst kind: **two
+design documents asserted the opposite of the code.** D2's node table said "Runs in a worker
+thread if `cpuBound: true`"; D3's pool diagram said "worker_threads if cpuBound". `packages/core/src`
+has no `worker_threads` import at all. A reader had two independent confirmations of a capability
+that does not exist — and independence is exactly what makes a false claim credible.
+
+**Measured rather than inferred, and the distinction was not pedantic.** "Nothing reads the field"
+and "the work does not run in parallel" are different claims, and only the second is what an
+author is buying. Two independent `cpuBound: true` function nodes took 2646 ms of compute against
+1325 ms for one — 1.997×, exactly serial, on a multi-core machine.
+
+**Warned, not implemented, and the line between this and the previous wave's node budget is the
+part worth keeping.** Both were "the design says it, the code does not". The node budget was ~4
+lines at a site where the accumulated `usage` already sat, so implementing was closing drift. A
+worker pool is not: `resources/realm.ts` builds a hardened `vm` context per body and bounds each
+call with `vm.runInContext`'s own `timeout`, and a worker would have to re-establish that context
+across a thread boundary and replace the timeout with termination. **Cheapness is not the test —
+whether the remaining work is engineering or a decision is.** That one is a decision, so it goes
+to §3 with its question written out, and the compiler stops repeating the claim meanwhile.
+
+**Reversal condition:** when a function worker pool exists, delete `GRAPH019_CPUBOUND_NO_EFFECT`
+and restore both design sentences in the same change. A warning that outlives its gap is the
+failure mode `docs-drift` rule 4 exists to catch, one level out.
