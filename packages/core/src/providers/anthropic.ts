@@ -58,6 +58,12 @@ export class AnthropicAdapter implements ModelAdapter {
   }
 
   async *stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    // WHAT THIS CALL COSTS IN TIME, measured because nothing else can. `UsageRecord.wallMs` is
+    // defined as total WORK — `addUsage` says so, and sums it deliberately while noting that
+    // elapsed time of concurrent effects is not additive — and both adapters hardcoded 0, so the
+    // accumulator had no producer. `loom run` printed `"wallMs": 0` for a run that took seconds.
+    const clock = this.#opts.now ?? Date.now;
+    const startedAt = clock();
     const url = `${this.#opts.baseUrl ?? "https://api.anthropic.com"}/v1/messages`;
     const res = await postJson(
       url,
@@ -189,7 +195,7 @@ export class AnthropicAdapter implements ModelAdapter {
         ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
         ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
       }),
-      wallMs: 0,
+      wallMs: Math.max(0, clock() - startedAt),
       ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
       ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
     };

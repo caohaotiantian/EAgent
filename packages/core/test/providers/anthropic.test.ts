@@ -225,3 +225,39 @@ test("a table row with no cache rates falls back to the input rate, which is the
   const a = new AnthropicAdapter({ apiKey: "k", prices: { m: { input: 10, output: 20 } } });
   assert.equal(a.priceOf("m", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1e6 }), 10);
 });
+
+test("A CALL'S WALL TIME IS MEASURED — the accumulator had no producer", async () => {
+  // `UsageRecord.wallMs` is defined as total WORK: `addUsage` sums it deliberately, noting that
+  // elapsed time of concurrent effects is not additive and that callers wanting makespan compute
+  // it from spans. A careful definition, a deliberate summation — and BOTH adapters hardcoded 0,
+  // so every consumer of the accumulator read a constant. `loom run` printed `"wallMs": 0` for a
+  // run that had just spent 1.3 seconds computing, and `evolution/score.ts`'s latency term
+  // (`usage.wallMs / cohort.p50Wall`) was identically zero for every candidate ever scored.
+  //
+  // The clock is injected rather than real, per this repo's rule: asserting against `Date.now()`
+  // makes the assertion a race, and a duration test that tolerates any value tests nothing.
+  let t = 1_000;
+  const clock = (): number => t;
+  const a = new AnthropicAdapter({
+    apiKey: "k",
+    now: clock,
+    fetch: () => {
+      t += 250; // the call takes 250ms of the injected clock
+      return sseFetch([START, delta("42"), STOP_DELTA, MESSAGE_STOP])();
+    },
+  });
+  const done = (await collect(a.stream(REQ, ac()))).at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type !== "done") return;
+  assert.equal(done.usage.wallMs, 250, "the duration must be the clock's, not a constant");
+});
+
+test("wallMs defaults to a real clock and is never negative", async () => {
+  // No `now` given: the default is `Date.now`, so the only safe assertion is the invariant —
+  // a duration is non-negative, and `Math.max(0, …)` holds it there even if a clock steps back.
+  const a = new AnthropicAdapter({ apiKey: "k", fetch: sseFetch([START, delta("42"), STOP_DELTA, MESSAGE_STOP]) });
+  const done = (await collect(a.stream(REQ, ac()))).at(-1)!;
+  assert.equal(done.type, "done");
+  if (done.type !== "done") return;
+  assert.ok(done.usage.wallMs >= 0, `wallMs was ${done.usage.wallMs}`);
+});

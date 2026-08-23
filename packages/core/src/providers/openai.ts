@@ -50,6 +50,9 @@ export class OpenAIAdapter implements ModelAdapter {
   }
 
   async *stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    // See `AnthropicAdapter.stream` — the same accumulator, the same missing producer.
+    const clock = this.#opts.now ?? Date.now;
+    const startedAt = clock();
     const url = `${this.#opts.baseUrl ?? "https://api.openai.com/v1"}/chat/completions`;
     const res = await postJson(
       url,
@@ -108,7 +111,7 @@ export class OpenAIAdapter implements ModelAdapter {
       inputTokens,
       outputTokens,
       costUsd: this.priceOf(req.model, { inputTokens, outputTokens }),
-      wallMs: 0,
+      wallMs: Math.max(0, clock() - startedAt),
     };
     // A TRUNCATED TURN IS NOT A TOOL CALL. `finishReason` was overridden to `tool_use` whenever
     // any tool call was parsed, which erased `max_tokens` — and a tool call whose argument JSON

@@ -35,6 +35,16 @@ export interface HttpOptions {
   readonly maxDelayMs?: number;
   /** Injected so tests and replay never depend on wall time. */
   readonly sleep?: (ms: number) => Promise<void>;
+  /**
+   * Reads the clock for `UsageRecord.wallMs`. Defaults to `Date.now`.
+   *
+   * Injected for the reason every clock in this codebase is: a test that wants to assert a
+   * duration must be able to produce one, and a real one makes the assertion a race. It is
+   * NOT a determinism requirement — the number it produces is an OBSERVATION, journaled with
+   * the rest of the call's usage and served back by `ReplayEffects` rather than re-measured,
+   * exactly as token counts are.
+   */
+  readonly now?: () => number;
 }
 
 /**
