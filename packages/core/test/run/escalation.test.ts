@@ -259,12 +259,36 @@ function rig(script: MockScript, opts: Partial<ConstructorParameters<typeof Engi
   return { engine, store, functions, ran };
 }
 
-async function escalations(store: MemoryStateStore, runId: RunId): Promise<string[]> {
-  const out: string[] = [];
+/**
+ * `rule` and `detail` READ SEPARATELY, because that is what the journal now carries.
+ *
+ * These assertions used to run against one packed string — `#escalate` journaled
+ * `` `${id} ${JSON.stringify(detail)}` `` — so every one of them was written as
+ * `startsWith(id)` plus a regex over the JSON tail. That worked, and it hid the defect the
+ * shape caused: `evolution/trajectory.ts` compared `e.payload.rule === "violation"` against
+ * `violation {"capability":{…}}` and never matched. Tests shaped around a defect are how a
+ * defect survives having tests.
+ */
+async function escalationRows(
+  store: MemoryStateStore,
+  runId: RunId,
+): Promise<{ rule: string; detail?: Record<string, unknown> }[]> {
+  const out: { rule: string; detail?: Record<string, unknown> }[] = [];
   for await (const ev of store.read(runId, 1)) {
-    if (ev.type === "policy.escalated") out.push((ev.payload as { rule: string }).rule);
+    if (ev.type === "policy.escalated") out.push(ev.payload as { rule: string; detail?: Record<string, unknown> });
   }
   return out;
+}
+
+/** Just the ids, for the many assertions that only care which rule fired. */
+async function escalations(store: MemoryStateStore, runId: RunId): Promise<string[]> {
+  return (await escalationRows(store, runId)).map((r) => r.rule);
+}
+
+/** The detail of the first row for a rule, as JSON — so an existing regex still reads. */
+async function detailOf(store: MemoryStateStore, runId: RunId, rule: string): Promise<string> {
+  const row = (await escalationRows(store, runId)).find((r) => r.rule === rule);
+  return row === undefined ? "" : JSON.stringify(row.detail ?? {});
 }
 
 const ANSWER: MockScript = (_req, turn) =>
@@ -283,10 +307,10 @@ test("E5 — a never-before-seen tool sequence escalates the node", async () => 
 
   const fired = await escalations(r.store, runId);
   assert.ok(
-    fired.some((f) => f.startsWith("novel_sequence")),
+    fired.some((f) => f === "novel_sequence"),
     `expected novel_sequence, got ${fired.join(", ")}`,
   );
-  assert.ok(fired.find((f) => f.startsWith("novel_sequence"))?.includes("net.fetch"), "the journal names the n-gram");
+  assert.match(await detailOf(r.store, runId, "novel_sequence"), /net\.fetch/, "the journal names the n-gram");
 });
 
 test("E5 — a TOOL node never trips it: its tool is in the spec, not chosen", async () => {
@@ -297,9 +321,9 @@ test("E5 — a TOOL node never trips it: its tool is in the spec, not chosen", a
   const runId = await r.engine.submit({ graph: compileEsc(), inputs: { goal: "x" } });
   await r.engine.advance(runId);
 
-  const fired = (await escalations(r.store, runId)).filter((f) => f.startsWith("novel_sequence"));
+  const fired = (await escalations(r.store, runId)).filter((f) => f === "novel_sequence");
   assert.equal(fired.length, 1);
-  assert.match(fired[0]!, /net\.fetch/, "the agent's choice, not the tool node's declaration");
+  assert.match(await detailOf(r.store, runId, "novel_sequence"), /net\.fetch/, "the agent's choice, not the tool node's declaration");
 });
 
 test("E5 — a sequence already in the index is silent", async () => {
@@ -310,7 +334,7 @@ test("E5 — a sequence already in the index is silent", async () => {
   const r = rig(ANSWER, { sequences });
   const runId = await r.engine.submit({ graph, inputs: { goal: "x" } });
   await r.engine.advance(runId);
-  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f.startsWith("novel_sequence")), []);
+  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f === "novel_sequence"), []);
 });
 
 test("E5 — with NO index configured the rule never fires", async () => {
@@ -318,7 +342,7 @@ test("E5 — with NO index configured the rule never fires", async () => {
   const r = rig(ANSWER);
   const runId = await r.engine.submit({ graph: compileEsc(), inputs: { goal: "x" } });
   await r.engine.advance(runId);
-  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f.startsWith("novel_sequence")), []);
+  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f === "novel_sequence"), []);
 });
 
 test("E6 — a denied capability escalates the whole run to `in`", async () => {
@@ -328,7 +352,7 @@ test("E6 — a denied capability escalates the whole run to `in`", async () => {
 
   assert.equal(p.status, "failed");
   const fired = await escalations(r.store, runId);
-  assert.ok(fired.some((f) => f.startsWith("violation")), fired.join(", "));
+  assert.ok(fired.some((f) => f === "violation"), fired.join(", "));
 });
 
 test("E7 — a run costing more than its cohort's p99 escalates", async () => {
@@ -341,16 +365,16 @@ test("E7 — a run costing more than its cohort's p99 escalates", async () => {
   await r.engine.advance(runId);
 
   const fired = await escalations(r.store, runId);
-  const anomaly = fired.find((f) => f.startsWith("anomaly"));
+  const anomaly = fired.find((f) => f === "anomaly");
   assert.ok(anomaly, fired.join(", "));
-  assert.match(anomaly, /"metric":"costUsd"/);
+  assert.match(await detailOf(r.store, runId, "anomaly"), /"metric":"costUsd"/);
 });
 
 test("E7 — with no baseline configured the rule never fires", async () => {
   const r = rig(ANSWER);
   const runId = await r.engine.submit({ graph: compileEsc(), inputs: { goal: "x" } });
   await r.engine.advance(runId);
-  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f.startsWith("anomaly")), []);
+  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f === "anomaly"), []);
 });
 
 test("E8 — TAINTED TOOL OUTPUT FEEDING AN IRREVERSIBLE ACTION GATES", async () => {
@@ -377,8 +401,8 @@ test("E8 — TAINTED TOOL OUTPUT FEEDING AN IRREVERSIBLE ACTION GATES", async ()
   // rule stayed inert under a covering test. The escalation event is the part only taint
   // can produce.
   const fired = await escalations(r.store, runId);
-  assert.ok(fired.some((f) => f.startsWith("taint")), `E8 must actually fire: ${fired.join(", ")}`);
-  assert.match(fired.find((f) => f.startsWith("taint"))!, /"reads":\["notes"\]/, "naming the channel that carried it");
+  assert.ok(fired.some((f) => f === "taint"), `E8 must actually fire: ${fired.join(", ")}`);
+  assert.match(await detailOf(r.store, runId, "taint"), /"reads":\["notes"\]/, "naming the channel that carried it");
 });
 
 test("E8 — TAINT OUTLIVES A HUMAN DE-ESCALATION; the class default does not", async () => {
@@ -586,7 +610,7 @@ test("E8 — an UNTAINTED irreversible action still honours the de-escalation", 
 
   assert.equal(p.status, "succeeded", `${p.status}: ${JSON.stringify(p.error ?? {})}`);
   assert.deepEqual(r.ran, ["pay.charge"], "the charge runs under the human's watch");
-  assert.deepEqual((await escalations(r.store, runId)).filter((x) => x.startsWith("taint")), [], "and E8 stays silent");
+  assert.deepEqual((await escalations(r.store, runId)).filter((x) => x === "taint"), [], "and E8 stays silent");
 });
 
 test("E4 — three failures on one node escalate it", async () => {
@@ -636,9 +660,9 @@ test("E4 — three failures on one node escalate it", async () => {
   await r.engine.advance(runId);
 
   const fired = await escalations(r.store, runId);
-  const hit = fired.find((f) => f.startsWith("repeated_failure"));
+  const hit = fired.find((f) => f === "repeated_failure");
   assert.ok(hit, fired.join(", "));
-  assert.match(hit, /"streak":3/);
+  assert.match(await detailOf(r.store, runId, "repeated_failure"), /"streak":3/);
 });
 
 test("E4 — a schema mismatch is NOT retried, so one bad answer is not a streak", async () => {
@@ -666,7 +690,7 @@ test("E4 — a schema mismatch is NOT retried, so one bad answer is not a streak
   };
   const runId = await r.engine.submit({ graph: compileEsc(one), inputs: { goal: "x" } });
   await r.engine.advance(runId);
-  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f.startsWith("repeated_failure")), []);
+  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f === "repeated_failure"), []);
 });
 
 test("E1 — an evaluator below its threshold escalates the run, without failing it", async () => {
@@ -696,7 +720,7 @@ test("E1 — an evaluator below its threshold escalates the run, without failing
 
   assert.equal(p.status, "succeeded", "escalation is not failure");
   const fired = await escalations(r.store, runId);
-  assert.ok(fired.some((f) => f.startsWith("low_confidence")), fired.join(", "));
+  assert.ok(fired.some((f) => f === "low_confidence"), fired.join(", "));
 });
 
 test("E1 — a verdict with NO score does not escalate", async () => {
@@ -717,7 +741,7 @@ test("E1 — a verdict with NO score does not escalate", async () => {
   r.functions.register("function/judge@stable", () => ({ writes: { done: { pass: true } } }));
   const runId = await r.engine.submit({ graph: compileEsc(graded), inputs: { goal: "x" } });
   await r.engine.advance(runId);
-  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f.startsWith("low_confidence")), []);
+  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f === "low_confidence"), []);
 });
 
 test("E2 — crossing 80% of the budget escalates ONCE", async () => {
@@ -727,9 +751,9 @@ test("E2 — crossing 80% of the budget escalates ONCE", async () => {
   const runId = await r.engine.submit({ graph: compileEsc(), inputs: { goal: "x" } });
   await r.engine.advance(runId);
 
-  const fired = (await escalations(r.store, runId)).filter((f) => f.startsWith("budget_warning"));
+  const fired = (await escalations(r.store, runId)).filter((f) => f === "budget_warning");
   assert.equal(fired.length, 1, `expected exactly one warning, got ${fired.length}`);
-  assert.match(fired[0]!, /"remainingUsd"/, "the journal says how much is left, which is what an operator acts on");
+  assert.match(await detailOf(r.store, runId, "budget_warning"), /"remainingUsd"/, "the journal says how much is left, which is what an operator acts on");
 });
 
 test("E3 — `onBudgetExhausted: \"gate\"` IS A COMPILE ERROR, because it never gated", () => {
@@ -766,7 +790,7 @@ test("E3 — the default is to FAIL, not to gate", async () => {
   const p = await r.engine.advance(runId);
 
   assert.equal(p.status, "failed");
-  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f.startsWith("budget_exhausted")), []);
+  assert.deepEqual((await escalations(r.store, runId)).filter((f) => f === "budget_exhausted"), []);
 });
 
 test("a rule that fires twice escalates once — `max` makes repeats no-ops", async () => {
@@ -777,7 +801,7 @@ test("a rule that fires twice escalates once — `max` makes repeats no-ops", as
 
   const events: JournalEvent[] = [];
   for await (const ev of r.store.read(runId, 1)) events.push(ev);
-  const novel = events.filter((ev) => ev.type === "policy.escalated" && String((ev.payload as { rule: string }).rule).startsWith("novel_sequence"));
+  const novel = events.filter((ev) => ev.type === "policy.escalated" && String((ev.payload as { rule: string }).rule) === "novel_sequence");
   assert.equal(novel.length, 1, "the second escalation to the same posture is a no-op and is not journaled");
   assert.match(String((novel[0]!.payload as { scope: string }).scope), /\/gather$/, "and it is scoped to the AGENT that chose the sequence");
 });

@@ -114,7 +114,13 @@ export interface PolicyEngineOptions {
    */
   readonly interventionWindowMs?: Partial<Record<IrreversibilityClass, number>>;
   /** Escalation rules armed for this run. See D7.7 E1–E10 (E11 is declared there and not built). */
-  readonly onEscalate?: (rule: string, from: Posture, to: Posture, scope: string) => void;
+  readonly onEscalate?: (
+    rule: string,
+    from: Posture,
+    to: Posture,
+    scope: string,
+    detail?: Record<string, unknown>,
+  ) => void;
 }
 
 /**
@@ -354,12 +360,12 @@ export class PolicyEngine {
   // ── the asymmetry rule ────────────────────────────────────────────────────
 
   /** Tightening. Automatic, callable by rules and by the system. */
-  escalate(scope: string, to: Posture, rule: string): void {
+  escalate(scope: string, to: Posture, rule: string, detail?: Record<string, unknown>): void {
     const from = this.#escalations.get(scope) ?? "out";
     const next = maxPosture(from, to);
     if (next === from) return;
     this.#escalations.set(scope, next);
-    this.#onEscalate?.(rule, from, next, scope);
+    this.#onEscalate?.(rule, from, next, scope, detail);
   }
 
   /**

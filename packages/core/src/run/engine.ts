@@ -707,9 +707,17 @@ export class Engine {
    * One funnel, so every rule is journaled the same way and none can quietly skip the
    * `policy.escalated` record that tells an operator why the run suddenly asked.
    */
+  /**
+   * THE RULE ID AND ITS EVIDENCE TRAVEL SEPARATELY.
+   *
+   * They used to be one string: `` `${id} ${JSON.stringify(detail)}` ``. Seven of these eight
+   * rules pass a detail, so seven of eight journaled a `rule` no consumer could match — and one
+   * consumer was already trying. `evolution/trajectory.ts` counted E6 with
+   * `e.payload.rule === "violation"` against the value `violation {"capability":{…}}`.
+   */
   #escalate(ctx: RunContext, id: EscalationRuleId, nodeId?: NodeId, detail?: Record<string, unknown>): void {
     const rule = ESCALATION_RULES[id];
-    ctx.policy.escalate(scopeOf(rule, ctx.runId, nodeId), rule.to, detail === undefined ? id : `${id} ${JSON.stringify(detail)}`);
+    ctx.policy.escalate(scopeOf(rule, ctx.runId, nodeId), rule.to, id, detail);
   }
 
   /**
@@ -1956,11 +1964,17 @@ export class Engine {
       policy: new PolicyEngine({
         ...this.#policyOpts,
         ...(budgetUsd === undefined ? {} : { budget: { ...this.#policyOpts.budget, runUsd: budgetUsd } }),
-        onEscalate: (rule, from, to, scope) => {
+        onEscalate: (rule, from, to, scope, detail) => {
           ctx.escalationWrites.push(
             this.#serialize(() =>
               ctx.log.append([
-                { type: "policy.escalated", payload: { rule, from, to, scope }, actor: SYSTEM_ACTOR("policy") },
+                {
+                  type: "policy.escalated",
+                  // Built conditionally: `exactOptionalPropertyTypes` is on, so an explicit
+                  // `detail: undefined` is not the same shape as an absent one.
+                  payload: { rule, from, to, scope, ...(detail === undefined ? {} : { detail }) },
+                  actor: SYSTEM_ACTOR("policy"),
+                },
               ]),
             ),
           );

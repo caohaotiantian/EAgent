@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3461 pass, 0 fail, 1 skipped** (Loom 1918 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 242 (111 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3464 pass, 0 fail, 1 skipped** (Loom 1921 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 243 (112 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -141,10 +141,14 @@ rest would break every reference to them in the journal.
   hard floor walked around. `RunContext.waveTaint` is a per-wave, TaskId-keyed overlay of what
   the wave's EXTERNAL members are about to write, derived and never durable so `ctx.tainted`
   keeps its fold-exactness. `test/run/wave-taint.test.ts`, 5 tests, 6 mutation-verified.
-- **T5 — `evolution/trajectory.ts` matches escalation rules by exact string.**
-  `e.payload.rule === "violation"` is dead: `#escalate` appends the detail, so the journaled
-  value is `violation {"capability":…}`. E8's firing site uses the same pattern, so any future
-  consumer inherits the bug. The journal should carry `rule` and `detail` as separate fields.
+- **T5 — CLOSED.** `#escalate` packed the rule id and its evidence into one string, so E6
+  arrived as `violation {"capability":{…}}` and `evolution/trajectory.ts`'s
+  `e.payload.rule === "violation"` was dead. **Seven of the eight firing sites pass a detail**,
+  so it was dead for seven of eight rules — the register only saw the one that had a consumer.
+  `policy.escalated` now carries `rule` (the bare `EscalationRuleId`) and `detail` separately,
+  through `PolicyEngine.escalate` and `onEscalate`. `test/evolution/escalation-rule-id.test.ts`
+  pins it as a SET: every journaled rule must be an id in `ESCALATION_RULES` and must contain
+  no space or brace.
 - **T6 — `reachableToolNames` does not descend into a `subgraph`**, so a subgraph node is
   classified `read_only` however irreversible its child is. Not currently a hole — each run has
   its own `PolicyEngine`, so the child re-decides at full strictness with no inherited ceiling —

@@ -5091,3 +5091,38 @@ deletes later on a correct-sounding argument.**
 *(Also caught in passing: a `.replace()` inside a JS template literal ate the escapes out of a
 regex — `[\s\S]` became `[sS]` — so an assertion silently tested a different pattern. Patches
 that write regexes now go through a heredoc, not a template literal.)*
+
+---
+
+## T5 — a shape that made every consumer wrong, and the tests that were written around it
+
+*Reversal condition: none — a rule id and its evidence are different things and the journal
+should say so. If a consumer ever wants the old packed form it can join the two fields.*
+
+`#escalate` journaled `` `${id} ${JSON.stringify(detail)}` `` as the rule, so E6 arrived as
+
+    rule = "violation {\"capability\":{\"capability\":\"danger:do\",\"nodeId\":\"act\"}}"
+
+and `evolution/trajectory.ts`'s `e.payload.rule === "violation"` never matched. Reproduced by
+running a graph whose capability the engine does not grant.
+
+**The register found the one rule that had a consumer; seven of the eight firing sites pass a
+detail.** Only `operator` does not. So the value was unmatchable for seven of eight rules, and
+the register's own second-order note — "E8's firing site uses the same pattern, so any future
+consumer inherits the bug" — was the important half. **A shape that makes the obvious consumer
+wrong is worse than a wrong consumer, because the next one is wrong too and nobody looks.**
+
+`policy.escalated` now carries `rule` and `detail` as separate fields, through
+`PolicyEngine.escalate(scope, to, rule, detail?)` and `onEscalate(rule, from, to, scope,
+detail?)`.
+
+**And the reason it survived having tests.** `test/run/escalation.test.ts` covers all ten rules,
+and every assertion was written as `startsWith(id)` plus a regex over the JSON tail — which is
+exactly how you assert against a packed string, and it passes forever while the field stays
+packed. The tests were shaped around the defect. They now read `rule` and `detail` as the two
+fields they are, and the mutation that packs them back turns **twelve** assertions red.
+
+**Tests shaped around a defect are how a defect survives having tests.** Worth holding next to
+this wave's other findings — a `pii` row that was the identity, a fixture whose two nodes were
+in different waves, a gate frame that asserted contents rather than the verdict. Every one of
+them passed, covered the code, and could not have failed.

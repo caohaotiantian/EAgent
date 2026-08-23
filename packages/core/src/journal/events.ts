@@ -569,7 +569,22 @@ export interface EventPayloads {
     readonly reasons: readonly string[];
     readonly capability?: string;
   };
-  "policy.escalated": { readonly rule: string; readonly from: Posture; readonly to: Posture; readonly scope: string };
+  /**
+   * `rule` is the bare `EscalationRuleId`. `detail` is the evidence, SEPARATE.
+   *
+   * They used to be one string — `#escalate` did `` `${id} ${JSON.stringify(detail)}` `` — so the
+   * journaled value of E6 was `violation {"capability":{...}}` and every consumer matching by
+   * rule id compared against something that could never equal it. `evolution/trajectory.ts`'s
+   * `e.payload.rule === "violation"` was dead for the whole life of the mechanism, and seven of
+   * the eight firing sites pass a detail, so it was dead for seven of the eight rules.
+   */
+  "policy.escalated": {
+    readonly rule: string;
+    readonly detail?: Record<string, unknown>;
+    readonly from: Posture;
+    readonly to: Posture;
+    readonly scope: string;
+  };
   "policy.deescalated": { readonly from: Posture; readonly to: Posture; readonly scope: string; readonly justification: string };
 
   // ── budget ───────────────────────────────────────────────────────────────
