@@ -192,6 +192,98 @@ test("calling a client that is not running is refused, not silently pending", as
 
 // ── the CLI wiring, which is what makes any of this reachable ────────────────
 
+test("THE EXAMPLE IN THE REFUSAL IS ONE THAT CAN ACTUALLY START", () => {
+  // The refusal is what an operator is holding when they write the file, and it used to suggest
+  // `{"name":"docs","command":"npx","args":[…]}` — no `envAllow`. `McpClient.start` builds the
+  // child environment from `envAllow` ALONE, so that shape has no PATH, `npx` is not found, and
+  // the operator gets `spawn npx ENOENT` from a config this very message handed them.
+  //
+  // USAGE has said so at length for a while. The refusal did not, and a reader following the
+  // error rather than the manual is exactly the reader who needs it.
+  const d = mkdtempSync(join(tmpdir(), "loom-mcpex-"));
+  try {
+    const p = join(d, "mcp.json");
+    writeFileSync(p, JSON.stringify({}));
+    let message = "";
+    try {
+      readMcpServers(p);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    assert.match(message, /envAllow/, "the suggested shape must include envAllow");
+    assert.match(message, /"PATH"/, "and name PATH, which is the one that stops `npx` resolving");
+
+    // And the shape it suggests must be a shape this parser accepts — an example that does not
+    // round-trip is worse than none.
+    // Extracted by BALANCING, not by a lazy regex. `/\{"servers":\[.*?\]\}/` stops at the first
+    // `]` — which is the `args` array's — and yields a fragment that does not parse. The example
+    // contains nested arrays by construction, so the extractor has to count.
+    const flat = message.replace(/`/g, "");
+    const from = flat.indexOf('{"servers":');
+    assert.notEqual(from, -1, `the refusal must contain a copyable example; got: ${message}`);
+    let depth = 0;
+    let to = from;
+    for (; to < flat.length; to++) {
+      const c = flat[to]!;
+      if (c === "{" || c === "[") depth++;
+      else if (c === "}" || c === "]") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    const parsed = JSON.parse(flat.slice(from, to + 1)) as { servers: unknown[] };
+    writeFileSync(p, JSON.stringify(parsed));
+    const rows = readMcpServers(p);
+    assert.equal(rows.length, 1);
+    assert.deepEqual([...(rows[0]!.envAllow ?? [])], ["PATH", "HOME"]);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("A COMMAND THAT NEEDS PATH FAILS WITH THE REASON, not just ENOENT", async () => {
+  // `spawn npx ENOENT` points an operator at their command, which is usually fine — the cause is
+  // the empty child environment. Measured through `bin/loom`: `command: "node"` with no envAllow
+  // fails ENOENT, and the identical config with an absolute path starts.
+  const d = mkdtempSync(join(tmpdir(), "loom-mcpenv-"));
+  try {
+    let message = "";
+    try {
+      await startMcp([{ name: "demo", command: "definitely-not-on-any-path-xyz" }]);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    assert.match(message, /ENOENT/, "the underlying failure is still reported");
+    assert.match(message, /envAllow/, "and the cause is named");
+    assert.match(message, /"PATH"/);
+
+    // NOT volunteered when it would be wrong. An absolute path that does not exist fails for its
+    // own reason, and blaming the environment there would send the reader somewhere useless.
+    let abs = "";
+    try {
+      await startMcp([{ name: "demo", command: "/nonexistent/bin/xyz" }]);
+    } catch (e) {
+      abs = (e as Error).message;
+    }
+    assert.match(abs, /ENOENT/);
+    assert.doesNotMatch(abs, /envAllow/, "an absolute command is not a PATH problem");
+
+    // Nor when the server ALREADY lists PATH — then the command really is missing, and telling
+    // the operator to add what they have added is the kind of advice that teaches people to stop
+    // reading errors.
+    let listed = "";
+    try {
+      await startMcp([{ name: "demo", command: "definitely-not-on-any-path-xyz", envAllow: ["PATH"] }]);
+    } catch (e) {
+      listed = (e as Error).message;
+    }
+    assert.match(listed, /ENOENT/);
+    assert.doesNotMatch(listed, /envAllow/, "PATH is already listed — the hint would be wrong");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("readMcpServers REFUSES A MALFORMED FILE rather than booting unconfigured", () => {
   const d = mkdtempSync(join(tmpdir(), "loom-mcpcfg-"));
   try {

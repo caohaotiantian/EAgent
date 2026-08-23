@@ -28,7 +28,7 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3500 pass, 0 fail, 1 skipped** (Loom 1957 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Tests | **3502 pass, 0 fail, 1 skipped** (Loom 1959 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
 | Test files | 252 (121 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
@@ -37,6 +37,11 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
+
+**AND THE MCP TOOL PATH**, which is the tool-extensibility story and had never been driven: a
+minimal stdio server, `--mcp-file`, `mcp__demo__shout` named from a graph, compiled, gated
+(every MCP tool is irreversible), approved, executed — `HELLO FROM A GRAPH`. What it cost to get
+there is the finding: see the journal.
 
 **AND SO WAS THE HTTP OVERSIGHT PATH**, through `loom serve --identity-file --token`: submit a
 run over `POST /runs`, read the gate off `GET /gates` with its approvers and payload, and answer

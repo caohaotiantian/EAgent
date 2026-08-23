@@ -1362,7 +1362,16 @@ export function readMcpServers(file: string): readonly McpClientOptions[] {
   };
   const rows = (parsed as { servers?: unknown } | null)?.servers;
   if (!Array.isArray(rows) || rows.length === 0) {
-    refuse(`must be {"servers":[{"name":"docs","command":"npx","args":["-y","@scope/server"]}]} with at least one server`);
+    // `envAllow` IS IN THE EXAMPLE because the example is what gets copied. Without it the
+    // child environment is empty, `npx` is not on a PATH that does not exist, and the operator
+    // gets `spawn npx ENOENT` — from a config shape this message handed them. USAGE has said so
+    // at length for a while; the refusal did not, and the refusal is the one a reader is
+    // holding when they write the file.
+    refuse(
+      `must be {"servers":[{"name":"docs","command":"npx","args":["-y","@scope/server"],` +
+        `"envAllow":["PATH","HOME"]}]} with at least one server. The child environment is EMPTY ` +
+        `unless envAllow names variables, so a command found via PATH needs "PATH" listed.`,
+    );
   }
   const seen = new Set<string>();
   return rows.map((raw, i): McpClientOptions => {
@@ -1417,9 +1426,22 @@ export async function startMcp(servers: readonly McpClientOptions[]): Promise<re
     } catch (e) {
       for (const c of clients) c.close();
       client.close();
+      // ENOENT WITH NO `PATH` IS ALMOST ALWAYS THE ENV, NOT THE COMMAND — and "spawn npx
+      // ENOENT" points an operator at their command, which is usually fine. The child gets only
+      // what `envAllow` names (`McpClient.start`), so a command resolved through PATH cannot be
+      // found unless PATH is listed. Measured on the documented example: `command: "node"` with
+      // no envAllow fails ENOENT, and the same config with an absolute path starts.
+      const why = (e as Error).message;
+      const missingPath =
+        /ENOENT/.test(why) && !(opts.envAllow ?? []).includes("PATH") && !opts.command.includes("/");
       throw err.unavailable(
         CODES.E_TOOL_SOURCE_UNAVAILABLE,
-        `mcp server "${opts.name}" failed to start: ${(e as Error).message}`,
+        `mcp server "${opts.name}" failed to start: ${why}` +
+          (missingPath
+            ? `. The child environment is EMPTY unless envAllow names variables, and this server does ` +
+              `not list "PATH" — so "${opts.command}" cannot be found. Add "envAllow":["PATH"] to it, ` +
+              `or give an absolute command path.`
+            : ""),
       );
     }
     clients.push(client);

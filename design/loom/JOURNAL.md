@@ -5710,3 +5710,46 @@ without the qualifier that makes it true. Dropping it now fails two tests.
 
 Both tables are now probed-or-excused in full: ten gap rows, eight works rows, eighteen probes.
 Twelve mutations across the two iterations, all red.
+
+---
+
+## The MCP path works, and the error that greets a new operator named the wrong thing
+
+*Reversal condition: if the child environment ever stops being an allowlist — if PATH is
+inherited by default — both the example and the hint go, and so does the security argument they
+rest on.*
+
+Drove the tool-extensibility story end to end for the first time: a minimal stdio MCP server,
+`--mcp-file`, a graph naming `mcp__demo__shout`, compiled `ok`, gated (every MCP tool is
+irreversible, so the run parks), approved, executed. `HELLO FROM A GRAPH`. **The extension path
+is real.**
+
+Getting there cost two attempts, and the first failure is the finding:
+
+    loom serve --mcp-file mcp.json    E_TOOL_SOURCE_UNAVAILABLE: … spawn node ENOENT
+
+`node` is on my PATH. `McpClient.start` builds the child environment from `envAllow` ALONE — a
+deliberate allowlist, the same argument `proc.exec`'s `execEnvAllow` makes — so there is no PATH
+and no command can be resolved through one. USAGE says this at length and even predicts the exact
+string `"spawn npx ENOENT"`. Somebody had already been here.
+
+**What USAGE says is not what an operator reads.** Two places contradicted it:
+
+  - `readMcpServers`' refusal suggested `{"name":"docs","command":"npx","args":[…]}` — no
+    `envAllow`. That is the shape a reader copies, and it cannot start. **The refusal is what
+    somebody is holding when they write the file; the manual is what they read afterwards, if at
+    all.**
+  - The failure itself said `spawn node ENOENT` and nothing more, which points at the command.
+    The command was fine.
+
+Both fixed: the example now carries `envAllow` and says why, and the ENOENT is enriched with the
+cause — but **only when the hint would be right**. An absolute command that is missing is not a
+PATH problem, and neither is a server that already lists PATH; volunteering the advice there
+teaches people to stop reading errors. Both negatives are asserted, and both were undistinguished
+until a mutation said so.
+
+**And the test's own extractor was wrong in a way the test existed to prevent.** It pulls the
+suggested config out of the refusal and re-parses it, to prove the example round-trips — with
+`/\{"servers":\[.*?\]\}/`, which stops at the first `]`. That is the `args` array's. The example
+contains nested arrays by construction, so the extractor has to count brackets, and a lazy regex
+over a nested shape is the same class of mistake as the doc it was checking.
