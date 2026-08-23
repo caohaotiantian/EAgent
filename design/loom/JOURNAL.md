@@ -5641,3 +5641,36 @@ present. Mutation-tested in both directions.
 unprobed ones look checked. The row I broke was the only one in that table without a probe, and
 that is not a coincidence — it is where the writing was loosest, which is why I reached for a
 verb name without running it. **The rows a gate skips are the rows most likely to be wrong.**
+
+---
+
+## The rows a gate skips are the rows most likely to be wrong
+
+*Reversal condition: none. If a row genuinely makes no machine-checkable claim, `EXCUSED` is
+where it goes, with the reason — the list exists to be used, not to stay empty.*
+
+Last iteration's finding had a specific shape worth acting on rather than only recording: I built
+a gate over the README's gaps table with six probes for a ten-row table, and the row that then
+went wrong was one of the four unprobed. That is not chance. **The unprobed rows are the ones
+where the writing was loosest, which is exactly where a wrong claim comes from.**
+
+So all four were verified — by running, not by reading — and probed:
+
+  - **`retry` on a function or evaluator node is inert.** Measured: a body with
+    `retry: { maxAttempts: 3 }` is called ONCE, the task fails `E_INTERNAL`, no backoff. The
+    mechanism is the class table — only `exhausted`, `unavailable` and `timeout` are retryable —
+    and the probe pins both that set and `if (!error.retryable) return undefined`.
+  - **`Math.random()` is unrecorded.** `Math` is in the safe globals, `Date` is stripped, and the
+    `random` effect KIND is declared in the vocabulary while nothing appends one. The probe pins
+    all three, including the last — if a random effect is ever journaled, the row is wrong.
+  - **Compensation edges traverse nothing.** `case "error": case "compensation": break;`, pinned
+    verbatim including the shared arm, so separating them fails the gate.
+  - **`onBudgetExhausted: "gate"/"degrade"` are compile errors.** `GRAPH003_BUDGET_ACTION_UNSUPPORTED`.
+
+And the structural fix, modelled on `audit-coverage.test.ts`: **every row is now probed or
+excused in writing, and nothing is both.** The excuse list is empty today and is the honest place
+for a row that genuinely makes no checkable claim. A stale excuse fails; a short one fails; a row
+nobody listed fails.
+
+**Six mutations, all red** — including a row added with neither probe nor excuse, and the row
+scan finding nothing, which is the failure that would make this whole file decorative.
