@@ -156,6 +156,7 @@ against a memory of having fixed it:
 | **D5** `loom compile` said `ok` for a resource that does not exist | the workspace resolver stopped fabricating pins; `GRAPH015` fires; `NAME_ONLY_KINDS` holds the two key kinds | `resources/unresolved-refs.test.ts`, 8 tests, 7 mutation-verified |
 | **D6** fallback chains were declared and unwired | `route.fallback` builds a synthetic `chain(key)` adapter (`cli.ts`) | the `CHAIN` suite in `cli.test.ts` |
 | **D7** error edges ignored their `codes` | `#errorEdges` filters by `e.codes` (`engine.ts`) | `run/error-edge-codes.test.ts` |
+| **wire codes** the server sent `E_REQUEST_TIMEOUT`, which `errors.ts` never declared, and answered an unknown path with `E_RUN_NOT_FOUND` | both declared; `http.ts` sends `CODES.*` at all five sites, never a literal | "THE OTHER DIRECTION: EVERY CODE `src/` USES IS A CODE `errors.ts` DECLARES" in `docs-drift.test.ts`; "AN UNKNOWN PATH SAYS SO" in `server/http.test.ts` |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until
@@ -339,6 +340,23 @@ node --test packages/core/test/<file>    # one suite
 node scripts/check-surface.mjs --write   # re-pin the public surface, then COMMIT surface.json
 npm run build:binary                     # bin/loom; fails if any node_modules input appears
 ```
+
+**The gate and the install were both verified from a CLEAN CLONE**, which is the condition CI
+runs in and the one `--force` exists for — no `dist/`, no `bin/loom`, no `node_modules`:
+
+```bash
+git clone -q --branch loom --single-branch . /tmp/cc && cd /tmp/cc
+npm ci && npm run check          # 3505 pass, 0 fail, both guards ok
+npm install && npm run build:binary   # the README's literal verb; bin/loom, 843 KB bundle
+```
+
+Three things this settles that the working tree cannot. **No gate input is gitignored** — only
+tracked files exist in a clone, so a green `check` there is the proof, and it is why no test
+needs to assert it. **`npm ci` and `npm install` both work**, though npm reports esbuild's
+postinstall blocked under a scripts policy; that is harmless, because modern esbuild ships its
+platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than fetching it.
+And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
+`200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
 **If several agents or shells are working at once, do not run `npm run check`, `npm run build`
 or a bare `tsc -b`** — concurrent `tsc -b` races on emit, and it races harder now that both are
@@ -594,6 +612,12 @@ packages/core/src/run/engine.ts` did that and also deleted the fix, which was no
 committed. `cp` the file aside and `cp` it back. The reproduction is worth doing — it is what
 turns "this looks wrong" into `unfenced: task.retry_scheduled+task.ready` — so make it cheap
 rather than skipping it.
+**This paragraph existed and the trap still fired** — a later mutation sweep put `git checkout
+--` in a shell `trap`, which restored the file to HEAD and silently deleted the fix under test.
+The reliable habit is stronger than `cp`: **mutate only a COMMITTED tree.** Then restore is
+total, and `git status` proves it happened. A `cp` restore also runs on the error path, where
+nobody reads its output. The tell that it went wrong is a mutation that reports NOT MATCHED on
+a second run — always assert the mutation matched, or a vanished fix reads as a passing guard.
 
 **A green test can be green for a reason it does not claim.** The first subgraph test passed
 because `skeleton.ts`'s resolver has no `subgraph()` method, so the child spec was never

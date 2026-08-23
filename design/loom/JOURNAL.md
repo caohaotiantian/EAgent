@@ -5862,3 +5862,46 @@ had never applied — a backslash-escaping mismatch meant the replacement was a 
 harness had no did-it-match check on that arm. **A mutation that does not apply looks exactly
 like a guard that does not fire**, which is the second time this session that has cost a wrong
 conclusion until checked.
+
+---
+
+## A code the wire carries must be one the vocabulary declares
+
+Found from the outside, which is why it had survived: running the README's own quickstart
+against a binary built from a clean clone, `GET /api/runs` answered
+
+```json
+{"error":{"code":"E_RUN_NOT_FOUND","message":"no route for GET /api/runs"}}
+```
+
+Two defects in one body. The message states a routing fact and the code states a different,
+false one — and a client can only act on the code. Worse, the neighbouring 504 sends
+`E_REQUEST_TIMEOUT`, which `errors.ts` **has never declared**. It reaches clients, two tests
+assert it, and it was invisible to every gate built to prevent exactly this: "every declared
+code is named by some design document" only iterates declared codes, `NEVER_RAISED` only
+iterates declared codes, and the boundary taxonomy is written from the same list. Three gates
+around one relation, all pointed the same way.
+
+`run/delivery.ts` had already noticed — "Not a new `E_REQUEST_TIMEOUT`: `ControlPlane.#withDeadline`
+writes that as a bare wire code … That reconciliation is not this change's to own either." A
+comment that names a defect and assigns it to nobody is how a defect acquires tenure. It is now
+false and rewritten.
+
+**The decision is which direction to gate, not which code to add.** Adding the two codes fixes
+today's instance; the class is that `send(res, …)` takes a `string`, so any literal at all can
+leave the process. The gate is the reverse iteration — every `E_*` in `src/` must be in `CODES`
+— and written before the fix it went red naming `E_REQUEST_TIMEOUT` **and nothing else**, which
+is simultaneously the reproduction and the proof that the instance was the only one.
+
+**Reversal condition:** if `send`'s signature is ever narrowed to `keyof typeof CODES`, the
+scanner becomes redundant and should be deleted rather than kept as a second opinion — the type
+checker would be strictly stronger. Until then it is the only thing standing between a typo'd
+literal and a client.
+
+**What made `E_ROUTE_NOT_FOUND` worth a code rather than a comment:** the two facts want
+different reactions. An absent run invites the caller to try another id; an absent endpoint means
+this deployment does not implement the call, which is version skew and no id will help. The
+objection worth answering is disclosure — and it does not survive contact, because the message
+already printed the path either way, and routing is decided after the bearer check, so an
+unauthenticated caller is told 401 for a path that exists and one that does not, identically.
+That last property is now pinned by the test rather than asserted here.
