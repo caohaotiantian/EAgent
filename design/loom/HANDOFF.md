@@ -159,6 +159,8 @@ against a memory of having fixed it:
 | **wire codes** the server sent `E_REQUEST_TIMEOUT`, which `errors.ts` never declared, and answered an unknown path with `E_RUN_NOT_FOUND` | both declared; `http.ts` sends `CODES.*` at all five sites, never a literal | "THE OTHER DIRECTION: EVERY CODE `src/` USES IS A CODE `errors.ts` DECLARES" in `docs-drift.test.ts`; "AN UNKNOWN PATH SAYS SO" in `server/http.test.ts` |
 | **event vocabulary** a key added to `EventPayloads` and forgotten in `EVENT_TYPES` was appendable and exempt from four gates at once | a compiler-enforced `Exclude<…>` exhaustiveness check, which names the absent keys | "EVENT_TYPES matches the EventPayloads key set" in `journal/store.test.ts` — it fails the BUILD, not the run |
 | **retried client errors** every 4xx except 429/401/403/400/422 was classed `unavailable`, so `request()` re-sent a permanent misconfiguration to the attempt cap | 4xx → `E_PROVIDER_BAD_REQUEST` (validation, not retryable), 408/425 excepted | "A 4xx IS NOT RETRIED" in `providers/http.test.ts` — it counts fetches, because the retry loop reads `retryable` and the count is what that field is FOR |
+| **a node's `policy.budget.costUsd`** bound nothing at run time, while D2 promised it did and `GRAPH009` told authors to add it | `#runAgent` checks the node ceiling against task-local `usage` before reserving | the three tests under "the node's own ceiling" in `run/budget-declared.test.ts` |
+| **`budget.exhausted` could not be written** when no `runUsd` was set — `limitUsd` was `spentUsd + remainingUsd`, and `remainingUsd` is `Infinity` | the row carries the ceiling actually exceeded, read off the error | "A NODE CEILING WITH NO RUN BUDGET JOURNALS A FINITE LIMIT" — same file |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until
@@ -287,6 +289,13 @@ for reasons, not forgotten.
   `loom rewind` is not just a verb: `atSeq` has to be discoverable, and no verb prints journal
   seqs today — `audit` prints violations, `trace` prints spans. That is the design question
   attached to it, and it is why this is recorded rather than built.
+
+- **A `subgraph` node's `policy.budget.costUsd` still binds nothing, and that is structural.**
+  The agent loop now enforces its node ceiling, but a subgraph's cost is settled from
+  `childP.usage.costUsd` AFTER the child run has finished, so there is no point at which a cap
+  could refuse the spend rather than report it. Enforcing it means giving the child its own
+  ceiling at submit time — a real design step, not a missing line. `GRAPH009` still counts these
+  budgets in its static sum, which is correct arithmetic about a number nothing enforces.
 
 - **`AssembleInput.retrieved` is never populated** — nothing retrieves. `turns` is partly
   addressed (`boundTurns` handles the transcript; `assembleContext` still never receives it).

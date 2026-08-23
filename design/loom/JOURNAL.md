@@ -6013,3 +6013,48 @@ root; OpenAI appends `/chat/completions` to a base that already ends in `/v1`. E
 vendor, so a base correct for one 404s on the other, and changing either would break every
 working deployment. It is documented in the one place an operator is looking when it bites — the
 404 message — rather than in a docstring read while writing the config that was still right.
+
+---
+
+## A budget nothing read, found by testing a guarantee the system advertises about itself
+
+The previous wave left a thread: running with no `prices` configured, `loom` warns that every
+call is journaled as costing 0 and therefore `policy.budget.costUsd` and `--budget` "cannot
+bind". That sentence is a claim that they DO bind once prices exist. Configuring prices — $1 per
+token, so every figure is exact — turned the claim into a measurement, and it split in two:
+
+    graph policy.budget.costUsd 1.0  → failed E_BUDGET_EXHAUSTED before the call
+    node  policy.budget.costUsd 1.0  → succeeded, spent $16
+
+**The scope string was the tell, and it reads like enforcement.** The run-level failure reports
+`"scope": "node:ask"` beside `"limit": 1` — but the scope is a LABEL passed to
+`PolicyEngine.reserve`, which consults `budget.runUsd` and nothing else. Per-node plumbing that
+carries a node's NAME and not its ceiling.
+
+**What makes this worse than an unread field is that the compiler argues for it.**
+`GRAPH009_UNBOUNDED_NODE` instructs the author to add `policy.budget.costUsd` to a spending node,
+and `GRAPH009_BUDGET_OVERCOMMIT` refuses a graph whose per-node numbers do not sum under the
+graph budget. Asked for, arithmetic checked, ignored. A reader has three reasons to believe in a
+cap that does not exist.
+
+**Implemented rather than warned about, and the distinction is the decision.** Twice this repo
+has correctly met a designed-but-unbuilt feature with a compile diagnostic —
+`GRAPH003_BUDGET_ACTION_UNSUPPORTED` for `onBudgetExhausted`, `GRAPH008_JOIN_TIMEOUT_INERT` for
+join deadlines — and that is right when the SEMANTICS are undecided. Here they were not: D2 says
+an agent node is "bounded by `maxTurns` AND node budget, whichever binds first". Implementing a
+sentence the design already chose is closing drift, not inventing policy.
+
+**Reversal condition:** the check reads task-local `usage`, so a re-run task gets its budget
+again. If per-node spend is ever required to accumulate ACROSS attempts, that is durable state
+driving a refusal and invariant 2 applies — it needs a fold, and this check moves into
+`PolicyEngine` with a journal behind it. Do not add a `Map` in memory and call it done; that is
+the exact shape of the four fields this repo has already had to retract.
+
+**And the ceiling immediately found a crash under it.** `budget.exhausted` wrote `limitUsd` as
+`spentUsd + remainingUsd`, and `remainingUsd` is `Infinity` when no `runUsd` was set, which
+`canonicalize` refuses on the durable write path — so the first run to hit a node ceiling with no
+run budget failed `E_INTERNAL: non-finite number Infinity at limitUsd` instead of reporting the
+budget failure it had. **It was unreachable for a reason that was itself the bug**: a reservation
+cannot exceed a limit that does not exist, so the only thing that could throw there never threw
+in that configuration. Every new enforcement point is a new reachability argument for the code
+downstream of it, and that code was written when the argument was different.
