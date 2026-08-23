@@ -400,6 +400,16 @@ platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than 
 And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
 `200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
+**The USAGE text was audited claim by claim, and the fs jail holds.** Driven through the binary:
+`fs.read`/`fs.write` on `.loom/journal.db` are both denied ("is inside … which this sandbox
+denies"), a custom `--data-dir` inside the workspace is denied the same way — so "wherever it is
+put" is true — and `../../../etc/hosts` is refused as escaping the sandbox root. `loom gates
+<runId>` lists open gates as JSON. **One claim was false and is fixed**: `--allow-exec` said
+"every call GATES … inside an agent turn it is refused outright", which describes a TOOL node and
+generalises wrongly. An agent gates ONCE at the floor over every tool it can reach, and one
+approval then covers every in-turn call — measured, one `gate.raised` and one `gate.decided`
+against TWO `proc.exec` executions.
+
 **`--allow-exec` is verified and holds exactly as documented**, driven through the binary: the
 tool is unregistered without the flag, every call GATES because `proc.exec` is irreversible, and
 the allowlist is matched by NAME — `echo` runs while `/bin/echo` and `echoes` are both refused,

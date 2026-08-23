@@ -6568,3 +6568,42 @@ unanchored, the slice runs backwards and comes out empty, which reads as "the te
 mention PATH" when it means "the window closed before it opened". That is the second time this
 session a usage-text window has overrun its intended bounds, and both times the failure LOOKED
 like a real finding.
+
+---
+
+## The sentence described a tool node and the reader applied it to an agent
+
+Auditing the USAGE text claim by claim, after self-contradiction turned up one falsehood last
+wave. Most of it holds and the fs jail holds firmly: the data directory is denied to `fs.read`
+and `fs.write` wherever it is put, including a custom `--data-dir` inside the workspace, and a
+`../../../` traversal is refused as escaping the root.
+
+One claim was false, and it is a containment claim. `--allow-exec` said "proc.exec is
+irreversible, so the graph must also hold proc:exec and **every call GATES**. A tool node suspends
+for a human; inside an agent turn it is refused outright."
+
+Both halves are true of a TOOL node and neither is true of an agent. An agent node gates ONCE,
+before its first turn, at the floor computed over every tool it can REACH — and every in-turn call
+afterwards runs under that one approval. Measured against a provider scripted to ask for
+`proc.exec` on two consecutive turns: one `gate.raised`, one `gate.decided`, two executions.
+
+**The behaviour is right; the sentence generalised.** `#invokeTool`'s `nodeApproved` arm is
+deliberate and says why in its own comment — re-deciding "would refuse the very action that
+approval authorized" — and a human approving an agent is approving something whose posture floor
+already accounts for everything it can reach. Invariant 5 is what makes that defensible.
+
+**What the reader loses is the quantifier.** "Every call gates" promises one question per
+irreversible execution; the truth is one question per agent, bounded only by `maxTurns`. An
+operator sizing the blast radius of an approval gets a different answer from the sentence than
+from the system, and the sentence is the one they read.
+
+**And the arm nobody tested was the permissive one.** `escalation.test.ts` pins the REFUSAL — an
+in-turn call that would gate with no approval — because that is the arm that looks dangerous.
+`nodeApproved` appeared in no test at all, so the arm that actually lets irreversible work happen
+was the unpinned one. **A guard's dangerous-looking branch attracts the tests; the branch that
+permits is where the surprise lives**, and it is the one an operator is relying on when they
+click approve.
+
+**Reversal condition:** if per-call approval inside a turn ever becomes possible — it needs
+turn-level durability the engine does not have, since the transcript lives in memory — this text
+and this test both change together.
