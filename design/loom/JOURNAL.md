@@ -6422,3 +6422,42 @@ the rig could not page under any circumstances. The assertion "nobody was paged"
 harness with no telephone. It now declares a real delivery block and drives the ORIGINAL run
 through the same channel first, asserting that one DOES page. **A negative assertion needs its
 positive control**, and the cost of skipping it is a test that will never fail.
+
+---
+
+## The subgraph path works, and the trace of it did not say so
+
+`subgraph` was the one node type this branch had never driven. It works: a parent whose node
+names `subgraph/child@stable` runs the child, the child's tool writes its file, the child's output
+channel maps back through `outputs`, the child runs under a DERIVED id —
+`<parent>~call@root#0`, which is invariant 3 holding across a run boundary — and the parent
+replays `match: true`. A comment in `cli.ts` records that this ONCE failed through the binary,
+because the resolver was built after the engine and so never reached it; that fix holds.
+
+What did not hold is the account the trace gives of it:
+
+    loom.task
+      loom.policy
+      loom.tool          ← a whole child graph
+      loom.state.reduce
+
+D9.1 fixes the span taxonomy at eight names and registers a generic effect span as
+designed-not-built, so every effect folds into the model or tool span, and the fold sends
+`subgraph` to the tool's name. **The fold is documented; calling a child run a tool is what the documentation does not
+say.** The `effect.kind` attribute was on the span the whole time — the renderer simply never
+printed it.
+
+**The rendering half is a fix and the rest is a decision, and separating them is the point.**
+Printing an attribute the span already carries costs nothing and takes no position. Adding a
+ninth span name for it, or a link from the parent span to the child run, changes a taxonomy the
+design fixed on purpose — so it goes to §3 with its question written out rather than being
+settled by whoever happened to be looking at the renderer. The second half is the one that
+matters more: `subgraph.started` and `subgraph.completed` carry the child run id, `spans.ts`
+builds no span from either, and a trace therefore offers no route to the child's own trace.
+
+**Three of the last four findings have been in what a tool SAYS rather than what the system
+DOES** — an audit reason that was false, a span tree that was a list, a child graph labelled a
+tool. The mechanisms underneath were all correct. That is worth noticing about where the
+remaining defects live: the engine has been driven hard for many waves and the things that
+report on it have not, and a report is exactly where being wrong is cheapest to ship and most
+expensive to trust.
