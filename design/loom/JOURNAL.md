@@ -5492,3 +5492,36 @@ a swallowed one is still found on its own pass. It makes the gate FLAG A CORRECT
 call whose first argument contains such a regex has its comma counted at depth 1 and reads as
 bare. A gate that cries wolf is a gate somebody switches off. The test asserts the false positive
 now, and the mutation that removes the regex handling finally goes red.
+
+---
+
+## "Every member of X" is vacuous when X is empty
+
+*Reversal condition: none. If a table stops being iterated by any claim it can leave the list;
+the floors cost nothing and a floor under an unused table is only noise.*
+
+Sweeping for assertions that pass by construction: **zero** tautological equalities
+(`assert.equal(a, a)`), **zero** tests with no assertion at all across 1882 `test()` blocks, and
+one `assert.ok(true)` that is a commented "reached at all" marker after real assertions. Clean.
+
+The shape those miss is the one the previous two iterations both hit: a loop whose collection can
+be empty. 80 tests have all their assertions inside a loop; most iterate a literal array or a
+counted range and cannot be empty. Narrowing to loops over a collection exported from `src/`
+leaves five, of which four had no non-empty floor — and one of those four was a false positive
+(the iterable was a local literal; my scan matched a `src` identifier on the assertion line, not
+on the loop's).
+
+Three real ones: `ESCALATION_RULES` twice and `CODES` once. Each asserts something true of every
+member and would pass if the table were empty.
+
+**Floored once rather than per test.** A floor in each of the three would have to be repeated in
+every "every X" test written afterwards, and a scan looking for `.length >=` inside each test
+would be a heuristic. `registries-are-populated.test.ts` states the fact instead, over the nine
+tables such claims are made about. They are FLOORS and not counts — growth is ordinary and must
+not cost a test edit; collapse is the failure.
+
+**And the gate repeated the exact mistake it exists to catch.** Its self-check asserted an inline
+COPY of the floor comparison, so inverting the real one to `n >= 0` left it green. The comparison
+is a named function now and the self-check calls it. **Asserting a restatement of the logic is
+not asserting the logic** — which is what the whole file is about, one level up. Third time this
+wave that the check and the checked have had to be made the same object.

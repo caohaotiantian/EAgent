@@ -48,6 +48,10 @@ const e = (id: string): EdgeId => id as EdgeId;
 
 test("EVERY RULE ONLY TIGHTENS — no rule can lower a posture", () => {
   // The property that makes the table safe to extend: a new rule is at worst noise.
+  //
+  // Non-vacuous because `registries-are-populated.test.ts` floors ESCALATION_RULES. An "every
+  // member" claim over an empty table passes while asserting nothing, and this repo has shipped
+  // that shape twice.
   for (const rule of Object.values(ESCALATION_RULES)) {
     assert.ok(postureRank(rule.to) > postureRank("out"), `${rule.id} escalates to "${rule.to}"`);
   }

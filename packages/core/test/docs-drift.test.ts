@@ -1683,6 +1683,7 @@ test("GateDelivery.deliver still raises exactly ONE code", () => {
 // ── D7.7: the escalation table ───────────────────────────────────────────────
 
 test("every rule in the code appears in the design's escalation table", () => {
+  // Non-vacuous because `registries-are-populated.test.ts` floors ESCALATION_RULES.
   const doc = design("04-OVERSIGHT.md");
   for (const rule of Object.values(ESCALATION_RULES)) {
     assert.ok(

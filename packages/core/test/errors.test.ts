@@ -70,6 +70,7 @@ test("every canonical code is unique", () => {
 });
 
 test("code keys and values match, so a typo cannot alias two codes", () => {
+  // Non-vacuous because `registries-are-populated.test.ts` floors CODES.
   for (const [key, value] of Object.entries(CODES)) assert.equal(key, value);
 });
 

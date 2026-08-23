@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3492 pass, 0 fail, 1 skipped** (Loom 1949 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 250 (119 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3494 pass, 0 fail, 1 skipped** (Loom 1951 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 251 (120 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -37,6 +37,12 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
+
+**An eighth sweep — assertions that pass by construction — was mostly clean.** Zero tautological
+equalities, zero tests with no assertion (1882 scanned), one commented `assert.ok(true)` marker.
+What it did find: three "every member of X" claims iterating a table exported from `src/` with no
+floor under it, so each would pass if the table emptied. `registries-are-populated.test.ts` floors
+the nine such tables once, rather than a floor per test and per future test.
 
 **A seventh sweep turned the method on the SUITE.** 11 of 347 `assert.throws`/`rejects` calls
 had no second argument, so each accepted any error — including one from the code being broken
