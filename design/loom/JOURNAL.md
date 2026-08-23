@@ -5974,3 +5974,42 @@ full set is named: `as const satisfies readonly …[]` — one occurrence, fixed
 a const object via `keyof typeof` — two, `Code` and `BuiltinName`, both now checked; plain
 `as const` arrays — one, `BASE_ENV_ALLOW`, a list that mirrors no type. Further registry-drift
 hunting should not be expected to pay.
+
+---
+
+## The provider path, driven for real — and the failure path was the interesting half
+
+The bar says *point it at a real provider*, and that row had carried a ✅ earned by unit tests
+against stubbed adapters. This wave earned it differently: a local `node:http` server speaking
+each vendor's wire format, an agent-node graph, and `bin/loom run --models-file`. Both paths
+work. The Anthropic path with a key, and the `openai` path with a `baseUrl` and NO key at all —
+which is a designed configuration, not a workaround, and its refusal is deliberately narrow: a
+keyless adapter is legal only for `openai` with a `baseUrl`, deferring to `OpenAIAdapter`'s own
+rule, and the refusal message tells an anthropic user exactly that.
+
+Two things worth keeping from the working half. The streamed text arrives as the run's output and
+the token counts are the ones the server sent, so the whole chain is real rather than defaulted.
+And a run with no `prices` for its routes warns, unprompted, that every call is journaled as
+costing 0 and therefore `policy.budget.costUsd` and `--budget` cannot bind — a system saying out
+loud that one of its own guarantees is switched off by the operator's configuration.
+
+**The defect was on the failure path, which is the half a working demo never shows.**
+`normalizeError` mapped the statuses somebody had thought about and let the rest fall through to
+`E_PROVIDER_TRANSPORT` — class `unavailable`, therefore retryable, and `request()` retries on
+that field alone. So every unlisted 4xx was treated as weather. Measured, not reasoned: an
+`openai` adapter whose `baseUrl` omitted `/v1` sent THREE identical POSTs to a server that 404s
+and reported `"retryable": true`.
+
+**A fallthrough is a decision about every case nobody enumerated**, and the enumerated ones look
+so deliberate that the residue reads as considered. It was not: 404, 405, 410, 413 and 415 are
+all statements about the request.
+
+**Reversal condition:** if a provider ever appears whose transient failures use an unlisted 4xx,
+this branch is where to make the exception — beside 408 and 425, with the vendor named. Do not
+widen it back to "all 4xx are weather".
+
+**The `/v1` asymmetry is real and is NOT a bug.** Anthropic appends `/v1/messages` to a host
+root; OpenAI appends `/chat/completions` to a base that already ends in `/v1`. Each matches its
+vendor, so a base correct for one 404s on the other, and changing either would break every
+working deployment. It is documented in the one place an operator is looking when it bites — the
+404 message — rather than in a docstring read while writing the config that was still right.

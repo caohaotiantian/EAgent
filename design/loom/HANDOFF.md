@@ -119,7 +119,7 @@ and have it run, with a human gate that works and a replay that reproduces.*
 |---|---|
 | install it | ✅ `npm run build:binary` → a single `bin/loom`, 0 third-party modules |
 | write a graph | ✅ `loom compile` diagnoses ordinary authoring mistakes instead of crashing |
-| point it at a real provider | ✅ `--models-file`; Anthropic + OpenAI over `fetch`+SSE. A run served by the mock now says so |
+| point it at a real provider | ✅ `--models-file`; Anthropic + OpenAI over `fetch`+SSE. A run served by the mock now says so. **Driven end to end through `bin/loom` against a local server speaking each vendor's wire format** — both the keyed Anthropic path and the documented keyless local `openai` one; the streamed text arrives as the run's output and the token counts are the ones the server sent |
 | have it run | ✅ all eight node types execute; a run that finishes reports what it wrote |
 | a human gate that works | ✅ raise → deliver → decide → resume, across a restart; an approval binds the graph the human was shown |
 | a replay that reproduces | ✅ including runs a human de-escalated — `replayRun` serves recorded `policy.deescalated` events like it serves gate decisions, rekeyed onto the shadow runId |
@@ -158,6 +158,7 @@ against a memory of having fixed it:
 | **D7** error edges ignored their `codes` | `#errorEdges` filters by `e.codes` (`engine.ts`) | `run/error-edge-codes.test.ts` |
 | **wire codes** the server sent `E_REQUEST_TIMEOUT`, which `errors.ts` never declared, and answered an unknown path with `E_RUN_NOT_FOUND` | both declared; `http.ts` sends `CODES.*` at all five sites, never a literal | "THE OTHER DIRECTION: EVERY CODE `src/` USES IS A CODE `errors.ts` DECLARES" in `docs-drift.test.ts`; "AN UNKNOWN PATH SAYS SO" in `server/http.test.ts` |
 | **event vocabulary** a key added to `EventPayloads` and forgotten in `EVENT_TYPES` was appendable and exempt from four gates at once | a compiler-enforced `Exclude<…>` exhaustiveness check, which names the absent keys | "EVENT_TYPES matches the EventPayloads key set" in `journal/store.test.ts` — it fails the BUILD, not the run |
+| **retried client errors** every 4xx except 429/401/403/400/422 was classed `unavailable`, so `request()` re-sent a permanent misconfiguration to the attempt cap | 4xx → `E_PROVIDER_BAD_REQUEST` (validation, not retryable), 408/425 excepted | "A 4xx IS NOT RETRIED" in `providers/http.test.ts` — it counts fetches, because the retry loop reads `retryable` and the count is what that field is FOR |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until
