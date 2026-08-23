@@ -163,6 +163,7 @@ against a memory of having fixed it:
 | **`budget.exhausted` could not be written** when no `runUsd` was set — `limitUsd` was `spentUsd + remainingUsd`, and `remainingUsd` is `Infinity` | the row carries the ceiling actually exceeded, read off the error | "A NODE CEILING WITH NO RUN BUDGET JOURNALS A FINITE LIMIT" — same file |
 | **`FunctionNode.cpuBound`** promised a worker thread in TWO design documents and was read by nothing; two such nodes ran exactly serially (1.997×) | `GRAPH019_CPUBOUND_NO_EFFECT` warns, and both documents now say inline | "GRAPH019: cpuBound is declared, read by nothing" in `graph/compile.test.ts` |
 | **a gate raised by `loom run` never escalated** — the `serve` sweeper held no chain for it and expired it at the first deadline, so `onTimeout: "escalate"` behaved as `fail` | the gate clock arms foreign gates before sweeping, memoised on `headSeq` | "A GATE THIS PROCESS DID NOT RAISE STILL ESCALATES" in `cli/cli.test.ts` |
+| **`loom audit` explained a skipped rule with a false reason** — three rules share the `if (completed)` precondition and only the gate one had its reason written, so on a failed run `task.leased-is-resolved` claimed "no event this rule constrains appears in this journal" about a journal whose seq 5 was `task.leased` | the two siblings get true reasons, conditioned on the event actually being present so it cannot become a blanket excuse | "A SKIPPED RULE'S REASON MUST BE TRUE" and its companion in `journal/audit.test.ts` — mutation-tested in BOTH directions |
 | **`UsageRecord.wallMs` had no producer** — both adapters hardcoded 0, so a carefully defined accumulator summed constants; `loom run` printed 0 for a run that took seconds and `evolution/score.ts`'s latency term was identically zero | the two real adapters measure their call, on an injected `HttpOptions.now`; the mock keeps 0 so usage assertions stay deterministic | "A CALL'S WALL TIME IS MEASURED" in `providers/anthropic.test.ts` |
 | **a run whose gate EXPIRED could not be replayed** — the gate loop served a recorded decision and threw when there was none, but a gate the CLOCK resolved has `gate.timeout`, and `onTimeout: "fail"` is the default | the expiry is reproduced by SWEEPING the shadow gate, walking its clock forward until it resolves | `run/replay-expired-gate.test.ts`; mutation-tested against both the missing arm AND the ts-derived instant that silently expires nothing |
 
@@ -295,6 +296,12 @@ for reasons, not forgotten.
   `loom rewind` is not just a verb: `atSeq` has to be discoverable, and no verb prints journal
   seqs today — `audit` prints violations, `trace` prints spans. That is the design question
   attached to it, and it is why this is recorded rather than built.
+
+- **`run.cancelled.forced` is written once as `false`, read by nobody, and named by no design
+  document.** Dead in both directions. Left alone deliberately: it sits in a durable event
+  payload, so deleting it is a schema change to journals already on disk, for a field no decision
+  reads. Either give it a meaning — what a forced cancel does that `cancel` does not — or remove
+  it in a change that owns the migration; do not half-wire it.
 
 - **The spec-field sweep has been run once; here is its whole answer, so it is not re-run blindly.**
   Every field of every `interface` in `graph/spec.ts` — 137 — was checked for a reader outside

@@ -6262,3 +6262,42 @@ system**, which is exactly how it hides.
 **Reversal condition:** `MockModelAdapter` keeps its hardcoded 0 on purpose — a mock that
 measures real time turns every usage assertion in the suite into a race. If the mock ever needs a
 duration, give it a scripted one, never a real clock.
+
+---
+
+## Two findings in a row came from re-reading output I had already seen
+
+The planned sweep this wave was mechanical: fields whose every assignment is a literal, the class
+`wallMs` had just proved real. It came back nearly dry. `requiresHumanSignOff` writes different
+literals per branch — that is a decision table, not a defect. `branchCount` is computed. The only
+true positive is `run.cancelled`'s `forced`, written once as `false`, read by nobody, and named in
+no design document — dead in both directions, and sitting in a durable payload where removing it
+is a schema change for a field nothing decides on. Recorded, not churned.
+
+**So the class was real and its population was about one.** Worth stating, because the temptation
+after a good mechanical find is to assume the sweep generalises. Two waves running, a sweep
+designed from the previous wave's defect found nothing, and both times the actual finding came
+from somewhere else.
+
+**And both times "somewhere else" was output already on the screen.** `wallMs: 0` had been in the
+CLI output of a dozen runs before the question got asked. This wave's finding was in the previous
+wave's own transcript: `loom audit` printing
+
+    · not checked — task.leased-is-resolved: no event this rule constrains appears in this journal
+
+three lines under a journal dump whose seq 5 was `task.leased`. Both facts were on screen
+together, in the same terminal, minutes apart, and the contradiction went unremarked because each
+line individually looked like a normal thing for the tool to say.
+
+**The defect itself is the register's most familiar shape.** `if (completed)` makes three rules
+inapplicable; one of them had a sentence explaining that and the other two fell through to a
+default which asserts the constrained event is ABSENT. It is checkable and it was false. A report
+that explains an omission with a false reason is worse than one that says nothing, because it
+answers the operator's next question wrongly — they go looking for a missing event instead of
+reading the run's status. Of the three, `task.leased-is-resolved` is the rule that catches a
+stranded lease: register defect D2, a run that reported success having undone its own work.
+
+**Reversal condition:** the correction is conditioned on the journal actually containing
+`task.leased`, so a failed run with no lease still reports the generic reason. If a future edit
+makes it unconditional the second test goes red, and that is the point — a reason that is always
+available is an excuse, not an explanation.
