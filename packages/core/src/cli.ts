@@ -206,6 +206,76 @@ export function resourceRefsIn(text: string): readonly string[] {
  * Split at the FIRST `=` only, so a value containing one survives intact — a token, a URL
  * with a query string, and a base64 blob all routinely contain `=`.
  */
+/**
+ * EVERY FLAG THIS BINARY UNDERSTANDS. A flag not on this list is refused, not ignored.
+ *
+ * `parseArgs` accepts any `--word` and puts it in the map, so a misspelling used to be silence.
+ * For most flags that is an annoyance; for `--token` it is the same security bug the `--name=value`
+ * support was added to fix, reached by a different route. Measured:
+ *
+ *     loom serve --token s3cret    → token set, plane authenticated
+ *     loom serve --tokne s3cret    → flags {"tokne": "s3cret"}, token ABSENT
+ *     loom serve --Token s3cret    → same
+ *
+ * and absent means "run an open plane on purpose". The operator sees their secret in `ps`, gets
+ * no complaint, and has an unauthenticated control plane. That flag's own docstring already says
+ * this class is "a security bug rather than an ergonomic gap" — it fixed one spelling of it.
+ *
+ * ONE LIST, GATED AGAINST THE OTHER TWO. `test/cli/known-flags.test.ts` asserts this equals both
+ * the set `USAGE` advertises and the set the code reads, so a flag cannot be added to any one of
+ * the three without the other two. A hand-kept list that drifts is how the refusal would start
+ * rejecting a real flag.
+ */
+const KNOWN_FLAGS: readonly string[] = [
+  "allow-exec",
+  "as",
+  "budget",
+  "channels-file",
+  "data-dir",
+  "egress",
+  "exec-env",
+  "grant",
+  "graph",
+  "help",
+  "identity-file",
+  "input",
+  "mcp-file",
+  "models-file",
+  "port",
+  "reason",
+  "reject",
+  "sweep-ms",
+  "token",
+  "workspace",
+];
+
+/**
+ * Refuse a flag this binary does not understand, naming the nearest one it does.
+ *
+ * At the door in `main`, not inside `parseArgs`: the parser stays a parser, and `openWorkspace`
+ * is called directly by embedders and tests with flag maps they built themselves.
+ */
+function assertKnownFlags(args: Args): void {
+  const unknown = Object.keys(args.flags).filter((f) => !KNOWN_FLAGS.includes(f));
+  if (unknown.length === 0) return;
+  const near = (f: string): string => {
+    const lower = f.toLowerCase();
+    const exact = KNOWN_FLAGS.find((k) => k === lower);
+    if (exact !== undefined) return ` (did you mean --${exact}? flags are case-sensitive)`;
+    // Same first two letters is a cheap stand-in for an edit distance and catches the
+    // transpositions that actually happen: `--tokne`, `--worksapce`, `--modles-file`.
+    const head = lower.slice(0, 2);
+    const guesses = KNOWN_FLAGS.filter((k) => k.startsWith(head));
+    return guesses.length === 0 ? "" : ` (did you mean ${guesses.map((g) => `--${g}`).join(" or ")}?)`;
+  };
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `unknown flag${unknown.length === 1 ? "" : "s"}: ${unknown.map((f) => `--${f}${near(f)}`).join(", ")}. ` +
+      `A flag this binary does not understand is IGNORED unless it is refused here — and for --token, ` +
+      `ignored means the control plane authenticates nobody. Run \`loom help\` for the list.`,
+  );
+}
+
 export function parseArgs(argv: readonly string[]): Args {
   const positional: string[] = [];
   const flags: Record<string, string | true> = {};
@@ -2149,6 +2219,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(USAGE);
     return 0;
   }
+  // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
+  assertKnownFlags(args);
+  // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
 
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`

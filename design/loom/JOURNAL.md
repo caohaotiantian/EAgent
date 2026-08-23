@@ -5348,3 +5348,54 @@ diagnostics of D5.5's worked example, and that example declares a join timeout. 
 says pinning exists so "a change in compiler behaviour show[s] up in the commit that causes it" —
 which is exactly what it did. The pin now includes the warning and asserts it is present, so the
 compiler and the paragraph next to the example agree.
+
+---
+
+## A misspelled flag was silence, and for `--token` silence was an open control plane
+
+*Reversal condition: none for the refusal. If flags ever become per-verb, `KNOWN_FLAGS` becomes a
+map and the gate compares per-verb sets — the shape holds.*
+
+`parseArgs` accepts any `--word` and puts it in the map; nothing checked the set. Measured:
+
+    loom serve --token s3cret    token set, plane authenticated
+    loom serve --tokne s3cret    flags {"tokne": "s3cret"}, token ABSENT
+    loom serve --Token s3cret    same
+
+and absent means "run an open plane on purpose". The operator's secret sits in `ps`, nothing
+complains, every caller is authorized.
+
+**The flag's own docstring had already named this class.** `--name=value` support exists because
+parsing only the space form "registers a flag literally NAMED `token=s3cret` and leaves
+`flags["token"]` undefined… a security bug rather than an ergonomic gap." One spelling of the
+class was fixed; a misspelling reached the identical place. **Fixing an instance is not fixing
+the class, and the comment that explains the instance is where to look for the class.**
+
+`assertKnownFlags` refuses at the door — after `help`, so the reader who typo'd still gets the
+list — and names the nearest real flag, including the case-only miss that reads as correct.
+Three lists now have to agree: `KNOWN_FLAGS` (what the refusal knows), `USAGE` (what the operator
+is told), and `args.flags[…]` (what the code consults). A flag in USAGE but not KNOWN_FLAGS is
+refused while advertised; one read but not advertised is undiscoverable — which this repo shipped
+once, with `--graph` appearing "in no usage text, no error message, and not in the hint `loom run`
+itself prints".
+
+### Three process failures in one iteration, all in the harness rather than the code
+
+**A grep window that overran.** The first flag comparison said `--callback-secret` was advertised
+and unread. It is not advertised: the extraction ran 80 lines past `const USAGE` into a docstring
+that says there is *deliberately* no such flag. Bounding the regex to the template literal gave
+perfect symmetry. That is the third hasty grep this wave to produce a wrong answer.
+
+**A mutation sweep that hung and left the tree edited.** The suites included `serve`; the mutation
+that removes the refusal turns `assert.rejects(cli(["serve", …]))` from a failing test into a
+LISTENING SERVER. The sweep stalled, the 10-minute cap killed it, and `finally` never ran — so
+`assertKnownFlags` was missing from `cli.ts` until it was checked. Now: every refusal is driven
+through `compile`, child runs carry `timeout: 60_000`, and the harness restores on SIGTERM.
+**A test that hangs under the mutation it exists to catch is worse than one that passes**, and a
+sweep must be assumed to have left the tree dirty until proven otherwise.
+
+**Two tests that claimed coverage they did not have**, both found by the fixed sweep. The security
+test asserted only that `compile nope.json --tokne x` rejected — which it does anyway, for the
+missing file — so deleting the refusal left it green; it now names `E_CONFIG_INVALID` and
+`unknown flag`. And "every real flag is accepted" iterated `KNOWN_FLAGS`, the list under test, so
+dropping a flag from it also dropped it from the loop; it now iterates what USAGE promises.
