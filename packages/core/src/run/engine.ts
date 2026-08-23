@@ -134,6 +134,7 @@ import {
   FunctionRegistry,
   ModelRegistry,
   ToolRegistry,
+  type FunctionOutcome,
   type Message,
   type ModelRequest,
   type ModelToolCall,
@@ -335,6 +336,48 @@ function frozenFirst(graph: RunGraph, live: ResourceResolver): ResourceResolver 
  * dressed as a policy is the one shape a refusal must not take, so the refusal is decided
  * where the outcome is CONSTRUCTED and travels as an ordinary failure.
  */
+/**
+ * A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT.
+ *
+ * `FunctionOutcome` is `{ writes?, take? }`, and it is a TypeScript type — a
+ * `resources/function/*.js` author writes plain JS and never sees it. Both ways of getting it
+ * wrong were handled badly, and measured through `bin/loom`:
+ *
+ *   (view) => ({ seen: [x] })   the channel map returned DIRECTLY. `out.writes` is undefined,
+ *                               the task commits `writes: {}`, and the run dies later with
+ *                               `E_OUTPUT_MISSING` naming a channel the body believed it wrote.
+ *   (view) => { ... }           no return at all — "TypeError: Cannot read properties of
+ *                               undefined (reading 'writes')", an internal error shown to a
+ *                               graph author.
+ *
+ * TWO CALLERS, because there are two places a function body runs: a `function` node and an
+ * `assertion` evaluator, whose `ref` is also a function body. The first version of this check
+ * lived inline in `#runFunction` and the evaluator kept the defect — the same too-small-a-set
+ * mistake the register keeps recording. A helper is what stops the two drifting.
+ *
+ * The rule is not a heuristic: an object EVERY key of which is ignored cannot be what the author
+ * meant. `{}` stays legal — a body that writes nothing is ordinary — and extra keys alongside
+ * `writes`/`take` stay legal too, because then the return WAS read.
+ */
+function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
+  const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }`;
+  if (out === null || typeof out !== "object") {
+    throw err.validation(
+      CODES.E_RESOURCE_INVALID,
+      `function "${ref}" on node "${nodeId}" returned ${out === undefined ? "nothing" : String(out)} — ${shape}`,
+    );
+  }
+  const keys = Object.keys(out);
+  if (keys.length > 0 && !("writes" in out) && !("take" in out)) {
+    throw err.validation(
+      CODES.E_RESOURCE_INVALID,
+      `function "${ref}" on node "${nodeId}" returned {${keys.join(", ")}}, every key of which is ignored — ${shape}. ` +
+        `Did you mean { writes: { ${keys[0]!}: … } }?`,
+    );
+  }
+  return out as FunctionOutcome;
+}
+
 function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
   if (node.humanGate?.approval?.separationOfDuties !== true) return undefined;
   const why = sodRefusal(p, node.humanGate.approval.approvers ?? []);
@@ -2691,41 +2734,12 @@ export class Engine {
   async #runFunction(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
     const body = this.functions.require(w.node.function!.ref);
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
-    const out = await body(view, {
+    const raw = (await body(view, {
       taskId: w.task.taskId,
       signal: ctx.abort.signal,
       now: this.#now,
-    });
-    // A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT. `FunctionOutcome` is
-    // `{ writes?, take? }`, and it is a TypeScript type — a `resources/function/*.js` author
-    // writes plain JS and never sees it. Both ways of getting it wrong were handled badly:
-    //
-    //   (view) => ({ seen: [x] })   the channel map returned DIRECTLY. `out.writes` is
-    //                               undefined, the task commits `writes: {}`, and the run dies
-    //                               later with `E_OUTPUT_MISSING` naming a channel the body
-    //                               believed it had written. Measured through `bin/loom`.
-    //   (view) => { ... }           no return at all — `out.writes` threw
-    //                               "TypeError: Cannot read properties of undefined (reading
-    //                               'writes')", an internal error shown to a graph author.
-    //
-    // The rule is not a heuristic: an object EVERY key of which is ignored cannot be what the
-    // author meant. `{}` stays legal — a body that writes nothing is ordinary — and extra keys
-    // alongside `writes`/`take` stay legal too, because then the return WAS read.
-    const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }`;
-    if (out === null || typeof out !== "object") {
-      throw err.validation(
-        CODES.E_RESOURCE_INVALID,
-        `function "${w.node.function!.ref}" on node "${w.node.id}" returned ${out === undefined ? "nothing" : String(out)} — ${shape}`,
-      );
-    }
-    const keys = Object.keys(out);
-    if (keys.length > 0 && !("writes" in out) && !("take" in out)) {
-      throw err.validation(
-        CODES.E_RESOURCE_INVALID,
-        `function "${w.node.function!.ref}" on node "${w.node.id}" returned {${keys.join(", ")}}, every key of which is ignored — ${shape}. ` +
-          `Did you mean { writes: { ${keys[0]!}: … } }?`,
-      );
-    }
+    })) as unknown;
+    const out = requireOutcome(raw, w.node.function!.ref, w.node.id);
     return {
       status: "succeeded",
       writes: { ...(out.writes ?? {}) },
@@ -2894,7 +2908,12 @@ export class Engine {
     if (ev.kind === "assertion") {
       const body = this.functions.require(ev.ref);
       const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
-      const out = await body(view, { taskId: w.task.taskId, signal: ctx.abort.signal, now: this.#now });
+      // THE SAME CONTRACT, THE SAME CHECK. An `assertion` evaluator's ref IS a function body,
+      // and this arm read `out.writes` exactly as `#runFunction` did — so the identical authoring
+      // mistake was a silent no-op here after being refused there. Measured: an assertion body
+      // returning `{ confidence: 0.9 }` committed nothing and the run died with
+      // `E_OUTPUT_MISSING`. One validator, two callers, so the two cannot drift.
+      const out = requireOutcome((await body(view, { taskId: w.task.taskId, signal: ctx.abort.signal, now: this.#now })) as unknown, ev.ref, w.node.id);
       this.#checkConfidence(ctx, w, out.writes ?? {}, ev.threshold);
       return { status: "succeeded", writes: { ...(out.writes ?? {}) }, usage: { ...ZERO_USAGE } };
     }

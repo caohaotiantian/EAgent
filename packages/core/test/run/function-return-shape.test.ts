@@ -90,3 +90,51 @@ test("AND THE LEGAL SHAPES STILL RUN — an empty object, and writes alongside a
   assert.equal(written.status, "succeeded", JSON.stringify(written.error ?? {}));
   assert.deepEqual(written.channels["seen"], ["x"], "the write still lands");
 });
+
+test("AND THE EVALUATOR ARM IS HELD TO THE SAME CONTRACT — one validator, two callers", async () => {
+  // An `assertion` evaluator's `ref` IS a function body: `#runEvaluator` calls
+  // `functions.require(ev.ref)` and reads `out.writes` exactly as `#runFunction` does. The first
+  // version of this check lived inline in `#runFunction` and the evaluator kept the defect —
+  // measured through `bin/loom`, an assertion body returning `{ confidence: 0.9 }` committed
+  // nothing and the run died with `E_OUTPUT_MISSING`, the same silent shape that was just fixed
+  // one function over. That is the too-small-a-set mistake the register keeps recording, so the
+  // check is a shared helper and this test is what proves both callers reach it.
+  const evalSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "evalshape", project: "t", version: 1 },
+    policy: { posture: "out" },
+    channels: { seen: { type: "array", reduce: "append_ordered" } },
+    inputs: [],
+    outputs: ["seen"],
+    nodes: [{ id: "e", type: "evaluator", writes: ["seen"], evaluator: { kind: "assertion", ref: "function/b@stable", threshold: 0.5 } }],
+    edges: [],
+  } as unknown as GraphSpec;
+
+  const run = async (body: unknown) => {
+    const functions = new FunctionRegistry();
+    functions.register("function/b@stable", body as () => FunctionOutcome);
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools: new ToolRegistry(),
+      functions,
+      models: new ModelRegistry(),
+      now: () => NOW,
+      sleep: async () => {},
+      policy: { granted: [], systemFloor: "out" },
+    });
+    const graph = compileOrThrow({ spec: evalSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+    return engine.advance(await engine.submit({ graph, inputs: {} }));
+  };
+
+  const bad = await run(() => ({ seen: ["x"] }));
+  assert.equal(bad.error?.code, "E_RESOURCE_INVALID", JSON.stringify(bad.error ?? {}));
+  assert.match(String(bad.error?.message), /every key of which is ignored/);
+
+  // The positive control again: the arm must still run a correct body.
+  const good = await run(() => ({ writes: { seen: ["x"] } }));
+  assert.equal(good.status, "succeeded", JSON.stringify(good.error ?? {}));
+  assert.deepEqual(good.channels["seen"], ["x"]);
+});
