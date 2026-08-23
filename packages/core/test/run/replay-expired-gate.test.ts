@@ -28,6 +28,8 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
+import { GateDispatcher, formatRecipients, type DeliveryChannel } from "../../src/run/delivery.ts";
+import { HumanGateBroker } from "../../src/run/gates.ts";
 
 const CAP = "danger:launch";
 const NOW = 1_700_000_000_000;
@@ -67,7 +69,14 @@ function gateSpec(): GraphSpec {
         id: "approve",
         type: "human_gate",
         writes: [],
-        humanGate: { ref: "oversight/ship@stable", sla: { respondWithinMs: 1000, onTimeout: "fail" } },
+        humanGate: {
+          ref: "oversight/ship@stable",
+          sla: { respondWithinMs: 1000, onTimeout: "fail" },
+          // A REAL DELIVERY BLOCK, or the paging test below is vacuous: `raise` only reaches the
+          // dispatcher when `dispatcher !== undefined && delivery !== undefined`, so a gate that
+          // declares no channel cannot page anyone however the engine is wired.
+          delivery: { channels: ["console"], recipients: [{ kind: "user", id: "u:alice" }] },
+        },
       },
       { id: "act", type: "tool", writes: ["done"], tool: { name: "danger.act", version: "1.0", args: {} } },
     ],
@@ -75,7 +84,7 @@ function gateSpec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-function harness() {
+function harness(gates?: HumanGateBroker) {
   const fired: string[] = [];
   const now = (): number => NOW;
   const store = new MemoryStateStore({ now });
@@ -89,6 +98,7 @@ function harness() {
     models: new ModelRegistry(),
     now,
     sleep: async () => {},
+    ...(gates === undefined ? {} : { gates }),
     policy: { granted: [CAP], systemFloor: "out" },
   });
   const graph = compileOrThrow({
@@ -126,4 +136,59 @@ test("A RUN WHOSE GATE EXPIRED REPLAYS — the clock is an answer too", async ()
   assert.equal(report.replayed.status, "failed", "the replay reaches the same end, by the same route");
   assert.equal(Object.values(report.replayed.gates)[0]?.state, "expired");
   assert.deepEqual(h.fired, [], "a replay of a refusal must not perform the thing that was refused");
+});
+
+test("A REPLAY MUST NOT PAGE ANYBODY — an audit has no business reaching a human", async () => {
+  // This branch made `replayRun` call `sweepGates` so a run that ended on an expired gate could be
+  // re-derived. `sweepTimeouts` is also the code that DELIVERS: it escalates tiers and calls the
+  // dispatcher. Before that change a dispatcher on the replay engine was inert because nothing in
+  // a replay ever swept; now it is not, and `replayRun` spreads `...opts.engine` straight through,
+  // so an embedder replaying with their production engine options hands the shadow run their
+  // broker and its channels.
+  //
+  // `loom replay` itself passes only tools, functions, models and policy, so the shipped CLI
+  // cannot page anyone. That is a property of one call site, and this repo's own rule is that a
+  // rule enforced by convention at each call site is not a rule — so it is asserted here against
+  // the worst input rather than left to the caller.
+  const paged: string[] = [];
+  const channel: DeliveryChannel = {
+    name: "console",
+    deliver: async (target) => {
+      paged.push(`${formatRecipients(target.recipients)}:${String(target.gate.gateId)}`);
+      return "receipt";
+    },
+  };
+
+  const h = harness();
+  const runId = await h.engine.submit({ graph: h.graph, inputs: {} });
+  await h.engine.advance(runId);
+  await h.engine.sweepGates(NOW + 5_000);
+  assert.equal((await h.engine.projection(runId))!.status, "failed");
+
+  // THE HARNESS CAN PAGE — asserted, because a paging test on a rig that cannot page is green
+  // for a reason it does not claim. The original run is driven through a broker with the same
+  // channel, and it must reach the human before the replay is asked not to.
+  const original = new HumanGateBroker({ now: () => NOW, dispatcher: new GateDispatcher({ channels: [channel] }) });
+  const live = harness(original);
+  const liveRun = await live.engine.submit({ graph: live.graph, inputs: {} });
+  await live.engine.advance(liveRun);
+  assert.notEqual(paged.length, 0, "the rig cannot page at all — the assertion below would be vacuous");
+
+  paged.length = 0; // only what the REPLAY does counts
+  const report = await replayRun({
+    store: h.store,
+    runId,
+    graph: h.graph,
+    // CAST ON PURPOSE. `ReplayOptions["engine"]` now excludes `gates`, so an ordinary caller
+    // cannot reach this at all — that half is enforced by the compiler and needs no test. What
+    // is tested here is the other half: the caller who casts past the type still must not page
+    // anyone, because a rule enforced at each call site is not a rule.
+    engine: {
+      ...h.replayOpts(),
+      gates: new HumanGateBroker({ now: () => NOW, dispatcher: new GateDispatcher({ channels: [channel] }) }),
+    } as unknown as Parameters<typeof replayRun>[0]["engine"],
+  });
+
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match)));
+  assert.deepEqual(paged, [], "a replay reached a human — an audit of a run that ended days ago must not page anyone");
 });

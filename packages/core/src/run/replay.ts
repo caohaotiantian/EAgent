@@ -343,8 +343,16 @@ export interface ReplayOptions {
   readonly store: StateStore;
   readonly runId: RunId;
   readonly graph: RunGraph;
-  /** Everything the live engine had except the store: tools, functions, models. */
-  readonly engine: Omit<EngineOptions, "store" | "bus">;
+  /**
+   * Everything the live engine had except the store: tools, functions, models.
+   *
+   * NOT the gate broker, and that is a refusal rather than an omission. `sweepTimeouts` is the
+   * code that DELIVERS — it escalates tiers and calls the dispatcher — and a replay sweeps now,
+   * so a caller handing this their production engine options would hand the shadow run their
+   * channels and page real people about a run that ended days ago. Excluded in the type so the
+   * ordinary caller cannot, and stripped again at construction for the one who casts.
+   */
+  readonly engine: Omit<EngineOptions, "store" | "bus" | "gates">;
   /** Auto-answer gates with what the human actually decided. Default true. */
   readonly replayGates?: boolean;
   /**
@@ -426,7 +434,18 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   }
 
   const shadow = new MemoryStateStore({ now: opts.engine.now ?? (() => original.startedAt) });
-  const engine = new Engine({ ...opts.engine, store: shadow, replay: effects });
+  // THE SHADOW GETS ITS OWN BROKER, always. `Engine` builds one when none is supplied, and that
+  // is what a replay must have: a broker carries a dispatcher, and `sweepTimeouts` — which this
+  // function now calls, to re-derive a run that ended on an expired gate — is the code that
+  // delivers. Measured against the worst input a caller can construct: with a live broker passed
+  // through, replaying an expired gate paged the approver. The type refuses it; this refuses it
+  // again for the caller who casts, because a rule enforced at each call site is not a rule.
+  //
+  // It also keeps the shadow's gates out of the caller's ephemeral map, which sharing a broker
+  // would not.
+  const engineOpts: Record<string, unknown> = { ...opts.engine };
+  delete engineOpts["gates"];
+  const engine = new Engine({ ...(engineOpts as Omit<EngineOptions, "store" | "bus">), store: shadow, replay: effects });
 
   // THE RECORDED PRINCIPAL COMES FORWARD, and without it every replay of a run whose graph
   // declares `separationOfDuties` DIVERGES: a shadow run with no initiator cannot resolve the
