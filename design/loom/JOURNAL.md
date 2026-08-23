@@ -5269,3 +5269,44 @@ otherwise report the whole list as untripped and read like nineteen new defects.
 recorder's own body, making it call itself. Caught by reading the result instead of trusting the
 patch — the second time this wave a mechanical edit has quietly produced something different
 from what it said.)*
+
+---
+
+## A list of error codes nothing validated, where a typo was a silence
+
+*Reversal condition: if error codes ever stop being a closed set — if a deployment can mint its
+own — this becomes a warning, because the rule's whole justification is that `CODES` is
+enumerable.*
+
+The sweep over `EdgeSpec` and the tool manifest turned up two things. `compensates` has five
+references and all of them are in `validate.ts` — that is B9, already recorded in HANDOFF §3 as
+needing a product decision, not a new find. `codes` has exactly two, both at run time.
+
+`EdgeSpec.codes` and `RetryPolicy.onlyIf` are both lists of error codes, both read when a task
+fails, and neither was checked at compile. Measured on a graph whose irreversible tool body
+throws:
+
+    error edge, no codes        the edge fires, the handler runs
+    codes: ["E_TYPOO"]          compiles clean, the edge NEVER fires
+
+**And the second row still satisfied `GRAPH011_UNHANDLED_IRREVERSIBLE`**, which asks only whether
+an `error` edge EXISTS. So the warning whose entire job is catching an unhandled irreversible
+node was suppressed by an edge that could not handle anything. On `onlyIf` the same typo means
+"retry nothing", which reads as a retry policy and switches retry off.
+
+**The reproduction found it by making the mistake.** The probe declared
+`codes: ["E_TOOL_FAILED"]` — a reasonable guess, and not a code this system has. A tool body that
+throws surfaces as `E_TOOL_SOURCE_UNAVAILABLE`. That is why the diagnostic SUGGESTS rather than
+just refusing: `E_BUDGET_GONE` → `did you mean E_BUDGET_EXHAUSTED`. An author cannot guess these
+and should not have to run the graph to learn them.
+
+An error rather than a warning, because the codes are a closed set and a code no error carries
+can never match — there is no reading of it that is correct. The rule is about EXISTENCE and not
+reachability: which codes a node can actually raise is not knowable at compile, and pretending
+otherwise would refuse correct graphs.
+
+**And it forced a fixture to stop conflating two things.** `error-edge-codes.test.ts` used
+`"E_SOMETHING_ELSE"` as its does-not-match code, which mixed "a code that does not MATCH" with
+"a code that does not EXIST". The new rule refuses the second, so the placeholder stopped
+compiling and the distinction had to be made. The fixture now uses a real, correctly-spelled code
+that this failure simply does not carry — which is the case an author actually hits.

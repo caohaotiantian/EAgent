@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3473 pass, 0 fail, 1 skipped** (Loom 1930 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 245 (114 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3477 pass, 0 fail, 1 skipped** (Loom 1934 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 246 (115 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -37,6 +37,13 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
+
+**A fourth sweep — `EdgeSpec` and the tool manifest — found one defect and one known item.**
+`EdgeSpec.codes` and `RetryPolicy.onlyIf` are lists of error codes read at run time and validated
+nowhere, so a typo was a SILENCE: an error edge that never fires, or a retry policy that disables
+retry. `GRAPH003_UNKNOWN_ERROR_CODE` refuses them now. `compensates` has five references, all in
+`validate.ts` — that is B9 in §3 below, already recorded as needing a product decision, not a new
+find.
 
 **Three sweeps came back clean on 2026-08-23, and the commands are here so the next session
 re-runs them rather than trusting this paragraph.** Every field of `GraphPolicy`/`NodePolicy`/

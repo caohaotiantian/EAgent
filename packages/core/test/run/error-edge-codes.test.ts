@@ -104,10 +104,22 @@ async function run(code: string, codes?: readonly string[]): Promise<string[]> {
  */
 const NORMALIZED = "E_TOOL_SOURCE_UNAVAILABLE";
 
+/**
+ * A REAL code that this failure does not carry — not an invented one.
+ *
+ * These fixtures used `OTHER_REAL_CODE`, which conflated two different things: a code that
+ * does not MATCH, and a code that does not EXIST. `GRAPH003_UNKNOWN_ERROR_CODE` now refuses the
+ * second at compile, because a code no error carries would never match and is therefore always
+ * a typo — so the placeholder stopped compiling and the distinction had to be made. The
+ * stronger fixture is the one an author actually hits: a real code, correctly spelled, that is
+ * simply not the one this failure raised.
+ */
+const OTHER_REAL_CODE = "E_BUDGET_EXHAUSTED";
+
 test("AN ERROR EDGE DECLARING CODES HANDLES ONLY THOSE CODES", async () => {
   assert.deepEqual(await run("E_PROVIDER_UNAVAILABLE", [NORMALIZED]), ["ran"], "the declared code is handled");
   assert.deepEqual(
-    await run("E_PROVIDER_UNAVAILABLE", ["E_SOMETHING_ELSE"]),
+    await run("E_PROVIDER_UNAVAILABLE", [OTHER_REAL_CODE]),
     [],
     "and a code it did NOT declare must not reach the handler",
   );
@@ -121,5 +133,5 @@ test("AN EDGE WITH NO `codes` IS STILL A CATCH-ALL", async () => {
 });
 
 test("ONE OF SEVERAL DECLARED CODES IS ENOUGH", async () => {
-  assert.deepEqual(await run("E_PROVIDER_UNAVAILABLE", ["E_SOMETHING_ELSE", NORMALIZED]), ["ran"]);
+  assert.deepEqual(await run("E_PROVIDER_UNAVAILABLE", [OTHER_REAL_CODE, NORMALIZED]), ["ran"]);
 });

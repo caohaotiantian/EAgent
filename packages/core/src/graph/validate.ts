@@ -26,6 +26,7 @@ import {
   type Posture,
   postureRank,
 } from "../vocab.ts";
+import { CODES } from "../errors.ts";
 import { checkExpr, type Ty } from "./expr.ts";
 import {
   DEFAULT_EXPANSION,
@@ -553,6 +554,46 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
     }
   }
+  // AN ERROR CODE THAT DOES NOT EXIST IS REFUSED, for the reason next door and one field over.
+  //
+  // `EdgeSpec.codes` and `RetryPolicy.onlyIf` are both lists of error codes read at run time and
+  // validated by nothing, so a typo is not an error — it is a SILENCE. Measured, on a graph with
+  // an irreversible tool whose body throws:
+  //
+  //     error edge, no codes        the edge fires, the handler runs
+  //     codes: ["E_TYPOO"]          compiles clean, the edge NEVER fires
+  //
+  // And the second row still satisfies `GRAPH011_UNHANDLED_IRREVERSIBLE`, which asks only
+  // whether an `error` edge exists — so the warning that exists to catch an unhandled
+  // irreversible node is suppressed by an edge that cannot handle anything. On `onlyIf` the same
+  // typo means "retry nothing", which reads as a retry policy and disables retry.
+  //
+  // The codes are a CLOSED SET (`CODES` in errors.ts), so this is checkable rather than a
+  // heuristic — which is what makes it an error and not a warning. Nothing in this repo declares
+  // either field on a graph today, so it refuses nothing that exists.
+  const knownCode = (c: string): boolean => Object.hasOwn(CODES, c);
+  const nearest = (c: string): string => {
+    const head = c.split("_").slice(0, 2).join("_");
+    const near = Object.keys(CODES).filter((k) => k.startsWith(head));
+    return near.length === 0 ? Object.keys(CODES).slice(0, 4).join(", ") : near.join(", ");
+  };
+  const checkCodes = (codes: unknown, at: Diagnostic["at"], who: string): void => {
+    // Caller data: `codes: "E_X"` is a string, and iterating it would report every CHARACTER.
+    if (!Array.isArray(codes)) return;
+    for (const c of codes) {
+      if (typeof c !== "string" || knownCode(c)) continue;
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_ERROR_CODE",
+        message: `${who} names error code "${c}", which no error in this system carries — it would never match`,
+        ...(at === undefined ? {} : { at }),
+        fix: `did you mean one of: ${nearest(c)}`,
+      });
+    }
+  };
+  for (const e of spec.edges) checkCodes(e.codes, { edgeId: e.id }, `edge "${e.id}"`);
+  for (const n of spec.nodes) checkCodes(n.retry?.onlyIf, { nodeId: n.id }, `node "${n.id}".retry.onlyIf`);
+
   // A BUDGET LADDER STEP THAT DOES NOT EXIST IS REFUSED, not silently downgraded. D6.5 designs
   // warn → degrade → gate → fail; only `fail` is built. `gate` read as "ask a human rather than
   // stop", and the engine escalated the ceiling for decisions that would never happen and then
