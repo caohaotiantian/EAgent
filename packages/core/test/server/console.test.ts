@@ -58,6 +58,19 @@ test("the console is served at / as one self-contained document", async () => {
     // Self-contained: no external script or stylesheet to fetch.
     assert.equal(/<script[^>]+src=/.test(html), false, "no external scripts");
     assert.equal(/<link[^>]+stylesheet/.test(html), false, "no external stylesheets");
+
+    // AND NOTHING ELSE REACHES THE NETWORK EITHER, which is the property the README's "ships
+    // inside the binary" actually asserts — and the two checks above are narrower than it. A
+    // CDN font in `@import url(…)`, a `background: url(https://…)`, an `<img src>`, a telemetry
+    // `fetch("https://…")`: each passes both, and each breaks an air-gapped deployment the first
+    // time somebody opens the page, with a blank panel and no error the operator can act on.
+    //
+    // An `<a href>` is exempt: a link is not a load, and a docs link on the page is fine offline.
+    // Everything else that names an absolute URL is refused, so adding one is a decision rather
+    // than an accident.
+    const withoutLinks = html.replace(/<a\b[^>]*>/gi, "<a>");
+    const absolute = [...withoutLinks.matchAll(/https?:\/\/[^\s"'`)]+/g)].map((m) => m[0]);
+    assert.deepEqual(absolute, [], "the console must load nothing from the network");
   } finally {
     await r.close();
   }

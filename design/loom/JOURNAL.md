@@ -5753,3 +5753,41 @@ suggested config out of the refusal and re-parses it, to prove the example round
 `/\{"servers":\[.*?\]\}/`, which stops at the first `]`. That is the `args` array's. The example
 contains nested arrays by construction, so the extractor has to count brackets, and a lazy regex
 over a nested shape is the same class of mistake as the doc it was checking.
+
+---
+
+## "Ships inside the binary" was guarded by two checks that miss four ways out
+
+*Reversal condition: if the console ever legitimately needs a network asset — it should not, but
+if it does — the assertion becomes an allow-list rather than a ban, and the reason goes beside
+it.*
+
+Drove the console as a first-time operator: `GET /` returns one 25KB `text/html` document, and
+every route the page names answers — `/health`, `/whoami`, `/graphs`, `/graphs/by-hash/:hash`,
+`/runs`, `/runs/:id`, `/runs/:id/gates`, `/gates`, and the `/runs/:id/events` stream, which
+delivers real journal rows. The graph endpoint carries `width`, `height`, `nodes`, `edges` and
+`plans` with `layoutRank`, and the page reads the ranks — the compiler's claim that "the browser
+never runs graph layout" holds from both ends.
+
+Two details worth keeping. The page does NOT use `EventSource`, and the two mentions of it are
+comments explaining why: it cannot carry an `Authorization` header, so the console streams with
+`fetch` and its own reconnect. "Live SSE" is still accurate — the wire format is unchanged.
+
+**And the claim that the console ships inside the binary was guarded by two checks narrower than
+the claim.** `console.test.ts` banned `<script src>` and external stylesheets. Measured, the real
+page contains ZERO absolute URLs of any kind — so the strong property already held and nothing
+asserted it. Four ways to break it pass both old checks:
+
+    @import url(https://fonts…)          a CDN font
+    background: url(https://cdn…)        a CDN image
+    <img src="https://cdn…">             a logo
+    fetch("https://telemetry…")          a ping
+
+Each breaks an air-gapped deployment the first time somebody opens the page — a blank panel and
+no error an operator can act on. The gate now refuses any absolute URL outside an `<a href>`,
+because a link is not a load and a docs link is fine offline. All four mutations caught.
+
+**The pattern, again**: a guard written for the instance that failed rather than the class it
+belonged to. Same as `readme-quickstart.test.ts` pinning graphs and not the test count, and the
+`--token=value` fix that left every other spelling open. **When a check names two specific
+shapes, ask what the third one is.**
