@@ -400,6 +400,16 @@ platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than 
 And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
 `200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
+**The SSE stream is verified and found sound** — the largest reporting surface that had never
+been driven, checked because three of the four findings before it were in what a tool SAYS rather
+than what the system does. `GET /runs/:id/events` replays history from seq 1, resumes gap-free
+from `Last-Event-ID` (id 4 → next frame is seq 5), and pushes live: a connection held open across
+an approval received all thirteen events from `gate.decided` to `run.completed`, in order. Every
+malformed `Last-Event-ID` fails SAFE — a value past the end, a negative, and a non-number each
+return a `snapshot` frame carrying the full projection rather than a silent gap, while an empty
+header is treated as absent. Unauthenticated is 401 and an unknown run is 404, never 403, so the
+refusal cannot be used to learn which ids are real. **No defect; recorded so it is not re-driven.**
+
 **If several agents or shells are working at once, do not run `npm run check`, `npm run build`
 or a bare `tsc -b`** — concurrent `tsc -b` races on emit, and it races harder now that both are
 `--force`. Use the read-only typecheck and a single `node --test` file instead.
@@ -672,6 +682,19 @@ whose comment names the direction it does not check — both said so in writing,
 believed for exactly as long as nobody added the key and ran it. **Ask of any registry: which of
 its two forms does each gate walk, and what happens to the member that is only in the other?**
 The fix to prefer is the type checker, which cannot be walked in the wrong direction at all.
+
+**THERE IS A RARE FLAKE IN THE SUITE, observed twice and not identified.** Two runs reported
+`fail 1` within one window; **20 consecutive runs since have been clean**, including three under
+deliberate CPU and socket load. Ruled out by measurement, so the next session need not redo it:
+no stray `loom serve` process (`pgrep -fl 'bin/loom serve'` empty at the time), no port collision
+(every test that names `serve` calls `parseArgs`/`openWorkspace`/`controlPlaneOptions` and binds
+no socket — the default 8787 is never taken by the suite), and it does not reproduce under load.
+
+**What cost the identification is worth more than the flake.** `npm test` uses node's default
+reporter, whose failure lines do not survive a grep for the name — by the time the reporter was
+switched, it had stopped reproducing. **Chase a flake with `node --test --test-reporter=tap
+"packages/*/test/**/*.test.ts"` from the first run**, where a failure prints `not ok <name>` and
+one occurrence is enough.
 
 **A green test can be green for a reason it does not claim.** The first subgraph test passed
 because `skeleton.ts`'s resolver has no `subgraph()` method, so the child spec was never

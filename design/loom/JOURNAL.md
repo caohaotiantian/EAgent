@@ -6461,3 +6461,37 @@ tool. The mechanisms underneath were all correct. That is worth noticing about w
 remaining defects live: the engine has been driven hard for many waves and the things that
 report on it have not, and a report is exactly where being wrong is cheapest to ship and most
 expensive to trust.
+
+---
+
+## A verified surface, and a flake that got away
+
+The SSE stream was the largest reporting surface never driven, chosen because three of the four
+findings before it were in what a tool SAYS rather than what the system does. It is sound, and
+the detail is worth keeping because it is the shape a reporting surface should have.
+`GET /runs/:id/events` replays from seq 1, resumes gap-free from `Last-Event-ID` — id 4, next
+frame seq 5 — and pushes live: a connection held open across an approval received all thirteen
+events from `gate.decided` to `run.completed` in order. Every malformed `Last-Event-ID` fails
+SAFE, returning a `snapshot` frame with the full projection rather than a silent gap: past the
+end, negative, and non-numeric all do, while an empty header is treated as absent. Unauthenticated
+is 401 and an unknown run is 404 rather than 403, so the refusal cannot be used to learn which ids
+are real. And `loom audit` on a succeeded run checks 14 rules and skips 5, each skip naming a
+reason that is true of that journal — the correction two waves ago holding against a real run.
+
+**No defect. Recorded so the surface is not re-driven** — a verified negative is worth as much as
+a fix if it is written down, and worth nothing if it is not.
+
+**The flake is the part with a lesson.** Two runs reported `fail 1` inside one window, and twenty
+consecutive runs since have been clean, three of them under deliberate CPU and socket load. Stray
+processes, a port collision on the 8787 default, and load sensitivity were each ruled out by
+measurement rather than by argument.
+
+**What cost the identification was the reporter, not the flake.** `npm test` runs node's default
+reporter, and its failure lines do not survive the grep that finds a name; by the time the run was
+switched to TAP, the flake had stopped appearing. Two observations were spent learning that the
+output could not answer the question. **The instrument has to be chosen before the rare event, not
+after it** — a flake gives no second chance to have been watching properly, and
+`--test-reporter=tap` makes one occurrence sufficient.
+
+**Reversal condition:** if this recurs and is identified, delete the HANDOFF paragraph rather than
+leaving it as folklore. An unidentified flake recorded forever becomes a thing people work around.
