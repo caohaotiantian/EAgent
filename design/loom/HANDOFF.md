@@ -400,6 +400,17 @@ platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than 
 And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
 `200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
+**`--allow-exec` is verified and holds exactly as documented**, driven through the binary: the
+tool is unregistered without the flag, every call GATES because `proc.exec` is irreversible, and
+the allowlist is matched by NAME — `echo` runs while `/bin/echo` and `echoes` are both refused,
+which are the two attacks the implementation comment names (a path to a file the model just
+wrote, and a prefix admitting `gitk`). **`--exec-env`'s line was false and is fixed**: it claimed
+"Default is an empty environment" while `buildEnv` always passes `BASE_ENV_ALLOW`, so a child
+receives PATH, LANG, LC_ALL and TZ. Measured with a secret exported into the parent — the child
+saw exactly LANG, PATH, TZ and not the secret, so the boundary held and only its description was
+wrong. Pinned now by a test reading the constant, so a name added there fails until the
+operator-facing text admits it.
+
 **The capability flags are verified and found sound**, and their usage text is accurate. Driven
 through `bin/loom` against a local sink: without `--egress`, `net.fetch` is unregistered and a
 graph naming it COMPILES with `GRAPH013_UNKNOWN_TOOL` (a warning) but fails to compile with

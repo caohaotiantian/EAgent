@@ -6531,3 +6531,40 @@ somebody who was not there.**
 **Reversal condition:** if gate rehydration ever stops making a suspended run recoverable, the
 argument above collapses and failing fast becomes strictly better. That is the fact to re-check
 before revisiting this, not the aesthetics of the error.
+
+---
+
+## The boundary held and the sentence describing it did not
+
+`--allow-exec` is exactly what it claims. Driven through `bin/loom`: unregistered without the
+flag, every call gating because `proc.exec` is irreversible, and the allowlist matched by name
+alone — `echo` runs, `/bin/echo` and `echoes` are refused, which are precisely the two attacks
+the implementation comment names, a path to a file the model just wrote and a prefix that admits
+`gitk`.
+
+`--exec-env`'s line was not. It said "Default is an empty environment, because this process holds
+API keys", and `buildEnv` always passes `BASE_ENV_ALLOW` — so a child gets PATH, LANG, LC_ALL and
+TZ with no flag at all. Measured with a secret exported into the parent: the child saw exactly
+`LANG`, `PATH`, `TZ`, and not the secret.
+
+**So the security property held and only the sentence was wrong, and that combination is worse
+than it sounds.** A false description of a boundary that WORKS fails in both directions at once.
+An operator who reads "empty" and then needs `PATH` concludes the sandbox is broken and starts
+loosening it. One who reads "empty" and assumes total isolation is trusting an inheritance they
+have never looked at. Neither is corrected by the boundary being correct, because neither of them
+is reading the code.
+
+**The corpus disagreed with itself, and that is what made this checkable.** Three lines below,
+the `--mcp-file` paragraph says "Unlike proc.exec there is no base allow-list" — a sentence that
+only means anything if proc.exec HAS one. Two statements in one screen of usage text, one of them
+necessarily false. **Where a document contradicts itself, one half is a defect and the other is
+the evidence**; it needs no external oracle, which is why self-contradiction is the cheapest thing
+to look for in prose that nothing tests.
+
+**And the pin reads the constant rather than copying it**, so `BASE_ENV_ALLOW` gaining a name
+fails the test until the operator-facing text admits it. Its window is anchored from the
+`--exec-env` index, because `--mcp-file` also appears inside the `--grant` description ABOVE it:
+unanchored, the slice runs backwards and comes out empty, which reads as "the text does not
+mention PATH" when it means "the window closed before it opened". That is the second time this
+session a usage-text window has overrun its intended bounds, and both times the failure LOOKED
+like a real finding.
