@@ -182,3 +182,38 @@ test("`loom help` still works, and every real flag is accepted", async () => {
     w.dispose();
   }
 });
+
+test("THE `--exec-env` LINE NAMES EXACTLY WHAT A CHILD INHERITS", () => {
+  // It said "Default is an empty environment, because this process holds API keys." The second
+  // half is true and the first is not: `buildEnv` always passes `BASE_ENV_ALLOW`, so a child gets
+  // PATH, LANG, LC_ALL and TZ with no `--exec-env` at all. Measured through `bin/loom` with a
+  // secret exported into the parent — `printenv` in the child returned exactly
+  // `["LANG", "PATH", "TZ"]` and the secret did NOT appear, so the SECURITY property held and
+  // only the sentence describing it was wrong.
+  //
+  // The corpus disagreed with itself, which is what makes this checkable rather than a matter of
+  // taste: the `--mcp-file` paragraph three lines down says "Unlike proc.exec there is no base
+  // allow-list", and that is only meaningful if proc.exec HAS one.
+  //
+  // Pinned against the constant rather than against a copy of the list, so a name added to
+  // `BASE_ENV_ALLOW` fails here until the operator-facing text admits it.
+  const subprocessSrc = readFileSync(fileURLToPath(new URL("../../src/sandbox/subprocess.ts", import.meta.url)), "utf8");
+  const decl = /const BASE_ENV_ALLOW = \[([^\]]*)\]/.exec(subprocessSrc);
+  assert.ok(decl, "BASE_ENV_ALLOW moved or was renamed — this guard reads it by name");
+  const base = [...decl[1]!.matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]!);
+  assert.ok(base.length >= 3, `the scan found ${base.length} names; the regex broke, not the list`);
+
+  const cliSrc = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), "utf8");
+  const line = cliSrc.indexOf("--exec-env");
+  assert.notEqual(line, -1, "the flag left the usage text");
+  // FROM `line`, not from 0: `--mcp-file` is also named inside the `--grant` description ABOVE
+  // this flag, so an unanchored search returns an earlier index and slices an EMPTY block — which
+  // reads as "the text does not mention PATH" and is really "the window closed before it opened".
+  const block = cliSrc.slice(line, cliSrc.indexOf("--mcp-file", line));
+  assert.ok(block.length > 60, `the usage window is empty or truncated: ${JSON.stringify(block)}`);
+
+  for (const name of base) {
+    assert.ok(block.includes(name), `a child inherits ${name} and the --exec-env text does not say so:\n${block}`);
+  }
+  assert.doesNotMatch(block, /empty environment/, "a child that inherits PATH is not in an empty environment");
+});

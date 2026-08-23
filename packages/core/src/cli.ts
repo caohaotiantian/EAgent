@@ -118,8 +118,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     boundary: proc.exec is irreversible, so the graph must also hold
                     proc:exec and every call GATES. A tool node suspends for a human;
                     inside an agent turn it is refused outright.
-  --exec-env  N,N   environment variable NAMES proc.exec passes to the child. Default
-                    is an empty environment, because this process holds API keys.
+  --exec-env  N,N   environment variable NAMES proc.exec passes to the child, ON TOP OF
+                    PATH, LANG, LC_ALL and TZ — the minimum a child needs to run at all.
+                    No credential is ever inherited: this process holds API keys and
+                    passes none of them, so a tool needing one is given it explicitly.
   --mcp-file  F     MCP servers to connect, as {"servers":[{"name":"docs",
                     "command":"npx","args":["-y","@scope/srv"],
                     "envAllow":["PATH","HOME"]}]}.
