@@ -5791,3 +5791,39 @@ because a link is not a load and a docs link is fine offline. All four mutations
 belonged to. Same as `readme-quickstart.test.ts` pinning graphs and not the test count, and the
 `--token=value` fix that left every other spelling open. **When a check names two specific
 shapes, ask what the third one is.**
+
+---
+
+## The zero-dep guard named three doors and left a fourth open
+
+*Reversal condition: none. If core ever legitimately needs a file outside `src/`, the rule
+becomes an allow-list with that path named — but `build:binary` bundles `src/` alone, so wanting
+one is the signal to move the file.*
+
+Applying the previous iteration's generalisation — "when a check names two specific shapes, ask
+what the third is" — to the guard the whole of invariant 1 rests on. CLAUDE.md calls
+`check-zero-dep.mjs` "the ONLY automatic enforcement", so its completeness is the invariant.
+
+It is thorough about what it names: bare specifiers, `require`, `createRequire` including
+aliased and re-exported spellings, `module._load`, `process.binding`, `process.dlopen`, and an
+`import()` whose specifier is not a literal. Each earned its place.
+
+**And it classified every specifier starting with `.` as "relative, therefore fine."** A relative
+path can leave the package:
+
+    import "../../eagent/src/kernel/agent.ts"
+
+is not bare, so nothing objected. Measured against the real guard, with that line at the top of
+`src/ids.ts`: **`zero-dep guard ok: packages/core has no runtime dependencies`.** The sibling it
+reaches carries `jiti`. Invariant 1 already says "core may not import them" in words; this was
+the half nothing enforced, and the guard's headline sentence could be false while it printed.
+
+The rule is now the SOURCE ROOT, not the package root — `build:binary` bundles `src/`, so that is
+the boundary the binary actually has, and `../package.json` is refused for the same reason a
+sibling package is. Zero of the 320 relative imports in `src/` escape today, so it refuses
+nothing that exists.
+
+**Three cases, and the third is the one that matters most.** `./nested/../sibling.ts` climbs and
+comes back inside, and must be ACCEPTED — the check is about where a specifier lands, not how
+many `..` it contains. A textual rule would refuse it and teach people the guard is noise, which
+is how a guard gets switched off.

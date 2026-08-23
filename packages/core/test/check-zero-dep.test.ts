@@ -164,6 +164,47 @@ const CASES: readonly Case[] = [
     },
     refusal: /createRequire/,
   },
+  // ── check 4: a relative specifier is not automatically an internal one ─────
+  //
+  // The guard named three routes into `node_modules` and left a fourth open, because it
+  // classified every specifier starting with "." as "relative, therefore fine". A relative
+  // path can leave the package entirely:
+  //
+  //     import "../../eagent/src/kernel/agent.ts"
+  //
+  // is not bare, so nothing objected — and it reaches a sibling package that carries `jiti`,
+  // pulling a runtime dependency into core through the one door left open. Measured against
+  // the real guard before the fix: `ok`, with that line at the top of `src/ids.ts`.
+  //
+  // Invariant 1 already said it in words — "core may not import them". This is the half
+  // nothing enforced. Zero of the 320 relative imports in `src/` escape today.
+  {
+    how: "a relative import that leaves the package for a sibling",
+    fixture: { files: { "index.ts": 'import "../../eagent/src/kernel/agent.ts";\nexport const x = 1;\n' } },
+    refusal: /resolves OUTSIDE/,
+  },
+  {
+    how: "a relative import that leaves src/ but stays in the package",
+    // `../package.json` is inside the package and still outside what `build:binary` bundles,
+    // which is `src/`. The rule is the SOURCE ROOT, not the package root, because that is the
+    // boundary the binary actually has.
+    fixture: { files: { "index.ts": 'import cfg from "../package.json" with { type: "json" };\nexport const x = cfg;\n' } },
+    refusal: /resolves OUTSIDE/,
+  },
+  {
+    how: "a relative import that climbs and comes back inside src/",
+    // NOT a refusal: `./a/../b.ts` is a silly spelling of `./b.ts` and resolves inside. The
+    // check must be about where a specifier LANDS, not how many `..` it contains — a textual
+    // rule would refuse this and teach people the guard is noise.
+    fixture: {
+      files: {
+        "index.ts": 'export { y } from "./nested/../sibling.ts";\n',
+        "sibling.ts": "export const y = 1;\n",
+        "nested/keep.ts": "export const k = 1;\n",
+      },
+    },
+    refusal: undefined,
+  },
   {
     how: "a bare require(), which type-strips straight through",
     fixture: { files: { "index.ts": "declare const require: (s: string) => unknown;\nexport const lodash = require(\"lodash\");\n" } },

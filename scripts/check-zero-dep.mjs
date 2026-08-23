@@ -45,7 +45,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import ts from "typescript";
 
 const CORE = process.argv[2] ?? "packages/core";
@@ -169,11 +169,33 @@ function auditFile(file) {
   return { specifiers, unauditable };
 }
 
+const SRC_ROOT = resolve(join(CORE, "src"));
 const files = walk(join(CORE, "src"));
 for (const file of files) {
   const { specifiers, unauditable } = auditFile(file);
   for (const spec of specifiers) {
-    if (spec.startsWith(".") || spec.startsWith("/")) continue; // relative
+    if (spec.startsWith(".") || spec.startsWith("/")) {
+      // A RELATIVE SPECIFIER IS NOT AUTOMATICALLY AN INTERNAL ONE, which is the shape this
+      // guard named three ways into `node_modules` and missed:
+      //
+      //     import "../../eagent/src/kernel/agent.ts"
+      //
+      // is not bare, so nothing above objects — and it reaches a sibling package that carries
+      // `jiti`, pulling a runtime dependency into core through the one door the guard leaves
+      // open. Measured: the guard printed `ok` with that line at the top of `src/ids.ts`.
+      //
+      // Invariant 1 says it in words already — "core may not import them" — and this is the
+      // half of it nothing enforced. Zero of the 320 relative imports in `src/` escape today,
+      // so the rule refuses nothing that exists.
+      const target = resolve(dirname(file), spec);
+      if (target !== SRC_ROOT && !target.startsWith(SRC_ROOT + sep)) {
+        failures.push(
+          `${file}: imports "${spec}", which resolves OUTSIDE packages/core/src ` +
+            `(core may not import a sibling package — invariant 1)`,
+        );
+      }
+      continue;
+    }
     if (spec.startsWith("node:")) continue; // builtin, explicitly prefixed
     failures.push(`${file}: imports bare specifier "${spec}" (core must be zero-dep)`);
   }
