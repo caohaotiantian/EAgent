@@ -4867,3 +4867,76 @@ the word "reversal" in the docstring. Three mentions minus one still cleared a t
 so deleting an entry's condition left it green. The unit is the bullet, not the file, and the
 last bullet has to stop at the end of the list rather than running into the closing paragraph —
 which is the second version of the same mistake, found the same way.
+
+---
+
+## T4 — replay could not reproduce the runs an auditor most wants to reproduce
+
+*Reversal condition: if a `policy.deescalated` event ever becomes derivable from the run itself
+rather than supplied by a human, it stops being an input and this serving goes away. Nothing
+suggests it will — that a human is the only source is what invariant 5 is.*
+
+`CLAUDE.md` carried this as the ONE caveat on the bar. Reproduced on a one-node graph with no
+taint in it:
+
+    recorded:  deescalate `run:<id>` → on, the irreversible action runs, no gate, succeeded
+    replayed:  no ceiling → posture `in` → a gate → E_REPLAY_DIVERGENCE, "replay raised a gate
+               on node "act" that the recorded run never decided"
+
+So an audit could not re-derive precisely the runs where a human used the one lever invariant 5
+allows to lower oversight.
+
+**The framing that made the fix obvious.** Every other term in the posture `max` is DERIVED — the
+graph declares it, a rule computes it, a class implies it — so a replay re-derives it by running.
+A human ceiling is the one term that comes from outside the run, which is exactly why nothing
+else may lower a posture. **It is an input, like a gate decision, and replay has to serve it.**
+
+**The trap, and it is the kind that ships.** `PolicyEngine.decide` keys ceilings by
+`run:<runId>` and `node:<runId>/<nodeId>`. The obvious fix — hand the original's `ceilings` map
+to `PolicyEngine.restore` — writes entries no lookup in the SHADOW run ever reaches. It
+type-checks, it runs, it changes nothing, and it reports green. Mutation-tested: dropping the
+rekey alone reopens the original failure exactly.
+
+**Ordering is by gates RAISED, not gates DECIDED.** `resolveGate` advances the run as part of
+answering, so a human lowering a ceiling while gate 2 is open does it after gate 2 was raised and
+before it was decided. Keyed on decisions, the replay applies that ceiling right after serving
+gate 1 — before gate 2 exists — and suppresses the very gate the recording raised. Measured on a
+three-node chain: keyed on decisions it diverges, keyed on raises it matches.
+
+**And the reproduction itself was wrong twice before it was right.** The first attempt
+de-escalated AFTER the gate was raised, so the recording had a decision to serve and replay
+passed. The second wired node 2 to read node 1's output — tool output is untrusted, so E8 tainted
+it, the hard floor went to `in`, and the gate fired whatever the human said. Correct behaviour,
+and it silently turned a test about de-escalation into a test about taint. The test file says so,
+because the next person will wire it the same way.
+
+### The bigger hole, found by mutating the fix
+
+`replayRun`'s `compare` weighed task states, channels and run status. **Never gates.** So a replay
+that raised a different number of human gates than the recording reported `match: true` — and so
+did one that asked NOBODY AT ALL. Measured: a recording that asked a human twice, replayed asking
+once, `match: true`; replayed asking zero times, `match: true`.
+
+That is "looks supervised, is not" at the level of the audit tool. The verdict every consumer
+reads — `loom replay`'s exit code, D10's promotion gate — was blind to exactly the thing
+replaying a gated run is for. Two of the seven mutations written to verify the T4 fix were
+silently green against it, which is how it was found: **the fix could not be verified until the
+verdict could see what the fix changed.**
+
+`compare` now emits a `gate.decided` frame per gated TaskId — derived, so comparable across the
+two runIds — carrying each side's state and decision. One exemption, narrow and per-task: a
+`subgraph` whose effect was SERVED from the record did not run its child, so its parent-side
+mirror gate has nothing to mirror; comparing it would report a divergence for behaving as
+designed, which is the same rule that stops a replay re-calling a model.
+
+**And a test that asserted contents rather than the verdict.** The first gate-frame test checked
+that the frames exist and carry the right strings; forcing every frame's `match` to `true` left
+it green. Asserting a frame's contents is not asserting that the verdict moves. A second test
+produces a real gate divergence through `replayGates: false` and asserts `match` is false — and
+that one dies under the mutation.
+
+**Four tests took ten seconds each.** Lowering an irreversible action to `on` is what turns the
+intervention window ON — at `in` a gate is stronger and there is no hold, at `out` nobody is
+watching — so the tests proving de-escalation works were exactly the ones that then sat in
+`#sleep`. 35 seconds on a 9-second suite. `sleep: async () => {}`, which this repo's working
+rules already name as the usual cause.

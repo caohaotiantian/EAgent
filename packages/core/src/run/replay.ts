@@ -36,11 +36,12 @@
 
 import { digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
-import type { GateId, RunId, TaskId } from "../ids.ts";
+import { effectKey, type GateId, type RunId, type TaskId } from "../ids.ts";
 import { isEvent, type JournalEvent } from "../journal/events.ts";
 import { MemoryStateStore } from "../journal/memory.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
+import type { Posture } from "../vocab.ts";
 import { Engine, type EngineOptions } from "./engine.ts";
 import { foldRun, type GateRecord, type RunProjection } from "./projection.ts";
 
@@ -197,6 +198,11 @@ export class ReplayEffects {
     return this.#completed.has(key) || this.#failed.has(key);
   }
 
+  /** Did the replay serve this key from the record, rather than re-deriving it? */
+  wasServed(key: string): boolean {
+    return this.#served.has(key);
+  }
+
   /** Recorded effects the replay never asked for — a divergence in the other direction. */
   get unserved(): readonly string[] {
     return [...this.#completed.keys()].filter((k) => !this.#served.has(k)).sort();
@@ -220,6 +226,7 @@ export interface ReplayFrame {
   readonly kind:
     | "state.reduced"
     | "task.committed"
+    | "gate.decided"
     | "run.completed"
     | "run.failed"
     | "graph.bound"
@@ -432,6 +439,25 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   const submittedBy =
     submitted !== undefined && isEvent(submitted, "run.submitted") ? submitted.payload.submittedBy : undefined;
   const replayRunId = await engine.submit({ graph: opts.graph, inputs, ...(submittedBy === undefined ? {} : { submittedBy }) });
+
+  // THE HUMAN CEILINGS, REKEYED AND SERVED IN ORDER — see `recordedCeilings`. Unconditional,
+  // unlike `replayGates`: answering a gate differently is a thing a caller may legitimately
+  // want, and running at a posture the recorded run did not have is not. Without this the
+  // replay of any de-escalated run either raises a gate that was never decided (and throws) or
+  // gates an action the recording performed.
+  const ceilings = recordedCeilings(events, opts.runId, replayRunId);
+  const applied = new Set<RecordedCeiling>();
+  const applyCeilings = async (raised: number): Promise<void> => {
+    for (const c of ceilings.filter((x) => x.afterRaised <= raised && !applied.has(x))) {
+      applied.add(c);
+      // Through the same door a human used, so the shadow journal RECORDS the ceiling rather
+      // than carrying it in memory — invariant 2 applies to the replay's own journal too, and
+      // a shadow whose posture came from nowhere is the shape that made this bug invisible.
+      await engine.deescalate(replayRunId, c.scope, c.to, c.justification, { kind: "human", id: c.subject });
+    }
+  };
+  await applyCeilings(0);
+
   let replayed = await engine.advance(replayRunId);
 
   // Serve recorded human decisions the same way effects are served: a gate's answer
@@ -463,12 +489,16 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
         );
       }
       served.add(recorded.gateId);
+      // Every ceiling the human had set by the time THIS gate existed, before answering it.
+      await applyCeilings(Object.keys(replayed.gates).length);
       replayed = await engine.resolveGate(replayRunId, {
         gateId: open.gateId,
         decision: decisionOf(recorded),
         actor: { kind: "system", component: "replay" },
         idempotencyKey: `replay:${open.gateId}`,
       });
+      await applyCeilings(Object.keys(replayed.gates).length);
+      if (replayed.status !== "awaiting_gate") replayed = await engine.advance(replayRunId);
     }
   }
 
@@ -476,7 +506,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   for await (const e of shadow.read(replayRunId, 1)) replayedEvents.push(e);
   const rebound = reboundEffects(events, replayedEvents);
 
-  const frames = compare(original, replayed);
+  const frames = compare(original, replayed, effects);
   // Appended after `compare`, so the frame seq numbers of the three original kinds are
   // untouched by whether a binding held.
   let seq = frames.length;
@@ -597,6 +627,81 @@ function reboundEffects(
  * the reason that file's version gives: it is six lines of loop, and exporting it would put
  * a projection helper on the pinned public surface to save them.
  */
+/**
+ * A DE-ESCALATION IS A HUMAN INPUT, and replay has to serve it exactly as it serves a gate.
+ *
+ * Every other term in the posture `max` is derived — the graph declares it, a rule computes it,
+ * a class implies it — so a replay re-derives it by running. A human ceiling is the one term
+ * that comes from OUTSIDE the run, which is precisely why invariant 5 lets nothing else lower a
+ * posture. Nothing re-derives it, so nothing replayed it, so:
+ *
+ *     recorded:  deescalate `run:<id>` → on, the irreversible action runs, no gate, succeeded
+ *     replayed:  no ceiling → posture `in` → a gate → E_REPLAY_DIVERGENCE, "a gate the
+ *                recorded run never decided"
+ *
+ * An audit could not re-derive the runs where a human used the one lever that lowers oversight
+ * — which are the runs an auditor most wants to re-derive. Reproduced end to end on a one-node
+ * graph with no taint in it, and it is the caveat CLAUDE.md put on the whole bar.
+ *
+ * ## The scope carries the runId, which is why restoring it verbatim would not have worked
+ *
+ * `PolicyEngine.decide` looks ceilings up under `node:<runId>/<nodeId>` and `run:<runId>`, and
+ * the shadow run has a different id. Handing the original's `ceilings` map straight to
+ * `PolicyEngine.restore` would write entries no lookup in the shadow ever reaches: the fix that
+ * looks right, does nothing, and reports green. The scope is rekeyed here instead.
+ *
+ * ## Ordering
+ *
+ * Applied in recorded order, positioned by how many gates had been RAISED when the human called
+ * it. A human can only intervene where the run is paused — before the first advance, or while a
+ * gate is open — so that count is the coordinate, and it is derived from the journal rather than
+ * read off a wall clock.
+ *
+ * RAISED, not DECIDED, and the difference is a real case rather than a nicety. `resolveGate`
+ * advances the run as part of answering, so a human who lowers a ceiling while gate 2 is open
+ * does it AFTER gate 2 was raised and BEFORE it was decided. Keyed on decisions, the replay
+ * would apply that ceiling straight after serving gate 1 — before gate 2 exists — and suppress
+ * the very gate the recording says was raised, leaving its recorded decision unserved. Measured
+ * on a three-node graph: keyed on decisions the replay diverges, keyed on raises it matches.
+ */
+interface RecordedCeiling {
+  readonly scope: string;
+  readonly to: Posture;
+  readonly justification: string;
+  readonly subject: string;
+  /** How many gates had been RAISED when the human called it. */
+  readonly afterRaised: number;
+}
+
+function recordedCeilings(events: readonly JournalEvent[], from: RunId, to: RunId): readonly RecordedCeiling[] {
+  const out: RecordedCeiling[] = [];
+  let raised = 0;
+  for (const e of events) {
+    if (isEvent(e, "gate.raised")) {
+      raised++;
+      continue;
+    }
+    if (!isEvent(e, "policy.deescalated")) continue;
+    // A scope naming no run — a tenant-wide ceiling — carries across unchanged. Only the run
+    // coordinate is rewritten, by exact substring, so a runId appearing inside a node name or
+    // a justification is not touched.
+    const scope = e.payload.scope.split(from).join(to);
+    // A de-escalation by a non-human cannot exist: `PolicyEngine.deescalate` refuses one. A
+    // journal holding one is a journal that was EDITED, and applying it here would launder the
+    // edit into a real ceiling. Skipped instead — which makes the replay raise the gate the
+    // recording lacks, and report the divergence rather than hide it.
+    if (e.actor.kind !== "human") continue;
+    out.push({
+      scope,
+      to: e.payload.to,
+      justification: e.payload.justification,
+      subject: e.actor.subject,
+      afterRaised: raised,
+    });
+  }
+  return out;
+}
+
 function oldestOpen(p: RunProjection): GateRecord | undefined {
   let oldest: GateRecord | undefined;
   for (const g of Object.values(p.gates)) {
@@ -658,7 +763,7 @@ function decisionOf(g: GateRecord): Parameters<Engine["resolveGate"]>[1]["decisi
   }
 }
 
-function compare(original: RunProjection, replayed: RunProjection): ReplayFrame[] {
+function compare(original: RunProjection, replayed: RunProjection, effects: ReplayEffects): ReplayFrame[] {
   const frames: ReplayFrame[] = [];
 
   // Task-by-task: the same Task ids must reach the same terminal states. TaskIds are
@@ -678,6 +783,46 @@ function compare(original: RunProjection, replayed: RunProjection): ReplayFrame[
       match: a?.state === b?.state,
       expected: a?.state ?? "(absent)",
       actual: b?.state ?? "(absent)",
+    });
+  }
+
+  // WHO WAS ASKED, AND WHAT THEY SAID. Absent until a mutation test went looking for it:
+  // `compare` weighed task states, channels and status, so a replay that raised a DIFFERENT
+  // NUMBER OF HUMAN GATES than the recording reported `match: true`. Measured on a
+  // three-node graph whose recording asked a human twice — a replay that asked once scored
+  // green, and so did one that asked NOBODY AT ALL.
+  //
+  // That is the "looks supervised, is not" shape at the level of the audit tool itself. The
+  // whole point of replaying a gated run is to re-derive the oversight, and the verdict every
+  // consumer reads — `loom replay`'s exit code, `evolution/gate.ts`'s promotion decision — was
+  // blind to exactly that.
+  //
+  // Keyed by TaskId, which is derived (`nodeId@branchPath#iteration`) and therefore the same
+  // coordinate in both runs — the same reason `task.committed` above can be compared at all.
+  // The DECISION is compared, not the gateId: ids are minted per run and always differ.
+  const gateKeys = new Set<TaskId>([
+    ...Object.values(original.gates).map((g) => g.taskId),
+    ...Object.values(replayed.gates).map((g) => g.taskId),
+  ]);
+  for (const id of [...gateKeys].sort()) {
+    // A SUBGRAPH SERVED FROM THE RECORD DID NOT RUN ITS CHILD, so its parent-side mirror gate
+    // has nothing to mirror and is not raised — which is the whole point of "a parent replay
+    // does not re-run the child", the same rule that stops it re-calling a model. Comparing it
+    // would report a divergence for behaving as designed. Narrow on purpose: the exemption is
+    // per TASK and only when that task's `subgraph` effect was actually served, so a subgraph
+    // node the replay DID execute is still compared.
+    if (effects.wasServed(effectKey(id, "subgraph", 0))) continue;
+    const a = Object.values(original.gates).filter((g) => g.taskId === id);
+    const b = Object.values(replayed.gates).filter((g) => g.taskId === id);
+    const render = (gs: readonly GateRecord[]): string =>
+      gs.map((g) => `${g.state}${g.decision === undefined ? "" : `:${g.decision}`}`).sort().join(",") || "(never raised)";
+    frames.push({
+      seq: seq++,
+      kind: "gate.decided",
+      taskId: id,
+      match: render(a) === render(b),
+      expected: render(a),
+      actual: render(b),
     });
   }
 

@@ -25,9 +25,17 @@ That is the bar. Correctness of the mechanism serves it and does not substitute 
 framework whose agent nodes can only return `[mock] …` is not a working deployment however
 well-guarded its invariants are.
 
-**Today the bar is met with one caveat**: replay does not reproduce a run whose posture a human
-lowered, because `replayRun` never re-applies `policy.deescalated`. HANDOFF T4 carries the
-reproduction. Everything else on the clause list is verified end to end.
+**Today the bar is met**, and the caveat that stood here — replay could not reproduce a run
+whose posture a human lowered — is closed: `replayRun` now serves recorded `policy.deescalated`
+events the same way it serves gate decisions, rekeyed onto the shadow run's id. Every clause is
+verified end to end, most of them through `bin/loom` rather than only through `node`.
+
+**Be suspicious of that sentence anyway.** Closing T4 immediately turned up a bigger hole one
+level up: `replayRun`'s `compare` weighed task states, channels and status and NEVER GATES, so
+a replay that asked a human a different number of times — including none at all — reported
+`match: true`. The verdict every consumer reads (`loom replay`'s exit code, the D10 promotion
+gate) was blind to the oversight it exists to re-derive. **A bar is met against the checks that
+exist; the checks are the thing to distrust.**
 
 **The thesis, in one line:** the executable graph is the runtime; an agent loop is one node
 type inside it; every durable fact is an append-only journal entry — so parallelism, human

@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3439 pass, 0 fail, 1 skipped** (Loom 1896 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 238 (107 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3445 pass, 0 fail, 1 skipped** (Loom 1902 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 239 (108 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 514 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -61,9 +61,18 @@ and have it run, with a human gate that works and a replay that reproduces.*
 | point it at a real provider | ✅ `--models-file`; Anthropic + OpenAI over `fetch`+SSE. A run served by the mock now says so |
 | have it run | ✅ all eight node types execute; a run that finishes reports what it wrote |
 | a human gate that works | ✅ raise → deliver → decide → resume, across a restart; an approval binds the graph the human was shown |
-| a replay that reproduces | ⚠️ **yes, except for de-escalated runs** — see T4 |
+| a replay that reproduces | ✅ including runs a human de-escalated — `replayRun` serves recorded `policy.deescalated` events like it serves gate decisions, rekeyed onto the shadow runId |
+| `loom compile` diagnoses a missing resource | ✅ the workspace resolver no longer fabricates a pin for every well-formed ref |
 
-The bar is met with one caveat, and T4 is that caveat. Nothing else on the list below blocks it.
+**The bar is met.** Every row was verified by running, and the last four by running `bin/loom`
+rather than `node` — the binary is the deployment, and a claim about `src/` is not a claim
+about it.
+
+**Read the last row of that table as a warning about the others.** Closing T4 took an afternoon;
+the hour that mattered was discovering that `replayRun`'s own verdict never compared GATES, so a
+replay which asked a human a different number of times — or nobody at all — scored `match: true`.
+Two of the mutations written to verify the T4 fix were silently green against it. **Each ✅ above
+is a statement about the checks that exist, and the checks are the thing to distrust first.**
 
 ---
 
@@ -95,6 +104,8 @@ its work), and D5's prescribed fix would have added a resource kind nothing read
 ### 2 · Open from the E8 taint hardening
 
 Each reproduced or confirmed in source during that work and deliberately left out of it.
+**The numbering has a hole and it stays**: T4 is closed (see the bar table), and renumbering the
+rest would break every reference to them in the journal.
 
 - **T1 — a `router`'s `when` reads the scope through the expression evaluator, not a `${}`
   template**, so `observedChannels` cannot see it. Control-flow taint, a different question
@@ -107,11 +118,6 @@ Each reproduced or confirmed in source during that work and deliberately left ou
   this today, so it is an announced change, not a drive-by.
 - **T3 — same-wave ordering.** Taint is added at commit, so a node decided in the SAME wave as
   its tainter sees none. Needs an under-constrained graph and nothing refuses one.
-- **T4 — replay cannot exercise any de-escalated run.** `replayRun` never re-applies
-  `policy.deescalated`, so a replayed run has no ceiling and every hard-to-undo action computes
-  to `in`. Reproduced with a graph containing NO taint: the replay raises a gate the recorded
-  run never decided, and throws. **This is the one caveat on the bar** — pre-existing and
-  taint-independent, but it means "a replay that reproduces" does not hold for de-escalated runs.
 - **T5 — `evolution/trajectory.ts` matches escalation rules by exact string.**
   `e.payload.rule === "violation"` is dead: `#escalate` appends the detail, so the journaled
   value is `violation {"capability":…}`. E8's firing site uses the same pattern, so any future
