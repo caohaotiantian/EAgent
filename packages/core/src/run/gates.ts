@@ -1999,7 +1999,26 @@ export class HumanGateBroker {
    * raise. See `EphemeralGate.slaMs` for why that cannot extend anything.
    */
   rehydrate(gateId: GateId, req: GateRequest): void {
-    this.#ephemeral.set(gateId, ephemeralOf(req));
+    const existing = this.#ephemeral.get(gateId);
+    const next = ephemeralOf(req);
+    // IT MAY ADD A PAYLOAD AND IT MAY NEVER TAKE ONE AWAY, which this replaced wholesale.
+    //
+    // `Engine.rehydrateGates` builds its request from the journal, and the journal does not
+    // carry the rendered payload — it passes `payload: undefined` deliberately, "absent rather
+    // than faked". Replacing meant calling this on a gate whose payload was in memory ERASED it.
+    // Measured through the console API: a gate raised in-process answered with
+    // `payload.state = {note: "timing probe"}` for the first two queries and `null` from the
+    // third, one gate-clock tick later. What the approver lost is the thing they are approving —
+    // `Engine.openGates`' own docstring calls that "a gate that gets approved on trust, which is
+    // the failure mode the whole oversight layer exists to avoid".
+    //
+    // Fixed HERE rather than in the caller that exposed it, because the contract is this
+    // method's: its name and its docstring both say re-ATTACH, and a caller cannot know whether
+    // some other component holds a live payload for the gate it is arming.
+    this.#ephemeral.set(
+      gateId,
+      existing?.payload !== undefined && next.payload === undefined ? { ...next, payload: existing.payload } : next,
+    );
   }
 
   async project(log: RunLog): Promise<RunProjection | undefined> {

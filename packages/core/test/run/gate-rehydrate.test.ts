@@ -164,3 +164,46 @@ test("WITHOUT REHYDRATION THE SAME GATE EXPIRES WITH A REASON THAT IS FALSE", as
   );
   assert.deepEqual(second.paged, [], "nobody was ever paged");
 });
+
+test("REHYDRATING A LIVE GATE MUST NOT ERASE THE PAYLOAD IT ALREADY HAS", async () => {
+  // `rehydrateGates` builds its request from the journal, and the journal does not carry the
+  // rendered payload — it passes `payload: undefined` deliberately, "absent rather than faked".
+  // `rehydrate` then REPLACED the ephemeral entry wholesale, so arming a gate whose payload was
+  // still in memory erased it.
+  //
+  // Harmless while the only callers were re-attach doors on a process that had just started and
+  // held no payloads. It stopped being harmless when the gate clock began arming every run in
+  // `awaiting_gate` on every tick: measured through the console API, a gate raised in-process
+  // answered with `payload.state = {note: …}` for two queries and `null` from the third, one tick
+  // later. The approver loses the thing they are approving — `Engine.openGates`' own docstring
+  // calls that "a gate that gets approved on trust, which is the failure mode the whole oversight
+  // layer exists to avoid".
+  const r = rig();
+  const runId = await park(r);
+
+  const before = await r.engine.openGates(runId);
+  assert.equal(before.length, 1);
+  assert.notEqual(before[0]!.payload, undefined, "the raising process must hold the rendered payload");
+
+  // The same process arms its own gate, which is what a clock tick does.
+  r.engine.attach(runId, compile());
+  await r.engine.rehydrateGates(runId);
+
+  const after = await r.engine.openGates(runId);
+  assert.equal(after.length, 1);
+  assert.deepEqual(after[0]!.payload, before[0]!.payload, "arming a gate may add a payload, never take one away");
+});
+
+test("and a gate with no payload in memory still gets everything else re-attached", async () => {
+  // The correction must not become "never overwrite": a genuine restart holds no payload, and
+  // the SLA, delivery spec and tier still have to be re-attached or the sweep expires gates it
+  // should escalate — which is what the first test in this file is about.
+  const first = rig();
+  const runId = await park(first);
+  const second = rig({ store: first.store, clock: first.clock });
+  second.engine.attach(runId, compile());
+  assert.equal(await second.engine.rehydrateGates(runId), 1, "the open gate must still be re-armed");
+  const gates = await second.engine.openGates(runId);
+  assert.equal(gates[0]!.payload, undefined, "a process that never rendered it has none to show");
+  assert.notEqual(gates[0]!.deadline, undefined, "but the clock is back");
+});
