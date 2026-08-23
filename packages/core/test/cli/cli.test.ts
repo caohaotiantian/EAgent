@@ -8,6 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -1162,6 +1163,74 @@ test("`loom serve` DRIVES THE GATE CLOCK, so a declared SLA is an enforced one",
       }, "the gate's SLA never fired — nothing is driving the clock");
       assert.equal(status, "failed", "onTimeout: fail, enforced by a tick the deployment started");
       // FAIL-CLOSED: the action behind the gate did not run because nobody approved it.
+      assert.equal(existsSync(join(d.dir, "out", "applied.txt")), false);
+    } finally {
+      await s.stop();
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
+test("A GATE THIS PROCESS DID NOT RAISE STILL ESCALATES — the clock arms what it is asked to sweep", async () => {
+  // `GateSweeper` reads its escalation chain from the broker record only the RAISING process
+  // wrote. `rehydrateGates` rebuilds it, and was wired into the two write paths and the RUN
+  // clock — never into the gate clock, whose whole job is the deadline. The run clock could not
+  // cover it either: it skips any run that is not `running`, and a run holding a gate is
+  // `awaiting_gate` by definition.
+  //
+  // So the shipped two-verb shape had it. Measured through `bin/loom` before the fix: submitted
+  // through `POST /runs` the journal reads gate.delivered, gate.escalated, gate.delivered,
+  // gate.timeout; raised by `loom run` against the same serving plane it read gate.raised,
+  // run.suspended, gate.timeout — `onTimeout: "escalate"` behaving precisely as `fail`, which is
+  // the outcome `GRAPH014_SLA_INVALID` refuses a graph at COMPILE time to prevent.
+  //
+  // `run(...)` here is that second process in miniature: its own `Workspace` and its own
+  // `Engine` over the same store, so the serving plane's broker never sees the raise.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    const escalating = {
+      ...GUARDED,
+      metadata: { ...GUARDED.metadata, name: "escalating-gate" },
+      nodes: GUARDED.nodes.map((n) =>
+        n.id !== "approve"
+          ? n
+          : {
+              ...n,
+              humanGate: {
+                ref: "oversight/deploy@stable",
+                sla: { respondWithinMs: 10, onTimeout: "escalate" },
+                // A second tier to reach, and a terminal one so the run still ends. The channel
+                // names need no deployment behind them: an unknown name fails delivery loudly and
+                // never auto-approves, and the assertion here is the ESCALATION, not the send.
+                delivery: { channels: ["first"], escalation: [{ afterMs: 10, channels: ["second"] }, { afterMs: 60_000, action: "fail" }] },
+              },
+            },
+      ),
+    };
+    const file = join(d.dir, "graphs", "esc.json");
+    writeFileSync(file, JSON.stringify(escalating));
+
+    const s = await serving(["serve", "--workspace", d.dir, "--port", "0", "--sweep-ms", "25"]);
+    try {
+      const r = await run(["run", file, "--workspace", d.dir, "--input", JSON.stringify({ plan: "nobody will answer this" })]);
+      const runId = /"runId":\s*"([0-9A-Z]+)"/.exec(r.out)?.[1];
+      assert.ok(runId, `no runId in: ${r.out}\n${r.err}`);
+
+      const types = (): string[] => {
+        const db = new DatabaseSync(join(d.dir, ".loom", "journal.db"), { readOnly: true });
+        try {
+          return db.prepare("select type from journal where run_id = ? order by seq").all(runId).map((x) => String((x as { type: unknown }).type));
+        } finally {
+          db.close();
+        }
+      };
+      await until(() => types().includes("gate.escalated"), "the gate expired without ever escalating — the sweeper held no chain for a gate it did not raise");
+
+      const seen = types();
+      assert.ok(seen.indexOf("gate.escalated") > seen.indexOf("gate.raised"), `escalation must follow the raise: ${seen.join(" ")}`);
+      // FAIL-CLOSED THROUGHOUT: escalating is telling someone else, never deciding for them.
       assert.equal(existsSync(join(d.dir, "out", "applied.txt")), false);
     } finally {
       await s.stop();

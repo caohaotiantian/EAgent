@@ -66,7 +66,7 @@ import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
-import type { GateId, RunId } from "./ids.ts";
+import type { GateId, RunId, Seq } from "./ids.ts";
 import type { HumanActor, SubmittedBy } from "./journal/events.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
@@ -2024,14 +2024,57 @@ function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop():
   return { stop: () => clearInterval(timer) };
 }
 
+/**
+ * ARM THE GATES THIS PROCESS DID NOT RAISE, or the sweep expires what it should escalate.
+ *
+ * `GateSweeper` reads its `DeliverySpec` from the broker's in-memory record, which only the
+ * process that RAISED the gate ever wrote. `rehydrateGates` rebuilds it from the journal and the
+ * node declaration, and it was wired into the three re-attach doors — the two write paths and
+ * `startRunClock` — but not into the clock that exists to enforce the deadline. `startRunClock`
+ * cannot cover it either: it skips any run whose status is not `running`, and a run suspended on
+ * a gate is `awaiting_gate` by definition.
+ *
+ * So the shipped two-verb shape had the defect. `loom run` raises a gate and exits; `loom serve`
+ * sweeps it holding no chain, finds it exhausted, and expires it at the first deadline —
+ * `onTimeout: "escalate"` behaving exactly as `fail`, which is the outcome
+ * `GRAPH014_SLA_INVALID` refuses a graph at compile time to prevent. Measured through `bin/loom`:
+ * the same graph submitted through `POST /runs` journals `gate.delivered`, `gate.escalated`,
+ * `gate.delivered` and only then `gate.timeout`; raised by `loom run` it journals `gate.raised`,
+ * `run.suspended`, `gate.timeout`.
+ *
+ * MEMOISED ON `headSeq`, because the fold this costs is the one `ControlPlane` declined to pay
+ * per request — "a fold per candidate run, and it is NOT the shape `GateSweeper` pays". Keyed on
+ * the head rather than the run id so a run that raises a SECOND gate later is armed again, and
+ * memoised even when the graph is missing so an unservable run cannot cost a fold every tick.
+ */
+async function armForeignGates(ws: Workspace, armed: Map<RunId, Seq>): Promise<void> {
+  const rows = await ws.store.listRuns(DEFAULT_RUN_CLOCK_LIMIT);
+  let index: ReadonlyMap<string, RunGraph> | undefined;
+  for (const row of rows) {
+    if (armed.get(row.runId) === row.headSeq) continue;
+    armed.set(row.runId, row.headSeq);
+    const p = await ws.engine.projection(row.runId);
+    if (p === undefined || p.status !== "awaiting_gate") continue;
+    index ??= graphsByHash(ws).index;
+    const wanted = await ws.engine.compiledGraphHash(row.runId);
+    const graph = wanted === undefined ? undefined : index.get(wanted);
+    if (graph === undefined) continue;
+    ws.engine.attach(row.runId, graph);
+    await ws.engine.rehydrateGates(row.runId);
+  }
+}
+
 function startGateClock(ws: Workspace, everyMs: number): { readonly everyMs: number; stop(): void } {
   let running = false;
   let failing = false;
+  const armed = new Map<RunId, Seq>();
   const tick = (): void => {
     if (running) return;
     running = true;
-    void ws.engine
-      .sweepGates()
+    void (async () => {
+      await armForeignGates(ws, armed);
+      return ws.engine.sweepGates();
+    })()
       .then(
         (report) => {
           if (report.failed > 0 && !failing) {
