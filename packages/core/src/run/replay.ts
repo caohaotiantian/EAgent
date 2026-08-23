@@ -483,10 +483,24 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
       if (open === undefined) break;
       const recorded = firstUnservedDecision(original, open.taskId, served);
       if (recorded === undefined) {
-        throw err.internal(
-          CODES.E_REPLAY_DIVERGENCE,
-          `replay raised a gate on node "${open.nodeId}" (task "${open.taskId}") that the recorded run never decided`,
-        );
+        // NOBODY ANSWERING IS AN OUTCOME, and it was the one outcome replay could not re-derive.
+        // A gate the CLOCK resolved has no `gate.decided` — it has `gate.timeout` and folds to
+        // `state: "expired"` — so this arm threw for every run that ended because a deadline
+        // passed. `onTimeout: "fail"` is the DEFAULT, which makes that the ordinary unanswered
+        // run rather than a corner, and the set an auditor most wants to re-derive.
+        const expired = firstUnservedExpiry(original, open.taskId, served);
+        if (expired === undefined) {
+          throw err.internal(
+            CODES.E_REPLAY_DIVERGENCE,
+            `replay raised a gate on node "${open.nodeId}" (task "${open.taskId}") that the recorded run never decided`,
+          );
+        }
+        served.add(expired.gateId);
+        await applyCeilings(Object.keys(replayed.gates).length);
+        replayed = await expireOnTheClock(engine, replayRunId, open.gateId, replayed);
+        await applyCeilings(Object.keys(replayed.gates).length);
+        if (replayed.status !== "awaiting_gate") replayed = await engine.advance(replayRunId);
+        continue;
       }
       served.add(recorded.gateId);
       // Every ceiling the human had set by the time THIS gate existed, before answering it.
@@ -700,6 +714,73 @@ function recordedCeilings(events: readonly JournalEvent[], from: RunId, to: RunI
     });
   }
   return out;
+}
+
+/**
+ * The earliest EXPIRY on this Task the replay has not re-served — the mirror of
+ * `firstUnservedDecision`, and deliberately its exact shape.
+ *
+ * `GateRecord.state` already carried `"expired"`; nothing read it. The two helpers differ in one
+ * literal because the two cases differ in one fact: who resolved the gate. Everything else — the
+ * per-Task scoping that keeps iteration 2 from being served iteration 1's answer, the `served`
+ * set, the earliest-first order a forward walk needs — is the same problem and must not acquire a
+ * second, drifting solution.
+ */
+function firstUnservedExpiry(p: RunProjection, taskId: TaskId, served: ReadonlySet<GateId>): GateRecord | undefined {
+  let best: GateRecord | undefined;
+  for (const g of Object.values(p.gates)) {
+    if (g.state !== "expired" || g.taskId !== taskId || served.has(g.gateId)) continue;
+    if (best === undefined || g.raisedAtSeq < best.raisedAtSeq) best = g;
+  }
+  return best;
+}
+
+/**
+ * Let the shadow gate expire BY RUNNING THE CLOCK, never by asserting the outcome.
+ *
+ * The alternative was to resolve the shadow gate with a synthesised timeout, and that is the
+ * shape which reports `match: true` for a mechanism that has stopped working — which `compare`'s
+ * own gate-blindness already was once in this file. Sweeping means the real `GateSweeper` decides:
+ * if the deadline arithmetic, the escalation chain or the terminal action ever break, a replay
+ * DIVERGES instead of agreeing with itself.
+ *
+ * ## Why the instant is searched for rather than read off the journal
+ *
+ * The obvious derivation is the offset the recorded run took, `gate.timeout.ts − raisedAtTs`,
+ * applied to the shadow's own raise. It was written that way first and it does not work, for a
+ * reason worth keeping: **an event `ts` is the STORE's clock, not a measurement of the deadline.**
+ * That clock is injected everywhere in this codebase — fixed in tests, and fixed at
+ * `original.startedAt` for a replay — so a run whose gate genuinely expired records
+ * `gate.timeout.ts === raisedAtTs`, an offset of ZERO, and sweeping there expires nothing. The
+ * instant `sweepGates` was actually called with is not journaled anywhere.
+ *
+ * So the coordinate the journal really carries is weaker, and using it honestly is the fix: the
+ * recorded run expired this gate AT ALL. The shadow clock is therefore walked forward until the
+ * gate stops being open, which reproduces the outcome through the mechanism without claiming to
+ * reproduce a wall-clock instant that was never recorded.
+ *
+ * ## Why a loop, and why doubling
+ *
+ * `sweepTimeouts` makes at most ONE append per gate per tick — its own comment says so — so a
+ * gate that escalates through tiers needs one sweep per tier to reach the terminal one, and each
+ * tier's deadline is further out than the last. Doubling covers any finite schedule in a bounded
+ * number of steps while still arriving at each deadline in order, so tiers fire in sequence
+ * rather than being skipped. The cap is a guard, not a policy: a sweep that stops making progress
+ * must not spin.
+ */
+async function expireOnTheClock(
+  engine: Engine,
+  runId: RunId,
+  gateId: GateId,
+  p: RunProjection,
+): Promise<RunProjection> {
+  const raisedAt = p.gates[gateId]?.raisedAtTs ?? 0;
+  let current = p;
+  for (let k = 0; k < 48 && current.gates[gateId]?.state === "open"; k++) {
+    await engine.sweepGates(raisedAt + 2 ** Math.min(k, 41));
+    current = (await engine.projection(runId)) ?? current;
+  }
+  return current;
 }
 
 function oldestOpen(p: RunProjection): GateRecord | undefined {
