@@ -6228,3 +6228,37 @@ instant, and each fails on its own.
 **Reversal condition:** if the instant a sweep ran ever becomes journaled — a `sweptAt` on
 `gate.timeout`, say — this search should be replaced by reading it, and the doubling walk deleted
 rather than kept as a fallback. Until then, do not reintroduce an offset derived from `ts`.
+
+---
+
+## The register has been reading one end of the chain
+
+Six times this repo has found a capability with no CALLER — `runSandboxed`, `McpClient`,
+`ResourceStore`, `createFunctionLoader`, `HumanGateBroker.rehydrate`, `rehydrateGates` at three
+of four. The habit that grew from it is to ask "who calls this?", and a caller sweep two waves
+ago found nothing because it could only see the empty set.
+
+This wave found the mirror image, and it had been sitting in plain sight the whole time:
+**a consumer chain with no PRODUCER.** `UsageRecord.wallMs` is defined with unusual care —
+`addUsage` sums it deliberately and explains itself, "wall time of concurrent effects is not
+additive; callers that care about makespan compute it from spans. This sum is 'total work', not
+'elapsed'" — and both adapters wrote `wallMs: 0`. Three consumers read the result:
+`loom run`'s own output, `evolution/score.ts`'s latency term (`usage.wallMs / cohort.p50Wall`,
+identically zero for every candidate ever scored), and `evolution/gate.ts`'s wall percentiles,
+which were percentiles of zeros.
+
+**A field with no writer is harder to see than a function with no caller**, and the asymmetry is
+worth naming. An uncalled function is dead weight that shows up in any coverage or reference
+sweep. An unwritten field is *live*: it is read, summed, compared, and rendered — every consumer
+works perfectly on a constant, and the only symptom is a number that is always the same. Nothing
+in a reference count distinguishes it from a field that happens to be zero this run.
+
+**How it was actually found:** not by a sweep at all, but by having read `"wallMs": 0` in the CLI
+output of about a dozen runs driven over several waves, one of which had just spent 1.3 seconds
+of measured CPU. The evidence had been on screen for hours before the question "why is that
+always zero?" got asked. **A constant you have seen many times reads as a property of the
+system**, which is exactly how it hides.
+
+**Reversal condition:** `MockModelAdapter` keeps its hardcoded 0 on purpose — a mock that
+measures real time turns every usage assertion in the suite into a race. If the mock ever needs a
+duration, give it a scripted one, never a real clock.
