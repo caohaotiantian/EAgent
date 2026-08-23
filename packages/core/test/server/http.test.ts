@@ -1695,6 +1695,38 @@ async function decidedBy(r: Rig, runId: string): Promise<readonly Actor[]> {
   return (await journal(r, runId)).filter((e) => e.type === "gate.decided").map((e) => e.actor);
 }
 
+test("A REPLAYED APPROVAL IS IDEMPOTENT — one decision, one row, one action", async () => {
+  // The network-retry case, and the one an operator produces by double-clicking. A second
+  // DIFFERENT decision is already covered as a conflict (`callback.test.ts`); the same decision
+  // arriving twice is the commoner event and was covered nowhere.
+  //
+  // Three things must hold, and only the first is visible in the response: the caller sees
+  // success rather than a confusing 409 for a decision that IS theirs and DID happen; the
+  // journal gains no second `gate.decided`, because a duplicate audit row is a second answer to
+  // "who decided this" that nobody gave; and the guarded action does not run twice.
+  //
+  // Found by driving `bin/loom serve` by hand and counting rows in the journal afterwards.
+  const r = await rig({ identity: people(), approvers: ["u:security-lead"] });
+  try {
+    const at = await atGate(r, "lead-token");
+
+    const first = await decide(r, at, { decision: { kind: "approve" } }, "lead-token");
+    assert.equal(first.status, 200);
+    await settle(r, at.runId);
+    const writesAfterFirst = r.h.writes.length;
+    assert.ok(writesAfterFirst > 0, "the guarded action must have run once — otherwise the rest proves nothing");
+
+    const again = await decide(r, at, { decision: { kind: "approve" } }, "lead-token");
+    assert.equal(again.status, 200, "a repeat of a decision the caller already made is not an error");
+    await settle(r, at.runId);
+
+    assert.equal((await decidedBy(r, at.runId)).length, 1, "the journal must hold exactly one decision");
+    assert.equal(r.h.writes.length, writesAfterFirst, "and the guarded action must not run a second time");
+  } finally {
+    await r.close();
+  }
+});
+
 test("THE APPROVER'S IDENTITY CANNOT BE TYPED INTO THE REQUEST BODY", async () => {
   // The reproduction, verbatim: one shared service token, a gate that names the security
   // lead, and a body that claims to be them. The caller proved possession of a credential

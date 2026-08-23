@@ -5565,3 +5565,41 @@ probes each checkable row **in both directions**: a row claiming something is BU
 stops working, and a row claiming a GAP fails if the gap closes and nobody updates the row. Each
 probe also asserts the row's own wording, so a row cannot be reworded into a different claim
 without the probe being rewritten with it.
+
+---
+
+## The HTTP oversight path holds, and the retry case was covered nowhere
+
+*Reversal condition: if gate decisions ever stop being idempotent by design — if a second
+identical approval should conflict — this test is the one that says otherwise and has to change
+with the decision.*
+
+Drove `loom serve --identity-file --token` by hand, as an operator would: submit over
+`POST /runs`, read the gate off `GET /gates` with its approvers and rendered payload, answer it
+at `POST /runs/:id/gates/:id`. Everything held, and the refusals are precise —
+
+    operator's shared token   403  "names approvers, and this credential identifies no person"
+    u:alice's token           200  {"status":"succeeded","decision":"approve"}
+    no credential             401
+    wrong token               401
+    /health                   200  (deliberately open)
+
+`loom audit` on the finished run: 14 rules checked, 5 skipped, every skip naming the event class
+it saw none of rather than passing silently.
+
+**The one thing nothing covered was the case an operator produces by accident.** Approving twice
+returns 200 both times. `callback.test.ts` covers a second DIFFERENT decision as a conflict with
+no second row; the same decision arriving twice — a network retry, a double-click, a proxy replay
+— was covered nowhere. Counting rows in the SQLite journal afterwards showed it is already
+correct: one `gate.raised`, one `gate.decided`, one `tool.called`.
+
+Three properties, and only the first is visible in the response: the caller sees success rather
+than a 409 for a decision that IS theirs and DID happen; the journal gains no second
+`gate.decided`, because a duplicate audit row is a second answer to "who decided this" that
+nobody gave; and **the guarded action does not run twice**. All three now asserted, and both
+mutations against `HumanGateBroker`'s idempotency cache turn the test red.
+
+**Verifying by hand found a gap that reading would not have.** The behaviour was right; the claim
+that it stays right did not exist. That is a different kind of finding from the last several —
+not a defect, but an unprotected correctness — and it only shows up by doing the thing a user
+does and then asking what would have caught it.
