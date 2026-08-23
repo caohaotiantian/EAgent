@@ -121,7 +121,7 @@ and have it run, with a human gate that works and a replay that reproduces.*
 | write a graph | ✅ `loom compile` diagnoses ordinary authoring mistakes instead of crashing |
 | point it at a real provider | ✅ `--models-file`; Anthropic + OpenAI over `fetch`+SSE. A run served by the mock now says so. **Driven end to end through `bin/loom` against a local server speaking each vendor's wire format** — both the keyed Anthropic path and the documented keyless local `openai` one; the streamed text arrives as the run's output and the token counts are the ones the server sent |
 | have it run | ✅ all eight node types execute; a run that finishes reports what it wrote |
-| a human gate that works | ✅ raise → deliver → decide → resume, across a restart; an approval binds the graph the human was shown |
+| a human gate that works | ✅ raise → deliver → decide → resume, across a restart; an approval binds the graph the human was shown. **The FAILURE paths are driven too**, through `bin/loom` against a live plane: a rejection fails the run with its reason and the guarded write never happens; an SLA expires into `E_GATE_EXPIRED` under the `serve` clock; `onTimeout: "escalate"` with no chain is refused at compile; and with a chain it journals `gate.escalated` and delivers to the next tier |
 | a replay that reproduces | ✅ including runs a human de-escalated — `replayRun` serves recorded `policy.deescalated` events like it serves gate decisions, rekeyed onto the shadow runId |
 | `loom compile` diagnoses a missing resource | ✅ the workspace resolver no longer fabricates a pin for every well-formed ref |
 
@@ -162,6 +162,7 @@ against a memory of having fixed it:
 | **a node's `policy.budget.costUsd`** bound nothing at run time, while D2 promised it did and `GRAPH009` told authors to add it | `#runAgent` checks the node ceiling against task-local `usage` before reserving | the three tests under "the node's own ceiling" in `run/budget-declared.test.ts` |
 | **`budget.exhausted` could not be written** when no `runUsd` was set — `limitUsd` was `spentUsd + remainingUsd`, and `remainingUsd` is `Infinity` | the row carries the ceiling actually exceeded, read off the error | "A NODE CEILING WITH NO RUN BUDGET JOURNALS A FINITE LIMIT" — same file |
 | **`FunctionNode.cpuBound`** promised a worker thread in TWO design documents and was read by nothing; two such nodes ran exactly serially (1.997×) | `GRAPH019_CPUBOUND_NO_EFFECT` warns, and both documents now say inline | "GRAPH019: cpuBound is declared, read by nothing" in `graph/compile.test.ts` |
+| **a gate raised by `loom run` never escalated** — the `serve` sweeper held no chain for it and expired it at the first deadline, so `onTimeout: "escalate"` behaved as `fail` | the gate clock arms foreign gates before sweeping, memoised on `headSeq` | "A GATE THIS PROCESS DID NOT RAISE STILL ESCALATES" in `cli/cli.test.ts` |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until

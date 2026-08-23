@@ -6099,3 +6099,43 @@ to §3 with its question written out, and the compiler stops repeating the claim
 **Reversal condition:** when a function worker pool exists, delete `GRAPH019_CPUBOUND_NO_EFFECT`
 and restore both design sentences in the same change. A warning that outlives its gap is the
 failure mode `docs-drift` rule 4 exists to catch, one level out.
+
+---
+
+## The compiler refused one route to a wrong outcome; the runtime kept another open
+
+The gate's happy path had been driven end to end for waves. Its failure paths had not, so this
+wave drove all four through `bin/loom` against a live plane. Three were right: a rejection fails
+the run carrying its reason and the guarded write never happens; an SLA expires into
+`E_GATE_EXPIRED` under the `serve` clock; and `onTimeout: "escalate"` with no chain is refused at
+compile by `GRAPH014_SLA_INVALID`, whose message reads "it would expire at the first deadline
+instead — or say onTimeout: fail and mean it".
+
+The fourth was not, and the shape is worth the entry. Same graph, same plane, same 1500 ms SLA
+with a two-tier chain:
+
+    submitted via POST /runs   gate.raised → gate.delivered → gate.escalated → gate.delivered → gate.timeout
+    raised by `loom run`       gate.raised → run.suspended  → gate.timeout
+
+**`onTimeout: "escalate"` behaved exactly as `fail` — the precise outcome the compiler refuses a
+graph to prevent.** One route to it was closed at compile time and another stayed open at run
+time, and the closed one is what made the open one invisible: a reader who finds `GRAPH014` has
+every reason to believe the case is handled.
+
+The cause was a caller that was never added. `GateSweeper` reads its chain from the broker record
+only the RAISING process wrote; `rehydrateGates` rebuilds it and had been wired into three doors —
+two write paths and `startRunClock` — but not the gate clock. `startRunClock` cannot cover it
+either: it skips any run that is not `running`, and a run holding a gate is `awaiting_gate` by
+definition. **The mechanism existed, was tested, had three callers, and none of them was the one
+component whose purpose is the deadline.** `gate-rehydrate.test.ts` already records this exact
+false-reason defect for the restart case; this is the same hole reached from the other side.
+
+**What generalises is not "add the caller".** It is that a fix which enumerates its call sites can
+still miss the site that matters most, because the enumeration is drawn from where the bug was
+FOUND rather than from who consumes the state. The question that finds it: *which components read
+this, and which of them did the fix visit?* Three of four is a failure that looks like completion.
+
+**Reversal condition:** the arming is memoised on `headSeq` and pays a projection fold per changed
+run — the cost `ControlPlane` explicitly declined per request. If the run count makes that tick
+expensive, the fix is not to drop the arming but to have the sweeper report which runs it could
+not arm, so the degradation is loud rather than silent. A silent unarmed gate is the defect.
