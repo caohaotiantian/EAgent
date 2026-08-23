@@ -144,18 +144,9 @@ Ordered by what a fresh session should pick up first. Everything here was verifi
 
 ### 1 · Defects — something claims to work and does not
 
-**One open, found by driving a path rather than reading it. Pick it up first.**
-
-| open | evidence | plan |
-|---|---|---|
-| **A run whose gate EXPIRED cannot be replayed.** `replayRun`'s gate loop serves a recorded `gate.decided` and throws when there is none — but a gate the CLOCK resolved has `gate.timeout` instead, and `onTimeout: "fail"` is the DEFAULT. So every run that ended because nobody answered is unreplayable, which is the set an auditor most wants to re-derive | `loom replay <id> --graph esc2.json` → `E_REPLAY_DIVERGENCE: replay raised a gate … that the recorded run never decided`, exit 1, on a run whose journal reads `gate.raised → gate.escalated → gate.delivered → gate.timeout → run.failed` | `.agent/replay-expired-gate/plan.md` — three decisions recorded, chiefly whether to reproduce the expiry by SWEEPING the shadow gate past its own deadline (re-deriving) or by synthesising the outcome (faking) |
-
-**It is the same shape as the de-escalation gap this repo already closed, and the argument is
-stronger**: that one needed a human to have used a rare lever, this one is what happens when
-nobody does anything at all.
-
-**Everything else here has been closed** and each was verified against `src/` before its row was
-deleted, not against a memory of having fixed it:
+**Empty again, and that is a claim to check rather than a state to trust.** Every row this section
+has carried was closed and each was verified against `src/` before its row was deleted, not
+against a memory of having fixed it:
 
 | was | closed by | the check that would fail if it regressed |
 |---|---|---|
@@ -172,6 +163,7 @@ deleted, not against a memory of having fixed it:
 | **`budget.exhausted` could not be written** when no `runUsd` was set — `limitUsd` was `spentUsd + remainingUsd`, and `remainingUsd` is `Infinity` | the row carries the ceiling actually exceeded, read off the error | "A NODE CEILING WITH NO RUN BUDGET JOURNALS A FINITE LIMIT" — same file |
 | **`FunctionNode.cpuBound`** promised a worker thread in TWO design documents and was read by nothing; two such nodes ran exactly serially (1.997×) | `GRAPH019_CPUBOUND_NO_EFFECT` warns, and both documents now say inline | "GRAPH019: cpuBound is declared, read by nothing" in `graph/compile.test.ts` |
 | **a gate raised by `loom run` never escalated** — the `serve` sweeper held no chain for it and expired it at the first deadline, so `onTimeout: "escalate"` behaved as `fail` | the gate clock arms foreign gates before sweeping, memoised on `headSeq` | "A GATE THIS PROCESS DID NOT RAISE STILL ESCALATES" in `cli/cli.test.ts` |
+| **a run whose gate EXPIRED could not be replayed** — the gate loop served a recorded decision and threw when there was none, but a gate the CLOCK resolved has `gate.timeout`, and `onTimeout: "fail"` is the default | the expiry is reproduced by SWEEPING the shadow gate, walking its clock forward until it resolves | `run/replay-expired-gate.test.ts`; mutation-tested against both the missing arm AND the ts-derived instant that silently expires nothing |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until

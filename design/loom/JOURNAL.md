@@ -6183,3 +6183,48 @@ belongs in a turn that starts with it, not at the end of one. `.agent/replay-exp
 carries it, along with two smaller ones: whether the escalation TIER history must be reproduced or
 only the terminal status, and whether `applyCeilings`' raised-gate coordinate still lines up when
 a raise is consumed with no decision.
+
+---
+
+## An event `ts` is the store's clock, not a measurement — and the fix that assumed otherwise
+
+Replay could not re-derive a run whose gate expired: the gate loop served a recorded
+`gate.decided` and threw when there was none, while a gate the CLOCK resolved carries
+`gate.timeout` and folds to `state: "expired"`. Since `onTimeout: "fail"` is the default, that is
+the ordinary unanswered run. Same shape as the de-escalation gap this file closed earlier, and
+the argument transfers with more force — that one needed a human to use a rare lever; this one is
+what happens when nobody does anything.
+
+Two decisions, and the second is the one that generalises.
+
+**Reproduce the expiry by SWEEPING, not by synthesising it.** Resolving the shadow gate with a
+fabricated timeout would report `match: true` for a mechanism that had stopped working, which is
+exactly what `compare`'s own gate-blindness was before it was fixed. Sweeping puts the real
+`GateSweeper` in the loop, so broken deadline arithmetic or a broken chain now diverges instead of
+agreeing with itself.
+
+**And the instant cannot be read off the journal, which took a wrong version to learn.** The
+obvious derivation is the offset the recorded run took — `gate.timeout.ts − raisedAtTs` — applied
+to the shadow's own raise. It was written that way, it typechecked, and it did nothing: the
+replay still threw. The reason is worth stating plainly because it applies to every future use of
+an event timestamp here. **`ts` is the STORE's clock**, injected everywhere in this codebase and
+fixed at `original.startedAt` for a replay, so a run whose gate genuinely expired records
+`gate.timeout.ts === raisedAtTs` — an offset of ZERO. The instant `sweepGates` was actually called
+with is journaled nowhere.
+
+So the coordinate the journal really carries is the weaker one: *this gate expired at all*. Using
+that honestly — walking the shadow clock forward until the gate resolves, doubling so a tiered
+chain still fires in order under `sweepTimeouts`' one-append-per-tick rule — is the fix.
+
+**The debugging is the transferable part.** The wrong version failed with the SAME error message
+as the unfixed code, because both end at the same throw; it looked exactly like "the fix did not
+land". Two guesses were spent on staleness and taskId derivation before a printf showed the data
+matching and the loop running TWICE — the first pass finding the expiry and failing to apply it,
+the second finding it already `served`. **A fix that no-ops is indistinguishable from a fix that
+is absent, and the distinguishing evidence was the iteration count, not the message.** The
+regression test pins both halves: one mutation removes the arm, the other restores the ts-derived
+instant, and each fails on its own.
+
+**Reversal condition:** if the instant a sweep ran ever becomes journaled — a `sweptAt` on
+`gate.timeout`, say — this search should be replaced by reading it, and the doubling walk deleted
+rather than kept as a fallback. Until then, do not reintroduce an offset derived from `ts`.
