@@ -484,9 +484,34 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     for (const [gateId, seq] of openGates) {
       add("gate.raised-is-resolved", seq, `gate "${gateId}" was raised and the run completed without resolving it`);
     }
-  } else if (saw.has("gate.raised-is-resolved")) {
-    unrunnable.set("gate.raised-is-resolved", "the run did not complete; an open or abandoned gate is legal on a failed, cancelled or live run");
-    saw.delete("gate.raised-is-resolved");
+  } else {
+    // THE SAME PRECONDITION GUARDS THREE RULES, AND ONLY ONE HAD ITS REASON WRITTEN.
+    //
+    // `if (completed)` is what makes all three inapplicable to a run that failed or was
+    // cancelled, and the gate rule got a sentence saying so while its two siblings fell through
+    // to the default — "no event this rule constrains appears in this journal" — on journals that
+    // plainly contain `task.leased` and `subgraph.started`. Measured through `bin/loom audit` on a
+    // run whose seq 5 IS `task.leased`.
+    //
+    // **A report that explains an omission with a false reason is worse than one that says
+    // nothing**, because the false reason is checkable and answers the operator's next question
+    // wrongly: they go looking for a missing event instead of reading the run's status. And of
+    // the three, `task.leased-is-resolved` is the one that matters most — it is the rule that
+    // catches a stranded lease, which is register defect D2, a run that reported success having
+    // undone its own work.
+    if (saw.has("gate.raised-is-resolved")) {
+      unrunnable.set("gate.raised-is-resolved", "the run did not complete; an open or abandoned gate is legal on a failed, cancelled or live run");
+      saw.delete("gate.raised-is-resolved");
+    }
+    if (leased.size > 0) {
+      unrunnable.set("task.leased-is-resolved", "the run did not complete; a lease left open by a failed, cancelled or live run is abandoned on purpose");
+    }
+    if (childStarts.size > 0) {
+      unrunnable.set(
+        "subgraph.start-and-completion-pair",
+        "the run did not complete; a child whose end the parent never recorded is legitimate on a failed, cancelled or live run",
+      );
+    }
   }
   if (opts.hookRefs === undefined) {
     unrunnable.set("hook.applied-ref-is-declared", "no hookRefs supplied: the graph's declared hooks are not in the journal, only the refs that fired");

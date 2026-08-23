@@ -577,3 +577,46 @@ test("EVERY AUDIT RULE HAS A FIXTURE THAT TRIPS IT", () => {
   // would be the whole list and the message above would be the only clue.
   assert.equal(TRIPPED.size, AUDIT_RULES.length, "the recorder saw a different number of rules than exist");
 });
+
+test("A SKIPPED RULE'S REASON MUST BE TRUE — three rules share one precondition, one had its reason", () => {
+  // `if (completed)` makes `gate.raised-is-resolved`, `task.leased-is-resolved` and
+  // `subgraph.start-and-completion-pair` all inapplicable to a run that failed. Only the gate one
+  // said so; the other two fell through to "no event this rule constrains appears in this
+  // journal" — a checkable claim, and false about a journal that contains `task.leased`.
+  //
+  // Measured through `bin/loom audit` on a real run whose seq 5 was `task.leased`. An operator
+  // reading that goes looking for a missing event instead of reading the run's status, and of the
+  // three this is the rule that catches a stranded lease — register defect D2.
+  const evs = fixture(() => [
+    ev("run.started", { posture: "out" }),
+    ev("task.ready", { nodeId: "n", branchPath: "root", edgesIn: [] }, { taskId: "n@root#0" }),
+    ev("task.leased", { attempt: 1, leaseId: "l1", expiresAt: 2 }, { taskId: "n@root#0" }),
+    ev("subgraph.started", { childRunId: "run_child", nodeId: "n" }, { taskId: "n@root#0" }),
+    ev("gate.raised", { gateId: "g1", nodeId: "n", policyRef: "oversight/x@stable", contentDigest: "d" }, { taskId: "n@root#0" }),
+    ev("run.failed", { error: { code: "E_X", message: "nope", class: "internal", retryable: false } }),
+  ]);
+  const why = new Map(audit(evs).skipped.map((s) => [s.rule, s.why]));
+
+  for (const rule of ["task.leased-is-resolved", "subgraph.start-and-completion-pair", "gate.raised-is-resolved"] as const) {
+    const reason = why.get(rule);
+    assert.ok(reason !== undefined, `${rule} should be skipped on a failed run`);
+    assert.doesNotMatch(
+      reason,
+      /no event this rule constrains appears in this journal/,
+      `${rule}: the journal DOES contain the event this rule constrains — the reason is false`,
+    );
+    assert.match(reason, /did not complete/, `${rule}: the true reason is the run's status`);
+  }
+});
+
+test("and a journal that really lacks the event still says so", () => {
+  // The correction must not become a blanket excuse: a failed run with no lease and no child has
+  // nothing for those rules to constrain, and the generic reason is the honest one there.
+  const evs = fixture(() => [
+    ev("run.started", { posture: "out" }),
+    ev("run.failed", { error: { code: "E_X", message: "nope", class: "internal", retryable: false } }),
+  ]);
+  const why = new Map(audit(evs).skipped.map((s) => [s.rule, s.why]));
+  assert.match(why.get("task.leased-is-resolved") ?? "", /no event this rule constrains/);
+  assert.match(why.get("subgraph.start-and-completion-pair") ?? "", /no event this rule constrains/);
+});
