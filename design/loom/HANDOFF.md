@@ -157,6 +157,7 @@ against a memory of having fixed it:
 | **D6** fallback chains were declared and unwired | `route.fallback` builds a synthetic `chain(key)` adapter (`cli.ts`) | the `CHAIN` suite in `cli.test.ts` |
 | **D7** error edges ignored their `codes` | `#errorEdges` filters by `e.codes` (`engine.ts`) | `run/error-edge-codes.test.ts` |
 | **wire codes** the server sent `E_REQUEST_TIMEOUT`, which `errors.ts` never declared, and answered an unknown path with `E_RUN_NOT_FOUND` | both declared; `http.ts` sends `CODES.*` at all five sites, never a literal | "THE OTHER DIRECTION: EVERY CODE `src/` USES IS A CODE `errors.ts` DECLARES" in `docs-drift.test.ts`; "AN UNKNOWN PATH SAYS SO" in `server/http.test.ts` |
+| **event vocabulary** a key added to `EventPayloads` and forgotten in `EVENT_TYPES` was appendable and exempt from four gates at once | a compiler-enforced `Exclude<…>` exhaustiveness check, which names the absent keys | "EVENT_TYPES matches the EventPayloads key set" in `journal/store.test.ts` — it fails the BUILD, not the run |
 
 **Do not add a row here without a reproduction that RUNS.** Every defect in this table was found
 by running a new shape of thing, and two of the six were described wrongly by the register until
@@ -618,6 +619,18 @@ The reliable habit is stronger than `cp`: **mutate only a COMMITTED tree.** Then
 total, and `git status` proves it happened. A `cp` restore also runs on the error path, where
 nobody reads its output. The tell that it went wrong is a mutation that reports NOT MATCHED on
 a second run — always assert the mutation matched, or a vanished fix reads as a passing guard.
+
+**A VOCABULARY WITH TWO REPRESENTATIONS WILL DRIFT, and every gate iterating the wrong one is
+silently switched off.** Two consecutive waves found this and neither was looking for it. Error
+codes: three gates — "every declared code is named by a document", `NEVER_RAISED`, and the
+boundary taxonomy — all iterate the DECLARED list, so a code that reached clients without being
+declared was invisible to every one of them. Event types: four gates all iterate `EVENT_TYPES`,
+so a type declared in `EventPayloads` and omitted from that array was appendable to the journal
+while needing no audit rule, no written excuse, no appender and no doc row. The tell is a guard
+whose comment names the direction it does not check — both said so in writing, and both were
+believed for exactly as long as nobody added the key and ran it. **Ask of any registry: which of
+its two forms does each gate walk, and what happens to the member that is only in the other?**
+The fix to prefer is the type checker, which cannot be walked in the wrong direction at all.
 
 **A green test can be green for a reason it does not claim.** The first subgraph test passed
 because `skeleton.ts`'s resolver has no `subgraph()` method, so the child spec was never

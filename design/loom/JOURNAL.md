@@ -5905,3 +5905,45 @@ objection worth answering is disclosure — and it does not survive contact, bec
 already printed the path either way, and routing is decided after the bearer check, so an
 unauthenticated caller is told 401 for a path that exists and one that does not, identically.
 That last property is now pinned by the test rather than asserted here.
+
+---
+
+## The event vocabulary's runtime list was not exhaustive, and four gates depended on it
+
+Predicted from the previous entry rather than stumbled on: if error codes had a direction
+nothing walked, ask the same of the other two vocabularies. Event types answered yes.
+
+`append` itself is safe and was never the risk — `NewEvent` is a mapped union over `EventType`,
+so an undeclared type cannot be appended at all. The risk was one level over: `EVENT_TYPES` is
+`as const satisfies readonly EventType[]`, and `satisfies` constrains entries, not coverage. A
+key added to `EventPayloads` and forgotten in the array still satisfies it.
+
+The test beside it claimed that gap: "This catches the other direction: a payload added to the
+map but forgotten in the runtime list." It checked for duplicates and for a length of 52.
+Neither moves when the key is added only to the map — **the assertion and the sentence above it
+were about different things**, which is the same tell as the wire-code entry, and is now written
+into the traps.
+
+What made it worth a fix rather than a note is what the array feeds. Reproduced with one probe
+key: `store.test.ts` 65/0, `audit-coverage.test.ts` 3/0, `docs-drift.test.ts` 42/0, `tsc` 0. So
+the type was appendable to the journal — invariant 2's only authoritative durable state — while
+exempt from its audit rule, from the excuse list whose whole purpose is that an unruled type must
+be argued for in writing, from the has-an-appender check that exists because `gate.cancelled` once
+shipped folded-but-never-appended, and from D3.10. Four gates, one omission.
+
+**The fix is the type checker, deliberately.** `Exclude<EventType, (typeof EVENT_TYPES)[number]>`
+is empty exactly when the list is complete, and the failure names the missing keys — a runtime
+scan cannot, because a TYPE has no keys at runtime. This is the same preference recorded one
+entry earlier for `send`: where the compiler can express the constraint, it is strictly stronger
+than a scanner and the scanner should not also exist.
+
+**Reversal condition:** if `EVENT_TYPES` is ever derived from a single source of truth — a value
+map that `EventPayloads` is typed FROM, rather than a second list typed AGAINST it — this check
+becomes tautological and should be deleted rather than kept. Two representations are the defect;
+the assertion only makes their disagreement loud.
+
+**And the class was swept, not assumed.** `as const satisfies readonly …[]` occurs exactly once
+in `packages/core/src`. Span names have no cross-file emission surface at all — they are built
+inside `telemetry/spans.ts`, and the only quoted `loom.*` literals elsewhere in `src/` are
+`loom.internal` and `loom.token`, both already allow-listed. Three vocabularies, three answers,
+and the sweep names its set rather than claiming totality.
