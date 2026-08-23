@@ -116,8 +116,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     boundary — a child does its own open(), so allow-listing a shell
                     dissolves the fs jail rather than narrowing it — but not the whole
                     boundary: proc.exec is irreversible, so the graph must also hold
-                    proc:exec and every call GATES. A tool node suspends for a human;
-                    inside an agent turn it is refused outright.
+                    proc:exec and it GATES. A TOOL node suspends per call. An AGENT node
+                    gates ONCE, before its first turn, at the floor over every tool it
+                    can REACH — so one approval covers every call that agent then makes,
+                    bounded only by maxTurns. An in-turn call that would gate with no
+                    such approval is refused outright: a turn cannot suspend.
   --exec-env  N,N   environment variable NAMES proc.exec passes to the child, ON TOP OF
                     PATH, LANG, LC_ALL and TZ — the minimum a child needs to run at all.
                     No credential is ever inherited: this process holds API keys and
