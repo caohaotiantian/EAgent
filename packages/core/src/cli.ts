@@ -2552,10 +2552,44 @@ export async function main(argv: readonly string[]): Promise<number> {
         const events = [];
         for await (const e of ws.store.read(runId, 1)) events.push(e);
         const spans = spansFrom(events);
-        for (const s of spans) {
-          const depth = s.parentSpanId === undefined ? 0 : 1;
-          process.stdout.write(`${"  ".repeat(depth)}${s.name} [${s.status}] ${s.endTime - s.startTime}ms\n`);
+        // A TREE IS WALKED, NOT INFERRED FROM ARRAY ORDER. Two defects lived in one line here,
+        // `const depth = s.parentSpanId === undefined ? 0 : 1`, and the second was hidden by the
+        // first.
+        //
+        // DEPTH was a presence test, so every span with any parent printed at one indent: a
+        // `loom.tool` under a `loom.task` under the run rendered as the task's SIBLING, and a
+        // subgraph's whole interior collapsed onto the run's own column. The usage line calls this
+        // "the span tree" and it was a two-level list.
+        //
+        // ORDER is the one that only became visible once the indentation meant something.
+        // `spansFrom` sorts by `startTime` with a `spanId` tie-break — right for a waterfall and
+        // for an OTel export, and NOT tree order: a task that starts in the same millisecond as
+        // its run can sort ahead of it, which printed a child above its own parent. Measured on an
+        // agent run: `loom.task 28ms` then `loom.run 29ms`. So the array order stays exactly as it
+        // is and the RENDER builds the tree, keeping the sorted order within each sibling group.
+        //
+        // An orphan — a span whose parent id is in no span here, which `spansFrom`'s own comments
+        // say is reachable — is rendered as a root rather than dropped. `seen` bounds the walk: a
+        // journal is the one input to this command that a caller supplies.
+        const byId = new Map(spans.map((x) => [x.spanId, x] as const));
+        const kids = new Map<string, (typeof spans)[number][]>();
+        const roots: (typeof spans)[number][] = [];
+        for (const sp of spans) {
+          const parent = sp.parentSpanId;
+          if (parent === undefined || !byId.has(parent)) roots.push(sp);
+          else kids.set(parent, [...(kids.get(parent) ?? []), sp]);
         }
+        const seen = new Set<string>();
+        const emit = (sp: (typeof spans)[number], depth: number): void => {
+          if (seen.has(sp.spanId)) return;
+          seen.add(sp.spanId);
+          process.stdout.write(`${"  ".repeat(depth)}${sp.name} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
+          for (const child of kids.get(sp.spanId) ?? []) emit(child, depth + 1);
+        };
+        for (const r of roots) emit(r, 0);
+        // Anything a cycle kept out of the walk is still printed, because a renderer that silently
+        // drops a span is worse than one that prints it flat.
+        for (const sp of spans) if (!seen.has(sp.spanId)) emit(sp, 0);
         const conformance = conformsToGraph(reconstructGraph(spans), graph.spec, graph.graphHash);
         process.stdout.write(`\nconformance: ${conformance.ok ? "ok" : JSON.stringify(conformance)}\n`);
         return conformance.ok ? 0 : 1;

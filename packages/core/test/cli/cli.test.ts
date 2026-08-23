@@ -405,6 +405,37 @@ test("trace prints spans and asserts graph conformance", async () => {
   }
 });
 
+test("TRACE PRINTS A TREE, and the indentation is the run's real shape", async () => {
+  // Two defects lived in one line, and the second was hidden by the first. Depth was
+  // `parentSpanId === undefined ? 0 : 1` — a presence test — so a `loom.tool` under a
+  // `loom.task` under the run printed as the task's SIBLING. And once indentation meant
+  // something, the ORDER showed: `spansFrom` sorts by startTime with a spanId tie-break, right
+  // for a waterfall and not tree order, so a task starting in its run's millisecond printed
+  // ABOVE its own parent. Measured on an agent run: `loom.task 28ms` then `loom.run 29ms`.
+  //
+  // The old test asserted that the names appear, which both defects satisfied.
+  const d = emptyDir();
+  try {
+    const graphFile = seed(d.dir);
+    const first = await run(["run", graphFile, "--workspace", d.dir, "--input", JSON.stringify({ source: "input.txt" })]);
+    const { runId } = JSON.parse(first.out) as { runId: string };
+
+    const r = await run(["trace", runId, "--graph", graphFile, "--workspace", d.dir]);
+    assert.equal(r.code, 0, r.err);
+    const lines = r.out.split("\n").filter((l) => l.includes("loom."));
+    const depth = lines.map((l) => (l.length - l.trimStart().length) / 2);
+
+    assert.ok(lines.length >= 3, `expected a tree, got:\n${r.out}`);
+    assert.equal(depth[0], 0, `the root must print first, got:\n${r.out}`);
+    assert.ok(Math.max(...depth) >= 2, `expected nesting deeper than one level, got:\n${r.out}`);
+    for (let i = 1; i < depth.length; i += 1) {
+      assert.ok(depth[i]! <= depth[i - 1]! + 1, `indentation may only deepen one level at a time:\n${r.out}`);
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
 // ── the jail applies to built-in tools ───────────────────────────────────────
 
 test("a built-in tool cannot escape the workspace", async () => {
