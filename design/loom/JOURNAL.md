@@ -6607,3 +6607,37 @@ click approve.
 **Reversal condition:** if per-call approval inside a turn ever becomes possible — it needs
 turn-level durability the engine does not have, since the transcript lives in memory — this text
 and this test both change together.
+
+---
+
+## Five sweeps, one and a half defects; nine driven surfaces, six
+
+The permit-arm sweep came back empty, and the emptiness is the entry.
+
+Last wave found that `nodeApproved` — the arm of a guard that PERMITS irreversible work — was in
+no test, while its refusal arm had been pinned since the E8 wave. That is a compelling shape, so
+this wave asked it of every two-armed oversight guard. They are all paired, and often in one test:
+the intervention window pairs "an interrupted window leaves a posture behind", which asserts the
+effect never started, with "a window that elapses untouched escalates nothing"; the capability
+ceiling pairs "a graph that declares no capabilities cannot use one" with "absent is not empty";
+separation of duties opens with "THE INITIATOR IS REFUSED AND A CO-APPROVER IS NOT — the rule, in
+one run".
+
+**So `nodeApproved` was an exception, not an instance.** And that has now happened often enough to
+count. Sweeps derived from a previous finding: registry drift (one real defect), constant-only
+fields (one dead field, not worth fixing), public-method caller counts (none), `ts` used as an
+elapsed measurement (none — `wallMs` arrived by a different route), permit arms (none). Surfaces
+driven end to end: clean clone, provider path, gate failure paths, replay of an expired gate, the
+console, subgraph, SSE, the capability flags, the USAGE text — six defects between them, and the
+two clean ones are now recorded as verified.
+
+**The asymmetry is structural, not luck.** A sweep assumes the defect it was designed from is an
+INSTANCE of a class. In a codebase with this much discipline, most defects are EXCEPTIONS: the
+class is handled everywhere else, and that is precisely why the one exception survived long enough
+to be found. Generalising from it searches the part of the codebase that already got the lesson.
+Driving an unexercised surface searches the part that never did.
+
+**The corollary for the register:** a wave that produces no fix is not a wasted wave if it converts
+"nobody has checked" into "checked, sound, here is the evidence". Three surfaces have that status
+now — SSE, the capability flags, and the oversight guards' permit arms — and the next session
+should spend its attention elsewhere.

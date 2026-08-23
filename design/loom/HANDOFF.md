@@ -400,6 +400,22 @@ platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than 
 And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
 `200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
+**The oversight guards were swept for untested PERMIT arms and are sound.** Each two-armed guard
+pairs its refusal with its permission, usually in adjacent tests: the intervention window has both
+"an interrupted window leaves a posture behind" (asserting the effect never started) and "a window
+that elapses untouched escalates nothing"; the capability ceiling has "a graph that declares no
+capabilities cannot use one" and "absent is not empty"; separation of duties opens with "THE
+INITIATOR IS REFUSED AND A CO-APPROVER IS NOT — the rule, in one run". `nodeApproved` was the
+exception, not an instance of a class.
+
+**DRIVING BEATS SWEEPING HERE, and the record now says so with numbers.** Nine surfaces driven end
+to end produced six defects; five sweeps derived from a previous finding produced about one and a
+half. The reason is structural rather than luck: a sweep assumes the finding it was designed from
+is an INSTANCE of a class, and in a codebase this disciplined most findings are EXCEPTIONS — the
+class is already handled everywhere else, which is exactly why the one exception survived long
+enough to be found. **Prefer driving something nobody has driven over generalising the last
+defect**, and when a sweep is run, expect a negative and record it so it is not re-run.
+
 **The USAGE text was audited claim by claim, and the fs jail holds.** Driven through the binary:
 `fs.read`/`fs.write` on `.loom/journal.db` are both denied ("is inside … which this sandbox
 denies"), a custom `--data-dir` inside the workspace is denied the same way — so "wherever it is
