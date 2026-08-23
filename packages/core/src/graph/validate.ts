@@ -415,6 +415,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
   rule013Reducers(spec, d);
   rule014And019Oversight(spec, idx, ctx, d);
+  rule019InertDeclarations(spec, d);
   rule015Resources(spec, ctx.resolver, d);
   rule016Subgraphs(spec, ctx, expansion, d);
   rule017Capabilities(spec, ctx, d);
@@ -1316,6 +1317,43 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
         fix: `remove timeoutMs, or bound the BRANCHES with node timeoutMs, which is enforced`,
       });
     }
+  }
+}
+
+// ── GRAPH019: a declaration that changes nothing ─────────────────────────────
+
+/**
+ * A field the runtime does not read is reported rather than silently accepted.
+ *
+ * `FunctionNode.cpuBound` is the case this was written for, and it differs from
+ * `GRAPH008_JOIN_TIMEOUT_INERT` in the way that decides the severity. The join deadline is a
+ * choice the design MADE — `02-EXECUTION-GRAPH.md` states in three places that there is no
+ * barrier deadline. This one is DRIFT: two documents said the opposite of the code, the node
+ * table's `function` row ("Runs in a worker thread if `cpuBound: true`") and D3's pool diagram
+ * ("worker_threads if cpuBound"), while `packages/core/src` contains no `worker_threads` import
+ * at all. Both have been corrected; this is what stops an author believing the old sentence.
+ *
+ * MEASURED, because "nothing reads it" and "it does not run in parallel" are different claims:
+ * two independent `cpuBound: true` function nodes took 2646 ms of compute against 1325 ms for
+ * one — 1.997x, exactly serial, on a multi-core machine.
+ *
+ * A warning and not an error, because nothing SUBSTITUTES — unlike `onBudgetExhausted: "gate"`,
+ * which ran something semantically different from what the graph said. The function computes the
+ * right answer on the wrong thread. What is lost is isolation: a long body blocks the event loop,
+ * and with it every other task in the wave and any `loom serve` plane sharing the process.
+ */
+function rule019InertDeclarations(spec: GraphSpec, d: Diagnostic[]): void {
+  if (!Array.isArray(spec.nodes)) return;
+  for (const n of spec.nodes) {
+    if (n?.type !== "function") continue;
+    if ((n.function as { readonly cpuBound?: unknown } | undefined)?.cpuBound !== true) continue;
+    d.push({
+      severity: "warning",
+      code: "GRAPH019_CPUBOUND_NO_EFFECT",
+      message: `function node "${n.id}" declares cpuBound, which nothing reads — the body runs on the main thread and blocks it`,
+      at: { nodeId: n.id },
+      fix: "remove cpuBound, or keep the body short enough to run inline — there is no worker pool",
+    });
   }
 }
 

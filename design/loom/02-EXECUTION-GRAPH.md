@@ -24,7 +24,7 @@ graph LR
 
 | Type | Guarantees | Reads/writes state | Model? | Tools? | Deterministic | Default posture | Can suspend |
 |---|---|---|---|---|---|---|---|
-| `function` | Pure TS/JS over declared channels. Same input hash ⇒ same output. Runs in a worker thread if `cpuBound: true` | yes / yes | no | no | **yes** | inherits | no |
+| `function` | Pure TS/JS over declared channels. Same input hash ⇒ same output. Runs INLINE on the main thread — `cpuBound` is declared and read by nothing, and `GRAPH019_CPUBOUND_NO_EFFECT` says so at compile | yes / yes | no | no | **yes** | inherits | no |
 | `agent` | A bounded ReAct loop from a pinned `AgentProfile`. Bounded by `maxTurns` **and** node budget, whichever binds first. Returns a value matching `outputSchema` or fails | yes / yes | yes | yes | no (recorded) | **`max` over every tool it can REACH** | yes — **before the first turn, never inside one** |
 | `tool` | Exactly one `ToolExecutor.invoke`. No model call. The only node type whose irreversibility class is known statically | yes / yes | no | one | no (recorded) | **from tool's irreversibility class** | yes (policy gate) |
 | `router` | Selects a subset of its declared outgoing edges. **Cannot write state.** `mode` has two values and only `expression` compiles: `model` is REFUSED (`GRAPH005_ROUTER_MODE_UNSUPPORTED`), see below | yes / **no** | **no** | no | **yes** | inherits | no |

@@ -360,6 +360,33 @@ test("GRAPH019: a node posture that cannot take effect warns", () => {
   assert.match(hit.message, /"on" applies from a higher level/);
 });
 
+test("GRAPH019: cpuBound is declared, read by nothing, and the compiler now says so", () => {
+  // Two design documents said the opposite of the code — the `function` row of D2's node table
+  // ("Runs in a worker thread if `cpuBound: true`") and D3's pool diagram — while
+  // `packages/core/src` has no `worker_threads` import at all. Both are corrected; this is what
+  // stops an author who read the old sentence from believing it.
+  //
+  // Measured before writing, because "nothing reads it" and "it does not run in parallel" are
+  // different claims: through `bin/loom`, two independent `cpuBound: true` function nodes took
+  // 2646 ms of compute against 1325 ms for one — 1.997x, exactly serial, on a multi-core machine.
+  const plain = clone(minimal());
+  assert.equal(
+    codes(compile(base(plain)).diagnostics).includes("GRAPH019_CPUBOUND_NO_EFFECT"),
+    false,
+    "a graph that does not declare it must not be warned about it",
+  );
+
+  const s = clone(minimal());
+  s.nodes = s.nodes.map((x) => ({ ...x, function: { ...(x.function as object), cpuBound: true } })) as typeof s.nodes;
+  const d = compile(base(s)).diagnostics;
+  const hit = d.find((x) => x.code === "GRAPH019_CPUBOUND_NO_EFFECT");
+  assert.ok(hit !== undefined, `expected the warning; got ${codes(d).join(", ") || "nothing"}`);
+  assert.match(hit.message, /main thread/);
+  // A WARNING, not an error: unlike `onBudgetExhausted: "gate"` nothing substitutes here. The
+  // function computes the right answer, on the wrong thread. What is lost is isolation.
+  assert.equal(hit.severity, "warning");
+});
+
 test("GRAPH020: a node whose type block is missing or duplicated", () => {
   const missing = clone(minimal());
   missing.nodes = missing.nodes.map((x) => omit(x, "function"));

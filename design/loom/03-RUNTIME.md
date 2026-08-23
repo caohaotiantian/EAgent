@@ -115,7 +115,7 @@ graph TB
   subgraph POOLS["Worker pools (independent limits)"]
     P1["model pool<br/>default 16"]
     P2["tool pool<br/>default 32"]
-    P3["function pool<br/>= cores, worker_threads if cpuBound"]
+    P3["function pool<br/>= inline; no worker_threads (cpuBound is inert — GRAPH019)"]
     P4["control pool<br/>router/join/gate · inline, no queue"]
   end
   subgraph LIM["Token buckets (shared, per resource)"]
