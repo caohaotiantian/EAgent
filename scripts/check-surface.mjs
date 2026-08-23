@@ -16,10 +16,15 @@
  * produce identical output. The failure text below says "(REMOVAL IS BREAKING)", which is
  * true of a removed NAME and says nothing about a narrowed one. That is a deliberate
  * boundary rather than a hole to close here: the two `tsc` projects in `npm run typecheck`
- * are the first `&&` arm of `npm run check` and catch shape changes by using them — 35 of
- * the 38 exported classes are constructed in `test/`, the other three inside `src/` — so a
- * demotion fails the gate before this script runs. 01-INTERFACES.md states the same
- * boundary for readers of the design.
+ * are the first `&&` arm of `npm run check` and catch shape changes by USING them — every
+ * exported class is constructed somewhere, so a demotion fails the gate before this script
+ * runs. 01-INTERFACES.md states the same boundary for readers of the design.
+ *
+ * THAT COMPENSATING CLAIM IS ITSELF GATED, by
+ * `packages/core/test/surface-shape-is-covered.test.ts`. It used to carry a count here — "35 of
+ * the 38 exported classes" — which had drifted to 37 of 40 by the time anybody checked, and a
+ * class constructed NOWHERE would have left this paragraph covering less than it says while
+ * still reading true. The count is gone; the property is a test.
  *
  * IT READS `dist/`, SO IT IS ONLY AS FRESH AS THE BUILD. `npm run typecheck` therefore
  * builds with `--force`: `tsc -b` decides by comparing timestamps, and a skipped build left

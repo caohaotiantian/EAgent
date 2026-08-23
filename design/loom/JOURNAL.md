@@ -5827,3 +5827,38 @@ nothing that exists.
 comes back inside, and must be ACCEPTED — the check is about where a specifier lands, not how
 many `..` it contains. A textual rule would refuse it and teach people the guard is noise, which
 is how a guard gets switched off.
+
+---
+
+## A guard's honesty rested on a sentence in its own docstring
+
+*Reversal condition: if `check-surface.mjs` ever pins signatures rather than names, the whole
+compensating argument goes and so does its gate — which the third test pins, so that change is a
+decision rather than a discovery.*
+
+`check-surface.mjs` is the better-written of the two CI guards. It states its boundary outright —
+"WHAT THIS PINS IS THE NAME SET, AND NOTHING ELSE" — explains that `symbol.getName()` cannot tell
+a value from a type, and records the staleness reproduction with the test that keeps it. There is
+no missing third shape here; the boundary is deliberate and argued.
+
+**The argument is what turned out to be ungated.** It closes with: the two `tsc` projects catch
+shape changes by USING the exports — "35 of the 38 exported classes are constructed in `test/`,
+the other three inside `src/` — so a demotion fails the gate before this script runs."
+
+Measured: **40** exported classes, **37** in `test/`, three in `src/`. The property holds and the
+numbers had drifted by two. That is the small half. The large half is that **a 41st class
+constructed nowhere would leave the paragraph covering less than it claims while still reading
+true** — at which point the surface guard's stated boundary stops being a considered one and
+becomes a hole, with a docstring insisting otherwise.
+
+So the property is a test and the count is gone: every exported class must be constructed
+somewhere, or `tsc` never checks its shape and the pin only holds its name. The three that no
+TEST constructs — `CanonicalizationError`, `ReplayEffects`, `SubscriberOverflowError` — are named
+rather than counted, because that exception is genuinely weaker (an internal caller has to happen
+to break) and a named set cannot grow quietly.
+
+**And my own sweep missed one, the same way.** The fourth mutation reported "NOT CAUGHT" when it
+had never applied — a backslash-escaping mismatch meant the replacement was a no-op, and the
+harness had no did-it-match check on that arm. **A mutation that does not apply looks exactly
+like a guard that does not fire**, which is the second time this session that has cost a wrong
+conclusion until checked.

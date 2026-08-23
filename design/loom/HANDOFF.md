@@ -28,7 +28,7 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3502 pass, 0 fail, 1 skipped** (Loom 1959 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Tests | **3505 pass, 0 fail, 1 skipped** (Loom 1962 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
 | Test files | 252 (121 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
