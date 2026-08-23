@@ -56,7 +56,7 @@ import {
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
-import { reachableToolNames } from "../graph/spec.ts";
+import { observedChannels, reachableToolNames } from "../graph/spec.ts";
 import type { BatchingSpec, DedupeSpec, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
@@ -2157,7 +2157,11 @@ export class Engine {
       irreversibility,
       capabilities: this.#capabilitiesOf(node),
       declaredPosture: ctx.graph.plans[node.id]?.posture ?? "out",
-      dataClassification: [classificationOf(spec.channels, [...(node.reads ?? []), ...(node.writes ?? [])])],
+      // OBSERVED, NOT DECLARED. Reading the classification off `node.reads` was the taint
+      // bypass one field over: a channel declared `secret_ref` (floor `in`) interpolated into
+      // a tool's arguments but left out of `reads` lost its floor entirely. Measured — the
+      // gate disappeared and the tool received the secret.
+      dataClassification: [classificationOf(spec.channels, [...observedChannels(node), ...(node.writes ?? [])])],
       tainted,
     });
 
@@ -4967,42 +4971,6 @@ function stateAtPrefix(p: RunProjection, branch: BranchCoordinate): Record<strin
 }
 
 /** `${channel}` and `${channel.path}` substitution in tool arguments. */
-/**
- * Channels a node can OBSERVE — which is not `node.reads`.
- *
- * `#runToolNode` resolves `tool.args` against `scopeFor(...)`, the WHOLE channel scope, so a
- * template may name a channel the node never declared. Reading taint off `reads` alone was a
- * one-token bypass: drop the channel from `reads`, interpolate it into `args`, and the
- * untrusted bytes reach an irreversible tool's arguments with nothing raised. Reproduced on a
- * graph that compiled clean.
- *
- * STATIC on purpose. The same function has to answer for a node running now and for a node
- * whose commit is being re-folded out of the journal at attach, where no scope exists. Making
- * it a pure function of the NodeSpec is what lets the live rule and the rebuild be one rule.
- *
- * `${a.b}` names channel `a`; only the root segment is a channel. Not covered: a `router`'s
- * `when` expression, which reads the scope through the expression evaluator rather than through
- * a template — control-flow taint, a different question from feeding an action.
- */
-function observedChannels(node: NodeSpec): readonly string[] {
-  const out = new Set<string>(node.reads ?? []);
-  const scan = (v: unknown): void => {
-    if (typeof v === "string") {
-      for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
-        const root = m[1]!.trim().split(".")[0];
-        if (root !== undefined && root !== "") out.add(root);
-      }
-      return;
-    }
-    if (Array.isArray(v)) {
-      for (const x of v) scan(x);
-      return;
-    }
-    if (v !== null && typeof v === "object") for (const x of Object.values(v)) scan(x);
-  };
-  scan(node.tool?.args ?? {});
-  return [...out];
-}
 
 /**
  * Is this tool call, inside this task, downstream of untrusted content?

@@ -680,3 +680,57 @@ export function reachableToolNames(node: NodeSpec): readonly string[] {
   for (const t of node.agent?.tools ?? []) if (!names.includes(t)) names.push(t);
   return names;
 }
+
+/**
+ * Every channel this node can OBSERVE — not the ones it declares in `reads`.
+ *
+ * `#runToolNode` resolves `tool.args` against `scopeFor(...)`, the WHOLE channel scope, so a
+ * template may name a channel `reads` never mentions and the node reads it anyway. That gap is
+ * a one-token bypass wherever a decision is computed from the declared set: drop the channel
+ * from `reads`, leave `${channel}` in the arguments, and whatever `reads` was protecting is
+ * gone while the graph still compiles clean.
+ *
+ * It has been reproduced twice, on two different decisions, and the second is why this lives
+ * here rather than in `run/`:
+ *
+ *   TAINT — untrusted bytes reach an irreversible tool's arguments with nothing raised.
+ *   CLASSIFICATION — a channel declared `secret_ref` (floor `in`, a gate) interpolated into a
+ *     `reversible_write` tool. Declared in `reads`: the run gates, the tool never runs.
+ *     Omitted, same arguments: no gate, and the tool receives `sk-live-SUPER-SECRET`.
+ *
+ * Both are the posture `max` losing a term it should have had, and BOTH SITES ARE FED FROM
+ * HERE now — the compiler's `dataFloor`, which becomes `plans[].posture`, and the engine's
+ * runtime `dataClassification`. Beside `reachableToolNames` because it is the same kind of
+ * thing one noun over: what this node actually reaches, derived statically, because invariant 5
+ * depends on the answer.
+ *
+ * STATIC on purpose. The same function answers for a node running now and for a node whose
+ * commit is being re-folded out of the journal at attach, where no scope exists — which is what
+ * lets the live rule and the rebuild be one rule rather than two that can disagree.
+ *
+ * `${a.b}` names channel `a`; only the root segment is a channel.
+ *
+ * NOT COVERED, and named so the boundary can be checked rather than assumed: a `router`'s
+ * `when` expression reads the scope through the expression evaluator rather than through a
+ * template, so nothing here sees it. That is control-flow influence, a different question from
+ * feeding an action, and it is HANDOFF T1.
+ */
+export function observedChannels(node: NodeSpec): readonly string[] {
+  const out = new Set<string>(node.reads ?? []);
+  const scan = (v: unknown): void => {
+    if (typeof v === "string") {
+      for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
+        const root = m[1]!.trim().split(".")[0];
+        if (root !== undefined && root !== "") out.add(root);
+      }
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) scan(x);
+      return;
+    }
+    if (v !== null && typeof v === "object") for (const x of Object.values(v)) scan(x);
+  };
+  scan(node.tool?.args ?? {});
+  return [...out];
+}

@@ -28,6 +28,7 @@ import {
   type NodePlan,
   type ResolvedRef,
   type RunGraph,
+  observedChannels,
 } from "./spec.ts";
 import { indexGraph, validateGraph, type Diagnostic, type ValidationContext } from "./validate.ts";
 
@@ -100,8 +101,12 @@ export function compile(input: CompileInput): CompileResult {
               return entry === undefined ? [] : [CLASS_DEFAULT_POSTURE[entry.irreversibility]];
             }),
           );
+    // OBSERVED, NOT DECLARED — the same correction as the engine's `dataClassification`, and
+    // it has to be made in both places. This floor becomes `plans[n.id].posture`, which the
+    // graph-binding check reads as "the compiled oversight FLOOR", so leaving it computed off
+    // the declared set leaves a second, quieter answer to the question the engine just fixed.
     const dataFloor = maxPosture(
-      ...[...(n.reads ?? []), ...(n.writes ?? [])].map((c) => {
+      ...[...observedChannels(n), ...(n.writes ?? [])].map((c) => {
         const cls = spec.channels[c]?.classification;
         return cls === undefined ? ("out" as Posture) : CLASSIFICATION_POSTURE_FLOOR[cls];
       }),

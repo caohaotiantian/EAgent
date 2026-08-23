@@ -28,11 +28,11 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3445 pass, 0 fail, 1 skipped** (Loom 1902 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 239 (108 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3451 pass, 0 fail, 1 skipped** (Loom 1908 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 240 (109 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
-| Public exports, pinned | 514 | `node -e "console.log(require('./scripts/surface.json').length)"` |
+| Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
 | Escalation rules | 10, and **all 10 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` is empty |
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
@@ -111,11 +111,19 @@ rest would break every reference to them in the journal.
   template**, so `observedChannels` cannot see it. Control-flow taint, a different question
   from feeding an action, and the branch is bounded by `GRAPH005_ROUTE_NOT_OWN_EDGE`. Needs the
   expression parser to report free variables.
-- **T2 — `reads` is still not enforced as the read set.** `GRAPH004_UNDECLARED_READ` covers edge
-  `when`/`until` and router cases, never `tool.args`. Taint now derives the wider set; every
-  OTHER consumer of `reads` still trusts a field nothing holds anyone to. The hygiene fix is a
-  compile rule refusing a template outside `reads` — it breaks every shipped graph that does
-  this today, so it is an announced change, not a drive-by.
+- **T2 — `reads` is still not enforced as the read set, but nothing that DECIDES reads it any
+  more.** `GRAPH004_UNDECLARED_READ` covers edge `when`/`until` and router cases, never
+  `tool.args`, so a template still names a channel `reads` omits and the graph compiles clean.
+  **The half that could change an answer is closed**: `observedChannels` moved to
+  `graph/spec.ts` and now feeds the compiler's `dataFloor` and the engine's
+  `dataClassification` as well as taint. Before that, a channel declared `secret_ref` — floor
+  `in`, a gate — interpolated into a tool's arguments and left out of `reads` lost its floor
+  entirely: measured, the gate vanished and the tool received the secret.
+  What remains is HYGIENE: a compile rule refusing a template outside `reads`, which breaks
+  every shipped graph that does this today and is an announced change, not a drive-by.
+  **Check before doing it** whether any decision still reads the declared set —
+  `grep -arn '\.reads\b' packages/core/src/` — the confinement sites (`viewFor(…, node.reads)`)
+  are meant to stay narrow, because widening those would GRANT rather than restrain.
 - **T3 — same-wave ordering.** Taint is added at commit, so a node decided in the SAME wave as
   its tainter sees none. Needs an under-constrained graph and nothing refuses one.
 - **T5 — `evolution/trajectory.ts` matches escalation rules by exact string.**

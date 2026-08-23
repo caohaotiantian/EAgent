@@ -4940,3 +4940,53 @@ intervention window ON — at `in` a gate is stronger and there is no hold, at `
 watching — so the tests proving de-escalation works were exactly the ones that then sat in
 `#sleep`. 35 seconds on a 9-second suite. `sleep: async () => {}`, which this repo's working
 rules already name as the usual cause.
+
+---
+
+## T2 — the declared read set was not the real one, and two decisions believed it
+
+*Reversal condition: if `tool.args` interpolation is ever narrowed to `reads` — the hygiene fix
+HANDOFF describes — then `observedChannels` becomes the identity and can go. Until then, every
+decision computed from `node.reads` is computed from a field nothing holds anyone to.*
+
+`#runToolNode` resolves `tool.args` against `scopeFor(...)`, the whole channel scope. So a
+template names a channel and the node reads it whether or not `reads` mentions it, and anything
+derived from the DECLARED set is one token from being switched off.
+
+`observedChannels` was written for the taint half of this and wired to taint alone. Two other
+sites still read `node.reads`, and both feed the posture `max`. Reproduced on a graph that
+compiles clean, with `token` declared `classification: "secret_ref"` — floor `in`, a gate:
+
+    reads DECLARES the secret:   awaiting_gate   gates=1   tool saw: nothing
+    reads OMITS it, same args:   succeeded       gates=0   tool saw: "sk-live-SUPER-SECRET"
+
+**One token deleted and the classification floor is gone.** Same shape as the E8 bypass, one
+field over, with the fix already sitting in the same file unused on this path.
+
+`observedChannels` moved to `graph/spec.ts`, beside `reachableToolNames` — the same kind of
+thing one noun over, a static derivation off `NodeSpec` that invariant 5 depends on — and now
+feeds the compiler's `dataFloor` and the engine's `dataClassification` too.
+
+**Both sites, and the reason is a test that could not fail.** Reverting the ENGINE site alone
+changed no outcome, because the compiler's plan already supplied the floor through
+`declaredPosture` — a fix with no test that could distinguish it, which this repo treats as no
+fix. The case where it matters is real and written down in 01-INTERFACES: `plans` are excluded
+from `graphHash`, so "a process registering fewer tools recomputes a weaker posture under an
+identical hash". A graph can therefore arrive carrying `posture: "out"` for a node whose channels
+say `in`, and then the engine's own computation is the only term left. The test attaches exactly
+that — same bytes, same hash, weakened plan — and the engine still gates.
+
+**And a fixture that proved nothing, caught the same way E8 was.** The first version used a
+`reversible_write` tool, whose own floor is already `on`. That makes `pii` — also `on` — the
+IDENTITY, so the `pii` row demonstrated nothing about classification at all. It is the exact
+mistake this repo found in E8, where taint was written into a `max` that `CLASS_DEFAULT_POSTURE`
+had already pinned. Caught by the `public` row refusing to come back `out`; the fixture is
+`read_only` now, so classification is the only term that can raise it.
+
+**What is deliberately NOT done.** The compile rule refusing a template outside `reads` — the
+hygiene fix — breaks every graph that does this today, and making a security fix hostage to a
+migration is how the security fix does not ship. Also untouched: `viewFor(…, node.reads)`, which
+is CONFINEMENT rather than a decision. Widening that would grant a `function` body more than it
+declared, which is the opposite of what this change is for. The boundary is now a test: a
+router's `when` reads the scope through the expression evaluator and is still not covered (T1),
+asserted rather than described, so the day it changes the test says so.
