@@ -22,7 +22,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains in `--models-file`. A provider that ignores `stream: true` fails loudly rather than reporting an empty success |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 3347 tests across both packages, offline, no API key; zero-dep and public-surface guards |
+| **Gates** | `npm run check` — 3400+ tests across both packages, offline, no API key; zero-dep and public-surface guards |
 
 ## What does not work yet
 

@@ -21,7 +21,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { globSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { compile } from "../src/graph/compile.ts";
@@ -240,4 +240,122 @@ test("EVERY ROW OF THE GAPS TABLE IS PROBED OR EXCUSED — and nothing is both",
   for (const [row, why] of Object.entries(EXCUSED)) {
     assert.ok(why.length > 30, `${row}: an excuse under 30 characters is a shrug, not a reason`);
   }
+});
+
+// ── the OTHER table: "What works today" ─────────────────────────────────────
+//
+// The gaps table is the half a cautious reader checks. This is the half a reader ACTS on, and
+// it was gated by nothing at all — its test count said 3347 against a suite of 3498, drift of
+// 151, in a repo whose `readme-quickstart.test.ts` exists BECAUSE that number was wrong once
+// before ("claimed 386 tests against 1775"). The fix that lasts is a floor, not a count:
+// growth must never cost a doc edit, and collapse must fail.
+
+const WORKS: readonly { readonly row: string; readonly claims: string; readonly probe: () => void }[] = [
+  {
+    row: "Graph compiler",
+    claims: "22 validation rules",
+    probe: () => {
+      // The RULES are the GRAPH0xx families, not the individual codes — 73 of those today.
+      const families = new Set([...SRC("graph/validate.ts").matchAll(/GRAPH(\d{3})/g)].map((m) => m[1]!));
+      assert.equal(families.size, 22, `the compiler has ${families.size} rule families, and the README says 22`);
+    },
+  },
+  {
+    row: "Executor",
+    claims: "All eight node types run",
+    probe: () => {
+      // Eight is the count the schema declares; a ninth would make the sentence wrong.
+      const types = [...SRC("graph/spec.ts").matchAll(/^\s*\| "(function|agent|tool|router|join|evaluator|human_gate|subgraph)"/gm)];
+      assert.ok(types.length >= 8, `found ${types.length} node types in the union`);
+      for (const t of ["function", "agent", "tool", "router", "join", "evaluator", "human_gate", "subgraph"]) {
+        assert.match(SRC("run/engine.ts"), new RegExp(`case "${t}"`), `the executor has no arm for ${t}`);
+      }
+    },
+  },
+  {
+    row: "Durability",
+    claims: "A run SUSPENDED on a human gate survives `kill -9`",
+    probe: () => {
+      // The qualifier is the load-bearing word — `readme-quickstart.test.ts` records that this
+      // row once claimed it without one. Pinned so it cannot be dropped again.
+      assert.match(README, /A run SUSPENDED on a human gate survives `kill -9`/);
+      assert.match(SRC("journal/sqlite.ts"), /node:sqlite/, "the durable store must still be node:sqlite");
+    },
+  },
+  {
+    row: "Human oversight",
+    claims: "An approval binds the graph it was shown — spec, resolved resources and oversight floor",
+    probe: () => {
+      // Three conjuncts, three checks. `#assertBound` is where all three live.
+      const eng = SRC("run/engine.ts");
+      assert.match(eng, /differs: mismatch/, "the binding check must still report WHICH conjunct moved");
+      assert.match(eng, /recorded\.manifest !== manifestKey/, "resources");
+      assert.match(eng, /recorded\.graphHash === ctx\.graph\.graphHash/, "spec");
+    },
+  },
+  {
+    row: "Replay",
+    claims: "zero model calls, zero side effects",
+    probe: () => {
+      assert.match(SRC("run/replay.ts"), /replay: effects/, "the shadow engine must still be handed the recorded effects");
+    },
+  },
+  {
+    row: "Providers",
+    claims: "Anthropic + OpenAI over `fetch`+SSE",
+    probe: () => {
+      assert.ok(SRC("providers/anthropic.ts").length > 0);
+      assert.ok(SRC("providers/openai.ts").length > 0);
+      assert.match(SRC("cli.ts"), /chain\(/, "declarative fallback chains must still be built");
+    },
+  },
+  {
+    row: "Console",
+    claims: "Ships inside the binary",
+    probe: () => {
+      // Claimed of the BINARY, so the source is not the evidence — `bin/loom` is gitignored and
+      // may be absent or stale, which is why this checks what goes INTO it rather than the file.
+      assert.match(SRC("server/http.ts"), /text\/html/, "the plane must still serve the console");
+    },
+  },
+  {
+    row: "Gates",
+    claims: "3400+ tests across both packages",
+    probe: () => {
+      // A FLOOR in the prose, so growth costs no doc edit. The number in the README must be at
+      // or below what the suite actually holds — checked against the test files rather than a
+      // second hard-coded figure, which would be the same drift one level over.
+      const m = /(\d[\d,]*)\+ tests across both packages/.exec(README);
+      assert.ok(m, "the Gates row must state a floor like `3400+ tests`");
+      const stated = Number(m[1]!.replace(/,/g, ""));
+      const actual = globSync(fileURLToPath(new URL("../../*/test/**/*.test.ts", import.meta.url)))
+        .map((f) => (readFileSync(f, "utf8").match(/^test\(/gm) ?? []).length)
+        .reduce((a, b) => a + b, 0);
+      assert.ok(actual >= stated, `the README claims ${stated}+ tests and the suite declares ${actual}`);
+    },
+  },
+];
+
+test("EVERY CLAIM IN THE README'S \"WHAT WORKS TODAY\" TABLE IS STILL TRUE", () => {
+  for (const { row, claims, probe } of WORKS) {
+    assert.ok(README.includes(claims), `the "${row}" row no longer says ${JSON.stringify(claims)}`);
+    probe();
+  }
+});
+
+test("EVERY ROW OF THE WORKS TABLE IS PROBED — all eight, not most of them", () => {
+  const start = README.indexOf("## What works today");
+  const end = README.indexOf("## What does not work yet");
+  assert.ok(start >= 0 && end > start, "the works section moved");
+  const block = README.slice(start, end);
+  const rows = [...block.matchAll(/^\|\s*\*\*(.+?)\*\*\s*\|/gm)].map((m) => m[1]!);
+  assert.ok(rows.length >= 8, `found ${rows.length} rows — the scan broke, not the table`);
+
+  const rowText = new Map<string, string>();
+  for (const line of block.split("\n")) {
+    const m = /^\|\s*\*\*(.+?)\*\*\s*\|/.exec(line);
+    if (m) rowText.set(m[1]!, line);
+  }
+  const uncovered = rows.filter((r) => !WORKS.some((w) => (rowText.get(r) ?? "").includes(w.claims)));
+  assert.deepEqual(uncovered, [], "these rows claim something no probe checks");
 });

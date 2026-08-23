@@ -5674,3 +5674,39 @@ nobody listed fails.
 
 **Six mutations, all red** — including a row added with neither probe nor excuse, and the row
 scan finding nothing, which is the failure that would make this whole file decorative.
+
+---
+
+## The half a reader ACTS on was the half with no gate
+
+*Reversal condition: none for the probes. The test-count FLOOR reverses if the count ever needs
+to be exact — but nothing wants that, which is the point of a floor.*
+
+Two tables sit at the top of the README. The gaps table is what a cautious reader checks; "What
+works today" is what a reader ACTS on, and it was gated by nothing.
+
+**Its test count said 3347 against a suite of 3498** — drift of 151, in a repo where
+`readme-quickstart.test.ts` exists BECAUSE that number was wrong once before ("claimed 386 tests
+against 1775"). The file written to stop this drift never asserted the number; it pinned the
+graphs and the command name and left the figure alone. **A gate built after a specific failure
+tends to cover the thing that failed and not the class it belonged to.**
+
+The fix is a floor, not a count: `3400+ tests`, checked against what the suite actually declares
+rather than a second hard-coded figure — which would be the same drift one level over. Growth now
+costs no doc edit and collapse fails.
+
+The other seven rows were each verified before being probed, and all seven were true. Two are
+worth naming because the probe had to be chosen carefully:
+
+  - **"22 validation rules"** is right, and the obvious check is wrong: there are 73 `GRAPH0xx_*`
+    codes and 22 FAMILIES. The rules are the families.
+  - **"Ships inside the binary"** is a claim about `bin/loom`, which is gitignored and may be
+    absent or stale — so the probe checks what goes INTO it, not the file. A probe that read the
+    binary would fail on a clean checkout and pass on a stale one, which is backwards.
+
+And the durability row's qualifier — "a run SUSPENDED on a human gate survives `kill -9`" — is
+pinned as a string, because `readme-quickstart.test.ts` records that this row once claimed it
+without the qualifier that makes it true. Dropping it now fails two tests.
+
+Both tables are now probed-or-excused in full: ten gap rows, eight works rows, eighteen probes.
+Twelve mutations across the two iterations, all red.
