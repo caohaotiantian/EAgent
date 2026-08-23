@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { checkExpr, evaluateSource, parseExpr, referencedChannels, type Ty } from "../../src/graph/expr.ts";
+import {
+  BUILTINS,
+  type BuiltinName,
+  checkExpr,
+  evaluateSource,
+  inferType,
+  parseExpr,
+  referencedChannels,
+  type Ty,
+  type TypeError as ExprTypeError,
+} from "../../src/graph/expr.ts";
 
 const CH: Record<string, Ty> = {
   verdict: "object",
@@ -227,4 +237,45 @@ test("parse errors surface through checkExpr as diagnostics, not exceptions", ()
   const r = checkExpr("1 +", CH);
   assert.equal(r.ok, false);
   if (!r.ok) assert.match(r.errors[0]!, /expected a value/);
+});
+
+/**
+ * `BUILTINS[name].returns` is exported public data — `scripts/surface.json` pins `BUILTINS` —
+ * and until this test it was read by NOTHING: `grep -a '\.returns' packages/core/src` came back
+ * empty. The real answer lived twice over in code that never consults the table. `inferType`
+ * hard-codes `return "number"` / `return "boolean"` per case, and `evalCall` produces the value.
+ * So a consumer branching on `.returns` was right by luck, and editing the table alone would
+ * have changed nothing, broken nothing, and made the published field a lie.
+ *
+ * The sample table is keyed by `BuiltinName` on purpose: a sixth builtin fails to COMPILE until
+ * somebody supplies a call for it. That matters beyond this test, because the two switches are
+ * not equally protected — `evalCall` has no `break` and `noImplicitReturns` fails the build when
+ * it stops being exhaustive (verified by adding a probe builtin: `TS7030`), while `inferType`
+ * falls through its `break` and would quietly widen the new builtin to `unknown`. This is what
+ * would catch that.
+ */
+const CALLS: Record<BuiltinName, { readonly src: string; readonly scope: Record<string, unknown> }> = {
+  len: { src: "len(findings)", scope: { findings: [1, 2, 3] } },
+  has: { src: "has(verdict)", scope: { verdict: { pass: true } } },
+  all: { src: "all(applied)", scope: { applied: [true, true] } },
+  any: { src: "any(applied)", scope: { applied: [false, true] } },
+  contains: { src: "contains(findings, 2)", scope: { findings: [1, 2, 3] } },
+};
+
+test("EVERY BUILTIN RETURNS WHAT `BUILTINS` SAYS IT RETURNS — statically and at run time", () => {
+  const names = Object.keys(BUILTINS) as BuiltinName[];
+  assert.equal(names.length, 5, "a builtin was added or removed — supply its call above, and check BOTH switches");
+
+  for (const name of names) {
+    const { src, scope } = CALLS[name];
+    const declared = BUILTINS[name].returns;
+
+    const errors: ExprTypeError[] = [];
+    const inferred = inferType(parseExpr(src), CH, errors);
+    assert.deepEqual(errors, [], `${src} should type-check cleanly against CH`);
+    assert.equal(inferred, declared, `${name}(): inferType says ${inferred}, BUILTINS says ${declared}`);
+
+    // And the value itself, because a consumer reading `.returns` is predicting THIS.
+    assert.equal(typeof evaluateSource(src, scope), declared, `${name}(): the runtime value must match too`);
+  }
 });
