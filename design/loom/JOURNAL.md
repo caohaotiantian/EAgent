@@ -5947,3 +5947,30 @@ in `packages/core/src`. Span names have no cross-file emission surface at all �
 inside `telemetry/spans.ts`, and the only quoted `loom.*` literals elsewhere in `src/` are
 `loom.internal` and `loom.token`, both already allow-listed. Three vocabularies, three answers,
 and the sweep names its set rather than claiming totality.
+
+---
+
+## Two switches over the same union were not equally protected, and only running it showed which
+
+Third pass of the registry-drift question, and the smallest: it found unprotected public data
+rather than a defect. `BUILTINS[name].returns` is pinned in `surface.json` and was read by
+nothing — the return type a caller actually gets is hard-coded per case in `inferType` and
+produced by `evalCall`, neither of which consults the table. Public, published, unverified.
+
+**The reusable part is not the assertion.** `evalCall` and `inferType` switch over the same
+`BuiltinName` union, so both look equally safe from a sixth builtin. They are not, and reading
+them does not reveal it: adding a probe builtin fails `evalCall` with `TS7030` because
+`noImplicitReturns` sees a non-exhaustive switch with no fallthrough, while `inferType` has a
+`break` and code after it, so it compiles and quietly widens the new builtin to `unknown`. Same
+union, same shape, one protected by the compiler and one not. The guard is therefore a
+`Record<BuiltinName, …>` sample table, which fails to compile until the new builtin is supplied —
+chosen over iterating `Object.keys` precisely because iteration would have been silent about it.
+
+**Reversal condition:** if `inferType` ever grows an exhaustive `default: assertNever(e.fn)`, the
+keyed table stops being the only thing guarding that switch and may become an ordinary loop.
+
+**The vein is now exhausted, and saying so is the point of the entry.** Across three passes the
+full set is named: `as const satisfies readonly …[]` — one occurrence, fixed; unions derived from
+a const object via `keyof typeof` — two, `Code` and `BuiltinName`, both now checked; plain
+`as const` arrays — one, `BASE_ENV_ALLOW`, a list that mirrors no type. Further registry-drift
+hunting should not be expected to pay.
