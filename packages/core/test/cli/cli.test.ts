@@ -405,6 +405,58 @@ test("trace prints spans and asserts graph conformance", async () => {
   }
 });
 
+test("a subgraph is not a tool, and the trace stops calling it one", async () => {
+  // D9.1 fixes the span taxonomy at eight names and registers `loom.effect` as
+  // designed-not-built, so every effect folds into `loom.model` or `loom.tool` — and the fold
+  // sends `subgraph` to `loom.tool`. Measured by driving one through `bin/loom`: a parent whose
+  // ONLY node is a `subgraph` traced as `loom.tool`, so the line standing for a whole child
+  // graph called it a tool, and nothing in the output led to the child's own run.
+  //
+  // The `effect.kind` attribute was on the span the whole time. Printing it is a rendering fix;
+  // adding a `loom.subgraph` span would be a taxonomy change, which is a design decision and is
+  // recorded as one rather than taken here.
+  const d = emptyDir();
+  try {
+    mkdirSync(join(d.dir, "graphs"), { recursive: true });
+    mkdirSync(join(d.dir, "resources", "subgraph"), { recursive: true });
+    const child = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "child", project: "t", version: 1 },
+      policy: { posture: "out", capabilities: ["fs:write"] },
+      channels: { q: { type: "string", reduce: "replace" }, a: { type: "object", reduce: "replace" } },
+      inputs: ["q"],
+      outputs: ["a"],
+      nodes: [{ id: "w", type: "tool", reads: ["q"], writes: ["a"], tool: { name: "fs.write", version: "1.0", args: { path: "child.txt", body: "${q}" } } }],
+      edges: [],
+    };
+    writeFileSync(join(d.dir, "resources", "subgraph", "child.json"), JSON.stringify(child));
+    const parent = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "parent", project: "t", version: 1 },
+      policy: { posture: "out", capabilities: ["fs:write"], expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { note: { type: "string", reduce: "replace" }, result: { type: "object", reduce: "replace" } },
+      inputs: ["note"],
+      outputs: ["result"],
+      nodes: [{ id: "call", type: "subgraph", reads: ["note"], writes: ["result"], subgraph: { ref: "subgraph/child@stable", inputs: { q: "note" }, outputs: { result: "a" } } }],
+      edges: [],
+    };
+    const parentFile = join(d.dir, "graphs", "parent.json");
+    writeFileSync(parentFile, JSON.stringify(parent));
+
+    const first = await run(["run", parentFile, "--workspace", d.dir, "--input", JSON.stringify({ note: "n" })]);
+    assert.equal(first.code, 0, first.err);
+    const { runId } = JSON.parse(first.out) as { runId: string };
+
+    const r = await run(["trace", runId, "--graph", parentFile, "--workspace", d.dir]);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /loom\.tool \(subgraph\)/, `the child graph must not read as a plain tool:\n${r.out}`);
+  } finally {
+    d.dispose();
+  }
+});
+
 test("TRACE PRINTS A TREE, and the indentation is the run's real shape", async () => {
   // Two defects lived in one line, and the second was hidden by the first. Depth was
   // `parentSpanId === undefined ? 0 : 1` — a presence test — so a `loom.tool` under a

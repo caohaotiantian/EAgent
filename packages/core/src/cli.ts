@@ -2583,7 +2583,17 @@ export async function main(argv: readonly string[]): Promise<number> {
         const emit = (sp: (typeof spans)[number], depth: number): void => {
           if (seen.has(sp.spanId)) return;
           seen.add(sp.spanId);
-          process.stdout.write(`${"  ".repeat(depth)}${sp.name} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
+          // THE EFFECT KIND, because the span NAME cannot carry it. D9.1 fixes the taxonomy at
+          // eight names and registers `loom.effect` as designed-not-built, so every effect folds
+          // into `loom.model` or `loom.tool` — and the fold sends `subgraph` to `loom.tool`.
+          // Measured by driving one: a parent whose only node is a `subgraph` traced as
+          // `loom.tool`, so the line naming the child graph called it a tool and nothing in the
+          // output led to the child's own run. The attribute was on the span the whole time; this
+          // prints it rather than growing the taxonomy, which is a design decision and not a
+          // rendering one.
+          const kind = sp.attributes?.["effect.kind"];
+          const qualifier = typeof kind === "string" && !sp.name.endsWith(kind) ? ` (${kind})` : "";
+          process.stdout.write(`${"  ".repeat(depth)}${sp.name}${qualifier} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
           for (const child of kids.get(sp.spanId) ?? []) emit(child, depth + 1);
         };
         for (const r of roots) emit(r, 0);
