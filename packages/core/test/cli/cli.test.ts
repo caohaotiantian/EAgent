@@ -356,7 +356,11 @@ test("compile prints every diagnostic with its suggested fix, then fails", async
     const file = join(d.dir, "graphs", "bad.json");
     writeFileSync(file, JSON.stringify(bad));
 
-    await assert.rejects(() => run(["compile", file, "--workspace", d.dir]));
+    await assert.rejects(
+      () => run(["compile", file, "--workspace", d.dir]),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_INVALID,
+      "the undeclared write must be what refuses, not the file being unreadable",
+    );
   } finally {
     d.dispose();
   }

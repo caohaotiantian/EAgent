@@ -5448,3 +5448,47 @@ asserted that `--egress "a, b"` still registers `net.fetch` — which it does ei
 removing `.trim()` left it green. Trimming's only observable consequence is that a
 whitespace-only entry becomes blank and is then caught as a stray comma; the test asserts that
 instead. **Find the consequence, not the restatement.**
+
+---
+
+## "It threw" is not "it refused"
+
+*Reversal condition: none. If a call site genuinely does not care which error it gets,
+`isLoomError(e)` says so in one clause and is still a claim.*
+
+The previous two iterations each had a mutation survive because a test asserted only that
+something threw:
+
+  - `list-flag-values.test.ts` asserted a bare `--allow-exec` throws. Deleting the guard makes
+    the value `true`, `true.split` is not a function, and the TypeError satisfied `assert.throws`
+    exactly as well as the refusal did — green, while the capability it protected was granted.
+  - `known-flags.test.ts` asserted `compile nope.json --tokne x` rejects. It does anyway, for the
+    missing file.
+
+So the method went to the suite: **11 of 347 throw assertions had no second argument.** Every one
+was in a test whose point was something else — the state after a refused registration, the key
+space of a counter, the rewrite of a model id — which is exactly how they got that way. The
+rejection was scenery, and scenery does not get a predicate.
+
+All 11 now name their failure, and every code was confirmed by running rather than guessed at.
+`predicate-on-throws.test.ts` keeps it at zero. The bar is deliberately low — any second
+argument counts — because the aim is to make the author say WHICH failure they mean, not to
+prescribe how.
+
+### The gate needed three attempts, and each failure is the gate's own subject matter
+
+**A line-based scan reported nine false positives**, because the first argument is routinely a
+multi-line arrow function full of commas and parens. It became a paren scanner that skips string,
+comment and regex literals.
+
+**Its floor counted with a different regex than its scan used**, so breaking the scanner left the
+floor green — a gate that silently finds nothing and reports success forever. That is precisely
+the defect `audit-coverage.test.ts` guards against for audit rules, rebuilt by hand two files
+over. One scanner now serves both.
+
+**And the case it was written to cover was stated wrong.** An unbalanced paren inside a regex
+does not make the gate MISS a bare call — every `assert.` match is scanned from its own start, so
+a swallowed one is still found on its own pass. It makes the gate FLAG A CORRECT ONE: a guarded
+call whose first argument contains such a regex has its comma counted at depth 1 and reads as
+bare. A gate that cries wolf is a gate somebody switches off. The test asserts the false positive
+now, and the mutation that removes the regex handling finally goes red.

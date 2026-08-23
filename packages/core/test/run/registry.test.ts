@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { LoomError } from "../../src/errors.ts";
+import { CODES, LoomError, isLoomError } from "../../src/errors.ts";
 import type { TaskId } from "../../src/ids.ts";
 import {
   FunctionRegistry,
@@ -251,8 +251,10 @@ test("KNOB: a refused registration leaves the registry byte-for-byte as it was",
   r.register(tool("fs.write", "wiring"));
   r.seal();
 
-  assert.throws(() => r.register(tool("fs.write", "late-shadow")));
-  assert.throws(() => r.register(tool("net.post", "brand-new")));
+  // The point is the STATE below, and an unchanged registry is exactly what a TypeError would
+  // also leave behind — so the refusal has to be named or this test cannot fail.
+  assert.throws(() => r.register(tool("fs.write", "late-shadow")), (e: unknown) => isLoomError(e) && e.code === CODES.E_NOT_AUTHORIZED);
+  assert.throws(() => r.register(tool("net.post", "brand-new")), (e: unknown) => isLoomError(e) && e.code === CODES.E_NOT_AUTHORIZED);
   assert.equal(r.require("fs.write").description, "wiring", "the approved definition must still be the live one");
   assert.equal(r.get("net.post"), undefined);
   assert.deepEqual(Object.keys(r.manifests()), ["fs.write"]);

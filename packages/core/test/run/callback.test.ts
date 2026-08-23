@@ -893,7 +893,7 @@ test("THE COUNTER'S KEY SPACE IS CLOSED — a stranger cannot grow it by one ent
   // either a name the dispatcher was CONFIGURED with or one literal, and nothing else.
   const r = await rig();
   for (let i = 0; i < 100; i++) {
-    await assert.rejects(() => r.post(approval(r), { channel: `chan-${i}` }));
+    await refuses(() => r.post(approval(r), { channel: `chan-${i}` }), CODES.E_GATE_NOT_FOUND);
   }
   assert.deepEqual(
     r.router.refusals(),
@@ -1081,7 +1081,7 @@ test("the counter separates (channel, reason), because the two questions are dif
   await refuses(() => r.post(approval(r), { sig: "v0=" + "0".repeat(64) }), CODES.E_GATE_NOT_AUTHORIZED);
   await refuses(() => r.post(approval(r), { sig: "v0=" + "1".repeat(64) }), CODES.E_GATE_NOT_AUTHORIZED);
   await refuses(() => r.post(approval(r), { ts: stale, sig: r.channel.sign(approval(r), stale) }), CODES.E_GATE_NOT_AUTHORIZED);
-  await assert.rejects(() => r.post(approval(r), { channel: "nope" }));
+  await refuses(() => r.post(approval(r), { channel: "nope" }), CODES.E_GATE_NOT_FOUND);
 
   assert.deepEqual(r.router.refusals(), [
     { channel: "(unknown)", reason: "unknown_channel", count: 1 },
@@ -1108,7 +1108,8 @@ test("EVERY REFUSAL LANDS SOMEWHERE — journaled or counted, never both, never 
   for (const attempt of attempts) {
     const rowsBefore = rejections(await r.events()).length;
     const countBefore = r.router.refusals().reduce((n, x) => n + x.count, 0);
-    await assert.rejects(attempt);
+    // Each `attempt` refuses for its own reason, so the shared claim is that it is a REFUSAL.
+    await assert.rejects(attempt, (e: unknown) => isLoomError(e));
     const rows = rejections(await r.events()).length - rowsBefore;
     const counted = r.router.refusals().reduce((n, x) => n + x.count, 0) - countBefore;
     assert.equal(rows + counted, 1, "exactly one sink took it");
@@ -1136,7 +1137,7 @@ test("a CONFLICTING decision after the run is over is counted, since it cannot b
 
 test("the counter is a snapshot, not a handle on the live state", async () => {
   const r = await rig();
-  await assert.rejects(() => r.post(approval(r), { sig: "v0=" + "a".repeat(64) }));
+  await refuses(() => r.post(approval(r), { sig: "v0=" + "a".repeat(64) }), CODES.E_GATE_NOT_AUTHORIZED);
   const snapshot = r.router.refusals() as unknown as { count: number }[];
   snapshot[0]!.count = 9999;
   assert.deepEqual(r.router.refusals(), [{ channel: "slack", reason: "signature", count: 1 }]);

@@ -523,9 +523,12 @@ test("a mid-stream failure does not fall through — the caller already saw delt
     fallback: [{ adapter: ok("second"), model: "small" }],
   });
   const seen: ModelEvent[] = [];
-  await assert.rejects(async () => {
-    for await (const ev of chain.stream(REQ, ac())) seen.push(ev);
-  });
+  await assert.rejects(
+    async () => {
+      for await (const ev of chain.stream(REQ, ac())) seen.push(ev);
+    },
+    (e: unknown) => isLoomError(e),
+  );
   assert.equal(seen.length, 1, "no re-emission from the fallback tier");
 });
 
@@ -557,7 +560,10 @@ test("a changed prompt is a cassette miss", async () => {
   const rec = new RecordingAdapter(ok("x"));
   await collect(rec.stream(REQ, ac()));
   const replay = new ReplayingAdapter(rec.cassette);
-  await assert.rejects(() => collect(replay.stream({ ...REQ, system: "different" })));
+  await assert.rejects(
+    () => collect(replay.stream({ ...REQ, system: "different" })),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_REPLAY_DIVERGENCE,
+  );
   assert.notEqual(requestKey(REQ), requestKey({ ...REQ, system: "different" }));
 });
 

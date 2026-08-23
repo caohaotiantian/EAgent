@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3489 pass, 0 fail, 1 skipped** (Loom 1946 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 249 (118 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3492 pass, 0 fail, 1 skipped** (Loom 1949 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 250 (119 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -37,6 +37,11 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
+
+**A seventh sweep turned the method on the SUITE.** 11 of 347 `assert.throws`/`rejects` calls
+had no second argument, so each accepted any error — including one from the code being broken
+rather than refusing. All 11 guarded; `predicate-on-throws.test.ts` keeps the count at zero.
+**"It threw" is not "it refused."**
 
 **A sixth sweep — flag VALUES — found the same class one level in.** `--egress`, `--allow-exec`
 and `--exec-env` read their value as `String(flags[name]).split(",")`, so a bare flag became the

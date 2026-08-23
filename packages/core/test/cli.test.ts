@@ -395,9 +395,14 @@ test("A ROUTED REQUEST REACHES THE PROVIDER AS A REAL MODEL ID — not as the gr
       tools: [],
       maxTokens: 1000,
     };
-    await assert.rejects(async () => {
-      for await (const _ of cfg.adapter.stream(req, new AbortController().signal)) void _;
-    });
+    // The rejection is incidental here — the point is the rewrite asserted below — but it must
+    // still be a REFUSAL and not a TypeError from a broken adapter.
+    await assert.rejects(
+      async () => {
+        for await (const _ of cfg.adapter.stream(req, new AbortController().signal)) void _;
+      },
+      (e: unknown) => isLoomError(e),
+    );
 
     assert.equal(sent.body?.model, "claude-sonnet-5", "the ResourceRef was rewritten to the routed model id");
     assert.equal(sent.url, "https://api.anthropic.com/v1/messages");
@@ -541,7 +546,11 @@ test("a broken models file refuses BEFORE the journal is created", async () => {
   const d = emptyDir();
   try {
     const file = modelsFile(d.dir, { adapters: [{ provider: "anthropic" }], routes: {} });
-    assert.throws(() => openWorkspace(parseArgs(["gates", "--workspace", join(d.dir, "fresh"), "--models-file", file]), FAKE_ENV));
+    assert.throws(
+      () => openWorkspace(parseArgs(["gates", "--workspace", join(d.dir, "fresh"), "--models-file", file]), FAKE_ENV),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
+      "the models file must be what refuses — not, say, a missing directory",
+    );
     assert.equal(existsSync(join(d.dir, "fresh", ".loom", "journal.db")), false, "no journal was opened");
   } finally {
     d.dispose();
