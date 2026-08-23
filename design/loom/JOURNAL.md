@@ -6675,3 +6675,37 @@ what somebody intended, and that one is easy to defend.
 every body, would pass a suite that only asserts the two refusals — a far worse defect than the
 one being fixed, shipped under a green test. The third test runs `{}` and
 `{ writes: {...}, note: "…" }` and asserts the write lands.
+
+---
+
+## The too-small-a-set mistake, made one commit after recording it
+
+Driving `router` and `evaluator` finishes the eight node types. Both are sound: a router takes its
+case edge for `n > 10` and its fallback otherwise, writing no state of its own — which is what
+`GRAPH005_ROUTER_WRITES` exists to keep true — and an `assertion` evaluator runs its body and
+escalates on a verdict below threshold.
+
+The finding was in neither of them. It was in the fix from the previous commit.
+
+`#runFunction` and the `assertion` arm of `#runEvaluator` both run a function body and both read
+`out.writes`. The previous wave refused a return nobody reads, INLINE in `#runFunction`, and the
+evaluator kept the defect: an assertion body returning `{ confidence: 0.9 }` still committed
+nothing and still died with `E_OUTPUT_MISSING`, one function away from a refusal that names the
+mistake precisely.
+
+**This register has a standing entry about exactly this** — "a fix written for the INSTANCE that
+failed rather than the CLASS it belonged to", found five times before — and the mistake was made
+one commit after writing that entry down again. Knowing a failure mode by name does not stop you
+producing it; what stops it is a mechanical question asked at fix time, and the question here was
+available and cheap: **who else calls this?** `functions.require` has two callers. Grepping for
+them takes ten seconds and would have caught it.
+
+**The structural fix is the shared helper, not the second copy.** `requireOutcome` has two callers
+now, so the contract cannot drift; a second inline copy would have been the same defect deferred.
+And the test drives both arms rather than asserting they agree, because "these two paths behave
+the same" is exactly the claim that rots.
+
+**What made it findable at all was driving the node type**, not reviewing the diff. The defect was
+invisible in the code — the evaluator arm reads `out.writes` in one line that looks correct — and
+obvious the moment an assertion evaluator ran with a body written the way an author would write
+it.

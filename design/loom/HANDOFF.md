@@ -404,7 +404,11 @@ And the README's three-line block runs verbatim into an EMPTY directory: `loom s
 through `bin/loom`: `fanout.planned` width 3, three branches under derived ids
 `work@root/e1[0..2]#0` each carrying its bound item, a join committing `branchCount: 3`, and an
 `append_ordered` channel returning `["alpha","beta","gamma"]` — branch-coordinate order, not
-arrival order. **`router` and `evaluator` remain the two node types nobody has driven.**
+arrival order. **ALL EIGHT NODE TYPES HAVE NOW BEEN DRIVEN through `bin/loom`**: a router takes
+its case edge for `n > 10` and its fallback otherwise while writing no state of its own, and an
+`assertion` evaluator runs its body and escalates below threshold. The bar's "all eight node types
+execute" is now a statement about the binary rather than about the engine with an injected
+resolver.
 
 **The `function` authoring path had a real usability defect and it is fixed.** `FunctionOutcome`
 is `{ writes?, take? }` and that is a TypeScript type a `function/*.js` author never sees: the
