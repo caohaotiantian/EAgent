@@ -273,6 +273,13 @@ for reasons, not forgotten.
 
 ### 6 · Smaller known gaps
 
+- **`rewind` and `advance` are control-plane commands with no CLI verb**, while `cancel` and
+  `approve` have both. An operator on a `loom serve` plane can
+  `POST /runs/:id/commands {"kind":"rewind","atSeq":N}`; one with only the binary cannot. Adding
+  `loom rewind` is not just a verb: `atSeq` has to be discoverable, and no verb prints journal
+  seqs today — `audit` prints violations, `trace` prints spans. That is the design question
+  attached to it, and it is why this is recorded rather than built.
+
 - **`AssembleInput.retrieved` is never populated** — nothing retrieves. `turns` is partly
   addressed (`boundTurns` handles the transcript; `assembleContext` still never receives it).
 - **The surface guard counts exported NAMES, not members.** A new public method on an

@@ -5603,3 +5603,41 @@ mutations against `HumanGateBroker`'s idempotency cache turn the test red.
 that it stays right did not exist. That is a different kind of finding from the last several —
 not a defect, but an unprotected correctness — and it only shows up by doing the thing a user
 does and then asking what would have caught it.
+
+---
+
+## I put a false claim in the README while fixing three false claims
+
+*Reversal condition: if `loom rewind` is ever built, the probe pinning its ABSENCE fails, which
+is the point — the row and the verb move together or not at all.*
+
+Hand-driving `cancel` and `rewind` found both sound, and found that the row I wrote about them
+one iteration ago was wrong.
+
+`loom cancel` is exactly as documented: needs no graph, closes the gate, and the guarded action
+does not run. The follow-up hazard `gates.ts` documents at length — answering a cancelled run's
+gate, whose `run.resumed` would carry out the very action the operator cancelled to prevent — is
+refused by name: `E_GATE_ALREADY_RESOLVED: gate … belongs to run …, which is cancelled`.
+
+**And D2's fix holds through the deployment surface**, verified for the first time outside unit
+fixtures. A one-node graph with `checkpoint: "before"` puts the checkpoint at seq 7, between
+`task.leased` (5) and `task.committed` (8) — the exact shape that stranded the lease. Over HTTP:
+rewind to 7 left the run `running` with `channels: {}`, and `advance` re-ran the node to `n = 1`.
+Before the fix that reported `succeeded` with the work undone.
+
+**The error.** Last iteration's commit fixed three stale README rows and introduced a fourth:
+"the one path back is an operator `loom rewind`". There is no such verb. `./bin/loom rewind`
+answers `unknown command "rewind"`. Rewind is reachable — over the control plane, at
+`POST /runs/:id/commands` — so the claim named the wrong door rather than a door that does not
+exist, which is the kind of wrong that reads perfectly.
+
+**And the gate I built for exactly this did not cover the row I broke.** `readme-gaps.test.ts`
+probes rows that make checkable claims; I wrote six probes and the "Crash mid-effect" row was not
+one of them, because at the time it made no claim I thought a machine could reach. It does now,
+and both halves are pinned: the verb must stay absent, and the control-plane command must stay
+present. Mutation-tested in both directions.
+
+**The lesson is narrower than "check your work".** A doc gate that probes SOME rows makes the
+unprobed ones look checked. The row I broke was the only one in that table without a probe, and
+that is not a coincidence — it is where the writing was loosest, which is why I reached for a
+verb name without running it. **The rows a gate skips are the rows most likely to be wrong.**

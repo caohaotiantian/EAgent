@@ -119,6 +119,19 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     },
   },
   {
+    row: "Crash mid-effect — rewind is a control-plane command, not a CLI verb",
+    claims: "**There is no `loom rewind` CLI verb**",
+    probe: () => {
+      // Written after getting this row WRONG. The previous wording said "the one path back is an
+      // operator `loom rewind`" — a verb that does not exist, introduced in the same commit that
+      // fixed three other false rows. Both halves are pinned now: the verb must stay absent, and
+      // the command must stay present.
+      assert.doesNotMatch(SRC("cli.ts"), /case "rewind"/, "a `loom rewind` verb exists now — update the row");
+      assert.match(SRC("server/http.ts"), /case "rewind": \{/, "the control-plane command is gone — update the row");
+      assert.match(SRC("run/engine.ts"), /task\.ready" as const/, "and rewind must still re-arm the leases it undoes");
+    },
+  },
+  {
     row: "Approval modes",
     claims: "Only `single`",
     probe: () => {
@@ -136,7 +149,7 @@ test("EVERY CHECKABLE CLAIM IN THE README'S GAPS TABLE IS STILL TRUE", () => {
 
 test("the probe table covers the rows that make checkable claims", () => {
   // A gate whose table emptied would pass forever. Floor, not a count: rows may be added.
-  assert.ok(ROWS.length >= 6, `${ROWS.length} rows probed — the table shrank`);
+  assert.ok(ROWS.length >= 7, `${ROWS.length} rows probed — the table shrank`);
   // And the README still HAS a gaps table to probe, rather than having lost it in an edit.
   assert.match(README, /^## What does not work yet$/m, "the gaps section is gone — this gate now checks nothing");
 });
