@@ -5033,3 +5033,61 @@ the day either goes, the boundary claim fails with it rather than quietly becomi
 understated, and T1's blocker had already been built. **The register is a record of what was
 believed when it was written; the code is what is true.** Reproduce before fixing — and read
 "reproduce" as including "reproduce that the problem still exists".
+
+---
+
+## T3 — a wave decides before it commits, and taint arrives at commit
+
+*Reversal condition: if `#runWave` ever commits each task as it finishes rather than after the
+whole wave, the overlay becomes the identity and can go. It is the `Promise.all`-then-commit
+shape that creates the window.*
+
+`#runWave` runs the whole wave with `Promise.all` and commits afterwards in branch order;
+`applyTaint` runs in that commit loop. So every policy decision in a wave is made against the
+taint set as it stood BEFORE the wave, and a node whose tainter is a sibling rather than an
+ancestor decided on a set one commit out of date.
+
+The register said "needs an under-constrained graph and nothing refuses one". Both true, and the
+graph is one edge from an ordinary one:
+
+    start → fetch  (a tool: taints `untrusted`)
+    start → charge (irreversible, reads `untrusted`)
+
+Measured, the same graph one edge apart, under a human ceiling of `on`:
+
+    edge fetch→charge    awaiting_gate   gates=1   charged=0
+    NO edge (same wave)  succeeded       gates=0   charged=1
+
+**E8's hard floor — never below `in` while a hard-to-undo action is tainted — is the one thing a
+human ceiling may not cross, and deleting an edge walked around it.**
+
+`RunContext.waveTaint` is the fix: a per-wave, TaskId-keyed overlay of what the wave's EXTERNAL
+members are about to write, consulted alongside `ctx.tainted` through one helper so the two
+halves cannot drift.
+
+**It is a separate field rather than a pre-fill of `ctx.tainted`, and that is invariant 2.**
+That set promises "monotonic and never cleared, so folding it forward from seq 1 gives the same
+answer as running it live". Pre-filling would break it: a wave member that FAILS writes nothing,
+so no fold ever produces its channels. The overlay is recomputed from the wave's composition —
+itself derived — so a replay reaches the same answer with nothing journaled a fold could not
+reproduce.
+
+**Two things it must not do, and both needed a fixture that could tell the difference.**
+A node is not tainted by its OWN pending write: its input on that channel came from elsewhere,
+and self-tainting would gate every read-modify-write node against itself. And only EXTERNAL
+members taint — a `function` body is trusted code (A13). The first version of the second test
+put producer and consumer in different waves, where the filter cannot act, and a mutation
+deleting the filter entirely left it green. Siblings, not a chain, is the only arrangement that
+tests it.
+
+**And a guard whose stated reason was wrong.** The `finally` that clears the overlay was
+commented "a stale overlay would taint the next wave's decisions with channels nobody in it
+writes". It would not: the map is keyed by TaskId, so a stale overlay reaches only a task with
+the SAME id in a later wave — a retry, and nothing else. The mutation that left it armed went
+green, which is what surfaced the overstatement. The comment now says it is defence rather than
+the thing that makes the mechanism correct. **A guard whose reason is overstated is one somebody
+deletes later on a correct-sounding argument.**
+
+*(Also caught in passing: a `.replace()` inside a JS template literal ate the escapes out of a
+regex — `[\s\S]` became `[sS]` — so an assertion silently tested a different pattern. Patches
+that write regexes now go through a heredoc, not a template literal.)*

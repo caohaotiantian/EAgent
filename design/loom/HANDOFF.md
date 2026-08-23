@@ -28,8 +28,8 @@ Measured **2026-08-23**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3456 pass, 0 fail, 1 skipped** (Loom 1913 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 241 (110 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3461 pass, 0 fail, 1 skipped** (Loom 1918 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 242 (111 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -133,8 +133,14 @@ rest would break every reference to them in the journal.
   **Check before doing it** whether any decision still reads the declared set —
   `grep -arn '\.reads\b' packages/core/src/` — the confinement sites (`viewFor(…, node.reads)`)
   are meant to stay narrow, because widening those would GRANT rather than restrain.
-- **T3 — same-wave ordering.** Taint is added at commit, so a node decided in the SAME wave as
-  its tainter sees none. Needs an under-constrained graph and nothing refuses one.
+- **T3 — CLOSED.** Taint was added at commit, so a node decided in the SAME wave as its tainter
+  saw none — reachable by DELETING an ordering edge, which the compiler only warns about
+  (`GRAPH005_UNPRODUCED_READ`, and it stays a warning: reading a channel a concurrent branch
+  writes is legal). Measured, same graph one edge apart, under a human ceiling of `on`:
+  `awaiting_gate/gates=1/charged=0` wired, `succeeded/gates=0/charged=1` as siblings — E8's
+  hard floor walked around. `RunContext.waveTaint` is a per-wave, TaskId-keyed overlay of what
+  the wave's EXTERNAL members are about to write, derived and never durable so `ctx.tainted`
+  keeps its fold-exactness. `test/run/wave-taint.test.ts`, 5 tests, 6 mutation-verified.
 - **T5 — `evolution/trajectory.ts` matches escalation rules by exact string.**
   `e.payload.rule === "violation"` is dead: `#escalate` appends the detail, so the journaled
   value is `violation {"capability":…}`. E8's firing site uses the same pattern, so any future

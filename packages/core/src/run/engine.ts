@@ -494,6 +494,36 @@ interface RunContext {
   readonly streaks: FailureStreaks;
   /** Channels written by a tool, i.e. carrying untrusted output. E8's evidence. */
   readonly tainted: Set<string>;
+  /**
+   * Channels a node LATER IN THIS WAVE will taint — derived per wave, never durable.
+   *
+   * `#runWave` executes the whole wave with `Promise.all` and commits afterwards, so every
+   * policy decision in a wave is made before any of that wave's writes land. `applyTaint` runs
+   * in the commit loop. So a node decided in the SAME wave as its tainter saw a clean set, and
+   * that is reachable by DELETING AN EDGE:
+   *
+   *     start → fetch (taints `untrusted`) ; start → charge (irreversible, reads `untrusted`)
+   *
+   * With `fetch → charge` the two are in different waves, `charge` is tainted, E8's hard floor
+   * forces `in`, and a human ceiling of `on` cannot lower it — the run gates. With the edge
+   * removed they share a wave, `charge` sees nothing, the ceiling applies, and the charge RUNS.
+   * Measured: `succeeded, gates=0, charged=1` against `awaiting_gate, gates=1, charged=0` for
+   * the same graph one edge apart. The compiler only WARNS about the missing edge
+   * (`GRAPH005_UNPRODUCED_READ`).
+   *
+   * Keyed by TaskId and excluding the deciding task's own writes: an external node's own output
+   * is untrusted, but its INPUT on the same channel came from somewhere else and tainting it
+   * against itself would over-gate the ordinary read-modify-write shape for no gain.
+   *
+   * DERIVED, NOT DURABLE, and that is the whole reason it is a separate field rather than a
+   * pre-fill of `ctx.tainted`. That set's docstring makes a promise this would break —
+   * "monotonic and never cleared, so folding it forward from seq 1 gives the same answer as
+   * running it live" — because a wave member that FAILS writes nothing, so no fold ever produces
+   * its channels. This overlay is recomputed from the wave's composition, which is itself
+   * derived, so a replay of the same wave reaches the same answer without anything being
+   * journaled that a fold could not reproduce.
+   */
+  waveTaint: ReadonlyMap<TaskId, ReadonlySet<string>>;
   /** Tool names called by each in-flight Task, in order. E5's evidence. */
   readonly toolCalls: Map<TaskId, string[]>;
   /** E2 fires once per run, not once per reservation past the line. */
@@ -1942,6 +1972,7 @@ export class Engine {
       folder: new RunFolder(),
       streaks: new FailureStreaks(),
       tainted: new Set(),
+      waveTaint: new Map(),
       toolCalls: new Map(),
       warnedBudget: false,
       escalationWrites: [],
@@ -2060,6 +2091,24 @@ export class Engine {
   }
 
   async #runWave(ctx: RunContext, wave: readonly Wave[]): Promise<void> {
+    // WHAT THIS WAVE IS ABOUT TO TAINT, before anything in it decides. Commits happen after
+    // every task in the wave has run, so without this a node sharing a wave with its tainter
+    // decides on a set that is one commit out of date — reachable by deleting an edge.
+    ctx.waveTaint = waveTaintFor(wave);
+    try {
+      await this.#runWaveInner(ctx, wave);
+    } finally {
+      // Cleared rather than left, and DEFENSIVELY rather than load-bearingly: the map is keyed
+      // by TaskId, so a stale overlay reaches only a task with the SAME id in a later wave —
+      // which is a RETRY and nothing else. Said plainly because the first version of this
+      // comment claimed it stopped the next wave being tainted "with channels nobody in it
+      // writes", and a mutation showed no test could tell the difference. A guard whose reason
+      // is overstated is one somebody deletes later on a correct-sounding argument.
+      ctx.waveTaint = new Map();
+    }
+  }
+
+  async #runWaveInner(ctx: RunContext, wave: readonly Wave[]): Promise<void> {
     // Work in parallel …
     const outcomes = await Promise.all(
       wave.map(async (w) => {
@@ -2144,9 +2193,11 @@ export class Engine {
     // at attach, so a fresh process reaches the same answer.
     // `escalate` is idempotent on re-raise, so a node decided repeatedly journals one event.
     const irreversibility = this.#irreversibilityOf(node);
-    const tainted = observedChannels(node).some((r) => ctx.tainted.has(r));
+    const tainted = observedChannels(node).some((r) => taintedFor(ctx, w.task.taskId, r));
     if (tainted && isHardToUndo(irreversibility)) {
-      this.#escalate(ctx, "taint", node.id, { reads: observedChannels(node).filter((r) => ctx.tainted.has(r)) });
+      this.#escalate(ctx, "taint", node.id, {
+        reads: observedChannels(node).filter((r) => taintedFor(ctx, w.task.taskId, r)),
+      });
     }
 
     const decision = ctx.policy.decide({
@@ -4973,6 +5024,45 @@ function stateAtPrefix(p: RunProjection, branch: BranchCoordinate): Record<strin
 /** `${channel}` and `${channel.path}` substitution in tool arguments. */
 
 /**
+ * IS THIS CHANNEL UNTRUSTED FOR THIS TASK'S DECISION — the durable set plus this wave's overlay.
+ *
+ * Both readers go through here so the two halves cannot drift apart. `ctx.tainted` is what the
+ * journal can rebuild; `ctx.waveTaint` is what a concurrent member of the same wave is about to
+ * write and has not committed yet. See `RunContext.waveTaint` for why the second cannot simply
+ * be folded into the first.
+ */
+function taintedFor(ctx: RunContext, taskId: TaskId, channel: string): boolean {
+  return ctx.tainted.has(channel) || (ctx.waveTaint.get(taskId)?.has(channel) ?? false);
+}
+
+/**
+ * Which channels an EXTERNAL node in this wave is about to taint, per task that is not it.
+ *
+ * Named beside `applyTaint` and using the same `isExternal` test, because "what counts as
+ * untrusted output" must have exactly one definition — this repo has already paid for the
+ * version where a rule was written twice and the copies disagreed.
+ */
+function waveTaintFor(wave: readonly Wave[]): Map<TaskId, ReadonlySet<string>> {
+  const out = new Map<TaskId, ReadonlySet<string>>();
+  const willTaint = wave.filter((w) => isExternal(w.node));
+  if (willTaint.length === 0) return out;
+  for (const w of wave) {
+    const channels = new Set<string>();
+    for (const other of willTaint) {
+      if (other.task.taskId === w.task.taskId) continue;
+      for (const c of other.node.writes ?? []) channels.add(c);
+    }
+    if (channels.size > 0) out.set(w.task.taskId, channels);
+  }
+  return out;
+}
+
+/** A node whose writes carry output from outside the system. The ONE definition. */
+function isExternal(node: NodeSpec): boolean {
+  return node.type === "tool" || node.type === "subgraph" || (node.type === "agent" && (node.agent?.tools ?? []).length > 0);
+}
+
+/**
  * Is this tool call, inside this task, downstream of untrusted content?
  *
  * `ordinal > 0` is the load-bearing half: it says a tool has already returned in this task.
@@ -4982,7 +5072,7 @@ function stateAtPrefix(p: RunProjection, branch: BranchCoordinate): Record<strin
 function taintedTurn(ctx: RunContext, task: TaskRecord, ordinal: number): boolean {
   if (ordinal > 0) return true;
   const node = ctx.index.byId.get(task.nodeId);
-  return node !== undefined && observedChannels(node).some((c) => ctx.tainted.has(c));
+  return node !== undefined && observedChannels(node).some((c) => taintedFor(ctx, task.taskId, c));
 }
 
 /**
@@ -5013,9 +5103,7 @@ function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Recor
   // The other direction needs no rule. Each run gets its own `PolicyEngine` (`#contextFor`), so
   // a parent's ceiling never reaches the child, and the child re-decides every node at full
   // strictness — an irreversible child node gates at `in` on its class whatever the parent did.
-  const external =
-    node.type === "tool" || node.type === "subgraph" || (node.type === "agent" && (node.agent?.tools ?? []).length > 0);
-  if (!external && !observedChannels(node).some((c) => tainted.has(c))) return;
+  if (!isExternal(node) && !observedChannels(node).some((c) => tainted.has(c))) return;
   for (const channel of Object.keys(writes)) tainted.add(channel);
 }
 
