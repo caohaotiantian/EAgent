@@ -400,6 +400,20 @@ platform binary as an optional dependency (`@esbuild/darwin-arm64`) rather than 
 And the README's three-line block runs verbatim into an EMPTY directory: `loom serve` answers
 `200` with the console, and scaffolds `.loom/`, `graphs/` and `resources/`.
 
+**Fan-out into a join is verified end to end, and invariant 7 holds through the product.** Driven
+through `bin/loom`: `fanout.planned` width 3, three branches under derived ids
+`work@root/e1[0..2]#0` each carrying its bound item, a join committing `branchCount: 3`, and an
+`append_ordered` channel returning `["alpha","beta","gamma"]` — branch-coordinate order, not
+arrival order. **`router` and `evaluator` remain the two node types nobody has driven.**
+
+**The `function` authoring path had a real usability defect and it is fixed.** `FunctionOutcome`
+is `{ writes?, take? }` and that is a TypeScript type a `function/*.js` author never sees: the
+channel map returned directly was a SILENT no-op ending in `E_OUTPUT_MISSING` about a channel the
+body believed it wrote, and no return at all surfaced a raw `TypeError`. Both now refuse with
+`E_RESOURCE_INVALID` naming the shape and the author's own key. The evidence it was a real defect
+rather than a nicety: **three function bodies were written while driving this and all three had
+the shape wrong**, with nothing in the product saying so.
+
 **The oversight guards were swept for untested PERMIT arms and are sound.** Each two-armed guard
 pairs its refusal with its permission, usually in adjacent tests: the intervention window has both
 "an interrupted window leaves a posture behind" (asserting the effect never started) and "a window

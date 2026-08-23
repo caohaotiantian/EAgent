@@ -6641,3 +6641,37 @@ Driving an unexercised surface searches the part that never did.
 "nobody has checked" into "checked, sound, here is the evidence". Three surfaces have that status
 now — SSE, the capability flags, and the oversight guards' permit arms — and the next session
 should spend its attention elsewhere.
+
+---
+
+## I wrote three function bodies and all three were wrong
+
+Fan-out into a join is sound, and invariant 7 holds where it can actually be observed: an
+`append_ordered` channel folded across three branches came back `["alpha","beta","gamma"]` — the
+branch coordinates, not the order the branches finished. The mechanism underneath is visible in
+the journal exactly as designed: `fanout.planned` with a width, one `task.ready` per branch under
+a derived id carrying its bound item, and a join committing `branchCount: 3`.
+
+The defect was in getting there. `FunctionOutcome` is `{ writes?, take? }`, and it is a
+TypeScript type — a `resources/function/*.js` author writes plain JS and never encounters it.
+Returning the channel map directly, which is the obvious thing to write, made the task commit
+`writes: {}` and the run die later with `E_OUTPUT_MISSING` naming a channel the body had just
+"written". Returning nothing produced a raw `TypeError: Cannot read properties of undefined`.
+
+**The evidence that this is a usability defect and not a nicety is that I could not write one
+correctly.** Three bodies across two graphs — `mark.js`, `spin.js` in an earlier wave, and the
+`start` node here — every one of them returned the channel map, and nothing in the product said
+so. The earlier one went unnoticed for several waves because that test measured elapsed time and
+never looked at the output: **a wrong function body is invisible to any test that does not read
+what it wrote.**
+
+**The refusal is a rule, not a heuristic**, which is what makes it safe to fail a run on. An
+object every key of which is ignored cannot be what the author meant. `{}` stays legal because a
+body that writes nothing is ordinary; extra keys beside `writes`/`take` stay legal because then
+the return WAS read. The only judgement is that silently discarding a non-empty return is never
+what somebody intended, and that one is easy to defend.
+
+**And the positive control earned its place immediately.** Refusing an empty object, or refusing
+every body, would pass a suite that only asserts the two refusals — a far worse defect than the
+one being fixed, shipped under a green test. The third test runs `{}` and
+`{ writes: {...}, note: "…" }` and asserts the write lands.
