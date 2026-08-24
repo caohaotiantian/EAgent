@@ -251,6 +251,16 @@ export type CommandActor = HumanActor | SystemActor;
  */
 const TERMINAL_TASK_STATES: ReadonlySet<TaskState> = new Set<TaskState>(["succeeded", "failed", "skipped", "cancelled"]);
 
+/**
+ * The longest a source's `retry-after` may park a Task.
+ *
+ * Five minutes. The header is a faithful record of what a provider ASKED FOR, not a promise the
+ * ask was reasonable — `retry-after: 86400` is legal, and a task silently parked for a day is
+ * indistinguishable from a hang. Beyond this the wait is capped and the run keeps its own
+ * timeouts as the outer bound.
+ */
+const RETRY_AFTER_CEILING_MS = 300_000;
+
 const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_BUDGET_EXHAUSTED,
   CODES.E_REPLAY_DIVERGENCE,
@@ -4577,7 +4587,23 @@ export class Engine {
     // No jitter here: the delay must be a pure function of (policy, attempt) or
     // replay diverges. Real jitter belongs in the distributed scheduler, where the
     // delay is not part of the recorded decision.
-    return { afterMs: Math.min(raw, max), code: error.code };
+    const curve = Math.min(raw, max);
+
+    // HONOUR WHAT THE SOURCE ASKED FOR. A provider that answers 429 with `retry-after` is
+    // telling us the one thing our curve cannot know: when it will serve us again. Retrying
+    // before then is not merely wasted, it is how a rate limit becomes a longer rate limit.
+    //
+    // Still deterministic. `retryAfterMs` is read off the RECORDED error, so a replay computes
+    // the same delay from the same journal — the property the no-jitter rule above protects.
+    //
+    // Bounded, because the field is a faithful record of a request rather than a promise that
+    // the request was reasonable: `retry-after: 86400` is a legal header, and a task parked for
+    // a day with nothing in the log explaining it is indistinguishable from a hang.
+    const asked = error.retryAfterMs;
+    const honoured =
+      typeof asked === "number" && Number.isFinite(asked) && asked > 0 ? Math.min(asked, RETRY_AFTER_CEILING_MS) : 0;
+
+    return { afterMs: Math.max(curve, honoured), code: error.code };
   }
 
   /**
