@@ -578,6 +578,41 @@ export function rejectionReasonOf(e: unknown): CallbackRejection {
   return reasonOf(ownError(e));
 }
 
+/**
+ * Settle with `work`, or reject as soon as `signal` aborts — whichever comes first.
+ *
+ * The point is NOT to cancel `work`; nothing can. It is to stop the caller's frame
+ * awaiting it, so every continuation from there up unwinds and drops what it was holding.
+ * On the callback route that is a request body, buffered by an unauthenticated stranger.
+ *
+ * `signal === undefined` means "no deadline" and returns `work` untouched — an embedder
+ * calling `GateCallbackRouter.handle` directly has no request deadline to offer, and an
+ * absent signal must not read as an expired one.
+ *
+ * THE LISTENER IS REMOVED IN A `finally`, and that is not tidiness. One `AbortSignal` is
+ * shared by every await in a request, so a listener left behind per call would accumulate
+ * on a live signal until the request ended — and `node` warns at eleven, which is the
+ * shape of a leak fixed by adding a leak. `once: true` covers the abort path; the
+ * `finally` covers the far more common one where `work` wins and the signal never fires.
+ */
+function raceDeadline<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return work;
+  if (signal.aborted) return Promise.reject(callbackRejection("timeout", "the request deadline passed before the channel answered"));
+  let onAbort: (() => void) | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(callbackRejection("timeout", "the request deadline passed before the channel answered"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  // `work` is still awaited by the race, so a rejection out of it is never unhandled —
+  // which is what an unobserved promise would become the moment this function returned
+  // the deadline's rejection instead.
+  return Promise.race([work, expired]).finally(() => {
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  });
+}
+
 /** The token of an error we OWN. Bare reads, because that is what owning it bought. */
 function reasonOf(le: LoomError): CallbackRejection {
   const reason = (le.details as { readonly reason?: unknown } | undefined)?.reason;
@@ -2609,9 +2644,32 @@ export class GateCallbackRouter {
       | { readonly ok: true; readonly call: OwnedCall }
       | { readonly ok: false; readonly error: LoomError };
     try {
-      const parsed = await parse({ body: input.body, headers: input.headers, now: this.#now() });
+      // RACED AGAINST THE DEADLINE RATHER THAN AWAITED, so this frame stops holding the
+      // request. `await parse(…)` suspends `handle` with `input` — and therefore
+      // `input.body` — live in its continuation, and the whole chain above it
+      // (`ControlPlane.#serve`, `#withDeadline`) is suspended on this one. A channel whose
+      // `parseCallback` never settles kept that chain alive for the lifetime of the
+      // process, on a route reachable WITHOUT A CREDENTIAL: one buffered body per hung
+      // POST, repeat until the process runs out of memory. Racing lets every frame from
+      // here up unwind at the deadline and drop its reference.
+      //
+      // WHAT THIS DOES NOT DO, because nothing in JavaScript can: cancel the channel's
+      // promise. If the channel captured the body itself, the channel still holds it. The
+      // half core owns is released; the half injected code owns is injected code's.
+      const parsed = await raceDeadline(parse({ body: input.body, headers: input.headers, now: this.#now() }), input.signal);
       verified = { ok: true, call: ownedCall(parsed) };
     } catch (e) {
+      // NO DEADLINE CHECK HERE, and its absence is load-bearing rather than an oversight.
+      // `raceDeadline` rejects with `callbackRejection("timeout", …)`, whose token
+      // `reasonOf` reads straight back — and `timeout` is deliberately NOT in
+      // `PERIMETER_REJECTIONS`, so it falls through to `verified = {ok: false}` and is
+      // counted once by the check below. A second check here would be a guard no test can
+      // fail: written, it survived its own mutation while all 85 tests stayed green.
+      //
+      // It also changes an answer for the worse in the one corner where it fires. A
+      // channel that legitimately reports `signature` at about the moment the deadline
+      // passes should be counted as `signature`, not relabelled as our clock — the
+      // refusal is more informative, and it is the channel's report either way.
       const error = ownError(e);
       const reason = reasonOf(error);
       if (PERIMETER_REJECTIONS.has(reason)) {
@@ -2621,26 +2679,10 @@ export class GateCallbackRouter {
       verified = { ok: false, error };
     }
 
-    // ── 2b. THE DEADLINE, CHECKED WHERE THE ANSWER STOPS BEING WANTED ───────
-    //
-    // `ControlPlane.#withDeadline` answers 504 and moves on; it cannot cancel this handler and
-    // its own docstring says so. So a `parseCallback` that hangs and then succeeds used to walk
-    // straight into `resolve` and apply a human's decision minutes after that human was told the
-    // request had failed — and, because every counter and every journal row below is reached
-    // only once `parse` has settled, the refusal appeared in NEITHER sink.
-    //
-    // Checked HERE rather than by handing the signal to the channel. An `AbortSignal` on
-    // `CallbackRequest` would be a request injected code may honour; this holds for code that
-    // never does, which is the only version that closes the hole.
-    //
-    // THE CHANNEL IS NOT GIVEN THE SIGNAL, and an earlier version of this comment said it was.
-    // `parse` is called with `{body, headers, now}` and `CallbackRequest` has exactly those three
-    // members; `CallbackInput.signal` is what the ControlPlane hands the ROUTER. Giving it to the
-    // channel is a published-interface change this deliberately did not make — and it would need
-    // more than a field, because a channel that cooperated by throwing an `AbortError` would land
-    // in the catch above, where `reasonOf` falls to `internal` and `PERIMETER_REJECTIONS` counts
-    // it as a broken channel rather than as our own deadline. That is the pollution this reason
-    // exists to avoid, reached from the other side.
+    // A parse that RESOLVED after the deadline is refused on the same terms: a decision
+    // must not be applied minutes after the human who sent it was told the POST failed.
+    // The race covers the hang; this covers the settle-just-too-late, and both land on one
+    // counter. Reachable when `parse` and the timer resolve in the same tick.
     if (input.signal?.aborted === true) {
       this.#count(name, "timeout");
       throw callbackRejection("timeout", "the request deadline passed before the channel answered");

@@ -419,8 +419,35 @@ between the mutation and the next turn. Measured: a frozen `function/mult2@stabl
 > once a Task is executing" is true for an ordinary run and false for a mutated one, and both
 > `HANDOFF` and `JOURNAL` now say so.
 
-**A5 · A hung `parseCallback` is the one refusal invisible in both sinks. TWO OF THREE CLOSED
-2026-08-19; consequence 1 REMAINS OPEN.**
+**A5 · A hung `parseCallback` is the one refusal invisible in both sinks. ALL THREE CLOSED
+2026-08-24 — kept for the reproduction and for what closing the last one cost.**
+
+> **Consequence 1 — the leaked continuation — is closed by RACING the parse rather than by
+> cancelling it.** `await parse(…)` suspended `handle` with `input`, and therefore
+> `input.body`, live in its continuation, and suspended `ControlPlane.#serve` and
+> `#withDeadline` on top of that: one buffered body per hung POST, on the one route reachable
+> without a credential, held for the life of the process. `raceDeadline(work, signal)` settles
+> with whichever comes first, so every frame from `handle` upward unwinds at the deadline and
+> drops what it held. **It does not cancel the channel's promise — nothing in JavaScript can.**
+> If the channel captured the body, the channel still holds it. The half core owns is released
+> and the entry says which half that is, because the previous two rewrites of this entry each
+> overstated what had been closed.
+>
+> **The obvious fix was the wrong one and the code had already said so.** An `AbortSignal` on
+> `CallbackRequest` is a request injected code may honour, and the channel that ships in this
+> binary would have ignored it — the hole would have stayed open behind a closed entry. The
+> race holds for code that never cooperates, which is the only version that closes it.
+>
+> **A mutation sweep changed the shape of the fix.** Three guards were written; the third — a
+> deadline check inside the `catch` — survived its own mutation with all 85 tests green, and
+> was DELETED rather than tested. `raceDeadline` rejects with a `timeout` token that `reasonOf`
+> reads back, and `timeout` is deliberately not in `PERIMETER_REJECTIONS`, so it already fell
+> through to the one check after the race. Worse, in the corner where the extra check DID fire
+> it relabelled a channel's legitimate `signature` refusal as our own clock. Removing it made
+> the surviving check load-bearing for all three deadline tests at once — which is how you can
+> tell it is the single point of enforcement.
+>
+> **The original three consequences, for the record**, of which 2 and 3 closed 2026-08-19:
 `CallbackRequest` carried no `AbortSignal`, so the HTTP request deadline could abandon the
 *response* but not the channel call. Three consequences: each hung POST leaks a pending
 continuation holding the body buffer, on an unauthenticated route; counting and journaling both

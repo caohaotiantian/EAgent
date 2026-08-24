@@ -6796,3 +6796,43 @@ field value and `node:http` strips it, so the suffix never reaches the guard. Me
 client, refused by `Headers.append`. **A test input has to survive the transport to reach the
 branch it is aimed at**, which is the same failure the guard's original coverage had, arriving
 from the other side within the hour.
+
+---
+
+## A promise nobody can cancel can still be stopped being awaited
+
+A5's last open consequence was a memory leak on the one HTTP route reachable without a
+credential: a channel's `parseCallback` that never settles left `handle` suspended with the
+request body live in its continuation, and `ControlPlane.#serve` and `#withDeadline` suspended
+on top of it. One buffered body per hung POST, held for the life of the process.
+
+The obvious fix is an `AbortSignal` on `CallbackRequest`, and the code had already written down
+why that is the wrong one: it is a request injected code may honour, and the channel that ships
+in this binary would ignore it, so the hole would stay open behind a closed register entry. That
+reasoning is right and it is why the entry had stood.
+
+**The third option neither the entry nor the comment considered is to stop awaiting.** Nothing
+in JavaScript can cancel a promise, but nothing requires you to keep a frame suspended on one.
+`raceDeadline(work, signal)` settles with whichever comes first, so at the deadline every frame
+from `handle` upward unwinds and drops what it was holding. The channel's promise still runs and
+still holds whatever it captured — **the half core owns is released, and the entry now says
+which half that is**, because the two previous rewrites of A5 each overstated what had closed.
+
+**The mutation sweep changed the shape of the fix, which is the part worth keeping.** Three
+guards went in. Two killed their tests. The third — a deadline check inside the `catch` — left
+all 85 tests green when deleted, and the response was to delete it rather than to write a test
+for it: `raceDeadline` rejects with a `timeout` token that `reasonOf` reads straight back, and
+`timeout` is deliberately outside `PERIMETER_REJECTIONS`, so it already fell through to the one
+check after the race. **And in the corner where the redundant check did fire it made the answer
+worse**, relabelling a channel's legitimate `signature` refusal as our own clock.
+
+Removing it made the surviving check load-bearing for all three deadline tests at once, which is
+the signal that it is the single point of enforcement. **A guard that survives its own mutation
+is not automatically a guard needing a test; it may be a guard needing deletion**, and the way
+to tell is to ask what changes when it fires rather than whether anything covers it.
+
+**A green test that does not typecheck, again.** The first version of the new test built a
+`GateCallbackRouter` from `r.engine` and `r.logFor`, neither of which is on the rig. It passed —
+node strips types rather than checking them — and `tsc` caught it. `CLAUDE.md` names this trap
+and it still took a deliberate `npx tsc -p …test.json` to find, one wave after the same file's
+own header says the suite is not type-checked by `npm test`.

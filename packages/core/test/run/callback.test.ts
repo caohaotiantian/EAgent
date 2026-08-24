@@ -2244,3 +2244,154 @@ test("A CALLBACK THAT ANSWERS AFTER THE DEADLINE IS REFUSED, not applied", async
   const out = (await send()) as { decision: { kind: string } };
   assert.equal(out.decision.kind, "approve");
 });
+
+/**
+ * A `parseCallback` THAT NEVER SETTLES MUST NOT PARK THE HANDLER FOREVER.
+ *
+ * This is the LAST of A5's three consequences, and the sibling test above closed a different
+ * one. That test aborts BEFORE the call, so `parse` settles immediately and the check that
+ * refuses it is reached; it says nothing about a parse that never settles at all, which is the
+ * shape A5 actually reproduced: `requestTimeoutMs: 100`, a channel that never resolves, and a
+ * 50 000-byte POST returning 504 with `parseCallback` still pending and the body still held.
+ *
+ * `await parse(…)` suspends `handle` with `input` — and so `input.body` — live in its
+ * continuation, and suspends `ControlPlane.#serve` and `#withDeadline` on top of it. One
+ * buffered body per hung POST, on the one route reachable WITHOUT A CREDENTIAL, held for the
+ * life of the process. Racing the parse against the deadline lets all three frames unwind.
+ *
+ * What it does NOT do is cancel the channel's promise — nothing in JavaScript can. If the
+ * channel captured the body, the channel still holds it. The half core owns is released.
+ *
+ * THE TEST FAILS BY TIMING OUT if the race is removed, which is a slow way to go red, so it
+ * races a sentinel of its own: `handle` must settle promptly after the abort, and "promptly" is
+ * a macrotask rather than a duration, so this waits on the event loop and not on a clock.
+ */
+test("A `parseCallback` THAT NEVER SETTLES RELEASES THE HANDLER AT THE DEADLINE", async () => {
+  const r = await rig();
+  const body = approval(r);
+  const ts = String(Math.floor(NOW / 1000));
+
+  // Never resolves, never rejects. `bodySeen` proves the router really did reach the channel,
+  // so a refusal cannot come from somewhere earlier and read as this one.
+  let bodySeen: Uint8Array | undefined;
+  const hung: DeliveryChannel = {
+    name: "slack",
+    deliver: async () => "receipt",
+    parseCallback: (req): Promise<CallbackDecision> => {
+      bodySeen = req.body;
+      return new Promise<CallbackDecision>(() => {});
+    },
+  };
+  const store: StateStore = r.h.store;
+  const router = new GateCallbackRouter({
+    dispatcher: new GateDispatcher({ channels: [hung] }),
+    engine: r.h.engine as unknown as CallbackEngine,
+    logFor: (id) => new RunLog(id, { store, bus: r.h.bus }),
+    now: () => NOW,
+  });
+
+  const ac = new AbortController();
+  const handled = router.handle({
+    channel: "slack",
+    runId: r.runId,
+    body: Buffer.from(body, "utf8"),
+    headers: { "x-loom-timestamp": ts, "x-loom-signature": r.channel.sign(body, ts) },
+    signal: ac.signal,
+  });
+
+  // Let the parse start and park, then fire the deadline the way `#withDeadline` does.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(bodySeen !== undefined, "the router must actually have called the channel");
+  ac.abort();
+
+  const LATE = Symbol("still pending");
+  const settled = await Promise.race([
+    handled.then(
+      (v) => v as unknown,
+      (e: unknown) => e,
+    ),
+    // Generous: several macrotasks, so this is not a race against a slow machine. Without
+    // the fix `handled` never settles and this sentinel wins on every machine.
+    new Promise((resolve) => setTimeout(() => resolve(LATE), 50)),
+  ]);
+
+  assert.notEqual(settled, LATE, "handle must settle at the deadline rather than await a promise that never resolves");
+  assert.ok(isLoomError(settled), `expected a LoomError, got ${String(settled)}`);
+  assert.match(settled.message, /deadline/i);
+  assert.equal((settled.details as { reason: string }).reason, "timeout");
+
+  // The gate is untouched and the refusal is counted, which is the property the sibling test
+  // states: a refusal that lands in neither sink is what A5 was about.
+  await stillOpen(r);
+  assert.deepEqual(router.refusals(), [{ channel: "slack", reason: "timeout", count: 1 }]);
+});
+
+/**
+ * A PARSE THAT WINS THE RACE BY A HAIR IS STILL TOO LATE.
+ *
+ * The race covers a parse that never settles. It does NOT cover the narrow ordering where the
+ * parse resolves and the deadline fires before the handler is resumed — there the race has
+ * already picked the parse, so the only thing standing between a stale decision and `resolve`
+ * is the check AFTER it. Written because a mutation found that check unguarded: deleting it
+ * left all 84 tests green, which is the exact failure mode this file's sibling entry describes
+ * — a refusal with a test addressed to the side of it that cannot fail.
+ *
+ * The ordering is forced rather than raced. `resolveParse(...)` settles the parse, which QUEUES
+ * the handler's continuation as a microtask; `ac.abort()` on the next line runs synchronously,
+ * so `aborted` is true before that microtask ever executes. No timers, no duration, and the
+ * same order on every machine.
+ */
+test("A PARSE THAT RESOLVES JUST BEFORE THE DEADLINE FIRES IS STILL REFUSED", async () => {
+  const r = await rig();
+  const body = approval(r);
+  const ts = String(Math.floor(NOW / 1000));
+
+  let resolveParse: ((d: CallbackDecision) => void) | undefined;
+  const slow: DeliveryChannel = {
+    name: "slack",
+    deliver: async () => "receipt",
+    parseCallback: (): Promise<CallbackDecision> =>
+      new Promise<CallbackDecision>((resolve) => {
+        resolveParse = resolve;
+      }),
+  };
+  const store: StateStore = r.h.store;
+  const router = new GateCallbackRouter({
+    dispatcher: new GateDispatcher({ channels: [slow] }),
+    engine: r.h.engine as unknown as CallbackEngine,
+    logFor: (id) => new RunLog(id, { store, bus: r.h.bus }),
+    now: () => NOW,
+  });
+
+  const ac = new AbortController();
+  const handled = router.handle({
+    channel: "slack",
+    runId: r.runId,
+    body: Buffer.from(body, "utf8"),
+    headers: { "x-loom-timestamp": ts, "x-loom-signature": r.channel.sign(body, ts) },
+    signal: ac.signal,
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(resolveParse !== undefined, "the router must have called the channel");
+
+  // A VALID decision — this must be refused for its lateness and nothing else, which is what
+  // makes the assertion below mean the deadline rather than a bad payload.
+  resolveParse({
+    runId: r.runId,
+    gateId: r.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "slack" },
+    idempotencyKey: "k",
+  });
+  ac.abort();
+
+  const e = await handled.then(
+    (v) => v as unknown,
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(isLoomError(e), `expected a LoomError, got ${String(e)}`);
+  assert.equal((e.details as { reason: string }).reason, "timeout");
+  await stillOpen(r);
+  assert.deepEqual(router.refusals(), [{ channel: "slack", reason: "timeout", count: 1 }]);
+});
