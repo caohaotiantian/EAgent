@@ -185,6 +185,97 @@ test("AN EMPTY SHARED TOKEN IS REFUSED AT CONSTRUCTION — it authenticated EVER
   }
 });
 
+test("A TOKEN THAT MERELY STARTS WITH THE SECRET IS REFUSED — the compare is padded, so length is load-bearing", async () => {
+  // `#sharedToken` pads the presented string UP to the expected length and then slices to
+  // it: `presented.padEnd(expected.length, "\0").slice(0, expected.length)`. That makes the
+  // buffers equal-length for `timingSafeEqual`, which is the point — but it also TRUNCATES
+  // anything longer than the secret, so on the bytes alone `s3cretEXTRA` and `s3cret` are
+  // the same value. `presented.length === expected.length` is the whole of what stops the
+  // constant-time compare degenerating into a PREFIX MATCH.
+  //
+  // Measured on a live plane with that final conjunct removed:
+  //
+  //     Bearer s3cretEXTRA  -> 200      Bearer s3cre  -> 401
+  //     Bearer s3cretX      -> 200      Bearer s3crez -> 401
+  //
+  // The two directions matter and both are asserted below. A SHORTER token already failed
+  // without the guard — `padEnd` fills with NUL and the compare is false — so a test that
+  // only sends short wrong tokens (`Bearer wrong`, above) passes with the guard deleted and
+  // certifies nothing. The guard's whole domain is presented strings that are LONGER.
+  //
+  // WHITESPACE IS NOT ONE OF THESE CASES, and the first version of this test asserted that it
+  // was. `Bearer s3cret ` returns 200, and that is `node:http`, not the guard: RFC 7230 makes
+  // surrounding whitespace optional in a field value and the parser strips it, so the trailing
+  // space never reaches `#sharedToken`. Measured on a bare `createServer`, the handler sees
+  // `"Bearer s3cret"` (length 13) for both the padded and the unpadded request; `"\0"` never
+  // leaves the client at all, refused by `Headers.append` as an invalid header value. A suffix
+  // has to SURVIVE the transport to test this guard.
+  const r = await rig({ token: "s3cret" });
+  try {
+    for (const suffix of ["EXTRA", "X", "."]) {
+      const res = await fetch(`${r.base}/runs`, { headers: { authorization: `Bearer s3cret${suffix}` } });
+      assert.equal(res.status, 401, `"s3cret${suffix}" extends the secret and must not authenticate`);
+    }
+    // The positive control, in the same test: the exact secret still works. A refusal that
+    // refuses everything would pass every assertion above and break the plane.
+    assert.equal((await fetch(`${r.base}/runs`, { headers: { authorization: "Bearer s3cret" } })).status, 200);
+    // And the short side, so the assertion set covers the compare rather than one half of it.
+    assert.equal((await fetch(`${r.base}/runs`, { headers: { authorization: "Bearer s3cre" } })).status, 401);
+  } finally {
+    await r.close();
+  }
+});
+
+test("A NON-STRING TOKEN IS REFUSED AT CONSTRUCTION — the compare is over LENGTH, so `[]` is an open plane", async () => {
+  // The sibling test above covers `token: ""`. This covers the OTHER half of the same
+  // condition — `typeof token !== "string"` — which is not defensive typing: the compare is
+  // over length, so ANY value of length zero reproduces the empty-string defect exactly.
+  //
+  // Measured with that half removed and `token: [] as unknown as string`: the plane
+  // CONSTRUCTS, `openToEveryCaller` is false, `/health` reports `auth: "required"` — and
+  // `GET /runs` with no Authorization header at all returns 200. Every surface claims the
+  // perimeter is up while there is none, which is the precise failure the empty-string
+  // refusal exists to prevent, reached through the half nobody tested.
+  //
+  // `[]` is the one that matters (`String([])` is `""` and `[].length` is 0). The others are
+  // here because the condition is `typeof`, not `length`, and a future narrowing to
+  // "anything falsy" or "anything with .length === 0" would let a `Number` or a `Symbol`
+  // through to a compare that has no defined behaviour for it.
+  const h = harness();
+  const base: ControlPlaneOptions = { engine: h.engine, store: h.store, graphs: {} };
+
+  for (const [what, token] of [
+    ["an empty array — length 0, exactly the empty-string defect", [] as unknown as string],
+    ["a number", 0 as unknown as string],
+    ["an object", {} as unknown as string],
+    ["a boolean", false as unknown as string],
+  ] as const) {
+    assert.throws(
+      () => new ControlPlane({ ...base, token }),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /must be a non-empty string/.test(e.message),
+      `${what} must fail to START, and the message must name the type it got`,
+    );
+    // BEFORE a socket is bound, for the reason the empty-string test gives: a plane that
+    // started and then refused everything would still be in rotation.
+    await assert.rejects(
+      startControlPlane({ ...base, token }, 0),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID,
+      `${what} must not reach listen()`,
+    );
+  }
+
+  // The positive control: `undefined` is the ONE way to be open, and it is an absence
+  // rather than a value. Without this, tightening the refusal to reject `undefined` too
+  // would pass every assertion above and delete the open-plane deployment.
+  const open = await rig();
+  try {
+    assert.equal((await json(await fetch(`${open.base}/health`)))["auth"], "open");
+    assert.equal((await fetch(`${open.base}/runs`)).status, 200, "an open plane serves an unauthenticated caller, on purpose");
+  } finally {
+    await open.close();
+  }
+});
+
 test("A PORT THAT CANNOT BE BOUND IS AN ERROR, NOT AN UNHANDLED 'error' EVENT", async () => {
   // Every refusal in this class happens before the socket. This is the failure ON the
   // socket, and it was the one the constructor's carefulness could not reach: `listen`
