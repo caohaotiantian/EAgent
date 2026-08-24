@@ -10,12 +10,21 @@
  * folded from `*.called`), so the fix is not new bookkeeping — it is folding what the
  * journal already had. Invariant 2 in its sharpest form: state that is durable in
  * principle and only in memory in practice is state the journal is not authoritative for.
+ *
+ * THE CLASS HAS FIVE MEMBERS NOW, and the last two are at the bottom of this file. Taint
+ * was the fourth and E4's failure streak the fifth — both live on `RunContext`, both are
+ * written by `Engine.#recordEvidence`, and only one of them was being restored. The lesson
+ * that generalises past this file: the unit that needs a restore arm is not the FIELD, it
+ * is the PRODUCER. `#restoreEvidence` is named for `#recordEvidence` so a sixth counter
+ * added there has one obvious place it is missing from.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES, err } from "../../src/errors.ts";
+import { compileOrThrow } from "../../src/graph/compile.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { foldRun } from "../../src/run/projection.ts";
@@ -23,7 +32,7 @@ import type { JournalEvent } from "../../src/journal/events.ts";
 import type { RunId } from "../../src/ids.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { PolicyEngine } from "../../src/run/policy.ts";
-import { compileSkeleton, DOCS, harness } from "./skeleton.ts";
+import { compileSkeleton, DOCS, harness, resolver } from "./skeleton.ts";
 
 async function events(store: MemoryStateStore, runId: RunId): Promise<JournalEvent[]> {
   const out: JournalEvent[] = [];
@@ -122,5 +131,195 @@ test("the fold replays escalate and de-escalate IN SEQ ORDER, not as two max-fol
     p.escalations["run:run_x"],
     "on",
     "the post-deescalation escalation raises from the floor, not from the deleted `in`",
+  );
+});
+
+// ── E4's evidence, which is a counter and not a set ───────────────────────────
+//
+// `repeated_failure` fires on the THIRD consecutive failure of one node. The counter lived
+// only in `RunContext.streaks`, so a restart between the second failure and the third reset
+// it to zero and the rule never fired — the same graph, the same three failures, the same
+// journal, and an escalation that happens or does not depending on whether a process was
+// replaced in the middle. Every test below carries its own in-process control, because the
+// interesting assertion is that the two runs agree.
+
+const STREAK_SPEC = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "streaks-survive", project: "test", version: 1 },
+  policy: {
+    posture: "out",
+    budget: { costUsd: 1 },
+    expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 },
+  },
+  channels: {
+    items: { type: "array", reduce: "replace" },
+    item: { type: "string", reduce: "replace" },
+    results: { type: "array", reduce: "append_ordered" },
+    done: { type: "object", reduce: "replace" },
+  },
+  inputs: ["items"],
+  outputs: ["done"],
+  nodes: [
+    { id: "start", type: "function", reads: ["items"], function: { ref: "function/pass@stable" } },
+    {
+      id: "flaky",
+      type: "function",
+      reads: ["item"],
+      writes: ["results"],
+      function: { ref: "function/flaky@stable" },
+      // A LONG BACKOFF ON A FIXED CLOCK IS WHAT MAKES A RESTART POINT EXIST. `advance`
+      // returns while a retry is still in backoff, so the test controls where the process
+      // boundary falls by moving the clock rather than by racing one.
+      retry: { maxAttempts: 6, backoff: "fixed", initialMs: 1000 },
+    },
+    {
+      id: "collect",
+      type: "join",
+      reads: ["results"],
+      writes: ["done"],
+      join: { branches: ["flaky"], mode: "all", onBranchError: "skip", timeoutMs: 100_000 },
+    },
+  ],
+  edges: [
+    { id: "fan", from: "start", to: "flaky", kind: "fanout", over: "items", as: "item", maxWidth: 2 },
+    { id: "j", from: "flaky", to: "collect", kind: "join", branches: ["flaky"] },
+  ],
+};
+
+const streakGraph = () =>
+  compileOrThrow({ spec: STREAK_SPEC as never, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+
+/**
+ * An Engine over `store` whose `flaky` node fails, by item.
+ *
+ * `"perm"` fails in a class nothing retries, so its failure COMMITS; every other item fails
+ * retryably, so its failure is RESCHEDULED. The two exits journal different events and the
+ * live counter counts both, which is the whole reason the restore has two arms.
+ */
+function streakEngine(store: MemoryStateStore, clock: { t: number }, calls: { n: number }): Engine {
+  const functions = new FunctionRegistry();
+  functions.register("function/pass@stable", () => ({}));
+  functions.register("function/flaky@stable", (view) => {
+    calls.n += 1;
+    // `StateView` is `{get, require, hash, visible}`, NOT a bag: `view["item"]` reads
+    // `undefined` and every branch then takes the same arm, which is how the first draft
+    // of this test asserted its precondition against a shape it had never produced.
+    if (String(view.get("item")) === "perm") {
+      throw err.validation(CODES.E_RESOURCE_INVALID, "permanently the wrong shape");
+    }
+    throw err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, "transient");
+  });
+  const models = new ModelRegistry();
+  models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+  return new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models,
+    now: () => clock.t,
+    sleep: async () => {},
+    maxParallelism: 2,
+    policy: { granted: [], budget: { runUsd: 1 } },
+  });
+}
+
+async function escalatedRules(store: MemoryStateStore, runId: RunId): Promise<string[]> {
+  return (await events(store, runId))
+    .filter((e) => e.type === "policy.escalated")
+    .map((e) => String((e.payload as { rule?: unknown }).rule));
+}
+
+test("E4's STREAK SURVIVES A RESTART — two failures, a new process, a third", async () => {
+  const clock = { t: 1_700_000_000_000 };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const calls = { n: 0 };
+
+  const first = streakEngine(store, clock, calls);
+  const runId = await first.submit({ graph: streakGraph(), inputs: { items: ["one"] } });
+  await first.advance(runId).catch(() => undefined);
+  clock.t += 10_000;
+  await first.advance(runId).catch(() => undefined);
+  clock.t += 10_000;
+
+  assert.deepEqual(
+    await escalatedRules(store, runId),
+    [],
+    "precondition: two failures are not yet a streak, or the restart proves nothing",
+  );
+
+  // THE RESTART: a second Engine over the same journal, exactly as `reattach` above.
+  const revived = streakEngine(store, clock, calls);
+  await revived.attach(runId, streakGraph());
+  await revived.advance(runId).catch(() => undefined);
+
+  assert.equal(calls.n, 3, `precondition: three attempts ran, saw ${String(calls.n)}`);
+  assert.ok(
+    (await escalatedRules(store, runId)).includes("repeated_failure"),
+    "three consecutive failures are three consecutive failures, whoever is holding the counter",
+  );
+});
+
+test("CONTROL — the same three failures in ONE process escalate", async () => {
+  // Not decoration. The first version of the test above passed against the unfixed engine
+  // for a while because the rig was not reaching three attempts at all, and a rig that
+  // cannot fire E4 proves nothing about a restart.
+  const clock = { t: 1_700_000_000_000 };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const calls = { n: 0 };
+
+  const engine = streakEngine(store, clock, calls);
+  const runId = await engine.submit({ graph: streakGraph(), inputs: { items: ["one"] } });
+  for (let i = 0; i < 3; i += 1) {
+    await engine.advance(runId).catch(() => undefined);
+    clock.t += 10_000;
+  }
+
+  assert.equal(calls.n, 3, `precondition: three attempts ran, saw ${String(calls.n)}`);
+  assert.ok(
+    (await escalatedRules(store, runId)).includes("repeated_failure"),
+    "the rig can fire E4 without a restart",
+  );
+});
+
+test("THE RESTORED STREAK COUNTS A COMMITTED FAILURE AND A RETRIED ONE", async () => {
+  // The fold has two arms because the live counter is updated ahead of BOTH commit exits:
+  // `task.retry_scheduled` for a failure that will be tried again, `task.committed` for one
+  // that will not. Folding either alone restores 1 instead of 2 here, and the third failure
+  // then reads as the second — so this test goes red for a missing arm of either kind.
+  //
+  // One branch fails permanently and commits; the other fails transiently and is rescheduled.
+  // A committed-failure-only shape is not reachable: a node whose failures have all committed
+  // has no work left to fail a third time, so there is nothing for a restart to sit in front of.
+  const clock = { t: 1_700_000_000_000 };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const calls = { n: 0 };
+
+  const first = streakEngine(store, clock, calls);
+  const runId = await first.submit({ graph: streakGraph(), inputs: { items: ["perm", "transient"] } });
+  await first.advance(runId).catch(() => undefined);
+  clock.t += 10_000;
+
+  const before = await events(store, runId);
+  assert.equal(
+    before.filter((e) => e.type === "task.retry_scheduled").length,
+    1,
+    "precondition: exactly one failure was rescheduled",
+  );
+  assert.equal(
+    before.filter((e) => e.type === "task.committed" && (e.payload as { status?: unknown }).status === "failed").length,
+    1,
+    "precondition: exactly one failure was committed",
+  );
+  assert.deepEqual(await escalatedRules(store, runId), [], "precondition: two failures, not yet a streak");
+
+  const revived = streakEngine(store, clock, calls);
+  await revived.attach(runId, streakGraph());
+  await revived.advance(runId).catch(() => undefined);
+
+  assert.ok(
+    (await escalatedRules(store, runId)).includes("repeated_failure"),
+    "a failure that was retried counts exactly as much as one that was committed",
   );
 });

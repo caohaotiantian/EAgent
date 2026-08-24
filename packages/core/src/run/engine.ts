@@ -907,20 +907,51 @@ export class Engine {
   }
 
   /**
-   * Re-derive the taint set from committed writes.
+   * Re-derive everything `#recordEvidence` accumulates, from the journal.
    *
-   * The same `applyTaint` the live path uses, over the journal in seq order. That is only
-   * sound because taint is monotonic and never cleared: replaying the writes forward reaches
-   * the state the original process held, with no ordering subtleties to get wrong. A node
-   * missing from the index — the graph was mutated out from under a committed task — is
-   * skipped rather than guessed at.
+   * PAIRED WITH `#recordEvidence` BY NAME, because the hole this closes is structural rather
+   * than local. That method is the only place a run's escalation evidence is updated, it holds
+   * all of it on `RunContext`, and `#contextFor` builds a fresh context per attach — so every
+   * field it touches needs an arm here or a restart silently switches its rule off. Taint had
+   * one and E4's streak did not: reproduced as two failures, a restart, a third failure, and no
+   * `repeated_failure` — the same graph escalates without the restart. That is invariant 2's
+   * fifth instance, after escalations, ceilings, spend and taint. **A counter added to
+   * `#recordEvidence` and not to this method has exactly the same hole.**
+   *
+   * ONE PASS in seq order, replaying the functions the live path calls, and appending nothing:
+   * `record` and `applyTaint` are both pure folds, so restoring cannot re-fire the escalations
+   * being replayed. The posture those already earned comes back through `PolicyEngine.restore`
+   * above. Sound for taint because it is monotonic and never cleared; sound for the streak
+   * because `record` depends only on the outcome sequence, which the journal carries in order.
+   * A node missing from the index — the graph was mutated out from under a committed task — is
+   * skipped for taint rather than guessed at.
+   *
+   * THE OUTCOME SEQUENCE IS TWO EVENT TYPES, NOT ONE, and folding commits alone under-counts
+   * precisely the case E4 exists for. `#recordEvidence` runs once per OUTCOME, ahead of both
+   * the retry exit and the mutation exit, so a failure that was RETRIED already counted toward
+   * the streak while appending `task.retry_scheduled` and no `task.committed`. A node failing
+   * over and over is mostly retries.
+   *
+   * ONE KNOWN DIVERGENCE, and it is the fail-safe one. A task that SUCCEEDED while proposing a
+   * mutation the compiler then rejected reaches `#recordEvidence` with `status: "succeeded"`,
+   * which RESETS the streak, and journals `task.committed{status:"failed"}`, which this fold
+   * COUNTS. So a restart can make E4 fire earlier than the original process would have, never
+   * later and never not at all. Escalating sooner is permitted; the bug above was escalating
+   * never.
    */
-  async #restoreTaint(ctx: RunContext): Promise<void> {
+  async #restoreEvidence(ctx: RunContext): Promise<void> {
     for await (const ev of this.#store.read(ctx.runId, 1 as Seq)) {
-      if (ev.type !== "task.committed" || ev.taskId === undefined) continue;
-      const node = ctx.index.byId.get(parseTaskId(ev.taskId).nodeId);
+      if (ev.taskId === undefined) continue;
+      if (isEvent(ev, "task.retry_scheduled")) {
+        ctx.streaks.record(parseTaskId(ev.taskId).nodeId, false);
+        continue;
+      }
+      if (!isEvent(ev, "task.committed")) continue;
+      const nodeId = parseTaskId(ev.taskId).nodeId;
+      ctx.streaks.record(nodeId, ev.payload.status !== "failed");
+      const node = ctx.index.byId.get(nodeId);
       if (node === undefined) continue;
-      applyTaint(ctx.tainted, node, (ev.payload as { writes?: Record<string, unknown> }).writes ?? {});
+      applyTaint(ctx.tainted, node, ev.payload.writes);
     }
   }
 
@@ -1171,16 +1202,20 @@ export class Engine {
       if (!ctx.policySeeded) {
         ctx.policySeeded = true;
         ctx.policy.restore({ escalations: p.escalations, ceilings: p.ceilings, spentUsd: p.usage.costUsd });
-        // AND THE TAINT SET, which was the third ephemeral half and the security-load-bearing
-        // one. It lived only in `ctx.tainted`, so a crash, a deploy or a `loom serve` restart
-        // between the tainting write and the hard-to-undo action deleted E8 silently — measured,
-        // on two Engines over one journal with identical human decisions: the charge ran.
+        // AND THE EVIDENCE `#recordEvidence` HOLDS — the taint set and E4's failure streak.
+        // Both lived only on `RunContext`, so a crash, a deploy or a `loom serve` restart
+        // deleted them: E8 between the tainting write and the hard-to-undo action — measured,
+        // on two Engines over one journal with identical human decisions, the charge ran — and
+        // E4 between the second consecutive failure and the third, measured the same way, the
+        // escalation that fires without a restart firing not at all with one.
         //
-        // The durable `policy.escalated{rule:"taint"}` event cannot stand in for this. It enters
-        // the FLOOR, where `CLASS_DEFAULT_POSTURE` already pins both hard classes at `in`, and
-        // the ceiling clamp is applied after — so restoring the event changes no answer. Only
-        // the set does, which is exactly what invariant 2 means by "rebuildable by folding".
-        await this.#restoreTaint(ctx);
+        // The durable `policy.escalated` rows cannot stand in for either. `{rule:"taint"}`
+        // enters the FLOOR, where `CLASS_DEFAULT_POSTURE` already pins both hard classes at
+        // `in`, and the ceiling clamp is applied after — so restoring the event changes no
+        // answer. `{rule:"repeated_failure"}` is only written once the streak has ALREADY
+        // breached, so it says nothing about a run sitting at two. Only the sets and the
+        // counter do, which is exactly what invariant 2 means by "rebuildable by folding".
+        await this.#restoreEvidence(ctx);
       }
       // NOT RETIRED HERE, and the attempt is recorded because it looks obviously right.
       //
