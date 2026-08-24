@@ -94,8 +94,8 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     },
   },
   {
-    row: "JoinNode.timeoutMs",
-    claims: "nothing reads it, so a barrier waits forever",
+    row: "`JoinNode.timeoutMs`",
+    claims: "nothing reads it, so a barrier whose branch never arrives waits forever",
     probe: () => {
       // STILL A GAP. If a reader ever wires it, this fails and the row has to change.
       assert.doesNotMatch(SRC("run/engine.ts"), /join[?.]*\.timeoutMs/, "a join timeout is read now — update the row");
@@ -149,15 +149,18 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     },
   },
   {
-    row: "`Math.random()` in a function body",
-    claims: "the realm's `Math.random` is a deterministic PRNG built from it",
+    row: "Reading the clock in a body",
+    claims: "`ctx.now()` is the task's journaled lease timestamp",
     // A ROW THAT FLIPPED, so the probe flipped with it. It used to assert the ABSENCE of a
     // random effect; asserting the same thing after the gap closed is how a gaps table starts
     // describing a system nobody has.
     probe: () => {
       const realm = SRC("resources/realm.ts");
       assert.match(realm, /^\s*"Math",$/m, "Math must still be in the safe globals — the PRNG replaces its `random`, not the object");
-      assert.match(realm, /Date: undefined/, "and Date must still be stripped: a clock read has no seed that would make it reproducible");
+      assert.match(realm, /Date: undefined/, "and Date must still be absent from the realm");
+      // THE ROW'S OWN CLAIM: the body clock is the fold's lease timestamp, not the engine's now.
+      assert.match(SRC("run/engine.ts"), /#bodyClock\(/, "the engine must bind a body clock");
+      assert.match(SRC("run/engine.ts"), /lease\?\.at \?\? p\.startedAt/, "bound to the journaled lease timestamp");
       // The three halves of the claim, each where it lives: the engine draws and journals a
       // seed, the bridge consumes it, and replay serves the recorded one instead of drawing.
       const engine = SRC("run/engine.ts");
@@ -297,7 +300,7 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
   },
   {
     row: "Human oversight",
-    claims: "An approval binds the graph it was shown — spec, resolved resources and oversight floor",
+    claims: "An approval binds the graph it was shown",
     probe: () => {
       // Three conjuncts, three checks. `#assertBound` is where all three live.
       const eng = SRC("run/engine.ts");
@@ -345,6 +348,35 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
         .map((f) => (readFileSync(f, "utf8").match(/^test\(/gm) ?? []).length)
         .reduce((a, b) => a + b, 0);
       assert.ok(actual >= stated, `the README claims ${stated}+ tests and the suite declares ${actual}`);
+    },
+  },
+  {
+    row: "One-line agents",
+    claims: "compiling to a one-node graph",
+    probe: () => {
+      const a = SRC("agent.ts");
+      assert.match(a, /compileOrThrow\(/, "agent() must compile a real graph rather than run a private loop");
+      assert.match(a, /new Engine\(/, "…and run it on the engine");
+      assert.match(a, /type: "agent"/, "…as an agent node");
+    },
+  },
+  {
+    row: "Declared effects",
+    claims: "invokes only the tools its node declared, through one dispatch path",
+    probe: () => {
+      assert.match(SRC("graph/spec.ts"), /readonly effects\?: readonly string\[\]/, "FunctionNode must declare effects");
+      assert.match(SRC("graph/spec.ts"), /node\.function\?\.effects/, "and reachableToolNames must see them");
+      assert.match(SRC("run/engine.ts"), /#effectsFor\(/, "the engine must bind them");
+      assert.match(SRC("run/engine.ts"), /this\.#invokeTool\(ctx, w\.task, tool, args, ordinal\+\+\)/, "…through the one dispatch path");
+    },
+  },
+  {
+    row: "Determinism",
+    claims: "a clock bound to the task's journaled lease timestamp",
+    probe: () => {
+      assert.match(SRC("run/engine.ts"), /#bodyClock\(/, "the body clock seam");
+      assert.match(SRC("run/engine.ts"), /lease\?\.at \?\? p\.startedAt/, "bound to the fold, not the wall clock");
+      assert.match(SRC("resources/functions.ts"), /Math\.random = function \(\)/, "and the seeded PRNG is still installed");
     },
   },
 ];

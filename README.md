@@ -1,9 +1,66 @@
 # Loom
 
-A multi-agent collaboration and orchestration framework where **the executable graph
-is the runtime**, an agent loop is one node type inside it, and every durable fact
-about a run is an append-only journal entry — so parallelism, human oversight, replay,
-and observability are one mechanism seen from different angles.
+A multi-agent runtime. You describe what you want done, it runs, and every durable fact about
+the run is an append-only journal entry — so parallelism, human oversight, replay and
+observability are one mechanism rather than four.
+
+The graph is the substrate, not the thing you have to write. **Determinism is enforced by
+controlling the realm** — a PRNG seeded from a journaled draw, a clock bound to a journaled task
+boundary, every effect declared and keyed — which is what lets the workflow language stay ordinary
+TypeScript instead of WASM components or a DSL.
+
+## Thirty seconds
+
+```ts
+import { agent } from "@loom/core";
+
+const summarise = agent({
+  prompt: "Summarise the input in two sentences.",
+  adapter: myAnthropicAdapter,
+});
+
+const result = await summarise.run("…text…");
+console.log(result.status, result.output, result.usage.costUsd);
+```
+
+That is a one-node graph on the full engine. Which means, without writing another line:
+
+```ts
+await summarise.replay(result.runId);   // re-runs from the journal. zero model calls.
+```
+
+and if you give it a tool that changes the world, it **stops and asks** — the oversight floor
+comes from what the tool *is*, not from configuration you remembered to add:
+
+```ts
+const pay = agent({
+  prompt: "Charge the customer.",
+  tools: ["pay.charge"],          // declared irreversible by its definition
+  toolDefs: [charge],
+  granted: ["pay:charge"],
+  adapter: myAnthropicAdapter,
+});
+
+const r = await pay.run("take the payment");
+r.status;      // "awaiting_gate"
+r.openGates;   // one decision waiting — and the charge has NOT run
+```
+
+## When you outgrow one node
+
+Reach for the graph. Fan-out and branch-ordered joins, routers, bounded loops, human-gate nodes,
+subgraphs, and `function` nodes that declare their own effects:
+
+```ts
+function: { ref: "function/settle@stable", effects: ["pay.charge", "note.write"] }
+```
+
+A declared effect is reachable by the capability ceiling, the unknown-tool diagnostic and the
+oversight floor by the same route a tool node's name travels — **declaring a capability and
+declaring a journaled effect are one act**, which is what keeps "every nondeterministic call is
+journaled" a property of the schema rather than a rule somebody has to remember.
+
+## Or run it as a service
 
 ```bash
 npm install && npm run build:binary   # → bin/loom, one file, 0 third-party modules
@@ -15,12 +72,15 @@ loom serve                            # console + API on :8787, from an empty di
 
 | | |
 |---|---|
+| **One-line agents** | `agent({prompt, tools})` compiling to a one-node graph, so the hello-world gets the journal, replay, gates and budget ceiling |
 | **Graph compiler** | 22 validation rules, aggregated diagnostics with suggested fixes, resource pinning |
 | **Executor** | Parallel fan-out, branch-ordered joins, bounded loops, retries. All eight node types run: tool, agent, router, join, human_gate, subgraph, function, evaluator |
+| **Declared effects** | A `function` body invokes only the tools its node declared, through one dispatch path, each keyed by position in the call sequence |
 | **Durability** | Append-only journal on `node:sqlite`. A run SUSPENDED on a human gate survives `kill -9` and resumes in another process |
-| **Human oversight** | Three postures by configuration alone; gates are rows, so a suspended run holds zero worker slots. An approval binds the graph it was shown — spec, resolved resources and oversight floor |
+| **Human oversight** | Three postures by configuration alone; gates are rows, so a suspended run holds zero worker slots. An approval binds the graph it was shown |
 | **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
-| **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains in `--models-file`. A provider that ignores `stream: true` fails loudly rather than reporting an empty success |
+| **Determinism** | Seeded `Math.random`, a clock bound to the task's journaled lease timestamp. Two reads of the time inside one body return the same instant |
+| **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
 | **Gates** | `npm run check` — 3400+ tests across both packages, offline, no API key; zero-dep and public-surface guards |
 
@@ -31,10 +91,10 @@ Stated because a framework that overstates itself costs its user a day finding o
 | | |
 |---|---|
 | **`retry` on a function or evaluator node** | **Works**, through the RETURN rather than a throw: a body returns `{ retry: { reason } }` and the engine raises `E_FUNCTION_UNAVAILABLE` on its behalf, which is retryable by class. A *throw* still cannot carry retryability — `isLoomError` is an `instanceof` against the host class and a guest object can never satisfy it, so every throw out of the `vm` is still `E_INTERNAL` |
-| **`Math.random()` in a function body** | **Recorded.** The engine draws a seed per task under `effectKey(taskId, "random", 0)`, journals it as an effect, and the realm's `Math.random` is a deterministic PRNG built from it — so replay serves the same stream instead of diverging. `Date` is still `undefined` in the sandbox, deliberately: a wall-clock read has no seed that would make it reproducible |
+| **Reading the clock in a body** | **Reproducible.** `ctx.now()` is the task's journaled lease timestamp, so replay computes the same number with nothing new written. Time does not advance during a task — two reads return the same instant. `Date` is still absent from the sandbox: a frozen `Date` that silently never advances is more surprising than one that is not there, and restoring it means binding the whole constructor |
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | **Built.** Publish `resources/hook/<name>.js`, name it under `hooks:` in the graph, and it runs in the same hardened `vm` realm a `function` body does. A declared hook the workspace does not publish is a compile error, not a silent skip |
-| **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever. Declaring one is a compile WARNING rather than an error, because the design states the absence deliberately and what a barrier timeout should DO (fail the join, or fold what arrived) is an open decision |
+| **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier whose branch never arrives waits forever. Declaring one is a compile WARNING rather than an error. The decision recorded in `DESIGN.md` is that a timeout FAILS the join; folding whatever arrived is a different feature wearing a timeout's name |
 | **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no automatic reclaim. The path back is `POST /runs/:id/commands {"kind":"rewind","atSeq":N}` on a `loom serve` plane, which re-arms the leases it undoes. **There is no `loom rewind` CLI verb** — `rewind` and `advance` are control-plane commands only, while `cancel` and `approve` are both |
 | **Approval modes** | Only `single`. `quorum`, `all`, `tiered` and delegation are compile errors, deliberately, rather than silent downgrades |
 
