@@ -7017,3 +7017,47 @@ both times: the backlog row named a cost, the cost turned out to rest on an assu
 assumption was worth more pinned than the fix was worth built. That is not an argument for
 skipping work. It is an argument for checking what a row assumes before pricing what it asks
 for — three of this week's stale claims were in entries nobody had re-read since writing them.
+
+---
+
+## An index, not a read model — and two tests that agreed on being wrong
+
+The backlog's one architectural item was "an open-gate read model", and three recorded entries
+were consequences of the same absence: `GateSweeper` loses an SLA after a restart (B7), `GET
+/gates` hides a question behind fifty newer runs, and A3's own stated reversal is "an open-gate
+index beside `run_head`". `CLAUDE.md` invariant 2 names `human_gates` as a derived read model and
+there is no such table.
+
+**It did not need one.** A read model is a second source of truth to keep consistent on every
+append. What both consumers actually need is a narrower *listing*, and that is an index:
+`journal_by_type_global ON journal (type, ts)`, plus `RunFilter.raisedAGate`, which orders by the
+most recent `gate.raised` instead of by run id. Additive — an older binary ignores an index it
+does not know, a newer one creates it on open, no column and no migration. The filter is
+documented as a SUPERSET of "has an open gate", because openness is a property of the fold and
+the sweeper folds anyway.
+
+The bound still bounds: `limit` now caps *gated* runs rather than all runs, which is a set an
+operator can size from their own SLA policy. "Runs created" never was.
+
+**Then the interesting part, which is that I shipped the bug and the test that could not see it,
+twice.**
+
+The first implementation ordered by `MAX(seq)`. **`seq` is per-run.** Two runs that each raise
+their gate as their second event both have `MAX(seq) = 2`, so ordering by it is a tie between
+gates days apart; `ts` is the only column in that table that compares across runs. Both stores
+had the identical bug — the SQL one in a `GROUP BY` and the memory one in a loop — and they
+AGREED. A per-store test could not have caught that. The cross-store conformance test could, and
+did, because it asked both the same question and compared the answers.
+
+**But its first version could not either.** It gave both runs a gate as their second event, so
+`MAX(seq)` tied, the `run_id DESC` tiebreak produced the expected order, and reverting the fix
+left the test green. It passed for a reason it did not claim. It now constructs the case where
+seq-order and ts-order actively disagree — r-1 gates earlier at a higher seq, r-2 later at a
+lower one — so the tiebreak never runs and only the correct implementation passes.
+
+**Two lessons, and the second is the one I did not already have.** A test whose two candidate
+implementations agree distinguishes nothing — that one is old. The new one: **a tiebreak is an
+excellent way to make them agree by accident.** It was added for determinism, it was right to
+add, and it silently converted a discriminating assertion into a tautology. Any test whose
+expected value could also be produced by the fallback path is a test to re-derive, and the way
+to find out is the mutation, not the reading.

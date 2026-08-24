@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS journal (
 CREATE INDEX IF NOT EXISTS journal_by_type ON journal (run_id, type, seq);
 CREATE INDEX IF NOT EXISTS journal_by_task ON journal (run_id, task_id, seq);
 
+-- GLOBAL by type, where journal_by_type above is per-run. GateSweeper has to answer
+-- "which runs raised a gate" across the whole store, and the per-run index cannot serve a
+-- query with no run_id: SQLite uses a leading-column prefix only. Additive on purpose --
+-- an older binary ignores an index it does not know about, and this one is created on open,
+-- so a store written before it gains it the first time a newer binary opens the file.
+-- (No backticks in this comment: the schema is a template literal.)
+CREATE INDEX IF NOT EXISTS journal_by_type_global ON journal (type, ts);
+
 -- Head is denormalised so the CAS is one indexed read rather than MAX(seq) over the log.
 CREATE TABLE IF NOT EXISTS run_head (
   run_id   TEXT    PRIMARY KEY,
@@ -386,17 +394,44 @@ export class SqliteStateStore implements StateStore {
     // `IS NULL` is the permissive half, and it is in the same statement rather than a second
     // query because "mine, plus the ones nobody owns" is one question.
     const mine = filter?.submittedByOrUnowned;
+    // ORDERED BY THE MOST RECENT GATE, not by the most recent run. `journal_by_type_global`
+    // makes the inner scan indexed, and the join is against `run_head` so the returned shape is
+    // identical either way — a caller cannot tell which query ran except by which runs come
+    // back, which is the whole point.
+    //
+    // `MAX(ts)` AND NOT `MAX(seq)`, and the first version had it wrong: **`seq` is per-run**.
+    // Two runs that each raised their gate as their second event both have `MAX(seq) = 2`, so
+    // ordering by it is a tie between runs whose gates are days apart. `ts` is the store's
+    // clock and is the only column here that compares ACROSS runs. Caught by asking both stores
+    // the same question — they agreed, and agreed on being wrong, which is what a conformance
+    // test is for and what neither store's own tests could have found.
+    //
+    // `run_id DESC` breaks a tie, so two gates in the same millisecond order deterministically
+    // rather than by whatever the query planner returns.
+    const gated = filter?.raisedAGate === true;
+    const ownership = mine === undefined ? "" : " AND (h.submitted_by IS NULL OR h.submitted_by = ?)";
     const rows = (
-      mine === undefined
+      gated
         ? this.#db
-            .prepare("SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head ORDER BY run_id DESC LIMIT ?")
-            .all(limit)
-        : this.#db
             .prepare(
-              `SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head
-               WHERE submitted_by IS NULL OR submitted_by = ? ORDER BY run_id DESC LIMIT ?`,
+              `SELECT h.run_id, h.head_seq, h.first_ts, h.last_ts, h.submitted_by
+               FROM run_head h
+               JOIN (SELECT run_id, MAX(ts) AS gate_ts FROM journal WHERE type = 'gate.raised' GROUP BY run_id) g
+                 ON g.run_id = h.run_id
+               WHERE 1 = 1${ownership}
+               ORDER BY g.gate_ts DESC, h.run_id DESC LIMIT ?`,
             )
-            .all(mine, limit)
+            .all(...(mine === undefined ? [limit] : [mine, limit]))
+        : mine === undefined
+          ? this.#db
+              .prepare("SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head ORDER BY run_id DESC LIMIT ?")
+              .all(limit)
+          : this.#db
+              .prepare(
+                `SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head
+                 WHERE submitted_by IS NULL OR submitted_by = ? ORDER BY run_id DESC LIMIT ?`,
+              )
+              .all(mine, limit)
     ) as unknown as readonly {
       run_id: string;
       head_seq: number;

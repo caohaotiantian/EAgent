@@ -2132,17 +2132,23 @@ interface RunCursor {
  * Memory is one projection per LIVE listed run, and terminal runs drop theirs. Both are
  * bounded by `limit`.
  *
- * WHAT IT CANNOT SEE, stated plainly because it is the limit that will bite somebody.
- * `listRuns` orders by run id descending, run ids are minted from a timestamp, and there is
- * no read model of open gates — so a tick sees the `limit` most recently CREATED runs and
- * nothing older. A cursor, once established, survives only as long as its run stays in that
- * window. In practice a gate is raised while its run is new, so it is inside the window when
- * the sweeper first meets it and it is tracked from then on; the hole is a PROCESS RESTART
- * on a store where more than `limit` runs have been created since the gate was raised. That
- * gate's SLA never fires. Closing it needs a query the `StateStore` interface cannot answer
- * today — "runs with an open gate", or at least an ordering by `last_ts` ascending — which
- * is a store change and a read model, not a knob. Until then: size `limit` above the number
- * of runs a deployment creates in the longest SLA it declares.
+ * WHAT IT CAN SEE, and what it still cannot. This USED to read `listRuns(limit)` — ordered by
+ * run id descending, and run ids are minted from a timestamp — so a tick saw the `limit` most
+ * recently CREATED runs and nothing older. A gate raised on a run that newer runs had since
+ * pushed out of that window lost its clock on the next PROCESS RESTART: no escalation, no
+ * expiry, a question standing in front of a human with nothing behind it. That is REGISTER
+ * **B7**, and it is closed: the listing is now `{ raisedAGate: true }`, which orders by the
+ * most recent `gate.raised` instead, so only runs that have EVER gated compete for the slots.
+ *
+ * The bound is the same number and it still bounds something. `limit` now caps *gated* runs
+ * rather than all runs, so the residual hole is a deployment with more than `limit` runs
+ * holding gates at once — a far smaller set than "runs created", and one whose size an
+ * operator can reason about from their own SLA policy. Size `limit` above the number of gates
+ * a deployment expects to have open simultaneously.
+ *
+ * `raisedAGate` is a SUPERSET of "has an open gate", deliberately: openness is a property of
+ * the fold and the listing is an index lookup. The sweeper folds anyway, so narrowing further
+ * in the store would buy nothing and would need a read model to keep consistent.
  */
 export class GateSweeper {
   readonly #store: StateStore;
@@ -2178,7 +2184,14 @@ export class GateSweeper {
    * paragraph is the one that is wrong.
    */
   async sweep(now = this.#now()): Promise<SweepReport> {
-    const rows = await this.#store.listRuns(this.#limit);
+    // GATED RUNS, ORDERED BY THEIR MOST RECENT GATE — not the newest runs. This was
+    // `listRuns(this.#limit)`, which orders by run id descending, so a tick saw the `limit`
+    // most recently CREATED runs and nothing older: a gate raised on a run that newer runs
+    // had since pushed out of that window never had its deadline checked again after a
+    // restart, and its SLA never fired. REGISTER B7. The `limit` is unchanged; what changed
+    // is what competes for the slots, so a deployment that creates a million runs and gates
+    // ten of them now has all ten in view.
+    const rows = await this.#store.listRuns(this.#limit, { raisedAGate: true });
     const live = new Map<RunId, RunCursor>();
     const fired: GateId[] = [];
     let caughtUp = 0;

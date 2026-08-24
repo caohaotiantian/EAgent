@@ -67,6 +67,33 @@ export interface RunFilter {
    * has — and offering the knob would invite a reader to assume the default is the strict one.
    */
   readonly submittedByOrUnowned?: string;
+  /**
+   * Only runs that have ever RAISED a human gate, newest gate first.
+   *
+   * A SUPERSET of "runs with an OPEN gate", and the docstring says superset because the exact
+   * set cannot be answered here: whether a gate is still open is a property of the FOLD, and
+   * this is an index lookup. The caller folds; this narrows what it has to fold.
+   *
+   * WHAT IT IS FOR. `GateSweeper` is the SLA clock, and it found its runs through
+   * `listRuns(limit)` — ordered by run id descending, which is newest-CREATED first. So a tick
+   * saw the `limit` most recently created runs and nothing older, and a gate raised on a run
+   * that has since been pushed out of that window by newer runs never had its deadline
+   * checked again after a process restart. Its SLA never fired: no escalation, no expiry, a
+   * question standing in front of a human with nothing behind it. That is REGISTER **B7**.
+   *
+   * WHY THIS AND NOT A READ MODEL. `CLAUDE.md` invariant 2 names `human_gates` as a derived
+   * read model and there is no such table — the durable schema is `meta`, `journal`,
+   * `run_head`, `task_fence`. Building one means a table to keep consistent with the journal
+   * on every append, which is a second source of truth to get wrong. Ordering by the gate
+   * events themselves needs no table and no column: an index over `(type, seq)` makes
+   * "the most recent runs that raised a gate" a single indexed scan, and it is ADDITIVE — an
+   * older binary ignores an index it does not know about, and a newer one creates it on open.
+   *
+   * IT DOES NOT MAKE THE LISTING UNBOUNDED. The same `limit` applies; what changes is what
+   * competes for the slots. A deployment that creates a million runs and gates ten of them now
+   * has all ten in view instead of whichever ten are newest.
+   */
+  readonly raisedAGate?: boolean;
 }
 
 export interface StateStore {

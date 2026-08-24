@@ -1803,3 +1803,47 @@ async function journalOf(store: StateStore, runId: RunId): Promise<readonly Jour
   for await (const ev of store.read(runId, 1 as Seq)) out.push(ev);
   return out;
 }
+
+test("A GATE ON AN OLD RUN STILL HAS A CLOCK — the sweep window is gated runs, not new ones", async () => {
+  // REGISTER B7. `GateSweeper` found its runs through `listRuns(limit)`, which is
+  // `ORDER BY run_id DESC` over time-ordered ids — so a tick saw the `limit` most recently
+  // CREATED runs and nothing older. In a live process that was survivable: a gate is raised
+  // while its run is new, so the sweeper met it inside the window and kept a cursor. A PROCESS
+  // RESTART threw the cursors away, and any gate whose run had since been pushed out by newer
+  // runs lost its clock permanently. No escalation, no expiry — a question standing in front of
+  // a human with nothing behind it, which is the one failure an oversight framework must not
+  // have quietly.
+  //
+  // The fix is not a bigger limit. It is that the listing now orders by the most recent
+  // `gate.raised`, so only runs that have EVER gated compete for the slots.
+  const r = rig(gatedSpec({ sla: { respondWithinMs: 60_000, onTimeout: "fail" }, delivery: undefined }));
+
+  // The gate is raised FIRST, on the oldest run in the store.
+  const { runId, gateId } = await park(r);
+
+  // …then three newer runs are created and finish, so under the old ordering they would fill a
+  // window of three and push the gated run out of view entirely.
+  const plain = compileOrThrow({ spec: gatedSpec({ sla: undefined, delivery: undefined }), resolver: resolver(), tools: {} });
+  void plain;
+  for (let i = 0; i < 3; i++) {
+    r.clock.t += 1000;
+    await r.engine.submit({ graph: r.graph, inputs: { plan: `later ${String(i)}` } });
+  }
+
+  // A FRESH SWEEPER, which is what a restart produces: no cursors, only what the listing shows.
+  // `limit: 3` is smaller than the four runs now in the store, so the ordering is what decides
+  // whether the gated one is visible at all.
+  const sweeper = new GateSweeper({ store: r.store, broker: r.broker, now: () => r.clock.t, limit: 3 });
+
+  r.clock.t += 120_000; // well past the 60s SLA
+  const report = await sweeper.sweep();
+
+  const p = (await r.engine.projection(runId))!;
+  assert.equal(p.gates[gateId]?.state, "expired", `the SLA must have fired; report=${JSON.stringify(report)}`);
+
+  // THE CONTROL, and without it this test passes against a sweeper that ignores `limit`
+  // entirely: the bound still bounds something. Four gated runs against a limit of 3 means one
+  // is out of view, and it is the one whose gate is OLDEST — which is the right one to drop,
+  // because the ordering is by most recent gate.
+  assert.ok(report.considered <= 3, `the limit must still bound the tick, saw ${String(report.considered)}`);
+});

@@ -105,10 +105,24 @@ export class MemoryStateStore implements StateStore {
   }
 
   async listRuns(limit = 100, filter?: RunFilter): Promise<readonly RunSummary[]> {
-    const out: RunSummary[] = [];
+    const out: (RunSummary & { readonly gateTs?: number })[] = [];
     const mine = filter?.submittedByOrUnowned;
+    const gated = filter?.raisedAGate === true;
     for (const [runId, log] of this.#runs) {
       if (log.events.length === 0) continue;
+      // A SCAN, where SQLite has an index — and that asymmetry is fine rather than a gap.
+      // This store exists for tests and for an embedder with no file, so its journals are
+      // small by construction; the SQL store is the one a deployment runs. What must NOT
+      // differ is the ANSWER, which is why both order by the most recent `gate.raised` and
+      // `test/journal/store-conformance.test.ts` asks the same question of both.
+      // `ts` AND NOT `seq`, because `seq` is per-run: two runs that each gated on their second
+      // event both have seq 2, and ordering by that is a tie between gates days apart. The SQL
+      // store had the identical bug and the two agreed on it — see `listRuns` there.
+      let gateTs: number | undefined;
+      if (gated) {
+        for (const e of log.events) if (e.type === "gate.raised") gateTs = Number(e.ts);
+        if (gateTs === undefined) continue;
+      }
       // Filtered BEFORE the slice below, matching the SQL store's `WHERE … LIMIT` order —
       // filtering after would make a low-volume principal's list empty on a busy journal and
       // would leak other principals' submission density through `limit`.
@@ -119,11 +133,14 @@ export class MemoryStateStore implements StateStore {
         firstTs: log.events[0]!.ts,
         lastTs: log.events[log.events.length - 1]!.ts,
         ...(log.submittedBy === undefined ? {} : { submittedBy: log.submittedBy }),
+        ...(gateTs === undefined ? {} : { gateTs }),
       });
     }
-    // Newest first, matching the SQLite store's ORDER BY.
-    out.sort((a, b) => (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
-    return out.slice(0, limit);
+    // Newest first, matching the SQLite store's ORDER BY — by the most recent GATE when that
+    // is what was asked for, by run id otherwise.
+    if (gated) out.sort((a, b) => (b.gateTs ?? 0) - (a.gateTs ?? 0) || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
+    else out.sort((a, b) => (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
+    return out.slice(0, limit).map(({ gateTs: _drop, ...r }) => r);
   }
 
   close(): void {

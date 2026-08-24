@@ -2674,7 +2674,13 @@ export class ControlPlane {
           const out: unknown[] = [];
           let scanned = 0;
           let truncated = false;
-          for (const summary of await store.listRuns(MAX_QUEUE_SCAN)) {
+          // GATED RUNS, NEWEST GATE FIRST — the same narrowing `GateSweeper` uses, and for the
+          // same reason. This was `listRuns(MAX_QUEUE_SCAN)`, ordered by run id descending, so a
+          // question addressed to an approver dropped out of the only route that shows it as
+          // soon as MAX_QUEUE_SCAN newer runs existed — inducible by anyone who can submit, and
+          // the entry above calls it a denial of oversight. Ordering by the most recent
+          // `gate.raised` means only runs that have ever gated compete for the scan budget.
+          for (const summary of await store.listRuns(MAX_QUEUE_SCAN, { raisedAGate: true })) {
             if (out.length >= want) {
               truncated = true;
               break;

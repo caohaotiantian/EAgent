@@ -1597,7 +1597,37 @@ endpoint: a run this process has not attached is ranked by nothing, so after a r
 `GET /runs/:id/gates` is journal order too, and the handler's own comment says so.
 
 **B7 · The gate sweep cannot see a run outside the `limit` most recent, and after a restart
-that is a lost SLA.** New, and it is the residue of the fix for B1 rather than a discovery.
+that is a lost SLA. RESOLVED 2026-08-24 with an index, not a read model.**
+
+> `RunFilter.raisedAGate` orders a listing by the most recent `gate.raised` instead of by run id,
+> so only runs that have EVER gated compete for the `limit` slots. `GateSweeper` and
+> `GET /gates` both use it — which closes A3's own stated reversal ("an open-gate index beside
+> `run_head`") in the same change, because it was the same absence.
+>
+> **AN INDEX RATHER THAN THE `human_gates` TABLE invariant 2 names.** A read model is a second
+> source of truth to keep consistent on every append; `CREATE INDEX journal_by_type_global ON
+> journal (type, ts)` is additive — an older binary ignores an index it does not know, a newer
+> one creates it on open, and there is no migration and no column. The filter is documented as a
+> SUPERSET of "has an open gate" on purpose: openness is a property of the fold, and the sweeper
+> folds anyway.
+>
+> **THE BOUND STILL BOUNDS.** `limit` now caps *gated* runs rather than all runs, so the residual
+> hole is a deployment with more than `limit` gates open at once — a set an operator can size
+> from their own SLA policy, which "runs created" never was.
+>
+> **The defect inside the fix, and it is the useful part.** The first version ordered by
+> `MAX(seq)`. **`seq` is per-run**: two runs that each gate as their second event both have
+> `MAX(seq) = 2`, so ordering by it is a tie between gates days apart. `ts` is the only column in
+> that table that compares across runs. Both stores had the bug and both AGREED, which is why a
+> per-store test could not have found it and the cross-store conformance test could.
+>
+> **And the conformance test found it only on the second attempt.** Its first version gave both
+> runs a gate as their second event, so `MAX(seq)` tied, the `run_id DESC` tiebreak produced the
+> expected answer, and reverting the fix left it green — the test passed for a reason it did not
+> claim. It now constructs the case where seq-order and ts-order DISAGREE (r-1 gates earlier at a
+> higher seq, r-2 later at a lower one) so the tiebreak never runs. **A test whose two candidate
+> implementations agree distinguishes nothing**, and a tiebreak is a very good way to make them
+> agree by accident. New, and it is the residue of the fix for B1 rather than a discovery.
 `GateSweeper` finds its runs through `StateStore.listRuns(limit)`, which orders by run id
 descending — run ids are minted from a timestamp, so that is "newest created first" — and
 there is **no read model of open gates** to ask instead. Cursors are kept between ticks, so

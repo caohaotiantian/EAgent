@@ -665,3 +665,97 @@ test("SQLITE EMITS NO EXPERIMENTAL WARNING (open thread T3)", () => {
   assert.deepEqual(seen, [], "if this fires, decide suppression deliberately — do not silence process warnings wholesale");
 });
 
+
+// ── raisedAGate: the same answer from both stores ────────────────────────────
+
+test("BOTH STORES ANSWER `raisedAGate` THE SAME WAY — ordered by the most recent gate", async () => {
+  // The two implementations are structurally different — SQLite joins against an index, the
+  // memory store scans — so "they agree" is a claim that has to be asked of both rather than
+  // reasoned about once. It is load-bearing: `GateSweeper` is the SLA clock and it runs against
+  // whichever store a deployment configured, so a divergence here is a gate that expires on one
+  // and never on the other.
+  const dir = mkdtempSync(join(tmpdir(), "loom-gated-"));
+  // AN INJECTED, ADVANCING CLOCK, so the ordering assertion is about `ts` and not about the
+  // tiebreak. Without it every append lands in the same millisecond, `run_id DESC` decides, and
+  // the last assertion below passes for a reason it does not claim — which is the failure mode
+  // that put `MAX(seq)` in here in the first place.
+  const clock = { t: 1_700_000_000_000 };
+  const now = (): number => clock.t;
+  const sqlite = new SqliteStateStore({ path: join(dir, "j.db"), now });
+  const memory = new MemoryStateStore({ now });
+  const actor: Actor = SYSTEM_ACTOR("t");
+
+  try {
+    for (const store of [sqlite, memory] as StateStore[]) {
+      clock.t = 1_700_000_000_000;
+      // Three runs. The OLDEST gates; the two newer ones never do — which is exactly the shape
+      // that used to hide a gate behind newer runs.
+      await store.append({
+        runId: "r-1" as never,
+        expectedSeq: 0,
+        events: [
+          { type: "run.started", payload: { posture: "on" }, actor },
+          { type: "gate.raised", payload: { gateId: "g1", nodeId: "n", approvers: [], kind: "policy" }, actor },
+        ] as never,
+      });
+      clock.t += 1000;
+      await store.append({ runId: "r-2" as never, expectedSeq: 0, events: [{ type: "run.started", payload: { posture: "on" }, actor }] as never });
+      clock.t += 1000;
+      await store.append({ runId: "r-3" as never, expectedSeq: 0, events: [{ type: "run.started", payload: { posture: "on" }, actor }] as never });
+
+      const all = (await store.listRuns(10)).map((r) => r.runId);
+      const gated = (await store.listRuns(10, { raisedAGate: true })).map((r) => r.runId);
+
+      assert.deepEqual([...all].sort(), ["r-1", "r-2", "r-3"], "the unfiltered listing still returns everything");
+      assert.deepEqual(gated, ["r-1"], "and the filtered one returns only the run that raised a gate");
+
+      // A LIMIT OF 1 IS THE WHOLE POINT. Unfiltered it returns the newest RUN; filtered it
+      // returns the run with the newest GATE — and those are different runs, which is B7.
+      assert.deepEqual((await store.listRuns(1)).map((r) => r.runId), ["r-3"], "unfiltered: newest run");
+      assert.deepEqual((await store.listRuns(1, { raisedAGate: true })).map((r) => r.runId), ["r-1"], "filtered: newest GATE");
+
+      // Ordering among gated runs is by the most recent gate, not by run id.
+      // THE ORDERING CASE, CONSTRUCTED SO seq AND ts DISAGREE — and the first version of this
+      // was not. It gave both runs a gate as their second event, so `MAX(seq)` tied at 2, the
+      // `run_id DESC` tiebreak produced the expected answer, and reverting the fix to `MAX(seq)`
+      // left the test green. A test whose two candidate implementations agree distinguishes
+      // nothing.
+      //
+      // Here r-1 gets three filler events so its gate lands at a HIGHER seq than r-2's, while
+      // r-2 gates strictly LATER in ts. `MAX(seq)` puts r-1 first; `MAX(ts)` puts r-2 first;
+      // the tiebreak never runs because there is no tie. Only the correct implementation passes.
+      for (let i = 0; i < 3; i++) {
+        clock.t += 1;
+        await store.append({
+          runId: "r-1" as never,
+          expectedSeq: (2 + i) as never,
+          events: [{ type: "task.progress", payload: { chunk: "filler" }, actor }] as never,
+        });
+      }
+      clock.t += 1;
+      await store.append({
+        runId: "r-1" as never,
+        expectedSeq: 5 as never,
+        events: [{ type: "gate.raised", payload: { gateId: "g1b", nodeId: "n", approvers: [], kind: "policy" }, actor }] as never,
+      });
+
+      clock.t += 1000; // strictly later than every r-1 event, and at a LOWER seq
+      await store.append({
+        runId: "r-2" as never,
+        expectedSeq: 1,
+        events: [{ type: "gate.raised", payload: { gateId: "g2", nodeId: "n", approvers: [], kind: "policy" }, actor }] as never,
+      });
+
+      assert.deepEqual(
+        (await store.listRuns(10, { raisedAGate: true })).map((r) => r.runId),
+        ["r-2", "r-1"],
+        "r-2 gated LATER (ts 2000-ish, seq 2); r-1 gated EARLIER at a HIGHER seq (6). Ordering by seq " +
+          "would put r-1 first — seq is per-run and does not compare across runs",
+      );
+    }
+  } finally {
+    sqlite.close();
+    memory.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
