@@ -7256,7 +7256,8 @@ diff looks like.**
 Two corrections to the record fell out of the same session. `packages/eagent/CLAUDE.md`'s house
 convention still said *"always use `.js` import specifiers even when importing a `.ts` file"* —
 inverted by the conformance that rewrote 1032 specifiers at the move, so an agent following it
-writes imports that resolve to nothing; measured, zero `.js` and 433 `.ts` in that package. And
+writes imports that resolve to nothing; measured, zero relative `.js` specifiers and 433 `.ts`
+ones under that package's `src/` (its `tui/` subpackage runs a separate toolchain and has 45). And
 its *"THERE IS NO `tsx` ANY MORE"* is true of the engine and false of `tui/`, three lines below a
 command that invokes it — Node cannot strip `.tsx` at all, which is also why no root gate runs the
 TUI's 17 tests. Both fixed under that file's own rule that the code wins.
@@ -7265,3 +7266,24 @@ TUI's 17 tests. Both fixed under that file's own rule that the code wins.
 `Record<Flag, Handler>` — the type-checked answer this repo says to prefer, deferred openly rather
 than argued away — then two of the three comparisons here become compile-time and this test
 should shrink to the `OPTIONS_HELP` half, which no type checker can hold.
+
+**Round 2, and the shape of what was left is worth one paragraph.** A second verifier reproduced
+the engine claim independently — and found the corrected docstring still overstated in eight
+places, of which two mattered. It ran the fourth case: the sentence said "three of the four types
+absent from this set behave the same way" without naming which three, and **all four do**
+(`function`, `evaluator`, `router`, `join`, each in its own compiling graph). *A count nobody can
+name the members of is a count nobody checked* — this repo's own rule, applied to a number I had
+written while applying it. And `HANDOFF.md` said all five corrected symbols were "pinned in
+`scripts/surface.json`", which is false and structurally impossible: `check-surface.mjs` reads
+`packages/core/dist/index.d.ts` and never sees `packages/eagent`, so `FLAGS` cannot be pinned. I
+had invented a justification for keeping an export, in the re-entry document, inside the wave
+whose subject is docstrings that invent a consumer.
+
+**The prettiest of the eight is a recursive one.** Three docstrings now cite the grep that proves
+they have no reader — and a docstring that names its own symbol is a line that grep returns. "No
+third line" was wrong because the sentence asserting it *was* the third line.
+`grep -arn 'OBSERVER_POINTS' packages/core/src scripts/` prints three; `CAN_SUSPEND`'s prints
+five, because `CONTROL_TYPES` mentions it twice. Only `CONTROL_TYPES`' own count was right, and
+only because its docstring happens not to name itself. **A self-describing grep counts itself**,
+and a claim about a command's output has to be run rather than predicted — which is the same rule
+this wave started with, one level further down.

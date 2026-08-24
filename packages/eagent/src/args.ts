@@ -35,9 +35,10 @@ export interface Args {
  * Every flag the parser accepts, including short aliases.
  *
  * THIS LIST HAS NO RUNTIME READER, and its docstring used to claim two. It said the TUI's own
- * help and a parity test read it "rather than re-listing them"; both consumers of this module —
- * `src/cli.ts` here and `tui/src/cli.tsx` — import `OPTIONS_HELP` and `parseArgs` and never
- * this, and no parity test was ever written. So the
+ * help and a parity test read it "rather than re-listing them"; both PRODUCTION consumers of
+ * this module — `src/cli.ts` here and `tui/src/cli.tsx` — import `OPTIONS_HELP` and `parseArgs`
+ * and never this, and no parity test was ever written. (`test/args-vocabulary.test.ts` imports
+ * it now, which is the gate described below and not a runtime reader.) So the
  * vocabulary exists three times over — here, as string literals in `parseArgs` below, and as
  * prose in `OPTIONS_HELP` — and a flag added to any one of them alone disagrees with the other
  * two silently. That is the failure mode this repository has already shipped twice at the Loom

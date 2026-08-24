@@ -663,18 +663,23 @@ export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
  * Node types D5.1 says can suspend a Run mid-execution.
  *
  * **NOTHING READS THIS, AND IT IS NOT TRUE.** Both halves were checked, and the second is the
- * one that matters: `grep -arn 'CAN_SUSPEND' packages/core/src scripts/` returns this line and
- * the `scripts/surface.json` pin, so no decision consults it — and if one did, it would be
- * wrong. **Every node type can suspend.** The gate that suspends a task is raised in
- * `Engine.#executeTask` from `decision.effect === "gate"`, BEFORE `#dispatch` picks a per-type
- * arm, and `PolicyRequest` carries `kind: "node" | "tool"` and no node type at all — it decides
- * on declared posture, data classification, irreversibility and taint. So a `function` node with
- * `policy: {posture: "in"}`, or one writing a `secret_ref`-classified channel, gates like any
- * other.
+ * one that matters. `grep -arn 'CAN_SUSPEND' packages/core/src scripts/` returns FIVE lines and
+ * not one is a reader: the declaration, the `scripts/surface.json` pin, and three sentences of
+ * documentation — this one, and two in `CONTROL_TYPES` below. **A self-describing grep counts
+ * itself**, which is why the number is written out here instead of "two hits".
  *
- * Measured, not reasoned: a one-node graph whose only node is `type: "function"` with
- * `policy: {posture: "in"}` reaches `awaiting_gate` with `gate.raised` for `f@root#0`. Three
- * of the four types absent from this set behave the same way, by the same path.
+ * **Every node type can suspend.** A gate reaches `#executeTask` from `decision.effect ===
+ * "gate"` BEFORE `#dispatch` picks a per-type arm, and `PolicyRequest` carries
+ * `kind: "node" | "tool"` and no node type at all — it decides on declared posture, data
+ * classification, irreversibility and taint. So a `function` node with `policy: {posture:"in"}`,
+ * or one writing a `secret_ref`-classified channel, gates like any other. That is not the ONLY
+ * `status: "gate"` site — the `human_gate` arm and `#runSubgraph`'s mirror gate are two more and
+ * both ARE per-type — but the type-agnostic one is what makes the claim total.
+ *
+ * Measured, not reasoned: **all four** types absent from this set — `function`, `evaluator`,
+ * `router`, `join` — reach `awaiting_gate` at posture `in`, each in its own compiling graph. An
+ * earlier version of this sentence said three of four and did not say which; a verifier ran the
+ * fourth. **A count nobody can name the members of is a count nobody checked.**
  *
  * Kept and exported because it is pinned in `scripts/surface.json` — removing it is a
  * public-surface change and a separate decision — and left here as a WARNING rather than a
@@ -687,7 +692,9 @@ export const CAN_SUSPEND: ReadonlySet<NodeType> = new Set<NodeType>(["agent", "t
  *
  * **`scheduler.ts` NEVER CONSULTS THIS.** Both this docstring and `CAN_SUSPEND`'s used to read
  * as invariants the scheduler enforces; it reads neither, and does not mention `node.type`
- * anywhere in the file. Same grep, same two hits: the declaration and the surface pin.
+ * anywhere in the file. `grep -arn 'CONTROL_TYPES' packages/core/src scripts/` returns two
+ * lines — the declaration and the surface pin — and unlike `CAN_SUSPEND`'s, that grep really
+ * does return two, because this docstring does not name its own symbol.
  *
  * This set is the complement of `CAN_SUSPEND` and inherits its defect — the justification for
  * running these three inline is that they "terminate without external input", and a `function`

@@ -165,7 +165,7 @@ rest — it is waiting, and §C below says who is waiting on what.
 | **1b** | A15 is no longer a partial-read hygiene item | It prescribed settling its open half by writing A3's premise — *every valid credential is a full operator credential* — into `frame`'s and `summarise`'s docstrings. **A3 was resolved twelve days later**: runs are scoped, and `server/http.ts`'s own boot diagnostic says in capitals that the old warning is gone *because its premise is false*. So the cheap resolution is unavailable and the question is now an authorization one — what may a SCOPED reader read — which is a different item than the one the register describes | REGISTER A15, A3 |
 | **2** | Unbounded and unobservable structures | `ResourceStore.#versions`/`#byDigest`/`#selectors` grow without bound; neither new cap emits a counter, so `MAX_CACHED_CHILD_GRAPHS`' own reversal condition is unmeasurable | REGISTER A8 |
 | **3** | Declared-and-unread fields, in one pass | `NodePlan.inboundEdges`, `GraphMetadata.labels`, `ExpansionBudget.maxLoopIterations`, `DelegationSpec.mustStayInGroup`/`maxDepth`, `ToolNode.version`, `AssembleInput.turns`, `SectionName "tool_results"`. `GRAPH019` is the pattern to follow — warn at compile rather than delete | §6 |
-| ✅ | ~~Docstrings claiming a consumer they do not have~~ | done — `fix(vocab): a docstring that names a consumer it does not have`. All five corrected in place rather than deleted (each is a pinned public export; `GRAPH019`'s precedent). `packages/eagent`'s `FLAGS` gets the gate it lacked: `test/args-vocabulary.test.ts` holds `FLAGS`, `parseArgs` and `OPTIONS_HELP` as ONE set, read from the source so the test cannot become a fourth copy. **Review turned up more than the row asked for** — one replacement docstring was itself false, and proving it made `02-EXECUTION-GRAPH.md` D5.1 invariant 2 wrong: see §1 | §6, `02` D5.1 |
+| ✅ | ~~Docstrings claiming a consumer they do not have~~ | done — `fix(vocab): a docstring that names a consumer it does not have`. All five corrected in place rather than deleted — the FOUR core ones are pinned public exports and `GRAPH019` is the precedent; `FLAGS` is in `packages/eagent`, which `check-surface.mjs` structurally cannot pin (it reads `packages/core/dist/index.d.ts`), and is kept for the reason its own docstring gives. `packages/eagent`'s `FLAGS` gets the gate it lacked: `test/args-vocabulary.test.ts` holds `FLAGS`, `parseArgs` and `OPTIONS_HELP` as ONE set, read from the source so the test cannot become a fourth copy. **Review turned up more than the row asked for** — one replacement docstring was itself false, and proving it made `02-EXECUTION-GRAPH.md` D5.1 invariant 2 wrong: see §1 | §6, `02` D5.1 |
 | **5** | The rare suite flake, and E3's two transient failures | Two observations, 20 clean runs since, no identification. Chase with `--test-reporter=tap` **from the first run** | *Traps*, REGISTER E3 |
 
 **Not in the order, and deliberately:** everything in §4 (`DEFERRED-v2` — each has a one-line
@@ -487,9 +487,14 @@ for reasons, not forgotten.
   All five said in prose that something read them and nothing did: `OBSERVER_POINTS` (*"asked at every call
   site"*), `CAN_SUSPEND` and `CONTROL_TYPES` (invariants "the scheduler enforces" — `scheduler.ts` does not
   mention node type anywhere), `createGraphCompiler` (an editor that does not exist; its `analyze` has one
-  caller, a test), and `packages/eagent`'s `FLAGS`. Each now states the absence instead, kept and exported
-  because all five are pinned in `scripts/surface.json` — deleting one is a public-surface change and a
-  separate decision.
+  caller, a test), and `packages/eagent`'s `FLAGS`. Each now states the absence instead. The four core
+  ones are kept and exported because they are pinned in `scripts/surface.json`, so deleting one is a
+  public-surface change and a separate decision. **`FLAGS` is not pinned and cannot be** —
+  `check-surface.mjs` reads `packages/core/dist/index.d.ts`, so it never sees `packages/eagent` at
+  all. An earlier version of this bullet said all five were pinned, which is the same
+  invented-justification defect the bullet is about, in the file a fresh session reads first.
+  `FLAGS` is kept because it is the declaration the other two lists are checked AGAINST — a job
+  even without a call site.
 
   **`FLAGS` was the live hazard and it now has a gate.** The flag vocabulary existed three times — `FLAGS`,
   `parseArgs`'s string literals, `OPTIONS_HELP` — with nothing over any pair, and the list a maintainer would

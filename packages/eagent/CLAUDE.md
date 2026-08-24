@@ -104,8 +104,9 @@ npm --prefix packages/eagent/tui run dev   # the interactive TUI (Ink + React)
 # THERE IS NO `tsx` IN THE ENGINE. Node 24 strips types natively and every relative import
 # specifier under `src/` and `test/` says `.ts`, so `node --test` runs the source directly.
 # `tui/` STILL USES IT, and has to: Node cannot strip `.tsx` — it does not parse JSX at all —
-# so `tui/package.json` keeps `tsx` as a devDep and `--import tsx` in both its scripts. That is
-# also why no root gate runs the TUI's 17 tests; see the root CLAUDE.md and HANDOFF §6.
+# so `tui/package.json` keeps `tsx` as a devDep and `--import tsx` in its `test` and `dev`
+# scripts (two of its five). That is also why no root gate runs the TUI's 17 test FILES
+# (~195 cases); see the root CLAUDE.md and HANDOFF §6.
 ```
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a

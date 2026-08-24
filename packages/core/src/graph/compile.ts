@@ -62,7 +62,8 @@ export interface GraphCompiler {
  * function's own delegation. This wrapper is reached by none of them. Total REACH of the graph
  * compiler is one higher than six, because `engine.ts` also arrives through `compileOrThrow`;
  * that is why this counts callers of a named function instead of claiming a total. What the
- * wrapper adds over the function is `analyze` alone, and nothing calls that.
+ * wrapper adds over the function is `analyze` alone, which nothing in `src/` calls — one test
+ * does, as the interface above says.
  *
  * Kept exported — it is pinned in `scripts/surface.json`, so removing it is a public-surface
  * change and a separate decision — and documented as unused rather than left looking
