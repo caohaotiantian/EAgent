@@ -198,6 +198,26 @@ export interface FunctionContext {
    * silently running a body whose output no replay can reproduce.
    */
   readonly seed?: number;
+  /**
+   * The tools this node DECLARED, one bound function each. Absent when it declared none.
+   *
+   * `ctx.effects.charge({...})` runs the tool through the engine's single dispatch path, so it
+   * is validated, policy-checked, gated when its class warrants one, journaled under a derived
+   * effect key, and served from the record on replay. A body cannot reach a tool it did not
+   * declare — there is no name for it to say, which is a stronger statement than a check.
+   *
+   * ORDER IS THE KEY. Each call takes the next ordinal for this task, so a body that makes the
+   * same calls in the same order replays onto the same keys. A body whose call ORDER depends on
+   * something unrecorded is a body whose replay diverges, and that is the one rule an author
+   * has to hold: **the sequence of effects must be a function of the inputs.**
+   *
+   * ABSENT INSIDE THE SANDBOX, and honestly so. A resource-loaded body runs synchronously inside
+   * `vm.runInContext` under a per-call timeout, so it cannot await anything — the same constraint
+   * that made `seed` a seed rather than a recorded value per call. Bodies registered in-process
+   * get this; sandboxed ones do not, and calling it there is a `TypeError` rather than a silent
+   * no-op.
+   */
+  readonly effects?: Readonly<Record<string, (args: unknown) => Promise<ToolResult>>>;
 }
 
 export interface FunctionOutcome {

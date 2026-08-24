@@ -163,10 +163,16 @@ again. **They are stated as properties to preserve, not as history to honour.**
 
 Each traces to a decision in `DESIGN.md`.
 
-- **Declared effects (D2).** A node manifest declares `{name, kind, irreversibility, idempotent}`
-  and the runtime supplies a bound, keyed, retryable invoker. This is the structural fix for the
-  memory-only-state class, and it also gives a node body somewhere to put a side effect — which
-  every competing runtime exposes and this one does not.
+- ~~**Declared effects (D2).**~~ **DONE for `function` nodes.** `FunctionNode.effects` names the
+  tools a body may invoke; `reachableToolNames` sees them, so the capability ceiling, the
+  unknown-tool diagnostic and the oversight floor all apply by the route a tool node's name
+  already travelled — an irreversible declared effect gates the node with nobody configuring
+  oversight. The body gets one bound invoker per name through `ctx.effects`, each routed through
+  the single dispatch path and keyed by position in the call sequence.
+  **Still open:** the same for `evaluator` bodies, and the sandbox. A resource-loaded body runs
+  synchronously inside `vm.runInContext` and cannot await, so `ctx.effects` is honestly absent
+  there rather than broken — giving a sandboxed body effects means an async bridge, which is its
+  own design.
 - ~~**Clock bound to the journal (D3).**~~ **DONE for `ctx.now`** — a body's clock is the task's
   journaled `task.leased` timestamp, so it reproduces on replay with nothing new written. Two
   reads in one body return the same instant, which is the property that makes replay total.

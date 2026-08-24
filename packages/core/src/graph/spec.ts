@@ -86,6 +86,29 @@ export type NodeType =
 export interface FunctionNode {
   readonly ref: ResourceRef;
   readonly cpuBound?: boolean;
+  /**
+   * Tools this body may invoke — DECLARED here, never chosen at run time.
+   *
+   * Before this existed a `function` node was a pure transform: it could compute, and anything
+   * with an effect had to be an `agent` node (model-driven, so the choice is the model's) or a
+   * `tool` node (exactly one call). A body that wanted to make three calls in a fixed order had
+   * nowhere to go, which is the gap every competing runtime fills with a durable-step primitive
+   * — `step.run`, `ctx.run`, an Activity.
+   *
+   * DECLARED RATHER THAN CALLED, and that is the whole design. An anonymous `ctx.step(closure)`
+   * is an unkeyed, unkinded, unauditable journal write; Temporal documents the same shape as
+   * unable to fail or to modify state, because it does not re-execute on replay. A NAME in the
+   * spec is visible to `reachableToolNames`, so it reaches the capability check, the
+   * unknown-tool diagnostic and the oversight floor by the same route a tool node's name does.
+   * **Declaring a capability and declaring a journaled effect become one act** — which is what
+   * turns "every nondeterministic call is journaled" from a rule somebody must remember into a
+   * property of the schema.
+   *
+   * The body invokes them through `ctx.effects`, one bound function per declared name, each
+   * routed through the engine's single tool-dispatch path. A body cannot reach a tool it did
+   * not declare, because there is no name for it to say.
+   */
+  readonly effects?: readonly string[];
 }
 
 export interface AgentNode {
@@ -716,6 +739,12 @@ export function reachableToolNames(node: NodeSpec): readonly string[] {
   const names: string[] = [];
   if (node.tool !== undefined) names.push(node.tool.name);
   for (const t of node.agent?.tools ?? []) if (!names.includes(t)) names.push(t);
+  // A `function` node's DECLARED effects are reachable tools by every definition this function
+  // serves — the capability ceiling, the unknown-tool diagnostic, and the oversight floor. Adding
+  // them here rather than at each of those eight call sites is the point of the helper: a new way
+  // to reach a tool should be one edit, not eight, and the last time this set was widened it was
+  // widened for agents and the compile-time floor was missed.
+  for (const t of node.function?.effects ?? []) if (!names.includes(t)) names.push(t);
   return names;
 }
 

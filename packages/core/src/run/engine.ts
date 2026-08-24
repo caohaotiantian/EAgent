@@ -2953,6 +2953,46 @@ export class Engine {
   }
 
   /**
+   * The bound invokers a `function` body sees, one per DECLARED effect.
+   *
+   * Every call goes through `#invokeTool` — the single dispatch path — so a body's effect is
+   * validated, policy-checked, gated where its class warrants one, journaled under a derived key
+   * and served from the record on replay, by exactly the same code a `tool` node uses. That is
+   * the reason this returns bound functions rather than handing the body a `call(name, args)`:
+   * a name the body can compose is a name the body can invent, and the declared set stops being
+   * the reachable set the moment it is a string parameter.
+   *
+   * THE ORDINAL IS SHARED ACROSS NAMES, and it has to be. Effect keys are per (task, kind,
+   * ordinal), so a per-name counter would give the second call to `a` and the second call to `b`
+   * the same key and replay would serve one the other's result. One counter over the body's whole
+   * call SEQUENCE is what makes the keys distinct and reproducible.
+   *
+   * `nodeApproved` is deliberately false: `#executeTask`'s chain ran for the NODE, and a `tool`
+   * node may claim that approval because its single call is the thing the human saw. A function
+   * body's calls were not on that screen, so each is judged on its own class.
+   */
+  #effectsFor(ctx: RunContext, w: Wave): Readonly<Record<string, (args: unknown) => Promise<ToolResult>>> | undefined {
+    const declared = w.node.function?.effects ?? [];
+    if (declared.length === 0) return undefined;
+
+    let ordinal = 0;
+    const bound: Record<string, (args: unknown) => Promise<ToolResult>> = {};
+    for (const name of declared) {
+      bound[name] = async (args: unknown): Promise<ToolResult> => {
+        const tool = this.tools.get(name);
+        // A DECLARED-BUT-UNREGISTERED tool is a deployment mistake, not a body mistake, and the
+        // compiler already warned about it. Answering with an error result rather than throwing
+        // keeps it the same shape as every other tool failure a body has to handle.
+        if (tool === undefined) {
+          return { content: `tool "${name}" is declared by node "${w.node.id}" but not registered in this process`, isError: true };
+        }
+        return this.#invokeTool(ctx, w.task, tool, args, ordinal++);
+      };
+    }
+    return bound;
+  }
+
+  /**
    * The clock a node body sees: JOURNALED, not the wall clock.
    *
    * `FunctionContext.now` used to be the engine's injected clock passed straight through, so a
@@ -2985,6 +3025,10 @@ export class Engine {
       signal: ctx.abort.signal,
       now: this.#bodyClock(p, w.task.taskId),
       seed: await this.#randomSeedEffect(ctx, p, w),
+      ...(() => {
+        const e = this.#effectsFor(ctx, w);
+        return e === undefined ? {} : { effects: e };
+      })(),
     })) as unknown;
     const out = requireOutcome(raw, w.node.function!.ref, w.node.id);
     retryRequested(out, w.node.function!.ref, w.node.id);
