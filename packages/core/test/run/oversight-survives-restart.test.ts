@@ -193,9 +193,11 @@ const streakGraph = () =>
 /**
  * An Engine over `store` whose `flaky` node fails, by item.
  *
- * `"perm"` fails in a class nothing retries, so its failure COMMITS; every other item fails
- * retryably, so its failure is RESCHEDULED. The two exits journal different events and the
- * live counter counts both, which is the whole reason the restore has two arms.
+ * Dispatch is by item, so one graph covers every shape the fold has to reproduce:
+ * `"ok"` SUCCEEDS, `"perm"` fails in a class nothing retries so its failure COMMITS, and
+ * anything else fails retryably so its failure is RESCHEDULED. The three exits journal three
+ * different things and the live counter reads all of them, which is why the restore has two
+ * arms and why one of them has to read `status` rather than count rows.
  */
 function streakEngine(store: MemoryStateStore, clock: { t: number }, calls: { n: number }): Engine {
   const functions = new FunctionRegistry();
@@ -205,9 +207,9 @@ function streakEngine(store: MemoryStateStore, clock: { t: number }, calls: { n:
     // `StateView` is `{get, require, hash, visible}`, NOT a bag: `view["item"]` reads
     // `undefined` and every branch then takes the same arm, which is how the first draft
     // of this test asserted its precondition against a shape it had never produced.
-    if (String(view.get("item")) === "perm") {
-      throw err.validation(CODES.E_RESOURCE_INVALID, "permanently the wrong shape");
-    }
+    const item = String(view.get("item"));
+    if (item === "ok") return { writes: { results: ["fine"] } };
+    if (item === "perm") throw err.validation(CODES.E_RESOURCE_INVALID, "permanently the wrong shape");
     throw err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, "transient");
   });
   const models = new ModelRegistry();
@@ -321,5 +323,75 @@ test("THE RESTORED STREAK COUNTS A COMMITTED FAILURE AND A RETRIED ONE", async (
   assert.ok(
     (await escalatedRules(store, runId)).includes("repeated_failure"),
     "a failure that was retried counts exactly as much as one that was committed",
+  );
+});
+
+test("A SUCCESS BEFORE THE RESTART STILL RESETS THE STREAK", async () => {
+  // The arm the first mutation sweep did not kill. A fold that counted every
+  // `task.committed` as a failure — ignoring `status` — passed all three tests above,
+  // because none of them journaled a SUCCESS for the failing node. That fold turns E4
+  // into an alarm that fires on a node which failed, recovered, and failed twice more,
+  // and an alarm that fires wrongly is one people learn to ignore.
+  //
+  // Branch order is branch-coordinate order and the precondition below pins it: `x` fails
+  // and is rescheduled, then `ok` succeeds and resets the node's streak to zero. Three
+  // failures of `x` follow across a restart and must still not reach the threshold, because
+  // they were not CONSECUTIVE.
+  const clock = { t: 1_700_000_000_000 };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const calls = { n: 0 };
+
+  const first = streakEngine(store, clock, calls);
+  const runId = await first.submit({ graph: streakGraph(), inputs: { items: ["x", "ok"] } });
+  await first.advance(runId).catch(() => undefined);
+  clock.t += 10_000;
+
+  const wave1 = (await events(store, runId))
+    .filter((e) => (e.type === "task.committed" || e.type === "task.retry_scheduled") && String(e.taskId).startsWith("flaky"))
+    .map((e) => (e.type === "task.retry_scheduled" ? "retry" : String((e.payload as { status?: unknown }).status)));
+  assert.deepEqual(
+    wave1,
+    ["retry", "succeeded"],
+    "precondition: the failure lands BEFORE the success, or this asserts nothing about a reset",
+  );
+
+  const revived = streakEngine(store, clock, calls);
+  await revived.attach(runId, streakGraph());
+  for (let i = 0; i < 2; i += 1) {
+    await revived.advance(runId).catch(() => undefined);
+    clock.t += 10_000;
+  }
+
+  assert.ok(calls.n >= 4, `precondition: the node ran again after the restart, saw ${String(calls.n)} calls`);
+  assert.deepEqual(
+    await escalatedRules(store, runId),
+    [],
+    "a node that failed, recovered, then failed twice has not failed three times in a row",
+  );
+});
+
+test("CONTROL — the same shape with NO success DOES escalate", async () => {
+  // The positive control for the test above: identical graph, identical restart, identical
+  // number of advances, with the succeeding item swapped for a failing one. Without this,
+  // "no escalation" is a result a permanently broken rig would also produce.
+  const clock = { t: 1_700_000_000_000 };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const calls = { n: 0 };
+
+  const first = streakEngine(store, clock, calls);
+  const runId = await first.submit({ graph: streakGraph(), inputs: { items: ["x", "y"] } });
+  await first.advance(runId).catch(() => undefined);
+  clock.t += 10_000;
+
+  const revived = streakEngine(store, clock, calls);
+  await revived.attach(runId, streakGraph());
+  for (let i = 0; i < 2; i += 1) {
+    await revived.advance(runId).catch(() => undefined);
+    clock.t += 10_000;
+  }
+
+  assert.ok(
+    (await escalatedRules(store, runId)).includes("repeated_failure"),
+    "the rig reaches the threshold when the failures ARE consecutive",
   );
 });
