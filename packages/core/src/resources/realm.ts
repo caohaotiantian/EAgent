@@ -36,8 +36,15 @@ import { CODES, err } from "../errors.ts";
  * stays here, because its `random` is now REPLACED rather than removed: `functions.ts`'s bridge
  * installs a PRNG seeded from a value the engine journals under `effectKey(taskId, "random", 0)`,
  * so a body's draws are served on replay instead of diverging. The asymmetry that used to be
- * invariant 4's known gap (REGISTER D11) is closed, and what remains is deliberate: a clock read
- * has no seed that would make it reproducible, so `Date` is still absent rather than seeded.
+ * invariant 4's known gap is closed.
+ *
+ * `Date` STAYS ABSENT, and the reason changed. It used to be "a clock read has no seed that would
+ * make it reproducible"; that is no longer true — `ctx.now` is bound to the task's journaled lease
+ * timestamp, so a body CAN read a reproducible time. What `Date` would add is a second clock with
+ * different semantics: `Date.now()` inside a body would have to be frozen to the same instant to
+ * stay replayable, and a frozen `Date` that silently never advances is more surprising than one
+ * that is not there. Restoring it means binding the whole constructor to `ctx.now`, which is real
+ * work and is recorded in TODO.md rather than half-done here.
  */
 const SAFE_GLOBAL_NAMES = [
   "JSON",

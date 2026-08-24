@@ -167,8 +167,13 @@ Each traces to a decision in `DESIGN.md`.
   and the runtime supplies a bound, keyed, retryable invoker. This is the structural fix for the
   memory-only-state class, and it also gives a node body somewhere to put a side effect — which
   every competing runtime exposes and this one does not.
-- **Clock bound to the journal (D3).** Bind `Date` to the timestamp of the last journaled
-  task boundary and restore it to the realm. Bind `Temporal` when it becomes a default global.
+- ~~**Clock bound to the journal (D3).**~~ **DONE for `ctx.now`** — a body's clock is the task's
+  journaled `task.leased` timestamp, so it reproduces on replay with nothing new written. Two
+  reads in one body return the same instant, which is the property that makes replay total.
+  **Still open: `Date` in the realm.** It stays absent, and the reason changed — not "no seed
+  could make it reproducible" but "a frozen `Date` that silently never advances is more
+  surprising than an absent one". Restoring it means binding the whole constructor to `ctx.now`.
+  Bind `Temporal` in the same change when it becomes a default global.
 - **The one-line agent surface (D1).** `agent({model, tools, prompt})` compiling to a one-node
   graph, so the journal, replay, gates and budgets apply to the hello-world.
 - **Divergence must be terminal and loud.** The known failure mode of every replay-based runtime

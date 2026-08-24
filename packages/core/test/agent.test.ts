@@ -143,3 +143,66 @@ test("A TOOL THE DEPLOYMENT DID NOT GRANT IS REFUSED AT BUILD, not mid-run", asy
     "a tool whose capability nobody granted must not compile",
   );
 });
+
+test("A BODY'S CLOCK IS JOURNALED — the same run replays to the same instant", async () => {
+  // Invariant 4's last admitted gap. `ctx.now` was the engine's wall clock passed straight
+  // through, so a body that read the time got a different answer on replay and nothing recorded
+  // the difference. It is bound to `task.leased.ts` now — already in the journal, so replay folds
+  // the same event and computes the same number with nothing new written.
+  //
+  // Driven through a `function` node rather than asserted on the helper, because the helper
+  // could be correct while the wiring passed the wrong clock — which is what it did.
+  const { compileOrThrow } = await import("../src/graph/compile.ts");
+  const { InProcessEventBus } = await import("../src/bus.ts");
+  const { Engine } = await import("../src/run/engine.ts");
+  const { FunctionRegistry, ModelRegistry, ToolRegistry } = await import("../src/run/registry.ts");
+  const { resolver } = await import("./run/skeleton.ts");
+
+  const spec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "clock", project: "test", version: 1 },
+    policy: { posture: "out", budget: { costUsd: 1 } },
+    channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["seed"],
+    outputs: ["out"],
+    nodes: [{ id: "t", type: "function", reads: ["seed"], writes: ["out"], function: { ref: "function/clock@stable" } }],
+    edges: [],
+  };
+
+  // A WALL CLOCK THAT MOVES ON EVERY READ. If the body's clock were this one, two reads inside
+  // one body would differ and a replay would differ again — so this is the rig that can fail.
+  let ticks = 0;
+  const wall = (): number => 1_700_000_000_000 + ticks++ * 1_000;
+
+  const store = new MemoryStateStore({ now: wall });
+  const functions = new FunctionRegistry();
+  functions.register("function/clock@stable", (_view, c) => ({ writes: { out: { a: c.now(), b: c.now() } } }));
+  const models = new ModelRegistry();
+  models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models,
+    now: wall,
+    maxParallelism: 1,
+    policy: { granted: [], budget: { runUsd: 1 } },
+  });
+
+  const graph = compileOrThrow({ spec: spec as never, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { seed: "go" } });
+  const p = await engine.advance(runId);
+
+  const out = p.channels["out"] as { a: number; b: number };
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(out.a, out.b, "two reads inside one task must return the same instant");
+  assert.ok(ticks > 2, "precondition: the injected wall clock really did advance during the run");
+
+  // And it is a JOURNALED instant, not an arbitrary frozen one: it is the lease timestamp the
+  // fold already carries, which is why replay reaches the same number without recording it.
+  const leasedAt = Object.values(p.tasks).find((t) => String(t.taskId).startsWith("t@"))?.lease?.at;
+  assert.equal(out.a, leasedAt, "the body's clock is the task's journaled lease time");
+});

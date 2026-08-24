@@ -273,35 +273,35 @@ test("KNOB: sealing is idempotent and one-way", () => {
 // H20 — the docstring must not claim a recording the engine does not do
 // ---------------------------------------------------------------------------
 
-test("H20: `FunctionContext.now` does not claim to be recorded while nothing records it", () => {
-  // Invariant 4 says all nondeterminism goes through a recorded effect. `ctx.now` is
-  // INJECTED (Engine.#now, defaulting to Date.now) and no `effect.started{kind:"clock"}`
-  // is ever appended, so a function body reading it replays differently.
+test("H20: `FunctionContext.now` says what it is — reproducible without being recorded", () => {
+  // The original H20 pinned the honest weaker claim: `ctx.now` was the engine's injected wall
+  // clock, nothing appended a clock effect, and a body reading it replayed differently — so the
+  // seam had to SAY it was not recorded rather than imply otherwise.
   //
-  // This guard is conditional on purpose: the day the engine records a clock read, the
-  // first assertion stops holding and this test tells whoever did it to restore the
-  // stronger docstring rather than leaving the weaker one in place.
+  // The behaviour changed, so the guard changed with it. `now` is bound to the task's journaled
+  // lease timestamp, which is reproducible on replay WITHOUT being recorded — the third option
+  // the old test's two branches did not have. Both of its branches are still wrong for today's
+  // code: "recorded" would be a lie (nothing appends a clock effect and nothing should), and
+  // "not a recorded effect" now reads as "not reproducible", which is the opposite of true.
+  //
+  // What is pinned instead is the property a body author can be hurt by: time does not advance
+  // during a task. A seam that stopped saying so would leave two reads in one body looking
+  // independent when they are the same instant.
   const here = fileURLToPath(new URL(".", import.meta.url));
   const engine = readFileSync(`${here}../../src/run/engine.ts`, "utf8");
   const registry = readFileSync(`${here}../../src/run/registry.ts`, "utf8");
 
-  const recordsAClock = /kind:\s*"clock"/.test(engine);
-  // `(?!\/\*\*)` keeps the capture inside the LAST comment before the declaration; without
-  // it the match starts at the module docstring and swallows the whole file.
   const nowDoc = /\/\*\*((?:(?!\/\*\*)[\s\S])*?)\*\/\s*now\(\): number;/.exec(registry)?.[1];
   assert.ok(nowDoc !== undefined, "FunctionContext.now lost its docstring");
+  assert.match(nowDoc, /does not advance/i, "the seam must warn that time is frozen for the task");
 
-  if (recordsAClock) {
-    assert.match(nowDoc, /\brecorded\b/i, "the engine records a clock now — say so on the seam");
-  } else {
-    // Phrase-level, deliberately. A regex cannot tell "is recorded" from "is not recorded"
-    // by the word alone, so this pins the negation and bans the old sentence outright.
-    assert.match(
-      nowDoc,
-      /not a recorded effect/i,
-      "nothing appends a clock effect, so the seam must say it is not recorded",
-    );
-    assert.doesNotMatch(nowDoc, /^\s*\*?\s*Recorded clock\b/im, "the claim H20 refuted is back");
-    assert.match(nowDoc, /inject/i, "say what it actually is: the engine's injected clock");
-  }
+  // And the mechanism is real, not just described: the engine binds the body clock to the fold
+  // rather than to its own `now`.
+  assert.match(engine, /#bodyClock\(/, "the engine no longer binds a body clock");
+  assert.doesNotMatch(
+    engine,
+    /now: this\.#now,\s*\n\s*seed: await this\.#randomSeedEffect/,
+    "a body is being handed the wall clock again",
+  );
+  assert.doesNotMatch(engine, /kind:\s*"clock"/, "a clock effect is being appended — then say `recorded` on the seam");
 });

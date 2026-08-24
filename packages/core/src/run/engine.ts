@@ -2952,13 +2952,38 @@ export class Engine {
     return seed;
   }
 
+  /**
+   * The clock a node body sees: JOURNALED, not the wall clock.
+   *
+   * `FunctionContext.now` used to be the engine's injected clock passed straight through, so a
+   * body that read the time produced a different answer on replay and nothing recorded the
+   * difference. That was invariant 4's last admitted gap, and the sanctioned accessor was the one
+   * carrying it — `Math.random` had already been closed by journaling a seed, and `Date` is absent
+   * from the realm for the same reason this existed.
+   *
+   * The fix is not a new effect kind. `task.leased.ts` is already in the journal and already folds
+   * onto the task's lease, so binding the body's clock to it makes the read reproducible with
+   * nothing new written: replay folds the same event and computes the same number. This is what
+   * Temporal's TypeScript sandbox does — a workflow clock is the last task-boundary time, not a
+   * recorded read, because a recorded wall-clock read replays a lie.
+   *
+   * The consequence a body author should know: **time does not advance during a task.** Two reads
+   * in one body return the same instant. That is correct for a deterministic step and it is the
+   * property that makes replay total; a body needing elapsed real time is describing an effect,
+   * and effects are declared.
+   */
+  #bodyClock(p: RunProjection, taskId: TaskId): () => number {
+    const at = p.tasks[taskId]?.lease?.at ?? p.startedAt;
+    return () => at;
+  }
+
   async #runFunction(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
     const body = this.functions.require(w.node.function!.ref);
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
     const raw = (await body(view, {
       taskId: w.task.taskId,
       signal: ctx.abort.signal,
-      now: this.#now,
+      now: this.#bodyClock(p, w.task.taskId),
       seed: await this.#randomSeedEffect(ctx, p, w),
     })) as unknown;
     const out = requireOutcome(raw, w.node.function!.ref, w.node.id);
@@ -3144,7 +3169,10 @@ export class Engine {
         (await body(view, {
           taskId: w.task.taskId,
           signal: ctx.abort.signal,
-          now: this.#now,
+          // BOTH ARMS, for the reason the comment above gives about the seed: an `assertion`
+          // body whose clock diverged while a `function` body's did not is the same asymmetry
+          // one field over, and this is the second time this pair has needed the same change.
+          now: this.#bodyClock(p, w.task.taskId),
           seed: await this.#randomSeedEffect(ctx, p, w),
         })) as unknown,
         ev.ref,

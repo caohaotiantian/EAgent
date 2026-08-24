@@ -163,15 +163,16 @@ export interface FunctionContext {
   readonly taskId: TaskId;
   readonly signal: AbortSignal;
   /**
-   * The engine's INJECTED clock — `Engine`'s own `now`, which defaults to `Date.now`.
+   * The TASK'S clock — its journaled lease timestamp, not the wall clock.
    *
-   * It is NOT a recorded effect, whatever R4 says a nondeterminism seam ought to be.
-   * Nothing appends `effect.started{kind:"clock"}` anywhere in the tree, and
-   * `#runFunction` has no replay branch, so a body that reads this executes live on replay
-   * and gets a different answer than the run being replayed. Still prefer it to calling
-   * `Date.now()` yourself: a host that injects a fixed clock controls this one, and the day
-   * the engine journals a clock read this is the seam that will serve the journaled value.
-   * Until then, a body that must be replayable takes its timestamp from a channel it reads.
+   * Reproducible without being recorded: `task.leased.ts` is already in the journal, so a replay
+   * folds the same event and computes the same number. That closes what was invariant 4's last
+   * admitted gap, where this field was the engine's injected clock passed straight through and a
+   * body reading it diverged on replay with nothing noting the difference.
+   *
+   * **TIME DOES NOT ADVANCE DURING A TASK.** Two reads in one body return the same instant. That
+   * is correct for a deterministic step and it is what makes replay total. A body that needs
+   * elapsed real time is describing an effect, and effects are declared rather than read.
    */
   now(): number;
   /**
