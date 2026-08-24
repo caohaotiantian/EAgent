@@ -159,7 +159,33 @@ again. **They are stated as properties to preserve, not as history to honour.**
 15. **macOS `grep` silently skips files containing non-ASCII bytes.** Always `grep -a`; empty
     output from a plain grep is not evidence of absence.
 
-## G · Housekeeping carried into the sweep
+## G · From the 2026 field survey — new work the redesign creates
+
+Each traces to a decision in `DESIGN.md`.
+
+- **Declared effects (D2).** A node manifest declares `{name, kind, irreversibility, idempotent}`
+  and the runtime supplies a bound, keyed, retryable invoker. This is the structural fix for the
+  memory-only-state class, and it also gives a node body somewhere to put a side effect — which
+  every competing runtime exposes and this one does not.
+- **Clock bound to the journal (D3).** Bind `Date` to the timestamp of the last journaled
+  task boundary and restore it to the realm. Bind `Temporal` when it becomes a default global.
+- **The one-line agent surface (D1).** `agent({model, tools, prompt})` compiling to a one-node
+  graph, so the journal, replay, gates and budgets apply to the hello-world.
+- **Divergence must be terminal and loud.** The known failure mode of every replay-based runtime
+  is a silent stall: the task retries forever without entering a failed state. A repeated
+  divergence signature with no forward progress needs its own terminal state.
+- **Two-axis labels on branch coordinates (D4).** Integrity × confidentiality, most-restrictive,
+  unlabelled ⇒ untrusted. Confine a label to its branch and resolve at the join.
+- **Prompt text into the artifact hash (D7).** A prompt edit currently changes what a resumed run
+  does, silently.
+- **Payload externalisation.** Above a byte threshold a payload moves out of the journal and
+  leaves a reference. This is what actually bounds the store; retention tiering is downstream of
+  it.
+- **Proposed-API mechanism and a version pin (D5).**
+- **One retry budget per run**, decremented across every layer. Engine retry × provider retry ×
+  agent-loop retry currently multiply.
+
+## H · Housekeeping carried into the sweep
 
 - `packages/eagent/tui` — **deleted** as part of this sweep. Its removal breaks two tests that
   assert the directory exists, and touches the package guide, the README, the architecture doc, a
