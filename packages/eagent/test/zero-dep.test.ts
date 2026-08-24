@@ -1,9 +1,10 @@
 /**
- * Permanent zero-dep + no-TUI surface pin (design 2026-07-27-drop-ink-tui AC1/AC2/AC8).
+ * The engine's dependency charter, enforced rather than asserted in prose.
  *
- * Replaces the deleted test/tui-isolation.test.ts: the engine may only depend on
- * `jiti` at runtime, must not import ink/react anywhere, must not ship eagent-tui,
- * and must not advertise a removed rich-TUI bin from src/.
+ * `@eagent/core` may depend on `jiti` at runtime and on nothing else. It must not import a UI
+ * framework anywhere, must not ship a terminal-client bin, and must not advertise one from
+ * `src/`. The terminal client itself was deleted 2026-08-25 — the operator surface is the
+ * browser — so these checks now guard against its RETURN rather than against its leakage.
  *
  * Uses readFileSync walks (never bare shell grep — macOS silently skips sources
  * with non-ASCII glyphs).
@@ -73,10 +74,10 @@ test("AC2: no eagent-tui bin, build:tui/test:tui scripts, tsx globs, or tui dirs
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
   };
-  // The TUI ships from `tui/`, which has its own bin and its own scripts. The
-  // root package must not grow a parallel set — that is what would drag ink back
-  // into the engine's dependency tree.
-  assert.equal(pkg.bin?.["eagent-tui"], undefined, "the tui bin belongs to tui/package.json");
+  // There is no TUI any more. These assertions stay because they name the exact shapes that
+  // would drag a UI framework back onto the engine's load path — a bin, a build script, a
+  // `.tsx` glob, a `jsx` compiler option — and each is cheaper to refuse than to remove twice.
+  assert.equal(pkg.bin?.["eagent-tui"], undefined, "there is no tui bin");
   assert.equal(pkg.scripts?.["build:tui"], undefined, "no build:tui script");
   assert.equal(pkg.scripts?.["test:tui"], undefined, "no test:tui script");
   assert.ok(
@@ -130,34 +131,35 @@ test("AC4: server header still documents monitor routes + session summary", () =
 });
 
 
-test("AC5: tui/ is the ONLY place ink and react may appear", () => {
-  // Topology: the published `eagent` command IS the TUI package, and it depends
-  // on `@eagent/core` — the engine, which stays embeddable and dependency-free.
-  // The boundary that makes the whole topology work. The engine stays embeddable
-  // — a library consumer of `eagent` must never download React — while the TUI
-  // package is free to take whatever it needs.
-  const tuiPkgPath = join(repoRoot, "tui", "package.json");
-  assert.ok(existsSync(tuiPkgPath), "tui/package.json exists");
+test("AC5: THERE IS NO TERMINAL CLIENT, and no route back to one", () => {
+  // This test used to assert the opposite — that `tui/` EXISTS and is the only place ink and
+  // react may appear. The terminal client is deleted: the operator surface is the browser, and
+  // a second rich client is a second thing to keep consistent with the HTTP contract.
+  //
+  // Inverted rather than removed, because the property worth keeping is the one the old test was
+  // really protecting: **no UI framework on the engine's load path.** That was true when the
+  // dependency arrow pointed one way; it is true more cheaply when there is no second package to
+  // point at all. A deleted directory silently coming back as a dependency is exactly what a
+  // guard is for.
+  assert.equal(existsSync(join(repoRoot, "tui")), false, "the tui/ package was deleted; it must not return");
 
-  const tui = JSON.parse(readFileSync(tuiPkgPath, "utf8")) as {
-    private?: boolean;
-    dependencies?: Record<string, string>;
-    devDependencies?: Record<string, string>;
-  };
-  const tuiDeps = { ...(tui.dependencies ?? {}), ...(tui.devDependencies ?? {}) };
-  for (const name of ["ink", "react"] as const) {
-    assert.ok(tuiDeps[name], `tui/ declares ${name}`);
+  for (const rel of ["package.json", "package-lock.json"]) {
+    const p = join(repoRoot, rel);
+    if (!existsSync(p)) continue;
+    const text = readFileSync(p, "utf8");
+    for (const name of BANNED_PACKAGES) {
+      assert.doesNotMatch(text, new RegExp(`"${name.replace("/", "\\/")}"\\s*:`), `${rel} must not name ${name}`);
+    }
   }
-  assert.ok(tui.dependencies?.["@eagent/core"], "tui/ depends on the engine, not the reverse");
 
-  // No engine file may import from the TUI package: the dependency arrow points
-  // one way, and reversing it would put React on the engine's load path.
+  // No source file anywhere in this package may import a UI framework or reach for a tui path.
   for (const file of walk(join(repoRoot, "src"), (n) => /\.tsx?$/.test(n))) {
     const src = readFileSync(file, "utf8");
+    assert.doesNotMatch(src, FORBIDDEN_IMPORT, `${relative(repoRoot, file)} must not import ink/react`);
     assert.doesNotMatch(
       src,
       /from\s+["'][^"']*\/tui\//,
-      `${relative(repoRoot, file)} must not import from tui/`,
+      `${relative(repoRoot, file)} must not import from a tui/ path`,
     );
   }
 });
@@ -176,22 +178,22 @@ test("AC15: the SEA binary bundles the HEADLESS entry, and says so", () => {
   assert.match(readme, /headless/, "and the README says the binary is headless");
 });
 
-test("AC15: the two packages are named and wired for a lockstep release", () => {
+test("AC15: ONE package, and the `eagent` bin name is deliberately unclaimed", () => {
+  // This asserted a two-package lockstep release: `@eagent/core` the library, `eagent` the
+  // installable TUI, same version, `release-tui.mjs` rewriting the `file:..` dependency at
+  // publish time. All three are gone with the terminal client.
+  //
+  // What replaces it is narrower on purpose. The engine keeps `eagent-headless`, its own name,
+  // and **nothing claims `eagent`** — that name belonged to the product users installed, and
+  // which package should own it now is a packaging decision for the redesign, not a default to
+  // back into here. A test that invented an answer would make the decision by accident.
   const root = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
     name?: string;
-    version?: string;
-    bin?: Record<string, string>;
-  };
-  const tui = JSON.parse(readFileSync(join(repoRoot, "tui", "package.json"), "utf8")) as {
-    name?: string;
-    version?: string;
     bin?: Record<string, string>;
   };
 
   assert.equal(root.name, "@eagent/core", "the engine is the scoped library");
-  assert.equal(tui.name, "eagent", "the product users install is the TUI");
-  assert.equal(tui.bin?.["eagent"], "./dist/cli.js", "`eagent` runs the TUI");
-  assert.equal(root.bin?.["eagent"], undefined, "the engine does not also claim the name");
   assert.ok(root.bin?.["eagent-headless"], "the machine entry keeps its own name");
-  assert.equal(root.version, tui.version, "they release in lockstep");
+  assert.equal(root.bin?.["eagent"], undefined, "the `eagent` name is unclaimed until the redesign assigns it");
+  assert.equal(existsSync(join(repoRoot, "scripts", "release-tui.mjs")), false, "the lockstep release script is gone");
 });

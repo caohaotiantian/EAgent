@@ -52,15 +52,11 @@ test("AC16: README.md documents no removed module and no deleted web SPA workflo
   }
 });
 
-test("AC16: docs/TUI.md describes the headless CLI and the Ink TUI package", () => {
-  const md = read("docs/TUI.md");
-  assert.match(md, /headless/i, "documents the headless machine CLI");
-  assert.match(md, /[Ii]nk/, "names the Ink TUI package");
-  assert.match(md, /zero runtime dependenc/i, "restates the engine charter");
-  assert.doesNotMatch(md, /build:web/, "no web build instructions");
-  for (const re of REMOVED_MODULES) {
-    assert.doesNotMatch(md, re, `must not document the removed ${re}`);
-  }
+test("AC16: docs/TUI.md is gone — there is no terminal client to document", () => {
+  // It described a headless CLI and an Ink TUI package. The TUI is deleted and the operator
+  // surface is the browser, so the document described one surface that no longer exists and
+  // one that `README.md` already covers. A doc for a deleted thing is worse than no doc.
+  assert.equal(existsSync(join(repoRoot, "docs", "TUI.md")), false, "docs/TUI.md was removed with tui/");
 });
 
 test("AC16: docs/WEB.md is gone — the web SPA is not a shipped surface", () => {
