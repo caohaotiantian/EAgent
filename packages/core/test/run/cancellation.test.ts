@@ -121,6 +121,70 @@ test("CANCEL CLOSES THE GATES, in the same append that ends the run", async () =
   assert.deepEqual(await h.engine.openGates(runId), []);
 });
 
+test("AND THE TASKS GO WITH IT — a cancelled run does not leave a Task reading as still running", async () => {
+  // REGISTER E6. `#commit` returns early on a terminal run, so a Task that was mid-flight when
+  // the cancel landed kept whatever state it last had — typically `leased`. The run then read
+  // `cancelled` while one of its Tasks read as still running: a projection describing a state
+  // the system is not in, and the read model is the thing every other surface renders from.
+  //
+  // It is also C1's `task.cancelled` finally gaining an appender. THREE folds were written for
+  // this event and none of them could ever run — `projection.ts`, `evolution/trajectory.ts` and
+  // `telemetry/spans.ts` — so the dead code was on the READING side, which is where it is
+  // hardest to see and where a registry of never-appended types is the only thing that finds it.
+  const { h, runId, gateId } = await parked();
+
+  const before = (await h.engine.projection(runId))!;
+  const live = Object.values(before.tasks).filter((t) => !["succeeded", "failed", "skipped", "cancelled"].includes(t.state));
+  assert.ok(live.length > 0, "the run must actually have a non-terminal Task, or this test asserts nothing");
+
+  await h.engine.cancel(runId, "operator changed their mind");
+
+  const p = (await h.engine.projection(runId))!;
+  assert.equal(p.status, "cancelled");
+  for (const t of live) {
+    assert.equal(p.tasks[t.taskId]?.state, "cancelled", `Task ${t.taskId} was ${t.state} and must not still read that way`);
+  }
+  assert.deepEqual(
+    Object.values(p.tasks).filter((t) => t.state === "leased"),
+    [],
+    "NO Task may be left leased on a run that has ended",
+  );
+
+  // The event really is appended, with the taskId the fold needs on the ENVELOPE — the fold is
+  // `isEvent(e, "task.cancelled") && e.taskId`, so a payload-only taskId would fold to nothing
+  // and this test would pass on the projection while the journal said nothing.
+  const seq = await events(h.store, runId);
+  const cancelled = seq.filter((ev) => ev.type === "task.cancelled");
+  assert.equal(cancelled.length, live.length, "one task.cancelled per non-terminal Task");
+  for (const ev of cancelled) {
+    assert.ok(ev.taskId, "the taskId is on the envelope, which is what the fold reads");
+    assert.match((ev.payload as { reason: string }).reason, /operator changed their mind/);
+  }
+
+  // AND IT IS ONE DURABLE FACT with the rest: tasks, then gates, then the run.
+  const iTask = seq.findIndex((ev) => ev.type === "task.cancelled");
+  const iGate = seq.findIndex((ev) => ev.type === "gate.cancelled");
+  const iRun = seq.findIndex((ev) => ev.type === "run.cancelled");
+  assert.ok(iTask >= 0 && iTask < iGate && iGate < iRun, `order must be task, gate, run — saw ${String(iTask)}, ${String(iGate)}, ${String(iRun)}`);
+});
+
+test("A TASK THAT ALREADY FINISHED IS NOT RE-ENDED BY A CANCEL", async () => {
+  // The negative control. Without it, a change that cancelled EVERY task would satisfy the test
+  // above perfectly while rewriting history the cancel never touched — a succeeded Task reading
+  // as cancelled is a worse lie than a leased one, because it erases work that really happened.
+  const { h, runId } = await parked();
+  const before = (await h.engine.projection(runId))!;
+  const finished = Object.values(before.tasks).filter((t) => t.state === "succeeded");
+  assert.ok(finished.length > 0, "the skeleton has run some tasks to completion before it gates");
+
+  await h.engine.cancel(runId, "stop");
+
+  const p = (await h.engine.projection(runId))!;
+  for (const t of finished) {
+    assert.equal(p.tasks[t.taskId]?.state, "succeeded", `Task ${t.taskId} succeeded before the cancel and must still say so`);
+  }
+});
+
 // ── layer 2: resolve refuses on a terminal run ───────────────────────────────
 
 const RUN = "run_cancel_broker" as RunId;

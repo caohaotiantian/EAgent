@@ -1169,10 +1169,6 @@ const NEVER_APPENDED: readonly { readonly type: string; readonly why: string }[]
     why: "there is no reload path in src/ at all — no SIGHUP handler, no admin endpoint. D11 designs both",
   },
   {
-    type: "task.cancelled",
-    why: "the same gap as gate.cancelled: cancel() appends run.cancelled only, so in-flight Tasks keep whatever state they last had and the task.cancelled arm of spans.ts is unreachable. D5's cancellation sequence and its join `any` short-circuit both say the executor appends it",
-  },
-  {
     type: "task.skipped",
     why: "nothing marks a Task skipped, so the `skipped` task state is unreachable — which also makes the join's onBranchError accounting count a population that cannot exist",
   },

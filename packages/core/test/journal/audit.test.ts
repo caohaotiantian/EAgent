@@ -552,6 +552,35 @@ test("task.leased-is-resolved — work the run reported as done and never did", 
   assert.deepEqual(rulesHit(cancelled), [], "a cancelled run is not in violation for stopping");
 });
 
+test("task.cancelled-not-after-commit — a cancel stops work, it does not un-land work", () => {
+  // `Engine.#cancelTree` appends `task.cancelled` for every NON-TERMINAL Task, which is what
+  // stopped a cancelled run leaving a Task reading as still `leased` (REGISTER E6). The rule is
+  // the other side of that filter: a Task that already committed is finished, and re-ending it
+  // would erase work that really happened — a worse lie in the read model than the stranded
+  // lease the event was added to fix.
+  //
+  // The rule exists because the EVENT is new. `task.cancelled` sat in `NEVER_APPENDED` until the
+  // E6 fix, so there was nothing to constrain; the moment it gained an appender the coverage
+  // guard asked for a rule and the `todo` ratchet refused to let it be deferred. Both guards
+  // were right, and neither needed a human to notice.
+  const undone = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "one@root#0" }),
+    ev("task.committed", { take: [], status: "succeeded" }, { taskId: "one@root#0" }),
+    ev("task.cancelled", { clean: true, reason: "operator" }, { taskId: "one@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(undone), ["task.cancelled-not-after-commit"]);
+
+  // THE HEALTHY SHAPE, which is what `#cancelTree` actually produces: the Task was leased and
+  // never committed, so cancelling it un-lands nothing.
+  const stopped = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "one@root#0" }),
+    ev("task.cancelled", { clean: true, reason: "operator" }, { taskId: "one@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(stopped), [], "cancelling work that never landed is the whole point of the event");
+});
+
 // ── and the gate that keeps the rule set honest ─────────────────────────────
 
 test("EVERY AUDIT RULE HAS A FIXTURE THAT TRIPS IT", () => {

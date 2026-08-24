@@ -131,6 +131,7 @@ import {
   type GateRecord,
   type RunProjection,
   type TaskRecord,
+  type TaskState,
 } from "./projection.ts";
 import {
   FunctionRegistry,
@@ -242,6 +243,15 @@ export type CommandActor = HumanActor | SystemActor;
  * run may continue past a breached budget or an invalid replay". Without this set,
  * fixing branch-failure containment silently defeats both.
  */
+/**
+ * Task states a cancel must not rewrite.
+ *
+ * Named as a SET rather than tested inline, because "which states are finished" is asked in
+ * more than one place and a second inline copy is how the two drift. `TaskState` has nine
+ * members; these four are the ones a Task cannot leave.
+ */
+const TERMINAL_TASK_STATES: ReadonlySet<TaskState> = new Set<TaskState>(["succeeded", "failed", "skipped", "cancelled"]);
+
 const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_BUDGET_EXHAUSTED,
   CODES.E_REPLAY_DIVERGENCE,
@@ -1690,6 +1700,30 @@ export class Engine {
 
     await this.#serialize(() =>
       log.append([
+        // AND THE TASKS GO WITH IT — REGISTER E6, and C1's `task.cancelled` finally has an
+        // appender. `#commit` returns early on a terminal run, so a Task that was `leased`
+        // when the cancel landed stayed `leased` in the read model for ever: the run reads
+        // `cancelled` while one of its Tasks reads as still running, which is a projection
+        // that describes a state the system is not in. Three folds — `projection.ts`,
+        // `evolution/trajectory.ts` and `telemetry/spans.ts` — were already written for this
+        // event and had no writer, so the dead code was on the READING side, where it is
+        // hardest to notice.
+        //
+        // NON-TERMINAL ONLY. A Task that already succeeded, failed, was skipped or was
+        // cancelled is a finished fact, and re-ending it would rewrite history the cancel did
+        // not touch. `clean` mirrors `run.cancelled`'s: nothing was left half-done that this
+        // event is aware of, and the run-level `unknownEffects` is where a half-done effect
+        // is actually recorded.
+        ...(p === undefined
+          ? []
+          : Object.values(p.tasks)
+              .filter((t) => !TERMINAL_TASK_STATES.has(t.state))
+              .map((t) => ({
+                type: "task.cancelled" as const,
+                payload: { clean: true, reason: `the run was cancelled: ${reason}` },
+                actor: by,
+                taskId: t.taskId,
+              }))),
         // THE GATES GO WITH IT. `ctx.abort` reaches every in-flight effect and reaches no
         // gate at all — an open gate has no work to interrupt; it is a row and a queue
         // entry — so cancelling the run used to stop the executor and leave the question

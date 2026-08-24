@@ -7061,3 +7061,43 @@ excellent way to make them agree by accident.** It was added for determinism, it
 add, and it silently converted a discriminating assertion into a tautology. Any test whose
 expected value could also be produced by the fallback path is a test to re-derive, and the way
 to find out is the mutation, not the reading.
+
+---
+
+## Four guards fired in sequence, and the last one found the second defect
+
+E6 was small: a mid-flight cancel left the in-flight Task reading `leased`, so a run said
+`cancelled` while one of its Tasks said it was still running. The fix is one append —
+`task.cancelled` for every non-terminal Task, in the same append as `run.cancelled` — and it also
+closes C1's entry for that type, activating three folds that had been written for an event
+nothing wrote. **The dead code was on the reading side**, which is where it is hardest to see;
+only a registry of never-appended types finds that.
+
+What is worth recording is what happened next, because I did not have to notice any of it.
+
+1. `NEVER_APPENDED` failed the moment the appender landed, and refused to pass until its entry
+   was deleted.
+2. `audit-coverage.test.ts` then saw a type that was both appended and excused as
+   never-appended — a cross-check between two registries neither of which owns the other.
+3. The **`todo` ratchet** refused to let the resulting rule be deferred. I had written
+   `task.cancelled` into the todo list with an honest description of the rule it deserved, and
+   the ratchet said no: the list may not grow. So the rule was written instead of postponed,
+   which is exactly what a ratchet is for and exactly what I would not have done unprompted.
+4. The every-rule-has-a-fixture gate demanded a fixture — **and the fixture found a second
+   defect.** `task.leased-is-resolved` did not know that a cancellation resolves a lease, so the
+   healthy shape the E6 fix produces (a Task leased, then cancelled) tripped a different rule.
+   Closing one rule's blind spot had opened another's false positive.
+
+Four mechanisms, none of which needed a human, and the fourth caught something the first three
+could not: the interaction between a new event and a rule that was never about it.
+
+**The generalisable form is the fourth step.** A new event type has to be taught to every rule
+that tracks the thing it ends, not only to the rule it was added for. `task.failed` had always
+cleared an open lease; `task.cancelled` ends a Task the same way and had to learn the same thing.
+Nothing in the type system says that — the relationship lives in the auditor's own state, one
+`Map` shared by rules that do not otherwise know about each other.
+
+And a smaller one, for the count in C1: it has now been wrong twice in one week — eight, then
+seven, now six. The entry has said "count it rather than quoting it" since the first correction,
+and the quoted number went stale anyway, because the entry is prose and the count is in a
+different file. The registry is the gate; the sentence beside it is decoration that ages.

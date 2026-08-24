@@ -1782,7 +1782,8 @@ of the error path describe what `kind === "error"` does, which is accurate. Cros
 
 ### C · Vocabulary that is declared and never written
 
-**C1 · Seven event types have no appender**, and this entry said EIGHT until `hook.applied`
+**C1 · Six event types have no appender** — `task.cancelled` left with the E6 fix, and this
+count has now been wrong twice in one week, which is why the entry says COUNT IT., and this entry said EIGHT until `hook.applied`
 gained one with B6 — **count it rather than quoting it**, exactly as C2 says of its own number:
 `grep -an 'type: "' packages/core/test/docs-drift.test.ts`. Pinned in `docs-drift.test.ts`'s
 `NEVER_APPENDED` with a reason each: `budget.reserved`, `budget.settled`, `channel.written`,
@@ -2340,9 +2341,31 @@ direction; the alternative needed `suppressedRanges` exported from `projection.t
 > suppressed events WOULD begin to matter, so the guard fires at the right moment rather than
 > never.
 
-**E6 · A mid-flight cancel leaves the in-flight Task `leased` in the read model.**
-`#commit` returns early on a terminal run, and `cancel` appends no `task.cancelled` (C1), so
-task states after a cancel are consistent but untidy.
+**E6 · A mid-flight cancel leaves the in-flight Task `leased` in the read model. RESOLVED
+2026-08-24, and it took C1's `task.cancelled` with it.**
+
+> `Engine.#cancelTree` appends `task.cancelled` for every NON-TERMINAL Task in the same append as
+> `run.cancelled`, so a run no longer reads `cancelled` while one of its Tasks reads as still
+> running. `task.cancelled` has left `NEVER_APPENDED`, which activates three folds that were
+> written for it and could never run — `projection.ts`, `evolution/trajectory.ts` and
+> `telemetry/spans.ts`. **The dead code was on the READING side**, which is where it is hardest
+> to notice and where a registry of never-appended types is the only thing that finds it.
+>
+> **Terminal Tasks are deliberately skipped**, and the negative control is in the suite: a Task
+> that already succeeded must still say so. Re-ending it would erase work that really happened,
+> which is a worse lie than the stranded lease this fixes.
+>
+> **Four guards fired in sequence and every one of them was right.** `NEVER_APPENDED` refused the
+> new appender until its entry was removed. `audit-coverage.test.ts` then saw a type both appended
+> and excused. The `todo` ratchet refused to let the rule be deferred, so
+> `task.cancelled-not-after-commit` was written instead of postponed. And the
+> every-rule-has-a-fixture gate demanded the fixture — **which is what found the second defect**:
+> `task.leased-is-resolved` did not know that a cancellation resolves a lease, so the E6 fix made
+> the healthy shape (leased, then cancelled) trip a different rule. Closing one rule's blind spot
+> had opened another's false positive, and only the fixture could see it.
+>
+> **The generalisable form: a new event type has to be taught to every rule that tracks the thing
+> it ends, not only to the rule it was added for.**
 
 **E8 · Two load-bearing refusals in `http.ts` had no test, and both failed open when removed.
 RESOLVED — kept only for the reason the SUITE could not see them, which generalises.**

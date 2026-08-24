@@ -55,7 +55,6 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   "budget.settled": { kind: "never-appended", why: "PolicyEngine.settle, same: the balance moves in memory only" },
   "channel.written": { kind: "never-appended", why: "writes ride on task.committed.writes; the per-channel event has no appender" },
   "config.reloaded": { kind: "never-appended", why: "there is no reload path in src/ at all — no SIGHUP handler, no admin endpoint" },
-  "task.cancelled": { kind: "never-appended", why: "cancel() appends run.cancelled only; in-flight Tasks keep whatever state they last had" },
   "task.skipped": { kind: "never-appended", why: "no appender; the skip arm resolves the task without its own event" },
   "task.started": { kind: "never-appended", why: "no appender; task.leased is the observable start" },
 

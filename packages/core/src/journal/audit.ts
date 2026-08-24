@@ -46,6 +46,7 @@ export const AUDIT_RULES = [
   "gate.raised-is-resolved",
   "gate.decision-has-a-raise",
   "task.committed-once",
+  "task.cancelled-not-after-commit",
   "task.leased-precedes-commit",
   "task.leased-is-resolved",
   "run.submitted-is-first-and-once",
@@ -381,6 +382,31 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
             add("gate.decision-has-a-raise", seq, `${e.type} for gate "${s}", which was never raised in this run`);
           }
           openGates.delete(s);
+        }
+        break;
+      }
+      case "task.cancelled": {
+        // A CANCEL STOPS WORK; IT DOES NOT UNDO WORK THAT LANDED. `Engine.#cancelTree` skips
+        // Tasks already in a terminal state for exactly this reason — re-ending a Task that
+        // committed would erase work that really happened, which is a worse lie in the read
+        // model than the stranded `leased` this event exists to fix (REGISTER E6).
+        //
+        // The rule exists because the EVENT is new. It was in `NEVER_APPENDED` until the E6
+        // fix, so nothing here had anything to constrain; the moment it gained an appender the
+        // coverage guard asked for a rule, and the `todo` ratchet refused to let it be deferred.
+        const tid = e.taskId === undefined ? undefined : String(e.taskId);
+        if (tid === undefined) break;
+        saw.add("task.cancelled-not-after-commit");
+        // AND IT RESOLVES THE LEASE, which `task.failed` one arm below has always done. Adding
+        // the event without this made `task.leased-is-resolved` fire on the very shape the E6
+        // fix produces — a Task leased, then cancelled — so the fix for one rule's blind spot
+        // would have created another's false positive. Found by the fixture this rule needed,
+        // which is the argument for the fixture gate: a new event type has to be taught to every
+        // rule that tracks the thing it ends, not only to the rule it was added for.
+        openLeases.delete(tid);
+        const committedAt = commits.get(tid);
+        if (committedAt !== undefined) {
+          add("task.cancelled-not-after-commit", seq, `task "${tid}" was cancelled after committing at seq ${String(committedAt)} — a cancel must not un-land work`);
         }
         break;
       }
