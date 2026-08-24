@@ -65,9 +65,10 @@ export type HookPoint = (typeof HOOK_POINTS)[number];
  *
  * **NOTHING IN `src/` READS THIS, and the docstring used to say otherwise** — it claimed the
  * question "is this one allowed to mutate?" is *"asked at every call site"*. It is not asked
- * anywhere: `grep -arn 'OBSERVER_POINTS' packages/core/src scripts/` returns three lines and no
- * reader — the declaration, the `scripts/surface.json` pin, and this sentence, because a
- * self-describing grep counts itself. The engine decides observe-vs-filter by which
+ * anywhere: run `grep -arn 'OBSERVER_POINTS' packages/core/src scripts/` and every hit is the
+ * declaration, the `scripts/surface.json` pin, or this sentence — never a reader. No count is
+ * given, because a docstring naming its own symbol is a line that grep returns, so any number
+ * written here changes the number. The engine decides observe-vs-filter by which
  * HELPER a point is dispatched through — `runFilters` at five sites in `engine.ts`, which reads
  * what the body returned, and `runObservers` at one, which discards it — so this set is a
  * statement ABOUT that code rather than an input to it, and the two can disagree with nothing

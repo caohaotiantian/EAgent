@@ -7279,11 +7279,20 @@ written while applying it. And `HANDOFF.md` said all five corrected symbols were
 had invented a justification for keeping an export, in the re-entry document, inside the wave
 whose subject is docstrings that invent a consumer.
 
-**The prettiest of the eight is a recursive one.** Three docstrings now cite the grep that proves
-they have no reader — and a docstring that names its own symbol is a line that grep returns. "No
-third line" was wrong because the sentence asserting it *was* the third line.
-`grep -arn 'OBSERVER_POINTS' packages/core/src scripts/` prints three; `CAN_SUSPEND`'s prints
-five, because `CONTROL_TYPES` mentions it twice. Only `CONTROL_TYPES`' own count was right, and
-only because its docstring happens not to name itself. **A self-describing grep counts itself**,
-and a claim about a command's output has to be run rather than predicted — which is the same rule
-this wave started with, one level further down.
+**The prettiest of the eight is recursive, and I got it wrong twice before seeing why.** Three
+docstrings now cite the grep that proves they have no reader — and a docstring that names its own
+symbol is a line that grep returns. "No third line" was false because the sentence asserting it
+*was* the third line. So I corrected the numbers: three, five, two. Then I re-ran the commands,
+and two of the three new numbers were already wrong — **writing them had changed them.** Saying
+"five" in `CAN_SUSPEND`'s docstring made it six; mentioning `CONTROL_TYPES` there took its two
+to four.
+
+**A self-describing count has no fixed point.** There is no number you can write in that sentence
+that survives writing it, and chasing one is a loop. The property is stable where the count is
+not, so all three now say the same thing without a number: *run this grep; every hit is a
+declaration, the surface pin, or prose — none is a reader.* That is checkable by running,
+falsifiable by a real reader appearing, and immune to being edited.
+
+The general form, and it outranks the specific trap: **when a claim is about the artifact that
+contains it, state the invariant, not the measurement.** A measurement of a self-referential set
+is a fact about the moment before you wrote it down.

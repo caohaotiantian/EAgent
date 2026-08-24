@@ -663,10 +663,13 @@ export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
  * Node types D5.1 says can suspend a Run mid-execution.
  *
  * **NOTHING READS THIS, AND IT IS NOT TRUE.** Both halves were checked, and the second is the
- * one that matters. `grep -arn 'CAN_SUSPEND' packages/core/src scripts/` returns FIVE lines and
- * not one is a reader: the declaration, the `scripts/surface.json` pin, and three sentences of
- * documentation — this one, and two in `CONTROL_TYPES` below. **A self-describing grep counts
- * itself**, which is why the number is written out here instead of "two hits".
+ * one that matters. Run `grep -arn 'CAN_SUSPEND' packages/core/src scripts/`: **every hit is a
+ * declaration, the `scripts/surface.json` pin, or documentation — none is a reader.**
+ *
+ * No COUNT is given here, and that is the point. A docstring that names its own symbol is a line
+ * that grep returns, so stating "two hits" was wrong, and the correction to "five" was wrong the
+ * moment it was written, because writing it added a sixth. **A self-describing count has no fixed
+ * point; a self-describing PROPERTY does.** State what every hit is, not how many there are.
  *
  * **Every node type can suspend.** A gate reaches `#executeTask` from `decision.effect ===
  * "gate"` BEFORE `#dispatch` picks a per-type arm, and `PolicyRequest` carries
@@ -692,9 +695,8 @@ export const CAN_SUSPEND: ReadonlySet<NodeType> = new Set<NodeType>(["agent", "t
  *
  * **`scheduler.ts` NEVER CONSULTS THIS.** Both this docstring and `CAN_SUSPEND`'s used to read
  * as invariants the scheduler enforces; it reads neither, and does not mention `node.type`
- * anywhere in the file. `grep -arn 'CONTROL_TYPES' packages/core/src scripts/` returns two
- * lines — the declaration and the surface pin — and unlike `CAN_SUSPEND`'s, that grep really
- * does return two, because this docstring does not name its own symbol.
+ * anywhere in the file. `grep -arn 'CONTROL_TYPES' packages/core/src scripts/` has the same
+ * answer as the grep above: declarations, the surface pin, and prose. No reader.
  *
  * This set is the complement of `CAN_SUSPEND` and inherits its defect — the justification for
  * running these three inline is that they "terminate without external input", and a `function`
