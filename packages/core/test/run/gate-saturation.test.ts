@@ -18,7 +18,6 @@
  * The clock is injected everywhere and advanced by hand — windows are the whole subject
  * here, and a test that reads the wall clock cannot state one.
  *
- * See design/loom/04-OVERSIGHT.md D7.9, and D7.8 for which of the two `contentDigest`s
  * deduplication is keyed on.
  */
 

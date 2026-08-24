@@ -26,7 +26,6 @@
  * `gateDecisionOf` is the one statement of the set; each door keeps only what is genuinely
  * its own, and those parts are pinned where they live.
  *
- * See design/loom/04-OVERSIGHT.md D7.3–D7.4, and REGISTER A19.
  */
 
 import test from "node:test";

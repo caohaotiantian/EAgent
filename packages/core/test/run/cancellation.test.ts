@@ -16,7 +16,6 @@
  * only exercises `resolve` in isolation cannot fail, because `resolve` was never the only
  * hole — and a test that only checks the fold cannot fail either, for the same reason.
  *
- * See design/loom/04-OVERSIGHT.md D7.3 and design/loom/03-RUNTIME.md D6.4 rule 4.
  */
 
 import test from "node:test";

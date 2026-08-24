@@ -25,7 +25,6 @@
  * and a tick is a method call — which is the same property that makes an
  * externally-driven sweep a sound design rather than a concession.
  *
- * See design/loom/04-OVERSIGHT.md D7.2–D7.4.
  */
 
 import test from "node:test";

@@ -112,7 +112,6 @@
  * `ATTRIBUTE_CLASSES`, and the deliberately narrow set of payload fields this fold reads at
  * all — is unaffected, which is where the real protection was already stated to live.
  *
- * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.1–D9.2, and D9.6 for why the journal
  * is never redacted.
  */
 

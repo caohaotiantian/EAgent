@@ -23,7 +23,6 @@
  *      appended to a cancelled run overwrote `cancelled` with `failed` and the operator's
  *      cancellation vanished from the derived state.
  *
- * See design/loom/04-OVERSIGHT.md D7.3 and design/loom/03-RUNTIME.md D6.4 rule 4.
  */
 
 import test from "node:test";

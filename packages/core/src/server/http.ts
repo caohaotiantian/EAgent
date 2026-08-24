@@ -132,7 +132,6 @@
  * posture, and the open one is documented, supported, and what `loom serve` gives an
  * operator who omits `--token`.
  *
- * See design/loom/01-INTERFACES.md D3.17–D3.18 and D3.20.
  */
 
 import { constants as BUFFER } from "node:buffer";
@@ -3660,7 +3659,7 @@ export function ownershipWarnings(plane: {
     return [
       `RUNS ARE SCOPED TO THE PRINCIPAL THAT SUBMITTED THEM, and this plane cannot tell how many of its ` +
         `credentials are operators — the identity source declares no \`operators\` count. An operator credential reads, ` +
-        `streams and cancels EVERY run in the journal. See design/loom/01-INTERFACES.md D3.17.`,
+        `streams and cancels EVERY run in the journal. See the design notes D3.17.`,
     ];
   }
   if (n === 0) {

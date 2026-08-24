@@ -12,7 +12,6 @@
  * per (run, task); a write carrying a token below the highest already seen is
  * rejected with E_FENCING_STALE.
  *
- * See design/loom/01-INTERFACES.md D3.10 and 07-CONFIG-DEPLOY.md D12.5.
  */
 
 import { CODES, err } from "../errors.ts";

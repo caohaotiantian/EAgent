@@ -11,7 +11,6 @@
  * would let subsystems invent private vocabularies and the log would stop being a
  * contract.
  *
- * See design/loom/01-INTERFACES.md D3.10.
  */
 
 import type { LoomError } from "../errors.ts";

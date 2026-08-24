@@ -13,7 +13,6 @@
  * EAgent needed two extensions (`prune`, `compact`) reacting to a growing `#messages`
  * array. There is no equivalent here because there is no growing array.
  *
- * See design/loom/03-RUNTIME.md D6.7.
  */
 
 import { digest, type Digest } from "../canonical.ts";

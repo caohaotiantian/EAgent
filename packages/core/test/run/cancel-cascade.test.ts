@@ -27,7 +27,6 @@
  *   4. `gate.decided` and `gate.timeout` folded over ANY gate state, so a gate a cancel had
  *      closed read back as `decided` or `expired`.
  *
- * See design/loom/04-OVERSIGHT.md D7.3 and design/loom/03-RUNTIME.md D6.4 rule 4.
  */
 
 import test from "node:test";

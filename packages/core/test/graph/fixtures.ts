@@ -1,7 +1,7 @@
 /**
  * Graph fixtures shared by the compiler tests.
  *
- * `incidentTriage()` is the worked example from design/loom/02-EXECUTION-GRAPH.md
+ * `incidentTriage()` is the worked example from the design notes
  * D5.5, transcribed to the canonical JSON form. It is deliberately the hardest
  * realistic graph we can state: dynamic fan-out, a quorum join, an evaluator, a
  * router, a bounded verify/remediate loop, an irreversible action behind a human

@@ -25,8 +25,6 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 import { compile } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
@@ -94,12 +92,4 @@ test("...and it is a WARNING — the graph still compiles", () => {
   const r = run(120_000);
   assert.equal(r.ok, true);
   assert.deepEqual(r.errors, []);
-});
-
-test("THE DESIGN ALREADY SAYS THIS, which is why it is not drift", () => {
-  // If the corpus ever starts claiming a join deadline exists, the warning is no longer the
-  // right treatment and this test is where that argument restarts.
-  const doc = readFileSync(fileURLToPath(new URL("../../../../design/loom/02-EXECUTION-GRAPH.md", import.meta.url)), "utf8");
-  assert.match(doc, /enforced by nothing — there is no join deadline/, "the node table's statement");
-  assert.match(doc, /waits — indefinitely, because `timeoutMs` is enforced by nothing/, "the `mode: all` row");
 });

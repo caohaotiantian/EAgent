@@ -1,7 +1,7 @@
 /**
  * The walking skeleton, as a reusable harness.
  *
- * The graph is from design/loom/08-PLAN.md D13.3: fan out over N documents, summarize
+ * The graph is from the design notes D13.3: fan out over N documents, summarize
  * each in parallel, join in branch order, merge, gate on a human, then write. It is
  * the smallest slice that exercises every architectural claim at once, which is why
  * the acceptance test drives this and not a simpler graph.

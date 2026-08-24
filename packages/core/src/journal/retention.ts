@@ -22,7 +22,6 @@
  * filesystem. Parquet, S3, and Glacier are `TierStore` implementations that live
  * outside the package — which is the same shape as `DeliveryChannel` and `StateStore`.
  *
- * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.4 and 04-OVERSIGHT.md D7.8.
  */
 
 import { digest, type Digest } from "../canonical.ts";

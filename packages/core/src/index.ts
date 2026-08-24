@@ -3,7 +3,7 @@
  *
  * This barrel IS the contract. `scripts/check-surface.mjs` snapshots every exported
  * name, so adding one is a deliberate, reviewed act. (Loom pins the interface
- * surface rather than a line count — see design/loom/01-INTERFACES.md, "The
+ * surface rather than a line count — see "The
  * minimalism guard, corrected".)
  */
 

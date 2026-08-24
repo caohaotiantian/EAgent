@@ -9,7 +9,6 @@
  *      replay all compute the same TaskId, which is what makes journal appends and
  *      effect keys idempotent. A random TaskId would break replay silently.
  *
- * See design/loom/01-INTERFACES.md D3.0.
  */
 
 import { randomBytes } from "node:crypto";

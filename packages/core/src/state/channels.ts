@@ -17,7 +17,6 @@
  * order the author never intended to be meaningful. The compiler rejects it for
  * concurrent writers (GRAPH010) rather than making it silently arbitrary.
  *
- * See design/loom/02-EXECUTION-GRAPH.md D5.3.
  */
 
 import { canonicalize, digest, type Digest } from "../canonical.ts";

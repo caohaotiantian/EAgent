@@ -17,7 +17,6 @@
  * recorded self-reports could not later measure how often they were wrong — which is
  * the evidence for keeping the weight at zero.
  *
- * See design/loom/06-EVOLUTION.md D10.b.
  */
 
 import { digest, type Digest } from "../canonical.ts";

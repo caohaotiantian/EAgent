@@ -11,7 +11,6 @@
  * a mapping wrong is how a content-policy refusal ends up being retried against
  * three providers in turn.
  *
- * See design/loom/01-INTERFACES.md D3.8.
  */
 
 import { CODES, LoomError, err, isLoomError, toLoomError } from "../errors.ts";

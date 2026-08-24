@@ -17,7 +17,7 @@
  * replay's graph asks for that the recording never held is the one case that derives rather than
  * serves — see `seedFromKey`, and the reason is `onGraphChange: "allow"`. An embedder passing
  * `opts.globals`, or registering a body directly on `FunctionRegistry`, still gets a genuine live
- * side effect. See `design/loom/HANDOFF.md` B11. If replay needs an effect the journal does not contain, that is
+ * side effect. See `the design notes` B11. If replay needs an effect the journal does not contain, that is
  * `E_REPLAY_DIVERGENCE`, a loud failure, never a silent live call.
  *
  * Three uses, one mechanism: debugging (step a run), regression evaluation (D10
@@ -35,7 +35,6 @@
  * with modified inputs (they re-execute for real), and effects whose outcome was
  * never recorded because the process died mid-call.
  *
- * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.5.
  */
 
 import { digest } from "../canonical.ts";

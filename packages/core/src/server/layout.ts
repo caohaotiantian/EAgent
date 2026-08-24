@@ -20,7 +20,6 @@
  * The browser still draws. Turning this geometry into SVG is presentation, and it belongs
  * where the pixels are.
  *
- * See design/loom/05-RESOURCES-OBSERVABILITY.md D8.
  */
 
 import type { RunGraph } from "../graph/spec.ts";

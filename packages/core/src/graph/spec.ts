@@ -17,7 +17,6 @@
  * a second way to say where a graph starts is a second thing that can disagree with
  * the edges.
  *
- * See design/loom/02-EXECUTION-GRAPH.md D5.4.
  */
 
 import type { Digest } from "../canonical.ts";
@@ -686,7 +685,7 @@ export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
  *
  * Kept and exported because it is pinned in `scripts/surface.json` — removing it is a
  * public-surface change and a separate decision — and left here as a WARNING rather than a
- * reference. `design/loom/02-EXECUTION-GRAPH.md` D5.1 has been corrected to match.
+ * reference. `the design notes` D5.1 has been corrected to match.
  */
 export const CAN_SUSPEND: ReadonlySet<NodeType> = new Set<NodeType>(["agent", "tool", "human_gate", "subgraph"]);
 

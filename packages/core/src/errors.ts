@@ -10,7 +10,6 @@
  * `message` (they may contain secrets); structured context goes in `details`, which
  * is redacted before it reaches a span or the journal.
  *
- * See design/loom/01-INTERFACES.md D3.0.
  */
 
 export type ErrorClass =

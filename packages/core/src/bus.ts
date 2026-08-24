@@ -21,7 +21,6 @@
  * never reaches the executor. What changed is only how the one policy that promises no
  * silent loss reports that it kept the promise.
  *
- * See design/loom/01-INTERFACES.md D3.9 and 03-RUNTIME.md D6.3.
  */
 
 import type { RunId, Seq } from "./ids.ts";

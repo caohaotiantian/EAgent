@@ -11,7 +11,6 @@
  * `packages/core/package.json`, which is what `check-zero-dep.mjs` enforces — so a
  * library consumer of `@loom/core` downloads neither.
  *
- * See design/loom/07-CONFIG-DEPLOY.md D12.1.
  */
 
 import { execFileSync } from "node:child_process";

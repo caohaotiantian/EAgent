@@ -58,7 +58,6 @@
  * another road. Build the loader (and the registry that wraps it) per run, or key the
  * cache by digest.
  *
- * See design/loom/08-PLAN.md open thread T2, and A13.
  */
 
 import { CODES, err } from "../errors.ts";

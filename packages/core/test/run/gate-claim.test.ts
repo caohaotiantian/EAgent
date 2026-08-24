@@ -32,7 +32,6 @@
  * of the fold, and a journal written by another process or an older build is the input
  * they have to hold for.
  *
- * See design/loom/04-OVERSIGHT.md D7.3.
  */
 
 import test from "node:test";

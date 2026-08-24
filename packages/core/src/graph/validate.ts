@@ -10,7 +10,6 @@
  *   - concurrent writes are deterministic (GRAPH010)
  *   - oversight cannot be weakened anywhere (GRAPH014, GRAPH019)
  *
- * See design/loom/02-EXECUTION-GRAPH.md D5.6.
  */
 
 import type { EdgeId, NodeId } from "../ids.ts";

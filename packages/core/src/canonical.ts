@@ -7,7 +7,6 @@
  * reader would call equal MUST produce identical bytes; anything ambiguous is
  * rejected loudly rather than silently normalized.
  *
- * See design/loom/09 (D9.2) and 01-INTERFACES.md D3.0.
  */
 
 import { createHash } from "node:crypto";

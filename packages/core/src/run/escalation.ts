@@ -22,7 +22,6 @@
  * A deployment with no history supplies nothing and those two rules simply never fire —
  * which is correct: neither has anything to say about the first run of a new graph.
  *
- * See design/loom/04-OVERSIGHT.md D7.7.
  */
 
 import type { NodeId } from "../ids.ts";

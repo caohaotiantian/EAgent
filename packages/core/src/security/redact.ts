@@ -153,7 +153,6 @@
  * a function-valued property — the redactor of all places being the one with the
  * recursion bug. Delegating is what keeps them from disagreeing again.
  *
- * See design/loom/05-RESOURCES-OBSERVABILITY.md D9.6.
  */
 
 import { createHmac, randomBytes } from "node:crypto";

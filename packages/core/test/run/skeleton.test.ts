@@ -1,7 +1,7 @@
 /**
  * The walking-skeleton acceptance suite.
  *
- * Each test maps to a numbered row of design/loom/08-PLAN.md D13.3. Passing all of
+ * Each test maps to a numbered row of the design notes D13.3. Passing all of
  * them is what turns "the architecture should work" into "the architecture works".
  */
 

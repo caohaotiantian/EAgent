@@ -18,7 +18,6 @@
  * synthesis and canary rollout are DEFERRED-v2. The eval harness is immediately
  * useful for people; the generator is not useful until a corpus exists.
  *
- * See design/loom/06-EVOLUTION.md D10.d.
  */
 
 import { CODES, err } from "../errors.ts";

@@ -23,7 +23,6 @@
  * four more with nothing holding them — three of them parts of the very fix that wave
  * shipped. They are covered below, from "guard 3" on.
  *
- * See design/loom/04-OVERSIGHT.md D7.3–D7.4.
  */
 
 import test from "node:test";

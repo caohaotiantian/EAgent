@@ -32,7 +32,6 @@
  * as `surface guard ok: … unchanged` with an unpinned public export sitting in the tree.
  * `packages/core/test/toolchain-gate.test.ts` is that reproduction, kept.
  *
- * See design/loom/01-INTERFACES.md, "The minimalism guard, corrected".
  */
 
 import { execFileSync } from "node:child_process";

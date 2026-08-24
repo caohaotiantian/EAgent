@@ -10,7 +10,6 @@
  * `E_CONTENT_FILTERED` is refused here even if a chain names it, and the refusal is
  * checked at construction rather than at call time.
  *
- * See design/loom/01-INTERFACES.md D3.8.
  */
 
 import { CODES, err, isLoomError, type LoomError } from "../errors.ts";

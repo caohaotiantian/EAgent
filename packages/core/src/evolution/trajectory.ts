@@ -23,7 +23,6 @@
  * `(node, promptRef)` — so without it the corpus cannot be grouped by the thing being
  * optimised. Both inputs are immutable and content-addressed, so the fold stays pure.
  *
- * See design/loom/06-EVOLUTION.md D10.a.
  */
 
 import { digest, type Digest } from "../canonical.ts";

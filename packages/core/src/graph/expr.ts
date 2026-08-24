@@ -21,7 +21,6 @@
  *
  * No lambdas, no user function calls, no loops, no assignment, no property writes.
  *
- * See design/loom/02-EXECUTION-GRAPH.md D5.4.
  */
 
 import { CODES, err } from "../errors.ts";

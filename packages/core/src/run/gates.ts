@@ -22,7 +22,6 @@
  * against is now folded out of `gate.raised`; the `Map` keeps only the rendered payload
  * and the delivery route, neither of which can authorize anything.
  *
- * See design/loom/04-OVERSIGHT.md D7.3–D7.4.
  */
 
 import { digest } from "../canonical.ts";

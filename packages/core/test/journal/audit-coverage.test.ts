@@ -126,12 +126,12 @@ test("every excuse says something, and `never-appended` agrees with the other re
   // The two registries must not disagree: a type pinned here as never-appended and pinned there
   // as having an appender means one of them is stale, and either way a rule was skipped for a
   // reason that is no longer true.
-  const drift = readFileSync(fileURLToPath(new URL("../docs-drift.test.ts", import.meta.url)), "utf8");
+  const drift = readFileSync(fileURLToPath(new URL("../registries.test.ts", import.meta.url)), "utf8");
   const seg = drift.slice(drift.indexOf("NEVER_APPENDED"), drift.indexOf("const RULES_NEVER_RAISED"));
   const pinnedThere = new Set([...seg.matchAll(/type: "([a-z_]+\.[a-z_]+)"/g)].map((m) => m[1]!));
   for (const [type, e] of Object.entries(EXCUSED)) {
     if (e.kind !== "never-appended") continue;
-    assert.ok(pinnedThere.has(type), `${type} is excused here as never-appended but docs-drift does not pin it — one of the two is stale`);
+    assert.ok(pinnedThere.has(type), `${type} is excused here as never-appended but registries.test.ts does not pin it — one of the two is stale`);
   }
 });
 

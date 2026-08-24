@@ -28,7 +28,6 @@
  * the RAW BYTES before parsing, before looking up a gate, before any durable write, or
  * the endpoint is a way to approve a production action by POSTing JSON.
  *
- * See design/loom/04-OVERSIGHT.md D7.3 and 01-INTERFACES.md D3.20.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";

@@ -16,7 +16,6 @@
  * Every decision records the rules that fired. An audit that cannot say *why* is not
  * an audit.
  *
- * See design/loom/01-INTERFACES.md D3.13 and 03-RUNTIME.md D6.5.
  */
 
 import { CODES, err, type LoomError } from "../errors.ts";

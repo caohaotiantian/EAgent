@@ -41,7 +41,6 @@
  * The tree to audit is `process.argv[2]`, defaulting to `packages/core`, so that the guard's
  * own failures can be reproduced against fixtures instead of argued about.
  *
- * See design/loom/07-CONFIG-DEPLOY.md D12.1.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";

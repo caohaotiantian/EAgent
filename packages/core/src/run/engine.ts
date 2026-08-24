@@ -21,7 +21,6 @@
  *      every sibling in branch-coordinate order. Applying them on arrival would make
  *      the result depend on which branch finished first.
  *
- * See design/loom/03-RUNTIME.md D6 and 02-EXECUTION-GRAPH.md D4.
  */
 
 import { randomInt } from "node:crypto";

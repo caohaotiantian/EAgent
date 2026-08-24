@@ -29,7 +29,7 @@
  * `typecheck`, not matched by the root test glob, not a workspace, so its dependencies are never
  * installed. Its `cli.tsx` prints `OPTIONS_HELP` and calls `parseArgs`, so it inherits whatever
  * this file protects; but nothing here executes a line of it. Recorded so the coverage claim is
- * the true one — see `design/loom/HANDOFF.md` §6.
+ * the true one — see `the design notes` §6.
  */
 
 import assert from "node:assert/strict";

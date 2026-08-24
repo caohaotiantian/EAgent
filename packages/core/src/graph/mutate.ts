@@ -15,7 +15,6 @@
  * deleted edge?", a question with no cheap answer, and it would let a mutation
  * retroactively change the meaning of events already in the journal.
  *
- * See design/loom/02-EXECUTION-GRAPH.md D5.7.
  */
 
 import { CODES, err, type LoomError } from "../errors.ts";

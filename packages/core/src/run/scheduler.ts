@@ -41,7 +41,6 @@
  * part is not selection but *who runs which run* — that needs a coordinator, and shipping
  * a half one is worse than shipping none.
  *
- * See design/loom/03-RUNTIME.md D6.2 and design/loom/99-DOD.md G3.
  */
 
 import { compareBranch } from "../ids.ts";

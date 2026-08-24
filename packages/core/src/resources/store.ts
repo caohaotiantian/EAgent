@@ -15,7 +15,6 @@
  * Promotion moves a SELECTOR. It never mutates content. So a rollback is a pointer
  * move — always safe, always instantaneous, and invisible to anything in flight.
  *
- * See design/loom/05-RESOURCES-OBSERVABILITY.md D8.
  */
 
 import { digest, type Digest } from "../canonical.ts";

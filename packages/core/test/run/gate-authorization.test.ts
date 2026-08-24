@@ -13,7 +13,6 @@
  * case below REBUILDS the engine and the broker from the store before it asks anything:
  * a resolution in the process that raised the gate proves nothing about the property.
  *
- * See design/loom/04-OVERSIGHT.md D7.2–D7.4.
  */
 
 import test from "node:test";

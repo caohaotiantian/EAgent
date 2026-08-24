@@ -13,7 +13,6 @@
  *      manifest is what makes the pinning rule real — a Run reads only what its
  *      manifest names, so a Resource published or promoted mid-run cannot affect it.
  *
- * See design/loom/01-INTERFACES.md D3.1.
  */
 
 import { digest, type Digest } from "../canonical.ts";

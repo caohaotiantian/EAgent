@@ -117,7 +117,7 @@ test("reasoning is annotated on stderr (the docstring's claim is real)", async (
   assert.equal(out.join("").includes("thinking"), false, "reasoning never pollutes the answer");
 });
 
-// The silent-truncation guard (docs/design/2026-07-15-silent-truncation-fix.md):
+// The silent-truncation guard :
 // an abnormal, otherwise-silent stop reason must warn. The negative half matters
 // as much — the clean ends already carry their own signal, so warning there would
 // be noise on every successful run.
