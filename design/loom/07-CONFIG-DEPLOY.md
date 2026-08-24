@@ -354,7 +354,7 @@ sequenceDiagram
   P1->>K: exit within terminationGracePeriodSeconds
   K->>P2: start v2
   P2->>DB: lease partitions · fold journals · re-lease requeued Tasks
-  Note over P2,DB: DESIGNED, NOT BUILT — sweepTimeouts would resume gate SLAs<br/>from the persisted timestamps here. Nothing calls it.
+    Note over P2,DB: BUILT — `serve` ticks `Engine.sweepGates()`, which resumes gate SLAs<br/>from the persisted timestamps here. The partition lease above is designed-only.
 ```
 
 Three properties make this boring, which is the goal:
@@ -362,8 +362,11 @@ Three properties make this boring, which is the goal:
 1. `terminationGracePeriodSeconds` only needs to exceed the *control-task* duration
    (milliseconds), because long Tasks are released rather than waited on.
 2. Gate SLA clocks are **absolute timestamps in the database**, not in-memory timers, so a
-   deploy neither resets nor skips an SLA. *Nothing sweeps them*, though — see the note in
-   the diagram — so today a deploy neither resets nor advances one either.
+   deploy neither resets nor skips an SLA — **and they are swept**: `cli.ts`'s serve loop calls
+   `ws.engine.sweepGates()` on its tick, so a restarted process re-arms the clock of every gate
+   it re-attaches. This paragraph and the diagram note above both read *"nothing sweeps them"*
+   for some time after that landed, which is the stale direction that costs most: it describes
+   a shipped guarantee as absent, so nobody relies on it and somebody eventually rebuilds it.
 3. A gate raised by v1 and answered under v2 works because the gate payload is
    self-contained and the decision is applied by whichever executor re-leases the Task.
 

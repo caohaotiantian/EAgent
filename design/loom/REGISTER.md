@@ -1588,10 +1588,16 @@ through the CLI at all, so W10's drive loop and exit-code fix are pinned at ENGI
 CLI-level test says so rather than pretending. Fixing it means a sanctioned way for a body to
 raise a classified error — which is a seam decision, not a patch.
 
-**B5 · `NodeSpec.timeoutMs` is in the schema and enforced by nothing.** A node with a
-declared timeout runs as long as it likes; `E_TASK_TIMEOUT` is declared and unraisable.
+**B5 · `NodeSpec.timeoutMs` was in the schema and enforced by nothing. THE NODE HALF IS CLOSED;
+THE JOIN HALF IS NOT, AND THAT IS WHY THIS ENTRY SURVIVES.** `run/engine.ts` reads
+`w.node.timeoutMs` and raises `E_TASK_TIMEOUT` against it, so the original sentence — *"a node
+with a declared timeout runs as long as it likes; `E_TASK_TIMEOUT` is declared and unraisable"* —
+is now false in both of its clauses, and `E_TASK_TIMEOUT` has left `NEVER_RAISED`. It stood in
+this register unchanged for long enough to be quoted as current. **Do not delete the entry: the
+paragraph below is still true, and deleting a two-part entry because one part closed is how the
+other part stops being tracked.**
 
-**The same is true of `JoinNode.timeoutMs`, and half of that is now fixed the cheap way.**
+**`JoinNode.timeoutMs` is the half that is still inert, and half of THAT is fixed the cheap way.**
 `#maybeFireJoin` decides on `branches`, `mode` and `k`; `#foldJoin` on `onBranchError`;
 neither reads a clock, nothing in `src/` reads the field, and `E_JOIN_TIMEOUT` is in
 `NEVER_RAISED`. It was **required** by the type, so every author wrote a number that decides
@@ -1610,8 +1616,20 @@ never mentioned the field asked for cancellation and got none. A field whose onl
 value is the one nobody writes cannot be salvaged by refusing the other one; it returns with
 straggler cancellation, in one change.
 
-**B6 · Hooks are declared, validated by the compiler, pinned by the resolver, and never
-invoked.** Which is also why `hook.applied` has no appender (C1).
+**B6 · Hooks were declared, validated by the compiler, pinned by the resolver, and never
+invoked. RESOLVED — and the entry's second sentence went stale with it.** `#hooksFor` dispatches
+at six points in `run/engine.ts` (`preNode`, `preTool`, `onGate`, `onError`, `onComplete`, and
+the shared arm), `resources/hook-loader.ts` loads a body into the same hardened `vm` realm a
+`function` body runs in, and `hook.applied` **has an appender**, so it has left `NEVER_APPENDED`
+— which is why C1's count below is seven and not eight.
+
+> **What is left of it is one specific thing, and it is not the invocation.**
+> `HookLoaderOptions.pins` is accepted and never supplied: `cli.ts` builds the loader with
+> `{ store }` alone, so the manifest-digest branch is unreachable through `bin/loom` and a
+> promotion between compile and execute swaps a hook body under a live run.
+> `FunctionLoaderOptions.pins` is the identical omission one file over, and A24 is the same seam
+> for a third content kind. **One seam, three kinds — fix them together or the claim rots
+> again.**
 
 **B9 · Compensation is a compile-time proof and a rewind refusal; nothing ever executes
 one.** `compensation` is a first-class `EdgeKind` with its own compile rule (`GRAPH012`), its
@@ -1636,16 +1654,23 @@ compensation. What it costs to build for real: reverse-commit-order tracking, a
 `Compensating` member in `RunStatus`/`TaskState` (neither has one), and `cancel{grace,
 compensate}`. That is a feature. The design corpus was corrected to describe the declaration
 rather than an executing saga — 02-EXECUTION-GRAPH D5.2 is the one authoritative paragraph
-and 01, 03 and 04 point at it — but **`src/graph/validate.ts` still asserts twice, in
-comments, that a compensation edge "runs on the error path, in reverse"**, which is the same
-false claim one layer down and is the next thing to fix. Cross-reference: C1's
+and 01, 03 and 04 point at it. **The two `validate.ts` comments this entry named as "the next
+thing to fix" are gone**; the file now says *"NOTHING TRAVERSES ONE."* and its remaining mentions
+of the error path describe what `kind === "error"` does, which is accurate. Cross-reference: C1's
 `task.skipped`, which is what `onBranchError: "skip"` cannot journal either.
 
 ### C · Vocabulary that is declared and never written
 
-**C1 · Eight event types have no appender.** Pinned in `docs-drift.test.ts`'s
+**C1 · Seven event types have no appender**, and this entry said EIGHT until `hook.applied`
+gained one with B6 — **count it rather than quoting it**, exactly as C2 says of its own number:
+`grep -an 'type: "' packages/core/test/docs-drift.test.ts`. Pinned in `docs-drift.test.ts`'s
 `NEVER_APPENDED` with a reason each: `budget.reserved`, `budget.settled`, `channel.written`,
-`config.reloaded`, `hook.applied`, `task.cancelled`, `task.skipped`, `task.started`. The two
+`config.reloaded`, `task.cancelled`, `task.skipped`, `task.started`. **Five of the seven are
+read by a fold that no writer feeds** — `projection.ts` folds `budget.reserved`,
+`budget.settled`, `channel.written`, `task.skipped` and `task.cancelled`, and `trajectory.ts`
+and `spans.ts` fold the last two as well — so the dead code is on the READING side, which is
+where it is hardest to notice. `task.started` and `config.reloaded` are dead in both
+directions. The two
 that matter most: `budget.reserved`/`budget.settled` are held in memory by `PolicyEngine`, so
 D6.5's assumption that a crashed worker's reservation is recoverable by folding is false and
 `RunProjection.reservedUsd` is **permanently zero**; `task.cancelled` means in-flight Tasks
@@ -2141,22 +2166,31 @@ pinned public surface.
 `#commit` returns early on a terminal run, and `cancel` appends no `task.cancelled` (C1), so
 task states after a cancel are consistent but untidy.
 
-**E8 · Two load-bearing refusals in `http.ts` have no test, and both fail open when removed.**
-Same method, same result — the suite is **1003 pass, 0 fail** with either one deleted.
+**E8 · Two load-bearing refusals in `http.ts` had no test, and both failed open when removed.
+RESOLVED — kept only for the reason the SUITE could not see them, which generalises.**
+Both are now pinned in `test/server/http.test.ts`, each mutation-verified: deleting the length
+conjunct fails exactly the prefix-match test, deleting the `typeof` half fails exactly the
+non-string test, and neither mutation touches any other test.
 
-- **`presented.length === expected.length`** in `#sharedToken` is what stops the constant-time
-  compare degenerating into a **prefix match**. `presented.padEnd(expected.length,
-  "\0").slice(0, expected.length)` truncates anything longer than the secret, so without the
-  final length check a token that merely *starts* with the secret authenticates. Measured on
-  a live plane with `token: "s3cret"`, guard removed: `Bearer s3cretEXTRA` → **200**,
-  `Bearer s3cretX` → **200**, `Bearer s3cre` → 401, `Bearer s3crez` → 401.
-- **The non-string half of the constructor's token refusal** — `typeof token !== "string"` —
-  is not defensive typing. The compare is over LENGTH, so any zero-length value reproduces the
-  empty-string defect the sibling test documents. Measured with that half removed and
-  `token: [] as unknown as string`: the plane **constructs**, `openToEveryCaller` is `false`,
-  `/health` reports `auth: "required"` — and `GET /runs` **with no `Authorization` header at
-  all returns 200**. Every surface says the perimeter is up while there is none, which is the
-  exact failure the empty-string refusal exists to prevent, reached through the half nobody
-  tests.
+> **Why 1992 tests missed a prefix match on the bearer token.** The refusal was covered in the
+> direction that cannot exercise it. `#sharedToken` pads the presented string UP to the expected
+> length, so a token SHORTER than the secret fails on the padded bytes whether the length check
+> is there or not — and every wrong token the suite sent was shorter (`Bearer wrong`). The
+> guard's entire domain is presented strings that are LONGER, and nothing sent one. Same shape
+> on the constructor: `token: ""` was pinned with a reproduction, and `typeof token !==
+> "string"` — the half of the same condition that catches `[]` — was not.
+>
+> **The generalisable form: a test whose input cannot reach the branch certifies the branch.**
+> This is `E4`'s "guards with no test" one level in — the guard HAD a test, addressed to the
+> wrong side of it. Ask of every refusal not "is it tested" but "does any test supply an input
+> that would fail without it", which is what a mutation answers and a reading does not.
+>
+> One assertion in the first draft was wrong and the reason is worth keeping: `Bearer s3cret `
+> returns 200, and that is `node:http`, not the guard. RFC 7230 makes surrounding whitespace
+> optional in a field value and the parser strips it, so a trailing space never reaches
+> `#sharedToken` — measured on a bare `createServer`, the handler sees `"Bearer s3cret"` for
+> both requests, and `"\0"` never leaves the client, refused by `Headers.append`. **A suffix has
+> to survive the transport to test this guard**, which is one more way an input fails to reach
+> a branch.
 
 ---

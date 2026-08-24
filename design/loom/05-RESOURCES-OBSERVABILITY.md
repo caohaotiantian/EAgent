@@ -197,6 +197,25 @@ stateDiagram-v2
   end note
 ```
 
+> **DESIGNED, NOT BUILT — the `health:` block and the state machine above are a design, and
+> this section drew them as machinery.** (Stated in prose rather than as a formal marker: the
+> drift registry admits span names and error codes only, and `SourceHealth` is an interface.) There is no circuit breaker in `src/`:
+> `grep -arn 'SourceHealth\|breaker' packages/core/src/` returns two prose comments and nothing
+> else. Nothing probes a server, nothing counts failures against a window, nothing withholds a
+> tool from an agent's list, and `ToolRegistry.health()` is commented out in `01-INTERFACES.md`
+> §D3.5 *"so it stops reading as a promise"*. A `health:` block in an `McpServer` document is
+> accepted and inert.
+>
+> **The two documents disagreed, and that is the finding.** `01-INTERFACES.md` §D3.5 has said
+> *"There is **no** circuit breaker: nothing measures a source, nothing withholds one"* while
+> this section drew the state diagram with no caveat at all — so which one a reader believed
+> depended on which they opened. A corpus that splits built from unbuilt **inside** one artifact
+> (`README.md` §Conventions) has to do it in every artifact that draws the same mechanism.
+>
+> Note what is NOT designed-only here: everything above the `health:` key is real. The
+> `declared` block, the untrusted-metadata rule, and the maximally-restricted default for an
+> undeclared tool are enforced — an MCP tool is `irreversible` and gates.
+
 ---
 
 # D9 — Observability design

@@ -103,9 +103,21 @@ continue;`. Two consequences, both live:
   having fixed **for gates** — still open one node type over;
 - a router naming an edge that exists **nowhere** is a silent no-op that strands the run.
 
-**Designed, not implemented — the router's half of the closed set.** It is a `GRAPH005`
-sub-code asserting `take ∪ {fallbackEdge} ⊆ outbound(node)`, and it does not exist. Do not
-read the gate check as covering routers; nothing does.
+**BUILT — and this paragraph said "designed, not implemented" long after it was.** The
+`GRAPH005` sub-code asserting `take ∪ {fallbackEdge} ⊆ outbound(node)` is
+`GRAPH005_ROUTE_NOT_OWN_EDGE` in `graph/validate.ts`, its runtime half is `E_ROUTE_INVALID`
+raised at two sites in `run/engine.ts`, and three test files assert the pair —
+`run/route-confinement.test.ts`, `run/gate-authorization.test.ts`,
+`graph/expression-reads.test.ts`. The scenario two bullets up, where a mutation rewrites `take`
+to another node's edge and the run skips `approve_remediation`, is refused at compile and again
+at run time.
+
+> **Read the correction as being about the guard that did not catch it.** This claim carried no
+> formal absence marker — it was prose — and `docs-drift.test.ts` only checks the markers, so a *stale marker* fails the suite while a stale *sentence* asserting the
+> same absence does not. That is `REGISTER` **D6** ("the drift guard checks names in MARKDOWN,
+> not behaviour") arriving one level over: the guard is a tripwire for the vocabulary, not for
+> the claims. The dangerous direction is this one — a reader told a live authorization hole
+> exists either rebuilds the check or stops trusting it.
 
 Building `mode: model` therefore costs three things, and `graph/spec.ts`'s `RouterNode`
 docstring already names all three: a **recorded model effect** (so replay serves the same
