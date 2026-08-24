@@ -659,10 +659,28 @@ export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
   subgraph: "subgraph",
 };
 
-/** Node types that can suspend a Run mid-execution (D5.1 invariant 3). */
+/**
+ * Node types that can suspend a Run mid-execution (D5.1 invariant 3).
+ *
+ * **A CLAIM ABOUT THE ENGINE, NOT AN INPUT TO IT.** `grep -arn 'CAN_SUSPEND' packages/core/`
+ * returns this line and the `scripts/surface.json` pin. Which node types actually suspend is
+ * decided by `Engine`'s per-type arms — the ones that can return a gate — and nothing compares
+ * those against this set, so a ninth node type could suspend without appearing here.
+ */
 export const CAN_SUSPEND: ReadonlySet<NodeType> = new Set<NodeType>(["agent", "tool", "human_gate", "subgraph"]);
 
-/** Node types the scheduler may run inline on the committing worker. */
+/**
+ * Node types the scheduler may run inline on the committing worker.
+ *
+ * **`scheduler.ts` NEVER CONSULTS THIS**, and both this docstring and `CAN_SUSPEND`'s used to
+ * read as invariants the scheduler enforces. It reads neither — it does not mention `node.type`
+ * at all. Same grep, same two hits: the declaration and the surface pin.
+ *
+ * Both sets are kept and exported rather than deleted, the treatment
+ * `GRAPH019_CPUBOUND_NO_EFFECT` established for a declaration that binds nothing. They are
+ * accurate today and they are documentation; **the first decision made from either one is also
+ * the moment it needs a test against the code it describes.**
+ */
 export const CONTROL_TYPES: ReadonlySet<NodeType> = new Set<NodeType>(["router", "join", "function"]);
 
 /**

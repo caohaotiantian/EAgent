@@ -40,10 +40,30 @@ export type CompileResult =
 
 export interface GraphCompiler {
   compile(input: CompileInput): CompileResult;
-  /** Diagnostics only — for the editor, which wants warnings without a RunGraph. */
+  /**
+   * Diagnostics only — for the editor, which wants warnings without a RunGraph.
+   *
+   * **THERE IS NO EDITOR.** That host is the interface's whole reason for existing and it does
+   * not exist, so nothing in `src/` calls this; the only in-tree caller of `analyze` is the test
+   * named "analyze returns diagnostics without building a RunGraph" in `graph/compile.test.ts`.
+   */
   analyze(input: CompileInput): readonly Diagnostic[];
 }
 
+/**
+ * The `GraphCompiler` object form of `compile`.
+ *
+ * **NO PRODUCTION CALLER.** Naming the set rather than asserting a total, because this file has
+ * two functions called `compile` in scope and the loaders have a third of their own: the graph
+ * compiler is reached from exactly **six** places in `src/`, and every one calls the bare
+ * `compile()` below — `cli.ts`, `graph/mutate.ts`, `run/engine.ts`, `builtin/authoring.ts`,
+ * `compileOrThrow` further down this file, and this function's own delegation. So the object
+ * wrapper is reached by none of them, and what it adds over the function is `analyze` alone.
+ *
+ * Kept exported — it is pinned in `scripts/surface.json`, so removing it is a public-surface
+ * change and a separate decision — and documented as unused rather than left looking
+ * load-bearing. **Prefer the bare `compile()` inside this package**, which is what all six do.
+ */
 export function createGraphCompiler(): GraphCompiler {
   return {
     analyze: (input) => validateGraph({ ...input, depth: 0, expanding: [] }),

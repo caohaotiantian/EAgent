@@ -21,8 +21,24 @@ export interface Args {
   prompt?: string;
 }
 
-/** Every flag the parser accepts, including short aliases. The TUI's own help
- *  and its parity test read this rather than re-listing them. */
+/**
+ * Every flag the parser accepts, including short aliases.
+ *
+ * THIS LIST HAS NO RUNTIME READER, and its docstring used to claim two. It said the TUI's own
+ * help and a parity test read it "rather than re-listing them"; `packages/eagent/tui` imports
+ * `OPTIONS_HELP` and `parseArgs` and never this, and no parity test was ever written. So the
+ * vocabulary exists three times over — here, as string literals in `parseArgs` below, and as
+ * prose in `OPTIONS_HELP` — and a flag added to any one of them alone disagrees with the other
+ * two silently. That is the failure mode this repository has already shipped twice at the Loom
+ * end (error codes, event types): a registry with two representations drifts, and a gate walking
+ * the wrong one is switched off without saying so.
+ *
+ * `test/args-vocabulary.test.ts` now gates all three AS ONE SET, reading each from this source
+ * so none can be restated in the test and drift with it — the shape
+ * `packages/core/test/cli/known-flags.test.ts` uses for `KNOWN_FLAGS`/`USAGE`/the code's readers.
+ * Keep this list exported and keep it accurate: it is the declaration the other two are checked
+ * against, which is a job even though it is not a call site.
+ */
 export const FLAGS = [
   "--model", "-m",
   "--provider", "-p",

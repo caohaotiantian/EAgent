@@ -63,9 +63,20 @@ export type HookPoint = (typeof HOOK_POINTS)[number];
 /**
  * Points that cannot change anything.
  *
- * Kept as data rather than as a convention, because "is this one allowed to mutate?" is asked
- * at every call site and a convention answered differently in one of them is exactly how an
- * observer becomes a filter nobody reviewed.
+ * **NOTHING IN `src/` READS THIS, and the docstring used to say otherwise** — it claimed the
+ * question "is this one allowed to mutate?" is *"asked at every call site"*. It is not asked
+ * anywhere: `grep -arn 'OBSERVER_POINTS' packages/core/` returns this declaration and the
+ * `scripts/surface.json` pin, and no third line. The engine decides observe-vs-filter by which
+ * HELPER a point is dispatched through — `runFilters` at five sites in `engine.ts`, which reads
+ * what the body returned, and `runObservers` at one, which discards it — so this set is a
+ * statement ABOUT that code rather than an input to it, and the two can disagree with nothing
+ * going red.
+ *
+ * Kept and exported rather than deleted, which is the treatment `GRAPH019_CPUBOUND_NO_EFFECT`
+ * established for a declaration that binds nothing: say so, do not quietly keep implying a
+ * consumer. **If you make a decision from this set, you are its first reader** — and at that
+ * point it needs a test tying it to the dispatch helpers, because until then the only thing
+ * keeping them agreed is that one person wrote both.
  */
 export const OBSERVER_POINTS: ReadonlySet<HookPoint> = new Set<HookPoint>(["onComplete"]);
 
