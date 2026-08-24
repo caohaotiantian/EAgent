@@ -30,7 +30,7 @@ Stated because a framework that overstates itself costs its user a day finding o
 
 | | |
 |---|---|
-| **`retry` on a function or evaluator node** | Inert. A body cannot raise a RETRYABLE error — every throw out of the `vm` is classified `E_INTERNAL`, so the backoff never schedules |
+| **`retry` on a function or evaluator node** | **Works**, through the RETURN rather than a throw: a body returns `{ retry: { reason } }` and the engine raises `E_FUNCTION_UNAVAILABLE` on its behalf, which is retryable by class. A *throw* still cannot carry retryability — `isLoomError` is an `instanceof` against the host class and a guest object can never satisfy it, so every throw out of the `vm` is still `E_INTERNAL` |
 | **`Math.random()` in a function body** | **Recorded.** The engine draws a seed per task under `effectKey(taskId, "random", 0)`, journals it as an effect, and the realm's `Math.random` is a deterministic PRNG built from it — so replay serves the same stream instead of diverging. `Date` is still `undefined` in the sandbox, deliberately: a wall-clock read has no seed that would make it reproducible |
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | **Built.** Publish `resources/hook/<name>.js`, name it under `hooks:` in the graph, and it runs in the same hardened `vm` realm a `function` body does. A declared hook the workspace does not publish is a compile error, not a silent skip |

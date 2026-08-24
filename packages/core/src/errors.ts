@@ -323,6 +323,20 @@ export const CODES = {
   E_QUORUM_UNREACHABLE: "E_QUORUM_UNREACHABLE",
 
   // unavailable
+  /**
+   * A `function` or `evaluator{assertion}` body reported a transient failure and asked to be
+   * re-run, by returning `{ retry: { reason } }`.
+   *
+   * `unavailable` and therefore RETRYABLE, which is the entire point: it is the only way a
+   * sandboxed body can reach `NodeSpec.retry`. Every throw out of the realm normalizes to
+   * `internal`/`E_INTERNAL`, so before this existed a `function` node's `retry` policy was
+   * declared and unreachable.
+   *
+   * It is raised by the ENGINE on the body's behalf, not by the body — a guest object cannot be
+   * a host `LoomError`. A node with no `retry` policy fails on it immediately, which is correct:
+   * the body asked and the graph declined.
+   */
+  E_FUNCTION_UNAVAILABLE: "E_FUNCTION_UNAVAILABLE",
   E_SECRET_UNAVAILABLE: "E_SECRET_UNAVAILABLE",
   E_PROVIDER_OVERLOADED: "E_PROVIDER_OVERLOADED",
   E_PROVIDER_TRANSPORT: "E_PROVIDER_TRANSPORT",

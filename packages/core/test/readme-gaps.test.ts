@@ -133,13 +133,19 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
   },
   {
     row: "`retry` on a function or evaluator node",
-    claims: "every throw out of the `vm` is classified `E_INTERNAL`, so the backoff never schedules",
+    claims: "a body returns `{ retry: { reason } }` and the engine raises `E_FUNCTION_UNAVAILABLE` on its behalf",
+    // A ROW THAT FLIPPED. Both halves are probed, because the row now makes two claims and they
+    // pull in opposite directions: the RETURN path works, and the THROW path still does not.
     probe: () => {
-      // Verified by running: a body with `retry: { maxAttempts: 3 }` is called ONCE, the task
-      // fails `E_INTERNAL`, and no backoff is scheduled. The mechanism is the class table —
-      // `E_INTERNAL` is `internal`, and only `exhausted`/`unavailable`/`timeout` are retryable.
       assert.match(SRC("errors.ts"), /RETRYABLE[^=]*=\s*new Set<ErrorClass>\(\["exhausted", "unavailable", "timeout"\]\)/);
       assert.match(SRC("run/engine.ts"), /if \(!error\.retryable\) return undefined;/, "the retry decision must still gate on retryability");
+      // The route that works: one helper, and `err.unavailable` is what makes it retryable.
+      const engine = SRC("run/engine.ts");
+      assert.match(engine, /function retryRequested\(/, "the helper must exist");
+      assert.match(engine, /err\.unavailable\(CODES\.E_FUNCTION_UNAVAILABLE/, "and must raise a class the RETRYABLE set contains");
+      assert.equal((engine.match(/retryRequested\(out,/g) ?? []).length, 2, "both callers of functions.require must reach it");
+      // The half that still does not: a guest throw cannot be a host LoomError.
+      assert.match(SRC("errors.ts"), /export function isLoomError/, "the instanceof check the row's second half is about");
     },
   },
   {

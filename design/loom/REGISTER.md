@@ -1604,7 +1604,35 @@ Not a patch. **Reverses when** an embedder relies on `opts.globals`, or when `Ma
 the way `Date` already is.
 
 **B10 · A `function` body cannot signal a RETRYABLE failure, so `retry` is unreachable for
-function nodes.** Every throw out of the `vm` context is classified `E_INTERNAL` with
+function nodes. RESOLVED 2026-08-24 — through the RETURN, and the entry is kept because why a
+THROW cannot work is the durable part.**
+
+> A body returns `{ retry: { reason } }` and the engine raises
+> `err.unavailable(E_FUNCTION_UNAVAILABLE)` on its behalf, which is retryable by class and so
+> reaches `#retryDecision`. Verified end to end: three attempts, two `task.retry_scheduled` rows,
+> the third attempt's write landing.
+>
+> **A THROW STILL CANNOT CARRY RETRYABILITY, and that is structural rather than unfinished.**
+> `isLoomError` is an `instanceof` against the HOST class, which a guest object can never
+> satisfy, and `toLoomError` deliberately declines to read a `class` off injected code — that
+> read is the hazard A1, A18 and A21 are all about. A RETURN crosses through `intoHostRealm`,
+> which rebuilds it structurally, so no getter of the body's survives to be consulted. The
+> asymmetry is the point of the design, not a gap in it.
+>
+> **No delay field, deliberately.** `#retryDecision` computes the backoff from `(policy, attempt)`
+> alone — its own comment says it must, or replay diverges — and a `function` body RE-EXECUTES on
+> replay (B11), so a delay the body chose would be re-chosen against a different clock. The graph
+> owns the schedule; the body owns the verdict.
+>
+> **`retry` is exclusive with `writes` and `take`, refused rather than resolved.** A retry re-runs
+> the body, so anything it also asked to commit would be proposed twice.
+>
+> **And a test-harness trap worth the line it costs**: the fold turns `task.retry_scheduled` into
+> `retryAfter: e.ts + afterMs` and `eligible()` skips a task while `retryAfter > now`, so under
+> this repo's usual frozen `now: () => NOW` a backoff of ONE millisecond never elapses. The first
+> version of the test read as "the retry fired once" when the truth was "the clock never moved".
+
+**The original text follows.** Every throw out of the `vm` context is classified `E_INTERNAL` with
 `retryable: false` — only the three classes in `errors.ts`'s `RETRYABLE` set (`exhausted`,
 `unavailable`, `timeout`) schedule a backoff, and a body has no way to construct one: `SAFE_GLOBALS`
 does not expose `err`, and a plain object with `class`/`retryable` properties is not read.

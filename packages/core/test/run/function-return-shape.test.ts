@@ -138,3 +138,134 @@ test("AND THE EVALUATOR ARM IS HELD TO THE SAME CONTRACT — one validator, two 
   assert.equal(good.status, "succeeded", JSON.stringify(good.error ?? {}));
   assert.deepEqual(good.channels["seen"], ["x"]);
 });
+
+// ── retry: the only route from a sandboxed body to NodeSpec.retry ────────────
+
+/** The same graph, with a retry policy on the one node. */
+function retrySpec(node: "function" | "evaluator"): GraphSpec {
+  const base = spec();
+  return {
+    ...base,
+    nodes: [
+      node === "function"
+        ? { ...(base.nodes[0] as object), retry: { maxAttempts: 3, backoff: "fixed", initialMs: 1 } }
+        : {
+            id: "f",
+            type: "evaluator",
+            writes: ["seen"],
+            evaluator: { kind: "assertion", ref: "function/b@stable", threshold: 0.5 },
+            retry: { maxAttempts: 3, backoff: "fixed", initialMs: 1 },
+          },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/** Runs `body` on a node that declares `retry`, and reports what the journal saw. */
+async function runRetrying(body: unknown, node: "function" | "evaluator" = "function") {
+  const functions = new FunctionRegistry();
+  functions.register("function/b@stable", body as () => FunctionOutcome);
+  // AN ADVANCING CLOCK, and it is load-bearing rather than incidental. The fold turns
+  // `task.retry_scheduled` into `retryAfter: e.ts + afterMs`, and `eligible()` skips a task while
+  // `retryAfter > now` — so with the frozen `now: () => NOW` the rest of this file uses, a
+  // backoff of ONE millisecond never elapses and the retry never runs. It cost a debugging round
+  // to see: the first attempt looked like "the retry only fired once" rather than "the clock
+  // never moved". Still no real time: the ticks are the test's, not the wall's.
+  const clock = { t: NOW };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    now: () => clock.t,
+    sleep: async () => {},
+    policy: { granted: [], systemFloor: "out" },
+  });
+  const graph = compileOrThrow({ spec: retrySpec(node), resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: {} });
+  let p = await engine.advance(runId);
+  // The backoff is 1 ms and `sleep` is injected, so the scheduler is what gates the re-run:
+  // advance until the run settles or the attempts are spent.
+  for (let i = 0; i < 6 && p.status === "running"; i++) {
+    clock.t += 1000;
+    p = await engine.advance(runId);
+  }
+  const events = [];
+  for await (const e of store.read(runId, 1)) events.push(e);
+  return { p, scheduled: events.filter((e) => e.type === "task.retry_scheduled") };
+}
+
+test("A BODY CAN ASK TO BE RETRIED, and the node's retry policy actually schedules it", async () => {
+  // README: "`retry` on a function or evaluator node — Inert. A body cannot raise a RETRYABLE
+  // error." Every throw out of the `vm` normalizes to `internal`/`E_INTERNAL` — `isLoomError` is
+  // an `instanceof` against the HOST class and a guest object can never satisfy it — so the only
+  // classes that schedule a backoff (`exhausted`, `unavailable`, `timeout`) were unreachable.
+  // A RETURN crosses through `intoHostRealm`, which rebuilds it structurally, so no getter of the
+  // body's is ever consulted; the engine raises the retryable error on the body's behalf.
+  let calls = 0;
+  const { p, scheduled } = await runRetrying(() => {
+    calls += 1;
+    return calls < 3 ? { retry: { reason: "upstream still warming up" } } : { writes: { seen: ["ok"] } };
+  });
+
+  assert.equal(scheduled.length, 2, "two failures, two scheduled retries");
+  assert.equal((scheduled[0]!.payload as { code: string }).code, "E_FUNCTION_UNAVAILABLE", "journaled under the body's own code");
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.deepEqual(p.channels["seen"], ["ok"], "and the third attempt's write is the one that lands");
+  assert.equal(calls, 3);
+});
+
+test("THE REASON REACHES THE OPERATOR — a retry that runs out of attempts says why", async () => {
+  const { p, scheduled } = await runRetrying(() => ({ retry: { reason: "upstream 503" } }));
+  assert.equal(scheduled.length, 2, "maxAttempts 3 means two retries, then the failure stands");
+  assert.equal(p.status, "failed");
+  assert.equal(p.error?.code, "E_FUNCTION_UNAVAILABLE", JSON.stringify(p.error ?? {}));
+  assert.match(String(p.error?.message), /upstream 503/, "the body's reason must survive into the run's error");
+  assert.match(String(p.error?.message), /asked to be retried/);
+});
+
+test("A BODY WITH NO RETRY POLICY FAILS IMMEDIATELY — the body asked and the graph declined", async () => {
+  // The negative control for the mechanism: `retry` on the RETURN does not create a retry
+  // policy, it only becomes eligible for one. Without this, a change that made every
+  // `E_FUNCTION_UNAVAILABLE` retry regardless of the graph would pass every test above.
+  const p = await runWith(() => ({ retry: { reason: "please" } }));
+  assert.equal(p.status, "failed");
+  assert.equal(p.error?.code, "E_FUNCTION_UNAVAILABLE", JSON.stringify(p.error ?? {}));
+});
+
+test("AND THE EVALUATOR ARM RETRIES TOO — the second caller, tested rather than assumed", async () => {
+  // Same graph shape, `type: "evaluator"`. This test exists because a mutation removing the call
+  // from `#runEvaluator`'s assertion arm has twice left the whole suite green: `functions.require`
+  // has two callers, and asking "who else calls this" has not been enough — the fix reached both
+  // arms both times and the SUITE only ever drove one.
+  let calls = 0;
+  const { p, scheduled } = await runRetrying(() => {
+    calls += 1;
+    return calls < 2 ? { retry: { reason: "flaky judge" } } : { writes: { seen: ["ok"] }, confidence: 1 };
+  }, "evaluator");
+  assert.equal(scheduled.length, 1);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.deepEqual(p.channels["seen"], ["ok"]);
+});
+
+test("`retry` IS EXCLUSIVE WITH `writes` AND `take` — refused, not silently picked", async () => {
+  // A retry re-runs the body, so anything it also asked to commit would be proposed twice.
+  // Refusing beats choosing, which is the rule the rest of this file is about.
+  const both = await runWith(() => ({ retry: { reason: "x" }, writes: { seen: ["x"] } }));
+  assert.equal(both.error?.code, "E_RESOURCE_INVALID", JSON.stringify(both.error ?? {}));
+  assert.match(String(both.error?.message), /proposed twice/);
+
+  const taking = await runWith(() => ({ retry: { reason: "x" }, take: [] }));
+  assert.equal(taking.error?.code, "E_RESOURCE_INVALID");
+});
+
+test("`retry: true` IS REFUSED and the message names the shape that works", async () => {
+  // The obvious thing to write, and not the contract. Accepting it would make `retry: 0` and
+  // `retry: "maybe"` mean different things by accident.
+  const p = await runWith(() => ({ retry: true }));
+  assert.equal(p.status, "failed");
+  assert.equal(p.error?.code, "E_RESOURCE_INVALID", JSON.stringify(p.error ?? {}));
+  assert.match(String(p.error?.message), /retry is an object/);
+  assert.match(String(p.error?.message), /reason/);
+});

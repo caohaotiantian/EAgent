@@ -6894,3 +6894,46 @@ check. Not one of them needed a human to notice.
 per-task — a long-running body drawing millions of values where a 32-bit seed's period matters
 — the seed becomes a stream and this becomes a per-draw effect, which is the same question B11
 asks about a function body's output. Answer them together.
+
+---
+
+## A sandboxed body cannot throw an error that means anything, so it returns one
+
+`retry` has been declared on `function` and `evaluator` nodes and unreachable from either since
+they were written, and the README said so. The cause is not an omission: `isLoomError` is an
+`instanceof` against the HOST class, a guest object can never satisfy it, and `toLoomError`
+deliberately declines to read a `class` off injected code — that read is the hazard A1, A18 and
+A21 are each about. So every throw out of the realm is `internal`/`E_INTERNAL`, and the three
+classes that schedule a backoff were unreachable by construction.
+
+**The route that works is the RETURN.** A returned object crosses through `intoHostRealm`, which
+rebuilds it structurally, so no getter of the body's survives to be consulted — the same property
+that makes `FunctionOutcome.writes` safe makes `FunctionOutcome.retry` safe. The engine raises
+`err.unavailable(E_FUNCTION_UNAVAILABLE)` on the body's behalf, and the existing
+`#retryDecision` does the rest.
+
+**The asymmetry is the design, not a gap in it**, and the register entry keeps saying so. A body
+that wants to fail permanently throws; a body that wants another attempt returns. That reads
+backwards until you notice that the throw is the channel that cannot carry information across
+the realm boundary and the return is the one that can.
+
+**Two things were deliberately not accepted.** A delay: `#retryDecision`'s own comment says the
+backoff must be a pure function of `(policy, attempt)` or replay diverges, and a `function` body
+re-executes on replay, so a body-chosen delay would be re-chosen against a different clock. The
+graph owns the schedule; the body owns the verdict. And `retry` beside `writes` or `take`: a
+retry re-runs the body, so anything it also committed would be proposed twice — refused rather
+than resolved, which is the rule this validator was written for in the first place.
+
+**The evaluator arm killed two mutations, and that is the news.** Twice now — `requireOutcome`,
+then the random seed — a change reached both callers of `functions.require` while the SUITE drove
+only one, and a mutation removing the second call left everything green. This time the test came
+with the change, and removing the evaluator call fails two tests instead of none. The habit that
+fixes this is not "who else calls this", which was asked and answered correctly every time. It is
+**write the second caller's test in the same commit as the second caller's line.**
+
+**A harness trap, recorded because it cost a debugging round and will again.** The fold turns
+`task.retry_scheduled` into `retryAfter: e.ts + afterMs`, and `eligible()` skips a task while
+`retryAfter > now`. Under this repo's standard frozen `now: () => NOW`, a backoff of one
+millisecond never elapses — so the first version of the test showed one retry where two were
+expected, and read as "the mechanism half works" rather than "the clock never moved". A test of
+anything scheduled needs a clock that moves, and it still need not be a real one.

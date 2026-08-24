@@ -386,8 +386,10 @@ function seedFromKey(key: string): number {
   return seed;
 }
 
+const OUTCOME_KEYS = ["writes", "take", "retry"] as const;
+
 function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
-  const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }`;
+  const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }, or { retry: { reason } } to ask for another attempt`;
   if (out === null || typeof out !== "object") {
     throw err.validation(
       CODES.E_RESOURCE_INVALID,
@@ -395,14 +397,54 @@ function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutc
     );
   }
   const keys = Object.keys(out);
-  if (keys.length > 0 && !("writes" in out) && !("take" in out)) {
+  if (keys.length > 0 && !OUTCOME_KEYS.some((k) => k in out)) {
     throw err.validation(
       CODES.E_RESOURCE_INVALID,
       `function "${ref}" on node "${nodeId}" returned {${keys.join(", ")}}, every key of which is ignored — ${shape}. ` +
         `Did you mean { writes: { ${keys[0]!}: … } }?`,
     );
   }
+  const retry = (out as { retry?: unknown }).retry;
+  if (retry !== undefined) {
+    // THE SHAPE IS REFUSED RATHER THAN COERCED, for the reason the whole of this function
+    // exists: `retry: true` is the obvious thing to write, it is not the contract, and
+    // accepting it would make `{retry: "maybe"}` and `{retry: 0}` mean different things by
+    // accident. One shape, named in the message.
+    if (retry === null || typeof retry !== "object" || Array.isArray(retry)) {
+      throw err.validation(
+        CODES.E_RESOURCE_INVALID,
+        `function "${ref}" on node "${nodeId}" returned retry: ${String(retry)} — retry is an object, ${'{ retry: { reason: "…" } }'}`,
+      );
+    }
+    // EXCLUSIVE. "Retry me, and also commit this" has no coherent reading — a retry re-runs
+    // the body, so the writes would be proposed a second time. Refusing beats picking one,
+    // which is the lesson from the return-value defect this function was written for.
+    if ("writes" in out || "take" in out) {
+      throw err.validation(
+        CODES.E_RESOURCE_INVALID,
+        `function "${ref}" on node "${nodeId}" returned retry alongside ${"writes" in out ? "writes" : "take"} — a retry re-runs the body, so anything it also asked to commit would be proposed twice. Return one or the other`,
+      );
+    }
+  }
   return out as FunctionOutcome;
+}
+
+/**
+ * Turn a body's `{ retry: … }` into the retryable failure `#retryDecision` can act on.
+ *
+ * ONE HELPER, TWO CALLERS, and that is deliberate rather than tidy. `functions.require` has
+ * exactly two — `#runFunction` and `#runEvaluator`'s `assertion` arm — and the last two changes
+ * to this contract were each written inline in the first and forgotten in the second. A shared
+ * function cannot drift; a second copy is the same defect deferred.
+ *
+ * `unavailable` is what makes it retryable at all: `RETRYABLE` in `errors.ts` holds exactly
+ * `exhausted`, `unavailable`, `timeout`, and a guest object can never be a host `LoomError`, so
+ * the engine raises this on the body's behalf.
+ */
+function retryRequested(out: FunctionOutcome, ref: string, nodeId: NodeId): void {
+  if (out.retry === undefined) return;
+  const why = typeof out.retry.reason === "string" && out.retry.reason.length > 0 ? out.retry.reason : "no reason given";
+  throw err.unavailable(CODES.E_FUNCTION_UNAVAILABLE, `function "${ref}" on node "${nodeId}" asked to be retried: ${why}`);
 }
 
 function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
@@ -2842,6 +2884,7 @@ export class Engine {
       seed: await this.#randomSeedEffect(ctx, p, w),
     })) as unknown;
     const out = requireOutcome(raw, w.node.function!.ref, w.node.id);
+    retryRequested(out, w.node.function!.ref, w.node.id);
     return {
       status: "succeeded",
       writes: { ...(out.writes ?? {}) },
@@ -3029,6 +3072,9 @@ export class Engine {
         ev.ref,
         w.node.id,
       );
+      // BOTH ARMS, in the same commit as the contract. This is the third change to the
+      // function-body contract, and the first two each landed here a commit late.
+      retryRequested(out, ev.ref, w.node.id);
       this.#checkConfidence(ctx, w, out.writes ?? {}, ev.threshold);
       return { status: "succeeded", writes: { ...(out.writes ?? {}) }, usage: { ...ZERO_USAGE } };
     }

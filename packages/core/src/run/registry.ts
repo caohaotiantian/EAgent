@@ -203,6 +203,27 @@ export interface FunctionOutcome {
   readonly writes?: Readonly<Record<string, unknown>>;
   /** Router/conditional selection. Absent means "let the executor evaluate edges". */
   readonly take?: readonly string[];
+  /**
+   * "This did not work, and trying again might." The only way a body can reach `NodeSpec.retry`.
+   *
+   * WHY A RETURN AND NOT A THROW. Every throw out of the realm is normalized to
+   * `internal`/`E_INTERNAL` with `retryable: false`, and it cannot be otherwise: `isLoomError`
+   * is an `instanceof` against the HOST class, which a guest object can never satisfy, and
+   * `toLoomError` deliberately refuses to read a `class` off injected code — that read is the
+   * hazard four register entries are about. A returned object crosses through `intoHostRealm`,
+   * which rebuilds it structurally, so no getter of the body's survives to be consulted.
+   *
+   * EXCLUSIVE WITH `writes` AND `take`, and `requireOutcome` refuses the combination rather
+   * than picking one. "Retry me, and also commit this" has no coherent reading — the retry
+   * re-runs the body, so the writes would be proposed twice.
+   *
+   * NO DELAY FIELD, deliberately. `#retryDecision` computes the backoff from `(policy, attempt)`
+   * alone because it must be a pure function of those or replay diverges — a `function` body
+   * RE-EXECUTES on replay (B11), so a delay it chose would be re-chosen against a different
+   * clock. The graph owns the schedule; the body owns the verdict. `reason` is journaled on
+   * the failure and reaches the operator.
+   */
+  readonly retry?: { readonly reason?: string };
 }
 
 export type FunctionBody = (view: StateView, ctx: FunctionContext) => Promise<FunctionOutcome> | FunctionOutcome;

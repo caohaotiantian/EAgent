@@ -76,6 +76,7 @@ load-bearing across layers):
 | `E_TOOL_NOT_IDEMPOTENT` | validation | `ToolExecutor` | A retry was requested for a tool that forbids it |
 | `E_SECRET_UNAVAILABLE` | unavailable | `SecretProvider` | Resolved *before* any effect runs |
 | `E_REPLAY_DIVERGENCE` | internal | `GraphExecutor` | Replay reached an effect key the journal does not contain |
+| `E_FUNCTION_UNAVAILABLE` | unavailable | `GraphExecutor`, on a body's behalf | A `function` or `evaluator{assertion}` body returned `{ retry: { reason } }`. Retryable by class, which is the only route from a sandboxed body to `NodeSpec.retry`: every throw out of the realm normalizes to `internal` |
 | `E_EFFECT_UNRECORDED` | conflict | the `function` realm bridge | A body called `Math.random()` with no journaled seed behind it. Both engine callers supply one, so this is reachable only by invoking a `FunctionBody` by hand |
 | `E_CANCELLED` | cancelled | any | The `AbortSignal` fired |
 
