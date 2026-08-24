@@ -101,8 +101,11 @@ npm --prefix packages/eagent run serve     # the HTTP host
 npm --prefix packages/eagent run build:binary   # esbuild + Node-SEA -> bin/eagent
 npm --prefix packages/eagent/tui run dev   # the interactive TUI (Ink + React)
 
-# THERE IS NO `tsx` ANY MORE. Node 24 strips types natively and every relative import
-# specifier in this package says `.ts`, so `node --test` runs the source directly.
+# THERE IS NO `tsx` IN THE ENGINE. Node 24 strips types natively and every relative import
+# specifier under `src/` and `test/` says `.ts`, so `node --test` runs the source directly.
+# `tui/` STILL USES IT, and has to: Node cannot strip `.tsx` — it does not parse JSX at all —
+# so `tui/package.json` keeps `tsx` as a devDep and `--import tsx` in both its scripts. That is
+# also why no root gate runs the TUI's 17 tests; see the root CLAUDE.md and HANDOFF §6.
 ```
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a
@@ -196,9 +199,15 @@ install`). A command that writes without that call bypasses the security model.
 
 ## House conventions
 
-- **ESM + NodeNext.** Always use `.js` import specifiers even when importing a
-  `.ts` file (e.g. `import { defineTool } from "../kernel/define.js"`). This is
-  required by `module: NodeNext` and `verbatimModuleSyntax`.
+- **ESM + NodeNext, and specifiers say `.ts`.** Write
+  `import { defineTool } from "../kernel/define.ts"`. **This rule used to say the opposite** —
+  "always use `.js` … even when importing a `.ts` file" — which was true in EAgent's own
+  repository and stopped being true at the move: conforming to Loom's toolchain rewrote 1032
+  relative specifiers `.js` → `.ts`, because Node 24 strips types from the file you actually
+  name. Re-derived rather than remembered: `packages/eagent/src` contains **zero** relative
+  `.js` specifiers and **433** `.ts` ones. Following the old rule now produces an import that
+  resolves to nothing at runtime.
+  (`tui/` is the exception and runs its own toolchain — see *Two packages*.)
 - **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
   `noImplicitOverride`, `noFallthroughCasesInSwitch` are all on. No `any`
   cop-outs; model the types. The build `tsconfig.json` covers `src/` only;

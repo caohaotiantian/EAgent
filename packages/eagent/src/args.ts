@@ -1,10 +1,20 @@
 /**
  * The shared command-line surface.
  *
- * Both front ends — the headless CLI here in the engine, and the `eagent` TUI in
- * its own package — parse the same flags. Keeping the parser in one exported
- * module is what stops them drifting: a flag added for one is available to the
- * other, and `test/cli-entry.test.ts` can assert parity against a single source.
+ * Both front ends — the headless CLI here in the engine (`src/cli.ts`) and the `eagent` TUI in
+ * its own package (`tui/src/cli.tsx`) — import `parseArgs` and `OPTIONS_HELP` from here, so a
+ * flag added for one is available to the other.
+ *
+ * **THAT IS WHERE THE SHARING STOPS, and this docstring used to claim more.** It said
+ * `test/cli-entry.test.ts` "can assert parity against a single source"; that file does not
+ * import this module at all, and there is no single source — the vocabulary is written out
+ * three times below (`FLAGS`, `parseArgs`'s literals, `OPTIONS_HELP`). One exported module
+ * stops the two FRONT ENDS drifting from each other. It does nothing about the three lists
+ * inside it drifting from each other, which is the failure that can actually reach a user:
+ * a flag the help advertises and the parser refuses.
+ *
+ * `test/args-vocabulary.test.ts` is the gate that does hold them together, and it reads all
+ * three from this file's source so it cannot become a fourth copy.
  */
 
 export interface Args {
@@ -25,8 +35,9 @@ export interface Args {
  * Every flag the parser accepts, including short aliases.
  *
  * THIS LIST HAS NO RUNTIME READER, and its docstring used to claim two. It said the TUI's own
- * help and a parity test read it "rather than re-listing them"; `packages/eagent/tui` imports
- * `OPTIONS_HELP` and `parseArgs` and never this, and no parity test was ever written. So the
+ * help and a parity test read it "rather than re-listing them"; both consumers of this module —
+ * `src/cli.ts` here and `tui/src/cli.tsx` — import `OPTIONS_HELP` and `parseArgs` and never
+ * this, and no parity test was ever written. So the
  * vocabulary exists three times over — here, as string literals in `parseArgs` below, and as
  * prose in `OPTIONS_HELP` — and a flag added to any one of them alone disagrees with the other
  * two silently. That is the failure mode this repository has already shipped twice at the Loom

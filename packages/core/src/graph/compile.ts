@@ -53,12 +53,16 @@ export interface GraphCompiler {
 /**
  * The `GraphCompiler` object form of `compile`.
  *
- * **NO PRODUCTION CALLER.** Naming the set rather than asserting a total, because this file has
- * two functions called `compile` in scope and the loaders have a third of their own: the graph
- * compiler is reached from exactly **six** places in `src/`, and every one calls the bare
- * `compile()` below — `cli.ts`, `graph/mutate.ts`, `run/engine.ts`, `builtin/authoring.ts`,
- * `compileOrThrow` further down this file, and this function's own delegation. So the object
- * wrapper is reached by none of them, and what it adds over the function is `analyze` alone.
+ * **NO PRODUCTION CALLER**, and the set is named rather than totalled, because "compile site" is
+ * ambiguous in this tree: `resources/functions.ts` and `resources/hook-loader.ts` each have a
+ * local `compile` of their own that has nothing to do with graphs.
+ *
+ * The bare `compile()` below has exactly **six** callers in `src/` — `cli.ts`, `graph/mutate.ts`,
+ * `run/engine.ts`, `builtin/authoring.ts`, `compileOrThrow` further down this file, and this
+ * function's own delegation. This wrapper is reached by none of them. Total REACH of the graph
+ * compiler is one higher than six, because `engine.ts` also arrives through `compileOrThrow`;
+ * that is why this counts callers of a named function instead of claiming a total. What the
+ * wrapper adds over the function is `analyze` alone, and nothing calls that.
  *
  * Kept exported — it is pinned in `scripts/surface.json`, so removing it is a public-surface
  * change and a separate decision — and documented as unused rather than left looking

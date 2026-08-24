@@ -57,11 +57,32 @@ human's "yes" into a run that succeeds having done none of the work. See D3.6.
    would require replaying arbitrary code. A router's entire output is an edge subset,
    which the journal records verbatim. Enforced: `GRAPH005_ROUTER_WRITES`, "routers cannot
    write state".
-2. **Only `human_gate`, `agent`, `tool`, and `subgraph` can suspend** — and all four
-   suspend *between* Tasks, never inside a node body. `function`, `router`, and `join`
-   are guaranteed to terminate without external input, which is what lets the scheduler
-   treat them as cheap and run them inline on the committing worker rather than
-   re-queueing.
+2. ~~**Only `human_gate`, `agent`, `tool`, and `subgraph` can suspend**~~ — **WRONG, and wrong in
+   the direction that matters.** Every node type can suspend. The gate that suspends a Task is
+   raised in `Engine.#executeTask` from
+   `decision.effect === "gate"`, which runs BEFORE `#dispatch` selects a per-type arm, and
+   `PolicyRequest` carries `kind: "node" | "tool"` and no node type at all — it decides on
+   declared posture, data classification, irreversibility and taint. Measured: a one-node graph
+   whose only node is `type: "function"` with `policy: {posture: "in"}` reaches `awaiting_gate`
+   with `gate.raised` for `f@root#0`. A `function` reading a `secret_ref` channel gates by the
+   same path, because `CLASSIFICATION_POSTURE_FLOOR.secret_ref` is `in`.
+
+   What survives is the *half* of the sentence nobody checked: suspension happens **between**
+   Tasks, never inside a node body. That part is real and is what the journal's task states rest
+   on.
+
+   The second half — that `function`, `router` and `join` "are guaranteed to terminate without
+   external input, which is what lets the scheduler run them inline" — is doubly wrong: the
+   guarantee is false, and **the scheduler never consults node type anyway.**
+   `grep -arn 'NodeType\|\.type' packages/core/src/run/scheduler.ts` returns nothing, so no
+   inline-vs-requeue decision is being made from this. `CAN_SUSPEND` and `CONTROL_TYPES` exist
+   in `graph/spec.ts` as exported constants encoding this paragraph; both are read by nothing,
+   both now carry the correction in their docstrings, and neither may be used as a reference
+   until something makes them true.
+
+   **How it survived:** the invariant was never enforced anywhere, so no test could contradict
+   it, and the two constants that restate it look like enforcement from any single file. A
+   sentence describing behaviour that nothing checks is a hypothesis, and this one was false.
 
 **Designed, not implemented — `mode: model` is a compile error today.** This used to sit
 above as a third invariant, asserting that a model-mode router "returns an index into

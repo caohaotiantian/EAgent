@@ -65,7 +65,7 @@ export type HookPoint = (typeof HOOK_POINTS)[number];
  *
  * **NOTHING IN `src/` READS THIS, and the docstring used to say otherwise** — it claimed the
  * question "is this one allowed to mutate?" is *"asked at every call site"*. It is not asked
- * anywhere: `grep -arn 'OBSERVER_POINTS' packages/core/` returns this declaration and the
+ * anywhere: `grep -arn 'OBSERVER_POINTS' packages/core/src scripts/` returns this declaration and the
  * `scripts/surface.json` pin, and no third line. The engine decides observe-vs-filter by which
  * HELPER a point is dispatched through — `runFilters` at five sites in `engine.ts`, which reads
  * what the body returned, and `runObservers` at one, which discards it — so this set is a

@@ -165,7 +165,7 @@ rest — it is waiting, and §C below says who is waiting on what.
 | **1b** | A15 is no longer a partial-read hygiene item | It prescribed settling its open half by writing A3's premise — *every valid credential is a full operator credential* — into `frame`'s and `summarise`'s docstrings. **A3 was resolved twelve days later**: runs are scoped, and `server/http.ts`'s own boot diagnostic says in capitals that the old warning is gone *because its premise is false*. So the cheap resolution is unavailable and the question is now an authorization one — what may a SCOPED reader read — which is a different item than the one the register describes | REGISTER A15, A3 |
 | **2** | Unbounded and unobservable structures | `ResourceStore.#versions`/`#byDigest`/`#selectors` grow without bound; neither new cap emits a counter, so `MAX_CACHED_CHILD_GRAPHS`' own reversal condition is unmeasurable | REGISTER A8 |
 | **3** | Declared-and-unread fields, in one pass | `NodePlan.inboundEdges`, `GraphMetadata.labels`, `ExpansionBudget.maxLoopIterations`, `DelegationSpec.mustStayInGroup`/`maxDepth`, `ToolNode.version`, `AssembleInput.turns`, `SectionName "tool_results"`. `GRAPH019` is the pattern to follow — warn at compile rather than delete | §6 |
-| **4** | Docstrings claiming a consumer they do not have | `OBSERVER_POINTS` ("asked at every call site" — nothing reads it), `CAN_SUSPEND`, `CONTROL_TYPES`, `createGraphCompiler`. And in `packages/eagent`, `args.ts`'s exported `FLAGS`, which `parseArgs` shadows with string literals — **that one is a live drift hazard, not dead weight** | §6 |
+| ✅ | ~~Docstrings claiming a consumer they do not have~~ | done — `fix(vocab): a docstring that names a consumer it does not have`. All five corrected in place rather than deleted (each is a pinned public export; `GRAPH019`'s precedent). `packages/eagent`'s `FLAGS` gets the gate it lacked: `test/args-vocabulary.test.ts` holds `FLAGS`, `parseArgs` and `OPTIONS_HELP` as ONE set, read from the source so the test cannot become a fourth copy. **Review turned up more than the row asked for** — one replacement docstring was itself false, and proving it made `02-EXECUTION-GRAPH.md` D5.1 invariant 2 wrong: see §1 | §6, `02` D5.1 |
 | **5** | The rare suite flake, and E3's two transient failures | Two observations, 20 clean runs since, no identification. Chase with `--test-reporter=tap` **from the first run** | *Traps*, REGISTER E3 |
 
 **Not in the order, and deliberately:** everything in §4 (`DEFERRED-v2` — each has a one-line
@@ -396,9 +396,23 @@ for reasons, not forgotten.
   ["packages/*"]` is one level deep — so its declared deps (`ink`, `react`, `tsx`,
   `ink-testing-library`) are never installed and it cannot run its own tests in this checkout;
   its test script still spawns `--import tsx`, the loader this repo dropped on conformance.
-  **This is the four-file transaction in `CLAUDE.md`'s *Layout* section, unsatisfied by a
-  directory that section does not mention.** It compounds the `FLAGS` item above: the TUI is the
-  front end `args.ts`'s docstring names as its consumer, so drift between them goes red nowhere.
+  **It is not undocumented, and an earlier version of this bullet implied it was.**
+  `packages/eagent/CLAUDE.md` describes the two-package topology in full — `@eagent/core` plus
+  the `eagent` TUI, the one-way dependency arrow, the lockstep release script, and
+  `npm --prefix packages/eagent/tui run dev` among its key commands — and lists `tui/**` under
+  *not load-bearing*. So the tier was decided; what was never decided is that **no gate runs it**,
+  and the ROOT `CLAUDE.md` — whose *Layout* section and four-file-transaction rule govern the
+  monorepo — does not mention the directory at all. The gap is between the two guides, not a
+  missing one.
+
+  **Bringing it in is not free, and that is the decision.** Node 24 cannot strip `.tsx` at all
+  (measured: it does not even parse the file as TypeScript), so the TUI's tests need either
+  `tsx` — a loader `packages/eagent/CLAUDE.md` says in capitals no longer exists here — or a
+  build step for tests, which this toolchain also does not have. Either way it changes a stated
+  toolchain fact, which is why this is escalated rather than done.
+
+  It compounds the `FLAGS` item above: the TUI is a front end `args.ts` serves, so drift between
+  them goes red nowhere.
   Decide it either way — bring it inside the gate, or move it out of `packages/` and say so — but
   a tracked subpackage no gate can see is the one shape every count in this file rests on.
 
@@ -469,15 +483,26 @@ for reasons, not forgotten.
   for all of these** — warn at compile that the declaration does nothing, rather than delete a
   public field or silently keep accepting it.
 
-- **Docstrings that name a consumer they do not have.** `OBSERVER_POINTS` says it is *"asked at
-  every call site"*; nothing reads it. `CAN_SUSPEND` and `CONTROL_TYPES` are documented as
-  invariants the scheduler enforces and `scheduler.ts` never consults either. `createGraphCompiler`
-  wraps a `GraphCompiler` interface whose `analyze` is unused, while all six in-tree compile sites
-  call the bare `compile()`. These are cheaper than a field to fix — the docstring is the defect.
-  **One is different and is a live hazard**: `packages/eagent`'s `args.ts` exports `FLAGS` saying
-  the help text and a parity test read it, and `parseArgs` re-lists every flag as string literals
-  instead, so the list and the parser can disagree with nothing going red. That is the same shape
-  as `KNOWN_FLAGS`/`USAGE`, which this repo already gates as ONE set in `known-flags.test.ts`.
+- **Docstrings that name a consumer they do not have — CLOSED, and the closure found something bigger.**
+  All five said in prose that something read them and nothing did: `OBSERVER_POINTS` (*"asked at every call
+  site"*), `CAN_SUSPEND` and `CONTROL_TYPES` (invariants "the scheduler enforces" — `scheduler.ts` does not
+  mention node type anywhere), `createGraphCompiler` (an editor that does not exist; its `analyze` has one
+  caller, a test), and `packages/eagent`'s `FLAGS`. Each now states the absence instead, kept and exported
+  because all five are pinned in `scripts/surface.json` — deleting one is a public-surface change and a
+  separate decision.
+
+  **`FLAGS` was the live hazard and it now has a gate.** The flag vocabulary existed three times — `FLAGS`,
+  `parseArgs`'s string literals, `OPTIONS_HELP` — with nothing over any pair, and the list a maintainer would
+  edit first was the one nothing read: two lists plus a decoy. `test/args-vocabulary.test.ts` holds all three
+  as one set. **What that gate cannot see is the TUI**, which is outside every gate here; the test says so
+  rather than implying coverage it does not have.
+
+  **The correction that mattered was not on the list.** `CAN_SUSPEND`'s first replacement asserted the set was
+  "accurate today" — it is not, and `02-EXECUTION-GRAPH.md` D5.1 asserted the same thing. Every node type can
+  suspend: the gate is raised in `#executeTask` before `#dispatch` picks a per-type arm, and `PolicyRequest`
+  carries no node type. Measured, a lone `function` node at posture `in` reaches `awaiting_gate`. **A fix for a
+  false claim can ship a differently-false claim, and only running it tells you which** — the design file is
+  struck through with the repro.
 
 - **The whole `evolution/` subsystem and all of `journal/retention.ts`'s tiering have no caller
   in `src/`** — `foldTrajectory`, `measureCohort`, `promotionCeiling`, `requirePromotable`,

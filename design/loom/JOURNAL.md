@@ -7187,3 +7187,81 @@ wrong", applied one level up to an audit rather than a document.
 `policy.escalated{rule:"repeated_failure"}` row starts carrying the counter rather than only the
 breach, the fold stops being the authority and this becomes double bookkeeping. Nothing else here
 reverses; the corpus corrections are corrections.
+
+---
+
+## Fixing a false claim, I shipped a differently-false one — and the review caught it by running
+
+Backlog row 4 was the cheap one: five symbols whose docstrings named a consumer that does not
+exist. `OBSERVER_POINTS` said the question it answers is *"asked at every call site"*;
+`CAN_SUSPEND` and `CONTROL_TYPES` read as invariants the scheduler enforces; `createGraphCompiler`
+exists for an editor; and `packages/eagent`'s `FLAGS` claimed the TUI's help and "its parity test"
+read it. All five verified false before planning. HANDOFF called it *"cheaper than a field to fix
+— the docstring is the defect."*
+
+**It was not cheaper, and the reason is the one worth keeping.** A docstring that replaces a false
+claim with a differently-false claim is WORSE than the original: the original was merely
+unverifiable, and the replacement asserts verified accuracy, so it will be believed harder. I
+wrote one. `CAN_SUSPEND`'s replacement said the suspending types are decided by `Engine`'s
+per-type arms and that the set is "accurate today". Neither is true. The gate that suspends a Task
+is raised in `#executeTask` from `decision.effect === "gate"`, which runs BEFORE `#dispatch`
+selects a per-type arm, and `PolicyRequest` carries `kind: "node" | "tool"` and no node type at
+all. **Every node type can suspend.** A lone `type: "function"` node with `policy: {posture:"in"}`
+reaches `awaiting_gate` with `gate.raised` for `f@root#0` — run, not reasoned.
+
+**And the falsehood was not mine originally.** `02-EXECUTION-GRAPH.md` D5.1 invariant 2 states it
+too, and adds a second claim that is independently false: that `function`, `router` and `join`
+terminate without external input *"which is what lets the scheduler run them inline"*. The
+scheduler does not consult node type anywhere — `grep -arn 'NodeType\|\.type'
+packages/core/src/run/scheduler.ts` is empty. So an invariant nothing enforced spawned two
+exported constants restating it, and the constants made it look enforced from any single file.
+**A sentence describing behaviour that nothing checks is a hypothesis**, and this one had been
+false for as long as it had existed. The design file is struck through with the repro.
+
+**The gate I built for `FLAGS` was porous in the way its own subject warns about.** Three
+spellings of one vocabulary — `FLAGS`, `parseArgs`'s literals, `OPTIONS_HELP` — and the list a
+maintainer would edit first was the one nothing read: two lists plus a decoy. The test reads all
+three from the source so it cannot become a fourth copy. But a driver found four ways to make
+them genuinely disagree while it stayed green, and the fourth is the instructive one: `--http2`
+added CONSISTENTLY to two lists, where the flag-name class `[a-z-]` matched neither literal, so
+**both extractors returned nothing and the equality was vacuously satisfied**. Two comparators
+agreeing because both are broken is the one way a comparison test proves nothing — the same shape
+as the cross-store gate that shipped twice agreeing on `MAX(seq)`. The others were cheaper and
+just as real: `a==="--x"` with no spaces defeated a regex keyed on the comparison SYNTAX rather
+than on the spellings, and `["--x"].includes(a)` did too. `parsed()` now scans every
+dash-prefixed string literal in the body, because a parser cannot compare against a flag it does
+not spell.
+
+**Two false POSITIVES mattered as much.** A `<name-or-id>` placeholder made the gate report
+`-or-id` as an advertised-and-unimplemented flag, and a comment inside `FLAGS` was read as a
+declaration. This repo already knows *"a guard that cries wolf on correct code is worse than no
+guard, and its first false positive will be its own bug"* — both were, and both were found by
+driving edits nobody would think to write a test for.
+
+**The precedent's own capitalised lesson, ignored while citing the precedent.**
+`known-flags.test.ts` says in capitals that iterating the list under test is self-referential:
+drop a flag from the list and the loop drops it too, so the mutation goes green. I cited that file
+as the model for this one and then iterated `FLAGS` in the behavioural test. It iterates
+`advertised()` now — the operator-facing promise, which is the honest thing to hold a parser to.
+**Reading a precedent is not applying it.**
+
+**What this says about how the review was set up, which is the transferable part.** The plan's
+Accept verified the `args.ts` half three ways — gates, a hand-drivable outcome, a mandatory
+mutation sweep — and gave the four core docstrings NO verification at all, because "correct a
+comment" does not look like it needs any. That asymmetry is what let a provably false claim about
+engine behaviour ship in the same commit that fixed four false claims. **A prose change asserting
+a fact about running code is a claim, and a claim with no Accept line is unverified whatever the
+diff looks like.**
+
+Two corrections to the record fell out of the same session. `packages/eagent/CLAUDE.md`'s house
+convention still said *"always use `.js` import specifiers even when importing a `.ts` file"* —
+inverted by the conformance that rewrote 1032 specifiers at the move, so an agent following it
+writes imports that resolve to nothing; measured, zero `.js` and 433 `.ts` in that package. And
+its *"THERE IS NO `tsx` ANY MORE"* is true of the engine and false of `tui/`, three lines below a
+command that invokes it — Node cannot strip `.tsx` at all, which is also why no root gate runs the
+TUI's 17 tests. Both fixed under that file's own rule that the code wins.
+
+**Reversal condition:** if `parseArgs` is ever made to iterate `FLAGS` through a
+`Record<Flag, Handler>` — the type-checked answer this repo says to prefer, deferred openly rather
+than argued away — then two of the three comparisons here become compile-time and this test
+should shrink to the `OPTIONS_HELP` half, which no type checker can hold.

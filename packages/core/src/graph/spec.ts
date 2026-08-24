@@ -660,26 +660,38 @@ export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
 };
 
 /**
- * Node types that can suspend a Run mid-execution (D5.1 invariant 3).
+ * Node types D5.1 says can suspend a Run mid-execution.
  *
- * **A CLAIM ABOUT THE ENGINE, NOT AN INPUT TO IT.** `grep -arn 'CAN_SUSPEND' packages/core/`
- * returns this line and the `scripts/surface.json` pin. Which node types actually suspend is
- * decided by `Engine`'s per-type arms — the ones that can return a gate — and nothing compares
- * those against this set, so a ninth node type could suspend without appearing here.
+ * **NOTHING READS THIS, AND IT IS NOT TRUE.** Both halves were checked, and the second is the
+ * one that matters: `grep -arn 'CAN_SUSPEND' packages/core/src scripts/` returns this line and
+ * the `scripts/surface.json` pin, so no decision consults it — and if one did, it would be
+ * wrong. **Every node type can suspend.** The gate that suspends a task is raised in
+ * `Engine.#executeTask` from `decision.effect === "gate"`, BEFORE `#dispatch` picks a per-type
+ * arm, and `PolicyRequest` carries `kind: "node" | "tool"` and no node type at all — it decides
+ * on declared posture, data classification, irreversibility and taint. So a `function` node with
+ * `policy: {posture: "in"}`, or one writing a `secret_ref`-classified channel, gates like any
+ * other.
+ *
+ * Measured, not reasoned: a one-node graph whose only node is `type: "function"` with
+ * `policy: {posture: "in"}` reaches `awaiting_gate` with `gate.raised` for `f@root#0`. Three
+ * of the four types absent from this set behave the same way, by the same path.
+ *
+ * Kept and exported because it is pinned in `scripts/surface.json` — removing it is a
+ * public-surface change and a separate decision — and left here as a WARNING rather than a
+ * reference. `design/loom/02-EXECUTION-GRAPH.md` D5.1 has been corrected to match.
  */
 export const CAN_SUSPEND: ReadonlySet<NodeType> = new Set<NodeType>(["agent", "tool", "human_gate", "subgraph"]);
 
 /**
- * Node types the scheduler may run inline on the committing worker.
+ * Node types D5.1 says the scheduler may run inline on the committing worker.
  *
- * **`scheduler.ts` NEVER CONSULTS THIS**, and both this docstring and `CAN_SUSPEND`'s used to
- * read as invariants the scheduler enforces. It reads neither — it does not mention `node.type`
- * at all. Same grep, same two hits: the declaration and the surface pin.
+ * **`scheduler.ts` NEVER CONSULTS THIS.** Both this docstring and `CAN_SUSPEND`'s used to read
+ * as invariants the scheduler enforces; it reads neither, and does not mention `node.type`
+ * anywhere in the file. Same grep, same two hits: the declaration and the surface pin.
  *
- * Both sets are kept and exported rather than deleted, the treatment
- * `GRAPH019_CPUBOUND_NO_EFFECT` established for a declaration that binds nothing. They are
- * accurate today and they are documentation; **the first decision made from either one is also
- * the moment it needs a test against the code it describes.**
+ * This set is the complement of `CAN_SUSPEND` and inherits its defect — the justification for
+ * running these three inline is that they "terminate without external input", and a `function`
+ * node that gates does not. Read the warning above before making any decision from either.
  */
 export const CONTROL_TYPES: ReadonlySet<NodeType> = new Set<NodeType>(["router", "join", "function"]);
 
