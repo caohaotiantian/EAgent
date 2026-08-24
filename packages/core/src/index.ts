@@ -7,6 +7,7 @@
  * minimalism guard, corrected".)
  */
 
+export * from "./agent.ts";
 export * from "./vocab.ts";
 export * from "./ids.ts";
 export * from "./errors.ts";

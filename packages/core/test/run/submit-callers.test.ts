@@ -38,6 +38,16 @@ const CALLERS: Readonly<Record<string, { readonly sites: number; readonly why: s
       "supplies it, from the CREDENTIAL and never the request body. This is the door real " +
       "deployments use, and the one place a principal is actually authenticated.",
   },
+  "agent.ts": {
+    sites: 1,
+    why:
+      "the one-line surface, which supplies it ONLY from `AgentOptions.as`. An in-process " +
+      "library call authenticates nobody, so the same reasoning as the CLI applies: inventing " +
+      "a subject would be the synthetic-principal failure, and recording none leaves the run " +
+      "in the permissive set. It is harmless under the default in-memory journal, where no " +
+      "other process can see the run at all, and it is the embedder's decision the moment " +
+      "they pass a store a control plane also serves.",
+  },
   "cli.ts": {
     sites: 1,
     why:
