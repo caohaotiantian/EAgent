@@ -7296,3 +7296,47 @@ falsifiable by a real reader appearing, and immune to being edited.
 The general form, and it outranks the specific trap: **when a claim is about the artifact that
 contains it, state the invariant, not the measurement.** A measurement of a self-referential set
 is a fact about the moment before you wrote it down.
+
+---
+
+## The UI question, answered: web, not terminal — and the answer was cheaper than the audit implied
+
+`packages/eagent/tui` surfaced during a state audit as 42 tracked files and 17 test files that no
+gate runs, in a directory the ROOT `CLAUDE.md` does not mention. The audit framed it as a hole to
+close. **The maintainer closed it the other way: do not develop the TUI; the UI direction is the
+web console, for extensibility and rich display.**
+
+That is worth recording as a decision rather than a deletion, because the framing was wrong and
+the correction generalises. The item read as "an ungated surface, therefore a gap", and the honest
+question was never "how do we gate it" but **"is anyone investing in this surface at all?"** Once
+that is asked, the cost side settles it too: Node 24 cannot strip `.tsx` — measured, it does not
+parse the file as TypeScript at all — so gating the TUI means reintroducing `tsx`, which this
+package's guide says in capitals no longer exists here, or adding a build step for tests that the
+toolchain does not have. **Changing a stated toolchain fact to gate a surface nobody is growing is
+the worst of both.** The tier list this came from had already recorded `tui/**` as *not
+load-bearing*; nobody had connected that to the gating question.
+
+**So the TUI is frozen rather than removed.** It stays tracked — it owns the published `eagent`
+bin, and deleting 42 files is not what "no need to develop" asked for — but it is now recorded as
+not-developed and not-gated, which is the difference between a decision and an oversight. EAgent's
+supported entry point is the headless `src/cli.ts`.
+
+**And the web direction needs no new build, which is the part worth checking before anyone starts
+one.** `server/console.ts` already ships inside the binary: vanilla JS and inline SVG, no bundler,
+graph canvas, live SSE, approve/reject queue, 592 lines. Its docstring anticipated this decision
+in one sentence — *"A React console can come later against the same API"* — and the reason it can
+is that the console was built as a CLIENT of `/runs`, `/gates`, `/graphs/:name` and
+`/runs/:id/events` rather than as a privileged inhabitant of the process. **That is the property
+to protect.** A richer UI is a second client of the same contract; the moment one needs a private
+route or in-process state, the zero-dep binary and the "console ships inside it" claim both stop
+being true.
+
+One thing this does NOT settle, and it should be asked before any UI work: a richer display is
+worth most where the plane has the most to say, and half the telemetry plane is designed and
+unbuilt — eight `loom.*` span names carry `DESIGNED-NOT-BUILT`, and roughly fifteen documented
+span attributes are never set. **A better window onto a plane that is not emitting is a better
+window onto nothing.**
+
+**Reversal condition:** a deployment where no browser can reach the control plane. The TUI is the
+answer that already exists for that case, which is the argument for freezing it rather than
+deleting it.

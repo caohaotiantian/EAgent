@@ -405,11 +405,31 @@ for reasons, not forgotten.
   monorepo — does not mention the directory at all. The gap is between the two guides, not a
   missing one.
 
-  **Bringing it in is not free, and that is the decision.** Node 24 cannot strip `.tsx` at all
-  (measured: it does not even parse the file as TypeScript), so the TUI's tests need either
-  `tsx` — a loader `packages/eagent/CLAUDE.md` says in capitals no longer exists here — or a
-  build step for tests, which this toolchain also does not have. Either way it changes a stated
-  toolchain fact, which is why this is escalated rather than done.
+  **DECIDED 2026-08-24 by the maintainer: the TUI is not developed further, and the UI direction
+  is the WEB console.** The reason given was extensibility and rich display, and it is the
+  cheaper answer as well as the better one — bringing the TUI inside the gate is not free. Node
+  24 cannot strip `.tsx` at all (measured: it does not even parse the file as TypeScript), so its
+  tests need either `tsx`, a loader `packages/eagent/CLAUDE.md` says in capitals no longer exists
+  here, or a build step for tests this toolchain does not have. Either route changes a stated
+  toolchain fact to gate a surface nobody is investing in.
+
+  **What that settles, and what it does not.** `packages/eagent/tui` stays TRACKED — it owns the
+  published `eagent` bin and deleting 42 files was not what was asked — but it is frozen: not
+  developed, not gated, and now recorded as such rather than looking forgotten. EAgent's
+  supported entry point is the headless `src/cli.ts`. The `FLAGS` coupling in §6 loses its
+  urgency for the same reason, and `test/args-vocabulary.test.ts` already covers the half that
+  can reach a user.
+
+  **The web UI is not a new build.** `server/console.ts` already ships inside the binary —
+  vanilla JS and inline SVG, no bundler, graph canvas, live SSE, approve/reject queue — and its
+  own docstring anticipates exactly this: *"A React console can come later against the same
+  API."* So the direction is to grow that surface, or build a richer one against the same
+  HTTP + SSE contract, rather than to start anything. **The one thing to protect is the
+  contract**: the console is a CLIENT of `/runs`, `/gates`, `/graphs/:name` and
+  `/runs/:id/events`, and a richer UI is worth having only if it stays one.
+
+  **Reversal condition:** if a deployment needs an operator surface where no browser can reach
+  the plane, the TUI is the answer that already exists and this decision is the thing to revisit.
 
   It compounds the `FLAGS` item above: the TUI is a front end `args.ts` serves, so drift between
   them goes red nowhere.
