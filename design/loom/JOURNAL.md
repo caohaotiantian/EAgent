@@ -6709,3 +6709,90 @@ the same" is exactly the claim that rots.
 invisible in the code — the evaluator arm reads `out.writes` in one line that looks correct — and
 obvious the moment an assertion evaluator ran with a body written the way an author would write
 it.
+
+---
+
+## The backlog was five lists in four files, and none of them was ordered
+
+A request to record everything unfinished turned out to be a request to reconcile five sources
+that had never been read against each other: `HANDOFF.md` §1–6, `REGISTER.md`'s entry headers,
+`README.md`'s *What does not work yet* table, `docs-drift.test.ts`'s two registries, and the
+`DESIGNED-NOT-BUILT` markers spread across eleven design documents. Each was internally
+consistent. Between them, six claims had gone stale.
+
+**They were stale in the dangerous direction, all six.** Not "we said this works and it does
+not" — the register is full of that and it is the direction that gets found, because somebody
+runs the thing. These said *this is missing* about mechanisms that had been built.
+`02-EXECUTION-GRAPH.md` D5.1 told a reader the router's closed-set check "does not exist. Do not
+read the gate check as covering routers; nothing does", two bullets below a worked example of a
+mutation skipping a human gate. `GRAPH005_ROUTE_NOT_OWN_EDGE` had been in `validate.ts` for some
+time, with a runtime half and three test files. A reader who believed the document either
+rebuilds the check or stops trusting the one that is there.
+
+**The reason none of the six was caught is worth more than the six.** `docs-drift.test.ts` reads
+formal `DESIGNED-NOT-BUILT(…)` and `NOT-IN-CODE(…)` markers and fails when a marked symbol turns
+out to exist. Every one of these six was PROSE. So the guard fails on a stale marker and is
+silent on a stale sentence making the identical claim — REGISTER D6's "the drift guard checks
+names in MARKDOWN, not behaviour" arriving one level over. The guard is a tripwire for the
+vocabulary, not for the claims, and the corpus states its absences in both.
+
+The guard did fire twice while this was being written, both times correctly: it rejected a
+marker naming `SourceHealth`, because the registry admits span names and error codes only, and
+it caught a literal `DESIGNED-NOT-BUILT(…)` written inside a sentence *about* markers. A guard
+that catches its own documentation is working.
+
+**Ordering the list changed what the list contains.** Grouped by kind — defect, unwired,
+deferred, blocked, small — three separate items turned out to be consequences of one absence:
+there is no read model of open gates, so `GateSweeper` loses an SLA outside its window, `GET
+/gates` caps at 200 gates over the 500 newest runs, and A3's own stated reversal is "an open-gate
+index beside `run_head`". `CLAUDE.md` invariant 2 names `human_gates` as a read model; the
+durable schema is `meta`, `journal`, `run_head`, `task_fence`. One fix, three consumers, and
+nothing in five documents said so because each named its own consequence.
+
+The same regrouping merged two rewind defects one method apart (A10 and E5), merged E6 with the
+`task.cancelled` appender it needs, and found that the three `pins`-style content kinds —
+function bodies, hook bodies, subgraph specs — are one seam wearing three entry numbers. That
+last one has already rotted once: the claim was written about hooks alone and went stale the
+moment hook invocation landed.
+
+**And Tier C is half again as large as `HANDOFF.md` §3 said.** §3 lists nine things needing a
+product decision. Five more of comparable size sit in the design documents stated as designed
+and unbuilt rather than deferred — admission control, the operator intervention surface, the
+`preAuthorization` envelope, the bounded mailbox, the circuit breaker — so §4's `DEFERRED-v2`
+justifications do not cover them and §3 never picked them up. `08-PLAN.md` §D14.2 additionally
+holds six questions explicitly marked "a human must answer before implementation", which had
+never been put to one.
+
+**Reversal condition for the ordering itself:** it is ordered by *no decision needed, then
+dependency, then cost*. If the human answers Tier C, the order changes — compensation and the
+intervention surface are large and would outrank most of what is scheduled now.
+
+## A refusal can have a test and still be untested
+
+`E8` said two load-bearing refusals in `http.ts` had no test. Both had one; both tests were
+addressed to the side of the guard that cannot exercise it.
+
+`#sharedToken` pads the presented token UP to the expected length before the constant-time
+compare, which is what makes the buffers comparable — and also truncates anything longer, so on
+the bytes alone `s3cretEXTRA` and `s3cret` are equal. `presented.length === expected.length` is
+the whole of what stops a prefix match. Every wrong token the suite sent was SHORTER than the
+secret, and a short token fails on the padded bytes whether the guard is present or not. 1992
+tests, and none of them supplied an input that would fail without the line.
+
+The constructor's other half is the same. `token: ""` was pinned with a full reproduction;
+`typeof token !== "string"` — the half of the same condition that catches `[]` — was not, and
+with it removed the plane constructs, reports `auth: "required"`, and serves `GET /runs` to a
+caller with no header at all.
+
+**The question to ask of a guard is not "is it tested".** It is "does any test supply an input
+that would fail without it" — which is what a mutation answers and what reading the test file
+does not. This is `E4`'s guards-with-no-test one level in, and the harder level, because the
+green checkmark is right there next to the guard's name.
+
+The first draft of the fix got one assertion wrong in an instructive way: it asserted `Bearer
+s3cret ` must be refused, and it is not — RFC 7230 makes surrounding whitespace optional in a
+field value and `node:http` strips it, so the suffix never reaches the guard. Measured on a bare
+`createServer`, the handler sees `"Bearer s3cret"` for both requests; `"\0"` never leaves the
+client, refused by `Headers.append`. **A test input has to survive the transport to reach the
+branch it is aimed at**, which is the same failure the guard's original coverage had, arriving
+from the other side within the hour.

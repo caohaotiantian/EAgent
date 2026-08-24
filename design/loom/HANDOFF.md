@@ -24,12 +24,12 @@ known to be wrong, what to do next, and what will bite you.
 
 ## Where things stand
 
-Measured **2026-08-23**, tree clean, `npm run check` green end to end.
+Measured **2026-08-24**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3505 pass, 0 fail, 1 skipped** (Loom 1962 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 252 (121 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3535 pass, 0 fail, 1 skipped** (Loom 1992 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 256 (125 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -139,8 +139,75 @@ is a statement about the checks that exist, and the checks are the thing to dist
 
 ## What is left
 
-Ordered by what a fresh session should pick up first. Everything here was verified against
-`src/` on 2026-08-21 — not recalled, and not taken on a reviewer's report.
+The sections below group by KIND — defect, unwired, deferred, blocked, small. **The table
+immediately below orders the same items by what to do first**, which is a different question and
+the one a fresh session actually has. Read the order here, then the detail in §1–§6.
+
+### The order, and why it is this order
+
+Ordering rule: **no decision needed before value**, then **dependency before dependent**, then
+cost. An item that needs a human answer cannot be scheduled, so it is not competing with the
+rest — it is waiting, and §C below says who is waiting on what.
+
+| # | Do | Why here | Detail |
+|---|---|---|---|
+| ✅ | ~~The two `http.ts` auth refusals with no test~~ | done — `test(server): the two auth refusals that fail open…`. Both mutation-verified | REGISTER E8 |
+| ✅ | ~~Six stale absence claims in the corpus~~ | done — `docs(loom): six sentences claimed an absence…` | REGISTER B5/B6/B9/C1; `02` D5.1; `07` D12.7; `08` A8; `05` D8.7 |
+| **1** | **Cancel the losing `parseCallback`** | An unauthenticated route where each hung POST leaks a pending continuation holding the body. Nothing else is both reachable by a stranger and unbounded | §2, REGISTER A5 consequence 1 |
+| **2** | **Let a `function`/`evaluator` body signal a RETRYABLE failure** | The README advertises `retry` and it is inert for two of eight node types. Self-contained; no dependency | §6, REGISTER B10 |
+| **3** | **Close the `Math.random` hole in the `vm` realm** | Invariant 4's one admitted gap. `Date` is already `undefined` one line away, so the cheap answer is consistent rather than novel — **carries a small decision**, see §C | §2 T-list, REGISTER D11 |
+| **4** | **The `pins` seam, all three content kinds at once** | `FunctionLoaderOptions.pins` and `HookLoaderOptions.pins` are accepted and never supplied, so the manifest-digest branch is unreachable through `bin/loom`; A24 is the same seam for subgraph specs. **Fixing one kind and not the others is how this claim rotted the first time** | §6, REGISTER B6/A24 |
+| **5** | **`Engine.rewind`'s two scan defects together** | A10 (the boundary refusal reads `gate.decided` and skips the identical `gate.timeout` + `run.failed` append) and E5 (the rejection scan over-refuses). One file, one method, one review | REGISTER A10, E5 |
+| **6** | **An open-gate read model** | The one architectural unlock in the backlog: three recorded items are consequences of one absence. Storage layout, so Deep | §6, REGISTER B7 + A3's stated reversal + `GET /gates`' cap |
+| **7** | **`task.cancelled` and the leased-after-cancel Task** | E6 is untidy state; its fix is the appender C1 names. One change, not two | REGISTER E6, C1 |
+| **8** | Partial reads swept but not finished — A21, A18, A13/A15, A14's unconfirmed half | Each is residue of a sweep that stopped at its first finding. Real, none urgent | REGISTER A21, A18, A13, A15, A14 |
+| **9** | Unbounded and unobservable structures | `ResourceStore.#versions`/`#byDigest`/`#selectors` grow without bound; neither new cap emits a counter, so `MAX_CACHED_CHILD_GRAPHS`' own reversal condition is unmeasurable | REGISTER A8 |
+| **10** | Declared-and-unread fields, in one pass | `NodePlan.inboundEdges`, `GraphMetadata.labels`, `ExpansionBudget.maxLoopIterations`, `DelegationSpec.mustStayInGroup`/`maxDepth`, `ToolNode.version`, `AssembleInput.turns`, `SectionName "tool_results"`. `GRAPH019` is the pattern to follow — warn at compile rather than delete | §6 |
+| **11** | Docstrings claiming a consumer they do not have | `OBSERVER_POINTS` ("asked at every call site" — nothing reads it), `CAN_SUSPEND`, `CONTROL_TYPES`, `createGraphCompiler`. And in `packages/eagent`, `args.ts`'s exported `FLAGS`, which `parseArgs` shadows with string literals — **that one is a live drift hazard, not dead weight** | §6 |
+| **12** | The rare suite flake, and E3's two transient failures | Two observations, 20 clean runs since, no identification. Chase with `--test-reporter=tap` **from the first run** | *Traps*, REGISTER E3 |
+
+**Not in the order, and deliberately:** everything in §4 (`DEFERRED-v2` — each has a one-line
+justification in `08-PLAN.md`), everything in §5 (blocked by a constraint we chose), and §C
+below (blocked on a human).
+
+### C · Blocked on a decision only a human can take
+
+These are **not** scheduled above, because picking one unilaterally is the failure this
+repository names most often. Each row's question is in §3 or in the source cited.
+
+`HANDOFF.md` §3 has nine: compensation firing semantics · `JoinNode.timeoutMs` (**doubly
+blocked** — the deadline needs lease reclaim, which needs G3, deferred) · `Budget.tokens` and
+`Budget.wallMs` · a subgraph span and a parent→child trace route · a `cpuBound` worker pool ·
+B11 function-body replay · retention tiering · quorum/delegation/trust tiers ·
+`run.cancelled.forced`.
+
+**Five more of comparable size that §3 does not list**, each stated in the corpus as designed
+and unbuilt rather than deferred, so §4's justifications do not cover them either: **admission
+control and rate-limit backpressure** (D6.3 levels 1 and 3 — `E_ADMISSION_REJECTED` is raised by
+nothing, so `POST /runs` admits everything it can authenticate, and a provider rate limit is
+absorbed by a retry that sleeps *holding the slot*) · **the operator intervention surface**
+(D7.5 — no `pause`, `resume`, `steer`, `redirect`, `kill`) · **the `preAuthorization` envelope**
+(D7.10 — not a field of `GraphSpec` at all, so a graph declaring it gets silence) · **the
+bounded agent-to-agent mailbox** (D6.6, distinct from §4's deferred free-form blackboard) ·
+**the circuit breaker** (D3.5 — `SourceHealth` appears nowhere in `src/`).
+
+**And `08-PLAN.md` §D14.2 already holds six questions marked *"a human must answer before
+implementation"*** that were never put to one: Q2 real performance numbers · Q4 which approval
+*callback* is mandatory · Q6 which providers must work at GA · Q8 the identity/RBAC source of
+truth · Q9 the first real workflow to port · Q10 the EAgent migration path.
+
+### What a marker sweep of the whole corpus found, so it is not re-run blindly
+
+**`design/loom/` carries 32 `DESIGNED-NOT-BUILT` occurrences over 16 distinct symbols, 18
+`DEFERRED-v2`, and 2 `NOT-IN-CODE`** — `grep -arnE 'DESIGNED-NOT-BUILT|NOT-IN-CODE|DEFERRED-v2'
+design/loom/` is the inventory command, and `docs-drift.test.ts` already gates every one.
+
+**`packages/*/src/` carries none of the usual markers at all.** Zero `TODO`, `FIXME`, `XXX`,
+`HACK`, `@ts-expect-error`, empty `catch`, or thrown stubs across both packages; every `() => {}`
+is a kill-switch disposer, a deliberate stream-cancel swallow, or a silent-logger default.
+**The unfinished work here is not marked** — it is inert fields, events with a fold and no
+appender, and uncalled exports. That is why the register and the design corpus are the only
+places it surfaces, and why a grep for markers is not a way to find it.
 
 ### 1 · Defects — something claims to work and does not
 
@@ -338,6 +405,61 @@ for reasons, not forgotten.
   real delta over per-file `fs.restore`), `limits`' output spill, and `memory`'s retrieval half,
   which is the only thing that would populate `retrieved`. None of it is urgent now that the
   code is in the tree and readable.
+- **Neither resource loader is ever handed its `pins`, so the shipped binary cannot enforce a
+  pin.** `FunctionLoaderOptions.pins` and `HookLoaderOptions.pins` are both accepted and both
+  unset — `cli.ts` constructs each loader with `{ store }` alone — which makes the
+  manifest-digest enforcement branch in each one unreachable through `bin/loom`. The consequence
+  is the one A22 closed for prompts: a promotion between compile and execute swaps a body under
+  a live run. **`subgraph` is the third content kind with the same seam (REGISTER A24), and this
+  is the entry that says so.** The first version of this claim was written about hooks alone and
+  went stale as soon as the invocation landed, which is the argument for fixing all three
+  together: `03-RUNTIME.md` D6.9 and both loader docstrings each concede their own half.
+
+- **Fields declared and read by nothing, beyond the eleven the spec-field sweep recorded.** The
+  sweep above covered `graph/spec.ts`'s interfaces; these came from a wider pass.
+  `GraphMetadata.labels` has ONE occurrence in the entire tree. `ExpansionBudget.maxLoopIterations`
+  is read by neither the engine nor `validate.ts`, while its three siblings all have readers —
+  `engine.ts` argues `GRAPH006_UNBOUNDED_LOOP` covers the need, which is true and leaves the
+  field inert. `DelegationSpec.mustStayInGroup` and `maxDepth` are unread (`allowed` is read only
+  in order to be REFUSED). `ToolNode.version` is declared required by the type and enforced by
+  nothing, because the engine looks a tool up by NAME. In `run/context.ts`: `AssembleInput.turns`
+  is never supplied any more than `retrieved` is, `SectionName "tool_results"` is declared and
+  prioritised and `buildSections` never constructs one, and the sole caller of `assembleContext`
+  reads `assembled.channels` and discards the other five fields. **`GRAPH019` is the precedent
+  for all of these** — warn at compile that the declaration does nothing, rather than delete a
+  public field or silently keep accepting it.
+
+- **Docstrings that name a consumer they do not have.** `OBSERVER_POINTS` says it is *"asked at
+  every call site"*; nothing reads it. `CAN_SUSPEND` and `CONTROL_TYPES` are documented as
+  invariants the scheduler enforces and `scheduler.ts` never consults either. `createGraphCompiler`
+  wraps a `GraphCompiler` interface whose `analyze` is unused, while all six in-tree compile sites
+  call the bare `compile()`. These are cheaper than a field to fix — the docstring is the defect.
+  **One is different and is a live hazard**: `packages/eagent`'s `args.ts` exports `FLAGS` saying
+  the help text and a parity test read it, and `parseArgs` re-lists every flag as string literals
+  instead, so the list and the parser can disagree with nothing going red. That is the same shape
+  as `KNOWN_FLAGS`/`USAGE`, which this repo already gates as ONE set in `known-flags.test.ts`.
+
+- **The whole `evolution/` subsystem and all of `journal/retention.ts`'s tiering have no caller
+  in `src/`** — `foldTrajectory`, `measureCohort`, `promotionCeiling`, `requirePromotable`,
+  `InMemoryCohortBaseline`, `TierManager`, `MemoryTierStore`, `tierFor`. Both are consistent with
+  §3 and §4 (capture and scoring ship, the generator does not; tiering needs a cold store), and
+  are recorded here so the absence of callers is not re-discovered as a defect.
+
+- **The evolution promotion gate is weaker than `06-EVOLUTION.md` D10.d documents, on six of its
+  eight criteria** — `maxAgeDays` declared and unenforced, a bare point-estimate comparison where
+  the design asks for McNemar plus a Wilson interval (*"arithmetic only, no dependency"*, so the
+  zero-dep rule is not the obstacle), no `medianCostUsd` so one pathological case can carry the
+  ratio, `promptGrowth` and `postureDiffNonNegative` both caller-supplied and trusted, and
+  injection-resistance cases *"not checked, and cannot be expressed"*. The document says all six;
+  nothing in this file did.
+
+- **Half the telemetry plane is designed and unbuilt, and two reversal conditions depend on it.**
+  Eight `loom.*` span names carry `DESIGNED-NOT-BUILT`, roughly fifteen documented span attributes
+  are never set with no guard over the attribute set, and the task-selection span is marked in
+  two documents while missing from `05`'s own inventory table. The consequence is in §5 already for
+  the scheduler tick, and it generalises: DL-1's and D12.8's reversal metrics are p99s over spans
+  emitted nowhere, so each **reads as a check that passed**.
+
 - **EAgent's tsconfig relaxes three flags Loom sets** (`exactOptionalPropertyTypes`,
   `noPropertyAccessFromIndexSignature`, `noImplicitReturns`). Turning them on is a migration
   somebody may choose; the gate does not require it.
