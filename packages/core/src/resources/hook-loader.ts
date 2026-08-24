@@ -65,6 +65,15 @@ const HOOK_BRIDGE = `
 })();
 `;
 
+/**
+ * SAME SEAM AS `FunctionLoaderOptions.pins`, same reason it is unwired, and the same measured
+ * exposure: `cli.ts` builds this loader with `{ store }` alone, so the manifest-digest branch is
+ * unreachable through `bin/loom`. What keeps that from being a live hole is that a
+ * `ResourceStore` in the shipped product is sealed after boot —
+ * `test/resources/store-is-sealed-after-boot.test.ts` names the three sites that would have to
+ * change for it not to be. Function bodies, hook bodies and subgraph specs (REGISTER A24) are ONE
+ * seam wearing three entry numbers; fix them together or the claim rots the way it did last time.
+ */
 export interface HookLoaderOptions {
   readonly store: ResourceStore;
   /** ref → the digest the compiler pinned. See the module docstring for why this is optional. */

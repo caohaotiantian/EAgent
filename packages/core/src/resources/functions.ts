@@ -44,6 +44,14 @@
  * in `run/` currently passes a manifest. Until it does, an embedder that constructs the
  * loader itself gets the guarantee and the default engine path does not.
  *
+ * WHAT MAKES THAT SURVIVABLE IS MEASURED, NOT ASSUMED. A promotion between compile and execute
+ * needs something able to MOVE a ref while a process runs, and in the shipped product nothing
+ * is: `test/resources/store-is-sealed-after-boot.test.ts` pins the three sites that would have
+ * to change — no `.publish(`/`.promote(` anywhere under `src/`, exactly one `readResources`
+ * call (the boot seed), and no HTTP route addressing a resource at all. An EMBEDDER holding a
+ * store can still move one, and then this seam is the fix. When a publish route or a hot-reload
+ * path arrives, one of those three assertions goes red and sends its author here first.
+ *
  * That seam is also why a manifest-bound loader belongs to ONE RUN. `FunctionRegistry`
  * caches a loaded body under the REF, not the digest, so a registry shared across runs
  * would hand run B whatever run A's manifest resolved that ref to — the same drift by

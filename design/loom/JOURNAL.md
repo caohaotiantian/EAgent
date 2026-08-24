@@ -6937,3 +6937,44 @@ fixes this is not "who else calls this", which was asked and answered correctly 
 millisecond never elapses — so the first version of the test showed one retry where two were
 expected, and read as "the mechanism half works" rather than "the clock never moved". A test of
 anything scheduled needs a clock that moves, and it still need not be a real one.
+
+---
+
+## The wave that should not be built, and how running the check said so
+
+Next in the order was the `pins` seam — two loaders that accept a manifest and are never handed
+one, so the digest-enforcement branch in each is unreachable through the binary. The consequence
+the docstrings name is real: a promotion between compile and execute swaps a body under a live
+run, which is the defect A22 closed for prompts and A24 still records for subgraph specs.
+
+The code names three obstacles to fixing it, and all three are true. `FunctionRegistry`'s loader
+seam carries no run identity. The registry caches under the REF, not the digest, so a shared
+registry hands run B whatever run A's manifest resolved. And `resolveManifest` walks the
+top-level spec only, so a loader closed over the parent's manifest is asked for a child's ref,
+misses, and fails closed — killing a run doing nothing wrong. That is a redesign of resource
+resolution, which is what A24 has said all along.
+
+**So the question became whether it needs doing now, and that turned on a sentence three files
+repeated without checking: "exposure today is nil".** Swapping a ref mid-run needs something able
+to MOVE a ref while a process runs. Enumerated: **zero** `.publish(`/`.promote(` call sites
+anywhere under `src/`; **exactly one** `readResources` call, the boot seed in `openWorkspace`;
+**no HTTP route addressing a resource at all** — thirteen routes, every one of them runs, gates,
+graphs or health. There is no way, through the shipped binary or the shipped server, to change
+what a ref resolves to after boot.
+
+**The right output of this wave was therefore a guard, not a redesign.** The sentence was true
+and unchecked, which in this repository is a sentence waiting to go stale — three of them had
+already gone stale in the corpus this week, all in the same direction. It is now
+`store-is-sealed-after-boot.test.ts`, three assertions, each mutation-verified: add a
+`.promote(` in `src/`, add a second `readResources`, or add a `/resources` route, and exactly one
+of them goes red.
+
+That converts A24 from "a defect waiting to bite" into **a guarantee held up by an absence, with
+the absence made loud**. The first publish route or hot-reload path anyone adds now fails a test
+whose message sends them to the loaders before it ships — which is the whole value the redesign
+would have bought, at a fraction of the cost, and without touching a seam G3 will redefine.
+
+**The general form, and it is the more useful half:** when a backlog row's fix is expensive, check
+what the row assumes before pricing the fix. This one assumed a trigger existed. Two greps and a
+route count later, the honest wave was to hold the assumption still rather than to build against
+it. Not every open entry wants closing; some want pinning.

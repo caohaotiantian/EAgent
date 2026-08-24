@@ -372,8 +372,25 @@ returns nothing.
 by REF.** Split out of A23 rather than folded into it. `engine.ts`'s `#runSubgraph` calls `this.#resolver.subgraph?.(sub.ref)` while a
 Task is executing, so a promotion between compile and execute swaps the child graph underneath
 a running parent — the defect `resources/functions.ts` records for function bodies and A22
-closed for prompts, still open for the third kind of content. Exposure today is nil: nothing
-promotes at run time and the CLI's store is seeded once at boot. The fix is the one A22 used —
+closed for prompts, still open for the third kind of content.
+
+> **"EXPOSURE TODAY IS NIL" IS NOW MEASURED AND GUARDED, 2026-08-24, and it was previously a
+> belief.** The sentence had stood in this entry, in `functions.ts` and in `hook-loader.ts`
+> without anything checking it. Swapping a ref mid-run needs something able to MOVE one while a
+> process runs, and the shipped product has nothing: **zero** `.publish(`/`.promote(` call sites
+> anywhere under `src/`, **exactly one** `readResources` call (the boot seed in `openWorkspace`),
+> and **no HTTP route addressing a resource at all** — 13 routes, all runs, gates, graphs and
+> health. `test/resources/store-is-sealed-after-boot.test.ts` pins all three, each
+> mutation-verified.
+>
+> So the disposition of this entry changes: it is not a defect waiting to bite, it is a
+> **guarantee held up by an absence** — and the absence is now the thing that fails loudly. The
+> first publish route, hot-reload path, or admin endpoint turns one of those three assertions red
+> and sends its author to the loaders before it ships.
+>
+> **And it is one seam wearing three entry numbers**: function bodies
+> (`FunctionLoaderOptions.pins`), hook bodies (`HookLoaderOptions.pins`) and subgraph specs
+> (this). Fixing one and not the others is exactly how the hooks half of B6 rotted. The fix is the one A22 used —
 freeze the child spec into `RunGraph` beside `documents` — and it is a redesign of subgraph
 resolution rather than a one-line guard, which is why it is its own entry.
 
