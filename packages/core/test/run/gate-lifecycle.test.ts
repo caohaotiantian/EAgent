@@ -39,6 +39,7 @@ import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { HumanGateBroker, type GateRequest } from "../../src/run/gates.ts";
 import { RunLog } from "../../src/run/log.ts";
+import { suppressedRanges } from "../../src/run/projection.ts";
 import { foldRun, type RunStatus } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { ZERO_USAGE } from "../../src/vocab.ts";
@@ -327,6 +328,53 @@ test("REWIND DOES NOT REPLAY PAST A HUMAN'S REJECTION", async () => {
   assert.equal(after.gates[gateId]?.state, "decided", "…and the gate is not back in anybody's queue");
   assert.equal(after.gates[gateId]?.decision, "reject");
   assert.equal(h.writes.length, 0, "AND THE ACTION THE HUMAN REFUSED DID NOT HAPPEN");
+});
+
+test("A REJECTION CAN NEVER BE INSIDE A SUPPRESSED RANGE — which is why the scan need not filter one", async () => {
+  // REGISTER E5 says `rewind`'s rejection scan reads `(atSeq, head]` "without excluding events an
+  // earlier rewind already suppressed, so a rejection whose effect was already erased still blocks
+  // a new rewind", and records the fix as blocked on exporting `suppressedRanges`.
+  //
+  // BOTH HALVES ARE STALE. `suppressedRanges` is exported and is in the pinned public surface —
+  // `journal/audit.ts` needed it — so the stated obstacle is gone. And the over-refusal it
+  // describes is not reachable, for a reason that is worth a test rather than a paragraph:
+  //
+  //   a rejection at seq R is suppressed only by a rewind to some atSeq < R,
+  //   and that rewind's own scan reads (atSeq, head], which contains R,
+  //   so the rule refuses it. The state E5 describes has no way to be entered.
+  //
+  // This is the positive control for a negative claim. It fails the moment the rejection refusal
+  // is loosened — which is exactly when filtering suppressed events WOULD start to matter, so it
+  // fails at the right time rather than never.
+  const { h, runId, gateId } = await parked();
+  const at = await suspendedAt(h, runId);
+
+  await h.engine.resolveGate(runId, {
+    gateId,
+    decision: { kind: "reject", reason: "no" },
+    actor: alice,
+    idempotencyKey: "r1",
+  });
+
+  // Every rewind an operator could ask for, from the start of the run to past its end.
+  const all = await events(h.store, runId);
+  const head = all[all.length - 1]!.seq;
+  const rejectSeqs = all.filter((e) => e.type === "gate.decided" && (e.payload as { decision: string }).decision === "reject").map((e) => e.seq);
+  assert.equal(rejectSeqs.length, 1, "one rejection, so the property below is about something");
+
+  for (let target = 0; target <= Number(head) + 1; target++) {
+    await h.engine.rewind(runId, target as Seq, "sweep").catch(() => undefined);
+  }
+
+  // Whatever was accepted, the rejection is still live: no suppressed range covers it.
+  const after = await events(h.store, runId);
+  const hidden = suppressedRanges(after);
+  for (const r of rejectSeqs) {
+    const covering = hidden.filter(([from, to]) => Number(r) > from && Number(r) < to);
+    assert.deepEqual(covering, [], `seq ${String(r)} is a rejection and landed inside a suppressed range ${JSON.stringify(covering)}`);
+  }
+  assert.equal((await h.engine.projection(runId))!.gates[gateId]?.decision, "reject", "and the refusal still stands in the fold");
+  assert.equal(h.writes.length, 0, "AND THE ACTION THE HUMAN REFUSED STILL DID NOT HAPPEN");
 });
 
 test("…but rewinding past an APPROVAL is allowed, because it ASKS AGAIN rather than assuming", async () => {

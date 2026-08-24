@@ -590,7 +590,26 @@ recompiles it cares about" — is therefore unmeasurable. Open.
 > and write the list into the claim** — the same lesson this register opens with.
 
 **A10 · The rewind boundary refusal covers `gate.decided` only, and `#expire` writes the same
-split.** `Engine.rewind` refuses a boundary that lands on a `gate.decided`, because `resolve`
+split. THE SPECIFIC DEFECT IS CLOSED; THE PRESCRIPTION IS NOT — do not delete this entry.**
+
+> `Engine.rewind` now refuses THREE boundaries, and `run/engine.ts` names this entry at two of
+> them: `gate.decided` (the original), `gate.batch_decided` at `ev.seq === atSeq` (a batch
+> receipt, reached through a new event type), and `gate.timeout{action:"fail"}` at
+> `ev.seq === atSeq` (the expiry this entry was written about). The reproduction below no longer
+> reproduces.
+>
+> **What this entry actually asks for is still not done, and the code says so where it matters.**
+> The refusal is written as *"this event is one of three named types"* when the property is
+> *"this boundary splits an append whose tail carries the run's status transition"*. Every row a
+> future change adds to a decision's or a terminal's append has to be added here too, or it
+> reopens the hole — and this is now the THIRD type added, which is evidence for the prescription
+> rather than against it. Making it structural needs an append boundary the journal does not
+> record: a new field on `JournalEvent`, both stores writing it, and a defined reading for every
+> journal that predates it. That is a change to the durable format invariant 2 makes
+> authoritative, and half of it is worse than the narrow version.
+
+**A10 (original text, kept for the reproduction) · The rewind boundary refusal covers
+`gate.decided` only, and `#expire` writes the same split.** `Engine.rewind` refuses a boundary that lands on a `gate.decided`, because `resolve`
 writes `gate.decided` + `run.resumed` in ONE append — two seqs — and a rewind to the first
 keeps the decision and drops the resume, wedging the run. `#expire` writes `gate.timeout` +
 `run.failed` in one append, the identical shape, and the scan skips it (`if (!isEvent(ev,
@@ -2267,11 +2286,29 @@ intermittently on a port bind under load, which reads as a kill on whatever ran 
 hazards are why the set above excludes name literals and the kill set above excludes files
 that cannot reach the subject.
 
-**E5 · `rewind`'s rejection scan over-refuses in one corner.** It reads `(atSeq, head]`
-without excluding events an *earlier* rewind already suppressed, so a rejection whose effect
-was already erased still blocks a new rewind. Fail-safe direction; the alternative needed
-`suppressedRanges` exported from `projection.ts`, which `export *` would have pushed into the
-pinned public surface.
+**E5 · `rewind`'s rejection scan over-refuses in one corner. NOT A DEFECT — the corner has no
+way to be entered, and BOTH halves of the original entry were stale. Closed 2026-08-24.**
+
+The entry read: *"It reads `(atSeq, head]` without excluding events an earlier rewind already
+suppressed, so a rejection whose effect was already erased still blocks a new rewind. Fail-safe
+direction; the alternative needed `suppressedRanges` exported from `projection.ts`, which
+`export *` would have pushed into the pinned public surface."*
+
+> **The stated obstacle is gone.** `suppressedRanges` is exported from `projection.ts` and is in
+> `scripts/surface.json` — `journal/audit.ts` needed it, so it was exported and pinned, and the
+> reason not to fix this stopped being true without anyone noticing.
+>
+> **And the corner is unreachable, which is the more useful half.** A rejection at seq `R` is
+> suppressed only by a rewind to some `atSeq < R`; that rewind's own scan reads `(atSeq, head]`,
+> which contains `R`; so the rule refuses it. The state this entry describes cannot be entered
+> while the rule it complains about exists.
+>
+> Pinned as a property rather than argued: *"A REJECTION CAN NEVER BE INSIDE A SUPPRESSED RANGE"*
+> in `test/run/gate-lifecycle.test.ts` sweeps every rewind target from 0 to head + 1, then asserts
+> no `gate.decided{reject}` seq falls inside any range `suppressedRanges` reports.
+> Mutation-verified: loosening the rejection refusal fails it — which is exactly when filtering
+> suppressed events WOULD begin to matter, so the guard fires at the right moment rather than
+> never.
 
 **E6 · A mid-flight cancel leaves the in-flight Task `leased` in the read model.**
 `#commit` returns early on a terminal run, and `cancel` appends no `task.cancelled` (C1), so

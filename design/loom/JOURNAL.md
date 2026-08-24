@@ -6978,3 +6978,42 @@ would have bought, at a fraction of the cost, and without touching a seam G3 wil
 what the row assumes before pricing the fix. This one assumed a trigger existed. Two greps and a
 route count later, the honest wave was to hold the assumption still rather than to build against
 it. Not every open entry wants closing; some want pinning.
+
+---
+
+## Two entries scheduled as a wave, and neither was a defect any more
+
+The order put A10 and E5 together — two defects in one method, one file, one review. Reading the
+method first turned both into corrections.
+
+**A10's specific defect is closed and the code cites the entry at two of the three arms that
+close it.** `Engine.rewind` now refuses `gate.decided`, `gate.batch_decided` at its own seq, and
+`gate.timeout{action:"fail"}` at its own seq. The reproduction in the entry — `89:gate.timeout
+90:run.failed`, `rewind(89)` accepted, the run wedged — no longer reproduces. The entry stays,
+because what it ASKS for is untouched: the refusal is written as "this event is one of three
+named types" when the property is "this boundary splits an append whose tail carries the run's
+status transition", and this is the third type added to that list. Three is the argument for the
+prescription, not against it.
+
+**E5 was stale in both halves.** Its stated obstacle — that fixing it needed `suppressedRanges`
+exported, which `export *` would push into the pinned surface — stopped being true when
+`journal/audit.ts` needed the same helper and exported it. It has been in `surface.json` since.
+Nobody re-read the entry.
+
+And the corner it describes cannot be entered. A rejection at seq `R` is suppressed only by a
+rewind to some `atSeq < R`; that rewind's own scan reads `(atSeq, head]`, which contains `R`; so
+the rule refuses it. **The over-refusal E5 reports requires the very rule it complains about to
+be absent.**
+
+**That argument is worth a test rather than a paragraph, and the test is the interesting part.**
+It sweeps every rewind target from 0 to head + 1, swallowing the refusals, and then asserts that
+no `gate.decided{reject}` seq falls inside any range `suppressedRanges` reports. It passes today
+for a reason — and loosening the rejection refusal fails it. So the guard fires at exactly the
+moment the property stops holding, which is exactly the moment filtering suppressed events would
+start to matter. A negative claim with a control that can go red.
+
+**Two waves in a row now have produced a guard instead of a fix**, and the shape is the same
+both times: the backlog row named a cost, the cost turned out to rest on an assumption, and the
+assumption was worth more pinned than the fix was worth built. That is not an argument for
+skipping work. It is an argument for checking what a row assumes before pricing what it asks
+for — three of this week's stale claims were in entries nobody had re-read since writing them.
