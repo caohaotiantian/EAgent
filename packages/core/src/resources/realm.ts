@@ -32,9 +32,12 @@ import { CODES, err } from "../errors.ts";
  * The globals a body may see. Everything absent is absent on purpose.
  *
  * `Date` is bound to `undefined` rather than copied: a body that reads the wall clock makes
- * its own replay non-deterministic and the journal has no effect key for it. `Math` IS here
- * and `Math.random` therefore runs unrecorded — that asymmetry is invariant 4's known gap
- * (REGISTER D11), and replay DETECTS the divergence rather than serving a wrong answer.
+ * its own replay non-deterministic and the journal has no effect key for it. `Math` IS here and
+ * stays here, because its `random` is now REPLACED rather than removed: `functions.ts`'s bridge
+ * installs a PRNG seeded from a value the engine journals under `effectKey(taskId, "random", 0)`,
+ * so a body's draws are served on replay instead of diverging. The asymmetry that used to be
+ * invariant 4's known gap (REGISTER D11) is closed, and what remains is deliberate: a clock read
+ * has no seed that would make it reproducible, so `Date` is still absent rather than seeded.
  */
 const SAFE_GLOBAL_NAMES = [
   "JSON",

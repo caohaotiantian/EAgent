@@ -173,8 +173,35 @@ export interface FunctionLoader {
 const ARGUMENT_BRIDGE = `
 (function () {
   var has = Object.prototype.hasOwnProperty;
+  // Captured BEFORE any body runs. The PRNG below is arithmetic over Math.imul, and a body
+  // that reassigns Math.imul would otherwise change the stream a replay is supposed to
+  // reproduce. \`Math\` here is the CONTEXT'S own, so nothing host-side is in reach.
+  var imul = Math.imul;
   globalThis.__loomInvoke = function (payload) {
     var p = JSON.parse(payload);
+    // RESEEDED PER CALL, from a value the engine journaled as an effect. mulberry32: one
+    // 32-bit word of state, no dependency, and identical output for identical seeds on
+    // every platform — which is the whole requirement, since replay compares outputs.
+    if (typeof p.seed === "number") {
+      var s = p.seed | 0;
+      Math.random = function () {
+        s = (s + 0x6D2B79F5) | 0;
+        var t = imul(s ^ (s >>> 15), 1 | s);
+        t = (t + imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    } else {
+      // NOT a fallback to the real Math.random. An unseeded body is one whose output no
+      // replay can reproduce, and \`Date\` two lines away is already \`undefined\` for exactly
+      // that reason — the asymmetry between them was invariant 4's admitted gap. Both engine
+      // callers pass a seed; reaching this means calling a FunctionBody by hand.
+      Math.random = function () {
+        throw new Error(
+          "E_EFFECT_UNRECORDED: Math.random() needs a journaled seed and this body was invoked without one. " +
+          "The engine draws it under effectKey(taskId, \\"random\\", 0); a caller invoking a FunctionBody directly must pass ctx.seed."
+        );
+      };
+    }
     var allowed = {};
     for (var i = 0; i < p.visible.length; i++) allowed[p.visible[i]] = true;
     var slice = p.slice;
@@ -235,6 +262,10 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
         taskId: String(callCtx.taskId),
         now: callCtx.now(),
         aborted: callCtx.signal.aborted,
+        // Consumed by the bridge to reseed `Math.random`, and deliberately NOT put on the
+        // `ctx` the body sees — that stays `{taskId, now, signal}`. Omitted rather than sent
+        // as `undefined` so the bridge's `typeof === "number"` test reads one thing.
+        ...(callCtx.seed === undefined ? {} : { seed: callCtx.seed }),
       }) as ReturnType<FunctionBody>;
     };
     cache.set(digest, body);

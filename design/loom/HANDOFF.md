@@ -28,8 +28,8 @@ Measured **2026-08-24**, tree clean, `npm run check` green end to end.
 
 | | Measured | Command |
 |---|---|---|
-| Tests | **3537 total, 3536 pass, 0 fail, 1 skipped** (Loom 1994 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
-| Test files | 256 (125 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
+| Tests | **3546 total, 3545 pass, 0 fail, 1 skipped** (Loom 2003 + EAgent 1543, of which 1 skipped) | `npm run check` (its test arm) |
+| Test files | 257 (126 Loom, 131 EAgent) | `node -e "console.log(require('node:fs').globSync('packages/*/test/**/*.test.ts').length)"` |
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
@@ -155,16 +155,16 @@ rest — it is waiting, and §C below says who is waiting on what.
 | ✅ | ~~Six stale absence claims in the corpus~~ | done — `docs(loom): six sentences claimed an absence…` | REGISTER B5/B6/B9/C1; `02` D5.1; `07` D12.7; `08` A8; `05` D8.7 |
 | ✅ | ~~The hung `parseCallback` on the unauthenticated route~~ | done — `fix(delivery): a promise nobody can cancel can still be stopped being awaited`. A5's last consequence; three mutations, one of which deleted a guard instead of testing it | REGISTER A5 |
 | **1** | **Let a `function`/`evaluator` body signal a RETRYABLE failure** | The README advertises `retry` and it is inert for two of eight node types. Self-contained; no dependency | §6, REGISTER B10 |
-| **2** | **Close the `Math.random` hole in the `vm` realm** | Invariant 4's one admitted gap. `Date` is already `undefined` one line away, so the cheap answer is consistent rather than novel — **carries a small decision**, see §C | §2 T-list, REGISTER D11 |
-| **3** | **The `pins` seam, all three content kinds at once** | `FunctionLoaderOptions.pins` and `HookLoaderOptions.pins` are accepted and never supplied, so the manifest-digest branch is unreachable through `bin/loom`; A24 is the same seam for subgraph specs. **Fixing one kind and not the others is how this claim rotted the first time** | §6, REGISTER B6/A24 |
-| **4** | **`Engine.rewind`'s two scan defects together** | A10 (the boundary refusal reads `gate.decided` and skips the identical `gate.timeout` + `run.failed` append) and E5 (the rejection scan over-refuses). One file, one method, one review | REGISTER A10, E5 |
-| **5** | **An open-gate read model** | The one architectural unlock in the backlog: three recorded items are consequences of one absence. Storage layout, so Deep | §6, REGISTER B7 + A3's stated reversal + `GET /gates`' cap |
-| **6** | **`task.cancelled` and the leased-after-cancel Task** | E6 is untidy state; its fix is the appender C1 names. One change, not two | REGISTER E6, C1 |
-| **7** | Partial reads swept but not finished — A21, A18, A13/A15, A14's unconfirmed half | Each is residue of a sweep that stopped at its first finding. Real, none urgent | REGISTER A21, A18, A13, A15, A14 |
-| **8** | Unbounded and unobservable structures | `ResourceStore.#versions`/`#byDigest`/`#selectors` grow without bound; neither new cap emits a counter, so `MAX_CACHED_CHILD_GRAPHS`' own reversal condition is unmeasurable | REGISTER A8 |
-| **9** | Declared-and-unread fields, in one pass | `NodePlan.inboundEdges`, `GraphMetadata.labels`, `ExpansionBudget.maxLoopIterations`, `DelegationSpec.mustStayInGroup`/`maxDepth`, `ToolNode.version`, `AssembleInput.turns`, `SectionName "tool_results"`. `GRAPH019` is the pattern to follow — warn at compile rather than delete | §6 |
-| **10** | Docstrings claiming a consumer they do not have | `OBSERVER_POINTS` ("asked at every call site" — nothing reads it), `CAN_SUSPEND`, `CONTROL_TYPES`, `createGraphCompiler`. And in `packages/eagent`, `args.ts`'s exported `FLAGS`, which `parseArgs` shadows with string literals — **that one is a live drift hazard, not dead weight** | §6 |
-| **11** | The rare suite flake, and E3's two transient failures | Two observations, 20 clean runs since, no identification. Chase with `--test-reporter=tap` **from the first run** | *Traps*, REGISTER E3 |
+| ✅ | ~~Close the `Math.random` hole in the `vm` realm~~ | done — `fix(run): Math.random in a body is a journaled effect now`. Decided in favour of journaling rather than stripping. Five mutations; one deleted a redundant guard, one found the evaluator arm untested for the second wave running | REGISTER D11 |
+| **2** | **The `pins` seam, all three content kinds at once** | `FunctionLoaderOptions.pins` and `HookLoaderOptions.pins` are accepted and never supplied, so the manifest-digest branch is unreachable through `bin/loom`; A24 is the same seam for subgraph specs. **Fixing one kind and not the others is how this claim rotted the first time** | §6, REGISTER B6/A24 |
+| **3** | **`Engine.rewind`'s two scan defects together** | A10 (the boundary refusal reads `gate.decided` and skips the identical `gate.timeout` + `run.failed` append) and E5 (the rejection scan over-refuses). One file, one method, one review | REGISTER A10, E5 |
+| **4** | **An open-gate read model** | The one architectural unlock in the backlog: three recorded items are consequences of one absence. Storage layout, so Deep | §6, REGISTER B7 + A3's stated reversal + `GET /gates`' cap |
+| **5** | **`task.cancelled` and the leased-after-cancel Task** | E6 is untidy state; its fix is the appender C1 names. One change, not two | REGISTER E6, C1 |
+| **6** | Partial reads swept but not finished — A21, A18, A13/A15, A14's unconfirmed half | Each is residue of a sweep that stopped at its first finding. Real, none urgent | REGISTER A21, A18, A13, A15, A14 |
+| **7** | Unbounded and unobservable structures | `ResourceStore.#versions`/`#byDigest`/`#selectors` grow without bound; neither new cap emits a counter, so `MAX_CACHED_CHILD_GRAPHS`' own reversal condition is unmeasurable | REGISTER A8 |
+| **8** | Declared-and-unread fields, in one pass | `NodePlan.inboundEdges`, `GraphMetadata.labels`, `ExpansionBudget.maxLoopIterations`, `DelegationSpec.mustStayInGroup`/`maxDepth`, `ToolNode.version`, `AssembleInput.turns`, `SectionName "tool_results"`. `GRAPH019` is the pattern to follow — warn at compile rather than delete | §6 |
+| **9** | Docstrings claiming a consumer they do not have | `OBSERVER_POINTS` ("asked at every call site" — nothing reads it), `CAN_SUSPEND`, `CONTROL_TYPES`, `createGraphCompiler`. And in `packages/eagent`, `args.ts`'s exported `FLAGS`, which `parseArgs` shadows with string literals — **that one is a live drift hazard, not dead weight** | §6 |
+| **10** | The rare suite flake, and E3's two transient failures | Two observations, 20 clean runs since, no identification. Chase with `--test-reporter=tap` **from the first run** | *Traps*, REGISTER E3 |
 
 **Not in the order, and deliberately:** everything in §4 (`DEFERRED-v2` — each has a one-line
 justification in `08-PLAN.md`), everything in §5 (blocked by a constraint we chose), and §C

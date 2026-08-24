@@ -174,6 +174,29 @@ export interface FunctionContext {
    * Until then, a body that must be replayable takes its timestamp from a channel it reads.
    */
   now(): number;
+  /**
+   * The seed for the body's `Math.random`, drawn ONCE per task and journaled as an effect.
+   *
+   * NOT VISIBLE TO THE BODY. The loader's bridge consumes this to reseed `Math.random`
+   * inside the realm before `__loomBody` is entered; the `ctx` a body receives still has
+   * exactly `{taskId, signal, now}` and nothing else, which is what invariant 4 states.
+   *
+   * WHY A SEED AND NOT A RECORDED VALUE PER CALL. A body runs synchronously inside
+   * `vm.runInContext` under a per-call timeout, so it cannot await a journal append between
+   * two `Math.random()` calls. Recording the seed makes the whole SEQUENCE reproducible with
+   * one effect: `Engine.#randomSeedEffect` draws it live under
+   * `effectKey(taskId, "random", 0)` and replay serves the recorded one, so the body draws
+   * the identical stream. The ordinal is `0` and not a counter because a body runs once per
+   * task, and the key is deliberately stable across RETRIES — a retried body re-draws the
+   * same stream, which is what "stable across retries" means everywhere else in this file.
+   *
+   * OPTIONAL IN THE TYPE, REQUIRED IN PRACTICE, and the bridge does not paper over the
+   * difference: a `function` or `evaluator{assertion}` body invoked without one gets a
+   * `Math.random` that THROWS. Both engine callers supply it. An embedder calling a
+   * `FunctionBody` by hand is the only way to reach the throw, and being told is better than
+   * silently running a body whose output no replay can reproduce.
+   */
+  readonly seed?: number;
 }
 
 export interface FunctionOutcome {

@@ -31,7 +31,7 @@ Stated because a framework that overstates itself costs its user a day finding o
 | | |
 |---|---|
 | **`retry` on a function or evaluator node** | Inert. A body cannot raise a RETRYABLE error — every throw out of the `vm` is classified `E_INTERNAL`, so the backoff never schedules |
-| **`Math.random()` in a function body** | Unrecorded. `Date` is stripped from the `vm` globals and `Math` is not, and there is no effect key for it — a body that calls it replays as a divergence rather than being served |
+| **`Math.random()` in a function body** | **Recorded.** The engine draws a seed per task under `effectKey(taskId, "random", 0)`, journals it as an effect, and the realm's `Math.random` is a deterministic PRNG built from it — so replay serves the same stream instead of diverging. `Date` is still `undefined` in the sandbox, deliberately: a wall-clock read has no seed that would make it reproducible |
 | **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | **Built.** Publish `resources/hook/<name>.js`, name it under `hooks:` in the graph, and it runs in the same hardened `vm` realm a `function` body does. A declared hook the workspace does not publish is a compile error, not a silent skip |
 | **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier waits forever. Declaring one is a compile WARNING rather than an error, because the design states the absence deliberately and what a barrier timeout should DO (fail the join, or fold what arrived) is an open decision |

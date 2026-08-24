@@ -301,6 +301,19 @@ export const CODES = {
   E_ILLEGAL_TRANSITION: "E_ILLEGAL_TRANSITION",
   E_RESTORE_ILLEGAL: "E_RESTORE_ILLEGAL",
   E_TOO_LATE: "E_TOO_LATE",
+  /**
+   * A body reached a nondeterminism seam with no journaled effect behind it.
+   *
+   * Raised from inside a `function` realm, by the bridge, when `Math.random()` is called in a
+   * body invoked with no `ctx.seed`. Both engine callers of `functions.require` supply one —
+   * `#runFunction` and `#runEvaluator`'s `assertion` arm — so the only way to reach this is to
+   * invoke a `FunctionBody` by hand.
+   *
+   * `conflict` rather than `validation`: the arguments are fine and the body is fine; what is
+   * wrong is the STATE the call was made in. Never retried, which is right — a second attempt
+   * with the same missing seed fails identically.
+   */
+  E_EFFECT_UNRECORDED: "E_EFFECT_UNRECORDED",
 
   // exhausted
   E_BUDGET_EXHAUSTED: "E_BUDGET_EXHAUSTED",

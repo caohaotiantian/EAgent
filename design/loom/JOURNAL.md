@@ -6836,3 +6836,61 @@ to tell is to ask what changes when it fires rather than whether anything covers
 node strips types rather than checking them — and `tsc` caught it. `CLAUDE.md` names this trap
 and it still took a deliberate `npx tsc -p …test.json` to find, one wave after the same file's
 own header says the suite is not type-checked by `npm test`.
+
+---
+
+## The decision was one line; the consequences were five, and none was visible from the decision
+
+Closing invariant 4's `random` gap was put as a choice between stripping `Math.random` — making
+it `undefined` like `Date` one line away — and journaling it. Journaling won, and the mechanism
+is a seed rather than a value per draw: a body runs synchronously inside `vm.runInContext` under
+a per-call timeout, so it can never await an append between two draws, and one recorded number
+reproduces the whole stream.
+
+That much was foreseeable. What followed was not, and each item was found by running.
+
+**Span counts.** The first version returned early on replay, copying `#summarizeEffect`. The
+model path does the opposite — serve the recorded value, then journal it anyway — and the
+difference is measurable: 44 spans in the shadow run against the original's 46. A replay branch
+that skips the append leaves the journal it is supposed to reproduce two events shorter per body.
+
+**A rewind became a duplicate.** Re-running a task re-drew the seed and appended a second
+`effect.completed` under one key in one attempt, which `auditRun` correctly called a violation.
+The tempting fix was in the auditor, and it was wrong: the auditor already discounts a rewind
+through `suppressedRanges`, and what it saw was a re-do of something still standing. The fix
+belongs at the draw — if the fold still holds the key, reuse the recorded seed and append
+nothing. That is `ids.ts`'s own "dedupes for free", applied to the least idempotent operation
+there is.
+
+**The eval suite broke.** `onGraphChange: "allow"` exists so a CANDIDATE graph can be replayed
+against a recording, and a candidate's new `function` node has a taskId nothing ever recorded a
+seed for — so `require` threw and every such replay failed. A model or a tool result cannot be
+invented, which is why `require` is right to throw for those. A seed can. Deriving it from the
+key keeps the candidate's own replay reproducible instead of making it entropy.
+
+**`digest` is prefixed.** The derivation sliced from character 0, handed `parseInt` the string
+`"sha256:c"`, got `NaN`, and it surfaced three layers away as
+`CanonicalizationError: non-finite number NaN` — naming neither the seed nor the key. It throws
+where it happens now.
+
+**A guest `Error` is not a host `Error`.** The refusal test's first predicate used `e instanceof
+Error` and failed. The realm boundary that stops a body reaching `process` also stops its throws
+being host errors, which is exactly why `toLoomError` normalizes every guest throw to `internal`.
+
+**And the evaluator arm was untested for the second wave running.** A mutation removing the seed
+from `#runEvaluator`'s `assertion` arm left all 2001 tests green — the same arm that kept the
+`requireOutcome` defect one wave earlier, found the same way. The lesson has to sharpen: it is
+not "who else calls this", which was asked and answered correctly both times. It is **which of
+the callers does a test actually drive.** The fix touched both arms; the suite only ever ran one.
+
+**The guards paid for themselves twice over on this change.** Six of them fired: the drift guard
+on an undeclared `E_EFFECT_UNRECORDED` and then again demanding its design-document row; the
+README gaps probe, because its own row had flipped from GAP to BUILT and a probe asserting the
+old claim is how a gaps table starts describing a system nobody has; the audit-coverage guard,
+which refused a `case` arm that would have masqueraded as a rule; and the replay conformance
+check. Not one of them needed a human to notice.
+
+**Reversal condition:** if a body ever needs entropy that is genuinely per-draw rather than
+per-task — a long-running body drawing millions of values where a 32-bit seed's period matters
+— the seed becomes a stream and this becomes a per-draw effect, which is the same question B11
+asks about a function body's output. Answer them together.

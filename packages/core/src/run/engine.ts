@@ -24,6 +24,8 @@
  * See design/loom/03-RUNTIME.md D6 and 02-EXECUTION-GRAPH.md D4.
  */
 
+import { randomInt } from "node:crypto";
+
 import { digest, shapeOf } from "../canonical.ts";
 import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
 import {
@@ -359,6 +361,31 @@ function frozenFirst(graph: RunGraph, live: ResourceResolver): ResourceResolver 
  * meant. `{}` stays legal — a body that writes nothing is ordinary — and extra keys alongside
  * `writes`/`take` stay legal too, because then the return WAS read.
  */
+/**
+ * A seed for a `random` effect the journal does not hold, derived from the effect key.
+ *
+ * Reached only under replay of a CANDIDATE graph (`onGraphChange: "allow"`), where a node the
+ * recording never had asks for a seed nobody ever wrote. Deriving beats drawing: two replays of
+ * the same candidate get the same stream, so an eval comparison is measuring the candidate and
+ * not the entropy it happened to receive.
+ *
+ * The first 8 hex characters of the key's digest — 32 bits, which is the whole state of the
+ * PRNG the bridge builds from it, so a wider read would be discarded.
+ *
+ * AFTER THE `sha256:` PREFIX, and the first version forgot it: `digest` returns
+ * `sha256:<hex>`, so slicing from 0 hands `parseInt` the string `"sha256:c"` and gets `NaN`.
+ * That reached the bridge, made every draw `NaN`, and surfaced three layers away as
+ * `CanonicalizationError: non-finite number NaN` when the body's output was journaled — a
+ * message naming neither the seed nor the key. Hence the throw below rather than a silent
+ * fallback: a seed that is not a finite number can only be a bug here.
+ */
+function seedFromKey(key: string): number {
+  const hex = digest(key).slice(-64, -56);
+  const seed = Number.parseInt(hex, 16);
+  if (!Number.isFinite(seed)) throw err.internal(CODES.E_INTERNAL, `could not derive a replay seed from "${key}" (digest slice "${hex}")`);
+  return seed;
+}
+
 function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
   const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }`;
   if (out === null || typeof out !== "object") {
@@ -2731,6 +2758,80 @@ export class Engine {
     };
   }
 
+  /**
+   * The seed a body's `Math.random` is built from — drawn once per task, journaled, replayed.
+   *
+   * `Math` reaches a `function` realm whole while `Date` is bound to `undefined`, and that
+   * asymmetry was invariant 4's one admitted gap: `Math.random()` ran unrecorded, so a body
+   * that used it replayed as a divergence rather than being served. `effect.started` has
+   * declared a `random` kind the whole time and nothing appended one.
+   *
+   * A SEED RATHER THAN A VALUE PER CALL, because a body runs synchronously inside
+   * `vm.runInContext` under a per-call timeout and cannot await an append between two draws.
+   * One recorded number reproduces the entire stream, which is the same trade `summarize`
+   * makes in the other direction — there the ordinal is the turn because a task summarizes
+   * many times; here it is `0` because a body runs once per task.
+   *
+   * `node:crypto` and not `Math.random()`: drawing the seed is the nondeterministic act this
+   * method exists to journal, and `randomInt` is a builtin, so invariant 1 is untouched.
+   */
+  async #randomSeedEffect(ctx: RunContext, p: RunProjection, w: Wave): Promise<number> {
+    const key = effectKey(w.task.taskId, "random", 0);
+
+    // ALREADY DRAWN AND NOT UNDONE — serve it, and append nothing. This is what a stable effect
+    // key is FOR: `ids.ts` says the key excludes the attempt "so a tool that supports
+    // server-side idempotency dedupes for free", and a random draw is the least idempotent
+    // operation there is unless something dedupes it here.
+    //
+    // The condition is the fold and not the raw journal, which is what makes it correct in both
+    // directions. `startedEffects` comes from `everStarted`, folded over LIVE events — so a
+    // rewind that suppressed this effect leaves the key absent and the body gets a fresh stream,
+    // while a re-run whose effect was never undone reuses the recorded one. Without it, the
+    // second case appended a second `effect.completed` under one key in one attempt and
+    // `auditRun` reported the run unhealthy, correctly: the auditor already discounts a rewind
+    // through `suppressedRanges`, and what it saw was a re-do of something still standing.
+    if (this.#replay === undefined && p.startedEffects.includes(key)) {
+      for await (const e of ctx.log.read(1 as Seq)) {
+        if (isEvent(e, "effect.completed") && e.payload.key === key) return Number(e.payload.result);
+      }
+      // Started and never completed — a process died between the two appends. Fall through and
+      // draw again rather than fail the task: the half-written effect is exactly the state a
+      // fresh draw is for, and `effect.completion-has-a-start` stays satisfied either way.
+    }
+
+    // JOURNALED ON REPLAY TOO, which is the MODEL path's shape and not `#summarizeEffect`'s.
+    // Those two differ and the difference is visible: a replay branch that returns before the
+    // append leaves the shadow run's journal two events shorter per body, so `spansFrom` builds
+    // a different span tree and the conformance check reports a mismatch it caused. Measured
+    // while writing this — 44 spans against the original's 46. Serving the recorded value and
+    // then recording it is what keeps a shadow journal structurally identical to its original.
+    // THE MISS IS NOT A DIVERGENCE HERE, and this is the one place in the engine where that is
+    // true. `onGraphChange: "allow"` exists so a CANDIDATE graph can be replayed against a
+    // recording — that is what `runEvalSuite` does — and a candidate's new `function` node has a
+    // taskId the recording never held, so no seed was ever written for it. A model or a tool
+    // result cannot be invented, which is why `require` is right to throw for those; a seed can,
+    // and deriving it from the key keeps the candidate's OWN replay reproducible rather than
+    // making it entropy. Measured before this line existed: a candidate that computes where the
+    // original wrote failed outright, and `report.replayed.channels` lost the channel the test
+    // compares.
+    const seed =
+      this.#replay !== undefined
+        ? this.#replay.has(key)
+          ? Number(this.#replay.require(key).result)
+          : seedFromKey(key)
+        : randomInt(0, 2 ** 32);
+    await this.#serialize(() =>
+      ctx.log.append(
+        [
+          { type: "effect.started", payload: { key, kind: "random", attempt: 1 }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
+          { type: "effect.completed", payload: { key, result: seed, resultDigest: digest(seed) }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
+        ],
+        { taskId: w.task.taskId },
+      ),
+    );
+    return seed;
+  }
+
   async #runFunction(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
     const body = this.functions.require(w.node.function!.ref);
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
@@ -2738,6 +2839,7 @@ export class Engine {
       taskId: w.task.taskId,
       signal: ctx.abort.signal,
       now: this.#now,
+      seed: await this.#randomSeedEffect(ctx, p, w),
     })) as unknown;
     const out = requireOutcome(raw, w.node.function!.ref, w.node.id);
     return {
@@ -2913,7 +3015,20 @@ export class Engine {
       // mistake was a silent no-op here after being refused there. Measured: an assertion body
       // returning `{ confidence: 0.9 }` committed nothing and the run died with
       // `E_OUTPUT_MISSING`. One validator, two callers, so the two cannot drift.
-      const out = requireOutcome((await body(view, { taskId: w.task.taskId, signal: ctx.abort.signal, now: this.#now })) as unknown, ev.ref, w.node.id);
+      // AND THE SEED, for the same reason and by the same route. `functions.require` has two
+      // callers and this is the one that kept the defect last time; a seed passed at only one
+      // of them would leave an `assertion` body's `Math.random` throwing while a `function`
+      // body's worked.
+      const out = requireOutcome(
+        (await body(view, {
+          taskId: w.task.taskId,
+          signal: ctx.abort.signal,
+          now: this.#now,
+          seed: await this.#randomSeedEffect(ctx, p, w),
+        })) as unknown,
+        ev.ref,
+        w.node.id,
+      );
       this.#checkConfidence(ctx, w, out.writes ?? {}, ev.threshold);
       return { status: "succeeded", writes: { ...(out.writes ?? {}) }, usage: { ...ZERO_USAGE } };
     }

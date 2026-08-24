@@ -144,14 +144,21 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
   },
   {
     row: "`Math.random()` in a function body",
-    claims: "`Date` is stripped from the `vm` globals and `Math` is not",
+    claims: "the realm's `Math.random` is a deterministic PRNG built from it",
+    // A ROW THAT FLIPPED, so the probe flipped with it. It used to assert the ABSENCE of a
+    // random effect; asserting the same thing after the gap closed is how a gaps table starts
+    // describing a system nobody has.
     probe: () => {
       const realm = SRC("resources/realm.ts");
-      assert.match(realm, /^\s*"Math",$/m, "Math must still be in the safe globals");
-      assert.match(realm, /Date: undefined/, "and Date must still be stripped");
-      // "there is no effect key for it": the `random` KIND is declared in the event vocabulary
-      // and nothing ever appends one. If that changes, the row is wrong.
-      assert.doesNotMatch(SRC("run/engine.ts"), /kind: "random"/, "a random effect is journaled now — update the row");
+      assert.match(realm, /^\s*"Math",$/m, "Math must still be in the safe globals — the PRNG replaces its `random`, not the object");
+      assert.match(realm, /Date: undefined/, "and Date must still be stripped: a clock read has no seed that would make it reproducible");
+      // The three halves of the claim, each where it lives: the engine draws and journals a
+      // seed, the bridge consumes it, and replay serves the recorded one instead of drawing.
+      const engine = SRC("run/engine.ts");
+      assert.match(engine, /kind: "random"/, "the engine must journal a random effect");
+      assert.match(engine, /effectKey\(w\.task\.taskId, "random", 0\)/, "under a derived key");
+      assert.match(engine, /Number\(this\.#replay\.require\(key\)\.result\)/, "and replay must SERVE the recorded seed rather than draw a new one");
+      assert.match(SRC("resources/functions.ts"), /Math\.random = function \(\)/, "the bridge must install the seeded PRNG");
     },
   },
   {

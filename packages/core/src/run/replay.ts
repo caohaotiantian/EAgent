@@ -8,12 +8,16 @@
  *
  * IT IS NOT SIDE-EFFECT-FREE, and this said it was. `function` and `evaluator{assertion}` bodies
  * compute no effect key, never consult `ReplayEffects`, and RE-EXECUTE. On the CLI path that is
- * narrow — the `vm` context cannot reach `process` or `fetch` — but `SAFE_GLOBALS` leaves
- * `Math.random()` reachable while deliberately removing `Date`, so a body using it diverges.
- * Measured through the binary: `✗ state.reduced : expected {"out":"0.534…"}, got {"out":"0.108…"}`,
- * `match: false`. Replay REPORTS that rather than serving a wrong answer. An embedder passing
- * `opts.globals`, or registering a body directly on `FunctionRegistry`, gets a genuine live side
- * effect. See `design/loom/HANDOFF.md` B11. If replay needs an effect the journal does not contain, that is
+ * narrow — the `vm` context cannot reach `process` or `fetch` — and `Math.random()` is no longer
+ * part of it. It used to be: `SAFE_GLOBALS` removed `Date` and left `Math` whole, so a body using
+ * it diverged, measured through the binary as
+ * `✗ state.reduced : expected {"out":"0.534…"}, got {"out":"0.108…"}`, `match: false`. The engine
+ * now journals a seed per task under `effectKey(taskId, "random", 0)` and the bridge builds the
+ * body's `Math.random` from it, so the draws are SERVED here like any other effect. A key this
+ * replay's graph asks for that the recording never held is the one case that derives rather than
+ * serves — see `seedFromKey`, and the reason is `onGraphChange: "allow"`. An embedder passing
+ * `opts.globals`, or registering a body directly on `FunctionRegistry`, still gets a genuine live
+ * side effect. See `design/loom/HANDOFF.md` B11. If replay needs an effect the journal does not contain, that is
  * `E_REPLAY_DIVERGENCE`, a loud failure, never a silent live call.
  *
  * Three uses, one mechanism: debugging (step a run), regression evaluation (D10

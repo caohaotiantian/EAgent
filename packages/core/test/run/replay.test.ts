@@ -843,7 +843,19 @@ test("A REPLAY THAT NEVER SERVED A RECORDED EFFECT DOES NOT REPORT `match: true`
   const events = await eventsOf(h.store as MemoryStateStore, runId);
   assert.deepEqual(
     events.filter((e) => e.type === "effect.completed").map((e) => (e.payload as { key: string }).key),
-    [MODEL_0, TOOL_0, TOOL_1, "summarize@root/e0[0]#0:model:1", "write@root#0:tool:0"],
+    [
+      // The seed for `start`'s function body — every `function` and `evaluator{assertion}` node
+      // journals one, so `Math.random()` inside a body is served on replay instead of diverging.
+      // Listed rather than filtered out: this assertion is the fixture's inventory, and an
+      // inventory that quietly skips a kind stops noticing when a kind appears.
+      "start@root#0:random:0",
+      MODEL_0,
+      TOOL_0,
+      TOOL_1,
+      "summarize@root/e0[0]#0:model:1",
+      "merge@root#0:random:0",
+      "write@root#0:tool:0",
+    ],
     "the recording really did make two tool calls in one turn",
   );
 

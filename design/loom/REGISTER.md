@@ -1860,7 +1860,46 @@ purpose was finding it. The guard cannot catch this class at all; it tracks span
 codes, `GRAPH` ids, method names and event appenders, not register ids.
 
 **D11 · The sanctioned way to satisfy invariant 4 does not exist, and there is no typecheck
-between the author and the failure.** CLAUDE.md's invariant 4 and four design documents told
+between the author and the failure. THE `random` HALF IS CLOSED 2026-08-24; the rest stands.**
+
+> **`Math.random()` in a `function` or `evaluator{assertion}` body is now a journaled effect.**
+> The engine draws a seed per task under `effectKey(taskId, "random", 0)`, appends
+> `effect.started{kind:"random"}` + `effect.completed`, and the loader's bridge builds the realm's
+> `Math.random` from it — so replay serves the recorded seed and the body draws the identical
+> stream. `effect.started`'s `random` kind finally has an appender.
+>
+> **A SEED AND NOT A VALUE PER DRAW**, because a body runs synchronously inside
+> `vm.runInContext` under a per-call timeout and cannot await an append between two draws. One
+> recorded number reproduces the whole stream.
+>
+> **What building it cost is the part worth keeping, because none of it was visible from the
+> decision.** Five interactions, each found by running:
+> 1. **Span counts.** The first version returned early on replay like `#summarizeEffect` does,
+>    leaving the shadow journal two events shorter per body — 44 spans against the original's 46.
+>    The MODEL path's shape is the right one: serve the recorded value, then journal it anyway.
+> 2. **`effect.completed-once-per-attempt`.** A rewind that re-runs a task re-drew and re-appended
+>    under one key in one attempt. The fix is not in the auditor — which already discounts a
+>    rewind through `suppressedRanges` — but here: if `startedEffects` still holds the key, the
+>    recorded seed is reused and nothing is appended. That is exactly what `ids.ts` means by a key
+>    that "dedupes for free", applied to the least idempotent operation there is.
+> 3. **`onGraphChange: "allow"`.** A CANDIDATE graph's new node has a taskId the recording never
+>    held, so `require` threw `E_REPLAY_DIVERGENCE` and every eval-suite replay of a graph with a
+>    new `function` node failed. `seedFromKey` derives one from the key instead — a model or tool
+>    result cannot be invented, a seed can, and deriving keeps the candidate's own replay
+>    reproducible.
+> 4. **`digest` is prefixed.** `seedFromKey` sliced from 0, handed `parseInt` the string
+>    `"sha256:c"`, got `NaN`, and surfaced three layers away as
+>    `CanonicalizationError: non-finite number NaN` — a message naming neither the seed nor the
+>    key. It now throws where it happens.
+> 5. **A guest `Error` is not a host `Error`.** The refusal test's first predicate used
+>    `e instanceof Error` and failed: the bridge builds its throw from the guest realm's
+>    constructor. The same boundary that stops a body reaching `process` stops its throws being
+>    host errors, which is why `toLoomError` normalizes every guest throw to `internal`.
+>
+> **And the evaluator arm was untested, again.** A mutation removing the seed from
+> `#runEvaluator`'s `assertion` arm left all 2001 tests green — the SAME arm that kept the
+> `requireOutcome` defect one wave earlier. `functions.require` has two callers; ask which of them
+> a test actually drives, not merely which of them the fix touched. CLAUDE.md's invariant 4 and four design documents told
 authors to route all nondeterminism through `ctx.effect(key, fn)`. **`ctx.effect` has never
 existed in this repo**, and neither has `ctx.random()`. Reproduced: a `function` resource
 written exactly as `00-OVERVIEW.md:136` instructs, invoked with the verbatim context

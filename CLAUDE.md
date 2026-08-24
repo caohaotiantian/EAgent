@@ -67,17 +67,23 @@ gates, replay, and observability are one mechanism.
    effect keys. A random id silently breaks replay.
 4. **Every nondeterministic call is journaled under a derived effect key.** The
    boundary is inside `Engine` — `effectKey(taskId, kind, ordinal)` from `src/ids.ts`,
-   with `kind` one of `model`, `tool`, `subgraph`, `summarize` — and replay serves the
+   with `kind` one of `model`, `tool`, `subgraph`, `summarize`, `random` — and replay serves the
    recorded result instead of calling out. **The kind in the key and the `kind` on
    `effect.started` must agree.** `summarize`'s ordinal is the TURN, not a literal `0`,
    which would collide every summary in a task onto one key.
    **There is no `ctx.effect` and no `ctx.random`**: a node body is handed `{taskId, signal,
-   now}` (`function`) or `{taskId, signal, progress}` (`tool`), and nothing else. Two gaps sit
-   inside this invariant rather than outside it, so do not read it as a closed boundary: the
-   clock is *outside* it (`FunctionContext.now` is the injected clock passed straight through,
-   appending nothing), and `Math` reaches a `function` resource whole, so `Math.random()` runs
-   unrecorded while `Date` is `undefined`. `effect.started` declares `clock` and `random` kinds
-   that nothing appends. See REGISTER D11.
+   now}` (`function`) or `{taskId, signal, progress}` (`tool`), and nothing else — and that list
+   is exact rather than approximate. `FunctionContext` carries a fourth field, `seed`, which the
+   LOADER consumes and the body never sees: `functions.ts`'s bridge uses it to build the realm's
+   `Math.random` before `__loomBody` is entered.
+   **The `random` half of this invariant's old gap is closed.** `Math.random()` in a `function`
+   or `evaluator{assertion}` body is a deterministic PRNG seeded from a value the engine draws
+   and journals under `effectKey(taskId, "random", 0)`, so replay serves it. A body invoked with
+   no seed gets a `Math.random` that THROWS `E_EFFECT_UNRECORDED` rather than falling back to
+   real entropy. **The clock half is still open and is deliberate**: `FunctionContext.now` is the
+   injected clock passed straight through, appending nothing, and `effect.started` still declares
+   a `clock` kind nothing writes — a wall-clock read has no seed that would make it reproducible,
+   which is why `Date` is `undefined` in the realm rather than seeded. See REGISTER D11.
 5. **Oversight posture composes by `max` over `out < on < in`.** Nothing may lower a
    posture except an explicit human `deescalate` call. An `agent` node's floor is the
    `max` over every tool it can REACH (`reachableToolNames`), not over the one it

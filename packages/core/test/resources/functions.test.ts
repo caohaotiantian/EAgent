@@ -488,3 +488,65 @@ test("A SYNCHRONOUS BODY THAT NEVER RETURNS IS TERMINATED, not left to hang", ()
   const body = createFunctionLoader({ store, callTimeoutMs: 50 }).load("function/spin@stable")!;
   assert.throws(() => body(view({}), ctx()), /timed out|Script execution/i, "the run must end, not freeze");
 });
+
+// ── Math.random: seeded, journaled, replayable ───────────────────────────────
+
+const RANDOM = `(view) => ({ writes: { doubled: Math.random() } })`;
+
+test("`Math.random()` IS SEEDED FROM ctx.seed — same seed, same stream; different seed, different", () => {
+  // The asymmetry this closes: `Date` is bound to `undefined` in the realm because a wall-clock
+  // read makes a body unreplayable, and `Math` was passed through whole, so `Math.random()` was
+  // the one nondeterminism seam left open inside a sandbox built to close them.
+  const { store } = storeWith(RANDOM, "rnd");
+  const body = createFunctionLoader({ store }).load("function/rnd@stable")!;
+  const at = (seed: number) => (body(view({ amount: 0 }), { ...ctx(), seed }) as { writes: { doubled: number } }).writes.doubled;
+
+  const a = at(12345);
+  assert.equal(at(12345), a, "the same seed must reproduce the draw — this is what replay serves");
+  assert.notEqual(at(999), a, "and a different seed must not, or the PRNG is a constant and the test is vacuous");
+  assert.ok(a >= 0 && a < 1, `a draw must still look like Math.random(): got ${String(a)}`);
+});
+
+test("A SEQUENCE of draws is reproduced, not just the first", () => {
+  // One recorded number stands in for the WHOLE stream — that is the trade that makes a seed
+  // work where a per-call recording cannot, because a body runs synchronously inside
+  // `vm.runInContext` and can never await an append between two draws.
+  const seq = `(view) => ({ writes: { doubled: [Math.random(), Math.random(), Math.random()].join(",") } })`;
+  const { store } = storeWith(seq, "seq");
+  const body = createFunctionLoader({ store }).load("function/seq@stable")!;
+  const at = (seed: number) => (body(view({ amount: 0 }), { ...ctx(), seed }) as { writes: { doubled: string } }).writes.doubled;
+
+  const first = at(7);
+  assert.equal(at(7), first, "three draws, reproduced in order");
+  assert.equal(first.split(",").length, 3);
+  assert.equal(new Set(first.split(",")).size, 3, "and they must DIFFER from each other — a PRNG stuck on one value would pass the line above");
+});
+
+test("WITHOUT A SEED, `Math.random()` REFUSES — it does not quietly fall back to the real one", () => {
+  // The fail-safe direction, and the reason this is a throw rather than a default: a body that
+  // draws unrecorded entropy produces a run no replay can reproduce, and silence is how that
+  // stays unnoticed until a replay disagrees months later. Both engine callers pass a seed, so
+  // this is reachable only by invoking a FunctionBody by hand.
+  const { store } = storeWith(RANDOM, "rnd2");
+  const body = createFunctionLoader({ store }).load("function/rnd2@stable")!;
+  // `instanceof Error` IS FALSE HERE and that is not a bug in the test. The bridge builds the
+  // error from the GUEST realm's `Error`, which fails a host `instanceof` — the same realm
+  // boundary that stops a body reaching `process` also stops its throws being host errors, and
+  // is why `toLoomError` normalizes every guest throw to `internal`/`E_INTERNAL` rather than
+  // reading a `class` off it. Match the text, which is what actually crosses.
+  assert.throws(
+    () => body(view({ amount: 0 }), ctx()),
+    (e: unknown) => /E_EFFECT_UNRECORDED/.test(String(e)) && /seed/.test(String(e)),
+    "the message must name the code and the missing thing",
+  );
+});
+
+test("the seed is NOT visible to the body — ctx stays {taskId, now, signal}", () => {
+  // Invariant 4 states what a body is handed, and the seed is consumed by the bridge on the way
+  // in. Widening `ctx` would make the seed a value a body could read, record, or branch on.
+  const keys = `(view, ctx) => ({ writes: { doubled: Object.keys(ctx).sort().join(",") } })`;
+  const { store } = storeWith(keys, "keys");
+  const body = createFunctionLoader({ store }).load("function/keys@stable")!;
+  const out = body(view({ amount: 0 }), { ...ctx(), seed: 1 }) as { writes: { doubled: string } };
+  assert.equal(out.writes.doubled, "now,signal,taskId");
+});
