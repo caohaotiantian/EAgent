@@ -59,10 +59,21 @@ gates, replay, and observability are one mechanism.
    in-memory only, so a restart silently switched off the prompt-injection guard, and it was
    the fourth such field found (escalations, ceilings and spend preceded it). If a decision
    reads it, the journal must be able to rebuild it.
+   **E4's failure streak was the fifth, and it is the one that says how to stop finding a
+   sixth.** `RunContext.streaks` counts consecutive failures per node and nothing rebuilt it,
+   so a restart between the second failure and the third reset it and `repeated_failure`
+   never fired — measured, same graph and same three failures, escalating without the restart
+   and not at all with one. Taint was already restored a few lines away, and the fix landed
+   one field short because the unit it was written against was the FIELD. **The unit is the
+   PRODUCER**: `#recordEvidence` is the only writer of a run's escalation evidence, so its
+   restore is now `#restoreEvidence`, named for it, and a sixth counter added there has one
+   obvious place it is missing from. Ask of any in-memory field not "is this one restored?"
+   but "what writes it, and is everything that writer touches restored together?"
    (`checkpoints` used to be listed here and there is no such read model: `checkpoint.created`
-   is written by one site and read only by `telemetry/spans.ts`, and `rewind` targets a raw
-   `Seq`, never a `CheckpointId`. Naming a read model that does not exist is the same defect
-   this invariant is about, one level up.)
+   is written by one METHOD — `#commit`, at two appends, the `before` and `after` arms — and
+   read only by `telemetry/spans.ts`, and `rewind` targets a raw `Seq`, never a
+   `CheckpointId`. Naming a read model that does not exist is the same defect this invariant
+   is about, one level up.)
 3. **`TaskId` is derived, never random** (`nodeId@branchPath#iteration`). Same for
    effect keys. A random id silently breaks replay.
 4. **Every nondeterministic call is journaled under a derived effect key.** The

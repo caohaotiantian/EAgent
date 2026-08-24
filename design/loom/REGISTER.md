@@ -2144,6 +2144,32 @@ nothing.
 > lost, because the grep that read the run filtered for `^✖` and the summary only. **Capture
 > the whole output when a gate fails**, or the next sighting is as uninformative as this one.
 
+> **A FOURTH SIGHTING, 2026-08-24, AND THIS ONE WAS CAPTURED.** The previous entry's whole
+> ask — *capture the whole output when a gate fails* — was followed, so for the first time E3
+> has a failing assertion rather than a count. One `npm run check` reported `3566 tests / 1 fail`
+> in `test/cli/cli.test.ts`, in **"`loom serve` SAYS which perimeter it has, including the second
+> hole"**:
+>
+> ```
+> expected: /CALLBACK ROUTE OPEN/
+> actual:   "! NO MODEL ADAPTER — the only registered adapter is the offline mock, …"
+> ```
+>
+> So `s.err` held the FIRST stderr warning the child wrote and not the later one — a truncated
+> read of a child process's stderr, not a wrong assertion. **That contradicts a claim written in
+> the test beside it**: *"Stopped BEFORE asserting: `stop` waits for the child's pipes to drain,
+> so what is read below is everything the process wrote and not a prefix of it."* `stop()` awaits
+> `close`, which is documented to fire after every stdio pipe drains, so either that guarantee is
+> weaker than the comment believes or the child never wrote the line. **The two hypotheses are
+> distinguishable and neither has been tested**: have `serving` wait for a known-last STDERR line
+> the way it already waits for `  clock:` on stdout — the same fix, one pipe over, that the
+> helper's own docstring says cured a one-in-three flake before.
+>
+> **It did not reproduce: 24 clean runs since** — that file alone ×12, `npm test` ×8 (tap
+> reporter, so a failure would print `not ok <name>`), `npm run check` ×4. Recorded at this
+> length because the sighting is cheap to lose and the next one may not be captured. The lead is
+> the stdout/stderr asymmetry in `serving`, and it is a lead rather than a diagnosis.
+
 **E4 · Guards with no test come in THREE kinds, and only one of them is a defect — and
 every count in this entry is a measurement, stated with the command that produced it.**
 The eight below cannot have a test: each was reverted and the suite re-run, each left it

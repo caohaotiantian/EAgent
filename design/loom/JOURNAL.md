@@ -7101,3 +7101,89 @@ And a smaller one, for the count in C1: it has now been wrong twice in one week 
 seven, now six. The entry has said "count it rather than quoting it" since the first correction,
 and the quoted number went stale anyway, because the entry is prose and the count is in a
 different file. The registry is the gate; the sentence beside it is decoration that ages.
+
+---
+
+## The fifth field with a decision behind it and no fold, found by auditing this file's claims
+
+The session's task was to report the state of the project, and the honest way to do that here is
+to re-derive rather than quote — this repo's own instruction, written into `HANDOFF.md`'s header
+because that table has been wrong in four rows at once, twice. Seven read-only agents re-derived
+its claims against the tree. **The findings that mattered were not in the numbers they checked.**
+
+**`ctx.streaks` was found by READING `#recordEvidence` next to the `attach` re-seed.** E4
+escalates a node on its third consecutive failure. The counter is a `Map` on `RunContext`,
+`#contextFor` builds a fresh one per attach, and the re-seed block a few hundred lines away
+restores escalations, ceilings, spend and taint — and not this. Two failures, a restart, a third
+failure: the escalation that fires without the restart does not fire with one. Same graph, same
+journal, same three failures.
+
+**It is the fifth of a class this repository has now found five times**, and that is the part
+worth recording. Escalations, ceilings and spend were the first three; taint was the fourth, and
+its fix is the code immediately above the gap. So the fourth fix was written, reviewed and
+journaled *one field short*, in the same block, with the missing field on the same object.
+
+**The reason is the unit the fix was written against.** Each of the five was found as a FIELD and
+fixed as a FIELD, so each fix ended exactly at its own field's edge. The unit that would have
+caught this one is the PRODUCER: `#recordEvidence` is the only writer of a run's escalation
+evidence — its docstring says so — and it writes two things. A restore paired with the producer
+covers both by construction, and a sixth counter added to it has one obvious place it is missing
+from. Hence `#restoreTaint` → `#restoreEvidence`, named for its opposite number. The general
+form: **ask not "is this field restored?" but "what writes it, and is everything that writer
+touches restored together?"**
+
+**The fold needed two arms and the second is the non-obvious one.** `#recordEvidence` runs once
+per OUTCOME, ahead of both commit exits — so a failure that is RETRIED already counted toward the
+streak while journaling `task.retry_scheduled` and no `task.committed`. Folding commits alone
+under-counts precisely the case E4 exists for, because a node failing over and over is mostly
+retries. One divergence is documented rather than fixed: a task that SUCCEEDED while proposing a
+mutation the compiler rejected resets the live streak and journals a failed commit, so a restart
+can make E4 fire earlier than the original process would have, never later. Earlier is permitted;
+never was the bug.
+
+**Then the mutation sweep earned its keep, which it does not always.** Four mutations died. The
+fifth — record every `task.committed` as a failure, ignoring `status` — **passed all three
+tests**, because not one of them journaled a SUCCESS for the failing node. That fold turns E4
+into an alarm on a node which failed, recovered, and failed twice more, and this file already
+argues at length that an alarm which fires wrongly is one people learn to ignore. The shape that
+kills it is reachable and deterministic because commits fold in branch-coordinate order, and the
+test pins that ordering as a precondition so it cannot quietly go vacuous. **A guard written from
+the same mental model as the fix tests the model; the mutation is what tests the mechanism** —
+and here the surviving mutation was not a variant of the defect, it was the defect's mirror.
+
+**And a fourth E3 sighting was captured, which is new.** One `npm run check` failed
+`cli.test.ts`'s perimeter test with `expected /CALLBACK ROUTE OPEN/`, `actual` the FIRST stderr
+warning the child wrote. E3 has been three sightings and no evidence; the previous entry's whole
+ask was to capture the output next time, and following it produced a lead in one line. It
+contradicts a comment in the test beside it — that `stop()` drains the pipes, so what is read is
+not a prefix — and the asymmetry is visible in `serving` itself: it waits for a known-last
+line on STDOUT (`  clock:`) and waits for nothing at all on STDERR, which is the same one-in-three
+flake its own docstring says that stdout wait was added to cure. 24 clean runs since, so it is a
+lead and not a diagnosis, and it is written down at length because the cheap thing to lose is the
+sighting.
+
+**What the audit found in the corpus, which is the other half of this wave.** A14's compile-time
+half was closed weeks ago by the `in` → `Object.hasOwn` sweep and nobody recorded it, so it sat on
+the ordered backlog as work. A15 went the other way: it prescribes settling itself by citing A3's
+premise, and A3 was resolved twelve days later — `server/http.ts` now says in capitals that the
+premise is false — so the item got harder while the entry describing it got quieter. The
+`Array.isArray` sweep says twenty files and there are twenty-eight, its `cli.ts` clearance covered
+eight occurrences of the twenty-two now there, and the tree has grown a THIRD private copy of the
+guard the entry's own moral is about. The escalation-rules row said all ten rules are raised and
+cited `RULES_NEVER_RAISED` being empty; nine are raised and that list holds one id, so the gate
+was green against a value the row misreported. **Every one of these is a sentence that was true
+when written, which is the only kind that goes stale.**
+
+**And two things were in no list at all.** §2 — the four live items from the E8 taint hardening,
+T6 among them, a stated invariant-5 gap — is absent from the ordering table AND from the sentence
+that says what the table deliberately excludes. `packages/eagent/tui` is 42 tracked files and 17
+tests that `npm run check` neither typechecks nor runs, in a directory `CLAUDE.md`'s *Layout*
+section does not mention, whose deps are never installed because `workspaces` is one level deep.
+**The audit's own coverage map was the backlog table, and the backlog table is what turned out to
+be incomplete** — which is this repo's "the rows a gate skips are the rows most likely to be
+wrong", applied one level up to an audit rather than a document.
+
+**Reversal condition for the fix:** if `FailureStreaks` ever gains durable state of its own, or a
+`policy.escalated{rule:"repeated_failure"}` row starts carrying the counter rather than only the
+breach, the fold stops being the authority and this becomes double bookkeeping. Nothing else here
+reverses; the corpus corrections are corrections.

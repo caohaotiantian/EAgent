@@ -33,7 +33,7 @@ Measured **2026-08-24**, tree clean, `npm run check` green end to end.
 | Source files | 57 in `packages/core`, 106 in `packages/eagent` | `node scripts/check-zero-dep.mjs` (it prints core's count — it is scoped to core on purpose) |
 | Runtime dependencies | **0 in `packages/core`**, which is the one that matters. `packages/eagent` carries `jiti` and is allowed to (invariant 1 is scoped to core) | same command — it fails on a bare import specifier that is not `node:`, on any non-`devDependencies` dependency field, on a `createRequire`/`require`/computed-`import()` load, and on a file under `src/` it cannot parse |
 | Public exports, pinned | 515 | `node -e "console.log(require('./scripts/surface.json').length)"` |
-| Escalation rules | 10, and **all 10 are raised** | `node --test packages/core/test/docs-drift.test.ts` — `RULES_NEVER_RAISED` is empty |
+| Escalation rules | 10, of which **9 are raised**; `budget_exhausted` (E3) is pinned unraised with a reason, because its only trigger `onBudgetExhausted: "gate"` is now a compile error | `node --test packages/core/test/docs-drift.test.ts` — the gate compares the unraised set against `RULES_NEVER_RAISED`, which holds exactly that one id. **This row read "all 10 are raised" and cited `RULES_NEVER_RAISED` being EMPTY while the gate was green against a list of one** — a command column that names a check without naming the value it returns is a row nobody can falsify by running it |
 | Built-in tools | 6 default + 2 opt-in | `fs.read fs.write fs.edit fs.glob fs.grep fs.restore`, plus `net.fetch` (needs `--egress`) and `proc.exec` (needs `--allow-exec`) |
 | Commits ahead of `origin/loom` | **some — always re-derive**, and there is always at least one, because committing this row changes it | `git log --oneline origin/loom..HEAD \| wc -l` |
 | Typecheck | clean, both packages | `npx tsc -p packages/core/tsconfig.test.json && npx tsc -p packages/eagent/tsconfig.test.json` |
@@ -160,7 +160,9 @@ rest — it is waiting, and §C below says who is waiting on what.
 | ✅ | ~~`Engine.rewind`'s two scan defects~~ | **Neither was a defect any more.** A10's boundary refusal already covers three event types, and the code cites the entry at two of them; E5's stated obstacle was gone (`suppressedRanges` is exported and pinned) and its corner is unreachable — proved as a property, mutation-verified. Both entries corrected; A10's *prescription* stays open | REGISTER A10, E5 |
 | ✅ | ~~An open-gate read model~~ | done — `fix(journal): the sweep window is gated runs, not new ones`. **An index, not a read model**: `RunFilter.raisedAGate` orders by the most recent `gate.raised`. Closes B7, A3's stated reversal and `GET /gates`' cap together | REGISTER B7 |
 | ✅ | ~~`task.cancelled` and the leased-after-cancel Task~~ | done — `fix(run): a cancel stops the tasks too`. Four guards fired in sequence; the last one found a SECOND defect (`task.leased-is-resolved` did not know a cancellation resolves a lease) | REGISTER E6, C1 |
-| **1** | Partial reads swept but not finished — A21, A18, A13/A15, A14's unconfirmed half | Each is residue of a sweep that stopped at its first finding. Real, none urgent | REGISTER A21, A18, A13, A15, A14 |
+| ✅ | ~~E4's failure streak did not survive a restart~~ | done — `fix(run): a restart forgets how many times a node just failed` + `test(run): the mutation sweep found the arm no test was holding`. **Not on this list when the session started** — found by reading `#recordEvidence` beside the `attach` re-seed while auditing this file's own claims. Six mutations | §1, and CLAUDE.md invariant 2 |
+| **1** | Partial reads swept but not finished — A21, A18, A13 | Each is residue of a sweep that stopped at its first finding. Real, none urgent. **A14 came OFF this row**: its compile-time half was closed by the `in` → `Object.hasOwn` sweep in `graph/validate.ts` — `reads: ["constructor"]` is a hard `GRAPH005` error now, not a warning — and neither the register nor this file recorded it, so it sat on the backlog as work for weeks. **A15 came off it too, and got HARDER rather than done**: see the row below | REGISTER A21, A18, A13 |
+| **1b** | A15 is no longer a partial-read hygiene item | It prescribed settling its open half by writing A3's premise — *every valid credential is a full operator credential* — into `frame`'s and `summarise`'s docstrings. **A3 was resolved twelve days later**: runs are scoped, and `server/http.ts`'s own boot diagnostic says in capitals that the old warning is gone *because its premise is false*. So the cheap resolution is unavailable and the question is now an authorization one — what may a SCOPED reader read — which is a different item than the one the register describes | REGISTER A15, A3 |
 | **2** | Unbounded and unobservable structures | `ResourceStore.#versions`/`#byDigest`/`#selectors` grow without bound; neither new cap emits a counter, so `MAX_CACHED_CHILD_GRAPHS`' own reversal condition is unmeasurable | REGISTER A8 |
 | **3** | Declared-and-unread fields, in one pass | `NodePlan.inboundEdges`, `GraphMetadata.labels`, `ExpansionBudget.maxLoopIterations`, `DelegationSpec.mustStayInGroup`/`maxDepth`, `ToolNode.version`, `AssembleInput.turns`, `SectionName "tool_results"`. `GRAPH019` is the pattern to follow — warn at compile rather than delete | §6 |
 | **4** | Docstrings claiming a consumer they do not have | `OBSERVER_POINTS` ("asked at every call site" — nothing reads it), `CAN_SUSPEND`, `CONTROL_TYPES`, `createGraphCompiler`. And in `packages/eagent`, `args.ts`'s exported `FLAGS`, which `parseArgs` shadows with string literals — **that one is a live drift hazard, not dead weight** | §6 |
@@ -169,6 +171,16 @@ rest — it is waiting, and §C below says who is waiting on what.
 **Not in the order, and deliberately:** everything in §4 (`DEFERRED-v2` — each has a one-line
 justification in `08-PLAN.md`), everything in §5 (blocked by a constraint we chose), and §C
 below (blocked on a human).
+
+**And §2 was in NEITHER — not in the order, and not in that sentence, for weeks.** The four live
+items from the E8 taint hardening (T1's branch-choice boundary, T2's `reads`-outside-`tool.args`
+compile rule, T6's `reachableToolNames` not descending into a `subgraph`, and the capability
+ceiling's "absent is not empty") were scheduled nowhere and excluded nowhere. T6 in particular is
+a stated invariant-5 gap — *the max over every tool it can REACH is not what the code computes* —
+sitting outside every list a fresh session reads. **The exclusion sentence above is the gate, and
+what falls between an ordering table and its exclusions is exactly what rots**; this repo has
+recorded that shape twice this month about documents and had not applied it to its own backlog.
+Treat §2 as scheduled-but-unranked until somebody either ranks its items or writes down why not.
 
 ### C · Blocked on a decision only a human can take
 
@@ -211,9 +223,21 @@ places it surfaces, and why a grep for markers is not a way to find it.
 
 ### 1 · Defects — something claims to work and does not
 
-**Empty again, and that is a claim to check rather than a state to trust.** Every row this section
-has carried was closed and each was verified against `src/` before its row was deleted, not
-against a memory of having fixed it:
+**No defect is currently RECORDED here, which is not the same claim as "there are none" — and
+the difference is the thing to hold on to.** Every row below was closed and each was verified
+against `src/` before its row was deleted, not against a memory of having fixed it. But the
+table is entirely PAST defects with their regression tests, so nothing in it, and no command
+anywhere, says anything about the undiscovered ones. **This section's emptiness is the absence
+of a measurement, not a measurement** — it is the least falsifiable sentence in this file, and
+the ordering table below treats it as licence to schedule hygiene.
+
+**It was falsified within one session of being written that way.** E4's failure streak — a
+counter with a decision behind it and no fold, the fifth of its class — was found by READING
+`#recordEvidence` beside the `attach` re-seed, reproduced by running, and closed; its row is in
+the table below. Nothing in §1 could have pointed at it, because §1 lists shapes that have
+already been run. **The useful content of this section is the list of shapes NOBODY HAS RUN,
+which lives in the journal and is not enumerable from here.** Treat an empty §1 as a prompt to
+drive something new, never as a clean bill of health:
 
 | was | closed by | the check that would fail if it regressed |
 |---|---|---|
@@ -222,6 +246,7 @@ against a memory of having fixed it:
 | **D4** `onBudgetExhausted: "gate"` did not gate | `GRAPH003_BUDGET_ACTION_UNSUPPORTED` refuses the unbuilt actions at compile | `graph/validate.ts` rule; the engine's `#budget` comment names it |
 | **D5** `loom compile` said `ok` for a resource that does not exist | the workspace resolver stopped fabricating pins; `GRAPH015` fires; `NAME_ONLY_KINDS` holds the two key kinds | `resources/unresolved-refs.test.ts`, 8 tests, 7 mutation-verified |
 | **D6** fallback chains were declared and unwired | `route.fallback` builds a synthetic `chain(key)` adapter (`cli.ts`) | the `CHAIN` suite in `cli.test.ts` |
+| **E4's failure streak** a restart between the second consecutive failure and the third reset the counter, so `repeated_failure` never fired — the fifth in-memory field with a decision behind it and no fold, after escalations, ceilings, spend and taint | `#restoreTaint` became `#restoreEvidence`, named for `#recordEvidence` so the restore is paired with the PRODUCER rather than with one field, and folds `task.retry_scheduled` as well as `task.committed` — a failure that was retried already counted, and a node failing over and over is mostly retries | the four tests under "E4's evidence" in `run/oversight-survives-restart.test.ts`, each with an in-process control asserting the restarted run and the unrestarted one AGREE. Six mutations, all dying; the fifth was written only because the first sweep left one alive |
 | **D7** error edges ignored their `codes` | `#errorEdges` filters by `e.codes` (`engine.ts`) | `run/error-edge-codes.test.ts` |
 | **wire codes** the server sent `E_REQUEST_TIMEOUT`, which `errors.ts` never declared, and answered an unknown path with `E_RUN_NOT_FOUND` | both declared; `http.ts` sends `CODES.*` at all five sites, never a literal | "THE OTHER DIRECTION: EVERY CODE `src/` USES IS A CODE `errors.ts` DECLARES" in `docs-drift.test.ts`; "AN UNKNOWN PATH SAYS SO" in `server/http.test.ts` |
 | **event vocabulary** a key added to `EventPayloads` and forgotten in `EVENT_TYPES` was appendable and exempt from four gates at once | a compiler-enforced `Exclude<…>` exhaustiveness check, which names the absent keys | "EVENT_TYPES matches the EventPayloads key set" in `journal/store.test.ts` — it fails the BUILD, not the run |
@@ -361,6 +386,21 @@ for reasons, not forgotten.
 | **EAgent's guard stack cannot move into `packages/core` as-is** | `secret-guard` and `bash-policy` need **argument-level inspection before dispatch**, and `PolicyEngine.decide` never looks at args; `irreversibility` is static per tool, so "this `git` invocation is read-only but that one force-pushes" has no home. The shape that works is to **split the tool**: a `read_only`-declaring variant whose `execute` REFUSES any argv it cannot prove read-only. Refusing is always permitted; lowering never is |
 
 ### 6 · Smaller known gaps
+
+- **`packages/eagent/tui` is tracked, carries its own dependencies, and `npm run check` neither
+  typechecks nor runs it.** 42 tracked files, **17 of them tests**, and every gate misses it:
+  root `tsconfig.json` `references` names only `./packages/core` and `./packages/eagent`;
+  `packages/eagent/tsconfig.json` is `"include": ["src/**/*.ts"]` with `rootDir: "./src"`, so
+  `tui/src/**` is outside the project; and root `"test"` globs `packages/*/test/**/*.test.ts`,
+  which matches **zero** of its 17 files. It is not a workspace either — `"workspaces":
+  ["packages/*"]` is one level deep — so its declared deps (`ink`, `react`, `tsx`,
+  `ink-testing-library`) are never installed and it cannot run its own tests in this checkout;
+  its test script still spawns `--import tsx`, the loader this repo dropped on conformance.
+  **This is the four-file transaction in `CLAUDE.md`'s *Layout* section, unsatisfied by a
+  directory that section does not mention.** It compounds the `FLAGS` item above: the TUI is the
+  front end `args.ts`'s docstring names as its consumer, so drift between them goes red nowhere.
+  Decide it either way — bring it inside the gate, or move it out of `packages/` and say so — but
+  a tracked subpackage no gate can see is the one shape every count in this file rests on.
 
 - **`rewind` and `advance` are control-plane commands with no CLI verb**, while `cancel` and
   `approve` have both. An operator on a `loom serve` plane can
@@ -804,21 +844,39 @@ answer `ok` or `not ok`. All three now go through `isList` (the call in a `try`,
 throw, which is the fail-closed direction at each). **A platform fact written into one file's
 Traps entry is not a fix in the other files that call the same API: when one lands here, grep
 the tree for the API, not for the file.** The sweep is
-`grep -ran 'Array\.isArray' packages/core/src`, which finds it in **twenty files** — and this
-wave swept **three** of them, so what follows is a clearance for those three and an open
-question for the rest, not a tree-wide all-clear:
+`grep -ran 'Array\.isArray' packages/core/src`, which found it in **twenty files** when this
+paragraph was written and finds it in **TWENTY-EIGHT today** — re-derived, and the number is in
+the wrong direction for a paragraph whose whole point is that a sweep goes stale. Five new files
+arrived carrying the API (`journal/audit.ts`, `mcp/client.ts`, `mcp/tools.ts`, `resources/realm.ts`,
+`run/hooks.ts`) and four existing ones gained it. **So what follows is a clearance for three files
+as they were, not a tree-wide all-clear, and the unswept remainder has grown rather than shrunk:**
 
-- **`server/http.ts`** (twelve occurrences) and **`cli.ts`** (eight) — every one is over a
-  `JSON.parse` result (a request body, a graph file, an identity file, `--input` argv) or over
-  Node's own `req.headers` record. Neither source can produce a `Proxy`, so `Array.isArray`
-  cannot throw there. **CLEARED, by enumeration.**
+- **`server/http.ts`** (twelve occurrences) — every one is over a `JSON.parse` result (a request
+  body, a graph file, an identity file) or over Node's own `req.headers` record. Neither source
+  can produce a `Proxy`, so `Array.isArray` cannot throw there. **CLEARED, by enumeration**, and
+  the count is unchanged since.
+- **`cli.ts`** — **the clearance said EIGHT and there are TWENTY-TWO.** Fourteen of them were
+  never in the enumeration that produced it. Read by hand they still all sit over parsed-document
+  results (identity file, models file, MCP-servers file, `GraphSpec` doc, `--input` argv), so the
+  exposure is probably still nil — but "CLEARED, by enumeration" is a claim about a SET, and this
+  set grew by 175% while the sentence stayed put. **A clearance has to carry the count it cleared,
+  or it silently re-covers whatever arrives next.**
 - **`server/console.ts`** — one, in `loadGates`, over a `fetch().json()` result. Same
   argument. **CLEARED.**
-- **The other sixteen files are UNSWEPT** — `security/redact.ts`, `state/channels.ts`,
-  `graph/expr.ts`, `run/context.ts`, `run/engine.ts`, `run/delivery.ts` and the rest. The
-  question to ask of each is not "is this value a list" but **"can a caller outside this
-  process's own code put a revoked `Proxy` here?"** — which is the same question `readProp`
-  was written for, one API over.
+- **The rest are UNSWEPT, and the list is re-derived rather than carried over.** By live
+  (non-comment) call count: `graph/validate.ts` (11), `run/engine.ts` (6), `graph/expr.ts` (5),
+  `schema.ts` (5), `state/channels.ts` (4), `security/redact.ts` (3), `run/context.ts` (3), plus
+  the five files that arrived after the sweep. **`run/delivery.ts` was on the old list wrongly**:
+  it already routed through `isArrayValue` when the list was written, in the same paragraph that
+  credits it with inventing the fix. The question to ask of each is not "is this value a list" but
+  **"can a caller outside this process's own code put a revoked `Proxy` here?"** — which is the
+  same question `readProp` was written for, one API over.
+- **And the habit produced a fourth private copy of the guard while warning about the third.**
+  `isList` in `telemetry/spans.ts`, `isArrayValue` in `run/delivery.ts`, and now `isList` in
+  `vocab.ts` — three files, three names, one body (`try { return Array.isArray(v); } catch { return
+  false; }`). Nothing prevents a fifth. Invariant 1 permits intra-core imports freely, so **one
+  exported helper would make this sweep re-derivable by grepping for a symbol instead of
+  re-auditing twenty-eight files** — which is the actual fix to the problem this entry describes.
 
 **`node:vm` is not a sandbox.** `resources/functions.ts` uses it for *scoping* — so a trusted
 `function` body cannot reach `process.env` by accident. Untrusted code goes through
