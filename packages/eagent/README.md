@@ -17,7 +17,7 @@ want to change is a hot-reloadable extension you can edit while the agent runs.
 flowchart TB
     subgraph FE["Front ends — one shared wiring (src/host.ts)"]
         direction LR
-        TUI["Interactive TUI (tui/)"]
+        WEB["Browser console (HTTP + SSE)"]
         ONE["One-shot (-e)"]
         BATCH["Batch (piped)"]
         HTTP["HTTP server"]
@@ -65,7 +65,7 @@ pi and Emacs make — is that a minimal, observable, malleable core beats a big 
 ## Install
 
 ```bash
-npm i -g eagent    # the interactive TUI — this is the product
+npm i -g eagent    # the interactive WEB — this is the product
 eagent             # start a session
 ```
 
@@ -82,7 +82,7 @@ npm i @eagent/core
 npm install && npm run build
 npm test                    # the full offline suite — no network or API key
 npm --prefix tui install
-npm --prefix tui run dev    # the interactive TUI
+npm --prefix tui run dev    # the interactive WEB
 
 # Or drive the machine entry offline — a deterministic mock LLM:
 node dist/cli.js -e "hello"
@@ -351,7 +351,7 @@ API. (Secrets like API keys are not config and are never printed by `/config`.)
 ```mermaid
 flowchart LR
     subgraph CLI["src/cli.ts"]
-        TUI["Interactive TUI<br/>(tui/ package)"]
+        WEB["Browser console (HTTP + SSE)"]
         ONE["One-shot<br/>eagent -e / --json"]
         BATCH["Batch<br/>(piped stdin)"]
     end
@@ -415,8 +415,9 @@ docker run -p 8787:8787 -e EAGENT_HOST=0.0.0.0 -e EAGENT_TOKEN=<your-token> \
 
 ## Terminal surfaces
 
-The rich interactive experience is the **`eagent` TUI** — an Ink + React
-application in the `tui/` package, modelled on Claude Code's interactive mode.
+The rich surface is the **browser**, driven by the HTTP host's monitor routes and its SSE
+feed. The interactive terminal client that used to ship in a `tui/` package was deleted
+2026-08-25.
 It depends on the engine rather than the reverse, which is what keeps `src/`
 free of runtime dependencies and embeddable as a library.
 
@@ -427,7 +428,7 @@ tool calls, and errors are annotated on stderr, so `--eval … | tee` yields the
 answer and nothing else and no cursor-control byte can reach a pipe. `--json`
 emits the machine JSONL stream instead (see [`docs/JSONL.md`](docs/JSONL.md)).
 
-See [`docs/TUI.md`](docs/TUI.md) for both surfaces.
+See [`docs/WEB.md`](docs/WEB.md) for both surfaces.
 
 ## Build a single binary
 
@@ -441,7 +442,7 @@ printf 'hi\n' | bin/eagent -p mock
 ```
 
 The binary bundles the **headless** entry, so it is machine-only: `--eval`, `--json`,
-and piped batch. The interactive TUI is not in it — `yoga-layout` ships a WASM
+and piped batch. The interactive WEB is not in it — `yoga-layout` ships a WASM
 artifact Node's SEA facility cannot embed without a separate asset-injection step.
 
 The script (`scripts/build-binary.mjs`) bundles `dist/cli.js` with `esbuild` into a
@@ -490,7 +491,6 @@ src/extensions/  65 built-in extensions, all riding the ExtensionAPI
 src/host.ts      createAgentHost — shared wiring for every front end
 src/cli.ts       headless host: one-shot (--eval) + batch + --json
 src/print.ts     the engine's plain stream printer for the machine paths
-tui/             the interactive `eagent` TUI (Ink + React; its own package)
 src/server.ts    HTTP host: /health, /run (streaming), /sessions,
                  DELETE /sessions/:id, monitor SSE feeds (/events, …)
 examples/        worked example extensions
@@ -503,8 +503,8 @@ test/            the full offline suite — every primitive and extension
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — the extension author's guide.
 - [`docs/JSONL.md`](docs/JSONL.md) — the canonical JSONL event schema shared by
   the CLI `--json` stream and the HTTP `/run` stream.
-- [`docs/TUI.md`](docs/TUI.md) — the two terminal surfaces: the interactive
-  `eagent` TUI package and the headless machine CLI.
+- [`docs/WEB.md`](docs/WEB.md) — the two terminal surfaces: the interactive
+  `eagent` WEB package and the headless machine CLI.
 - [`SECURITY.md`](SECURITY.md) — the threat model and what is / isn't defended.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup and house conventions.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.

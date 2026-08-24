@@ -115,25 +115,22 @@ Parallel work is a tool call that blocks a turn, background jobs die at process
 restart, and its DAG scheduler had to hand-clone the kernel's policy guard. Survivable
 for one interactive session; painful in production with many concurrent tasks.
 
-Loom inverts the structure. See
-[`design/loom/00-OVERVIEW.md § What EAgent taught us`](design/loom/00-OVERVIEW.md#what-eagent-taught-us)
-for the evidence, line by line.
+Loom inverts the structure: orchestration state lives in an append-only journal that every
+run folds, so parallelism, human gates, replay and observability are one mechanism instead of
+four.
 
 ## Documentation
 
-- [`design/loom/`](design/loom/) — the architecture (D1–D14). Start with the
-  [index](design/loom/README.md).
-- [`design/loom/JOURNAL.md`](design/loom/JOURNAL.md) — append-only implementation log:
-  milestone status, decisions taken while building, and the bugs that changed the
-  design.
-- [`design/loom/99-DOD.md`](design/loom/99-DOD.md) — every requirement, and whether the
-  **code proves it** or only the design describes it.
-- [`CLAUDE.md`](CLAUDE.md) — invariants and working rules.
+- [`CLAUDE.md`](CLAUDE.md) — the goal, the three properties, and the working rules. Short on
+  purpose.
+- [`TODO.md`](TODO.md) — everything unfinished, written to be self-contained.
+- The commit history is the record of why. There is no separate design corpus: the previous
+  one (14 architecture documents, a defect register and a journal) was **deliberately deleted
+  on 2026-08-25** because its accumulated history was steering the work more than the goal was.
 
 ## Layout
 
 ```
-design/loom/       the architecture + implementation journal
 packages/core/     the Loom engine — zero runtime dependencies
   src/graph/         compiler, expression language, validation
   src/run/           executor, scheduler, policy, gates, replay
@@ -141,7 +138,7 @@ packages/core/     the Loom engine — zero runtime dependencies
   src/providers/     Anthropic, OpenAI, fallback chains, cassettes
   src/server/        control plane + embedded console
   src/security/      redaction, SecretValue
-packages/eagent/   EAgent — the agent kernel and its 65 extensions
+packages/eagent/   the agent kernel and its 65 extensions
 scripts/           CI guards and the binary build
 ```
 

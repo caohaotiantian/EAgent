@@ -28,7 +28,7 @@ extensions are loaded. Everything above the kernel is policy.
 flowchart TB
     subgraph L4["Front ends"]
         direction LR
-        TUI["TUI (tui/)"]
+        WEB["Browser console (HTTP + SSE)"]
         ONE["one-shot / --json"]
         BATCH["batch"]
         HTTP["HTTP server"]
@@ -315,12 +315,9 @@ is set by the front end — the CLI passes `yolo: false` (fallback **ask**) whil
 the HTTP server defaults `yolo: true` (fallback **allow**, auto-granting every
 capability). See `SECURITY.md`.
 
-Four **engine** front ends share that one assembly, so they all load exactly the
+Three **engine** front ends share that one assembly, so they all load exactly the
 same extensions:
 
-- **Interactive TUI** — the `eagent` command, published from `tui/` as its own
-  package (Ink + React) depending on `@eagent/core`. It is the product users
-  install; the engine is the library they embed.
 - **One-shot** — `eagent -e "…"` runs a single turn and exits; `--json` emits
   lifecycle events as JSONL on stdout (diagnostics on stderr).
 - **Batch** — piped, non-interactive stdin, processed line by line.
@@ -329,10 +326,10 @@ same extensions:
 
 The engine's own human output is `src/print.ts`, a plain stream printer for the
 machine paths only — assistant text to stdout, annotations to stderr, and no
-cursor or alt-screen byte by construction. The engine keeps
-**zero runtime dependencies except `jiti`** (`test/zero-dep.test.ts`), which is why the rich
-interactive experience is a separate Ink + React package (`tui/`) that depends on
-the engine rather than the reverse. See `docs/TUI.md`.
+cursor or alt-screen byte by construction. The engine keeps **zero runtime dependencies except `jiti`** (`test/zero-dep.test.ts`),
+which is why every rich surface lives OUTSIDE it. The interactive terminal client that used
+to ship beside it was deleted 2026-08-25; the rich surface is the browser, driven by the HTTP
+host's monitor routes and its SSE feed.
 
 ```mermaid
 sequenceDiagram

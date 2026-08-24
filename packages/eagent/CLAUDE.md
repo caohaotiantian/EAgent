@@ -15,15 +15,16 @@ of truth**; where this file and the code disagree, the code wins — fix this fi
 - _engineering-norms_   → "## House conventions"
 - _load-bearing-docs_   → "## Load-Bearing Documents"
 
-## Two packages
+## One package
 
-- **`@eagent/core`** (this directory) — the engine: kernel, providers, extensions, the
-  HTTP host, and the headless `eagent-headless` CLI. Zero runtime deps but `jiti`.
-- **`eagent`** (`tui/`) — the installable product: the interactive Ink + React
-  TUI, which owns the `eagent` command and depends on `@eagent/core`.
+**`@eagent/core`** — the engine: kernel, providers, extensions, the HTTP host, and the
+headless `eagent-headless` CLI. Zero runtime dependencies but `jiti`.
 
-They release in lockstep (`scripts/release-tui.mjs` rewrites the `file:..`
-dependency to the real version at publish time).
+The interactive terminal client that used to ship beside it as `eagent` was **deleted
+2026-08-25**. The rich surface is the browser, served by the HTTP host. Nothing claims the
+bare `eagent` bin name today; which entry point should own it is a packaging decision the
+redesign will take, and `test/zero-dep.test.ts` deliberately asserts it stays unclaimed so
+that decision is not made by accident.
 
 ## What this is
 
@@ -58,7 +59,7 @@ lines of slack). The ceiling moved from 2,200 to 2,250 when the `Config`
 interface + `envOnlyConfig` fallback were added to `store.ts` for the injected
 `e.config` facility, then from 2,250 to 2,265 for the multi-tenant isolation
 seam (`currentRootAgent()` + a `rootAgentStore` ALS, the `e.agent`/`e.rootAgent`
-getters), then from 2,265 to 2,335 for the TUI permission seams — `UI.decide?`
+getters), then from 2,265 to 2,335 for the interactive permission seams — `UI.decide?`
 (a structured permission request, since `confirm`'s single pre-formatted string
 cannot carry a diff or a command), `CapabilityManager.setFallback`/`forget`
 (without which a permission-mode control cannot exist: the fallback was
@@ -99,14 +100,9 @@ npm --prefix packages/eagent run eval      # offline evals-as-CI gate (exits non
 npm --prefix packages/eagent run dev       # headless CLI
 npm --prefix packages/eagent run serve     # the HTTP host
 npm --prefix packages/eagent run build:binary   # esbuild + Node-SEA -> bin/eagent
-npm --prefix packages/eagent/tui run dev   # the interactive TUI (Ink + React)
 
-# THERE IS NO `tsx` IN THE ENGINE. Node 24 strips types natively and every relative import
+# THERE IS NO `tsx`. Node 24 strips types natively and every relative import
 # specifier under `src/` and `test/` says `.ts`, so `node --test` runs the source directly.
-# `tui/` STILL USES IT, and has to: Node cannot strip `.tsx` — it does not parse JSX at all —
-# so `tui/package.json` keeps `tsx` as a devDep and `--import tsx` in its `test` and `dev`
-# scripts (two of its five). That is also why no root gate runs the TUI's 17 test FILES
-# (~195 cases); see the root CLAUDE.md and HANDOFF §6.
 ```
 
 The whole suite runs offline: `MockProvider` (`src/providers/mock.ts`) is a
@@ -132,11 +128,11 @@ required. Keep it that way. CI gates on `typecheck`, `test`, `eval`, and `build`
 - **The human display layer is not in the engine.** `src/print.ts` is the only
   human-readable output the engine emits — a plain stream printer for the machine
   paths (assistant text to stdout, tool/reasoning/error annotations to stderr).
-  The rich interactive experience is the `eagent` TUI in the **`tui/` package**
-  (Ink + React), which depends on the engine rather than the reverse; that
-  direction is what keeps `src/` zero-dep and embeddable. See `docs/TUI.md`.
+  The rich surface is the **browser**, served by `src/server.ts` over HTTP + SSE.
+  Keeping every display out of the engine is what keeps `src/` zero-dep and
+  embeddable — a library consumer must never download a rendering stack.
 - `src/complete.ts` — a pure, offline-testable `complete(line, ctx)` completion
-  engine, consumed by the TUI package.
+  engine, consumed by whatever front end is attached.
 - `src/server.ts` — the HTTP host (`GET /health`, `POST /run`, `POST /answer`
   for a mid-turn elicitation reply, `GET /sessions/:id` for a session's usage +
   cost summary, `DELETE /sessions/:id`), plus additive, read-mostly **monitor
@@ -208,7 +204,6 @@ install`). A command that writes without that call bypasses the security model.
   name. Re-derived rather than remembered: `packages/eagent/src` contains **zero** relative
   `.js` specifiers and **433** `.ts` ones. Following the old rule now produces an import that
   resolves to nothing at runtime.
-  (`tui/` is the exception and runs its own toolchain — see *Two packages*.)
 - **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
   `noImplicitOverride`, `noFallthroughCasesInSwitch` are all on. No `any`
   cop-outs; model the types. The build `tsconfig.json` covers `src/` only;
@@ -225,10 +220,8 @@ install`). A command that writes without that call bypasses the security model.
   bundles — stay zero-runtime-dep: providers use the global `fetch`; nothing pulls
   in an SDK. Do not add any other npm dependency. Enforced by
   `test/zero-dep.test.ts` (runtime `dependencies` ⊆ `{ jiti }`; no ink/react
-  imports under `src/` or `test/`). The **`tui/`** package may take `ink`/`react`
-  as its own package deps — not engine runtime deps, not under root `test/`. The
-  dependency arrow points ONE way: `tui/` depends on `@eagent/core`, never the
-  reverse, which is what keeps a library consumer from downloading React.
+  imports under `src/` or `test/`). No UI framework may enter this package at all: a library consumer must never download a
+  rendering stack to use the engine.
 - **Tests use `node:test`, run directly by `node --test`**, and must run offline. Every extension
   is capability-gated and ships with tests.
 - **Capabilities are the security vocabulary.** Privileged tools declare
@@ -271,7 +264,7 @@ recorded before choosing, a plan in `.agent/plan.md`, two independent reviewers,
 - `docs/EXTENSIONS.md` — the extension API every extension is written against
 - `docs/JSONL.md` — the on-disk session format, which persisted data depends on
 
-**Not** load-bearing — these take Standard or Direct: `src/extensions/**`, `test/**`, `tui/**`,
+**Not** load-bearing — these take Standard or Direct: `src/extensions/**`, `test/**`,
 `evals/**`, and the remaining `docs/*.md`.
 
 ## Working here
