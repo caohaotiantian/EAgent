@@ -37,7 +37,15 @@ import { Engine, type EngineOptions } from "./run/engine.ts";
 import { replayRun, type ReplayReport } from "./run/replay.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
 import type { JournalEvent } from "./journal/events.ts";
-import { FunctionRegistry, ModelRegistry, ToolRegistry, type ModelAdapter, type ToolDefinition } from "./run/registry.ts";
+import {
+  FunctionRegistry,
+  ModelRegistry,
+  ToolRegistry,
+  type ModelAdapter,
+  type ModelEvent,
+  type ModelRequest,
+  type ToolDefinition,
+} from "./run/registry.ts";
 import type { Posture } from "./vocab.ts";
 
 /** What a caller has to decide, and nothing more. */
@@ -167,6 +175,44 @@ function inlineResolver(prompt: string, profileRef: ResourceRef): ResourceResolv
   };
 }
 
+/**
+ * The caller's `model` reaches the provider, instead of the profile ref.
+ *
+ * `#runAgent` sends `agent.profile` as `ModelRequest.model` — the graph's routing KEY, which the
+ * `--models-file` table maps to a real model id for a deployment that has one. A one-liner has
+ * no such table, so without this the adapter received `agent_profile/claude-opus-5@v1` and a real
+ * provider rejected it as an unknown model. Measured: the mock adapter answered anyway, which is
+ * exactly why this survived being tested — an offline suite cannot tell a model id from a ref.
+ *
+ * The substitution is UNCONDITIONAL rather than keyed on the profile, and that is deliberate. The
+ * engine sends other non-model strings through this seam too: a rubric evaluator sends "mock" and
+ * context compaction sends "compaction". In a one-node agent every one of those calls is made on
+ * behalf of THIS agent — compacting its own transcript — so they all belong on its model. A
+ * deployment that wants different models for different jobs has outgrown the one-liner and wants
+ * the routing table.
+ */
+class OneModelAdapter implements ModelAdapter {
+  readonly provider: string;
+  readonly #inner: ModelAdapter;
+  readonly #model: string;
+  constructor(inner: ModelAdapter, model: string) {
+    this.#inner = inner;
+    this.#model = model;
+    this.provider = inner.provider;
+  }
+  stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    return this.#inner.stream({ ...req, model: this.#model }, signal);
+  }
+  priceOf(_model: string, usage: Parameters<ModelAdapter["priceOf"]>[1]): number {
+    // PRICED AS THE REAL MODEL, not as the ref. `priceOf` on an unknown id returns 0, so pricing
+    // the key would silently make every run free and every budget ceiling unreachable.
+    return this.#inner.priceOf(this.#model, usage);
+  }
+  estimateOf(req: ModelRequest): number {
+    return this.#inner.estimateOf({ ...req, model: this.#model });
+  }
+}
+
 function specFor(opts: AgentOptions, profileRef: ResourceRef): GraphSpec {
   return {
     apiVersion: "loom.dev/v1",
@@ -220,7 +266,9 @@ export function agent(opts: AgentOptions): RunnableAgent {
   }
 
   const models = new ModelRegistry();
-  if (opts.adapter !== undefined) models.register(opts.adapter, true);
+  if (opts.adapter !== undefined) {
+    models.register(new OneModelAdapter(opts.adapter, opts.model ?? "default"), true);
+  }
 
   const store = opts.store ?? new MemoryStateStore(opts.now === undefined ? {} : { now: opts.now });
   const graph = compileOrThrow({

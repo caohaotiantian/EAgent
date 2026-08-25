@@ -222,3 +222,32 @@ test("A RUN CAN BE SCORED — the trajectory is reachable in one line", async ()
   assert.ok(t.steps.length > 0, "a trajectory with no steps has nothing to learn from");
   assert.ok(t.cohort !== undefined, "and it must land in a cohort, or it cannot be compared to anything");
 });
+
+test("THE CALLER'S MODEL ID REACHES THE PROVIDER, not the profile ref", async () => {
+  // `#runAgent` sends `agent.profile` as `ModelRequest.model` — the graph's routing KEY, which a
+  // deployment's `--models-file` table maps to a real model id. A one-liner has no such table, so
+  // the adapter was receiving `agent_profile/claude-opus-5@v1` and a real provider would reject it
+  // as an unknown model.
+  //
+  // THE OFFLINE SUITE COULD NOT HAVE CAUGHT THIS, which is the interesting part: the mock adapter
+  // answers whatever it is asked, so a ref and a model id are indistinguishable to it. Found by
+  // asking what a provider would actually receive rather than whether the run succeeded.
+  let seen = "(never called)";
+  const spy = {
+    provider: "spy",
+    // eslint-disable-next-line require-yield
+    async *stream(req: { model: string }) {
+      seen = req.model;
+      yield { type: "text_delta", text: "{}" } as never;
+      yield { type: "message_stop", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 } } as never;
+    },
+    priceOf: () => 0,
+    estimateOf: () => 0,
+  };
+
+  const a = agent({ prompt: "hi", model: "claude-opus-5", adapter: spy as never, now: NOW });
+  const r = await a.run("go");
+
+  assert.equal(r.status, "succeeded", JSON.stringify(r.projection.error ?? {}));
+  assert.equal(seen, "claude-opus-5", "the provider was sent a resource ref instead of a model id");
+});
