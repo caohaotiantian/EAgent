@@ -1341,6 +1341,49 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     // taking it: an author who never read D5 finds out from the compiler instead of from a
     // barrier that waits forever. This is the treatment `GRAPH019_POSTURE_NO_EFFECT` gets, and
     // for the same reason — you declared something that changes nothing.
+    // A JOIN CAN ONLY PROPAGATE WHAT ITS BRANCHES WROTE, and declaring otherwise compiled clean.
+    //
+    // `#foldJoin` folds each branch task's committed `writes` per channel and commits the result
+    // at the join's own coordinate. It has no body and no transform, so a channel no branch wrote
+    // is a channel the barrier cannot produce — whatever the node's `writes` says.
+    //
+    // Found by writing a graph. A `collect` join declared `writes: ["report"]` over branches that
+    // write `reviews`; the compiler reported `ok` with no diagnostics, the fold produced nothing,
+    // and the run either failed later with `E_OUTPUT_MISSING` — a message about the OUTPUT, three
+    // nodes away from the mistake — or, when a downstream node happened to write the same channel
+    // itself, SUCCEEDED with an empty report. The second is the plausible-wrong-answer shape this
+    // system exists to refuse.
+    //
+    // A WARNING, by this file's own rule: an ERROR is for a declaration that SUBSTITUTES
+    // semantics — `mode: "quorum"`, `onBudgetExhausted: "gate"` — where accepting it ships a graph
+    // that reads as supervised and behaves otherwise. This one does nothing at all: the channel is
+    // simply not written, and the harm lands downstream on whoever reads it.
+    //
+    // The severity was ERROR for one test run, and what changed it is worth keeping: SIX fixtures
+    // in this repository carry the same declaration, each over branches writing a different
+    // channel. A mistake the codebase makes six times in its own tests is one shipped graphs make
+    // too, and turning it into a compile failure would break working graphs to report something
+    // that was already inert in them. Warning tells the author at authoring time, which is the
+    // whole gap — my own review graph compiled `ok`, folded nothing, and wrote an empty report.
+    const produced = new Set<string>(
+      join.branches.flatMap((b) => spec.nodes.find((x) => x.id === b)?.writes ?? []),
+    );
+    for (const channel of n.writes ?? []) {
+      if (produced.has(channel)) continue;
+      d.push({
+        severity: "warning",
+        code: "GRAPH008_JOIN_WRITES_UNPRODUCED",
+        message:
+          `join "${n.id}" declares it writes "${channel}", but none of its branches (${join.branches.join(", ")}) ` +
+          `writes that channel — a barrier folds what its branches produced and cannot make anything new`,
+        at: { nodeId: n.id, channel },
+        fix:
+          produced.size > 0
+            ? `write ${[...produced].map((c) => `"${c}"`).join(" or ")}, or put a node AFTER the join to produce "${channel}"`
+            : `its branches write nothing, so this join can only signal that they finished`,
+      });
+    }
+
     if (join.timeoutMs !== undefined) {
       d.push({
         severity: "warning",
