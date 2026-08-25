@@ -187,8 +187,12 @@ Each traces to a decision in `DESIGN.md`.
 - **Divergence must be terminal and loud.** The known failure mode of every replay-based runtime
   is a silent stall: the task retries forever without entering a failed state. A repeated
   divergence signature with no forward progress needs its own terminal state.
-- **Two-axis labels on branch coordinates (D4).** Integrity × confidentiality, most-restrictive,
-  unlabelled ⇒ untrusted. Confine a label to its branch and resolve at the join.
+- **Two-axis labels (D4).** Integrity × confidentiality, most-restrictive, **unlabelled ⇒
+  untrusted** — the last is the valuable half and the one this codebase does not have: a tool that
+  is not `isExternal` writing data from anywhere is untainted today. Branch-coordinate scoping was
+  built and reverted: sibling arms of a fan-out run the same node sequence so they taint
+  identically, and the one divergent shape is refused by `GRAPH010_CONCURRENT_WRITE`. See
+  `DESIGN.md` D4 for what would reopen it.
 - **Prompt text into the artifact hash (D7).** A prompt edit currently changes what a resumed run
   does, silently.
 - **Payload externalisation.** Above a byte threshold a payload moves out of the journal and

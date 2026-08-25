@@ -103,19 +103,39 @@ TypeScript sandbox does the same thing.
 
 Bind `Temporal` too when it lands as a default global.
 
-### D4 · Information flow, scoped to branch coordinates
+### D4 · Information flow — two axes, and NOT scoped to branch coordinates
 
-*Alternatives:* (a) today's single taint set; (b) adopt FIDES as-is; (c) FIDES' two axes with
-scoping on the graph's branch coordinate.
+*Alternatives:* (a) today's single taint bit; (b) adopt FIDES' two axes as-is; (c) FIDES' two
+axes with scoping on the graph's branch coordinate.
 
-**Choice: (c).** Adopt the two axes (integrity × confidentiality), most-restrictive combination,
-and — the highest-value single default in the domain — **unlabelled means untrusted**.
+**Choice: (b). (c) was tried and reverted, and the reason is worth more than the code was.**
 
-The novelty is in the scoping. FIDES' own stated limitation is that most-restrictive propagation
-is conservative: once an untrusted issue body enters the context, *the whole run* is untrusted,
-because the only units available are "the message" and "the run". **A graph has a third unit
-neither has: the branch coordinate.** A label can be confined to a branch and resolved at the
-join, so one untrusted fetch does not poison a parallel branch that never read it.
+Adopt the two axes — integrity × confidentiality, combined most-restrictively — and the
+highest-value default in the domain: **unlabelled means untrusted**. Some of this already exists
+here in another form: channel `classification` is the confidentiality axis, and the taint set is
+the integrity one. What is missing is that they compose, and that an unlabelled value fails
+closed rather than open.
+
+**Why (c) is wrong FOR THIS GRAPH MODEL, having built it.** FIDES' own documented limitation is
+that most-restrictive propagation is conservative: once untrusted content enters, the whole run
+is untrusted, because its only scoping units are the message and the run. A graph looked like it
+had a third unit — the branch coordinate — and it does. It just cannot be used, and the
+demonstration is the useful part:
+
+- Branch coordinates differ **only** under fan-out. `TaskId` is `nodeId@branchPath#iteration`, so
+  loop iterations share a coordinate, and a subgraph child gets its own run and its own set.
+- Every arm of a fan-out runs the **same node sequence**, so `isExternal` and the observed
+  channels are identical in every arm. Sibling arms therefore taint identically, always.
+- The one shape where siblings could diverge — two different writers of one channel on exclusive
+  router arms — is refused by the compiler as `GRAPH010_CONCURRENT_WRITE`.
+
+So sibling isolation is unreachable, and a `TaintSet` keyed by coordinate buys precision that
+nothing can observe. It was implemented, passed the whole suite, and was reverted: complexity in
+a security boundary with no demonstrable gain is a bad trade however elegant the model.
+
+**What would reopen it:** a graph model where sibling branches can run different nodes — which
+is what relaxing `GRAPH010` for provably-exclusive router arms would create. If that lands, this
+decision is the first thing to revisit, and the `TaintSet` shape is in the history.
 
 ### D5 · The extension surface is versioned mechanically
 
