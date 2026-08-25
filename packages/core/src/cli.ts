@@ -2598,7 +2598,20 @@ export async function main(argv: readonly string[]): Promise<number> {
           // rendering one.
           const kind = sp.attributes?.["effect.kind"];
           const qualifier = typeof kind === "string" && !sp.name.endsWith(kind) ? ` (${kind})` : "";
-          process.stdout.write(`${"  ".repeat(depth)}${sp.name}${qualifier} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
+          // WHICH NODE. Same argument as the line above, one span up: `node.id` and `branch.path`
+          // have been on every `loom.task` span since it was built, and the renderer printed
+          // neither. Measured by driving a four-node graph: five identical `loom.task [ok]` lines,
+          // in an output whose whole job is to say what happened. The branch is what separates a
+          // fanned-out node's instances, so `review` twice becomes `review fan[0]` and
+          // `review fan[1]` — without it the two lines are indistinguishable and the reader
+          // cannot tell a re-attempt from a sibling branch.
+          const node = sp.attributes?.["node.id"];
+          const branch = sp.attributes?.["branch.path"];
+          const where =
+            typeof node === "string" && node !== ""
+              ? ` ${node}${typeof branch === "string" && branch !== "" ? ` ${branch}` : ""}`
+              : "";
+          process.stdout.write(`${"  ".repeat(depth)}${sp.name}${where}${qualifier} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
           for (const child of kids.get(sp.spanId) ?? []) emit(child, depth + 1);
         };
         for (const r of roots) emit(r, 0);
