@@ -19,6 +19,14 @@ State at capture: 259 test files, 57 source files in `packages/core`, 106 in `pa
 
 Each was verified against the code, not remembered.
 
+- ~~**Unknown-field check for a node's TOP-LEVEL fields and for `GraphSpec` itself.**~~ **DONE**,
+  and it held the worst member of the declared-inert-and-permissive family: `policyy: {posture:
+  "in"}` compiled clean and ran at `out`, so an author asking for the strongest oversight the
+  system has got the weakest, silently. `retry`, `timeoutMs`, `checkpoint` were discarded the same
+  way, and a misspelled edge `when` made a guarded branch UNCONDITIONAL. `NODE_FIELDS`,
+  `SPEC_FIELDS`, `EDGE_FIELDS` now cover all three scopes through one `unknownKeys`; the test
+  reads the interfaces out of `spec.ts` so they cannot drift. No fixture broke.
+
 - **Authoring warts, found by writing a real graph through `bin/loom`.** **(2) AND (3) ARE DONE**,
   and (3) turned out not to be a wart at all — see below. **(1) remains:** you cannot fan out from
   a graph's entry — a fan-out edge needs a source node, so every fan-out graph opens with a no-op
