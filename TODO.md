@@ -19,6 +19,15 @@ State at capture: 259 test files, 57 source files in `packages/core`, 106 in `pa
 
 Each was verified against the code, not remembered.
 
+- **Authoring warts, found by writing a real graph through `bin/loom`.** None is a correctness bug;
+  all three cost a user time. **(1)** You cannot fan out from a graph's entry — a fan-out edge needs
+  a source node, so every fan-out graph opens with a no-op `function` node whose only job is to
+  exist. **(2)** A `${template}` substitutes a value but cannot SERIALISE one, so writing an object
+  channel to a file with `fs.write` is impossible without inserting another no-op node to
+  stringify it. **(3)** `GRAPH009_UNBOUNDED_NODE` warns on every agent node that declares no
+  budget, which is every agent node in a graph that sets a run budget — the warning is correct and
+  fires so reliably that it reads as noise.
+
 - ~~**Confidentiality does not propagate, and a human ceiling erases it entirely.**~~ **HALF DONE.**
   A secret now FLOWS: `applySecretFlow` marks every channel a node writes after observing one that
   is `secret_ref`/`pii` or already carries a secret, folded at commit and rebuilt in

@@ -9,7 +9,7 @@
  */
 
 import type { Disposable as LoomDisposable } from "../vocab.ts";
-import { CODES, err } from "../errors.ts";
+import { CODES, err, type LoomError } from "../errors.ts";
 import type { TaskId } from "../ids.ts";
 import type { JSONSchema } from "../schema.ts";
 import type { StateView } from "../state/channels.ts";
@@ -35,6 +35,22 @@ export interface ToolResult {
   readonly details?: unknown;
   /** Channel writes this tool proposes. Merged into the node's writes. */
   readonly writes?: Readonly<Record<string, unknown>>;
+  /**
+   * The TYPED reason, when the failure has one. Carries class and code; the string does not.
+   *
+   * Every `isError` result used to collapse into `E_TOOL_SOURCE_UNAVAILABLE` at the tool-node
+   * boundary — class `unavailable`, therefore RETRYABLE. So a permanently invalid argument was
+   * re-sent to the attempt cap: measured, two retries for `${obj}` against a tool requiring a
+   * string, with the tool never executing once. That is the same defect the provider layer
+   * already fixed, where every 4xx was classed `unavailable` and a permanent misconfiguration
+   * was re-sent until the attempts ran out.
+   *
+   * OPTIONAL, and its absence still means "unavailable, retryable" — a tool author reporting a
+   * transient failure with `isError` alone keeps exactly the behaviour they had. What changes is
+   * that the engine's OWN refusals — an argument that does not fit the schema, a tool nobody
+   * registered, a policy denial — now say so in a vocabulary the retry loop reads.
+   */
+  readonly error?: LoomError;
 }
 
 export interface ToolDefinition extends ToolManifestLite {

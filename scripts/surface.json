@@ -385,6 +385,7 @@
   "createFunctionLoader",
   "createGraphCompiler",
   "createHookLoader",
+  "dataFloorOf",
   "decodeBranch",
   "descendantsOf",
   "detectAnomaly",

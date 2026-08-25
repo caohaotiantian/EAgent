@@ -103,7 +103,6 @@ const NEVER_RAISED: readonly string[] = [
   "E_SECRET_UNAVAILABLE",
   "E_STORAGE_FULL",
   "E_TOOL_NOT_IDEMPOTENT",
-  "E_TOOL_SCHEMA_INVALID",
   "E_TOO_LATE",
 ];
 

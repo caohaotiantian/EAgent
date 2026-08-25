@@ -3026,7 +3026,8 @@ export class Engine {
         // compiler already warned about it. Answering with an error result rather than throwing
         // keeps it the same shape as every other tool failure a body has to handle.
         if (tool === undefined) {
-          return { content: `tool "${name}" is declared by node "${w.node.id}" but not registered in this process`, isError: true };
+          const why = `tool "${name}" is declared by node "${w.node.id}" but not registered in this process`;
+          return { content: why, isError: true, error: err.validation(CODES.E_TOOL_NOT_FOUND, why) };
         }
         return this.#invokeTool(ctx, w.task, tool, args, ordinal++, true);
       };
@@ -3217,7 +3218,9 @@ export class Engine {
         status: "failed",
         writes: {},
         usage: { ...ZERO_USAGE },
-        error: err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, result.content),
+        // The typed reason when the refusal carries one; otherwise the old default, which is
+        // still right for a tool that genuinely failed to reach its source.
+        error: result.error ?? err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, result.content),
       };
     }
     // A tool's channel write is its `writes` when it declares one, otherwise its
@@ -4096,10 +4099,14 @@ export class Engine {
     if (!allowed.has(call.name)) {
       // The injection-containment path: the model asked for something the node never
       // declared, so it is refused before dispatch rather than policed inside the tool.
-      return { content: `tool "${call.name}" is not available to node "${w.node.id}"`, isError: true };
+      const why = `tool "${call.name}" is not available to node "${w.node.id}"`;
+      return { content: why, isError: true, error: err.policy(CODES.E_CAP_DENIED, why) };
     }
     const tool = this.tools.get(call.name);
-    if (tool === undefined) return { content: `unknown tool "${call.name}"`, isError: true };
+    if (tool === undefined) {
+      const why = `unknown tool "${call.name}"`;
+      return { content: why, isError: true, error: err.validation(CODES.E_TOOL_NOT_FOUND, why) };
+    }
     return this.#invokeTool(ctx, w.task, tool, call.arguments, ordinal, nodeApproved);
   }
 
@@ -4126,7 +4133,12 @@ export class Engine {
 
     // 1 — validate
     const first = validate(tool.parameters, rawArgs);
-    if (!first.ok) return { content: `invalid arguments for ${tool.name}:\n- ${first.errors.join("\n- ")}`, isError: true };
+    if (!first.ok) {
+      // A VALIDATION FAILURE, NOT AN OUTAGE. These arguments will not fit this schema on the
+      // second attempt either, and before the class was carried they were re-sent to the cap.
+      const why = `invalid arguments for ${tool.name}:\n- ${first.errors.join("\n- ")}`;
+      return { content: why, isError: true, error: err.validation(CODES.E_TOOL_SCHEMA_INVALID, why) };
+    }
 
     // 1.5 — THE EXTENSION SEAM. `preTool` may BLOCK the call or REWRITE its arguments, and it
     // runs here — after the schema check, before policy — for two reasons. Rewritten arguments
@@ -4177,7 +4189,9 @@ export class Engine {
       // incremented at dispatch would not.
       tainted: taintedTurn(ctx, task, ordinal),
     });
-    if (decision.effect === "deny") return { content: decision.error.message, isError: true };
+    // The policy engine already built a typed refusal; re-wrapping it as a string threw away the
+    // class that says a denial is not worth retrying.
+    if (decision.effect === "deny") return { content: decision.error.message, isError: true, error: decision.error };
 
     // A `gate` decision here is a REFUSAL, not a suspension. Suspending mid-turn would
     // need turn-level durability the engine does not have: the model's transcript for
