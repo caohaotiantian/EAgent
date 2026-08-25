@@ -71,8 +71,8 @@ Each was verified against the code, not remembered.
   beside `REQUIRED_FIELDS` and is cross-checked against the interfaces it enumerates, because an
   allow-list that falls behind refuses correct graphs — worse than the hole it closed. It caught an
   invalid `humanGate: {prompt}` in a test graph of mine on its first run.
-  **Still open:** the same check for a node's TOP-LEVEL fields (`id`, `reads`, `retry`, `unhandled`
-  …) and for `GraphSpec` itself, neither of which is enumerated anywhere yet.
+  **Now closed at all four scopes** — see the entry above. The node's own fields turned out to hold
+  the worst instance in the family, `policyy` losing a declared `posture: "in"` in silence.
 - **The journal amplifies a payload by `2N+2`.** **BOUNDED, NOT FIXED.** `prepare` now refuses a
   single canonical payload above 8 MiB (`E_PAYLOAD_TOO_LARGE`), which stops the runaway — a 256 MiB
   event used to be accepted at ~2.5 GiB of RSS — and says what to do instead. It does nothing about
