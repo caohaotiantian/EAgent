@@ -19,14 +19,26 @@ State at capture: 259 test files, 57 source files in `packages/core`, 106 in `pa
 
 Each was verified against the code, not remembered.
 
-- **Authoring warts, found by writing a real graph through `bin/loom`.** None is a correctness bug;
-  all three cost a user time. **(1)** You cannot fan out from a graph's entry — a fan-out edge needs
-  a source node, so every fan-out graph opens with a no-op `function` node whose only job is to
-  exist. **(2)** A `${template}` substitutes a value but cannot SERIALISE one, so writing an object
-  channel to a file with `fs.write` is impossible without inserting another no-op node to
-  stringify it. **(3)** `GRAPH009_UNBOUNDED_NODE` warns on every agent node that declares no
-  budget, which is every agent node in a graph that sets a run budget — the warning is correct and
-  fires so reliably that it reads as noise.
+- **Authoring warts, found by writing a real graph through `bin/loom`.** **(2) AND (3) ARE DONE**,
+  and (3) turned out not to be a wart at all — see below. **(1) remains:** you cannot fan out from
+  a graph's entry — a fan-out edge needs a source node, so every fan-out graph opens with a no-op
+  `function` node whose only job is to exist. Not a correctness bug; it costs a user a node.
+
+  **(2) closed** by `${x | json}`. The whole-string form still yields the VALUE, which is what a
+  tool taking a structured argument needs; the filter is opt-in. Sized honestly in the commit:
+  argument validation already refused the object before `execute` with an accurate message, so
+  this removed a required workaround rather than a wrong value reaching a tool.
+
+  **(3) was misread, and the truth was a real defect.** The warning was not noise-but-correct: it
+  keyed on `graphBudget !== undefined`, so it fired on graphs that DO declare a ceiling — where
+  its message ("the run budget cannot be proven") was false, since `Engine.submit` enforces
+  `minDefined(caller, graph, deployment)` — and stayed silent on graphs declaring no budget at
+  all, which nothing bounds: `PolicyEngine.reserve` skips its check when `runUsd` is undefined,
+  `remainingUsd` returns Infinity, and `loom run` has no default. So the cheapest way to silence
+  it was `delete policy.budget`, moving a graph from the bounded shape to the unbounded one.
+  Now `GRAPH009_NO_BUDGET` covers the silent case and the old message says what is actually
+  unprovable (`GRAPH009_BUDGET_OVERCOMMIT`'s sum). **The lesson worth keeping: "correct but
+  noisy" was a conclusion reached by reading the warning, not by testing when it fires.**
 
 - ~~**Confidentiality does not propagate, and a human ceiling erases it entirely.**~~ **HALF DONE.**
   A secret now FLOWS: `applySecretFlow` marks every channel a node writes after observing one that
