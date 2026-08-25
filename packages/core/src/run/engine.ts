@@ -5587,7 +5587,19 @@ function waveTaintFor(wave: readonly Wave[]): Map<TaskId, ReadonlySet<string>> {
 
 /** A node whose writes carry output from outside the system. The ONE definition. */
 function isExternal(node: NodeSpec): boolean {
-  return node.type === "tool" || node.type === "subgraph" || (node.type === "agent" && (node.agent?.tools ?? []).length > 0);
+  return (
+    node.type === "tool" ||
+    node.type === "subgraph" ||
+    (node.type === "agent" && (node.agent?.tools ?? []).length > 0) ||
+    // A `function` node that DECLARED EFFECTS can reach a tool, so it produces untrusted output
+    // exactly as an agent with tools does. Without this clause, giving function bodies effects
+    // opened a laundering path one node type over from the one this rule already names: declare
+    // `effects: ["net.fetch"]`, fetch untrusted text, write it to a channel, and the channel comes
+    // out CLEAN — so an irreversible action downstream sees no taint and E8's hard floor never
+    // applies. Widening `reachableToolNames` without widening this is the same set answered two
+    // ways, which is the shape that produced the agent hole in the first place.
+    (node.function?.effects ?? []).length > 0
+  );
 }
 
 /**
