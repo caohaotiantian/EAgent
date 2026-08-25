@@ -550,3 +550,36 @@ test("the seed is NOT visible to the body — ctx stays {taskId, now, signal}", 
   const out = body(view({ amount: 0 }), { ...ctx(), seed: 1 }) as { writes: { doubled: string } };
   assert.equal(out.writes.doubled, "now,signal,taskId");
 });
+
+test("A SANDBOXED BODY IS TOLD WHY IT CANNOT INVOKE A DECLARED EFFECT", async () => {
+  // `FunctionNode.effects` hands an in-process body one bound invoker per declared name. A
+  // resource-loaded body cannot have them: it runs synchronously inside `vm.runInContext` under a
+  // per-call timeout — the constraint that made `Math.random`'s seed a seed rather than a value
+  // per call — and a bound function cannot be serialized across the boundary regardless.
+  //
+  // A THROWING STUB, not an omission, for the reason the unseeded `Math.random` throws.
+  // `ctx.effects["x"](…)` against a missing object dies with "Cannot read properties of
+  // undefined", which sends an author hunting for a typo in their own code instead of telling
+  // them the capability is real and lives somewhere else.
+  const { store } = storeWith(
+    `(view, ctx) => { ctx.effects["pay.charge"]({}); return { writes: {} }; }`,
+    "calls-an-effect",
+  );
+  const body = createFunctionLoader({ store }).load("function/calls-an-effect@stable")!;
+
+  await assert.rejects(
+    async () =>
+      body(view({}), {
+        ...ctx(),
+        seed: 1,
+        effects: { "pay.charge": async () => ({ content: "" }) },
+      } as never),
+    (e: unknown) => {
+      const m = e instanceof Error ? e.message : String(e);
+      assert.match(m, /E_EFFECT_UNAVAILABLE/, m);
+      assert.match(m, /pay\.charge/, "the message must name the effect the body asked for");
+      assert.match(m, /FunctionRegistry\.register|tool node/, "…and where the capability does work");
+      return true;
+    },
+  );
+});

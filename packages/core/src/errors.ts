@@ -313,6 +313,8 @@ export const CODES = {
    * with the same missing seed fails identically.
    */
   E_EFFECT_UNRECORDED: "E_EFFECT_UNRECORDED",
+  /** A sandboxed body reached for a declared effect. It cannot: it may not await a host call. */
+  E_EFFECT_UNAVAILABLE: "E_EFFECT_UNAVAILABLE",
 
   // exhausted
   E_BUDGET_EXHAUSTED: "E_BUDGET_EXHAUSTED",

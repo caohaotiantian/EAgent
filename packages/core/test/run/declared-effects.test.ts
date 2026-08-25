@@ -180,6 +180,23 @@ test("AN IRREVERSIBLE DECLARED EFFECT GATES THE NODE — nobody configured overs
 
   assert.equal(p.status, "awaiting_gate", `expected a gate, got ${p.status}`);
   assert.equal(charged, 0, "THE CHARGE MUST NOT HAVE RUN — a gate before the action, not after it");
+
+  // AND THE APPROVAL HAS TO MEAN SOMETHING. Stopping at `awaiting_gate` is what let a broken
+  // version of this feature pass: the node gated, a human approved, the body ran, and the
+  // in-body call was re-decided and REFUSED — so the run reported `succeeded` with the refusal
+  // string sitting in a channel and the charge never made. A gate a human answered that changes
+  // nothing is worse than no gate at all, and only resuming can tell the two apart.
+  const gateId = Object.values(p.gates).find((g) => g.state === "open")!.gateId;
+  await r.engine.resolveGate(runId, {
+    gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "api" },
+    idempotencyKey: "k1",
+  });
+  const after = await r.engine.advance(runId);
+
+  assert.equal(after.status, "succeeded", JSON.stringify(after.error ?? {}));
+  assert.equal(charged, 1, "the human approved and the charge STILL did not run");
 });
 
 test("DECLARED EFFECTS REPLAY — served from the record, not re-executed", async () => {

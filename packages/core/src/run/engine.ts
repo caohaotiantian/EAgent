@@ -2967,9 +2967,23 @@ export class Engine {
    * the same key and replay would serve one the other's result. One counter over the body's whole
    * call SEQUENCE is what makes the keys distinct and reproducible.
    *
-   * `nodeApproved` is deliberately false: `#executeTask`'s chain ran for the NODE, and a `tool`
-   * node may claim that approval because its single call is the thing the human saw. A function
-   * body's calls were not on that screen, so each is judged on its own class.
+   * `nodeApproved` IS CLAIMED, and getting this wrong shipped a feature that reported success
+   * while doing nothing. The first version passed `false`, reasoning that a body's calls "were not
+   * on the screen the human saw". Measured, that produced: node floors at `in` → run suspends →
+   * human approves → the body runs → `#invokeTool` re-decides, sees `gate`, and returns the
+   * refusal string `"…requires human approval this turn cannot request"` → **the run reports
+   * `succeeded` with that sentence sitting in a channel and the action never taken.** A gate a
+   * human answered that changes nothing is worse than no gate.
+   *
+   * The claim is sound, and it is the same one a `tool` node makes: `#executeTask` ran the full
+   * guard chain for this node before any body was entered, and the node's oversight floor is the
+   * `max` over exactly these DECLARED names — that is what `reachableToolNames` computed it from.
+   * So the human approved this set. It is a stronger claim than an agent's, whose tool choice is
+   * made at run time and was never in the payload.
+   *
+   * ONE APPROVAL COVERS EVERY CALL THE BODY MAKES, which is the semantics an agent node already
+   * has — measured there as one `gate.raised` and one `gate.decided` against two executions. The
+   * declared set bounds WHICH tools, never how many times.
    */
   #effectsFor(ctx: RunContext, w: Wave): Readonly<Record<string, (args: unknown) => Promise<ToolResult>>> | undefined {
     const declared = w.node.function?.effects ?? [];
@@ -2986,7 +3000,7 @@ export class Engine {
         if (tool === undefined) {
           return { content: `tool "${name}" is declared by node "${w.node.id}" but not registered in this process`, isError: true };
         }
-        return this.#invokeTool(ctx, w.task, tool, args, ordinal++);
+        return this.#invokeTool(ctx, w.task, tool, args, ordinal++, true);
       };
     }
     return bound;

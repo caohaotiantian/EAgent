@@ -19,6 +19,32 @@ State at capture: 259 test files, 57 source files in `packages/core`, 106 in `pa
 
 Each was verified against the code, not remembered.
 
+- **Confidentiality does not propagate, and a human ceiling erases it entirely.** Measured, twice.
+  One `function` node copying a `secret_ref` channel into an `internal` (or unclassified) one drops
+  the downstream node's floor from `in` to `on`, no gate is raised, and the plaintext reaches the
+  tool — the compiler neither refuses nor warns. Separately, `effectivePosture`'s hard floor is
+  `max(ceiling, tainted ? "in" : "on")`, which has terms for irreversibility and taint and **none
+  for classification**, so a human ceiling of `on` erases a `secret_ref` floor with no laundering
+  needed. The integrity axis has `applyTaint` as a working template; the confidentiality axis has
+  no analogue. It must land at BOTH sites — `compile.ts`'s `dataFloor` and the engine's runtime
+  `dataClassification` — because that pair has drifted before.
+- **`validate.ts` has no unknown-field check, for any node type.** `evaluator: {kind, ref,
+  threshold, effects: [...]}` compiles clean, warns nothing, and decides nothing — the author
+  believes they declared a capability ceiling and got none. Same hole admits `function: {ref,
+  effectz: [...]}`. The TypeScript excess-property check hides this from in-repo authors; the YAML
+  path has nothing.
+- **The journal amplifies a payload by `2N+2`.** Measured: `journal_bytes = payload × (2N + 2)`
+  where N is the nodes a value flows through — `task.committed` and `state.reduced` each carry a
+  full copy per hop, plus `run.submitted` and `run.completed`. One run, one 16 MiB value, four
+  nodes = **160 MiB of SQLite**, fsynced. Nothing caps bytes anywhere: a 256 MiB single event is
+  accepted by both stores. The one payload guard is `MAX_DEPTH` and it is byte-blind — 300-deep
+  5 KB is refused, 2-deep 64 MiB is accepted. `foldRun` is NOT the problem (0.0 ms over 160 MiB;
+  it copies references); the cost is in append and in replay, which re-materialises the whole
+  journal at four sites and is strictly linear in bytes.
+- **`validate.ts` and `compile.ts` compute `dataFloor` from different sets** — `n.reads` versus
+  `observedChannels(n)`. The `${channel}`-in-`tool.args` bypass was fixed in the compiler and the
+  engine and not in the validator. Diagnostics only, not enforcement.
+
 - **`E_ADMISSION_REJECTED` is raised by nothing.** `POST /runs` admits everything it can
   authenticate. There is no queue, no depth limit, no token bucket.
 - **A provider rate limit sleeps holding the worker slot.** A 429 is absorbed by a retry that

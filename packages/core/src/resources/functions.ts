@@ -229,6 +229,31 @@ const ARGUMENT_BRIDGE = `
       now: function () { return p.now; },
       signal: { aborted: p.aborted },
     };
+    // DECLARED EFFECTS DO NOT CROSS THIS BOUNDARY, and the body is TOLD so rather than handed
+    // undefined. A resource-loaded body runs synchronously inside vm.runInContext under a
+    // per-call timeout -- the same constraint that made the random SEED a seed rather than a
+    // recorded value per call -- so it cannot await a host round trip, and a bound invoker
+    // cannot be serialized across the boundary in any case.
+    //
+    // A THROWING STUB, not an omission, for exactly the reason the unseeded Math.random above
+    // throws. Reading a method off a missing object dies with 'Cannot read properties of
+    // undefined', which sends an author hunting for a typo in their own code instead of telling
+    // them the capability is real and lives somewhere else.
+    if (p.declaredEffects && p.declaredEffects.length > 0) {
+      var stub = {};
+      for (var k = 0; k < p.declaredEffects.length; k++) {
+        (function (name) {
+          stub[name] = function () {
+            throw new Error(
+              'E_EFFECT_UNAVAILABLE: this node declares the effect ' + name + ', but a SANDBOXED body cannot invoke one. ' +
+              'A resource-loaded body runs synchronously inside a vm and cannot await a host call. ' +
+              'Register the body in-process with FunctionRegistry.register to use ctx.effects, or put the call on a tool node.'
+            );
+          };
+        })(p.declaredEffects[k]);
+      }
+      ctx.effects = stub;
+    }
     return globalThis.__loomBody(view, ctx);
   };
 })();
@@ -273,6 +298,9 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
         // `ctx` the body sees — that stays `{taskId, now, signal}`. Omitted rather than sent
         // as `undefined` so the bridge's `typeof === "number"` test reads one thing.
         ...(callCtx.seed === undefined ? {} : { seed: callCtx.seed }),
+        // The NAMES only. A bound invoker cannot cross the boundary — see the bridge — so what
+        // travels is just enough to build a stub that names each one when it is called.
+        ...(callCtx.effects === undefined ? {} : { declaredEffects: Object.keys(callCtx.effects) }),
       }) as ReturnType<FunctionBody>;
     };
     cache.set(digest, body);
