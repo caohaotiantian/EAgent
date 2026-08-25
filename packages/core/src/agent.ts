@@ -35,6 +35,8 @@ import type { RunProjection, RunStatus } from "./run/projection.ts";
 import type { UsageRecord } from "./journal/events.ts";
 import { Engine, type EngineOptions } from "./run/engine.ts";
 import { replayRun, type ReplayReport } from "./run/replay.ts";
+import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
+import type { JournalEvent } from "./journal/events.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ModelAdapter, type ToolDefinition } from "./run/registry.ts";
 import type { Posture } from "./vocab.ts";
 
@@ -106,6 +108,20 @@ export interface RunnableAgent {
    * and `hermetic` says whether anything had to be re-derived rather than served.
    */
   replay(runId: RunId): Promise<ReplayReport>;
+  /**
+   * What this run DID, folded into the shape the scorer reads.
+   *
+   * The third property — a system that improves on its own runs — needs its evidence to be
+   * reachable, and until now the whole capture-and-score path had no caller anywhere: correct
+   * code, tested, and unreachable from a run somebody actually made. One line here is the same
+   * move `replay` makes, for the same reason.
+   *
+   * A READ MODEL, folded from the journal rather than logged alongside it. That distinction is
+   * what keeps the journal bounded: a trajectory is derived, so it costs nothing until asked
+   * for, and an agent's working notes are a FILE it writes — the journal records that the file
+   * changed, and the file is not in the journal.
+   */
+  trajectory(runId: RunId): Promise<Trajectory>;
   /** The compiled graph. This IS the agent; everything above is a convenience over it. */
   readonly graph: RunGraph;
   /** The engine, for gates, replay, cancellation and everything else the graph runtime offers. */
@@ -263,6 +279,11 @@ export function agent(opts: AgentOptions): RunnableAgent {
     },
     async replay(runId: RunId): Promise<ReplayReport> {
       return replayRun({ store, runId, graph, engine: engineOptions });
+    },
+    async trajectory(runId: RunId): Promise<Trajectory> {
+      const events: JournalEvent[] = [];
+      for await (const e of store.read(runId, 1 as never)) events.push(e);
+      return foldTrajectory(events, { graph });
     },
   };
 }

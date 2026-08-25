@@ -56,8 +56,10 @@ believes a feature is present.
   of the graph schema at all, so declaring one is silence.
 - **Retention tiering** — proven by test, zero callers, so a journal never leaves the hot tier and
   grows without bound.
-- **The whole evolution subsystem** — trajectory folding, cohort measurement, promotion ceilings,
-  baselines. Capture and scoring exist; nothing calls them.
+- **The evolution subsystem is now REACHABLE but not wired.** `agent().trajectory(runId)` folds a
+  run into the shape the scorer reads, so capture has a caller for the first time. Still uncalled:
+  cohort measurement, promotion ceilings and baselines — and the generator stays deferred, because
+  under roughly thirty scored trajectories per cohort any candidate is fitted to noise.
 - **Quorum, delegation and trust-tier approvals** — deliberate compile errors rather than silent
   downgrades. Implementing one means deleting its refusal in the same change.
 - **The operator intervention surface** — no pause, resume, steer, redirect or kill; cancel exists.

@@ -206,3 +206,19 @@ test("A BODY'S CLOCK IS JOURNALED — the same run replays to the same instant",
   const leasedAt = Object.values(p.tasks).find((t) => String(t.taskId).startsWith("t@"))?.lease?.at;
   assert.equal(out.a, leasedAt, "the body's clock is the task's journaled lease time");
 });
+
+test("A RUN CAN BE SCORED — the trajectory is reachable in one line", async () => {
+  // The third property needs its evidence reachable. The capture-and-score path was correct,
+  // tested, and had no caller anywhere in `src/` — so a run somebody actually made could not be
+  // turned into the shape the scorer reads without hand-wiring a fold.
+  const store = new MemoryStateStore({ now: NOW });
+  const a = agent({ prompt: "You summarise things.", adapter: answering('{"summary":"scored"}'), store, now: NOW });
+  const r = await a.run("summarise this");
+  assert.equal(r.status, "succeeded");
+
+  const t = await a.trajectory(r.runId);
+
+  assert.equal(t.runId, r.runId);
+  assert.ok(t.steps.length > 0, "a trajectory with no steps has nothing to learn from");
+  assert.ok(t.cohort !== undefined, "and it must land in a cohort, or it cannot be compared to anything");
+});
