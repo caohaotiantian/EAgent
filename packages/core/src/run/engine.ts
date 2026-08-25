@@ -96,6 +96,7 @@ import {
   CLASS_DEFAULT_POSTURE,
   type Posture,
   type UsageRecord,
+  type Classification,
 } from "../vocab.ts";
 import type { DeliverySpec } from "./delivery.ts";
 import {
@@ -627,6 +628,28 @@ interface RunContext {
   /** Channels written by a tool, i.e. carrying untrusted output. E8's evidence. */
   readonly tainted: Set<string>;
   /**
+   * Channels carrying secret-classified data they were NOT declared to hold.
+   *
+   * The confidentiality axis of what `tainted` does for integrity, and it exists because the
+   * declared classification is a property of the CHANNEL rather than of the data in it. One
+   * ordinary node — a normalizer, a summariser — reading a `secret_ref` channel and writing an
+   * `internal` one moved the secret to a channel with a lower floor, and the downstream sink
+   * dropped from `in` to `on` with no gate and no diagnostic. Measured: the tool received the
+   * plaintext.
+   *
+   * WHY THIS IS NOT THE SAME AS RAISING THE FLOOR FOR A DECLARED SECRET. A human ceiling may
+   * lower a node that reads a declared `secret_ref` channel, and that is correct — the
+   * classification is written in the graph they were shown, so their "let this run on-the-loop"
+   * covered it. A secret that arrived by LAUNDERING is different in exactly the way taint is:
+   * it is information the human did not have when they decided, so the earlier judgement no
+   * longer covers this action and they are asked again.
+   *
+   * Monotonic and never cleared, like taint, so folding forward from seq 1 reaches the state the
+   * original process held. The cost is the same one taint accepts: a channel stays hot after the
+   * secret has been overwritten, and there is deliberately no declassification operator.
+   */
+  readonly carriesSecret: Set<string>;
+  /**
    * The capability ceiling in force for this run — this graph's allowlist, narrowed by whatever
    * a parent already narrowed. `undefined` means no graph in the chain declared one.
    *
@@ -961,6 +984,7 @@ export class Engine {
       const node = ctx.index.byId.get(nodeId);
       if (node === undefined) continue;
       applyTaint(ctx.tainted, node, ev.payload.writes);
+      applySecretFlow(ctx.carriesSecret, node, ev.payload.writes, ctx.graph.spec.channels);
     }
   }
 
@@ -2263,6 +2287,7 @@ export class Engine {
       folder: new RunFolder(),
       streaks: new FailureStreaks(),
       tainted: new Set(),
+      carriesSecret: new Set(),
       waveTaint: new Map(),
       toolCalls: new Map(),
       warnedBudget: false,
@@ -2505,6 +2530,9 @@ export class Engine {
       // gate disappeared and the tool received the secret.
       dataClassification: [classificationOf(spec.channels, [...observedChannels(node), ...(node.writes ?? [])])],
       tainted,
+      // The confidentiality half of the same question `tainted` asks: is this action reading
+      // something sensitive that the graph does not say it reads?
+      carriesSecret: observedChannels(node).some((c) => ctx.carriesSecret.has(c)),
     });
 
     await this.#serialize(() =>
@@ -4789,6 +4817,7 @@ export class Engine {
 
     // E8's evidence.
     applyTaint(ctx.tainted, w.node, outcome.writes);
+    applySecretFlow(ctx.carriesSecret, w.node, outcome.writes, ctx.graph.spec.channels);
 
     // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
     // does not accumulate into an escalation.
@@ -5627,6 +5656,40 @@ function taintedTurn(ctx: RunContext, task: TaskRecord, ordinal: number): boolea
   if (ordinal > 0) return true;
   const node = ctx.index.byId.get(task.nodeId);
   return node !== undefined && observedChannels(node).some((c) => taintedFor(ctx, task.taskId, c));
+}
+
+/**
+ * THE CONFIDENTIALITY FLOW RULE, and the only place it is written.
+ *
+ * Deliberately the same shape as `applyTaint` one function below, because it answers the same
+ * question on the other axis: a node that OBSERVED sensitive data and wrote something has passed
+ * it on. `applyTaint`'s docstring records what happens when only half of that is implemented — a
+ * `function` node doing `clean = copy(notes)` laundered untrusted content away, and those are
+ * ordinary graph shapes. Confidentiality had NEITHER half: classification was read off the
+ * channel spec and never followed the data, so one hop through a normalizer dropped a
+ * `secret_ref` to whatever the next channel declared.
+ *
+ * SENSITIVE means `pii` or `secret_ref` — the two classifications whose posture floor is above
+ * `out`. `internal` is not a secret; treating it as one would mark almost every channel and turn
+ * this into a constant gate, which is the approval-fatigue failure that makes an oversight
+ * mechanism worthless.
+ *
+ * The DECLARED classification still does its own work in `dataClassification`. This set is only
+ * consulted where the declared one cannot help: under a human ceiling, where a laundered secret
+ * is new information and a declared one is not.
+ */
+function applySecretFlow(
+  carriesSecret: Set<string>,
+  node: NodeSpec,
+  writes: Readonly<Record<string, unknown>>,
+  channels: Readonly<Record<string, { readonly classification?: Classification }>>,
+): void {
+  const sensitive = (c: string): boolean => {
+    const declared = channels[c]?.classification;
+    return declared === "secret_ref" || declared === "pii" || carriesSecret.has(c);
+  };
+  if (!observedChannels(node).some(sensitive)) return;
+  for (const channel of Object.keys(writes)) carriesSecret.add(channel);
 }
 
 /**

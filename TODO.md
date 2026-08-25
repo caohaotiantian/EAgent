@@ -19,7 +19,16 @@ State at capture: 259 test files, 57 source files in `packages/core`, 106 in `pa
 
 Each was verified against the code, not remembered.
 
-- **Confidentiality does not propagate, and a human ceiling erases it entirely.** Measured, twice.
+- ~~**Confidentiality does not propagate, and a human ceiling erases it entirely.**~~ **HALF DONE.**
+  A secret now FLOWS: `applySecretFlow` marks every channel a node writes after observing one that
+  is `secret_ref`/`pii` or already carries a secret, folded at commit and rebuilt in
+  `#restoreEvidence`. A laundered secret raises the hard floor to `in` exactly as taint does, so a
+  human ceiling of `on` no longer erases it. The DECLARED classification stays clampable on
+  purpose — it is written in the graph the human de-escalated, so their judgement covered it, and
+  a fix that refused that too would make de-escalation impossible for any graph touching a secret.
+  **Still open:** the compiler neither refuses nor warns about a laundering hop, so an author gets
+  no diagnostic at authoring time; and the `dataFloor` in `validate.ts` still disagrees with
+  `compile.ts` (below). Original finding, for the record:
   One `function` node copying a `secret_ref` channel into an `internal` (or unclassified) one drops
   the downstream node's floor from `in` to `on`, no gate is raised, and the plaintext reaches the
   tool — the compiler neither refuses nor warns. Separately, `effectivePosture`'s hard floor is

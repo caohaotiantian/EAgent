@@ -44,6 +44,16 @@ export interface PolicyRequest {
   readonly dataClassification?: readonly Classification[];
   /** True when any channel this action reads was written from untrusted tool output. */
   readonly tainted?: boolean;
+  /**
+   * True when a channel this action reads carries secret data it was not DECLARED to hold.
+   *
+   * Separate from `dataClassification` on purpose, and the difference is what a human could see.
+   * A declared `secret_ref` is written in the graph they de-escalated, so their judgement covered
+   * it and the ceiling may lower it. A secret that arrived through an ordinary node — a
+   * normalizer copying it into an `internal` channel — was not visible to them, so it raises the
+   * hard floor exactly as taint does.
+   */
+  readonly carriesSecret?: boolean;
 }
 
 export type PolicyDecision =
@@ -384,9 +394,13 @@ export class PolicyEngine {
     // feeding a hard-to-undo action is new information they have NOT seen, so the earlier
     // "let this run on-the-loop" no longer covers this action and they are asked again.
     // That is what D7.7's "cleared by: human" means for this rule.
-    const clamped = isHardToUndo(req.irreversibility)
-      ? maxPosture(ceiling, req.tainted === true ? "in" : "on")
-      : ceiling;
+    // A LAUNDERED SECRET RAISES IT TOO, for the same reason and not for a similar one. Measured
+    // before this existed: one `function` node copying a `secret_ref` channel into an `internal`
+    // one dropped the sink from `in` to `on`, no gate was raised, and the tool received the
+    // plaintext. The declared classification stays clampable — it is in the graph the human saw —
+    // and only the flow they could not see holds the floor at `in`.
+    const unseen = req.tainted === true || req.carriesSecret === true;
+    const clamped = isHardToUndo(req.irreversibility) ? maxPosture(ceiling, unseen ? "in" : "on") : ceiling;
 
     return postureRank(clamped) < postureRank(floor) ? clamped : floor;
   }
