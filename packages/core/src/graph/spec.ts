@@ -702,6 +702,77 @@ export const ALLOWED_FIELDS: Readonly<Record<NodeType, readonly string[]>> = {
   subgraph: ["ref", "inputs", "outputs", "budgetShare"],
 };
 
+/**
+ * The same check one level up: a node's OWN fields, the graph's, and an edge's.
+ *
+ * `ALLOWED_FIELDS` closed the hole inside a node's type block and left the three enclosing
+ * scopes open, which is where the worst instance of it turned out to live. Measured:
+ *
+ *     policy:  { posture: "in" }   →  plan posture `in`
+ *     policyy: { posture: "in" }   →  plan posture `out`, and ZERO diagnostics
+ *
+ * An author asking for the strongest oversight the system has, receiving the weakest, told
+ * nothing. Every other member of this family costs a feature; this one costs the control that
+ * decides whether a human sees the action at all. `retry`, `timeoutMs` and `checkpoint` fail the
+ * same way and quietly — `checkpoint`'s own docstring records that a VALID value was ignored for
+ * months, which is this defect's twin with the misspelling on the compiler's side.
+ *
+ * An edge is here for one reason worth naming: a misspelled `when` does not disable a condition,
+ * it makes the edge UNCONDITIONAL, so a branch the author meant to guard always fires. `codes` on
+ * an error edge is the same shape — the typo widens it to every code.
+ *
+ * These three are `NodeSpec`, `GraphSpec` and `EdgeSpec` verbatim, and the test reads all three
+ * interfaces out of this file so the copies cannot drift apart.
+ */
+export const NODE_FIELDS: readonly string[] = [
+  "id",
+  "type",
+  "reads",
+  "writes",
+  "policy",
+  "retry",
+  "timeoutMs",
+  "checkpoint",
+  "unhandled",
+  "function",
+  "agent",
+  "tool",
+  "router",
+  "join",
+  "evaluator",
+  "humanGate",
+  "subgraph",
+];
+
+export const SPEC_FIELDS: readonly string[] = [
+  "apiVersion",
+  "kind",
+  "metadata",
+  "policy",
+  "channels",
+  "inputs",
+  "outputs",
+  "nodes",
+  "edges",
+  "hooks",
+];
+
+export const EDGE_FIELDS: readonly string[] = [
+  "id",
+  "from",
+  "to",
+  "kind",
+  "when",
+  "over",
+  "as",
+  "maxWidth",
+  "branches",
+  "until",
+  "maxIterations",
+  "codes",
+  "compensates",
+];
+
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
   function: "function",
   agent: "agent",

@@ -31,6 +31,9 @@ import {
   DEFAULT_EXPANSION,
   GRAPH_API_VERSION,
   ALLOWED_FIELDS,
+  NODE_FIELDS,
+  SPEC_FIELDS,
+  EDGE_FIELDS,
   dataFloorOf,
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
@@ -433,6 +436,40 @@ function channelTypeMap(channels: Readonly<Record<string, ChannelSpec>>): Record
 // ── GRAPH003 + GRAPH020: structure ───────────────────────────────────────────
 
 /**
+ * Report every key of `got` that `allowed` does not contain, suggesting the nearest real one.
+ *
+ * One function because there are now FOUR scopes to check — a node's type block, the node
+ * itself, the graph, and an edge — and the block-level version was written first as a loop
+ * inline. Four copies of "compare keys, guess the typo, push a diagnostic" is how the four
+ * come to disagree about what a near miss is or how the message reads.
+ */
+function unknownKeys(
+  got: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  what: string,
+  at: Diagnostic["at"],
+  d: Diagnostic[],
+): boolean {
+  let found = false;
+  for (const key of Object.keys(got)) {
+    if (allowed.includes(key)) continue;
+    const near = allowed.filter((a) => a.toLowerCase().startsWith(key.slice(0, 3).toLowerCase()));
+    d.push({
+      severity: "error",
+      code: "GRAPH020_UNKNOWN_FIELD",
+      message: `${what} has an unknown field \`${key}\``,
+      ...(at === undefined ? {} : { at }),
+      fix:
+        near.length > 0
+          ? `did you mean ${near.map((a) => `\`${a}\``).join(" or ")}?`
+          : `${what} may declare ${allowed.map((a) => `\`${a}\``).join(", ")}`,
+    });
+    found = true;
+  }
+  return found;
+}
+
+/**
  * The characters an id may be built from.
  *
  * Not a style rule. Every durable id in the system is a STRING JOIN with no escaping:
@@ -490,6 +527,11 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       return true;
     }
   }
+  // The graph's own keys, once its arrays are known to be arrays. Deliberately NOT fatal on its
+  // own: a stray top-level key does not stop any later rule from reasoning correctly, and
+  // reporting it alongside the real diagnostics is more useful than replacing them.
+  unknownKeys(spec as unknown as Record<string, unknown>, SPEC_FIELDS, "the graph", undefined, d);
+
   if (typeof spec.metadata?.name !== "string") {
     d.push({
       severity: "error",
@@ -764,22 +806,16 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     const holder = REQUIRED_BLOCK[n.type];
     const declared = (n as unknown as Record<string, unknown>)[holder as string] as Record<string, unknown> | undefined;
     if (declared !== undefined && typeof declared === "object") {
-      const allowed = ALLOWED_FIELDS[n.type];
-      for (const key of Object.keys(declared)) {
-        if (allowed.includes(key)) continue;
-        const near = allowed.filter((a: string) => a.toLowerCase().startsWith(key.slice(0, 3).toLowerCase()));
-        d.push({
-          severity: "error",
-          code: "GRAPH020_UNKNOWN_FIELD",
-          message: `node "${n.id}" has a \`${String(holder)}\` block with an unknown field \`${key}\``,
-          at: { nodeId: n.id },
-          fix:
-            near.length > 0
-              ? `did you mean ${near.map((a: string) => `\`${a}\``).join(" or ")}?`
-              : `a \`${String(holder)}\` block may declare ${allowed.map((a: string) => `\`${a}\``).join(", ")}`,
-        });
-        fatal = true;
-      }
+      const where = `node "${n.id}"'s \`${String(holder)}\` block`;
+      if (unknownKeys(declared, ALLOWED_FIELDS[n.type], where, { nodeId: n.id }, d)) fatal = true;
+    }
+
+    // AND THE NODE'S OWN KEYS. This is where the family's worst member lives: `policyy:
+    // {posture: "in"}` compiled clean and ran at `out`, so an author asking for the strongest
+    // oversight the system has got the weakest and was told nothing. `retry`, `timeoutMs` and
+    // `checkpoint` are silently discarded the same way.
+    if (unknownKeys(n as unknown as Record<string, unknown>, NODE_FIELDS, `node "${n.id}"`, { nodeId: n.id }, d)) {
+      fatal = true;
     }
 
     // Exactly one type block, so a node cannot quietly carry a stale second config.
@@ -808,6 +844,12 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     }
     if (!seenNodes.has(e.to)) {
       d.push({ severity: "error", code: "GRAPH003_DANGLING_EDGE", message: `edge "${e.id}" ends at unknown node "${e.to}"`, at: { edgeId: e.id } });
+      fatal = true;
+    }
+    // A misspelled `when` does not disable a condition — it makes the edge unconditional, so a
+    // branch the author meant to guard fires every time. `codes` on an error edge is the same
+    // shape widened to every code.
+    if (unknownKeys(e as unknown as Record<string, unknown>, EDGE_FIELDS, `edge "${e.id}"`, { edgeId: e.id }, d)) {
       fatal = true;
     }
   }

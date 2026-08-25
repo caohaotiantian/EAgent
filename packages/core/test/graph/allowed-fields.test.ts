@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { compile } from "../../src/graph/compile.ts";
-import { ALLOWED_FIELDS, REQUIRED_BLOCK, type NodeType } from "../../src/graph/spec.ts";
+import { ALLOWED_FIELDS, EDGE_FIELDS, NODE_FIELDS, REQUIRED_BLOCK, SPEC_FIELDS, type NodeType } from "../../src/graph/spec.ts";
 import { resolver } from "../run/skeleton.ts";
 
 const SPEC_SRC = readFileSync(fileURLToPath(new URL("../../src/graph/spec.ts", import.meta.url)), "utf8");
@@ -100,4 +100,92 @@ test("the table covers every node type, and every type has a block", () => {
   assert.deepEqual(Object.keys(ALLOWED_FIELDS).sort(), Object.keys(REQUIRED_BLOCK).sort());
   assert.deepEqual(Object.keys(BLOCK_INTERFACE).sort(), Object.keys(REQUIRED_BLOCK).sort());
   assert.equal(Object.keys(ALLOWED_FIELDS).length, 8, "eight node types");
+});
+
+// ── the three enclosing scopes ───────────────────────────────────────────────
+
+/**
+ * The block check left the node, the graph and the edge open, and the worst instance was there.
+ *
+ * Measured on a `tool` node, everything else identical:
+ *
+ *     policy:  { posture: "in" }   →  plan posture `in`
+ *     policyy: { posture: "in" }   →  plan posture `out`, ZERO diagnostics
+ *
+ * Every other member of this family costs a feature. This one costs the control deciding whether
+ * a human sees the action at all — the author asked for the strongest oversight the system has,
+ * got the weakest, and was told nothing. `retry`, `timeoutMs` and `checkpoint` are discarded the
+ * same way; `checkpoint`'s own docstring records a VALID value being ignored for months, which is
+ * this defect with the misspelling on the compiler's side instead of the author's.
+ */
+const full = (over: { spec?: Record<string, unknown>; node?: Record<string, unknown>; edge?: Record<string, unknown> }) =>
+  compile({
+    spec: {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "sc", project: "test", version: 1 },
+      policy: { posture: "out", budget: { costUsd: 1 }, capabilities: [] },
+      channels: { a: { type: "string", reduce: "replace" }, b: { type: "object", reduce: "replace" } },
+      inputs: ["a"],
+      outputs: ["b"],
+      nodes: [
+        { id: "n", type: "function", reads: ["a"], writes: ["b"], function: { ref: "function/f@stable" }, ...(over.node ?? {}) },
+        { id: "m", type: "function", reads: ["b"], writes: ["b"], function: { ref: "function/f@stable" } },
+      ],
+      edges: [{ id: "e", from: "n", to: "m", kind: "seq", ...(over.edge ?? {}) }],
+      ...(over.spec ?? {}),
+    } as never,
+    resolver: resolver(),
+    tools: {},
+    tenantCapabilities: [],
+  });
+
+const unknownField = (r: ReturnType<typeof compile>) => r.diagnostics.find((x) => x.code === "GRAPH020_UNKNOWN_FIELD");
+
+test("A MISSPELLED `policy` IS REFUSED — the oversight control that silently vanished", () => {
+  const r = full({ node: { policyy: { posture: "in" } } });
+
+  assert.equal(r.ok, false, "a node asking for `in` and running at `out` compiled clean");
+  const diag = unknownField(r)!;
+  assert.ok(diag !== undefined, r.diagnostics.map((x) => x.code).join(", ") || "(no diagnostics)");
+  assert.match(diag.message, /policyy/, "the message must name what the author wrote");
+  assert.match(diag.fix ?? "", /`policy`/, `expected the near miss, got: ${diag.fix ?? "(none)"}`);
+});
+
+test("AN UNKNOWN TOP-LEVEL GRAPH FIELD IS REFUSED", () => {
+  const r = full({ spec: { channelz: {} } });
+  assert.equal(r.ok, false);
+  assert.match(unknownField(r)!.message, /channelz/);
+  assert.match(unknownField(r)!.fix ?? "", /`channels`/);
+});
+
+test("AN UNKNOWN EDGE FIELD IS REFUSED — a misspelled `when` fires every time", () => {
+  // Not merely inert: the edge keeps running, unconditionally. The guard the author wrote is
+  // absent rather than broken, which is the direction that does not announce itself.
+  const r = full({ edge: { whenn: "a == 'x'" } });
+  assert.equal(r.ok, false);
+  assert.match(unknownField(r)!.message, /whenn/);
+  assert.match(unknownField(r)!.fix ?? "", /`when`/);
+});
+
+test("EVERY FIELD THE THREE INTERFACES DECLARE IS ALLOWED — the guard must not refuse valid graphs", () => {
+  // The same anti-cry-wolf check as the block table above, for the same reason: an allow-list
+  // that has fallen behind its interface refuses correct graphs, which is worse than the hole.
+  assert.deepEqual([...NODE_FIELDS].sort(), membersOf("NodeSpec"), "NODE_FIELDS and NodeSpec disagree");
+  assert.deepEqual([...SPEC_FIELDS].sort(), membersOf("GraphSpec"), "SPEC_FIELDS and GraphSpec disagree");
+  assert.deepEqual([...EDGE_FIELDS].sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
+});
+
+test("A GRAPH USING THESE FIELDS CORRECTLY STILL COMPILES — the control", () => {
+  // Reading a table is not evidence the check accepts what it should. This exercises the exact
+  // four node fields whose typos are tested above, all valid, all together.
+  const r = full({
+    node: { policy: { posture: "in" }, retry: { maxAttempts: 2 }, timeoutMs: 5000, checkpoint: "after" },
+    edge: { when: "true" },
+  });
+  assert.deepEqual(
+    r.diagnostics.filter((x) => x.code === "GRAPH020_UNKNOWN_FIELD"),
+    [],
+    "valid fields were refused",
+  );
 });
