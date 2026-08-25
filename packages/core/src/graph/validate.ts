@@ -1506,13 +1506,43 @@ function rule009And018Budgets(
       fix: "lower a per-node budget, lower a fanout maxWidth, or raise policy.budget.costUsd",
     });
   }
-  if (graphBudget !== undefined && unbudgeted.length > 0) {
-    d.push({
-      severity: "warning",
-      code: "GRAPH009_UNBOUNDED_NODE",
-      message: `node(s) ${unbudgeted.join(", ")} can spend but declare no budget, so the run budget cannot be proven`,
-      fix: `add policy.budget.costUsd to ${unbudgeted[0]}`,
-    });
+  // THE WARNING USED TO FIRE ON THE SAFER GRAPH AND STAY SILENT ON THE DANGEROUS ONE, and its
+  // message was false where it fired. Both halves come from the same missing distinction.
+  //
+  //   graph budget declared → `submit` takes `minDefined(caller, graph, deployment)`, so the run
+  //   IS bounded and IS enforced. What is unproven is the ARITHMETIC: `declaredTotal` sums
+  //   per-node budgets, an undeclared spender contributes 0, and so `GRAPH009_BUDGET_OVERCOMMIT`
+  //   silently underestimates. That is worth saying. "the run budget cannot be proven" is not.
+  //
+  //   no graph budget → nothing in the spec bounds anything. `PolicyEngine.reserve` skips its
+  //   check entirely when `runUsd` is undefined and `remainingUsd` returns Infinity, and
+  //   `loom run` has no default. This is the shape that can spend without limit, and it produced
+  //   NO diagnostic at all.
+  //
+  // Which made the cheapest way to silence the old warning `delete policy.budget` — strictly
+  // worse, and rewarded. Covering the silent case is what removes that incentive.
+  if (unbudgeted.length > 0) {
+    d.push(
+      graphBudget === undefined
+        ? {
+            severity: "warning",
+            code: "GRAPH009_NO_BUDGET",
+            message:
+              `node(s) ${unbudgeted.join(", ")} can spend and nothing in this graph bounds them: ` +
+              `no policy.budget.costUsd here and no per-node budget either, so the only ceiling is ` +
+              `whatever the deployment supplies — and a deployment that supplies none does not stop`,
+            fix: `add policy.budget.costUsd to the graph, or to ${unbudgeted[0]}`,
+          }
+        : {
+            severity: "warning",
+            code: "GRAPH009_UNBOUNDED_NODE",
+            message:
+              `node(s) ${unbudgeted.join(", ")} can spend but declare no budget, so the ` +
+              `$${graphBudget.toFixed(2)} graph budget still caps the run while ` +
+              `GRAPH009_BUDGET_OVERCOMMIT cannot see what these nodes contribute to it`,
+            fix: `add policy.budget.costUsd to ${unbudgeted[0]}`,
+          },
+    );
   }
   if (worstCase > expansion.maxNodes) {
     d.push({
