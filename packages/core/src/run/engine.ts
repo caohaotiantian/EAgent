@@ -5738,16 +5738,40 @@ function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Recor
   for (const channel of Object.keys(writes)) tainted.add(channel);
 }
 
+/**
+ * `${channel}` and `${channel | json}` — the value, or the value as text.
+ *
+ * A lone `${x}` yields the VALUE so an object stays an object, and that is right: a tool whose
+ * schema wants an object must receive one. The consequence nobody had a way around is the other
+ * direction. Writing a structured channel to a file needs TEXT, and `fs.write` refuses an object
+ * with "value.body must be a string" — so an author had to insert a `function` node whose entire
+ * job was `JSON.stringify`, plus a published resource to hold it. Measured while authoring a
+ * report-writing graph: one extra node and one extra file to serialise one value.
+ *
+ * `| json` says it explicitly. The embedded form (`"see ${x} here"`) already stringifies a
+ * non-string, so this makes the whole form able to express the same intent without the trailing
+ * space that was the only workaround.
+ */
+const TEMPLATE_JSON = /\s*\|\s*json$/;
+
 function resolveArgs(args: Readonly<Record<string, unknown>>, scope: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const resolveOne = (expr: string): { value: unknown; asText: boolean } => {
+    const asText = TEMPLATE_JSON.test(expr);
+    return { value: lookup(scope, expr.replace(TEMPLATE_JSON, "").trim()), asText };
+  };
   const sub = (v: unknown): unknown => {
     if (typeof v === "string") {
       const whole = /^\$\{([^}]+)\}$/.exec(v);
       // A lone `${x}` yields the VALUE (so an object stays an object); an embedded
-      // one interpolates as text.
-      if (whole) return lookup(scope, whole[1]!.trim());
+      // one interpolates as text. `| json` asks for text explicitly.
+      if (whole) {
+        const { value, asText } = resolveOne(whole[1]!.trim());
+        if (!asText) return value;
+        return value === undefined ? undefined : typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      }
       return v.replace(/\$\{([^}]+)\}/g, (m, path: string) => {
-        const found = lookup(scope, path.trim());
-        return found === undefined ? m : typeof found === "string" ? found : JSON.stringify(found);
+        const { value } = resolveOne(path.trim());
+        return value === undefined ? m : typeof value === "string" ? value : JSON.stringify(value);
       });
     }
     if (Array.isArray(v)) return v.map(sub);
