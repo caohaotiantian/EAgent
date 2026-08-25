@@ -30,6 +30,7 @@ import { checkExpr, type Ty } from "./expr.ts";
 import {
   DEFAULT_EXPANSION,
   GRAPH_API_VERSION,
+  ALLOWED_FIELDS,
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
@@ -743,6 +744,38 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
           }`,
           at: { nodeId: n.id },
           fix: `add \`${field}:\` to node "${n.id}"'s \`${String(holder)}\` block`,
+        });
+        fatal = true;
+      }
+    }
+
+    // AND NOTHING THE BLOCK DOES NOT DECLARE. Missing was checked; UNKNOWN was not, for any node
+    // type, so a misspelled or invented key compiled clean and decided nothing. That is quiet in
+    // the dangerous direction: `evaluator: {…, effects: [...]}` reads as a capability ceiling to
+    // the author who wrote it and is not one. `ALLOWED_FIELDS` is the enumeration; see its
+    // docstring for why it lives beside `REQUIRED_FIELDS`.
+    //
+    // An ERROR rather than a warning. The two other treatments in this family — GRAPH019's inert
+    // declaration and GRAPH013's unknown tool — warn because the graph still means what it says
+    // and the author has merely been told less than they think. An unknown KEY means the author
+    // wrote something the compiler cannot interpret at all, and the nearest-name hint below makes
+    // a typo cheap to fix rather than cheap to ignore.
+    const holder = REQUIRED_BLOCK[n.type];
+    const declared = (n as unknown as Record<string, unknown>)[holder as string] as Record<string, unknown> | undefined;
+    if (declared !== undefined && typeof declared === "object") {
+      const allowed = ALLOWED_FIELDS[n.type];
+      for (const key of Object.keys(declared)) {
+        if (allowed.includes(key)) continue;
+        const near = allowed.filter((a: string) => a.toLowerCase().startsWith(key.slice(0, 3).toLowerCase()));
+        d.push({
+          severity: "error",
+          code: "GRAPH020_UNKNOWN_FIELD",
+          message: `node "${n.id}" has a \`${String(holder)}\` block with an unknown field \`${key}\``,
+          at: { nodeId: n.id },
+          fix:
+            near.length > 0
+              ? `did you mean ${near.map((a: string) => `\`${a}\``).join(" or ")}?`
+              : `a \`${String(holder)}\` block may declare ${allowed.map((a: string) => `\`${a}\``).join(", ")}`,
         });
         fatal = true;
       }

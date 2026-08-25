@@ -37,11 +37,13 @@ Each was verified against the code, not remembered.
   needed. The integrity axis has `applyTaint` as a working template; the confidentiality axis has
   no analogue. It must land at BOTH sites — `compile.ts`'s `dataFloor` and the engine's runtime
   `dataClassification` — because that pair has drifted before.
-- **`validate.ts` has no unknown-field check, for any node type.** `evaluator: {kind, ref,
-  threshold, effects: [...]}` compiles clean, warns nothing, and decides nothing — the author
-  believes they declared a capability ceiling and got none. Same hole admits `function: {ref,
-  effectz: [...]}`. The TypeScript excess-property check hides this from in-repo authors; the YAML
-  path has nothing.
+- ~~**`validate.ts` has no unknown-field check.**~~ **DONE.** `GRAPH020_UNKNOWN_FIELD` refuses any
+  key a node block does not declare, and suggests the nearest real field. `ALLOWED_FIELDS` sits
+  beside `REQUIRED_FIELDS` and is cross-checked against the interfaces it enumerates, because an
+  allow-list that falls behind refuses correct graphs — worse than the hole it closed. It caught an
+  invalid `humanGate: {prompt}` in a test graph of mine on its first run.
+  **Still open:** the same check for a node's TOP-LEVEL fields (`id`, `reads`, `retry`, `unhandled`
+  …) and for `GraphSpec` itself, neither of which is enumerated anywhere yet.
 - **The journal amplifies a payload by `2N+2`.** Measured: `journal_bytes = payload × (2N + 2)`
   where N is the nodes a value flows through — `task.committed` and `state.reduced` each carry a
   full copy per hop, plus `run.submitted` and `run.completed`. One run, one 16 MiB value, four

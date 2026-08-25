@@ -670,6 +670,38 @@ export const REQUIRED_FIELDS: Readonly<Record<NodeType, readonly (readonly [stri
   tool: [["name", "tool", "string"]],
 };
 
+/**
+ * Every field each node block MAY carry. A key outside this list is refused.
+ *
+ * There was no unknown-field check anywhere in the compiler, for any node type, and the hole is
+ * quiet in the dangerous direction: `evaluator: {kind, ref, threshold, effects: [...]}` compiled
+ * clean, warned nothing, and decided nothing — so an author who had just read `FunctionNode.effects`
+ * declared a capability ceiling and got none. That is the failure this repository has named four
+ * times under other names (`drain`, `JoinNode.timeoutMs`, a router's `mode: "model"`,
+ * `CAN_SUSPEND`), except worse, because those are declared-and-inert and this one is declared,
+ * inert, and PERMISSIVE.
+ *
+ * TypeScript's excess-property check hides it from anyone authoring a spec in this repository.
+ * The YAML path — which is how an operator writes a graph — has nothing.
+ *
+ * Beside `REQUIRED_FIELDS` and total for the same reasons that table gives: it is the runtime
+ * enumeration of what a `NodeSpec` means, two enumerations in two files is how they come to
+ * disagree, and a `Partial` would let a node type be forgotten rather than looked at.
+ * `test/graph/allowed-fields.test.ts` reads the interfaces out of this file and checks the two
+ * agree, because the failure mode of an allow-list is refusing a field somebody legitimately
+ * added — a guard that cries wolf on correct code is worse than no guard.
+ */
+export const ALLOWED_FIELDS: Readonly<Record<NodeType, readonly string[]>> = {
+  function: ["ref", "cpuBound", "effects"],
+  agent: ["profile", "prompt", "outputSchema", "maxTurns", "tools", "canMutate"],
+  tool: ["name", "version", "args"],
+  router: ["mode", "cases", "fallbackEdge", "profile"],
+  join: ["branches", "mode", "k", "onBranchError", "timeoutMs"],
+  evaluator: ["kind", "ref", "threshold"],
+  human_gate: ["ref", "approval", "sla", "batching", "dedupe", "delivery"],
+  subgraph: ["ref", "inputs", "outputs", "budgetShare"],
+};
+
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
   function: "function",
   agent: "agent",

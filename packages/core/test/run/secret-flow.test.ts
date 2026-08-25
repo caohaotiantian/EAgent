@@ -58,7 +58,7 @@ const spec = (launder: boolean, pause = false) =>
       // first one already made — which is how the first version of the restart test passed with
       // the restore arm deleted.
       ...(pause
-        ? [{ id: "pause", type: "human_gate", reads: ["mid"], humanGate: { ref: "policy/pause@stable", prompt: "continue?" } }]
+        ? [{ id: "pause", type: "human_gate", reads: ["mid"], humanGate: { ref: "policy/pause@stable" } }]
         : []),
       {
         id: "b",
