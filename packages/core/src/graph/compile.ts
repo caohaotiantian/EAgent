@@ -21,6 +21,7 @@ import type { NodeId } from "../ids.ts";
 import { CLASSIFICATION_POSTURE_FLOOR, CLASS_DEFAULT_POSTURE, maxPosture, type Posture } from "../vocab.ts";
 import {
   DEFAULT_EXPANSION,
+  dataFloorOf,
   reachableToolNames,
   type ExpansionBudget,
   type GraphSpec,
@@ -129,12 +130,7 @@ export function compile(input: CompileInput): CompileResult {
     // it has to be made in both places. This floor becomes `plans[n.id].posture`, which the
     // graph-binding check reads as "the compiled oversight FLOOR", so leaving it computed off
     // the declared set leaves a second, quieter answer to the question the engine just fixed.
-    const dataFloor = maxPosture(
-      ...[...observedChannels(n), ...(n.writes ?? [])].map((c) => {
-        const cls = spec.channels[c]?.classification;
-        return cls === undefined ? ("out" as Posture) : CLASSIFICATION_POSTURE_FLOOR[cls];
-      }),
-    );
+    const dataFloor = dataFloorOf(spec.channels, n);
 
     plans[n.id] = {
       id: n.id,

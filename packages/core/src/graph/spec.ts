@@ -29,7 +29,7 @@ import type { EdgeId, NodeId } from "../ids.ts";
 // checks and the broker does not.
 import type { DeliverySpec } from "../run/delivery.ts";
 import type { ChannelSpec } from "../state/channels.ts";
-import type { Posture } from "../vocab.ts";
+import { CLASSIFICATION_POSTURE_FLOOR, maxPosture, type Classification, type Posture } from "../vocab.ts";
 
 export const GRAPH_API_VERSION = "loom.dev/v1";
 
@@ -778,6 +778,34 @@ export function reachableToolNames(node: NodeSpec): readonly string[] {
   // widened for agents and the compile-time floor was missed.
   for (const t of node.function?.effects ?? []) if (!names.includes(t)) names.push(t);
   return names;
+}
+
+/**
+ * The oversight floor this node's DATA imposes, from the classification of every channel it can
+ * observe or write.
+ *
+ * ONE COPY, and it is here because there were two. `compile.ts` computed it from
+ * `observedChannels(n)` and `validate.ts` from `n.reads` — the same six lines, one word apart —
+ * so for a node that reaches a channel only through a `${template}` the validator computed a
+ * LOWER floor than the compiler enforces. The diagnostics that read it (GRAPH014's
+ * oversight-loosened refusal, GRAPH019's inert-declaration warning) were therefore reasoning about
+ * a graph the executor does not run: an author declaring `posture: on` beside a templated
+ * `secret_ref` read was told their declaration was meaningful, and it was being overridden.
+ *
+ * The bypass this closes is the one `observedChannels` exists for, arriving one function later —
+ * which is the whole argument for a shared helper over two correct-looking copies. `reads` is not
+ * the read set, and every place that treats it as one has to be found again each time.
+ */
+export function dataFloorOf(
+  channels: Readonly<Record<string, { readonly classification?: Classification }>>,
+  node: NodeSpec,
+): Posture {
+  return maxPosture(
+    ...[...observedChannels(node), ...(node.writes ?? [])].map((c) => {
+      const cls = channels[c]?.classification;
+      return cls === undefined ? ("out" as Posture) : CLASSIFICATION_POSTURE_FLOOR[cls];
+    }),
+  );
 }
 
 /**

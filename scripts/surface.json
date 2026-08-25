@@ -1,4 +1,5 @@
 [
+  "ALLOWED_FIELDS",
   "AUDIT_RULES",
   "Actor",
   "AgentNode",

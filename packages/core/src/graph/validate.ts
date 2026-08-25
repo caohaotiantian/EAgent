@@ -31,6 +31,7 @@ import {
   DEFAULT_EXPANSION,
   GRAPH_API_VERSION,
   ALLOWED_FIELDS,
+  dataFloorOf,
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
@@ -1806,12 +1807,10 @@ function rule014And019Oversight(
             }),
           );
 
-    const dataFloor = maxPosture(
-      ...[...(n.reads ?? []), ...(n.writes ?? [])].map((c) => {
-        const cls = spec.channels[c]?.classification;
-        return cls === undefined ? ("out" as Posture) : CLASSIFICATION_POSTURE_FLOOR[cls];
-      }),
-    );
+    // THE SAME HELPER THE COMPILER USES. These were two copies a word apart — `n.reads` here,
+    // `observedChannels(n)` there — so this diagnostic reasoned about a lower floor than the
+    // executor enforces for any node that reaches a channel through a template.
+    const dataFloor = dataFloorOf(spec.channels, n);
 
     const floor = maxPosture(systemFloor, graphPosture, classFloor, dataFloor);
     const effective = maxPosture(floor, declared ?? "out");

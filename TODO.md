@@ -61,9 +61,11 @@ Each was verified against the code, not remembered.
   5 KB is refused, 2-deep 64 MiB is accepted. `foldRun` is NOT the problem (0.0 ms over 160 MiB;
   it copies references); the cost is in append and in replay, which re-materialises the whole
   journal at four sites and is strictly linear in bytes.
-- **`validate.ts` and `compile.ts` compute `dataFloor` from different sets** — `n.reads` versus
-  `observedChannels(n)`. The `${channel}`-in-`tool.args` bypass was fixed in the compiler and the
-  engine and not in the validator. Diagnostics only, not enforcement.
+- ~~**`validate.ts` and `compile.ts` compute `dataFloor` from different sets.**~~ **DONE.** One
+  exported `dataFloorOf` now, read by both. The drift was visible in the direction that matters: an
+  author declaring `posture: "on"` beside a templated `secret_ref` read ran at `in` and was told
+  NOTHING, because the validator computed the floor from `reads` alone and concluded the
+  declaration was meaningful.
 
 - **`E_ADMISSION_REJECTED` is raised by nothing.** `POST /runs` admits everything it can
   authenticate. There is no queue, no depth limit, no token bucket.
