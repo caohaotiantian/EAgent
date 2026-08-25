@@ -17,6 +17,25 @@ State at capture: 259 test files, 57 source files in `packages/core`, 106 in `pa
 
 ## A · Defects and unguarded behaviour
 
+**The whole product path has now been walked end to end**, on a real graph through `bin/loom`:
+author → `compile` → `run` → gate → `gates` → `approve` → `replay` → `audit` → `trace`. What it
+established, each checked rather than assumed:
+
+- the gated irreversible write **had not happened** while the run sat at the gate, and did happen
+  on approval — the property the whole oversight mechanism exists for;
+- `replay` reports `match: true, hermetic: true`, and **does not re-perform the write** — deleting
+  the output file and replaying left it absent, so the record is served rather than the effect
+  re-run;
+- `audit` reports `14 rule(s) checked, 6 skipped` and **names every skipped rule with its reason**,
+  rather than counting an unrunnable rule as a pass;
+- fan-out → join → serialise → write produces the right bytes, with `${reviews | json}` doing the
+  serialising and no helper node.
+
+Two defects came out of the last two steps, which is where they always are. See the `trace`
+entries below. The remaining known gap on this path is the inert join `timeoutMs`, which
+`loom compile` correctly warns about.
+
+
 Each was verified against the code, not remembered.
 
 - ~~**Unknown-field check for a node's TOP-LEVEL fields and for `GraphSpec` itself.**~~ **DONE**,
