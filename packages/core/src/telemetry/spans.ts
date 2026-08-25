@@ -256,8 +256,25 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   // instant the journal actually claims.
   let lastTs = events.find((x) => typeof x.ts === "number" && Number.isFinite(x.ts))?.ts ?? 0;
 
+  /**
+   * The order spans were STARTED in, which is journal order, which is causal order.
+   *
+   * The tie-break below used to be `spanId`, and a span id is a digest — so two spans starting
+   * in the same millisecond were ordered by a hash. Measured on a four-node run: `collect`
+   * (a join) and `write` (the node that consumes it) both reached `task.ready` at ts …882080,
+   * and the trace printed `write` ABOVE `collect`, reversing the one edge between them. A
+   * millisecond is simply too coarse to order tasks — this run put five of them inside nine.
+   *
+   * `seq` is the total order the journal already has, and this loop consumes events in it, so
+   * an incrementing ordinal at `start` recovers it without threading `e.seq` through fifteen
+   * call sites or putting a new `loom.*` attribute on the exported span.
+   */
+  const startOrder = new Map<string, number>();
+  let startOrdinal = 0;
   const start = (id: string, o: Open): void => {
-    if (!open.has(id)) open.set(id, o);
+    if (open.has(id)) return;
+    open.set(id, o);
+    startOrder.set(id, startOrdinal++);
   };
   const close = (id: string, ts: number, status: SpanStatus, extra: Record<string, unknown> = {}): void => {
     const o = open.get(id);
@@ -806,8 +823,9 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   // Everything still open belongs to a run that has not finished (or that died).
   for (const id of [...open.keys()]) close(id, lastTs, "unset");
 
-  // Deterministic order, so two traces of the same journal are byte-identical.
-  return done.sort((a, b) => a.startTime - b.startTime || (a.spanId < b.spanId ? -1 : 1));
+  // Deterministic order, so two traces of the same journal are byte-identical — and, on a tie,
+  // the order the journal put them in rather than the order their digests happen to fall in.
+  return done.sort((a, b) => a.startTime - b.startTime || (startOrder.get(a.spanId) ?? 0) - (startOrder.get(b.spanId) ?? 0));
 }
 
 // ---------------------------------------------------------------------------

@@ -798,12 +798,21 @@ test("SPANS COME OUT IN TIME ORDER, with the id only breaking ties", () => {
   const byIdAlone = [...spans].sort((a, b) => (a.spanId < b.spanId ? -1 : 1)).map((s) => s.spanId);
   assert.notDeepEqual(byIdAlone, spans.map((s) => s.spanId), "sorting by id alone would give the same answer here");
 
-  // The tie-break itself: two spans that start at the same instant are ordered, not left to
-  // insertion order, so a re-fold cannot shuffle them.
-  // The seqs are chosen so the two ids sort the OTHER WAY ROUND from the order the fold
-  // produces them in — `checkpoint.created` at seq 3 is emitted first and its id sorts
-  // second. Without that the tie-break is invisible, because `Array.prototype.sort` is
-  // stable and insertion order would already be the answer.
+  // THE TIE-BREAK ITSELF, and it changed: it was the SPAN ID and is now journal order.
+  //
+  // What this assertion has always been for is determinism — two spans starting at the same
+  // instant must be ordered by something, so a re-fold cannot shuffle them. A span id met that
+  // bar and nothing else: it is a digest, so the order it imposes carries no meaning. Measured
+  // on a four-node run through `bin/loom` — `collect` (a join) and `write` (the only node that
+  // reads what it produces) both reached `task.ready` in the same millisecond, and `loom trace`
+  // printed `write` above `collect`, reversing the one edge between them. Five of that run's
+  // Tasks fell inside nine milliseconds, so a collision is ordinary rather than a race.
+  //
+  // `seq` totally orders a journal and the fold consumes it in that order, so the order spans
+  // are STARTED in is causal. It is a pure function of the journal, so the determinism this
+  // assertion protects is unchanged; only the meaning of the order improved. The fixture is kept
+  // exactly as it was — its whole point is that the two ids sort the OTHER way round from the
+  // order the fold produces them in, which is now what makes the change visible here.
   const sameTs = [
     submitted,
     ready,
@@ -811,10 +820,17 @@ test("SPANS COME OUT IN TIME ORDER, with the id only breaking ties", () => {
     { ...ev(5, "state.reduced", { channels: [], values: {}, branchCount: 1, skipped: 0, degraded: false, stateHashBefore: "sha256:a", stateHashAfter: "sha256:b" }), ts: 2_000 } as JournalEvent,
   ];
   const tiedSpans = spansFrom(sameTs).filter((s) => s.startTime === 2_000);
+  assert.equal(tiedSpans.length, 2);
+  assert.deepEqual(
+    tiedSpans.map((s) => s.name),
+    ["loom.checkpoint", "loom.state.reduce"],
+    "seq 3 was journaled before seq 5, so it comes first — this is the assertion that flipped",
+  );
+  // And the id order really would disagree, so the line above is not passing by coincidence.
   const tied = tiedSpans.map((s) => s.spanId);
-  assert.equal(tied.length, 2);
-  assert.deepEqual(tiedSpans.map((s) => s.name), ["loom.state.reduce", "loom.checkpoint"], "the fixture no longer inverts insertion order");
-  assert.deepEqual(tied, [...tied].sort(), "equal start times must be broken by span id, deterministically");
+  assert.notDeepEqual(tied, [...tied].sort(), "the fixture no longer inverts id order — it must, or this proves nothing");
+  // Determinism, stated directly rather than through whichever key happens to break the tie.
+  assert.deepEqual(JSON.stringify(spansFrom(sameTs)), JSON.stringify(spansFrom(sameTs)), "a re-fold must be byte-identical");
 });
 
 // ── reconstructGraph still trusts the trace in three places ──────────────────
