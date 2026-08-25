@@ -143,6 +143,42 @@ export interface PreparedEvent {
 }
 
 /**
+ * The largest a single event's canonical payload may be.
+ *
+ * NOTHING BOUNDED BYTES AT ALL before this. Measured: a 256 MiB single event was accepted by both
+ * stores, taking ~2.5 GiB of RSS on the way in. The one payload guard that existed is `MAX_DEPTH`,
+ * and it is byte-blind — a 300-deep 5 KB value is refused while a 2-deep 64 MiB one is written.
+ *
+ * **AND THE JOURNAL AMPLIFIES.** Measured on a chain of `function` nodes passing one value:
+ * `journal_bytes = payload × (2N + 2)` where N is the nodes the value flows through —
+ * `task.committed` and `state.reduced` each carry a full copy per hop, plus `run.submitted`'s
+ * inputs and `run.completed`'s outputs. Exact at every N tried. One run, one 16 MiB value, four
+ * nodes = 160 MiB of SQLite, every byte fsynced because invariant 8 says durability is not
+ * negotiable. An operator's first sign of this today is `du`.
+ *
+ * EIGHT MEBIBYTES, and the number is chosen to be uncontroversial rather than tight. Temporal
+ * refuses a payload above 2 MB and kills a history above 50 MB; Golem inlines to 65 KB and
+ * externalises past it; this repo's own HTTP door already caps a request body at 1 MiB. By those
+ * standards this is generous, deliberately: the bound exists to catch a runaway, not to constrain
+ * a workload.
+ *
+ * IT WAS 4 MiB FOR ABOUT A MINUTE, and what moved it is worth keeping. The SSE backpressure test
+ * writes a deliberate 4 MiB wall to fill a socket buffer — so a payload of exactly that size is
+ * something this codebase already produces on purpose. A bound that refuses a size the tree
+ * demonstrably uses is not "certainly a mistake", and editing the test to fit the number would
+ * have been fitting the evidence to the conclusion.
+ *
+ * REFUSE, NEVER TRUNCATE — the rule `MAX_DEPTH` states one layer down, for the same reason: a
+ * clipped payload is journaled as a value that is not the value, and replay compares digests, so
+ * truncating converts a loud failure into a silent divergence.
+ *
+ * **THIS IS A BOUND, NOT THE FIX.** It stops a runaway; it does nothing about the amplification,
+ * which needs payload externalisation — a reference above a threshold, resolved on read. That is
+ * a real change to a synchronous fold and is recorded in `TODO.md` rather than half-done here.
+ */
+const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+/**
  * Turn a batch into positioned rows. Pure, so both stores share exactly one
  * definition of "what an append means" — the reason a conformance suite can hold
  * them to the same behaviour.
@@ -172,6 +208,20 @@ export interface PreparedEvent {
  * durability one; it belongs to `memory.ts` and `sqlite.ts`, and `journal/conformance.ts`
  * is where a decision about it would be pinned.
  */
+/** Canonical bytes, or a refusal that says which event and by how much. */
+function boundedPayload(json: string, type: string): string {
+  const bytes = Buffer.byteLength(json, "utf8");
+  if (bytes <= MAX_PAYLOAD_BYTES) return json;
+  throw err.validation(
+    CODES.E_PAYLOAD_TOO_LARGE,
+    `a "${type}" payload is ${(bytes / 1048576).toFixed(1)} MiB, over the ${String(MAX_PAYLOAD_BYTES / 1048576)} MiB per-event bound. ` +
+      `The journal keeps every version of every value forever and writes one copy per hop, so a large value costs ` +
+      `roughly (2 x nodes + 2) times its own size on disk. Put a REFERENCE in the channel — a path, a URL, a blob id — ` +
+      `and let a tool fetch the bytes when it needs them.`,
+    { details: { type, bytes, limit: MAX_PAYLOAD_BYTES } },
+  );
+}
+
 export function prepare(
   input: AppendInput,
   canonicalize: (v: unknown) => string,
@@ -188,7 +238,7 @@ export function prepare(
     seq: input.expectedSeq + i + 1,
     ts: e.ts ?? ts,
     type: e.type,
-    payloadJson: canonicalize(e.payload),
+    payloadJson: boundedPayload(canonicalize(e.payload), e.type),
     actorJson: canonicalize(e.actor),
     taskId: e.taskId ?? input.taskId ?? null,
     classification: e.classification ?? DEFAULT_CLASSIFICATION,

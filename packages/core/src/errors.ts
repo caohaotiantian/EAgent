@@ -254,6 +254,8 @@ export const CODES = {
    * one path invariant 2 says must not fail unrecognisably.
    */
   E_PAYLOAD_TOO_DEEP: "E_PAYLOAD_TOO_DEEP",
+  /** An event payload exceeded the per-event byte bound. Refused, never truncated. */
+  E_PAYLOAD_TOO_LARGE: "E_PAYLOAD_TOO_LARGE",
 
   // policy
   E_OVERSIGHT_LOOSENED: "E_OVERSIGHT_LOOSENED",

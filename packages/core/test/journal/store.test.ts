@@ -759,3 +759,70 @@ test("BOTH STORES ANSWER `raisedAGate` THE SAME WAY — ordered by the most rece
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("A PAYLOAD OVER THE BYTE BOUND IS REFUSED, and the message says what to do instead", async () => {
+  // Nothing bounded bytes at all. Measured before this: a 256 MiB single event was accepted by
+  // both stores, at ~2.5 GiB of RSS. The one payload guard that existed is MAX_DEPTH, and it is
+  // byte-blind — a 300-deep 5 KB value is refused while a 2-deep 64 MiB one is written.
+  const store = new MemoryStateStore({ now: () => 1 });
+  const runId = "run_big" as RunId;
+
+  await assert.rejects(
+    async () =>
+      store.append({
+        runId,
+        expectedSeq: 0,
+        events: [
+          {
+            type: "run.submitted",
+            payload: {
+              workflow: "w",
+              graphHash: "h",
+              inputs: { blob: "x".repeat(9 * 1024 * 1024) },
+              idempotencyKey: "k",
+              configDigest: "d",
+            },
+            actor: { kind: "system", component: "test" },
+          },
+        ],
+      }),
+    (e: unknown) => {
+      assert.ok(isLoomError(e), String(e));
+      assert.equal(e.code, CODES.E_PAYLOAD_TOO_LARGE);
+      assert.equal(e.retryable, false, "the caller's value will not get smaller on a retry");
+      // The message has to name the amplification, because the size alone reads as arbitrary:
+      // one value costs roughly (2 x nodes + 2) times its own bytes, measured.
+      assert.match(e.message, /run\.submitted/, "name the event");
+      assert.match(e.message, /9\.0 MiB/, "name the size");
+      assert.match(e.message, /REFERENCE/, "and say what to do instead of it");
+      return true;
+    },
+  );
+});
+
+test("a payload UNDER the bound is written — the guard must not refuse ordinary work", async () => {
+  // The control. A bound whose only test is the refusal cannot tell "correctly refuses 9 MiB"
+  // from "refuses everything", and this tree already writes a deliberate 4 MiB payload.
+  const store = new MemoryStateStore({ now: () => 1 });
+  const runId = "run_ok" as RunId;
+  await store.append({
+    runId,
+    expectedSeq: 0,
+    events: [
+      {
+        type: "run.submitted",
+        payload: {
+          workflow: "w",
+          graphHash: "h",
+          inputs: { blob: "x".repeat(4 * 1024 * 1024) },
+          idempotencyKey: "k",
+          configDigest: "d",
+        },
+        actor: { kind: "system", component: "test" },
+      },
+    ],
+  });
+  const seen: string[] = [];
+  for await (const e of store.read(runId, 1)) seen.push(e.type);
+  assert.deepEqual(seen, ["run.submitted"], "4 MiB is written, and readable, without complaint");
+});

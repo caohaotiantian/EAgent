@@ -44,7 +44,16 @@ Each was verified against the code, not remembered.
   invalid `humanGate: {prompt}` in a test graph of mine on its first run.
   **Still open:** the same check for a node's TOP-LEVEL fields (`id`, `reads`, `retry`, `unhandled`
   …) and for `GraphSpec` itself, neither of which is enumerated anywhere yet.
-- **The journal amplifies a payload by `2N+2`.** Measured: `journal_bytes = payload × (2N + 2)`
+- **The journal amplifies a payload by `2N+2`.** **BOUNDED, NOT FIXED.** `prepare` now refuses a
+  single canonical payload above 8 MiB (`E_PAYLOAD_TOO_LARGE`), which stops the runaway — a 256 MiB
+  event used to be accepted at ~2.5 GiB of RSS — and says what to do instead. It does nothing about
+  the amplification itself. **The real fix is payload externalisation**: a reference above a
+  threshold, resolved on read. The write half is a threshold check in the same funnel; the read half
+  is the hard part, because `foldRun` is SYNCHRONOUS and hands channel values straight to node
+  bodies, so either the fold becomes async (touching the engine, gates, replay and audit) or the
+  projection carries unresolved handles and replay's comparison learns to compare what they point
+  at. `effect.completed` already carries `resultDigest`, so an externalised effect result keeps its
+  identity for free; `task.committed` and `state.reduced` would need one. Original finding: Measured: `journal_bytes = payload × (2N + 2)`
   where N is the nodes a value flows through — `task.committed` and `state.reduced` each carry a
   full copy per hop, plus `run.submitted` and `run.completed`. One run, one 16 MiB value, four
   nodes = **160 MiB of SQLite**, fsynced. Nothing caps bytes anywhere: a 256 MiB single event is
