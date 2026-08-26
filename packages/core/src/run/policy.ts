@@ -126,7 +126,7 @@ export interface PolicyEngineOptions {
   /**
    * THE GRAPH'S OWN ALLOWLIST — a ceiling, not a request.
    *
-   * `02-EXECUTION-GRAPH.md` specifies `capabilities: [string]  # allowlist; intersected with
+   * `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` specifies `capabilities: [string]  # allowlist; intersected with
    * system + tenant (never widened)`. The code checked it UPWARD against the tenant and
    * downward against nothing, so `policy: { capabilities: [] }` was not a restriction: measured,
    * a graph declaring the empty list ran `pay.charge` to completion because the TENANT held
@@ -205,16 +205,37 @@ const DEFAULT_WINDOWS: Readonly<Record<IrreversibilityClass, number>> = {
 const MAX_TIMER_MS = 2_147_483_647;
 
 /**
- * The two classes a human may NOT de-escalate to `out`, and the two E8 guards.
+ * Which classes a human may NOT de-escalate to `out`, and the E8 guard — READ AS A DENY-LIST
+ * OVER THE TWO UNDOABLE CLASSES, never as an allow-list over the hard ones.
  *
- * Named because the same pair drives the hard floor and the taint rule, and they were written
- * out longhand in both — which is how one of them could quietly become the identity without
- * the other noticing. Five more sites still spell it out (`graph/mutate.ts`, twice in
+ * It was `c === "irreversible" || c === "externally_visible"`: an allow-list read in the
+ * negative, so every word outside the union answered `false` and skipped the hard floor.
+ * Measured, systemFloor `out`, one human de-escalation of the run scope to `out`:
+ *
+ *     irreversible        floor=in → on    (held)
+ *     externally_visible  floor=in → on    (held)
+ *     nuclear             floor=in → OUT   effect=allow
+ *     IRREVERSIBLE        floor=in → OUT   effect=allow
+ *
+ * A sibling change floors an unreadable class at `in` through `maxPosture`, so the FLOOR was
+ * right — and then the ceiling walked straight past it, because the guard that stops a human
+ * lowering a dangerous action below `on` did not recognise the word. **A typo'd or hostile
+ * class was strictly LESS protected than a correctly spelled one**, which inverts the rule:
+ * refusing is always allowed, loosening never is, and a guard that cannot decide fails closed.
+ *
+ * The two members named here are exactly the two `CLASS_DEFAULT_POSTURE` puts below `in`, and
+ * naming them costs an edit only when someone adds a new EASY-to-undo class — a deliberate,
+ * visible loosening. A new hard one needs no edit at all. Rejecting the unknown class outright
+ * was considered and refused for the reason `postureRank` gives: these values arrive from the
+ * append-only journal, and one bad event that throws poisons every later fold of that run.
+ *
+ * Five more sites still spell the pair out longhand (`graph/mutate.ts`, twice in
  * `graph/validate.ts`, `telemetry/spans.ts`, `run/engine.ts`); they are not converted because
- * `graph/` importing from `run/` inverts the layering, and that is the worse trade.
+ * `graph/` importing from `run/` inverts the layering, and that is the worse trade. They carry
+ * the same inversion and are worth the same fix in their own layer.
  */
 export function isHardToUndo(c: IrreversibilityClass): boolean {
-  return c === "irreversible" || c === "externally_visible";
+  return c !== "read_only" && c !== "reversible_write";
 }
 
 /**
@@ -260,7 +281,73 @@ function boundedWindows(
       );
     }
   }
-  return { ...DEFAULT_WINDOWS, ...supplied };
+  // KEY BY KEY, NOT `{...DEFAULT_WINDOWS, ...supplied}`. Spread copies a key that is
+  // PRESENT, whatever it holds, so `{irreversible: undefined}` DELETED the default it was
+  // merged over and left a hole in the stored table. Nothing in this tree supplies this
+  // option — it arrives from an embedder's `EngineOptions.policy`, i.e. the surface a
+  // stranger writes against — and the ordinary way to build one, `{irreversible: cfg.window}`
+  // with `cfg.window` unset, is exactly the shape that produces the hole. The loop above
+  // waved it through, correctly: `if (ms === undefined) continue` says an UNSET key is not a
+  // bad value, and it is not. It only has to stay unset. Every read below assumes this map is
+  // total over the union; this is what makes that true.
+  const out: Record<string, number> = { ...DEFAULT_WINDOWS };
+  for (const [cls, ms] of Object.entries(supplied)) {
+    if (typeof ms === "number" && Number.isFinite(ms)) out[cls] = ms;
+  }
+  return out as Record<IrreversibilityClass, number>;
+}
+
+/**
+ * The window for a class, WITHOUT the table lookup's `undefined`.
+ *
+ * The same allow-list-in-the-negative shape `isHardToUndo` had, ten lines further down:
+ * `#windows[req.irreversibility]` is a plain lookup and a class outside the union yields
+ * `undefined`. It only became reachable once the hard floor started holding an unreadable
+ * class at `on` — and `on` is the one posture that reads a window. Measured with the fix
+ * above but not this one, `nuclear` de-escalated to `out`:
+ *
+ *     {effect: "allow", posture: "on", holdMs: undefined}
+ *
+ * `holdMs > 0` is false, and `Engine` writes `action.pending`, sleeps, and re-checks the abort
+ * signal ONLY inside that test (`run/engine.ts:2563` and `:4248` — the sleep and the abort check
+ * are both in the body of the `if`). So a window that is not a positive number does not hold, is
+ * not journaled, and cannot be interrupted: the action starts immediately and the only place the
+ * operator's declared window still exists is the config they wrote it in. That is the same
+ * failure `boundedWindows` refuses a truncating timer for — supervision believed, not given —
+ * arriving through the one class the vocabulary cannot read.
+ *
+ * An unreadable class is hard-to-undo everywhere else now, so it takes the STRICTEST window
+ * any hard-to-undo class carries rather than a constant, which keeps an operator who widened
+ * `irreversible` from being narrowed behind their back.
+ *
+ * AND THE FALLBACK IS FOLDED OVER NUMBERS ONLY, because `Math.max(0, ...hard)` is `NaN` if a
+ * SINGLE element is `undefined` — one hole in the table poisoned the answer for every class
+ * that fell back, not just for the class that was missing. Measured, systemFloor `out`, one
+ * human de-escalation of the run scope to `out`, `interventionWindowMs: {irreversible: undefined}`:
+ *
+ *     irreversible        allow  on  holdMs='NaN'   holds=false
+ *     externally_visible  allow  on  holdMs='5000'  holds=true
+ *     nuclear             allow  on  holdMs='NaN'   holds=false
+ *
+ * `NaN > 0` is false — the same false that `undefined > 0` gives — so the fix for the
+ * unreadable class handed back exactly the failure it was written to close, and took
+ * `irreversible` itself down with it. `boundedWindows` now keeps the stored table total, so
+ * that input cannot arise through the constructor; this filter is what makes the property
+ * hold for a table reaching here any other way, and it is the read that must not fail open.
+ *
+ * WITH NOTHING FINITE LEFT, the strictest hard window in `DEFAULT_WINDOWS` — not
+ * `Math.max(0)`. An empty fold answering `0` is a window that does not hold either; the
+ * only difference from `NaN` is that it looks deliberate in the journal.
+ */
+function windowFor(windows: Readonly<Record<IrreversibilityClass, number>>, c: IrreversibilityClass): number {
+  const declared = windows[c];
+  if (Number.isFinite(declared)) return declared;
+  const hard = (table: Readonly<Record<string, number>>): readonly number[] =>
+    Object.entries(table)
+      .filter(([cls, ms]) => isHardToUndo(cls as IrreversibilityClass) && Number.isFinite(ms))
+      .map(([, ms]) => ms);
+  const supplied = hard(windows);
+  return Math.max(0, ...(supplied.length > 0 ? supplied : hard(DEFAULT_WINDOWS)));
 }
 
 export class PolicyEngine {
@@ -351,7 +438,7 @@ export class PolicyEngine {
 
     // The hold applies ONLY at `on`. At `in` a gate is strictly stronger; at `out`
     // there is no supervisor watching, so holding would delay nobody's decision.
-    const holdMs = posture === "on" ? this.#windows[req.irreversibility] : 0;
+    const holdMs = posture === "on" ? windowFor(this.#windows, req.irreversibility) : 0;
     if (holdMs > 0) reasons.push(`intervention window ${holdMs}ms`);
     return { effect: "allow", posture, reasons, holdMs };
   }

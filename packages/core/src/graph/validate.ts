@@ -18,9 +18,12 @@ import { MULTI_WRITER_SAFE, REDUCER_NAMES, type ChannelSpec } from "../state/cha
 import {
   CLASSIFICATION_POSTURE_FLOOR,
   CLASS_DEFAULT_POSTURE,
+  type Classification,
   isLoosening,
+  isPosture,
   isSyntheticSubject,
   maxPosture,
+  POSTURES,
   type IrreversibilityClass,
   type Posture,
   postureRank,
@@ -32,6 +35,7 @@ import {
   GRAPH_API_VERSION,
   ALLOWED_FIELDS,
   NODE_FIELDS,
+  POLICY_FIELDS,
   SPEC_FIELDS,
   EDGE_FIELDS,
   dataFloorOf,
@@ -436,6 +440,26 @@ function channelTypeMap(channels: Readonly<Record<string, ChannelSpec>>): Record
 // ── GRAPH003 + GRAPH020: structure ───────────────────────────────────────────
 
 /**
+ * What a data classification may be, and the list a diagnostic quotes back.
+ *
+ * ONE TEST, TWO CALLERS, and it stays module-private on purpose. `vocab.ts` exports `isPosture`
+ * because the posture vocabulary is folded in files across the tree; a classification is only
+ * ever *authored* in a graph, so the only thing that has to test membership is the compiler, and
+ * a third exported name on a pinned public surface buys nothing. Both sites here — a channel's
+ * `classification` and a delivery block's `redactAs` — now ask this rather than each spelling
+ * `Object.hasOwn(CLASSIFICATION_POSTURE_FLOOR, …)` for itself, which is the two-copies drift
+ * `unknownKeys` below was written to end one scope over.
+ *
+ * The floor table is the source because it is TOTAL over the union — every member has a floor —
+ * so it cannot fall out of step with the union the way a hand-written list can.
+ */
+const CLASSIFICATIONS: readonly string[] = Object.keys(CLASSIFICATION_POSTURE_FLOOR);
+
+function isClassification(v: unknown): v is Classification {
+  return typeof v === "string" && Object.hasOwn(CLASSIFICATION_POSTURE_FLOOR, v);
+}
+
+/**
  * Report every key of `got` that `allowed` does not contain, suggesting the nearest real one.
  *
  * One function because there are now FOUR scopes to check — a node's type block, the node
@@ -467,6 +491,147 @@ function unknownKeys(
     found = true;
   }
   return found;
+}
+
+/**
+ * A block that must be an object, reported when it is anything else.
+ *
+ * ABSENT IS FINE; MALFORMED IS NOT, and the two used to answer the same. The helper this
+ * replaces mapped every non-object to `undefined` and every caller then skipped, on a comment
+ * saying the shape was "left to the type layer". THERE IS NO TYPE LAYER: `compile`'s input is
+ * `JSON.parse` output — `readSpec` in `cli.ts` parses a file and casts it — so `undefined` was
+ * the entire treatment. Measured against `compile` on a graph whose control plans its `write`
+ * node at `on`:
+ *
+ *     policy: "in"                →  ok, and the node planned at `out`
+ *     policy: null                →  ok, node at `out`
+ *     policy: ["posture"]         →  ok, node at `out`
+ *     policy: {budget: [1, 2]}    →  ok, and no budget enforced
+ *     nodes[1].policy: null       →  ok, the node's own declaration dropped
+ *
+ * The first row is the failure in one line: an author asking for the STRONGEST oversight got the
+ * WEAKEST, silently, because `("in").posture` is `undefined` and the `?? "out"` below it applies.
+ * That is the same silent-loosening shape `GRAPH003_UNKNOWN_POSTURE` closes one level in, and it
+ * sits one level OUT — where the value is not a wrong word but a wrong kind of thing.
+ *
+ * `GRAPH003_MALFORMED` rather than a new code: it is already this file's answer to "a block is
+ * not the shape it must be" at seven sites (`inputs`, `outputs`, `nodes`, `edges`,
+ * `metadata.name`, a node/edge element, `hooks.<when>`), and an eighth spelling of one idea is
+ * how diagnostics come to disagree about what they mean.
+ */
+function objectBlock(
+  v: unknown,
+  what: string,
+  at: Diagnostic["at"],
+  fix: string,
+  d: Diagnostic[],
+): Record<string, unknown> | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: `${what} must be an object, not ${v === null ? "null" : Array.isArray(v) ? "an array" : `a ${typeof v}`}`,
+      ...(at === undefined ? {} : { at }),
+      fix,
+    });
+    return undefined;
+  }
+  return v as Record<string, unknown>;
+}
+
+/**
+ * The `policy` block's CONTENTS, at both scopes — its keys, its nested blocks' keys, and the
+ * one field whose value is a vocabulary.
+ *
+ * `unknownKeys` above closed four scopes and `policy` was the floor of all of them: the node's
+ * own keys catch `policyy: {posture: "in"}`, and one level in nothing was checked at all.
+ * Measured against `compile` before this existed, on a graph that is otherwise byte-identical
+ * to one that compiles clean:
+ *
+ *     policy: { posture:  "strict" }    →  ok, and every node planned at `out`
+ *     policy: { posturr:  "out"    }    →  ok, zero diagnostics
+ *     policy: { budget: {nonsense:5} }  →  ok, zero diagnostics
+ *
+ * The first row is the reason this is an error and not a warning, and it is worse than a lost
+ * declaration: an author asking for the strongest oversight the system has was given the
+ * weakest one, silently, because `POSTURE_RANK["strict"]` is `undefined` and a miss loses every
+ * comparison it enters. `vocab.ts` now ranks an unreadable posture at `in` so that graph would
+ * fail SAFE rather than open — but failing safe on a typo is still not what the author wrote,
+ * and only the compiler is positioned to say which word was wrong and what the real ones are.
+ *
+ * A BAD POSTURE VALUE IS FATAL, AND SO IS A `policy` THAT IS NOT A BLOCK; a bad KEY is not, and
+ * neither is a malformed `budget` or `expansion` — those cost a limit, not a posture, so no later
+ * rule reasons wrongly from them. `rule014And019Oversight` computes postures
+ * from this field, so leaving it in play makes the next diagnostic `GRAPH014_OVERSIGHT_LOOSENED`
+ * — "this graph would weaken oversight", classified `E_OVERSIGHT_LOOSENED`, a policy refusal —
+ * for what is a spelling mistake, pointing the author at the wrong line and the operator at the
+ * wrong class of fault. That is the same reason `GRAPH003_UNKNOWN_REDUCER` is fatal one check
+ * over. An unknown KEY stops no later rule from reasoning correctly, so it reports alongside
+ * everything else, exactly as the graph-scope check above decided.
+ */
+function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
+  let fatal = false;
+  const list = (fields: readonly string[]): string => fields.map((a) => `\`${a}\``).join(", ");
+
+  const check = (policy: unknown, whose: string, at: Diagnostic["at"], allowed: readonly string[]): void => {
+    // A BARE POSTURE IS THE MISTAKE WORTH NAMING. `policy: "in"` is the reproduced case, and an
+    // author who wrote it was reaching for the strongest oversight there is.
+    const p = objectBlock(
+      policy,
+      `${whose}\`policy\``,
+      at,
+      isPosture(policy)
+        ? `that is a posture, not a policy block — write \`policy: { posture: ${JSON.stringify(policy)} }\``
+        : `${whose}\`policy\` block declares ${list(allowed)}, all optional — or drop the block`,
+      d,
+    );
+    if (p === undefined) {
+      // Absent is fine; MALFORMED is fatal, for the reason stated below the posture check.
+      if (policy !== undefined) fatal = true;
+      return;
+    }
+    unknownKeys(p, allowed, `${whose}\`policy\` block`, at, d);
+    const budget = objectBlock(
+      p["budget"],
+      `${whose}\`policy.budget\``,
+      at,
+      `a budget declares ${list(POLICY_FIELDS.budget)}, all optional`,
+      d,
+    );
+    if (budget !== undefined) unknownKeys(budget, POLICY_FIELDS.budget, `${whose}\`policy.budget\` block`, at, d);
+    // `expansion` is graph-scope only, so a node declaring one is already an unknown key above
+    // and must not also be walked as though it meant something.
+    const expansion = allowed.includes("expansion")
+      ? objectBlock(
+          p["expansion"],
+          `${whose}\`policy.expansion\``,
+          at,
+          `an expansion budget declares ${list(POLICY_FIELDS.expansion)}, all optional`,
+          d,
+        )
+      : undefined;
+    if (expansion !== undefined) {
+      // A misspelled limit does not fail — it falls back to `DEFAULT_EXPANSION`. An author who
+      // wrote `maxNodes: 8` and gets 256 has had a bound raised on them by a typo.
+      unknownKeys(expansion, POLICY_FIELDS.expansion, `${whose}\`policy.expansion\` block`, at, d);
+    }
+    const posture = p["posture"];
+    if (posture !== undefined && !isPosture(posture)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_POSTURE",
+        message: `${whose}\`policy.posture\` is ${JSON.stringify(posture)}, which is not an oversight posture`,
+        ...(at === undefined ? {} : { at }),
+        fix: `use one of ${POSTURES.join(", ")} — \`in\` gates every action for a human, \`on\` runs with a human watching and able to interrupt, \`out\` runs unsupervised`,
+      });
+      fatal = true;
+    }
+  };
+
+  check(spec.policy, "the graph's ", undefined, POLICY_FIELDS.graphPolicy);
+  for (const n of spec.nodes) check(n.policy, `node "${n.id}"'s `, { nodeId: n.id }, POLICY_FIELDS.nodePolicy);
+  return fatal;
 }
 
 /**
@@ -657,6 +822,11 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       fix: 'use "fail", which is what the engine does today',
     });
   }
+  // AND INSIDE `policy`, at both scopes. Everything above this line checks a BLOCK's name;
+  // this checks the block's contents, which is where the check stopped and where a typo costs
+  // the most. See `checkPolicyBlocks`.
+  if (checkPolicyBlocks(spec, d)) fatal = true;
+
   if (typeof spec.channels !== "object" || spec.channels === null) {
     d.push({
       severity: "error",
@@ -672,7 +842,22 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // run finished without writing any of its declared outputs` — pointing at the output rather
   // than at the typo three lines above it.
   for (const [name, ch] of Object.entries(spec.channels)) {
-    const reduce = (ch as { reduce?: unknown }).reduce;
+    // A CHANNEL THAT IS NOT AN OBJECT reaches `.reduce` on `null` and throws `E_INTERNAL` out of
+    // the validator — the same "not the shape it must be" as the policy blocks above, so it gets
+    // the same treatment rather than a stack trace.
+    const fix = "a channel is `{type, reduce, classification?}`";
+    const decl = objectBlock(ch, `channel "${name}"`, { channel: name }, fix, d);
+    if (decl === undefined) {
+      // `objectBlock` treats ABSENT as fine, because the `policy` blocks it also serves are
+      // optional. A channel's declaration is not, so `{note: undefined}` is reported here rather
+      // than becoming a `fatal` with no diagnostic behind it — which `compile` reads as `ok`.
+      if (ch === undefined) {
+        d.push({ severity: "error", code: "GRAPH003_MALFORMED", message: `channel "${name}" declares nothing`, at: { channel: name }, fix });
+      }
+      fatal = true;
+      continue;
+    }
+    const reduce = decl["reduce"];
     if (!REDUCER_NAMES.includes(reduce as never)) {
       d.push({
         severity: "error",
@@ -682,6 +867,27 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
         fix: `use one of ${REDUCER_NAMES.join(", ")}`,
       });
       fatal = true;
+    }
+    // A CLASSIFICATION IN NO VOCABULARY. `vocab.ts` now floors an unreadable one at `in` so the
+    // run fails SAFE — measured, `classification: "SECRET"` and `classification: "nonsense"` both
+    // plan every reader at `in` — but safe is not what the author wrote, and until this check
+    // existed neither word produced a single diagnostic. An author who typed `SECRET` for
+    // `secret_ref` gets the strictest gate in the system on a channel they thought was ordinary,
+    // with nothing anywhere saying why; an author who typed `pubic` for `public` gets the same.
+    // Only the compiler is positioned to say which word was wrong and what the real ones are.
+    //
+    // NOT FATAL, unlike the reducer above: `dataFloorOf` folds this value through `maxPosture`,
+    // which answers `in` for a non-member, so every rule downstream already reasons from the safe
+    // answer and reporting the rest of the graph's faults alongside this one is worth more.
+    const cls = decl["classification"];
+    if (cls !== undefined && !isClassification(cls)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_CLASSIFICATION",
+        message: `channel "${name}" declares classification ${JSON.stringify(cls)}, which is not a data classification`,
+        at: { channel: name },
+        fix: `use one of ${CLASSIFICATIONS.join(", ")} — \`secret_ref\` gates every reader, \`pii\` requires a human watching, \`internal\` and \`public\` add no floor`,
+      });
     }
   }
 
@@ -1373,7 +1579,7 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     //
     // Those four SUBSTITUTE: they run something semantically different from what the graph says,
     // so accepting them ships a graph that reads as supervised and behaves otherwise. This one
-    // does nothing at all, and `02-EXECUTION-GRAPH.md` says so in three places — the node table,
+    // does nothing at all, and `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` says so in three places — the node table,
     // the field table and the `mode: all` row all state there is no join deadline. The design is
     // not drifting; it made a choice.
     //
@@ -1445,7 +1651,7 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  *
  * `FunctionNode.cpuBound` is the case this was written for, and it differs from
  * `GRAPH008_JOIN_TIMEOUT_INERT` in the way that decides the severity. The join deadline is a
- * choice the design MADE — `02-EXECUTION-GRAPH.md` states in three places that there is no
+ * choice the design MADE — `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` states in three places that there is no
  * barrier deadline. This one is DRIFT: two documents said the opposite of the code, the node
  * table's `function` row ("Runs in a worker thread if `cpuBound: true`") and D3's pool diagram
  * ("worker_threads if cpuBound"), while `packages/core/src` contains no `worker_threads` import
@@ -2357,10 +2563,10 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
       "redact names payload FIELDS, matched recursively by key; an empty entry would match nothing",
     );
   }
-  if (spec.redactAs !== undefined && !Object.hasOwn(CLASSIFICATION_POSTURE_FLOOR, spec.redactAs)) {
+  if (spec.redactAs !== undefined && !isClassification(spec.redactAs)) {
     bad(
       `declares redactAs "${String(spec.redactAs)}", which is not a classification`,
-      `use one of ${Object.keys(CLASSIFICATION_POSTURE_FLOOR).join(", ")}`,
+      `use one of ${CLASSIFICATIONS.join(", ")}`,
     );
   }
 
@@ -2494,7 +2700,7 @@ function collectRefs(spec: GraphSpec): { ref: ResourceRef; at: Diagnostic["at"] 
  *     what gets deleted."
  *   `oversight` — the policy label. `humanGate.ref` becomes `policyRef`, which gates BATCH by
  *     and `resolveGate` matches on, and nothing resolves its content: D7.2's blocks are inline
- *     on the node for exactly that reason (`ApprovalSpec`'s docstring). 04-OVERSIGHT.md states
+ *     on the node for exactly that reason (`ApprovalSpec`'s docstring). design/loom/04-OVERSIGHT.md (deleted at f975f9f) states
  *     the reversal: "a resolver seam exists that hands a validated `OversightPolicy` document to
  *     the compiler and the broker."
  *
@@ -2665,7 +2871,7 @@ function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, d: Diagnos
   /**
    * AND THE GRAPH'S OWN ALLOWLIST IS A CEILING, not a request.
    *
-   * `02-EXECUTION-GRAPH.md` says `capabilities: [string]  # allowlist; intersected with system +
+   * `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` says `capabilities: [string]  # allowlist; intersected with system +
    * tenant (never widened)`. Only the upward half was built: the list was checked against the
    * tenant and bounded nothing below it, so `policy: { capabilities: [] }` permitted everything
    * the tenant did. Measured — a graph declaring the empty list ran `pay.charge` to completion.

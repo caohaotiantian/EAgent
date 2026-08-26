@@ -757,6 +757,34 @@ export const SPEC_FIELDS: readonly string[] = [
   "hooks",
 ];
 
+/**
+ * And INSIDE `policy`, which is where the check stopped and where the loss is worst.
+ *
+ * The three enclosing scopes above close a misspelled BLOCK — `policyy: {posture: "in"}` is
+ * refused with a suggested fix. One level in, nothing was checked at all. Measured against
+ * `compile`, one graph each:
+ *
+ *     policy: { posturr: "out" }        →  ok, zero diagnostics
+ *     policy: { budget: {nonsense: 5} } →  ok, zero diagnostics
+ *
+ * A budget nobody enforces and an oversight declaration nobody reads, both compiling clean.
+ * `expansion` is here for the same reason with a different consequence: a misspelled
+ * `maxNodes` does not fail, it falls back to `DEFAULT_EXPANSION`'s 256 — an author writing
+ * `8` and getting 256 is the one direction a limit must never move on its own.
+ *
+ * FOUR LISTS IN ONE TABLE rather than four exports, because each is one exported name on a
+ * pinned public surface and they are read at exactly one call site together. Keyed, like
+ * `ALLOWED_FIELDS`, and checked against `GraphPolicy`, `NodePolicy`, `Budget` and
+ * `ExpansionBudget` by the same test that checks the other four lists — an allow-list's
+ * failure mode is refusing a field somebody legitimately added.
+ */
+export const POLICY_FIELDS: Readonly<Record<"graphPolicy" | "nodePolicy" | "budget" | "expansion", readonly string[]>> = {
+  graphPolicy: ["posture", "budget", "expansion", "capabilities", "onBudgetExhausted"],
+  nodePolicy: ["posture", "budget", "capabilities"],
+  budget: ["costUsd", "tokens", "wallMs"],
+  expansion: ["maxNodes", "maxDepth", "maxFanout", "maxLoopIterations"],
+};
+
 export const EDGE_FIELDS: readonly string[] = [
   "id",
   "from",

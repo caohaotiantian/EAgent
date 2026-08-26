@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { compile } from "../../src/graph/compile.ts";
-import { ALLOWED_FIELDS, EDGE_FIELDS, NODE_FIELDS, REQUIRED_BLOCK, SPEC_FIELDS, type NodeType } from "../../src/graph/spec.ts";
+import { ALLOWED_FIELDS, EDGE_FIELDS, NODE_FIELDS, POLICY_FIELDS, REQUIRED_BLOCK, SPEC_FIELDS, type NodeType } from "../../src/graph/spec.ts";
 import { resolver } from "../run/skeleton.ts";
 
 const SPEC_SRC = readFileSync(fileURLToPath(new URL("../../src/graph/spec.ts", import.meta.url)), "utf8");
@@ -174,6 +174,26 @@ test("EVERY FIELD THE THREE INTERFACES DECLARE IS ALLOWED — the guard must not
   assert.deepEqual([...NODE_FIELDS].sort(), membersOf("NodeSpec"), "NODE_FIELDS and NodeSpec disagree");
   assert.deepEqual([...SPEC_FIELDS].sort(), membersOf("GraphSpec"), "SPEC_FIELDS and GraphSpec disagree");
   assert.deepEqual([...EDGE_FIELDS].sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
+});
+
+test("EVERY FIELD THE POLICY INTERFACES DECLARE IS ALLOWED — the same, one level in", () => {
+  // `POLICY_FIELDS` is read at one call site for four scopes, and the cry-wolf risk is higher
+  // here than above: a field added to `Budget` and not to this table refuses a graph whose
+  // budget is correct, and the author has no way to tell that from a real typo.
+  const IFACE: Readonly<Record<keyof typeof POLICY_FIELDS, string>> = {
+    graphPolicy: "GraphPolicy",
+    nodePolicy: "NodePolicy",
+    budget: "Budget",
+    expansion: "ExpansionBudget",
+  };
+  for (const [key, iface] of Object.entries(IFACE) as [keyof typeof POLICY_FIELDS, string][]) {
+    assert.deepEqual(
+      [...POLICY_FIELDS[key]].sort(),
+      membersOf(iface),
+      `POLICY_FIELDS.${key} and ${iface} disagree — a field was added to one and not the other`,
+    );
+  }
+  assert.deepEqual(Object.keys(POLICY_FIELDS).sort(), Object.keys(IFACE).sort(), "the table lost or gained a scope");
 });
 
 test("A GRAPH USING THESE FIELDS CORRECTLY STILL COMPILES — the control", () => {

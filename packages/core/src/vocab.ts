@@ -21,19 +21,92 @@ export type Posture = "out" | "on" | "in";
 
 const POSTURE_RANK: Readonly<Record<Posture, number>> = { out: 0, on: 1, in: 2 };
 
-export function postureRank(p: Posture): number {
-  return POSTURE_RANK[p];
+/**
+ * THE ONE STATEMENT OF WHAT A POSTURE MAY BE, and until this existed there was none —
+ * `isPosture` appeared nowhere in the tree, so every function below read an unchecked
+ * string through a table lookup and every miss came back `undefined`.
+ *
+ * `Posture` is a union of three string literals, which TypeScript erases: a graph is
+ * JSON, a journal event is JSON, and a de-escalation arrives over HTTP, so the value
+ * reaching these functions has been cast and never checked. Measured on the code this
+ * replaces, one call each:
+ *
+ *     maxPosture("strict")        → "out"     the WEAKEST posture
+ *     maxPosture("IN")            → "out"
+ *     maxPosture("out","strict")  → "out"
+ *     isLoosening("in","IN")      → false     not a loosening, said the loosening guard
+ *
+ * A graph declaring `policy: {posture: "strict"}` compiled `ok`, ran at `out` — nobody
+ * watching — and said nothing, because `POSTURE_RANK["strict"]` is `undefined` and
+ * `undefined > 0` is false. Every comparison against a miss is false, so a miss lost
+ * every comparison it entered and the fold kept its identity: the weakest member.
+ */
+export function isPosture(v: unknown): v is Posture {
+  return typeof v === "string" && Object.hasOwn(POSTURE_RANK, v);
 }
 
-/** Tightening. The ONLY sanctioned way to combine postures. */
+/**
+ * Every posture, weakest first — the set `isPosture` tests against, so a diagnostic can tell
+ * an author what to type instead of the word that was refused.
+ *
+ * SORTED BY THE RANK TABLE rather than written out again. A second literal list of the same
+ * three members is the drift this module's own docstring argues against one union up, and
+ * "weakest first" is then true by construction instead of by the order somebody happened to
+ * type the ranks in.
+ */
+export const POSTURES: readonly Posture[] = (Object.keys(POSTURE_RANK) as Posture[]).sort(
+  (a, b) => POSTURE_RANK[a] - POSTURE_RANK[b],
+);
+
+/**
+ * FAIL CLOSED: a member this vocabulary cannot read ranks as `in`, the most supervised.
+ *
+ * The alternative was to THROW, and it was rejected for a reason this repository has
+ * already paid for once. These ranks are folded over values that come out of the
+ * JOURNAL — `foldRun` folds `escalation.to`, `PolicyEngine.restore` folds recorded
+ * escalations and ceilings — and the journal is append-only, so one bad event would
+ * make every later fold of that run throw forever. `SAFE_ID` in `graph/validate.ts`
+ * records that exact shape as the reason ids are constrained rather than rejected late.
+ * Ranking an unreadable value at the top is total, and `max` is the tightening
+ * operator, so it can only ever refuse more.
+ */
+export function postureRank(p: Posture): number {
+  return isPosture(p) ? POSTURE_RANK[p] : POSTURE_RANK.in;
+}
+
+/**
+ * Tightening. The ONLY sanctioned way to combine postures, and now the place where an
+ * unreadable one stops being free: it short-circuits to `in`, since no member outranks it.
+ *
+ * This is also where the OTHER two vocabularies get their fail-closed answer without a
+ * caller changing. `CLASS_DEFAULT_POSTURE[cls]` and `CLASSIFICATION_POSTURE_FLOOR[cls]`
+ * are plain table lookups that return `undefined` for a class outside their union — a
+ * tool manifest declaring `irreversibility: "nuclear"`, a channel declaring
+ * `classification: "SECRET"` — and every one of those lookups in this tree is an argument
+ * to this fold (`run/policy.ts:364,372`, `graph/compile.ts:126`, `graph/spec.ts:877`).
+ * `undefined` is not a member, so those now floor at `in` instead of contributing nothing.
+ */
 export function maxPosture(...postures: readonly Posture[]): Posture {
   let best: Posture = "out";
-  for (const p of postures) if (POSTURE_RANK[p] > POSTURE_RANK[best]) best = p;
+  for (const p of postures) {
+    if (!isPosture(p)) return "in";
+    if (POSTURE_RANK[p] > POSTURE_RANK[best]) best = p;
+  }
   return best;
 }
 
-/** True when `candidate` is anywhere weaker than `baseline` — i.e. a loosening. */
+/**
+ * True when `candidate` is anywhere weaker than `baseline` — i.e. a loosening.
+ *
+ * AND TRUE WHEN EITHER SIDE IS UNREADABLE. The two arguments play opposite roles, so no
+ * single rank for a non-member is fail-closed for both — rank it low and a bad baseline
+ * hides a real loosening, rank it high and a bad candidate walks past the guard. The
+ * question this function answers is "may this change be allowed?", and a guard that
+ * cannot decide fails closed: an answer built from a word in no vocabulary is a
+ * loosening, and loosening is the one thing that is never allowed.
+ */
 export function isLoosening(baseline: Posture, candidate: Posture): boolean {
+  if (!isPosture(baseline) || !isPosture(candidate)) return true;
   return POSTURE_RANK[candidate] < POSTURE_RANK[baseline];
 }
 
@@ -247,10 +320,22 @@ const CLASSIFICATION_RANK: Readonly<Record<Classification, number>> = {
   secret_ref: 3,
 };
 
-/** Combining data always takes the most sensitive classification present. */
+/**
+ * Combining data always takes the most sensitive classification present — and a
+ * classification this vocabulary cannot read is the most sensitive one there is.
+ *
+ * The identical fail-open shape `maxPosture` had, one union over: `CLASSIFICATION_RANK["SECRET"]`
+ * is `undefined`, `undefined > 0` is false, and `maxClassification("SECRET")` therefore answered
+ * `"public"` — a label nobody could interpret, resolved to the one that redacts nothing.
+ * `run/delivery.ts:3015` folds a delivery block's declared `redactAs` through here on its way
+ * into `redact()`.
+ */
 export function maxClassification(...cs: readonly Classification[]): Classification {
   let best: Classification = "public";
-  for (const c of cs) if (CLASSIFICATION_RANK[c] > CLASSIFICATION_RANK[best]) best = c;
+  for (const c of cs) {
+    if (!(typeof c === "string" && Object.hasOwn(CLASSIFICATION_RANK, c))) return "secret_ref";
+    if (CLASSIFICATION_RANK[c] > CLASSIFICATION_RANK[best]) best = c;
+  }
   return best;
 }
 
