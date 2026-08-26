@@ -441,7 +441,28 @@ Each was verified against the code, not remembered.
 
 - **`E_ADMISSION_REJECTED` is raised by nothing.** `POST /runs` admits everything it can
   authenticate. There is no queue, no depth limit, no token bucket.
-- **A provider rate limit sleeps holding the worker slot.** A 429 is absorbed by a retry that
+- **A provider rate limit sleeps holding the worker slot — AND THAT SLEEP IS THE ONLY THING
+  MAKING A 429 SURVIVABLE.** Reframed 2026-08-26 after an attempt to fix the stated defect made
+  the product worse, which is the useful outcome.
+
+  The stated half is true: `postJson` loops `maxAttempts` and awaits the backoff INSIDE the call,
+  so one rate-limited provider idles a worker slot. But removing that hold fails the run on the
+  first 429, because **nothing declares a retry policy anywhere**: `grep -ac '"retry"'` over all
+  four shipped example graphs returns 0, `agent()` — the documented one-line surface — compiles
+  none, and `graph/compile.ts` supplies no default. `Engine.#retryDecision` returns early on
+  `policy === undefined`, so the engine's requeue path — which is complete, journal-backed, and
+  correct — has **never once been reached for a rate limit.** The hidden in-slot sleep was
+  silently pre-empting it.
+
+  So the fix is two-part and the order matters: **first give provider-calling nodes a retry
+  policy that is visible in the compiled artifact, then remove the hidden sleep.** Doing the
+  second alone turns a recoverable rate limit into a failed run on the project's headline path.
+
+  Worth naming as a defect CLASS rather than an instance: *a complete mechanism with no caller,
+  because a lower layer silently pre-empted it.* That is §B's shape hiding under an §A symptom,
+  and it is the second time this programme has found one (the other was `LeasedScheduler`).
+
+- ~~**A provider rate limit sleeps holding the worker slot.**~~ Original entry: A 429 is absorbed by a retry that
   waits *inside* the concurrency slot, so one rate-limited provider can idle the whole node. This
   is the most consequential live defect in the list.
 - **No circuit breaker.** Nothing measures a source's health and nothing withholds an unhealthy
