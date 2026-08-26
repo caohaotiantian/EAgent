@@ -467,6 +467,29 @@ Each was verified against the code, not remembered.
   no node had a default, and made ordinary by giving agent nodes one. Half two — releasing the
   slot — is next.
 
+  **HALF TWO HAS NOW FAILED TWICE, and the two failures agree on the cause.** Both attempts
+  removed the in-slot sleep; both were reverted. Measured before/after on the second, with an
+  injected clock, a recoverable 429 in every case:
+
+  | shape | before | after |
+  |---|---|---|
+  | agent node, no declared retry | succeeded | succeeded |
+  | author declared `maxAttempts: 1`, or an `onlyIf` the error misses | succeeded | **failed** |
+  | 429 after a NON-IDEMPOTENT tool already ran | succeeded | **failed**, after the side effect |
+  | 429 inside a SUBGRAPH, provider asks > ~78 s | succeeded | **failed** |
+
+  **The in-slot sleep is a UNIVERSAL rescue; the engine's requeue is a CONDITIONAL one.** The
+  requeue needs a policy, respects `maxAttempts` and `onlyIf`, refuses when a non-idempotent tool
+  has started, and composes multiplicatively through a subgraph. Swapping one for the other loses
+  coverage everywhere those conditions do not hold — which is why adding defaults (half one) was
+  necessary and is not sufficient.
+
+  **The question underneath is a model decision, not an implementation one: is a provider rate
+  limit a NODE FAILURE at all?** The node's work never ran. Charging a 429 against the node's
+  retry budget, or refusing it because a tool the node already ran was non-idempotent, conflates
+  "the provider is busy" with "the work failed". Every row in that table follows from that
+  conflation. Escalated rather than answered.
+
   Worth naming as a defect CLASS rather than an instance: *a complete mechanism with no caller,
   because a lower layer silently pre-empted it.* That is §B's shape hiding under an §A symptom,
   and it is the second time this programme has found one (the other was `LeasedScheduler`).
@@ -474,6 +497,14 @@ Each was verified against the code, not remembered.
 - ~~**A provider rate limit sleeps holding the worker slot.**~~ Original entry: A 429 is absorbed by a retry that
   waits *inside* the concurrency slot, so one rate-limited provider can idle the whole node. This
   is the most consequential live defect in the list.
+- **A cancelled run can be left holding a queued task.** Measured 2026-08-26, and confirmed
+  IDENTICAL with and without the change that surfaced it, so it is pre-existing rather than
+  introduced: an abort landing between `stopped()` and `#commit` journals
+  `8 operator.command | 9 task.cancelled | 10 run.cancelled | 11 effect.failed |
+  12 task.retry_scheduled | 13 task.ready` — a Task left in state `ready` inside a run that is
+  already terminal. §F.13 states the property this breaks: *a terminal operation is not final
+  until every producer of the state it ends is stopped.*
+
 - **No circuit breaker.** Nothing measures a source's health and nothing withholds an unhealthy
   one. `SourceHealth` appears nowhere in the code.
 - ~~**A subgraph's cost ceiling binds nothing.**~~ **WRONG, re-checked 2026-08-25.** There is a
