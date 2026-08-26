@@ -149,7 +149,13 @@ test("FAN-OUT ARRIVAL ORDER DOES NOT CHANGE THE TRAJECTORY", async () => {
   const strategy = (t: Trajectory) =>
     t.steps.map((s) => [s.branchPath, s.nodeId, s.actions.map((x) => x.kind)]);
   assert.deepEqual(strategy(a), strategy(b));
-  assert.equal(a.cohort.inputBucket !== b.cohort.inputBucket, true, "…though the INPUTS still differ");
+  // THE INPUTS REALLY DO DIFFER — five documents in the opposite order is a different input,
+  // and `inputDigest` still says so. What CHANGED is the bucket: it used to be a digest of the
+  // whole input, so these two runs of one strategy landed in two cohorts of one and neither
+  // could ever reach `MIN_COHORT_SIZE`. The default is the input's SHAPE now, and both runs
+  // are `{paths:[string]}`, so the same strategy over the same kind of problem is one cohort.
+  assert.notEqual(a.inputDigest, b.inputDigest, "the INPUTS still differ…");
+  assert.equal(cohortKeyOf(a), cohortKeyOf(b), "…and the two runs are nonetheless comparable");
 });
 
 test("branches are ranked by what they DID, not by when they arrived", () => {

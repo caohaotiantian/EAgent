@@ -215,8 +215,26 @@ re-check, or the first real workload, found it — not the audit.
 
 ### Found by driving the evolution loop on a real corpus, 2026-08-26
 
-- **`NEW` `cohortKeyOf` includes the input digest, so every run on a different input is its own
-  cohort of one — and `isGolden` needs thirty.** Measured on five real GLM-5.2 runs of the same
+- ~~**`cohortKeyOf` includes the input digest, so every run on a different input is its own
+  cohort of one.**~~ **FIXED 2026-08-26.** The default bucket is now `shape:<digest of
+  shapeOf(inputs)>` — structure generalises, values do not, which is the same rule this fold
+  already applies to arguments for privacy — and `loom score --bucket shape|exact|fields:a,b`
+  makes the seam reachable. Verified on the five REAL GLM-5.2 runs: one cohort, `n = 5`, and the
+  remaining blocker is now honest — `n = 5 (need ≥ 30)` is "run it 25 more times", not a
+  structural impossibility.
+
+- **`NEW` THE SCORE SATURATES, so inside a cohort it ranks cheapness and nothing else.**
+  Measured on those same five real runs once they shared a cohort: **every one has
+  `outcome: 1`**. With the outcome term pinned at its maximum, the only discrimination left is
+  cost — and `costNormalized` clamps at the cohort median, so the two cheapest runs rank
+  (0.763, 0.669) and **the other three tie at exactly 0.600 and are unrankable**.
+  `isGolden` condition 2 is "top decile of its cohort", so with a saturated outcome that
+  reads "the cheapest decile". A run that does LESS work scores better, which is the failure
+  mode CLAUDE.md names: a measurement gamed by the thing being measured.
+  The cause is not the bucket — it is that this workflow produces no ground-truth signal
+  (no assertion, no rubric, no downstream outcome), so `outcomeOf` has only S5 "the agent said
+  it was done" to read. **The fix is a workflow with a real signal, not a change to the scorer.**
+  Until one exists, the cohort ranks efficiency and should not be read as ranking quality. Measured on five real GLM-5.2 runs of the same
   graph over five different diffs ($0.044, 510 s): five distinct `cohortKey`s, every one
   `n = 1`, and the verdict says so — `goldenBlockers: ["cohort large enough: n = 1 (need ≥ 30)"]`.
   `trajectory.ts:474` is `opts.bucketInput?.(inputs) ?? digest(inputs).slice(7, 15)`, so the
@@ -242,7 +260,14 @@ Naming that here rather than letting them sit unowned:
   Measured: a 36-second body on a 200 ms deadline reporting `succeeded`; with an `await`, still
   spinning at 70 s. Against CLAUDE.md's bar — "watch it, stop it" — this is the sharpest gap
   here, and it belongs in Sequence 2 once that item has a harness to run it in.
-- **`F19` A retry erases the human gate decision from the trajectory** — the highest-value
+- ~~**`F19` A retry erases the human gate decision from the trajectory**~~ **CONFIRMED AND FIXED
+  2026-08-26**, on a live engine rather than the hand-built journals that left it unverified.
+  Under a `systemFloor: "in"` a `tool` node raises its own gate on its own Task, and a retryable
+  tool failure on the attempt AFTER the approval appends `task.retry_scheduled` to that same
+  Task: `9 gate.decided`, `15 task.retry_scheduled`, one taskId. The fold read back
+  `humanDecisions: []` and a `draft` ceiling for a run a human had approved, while the identical
+  non-flaky run read `approve` and `stable`. A retry now drops the failed attempt's model and
+  tool calls and keeps the human's answer. Original finding: the highest-value
   label the system collects, deleted by the normalisation rule that claims to preserve strategy
   identity. Belongs to Sequence 5; its verifier could not drive the live engine into the state,
   so it is `unverified`, not confirmed.

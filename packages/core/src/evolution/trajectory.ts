@@ -25,7 +25,7 @@
  *
  */
 
-import { digest, type Digest } from "../canonical.ts";
+import { digest, shapeOf, type Digest } from "../canonical.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { NodeType } from "../graph/spec.ts";
 import { compareBranch, decodeBranch, encodeBranch, parseTaskId, type NodeId, type RunId, type TaskId } from "../ids.ts";
@@ -164,7 +164,20 @@ export interface FoldTrajectoryOptions {
   /** Supplies `promptRef`/`promptDigest` and node types. See the deviation above. */
   readonly graph?: RunGraph;
   readonly tenantTier?: string;
-  /** Buckets an input into a comparable class. Default: the digest's first 8 chars. */
+  /**
+   * Buckets an input into a comparable class — "a small diff", "this tenant", "a nightly".
+   *
+   * Default: `shape:<digest of shapeOf(inputs)>`. See `defaultBucket` for why the default is
+   * the input's SHAPE and not its value, and what that costs.
+   *
+   * This is the seam a deployment overrides when shape is the wrong grain — either too
+   * coarse (one shape covering work of wildly different size) or too fine (a config object
+   * whose keys vary run to run). `loom score --bucket` is the one that ships; anything with
+   * the same signature works, and the only rule is that the value must be DERIVED and short.
+   * It ends up in `cohortKey`, which is journaled into `evolution.scored`, so returning an
+   * input VALUE here would put production data in the journal — the same reason a step
+   * records `argsShape` and not arguments.
+   */
   readonly bucketInput?: (inputs: Readonly<Record<string, unknown>>) => string;
   /**
    * Graph hashes a human approved. Anything else — INCLUDING not answering — marks the run as
@@ -382,7 +395,23 @@ export function foldTrajectory(
       // leaves no step of its own. Two runs of one strategy, one of which hit a flaky
       // network, must not look like two strategies.
       s.attempts = Math.max(s.attempts, e.payload.attempt + 1);
-      s.actions.length = 0;
+      // A RETRY CLEARS THE ACTIONS A RETRY INVALIDATES — AND NOT THE HUMAN'S ANSWER. This
+      // was `s.actions.length = 0`, which also deleted the `gate` action, because
+      // `gate.decided` is journaled on the very Task that then retries. MEASURED on a real
+      // Engine (`test/evolution/gate-retry.test.ts`): under the `in` posture floor a `tool`
+      // node raises its own gate on its own Task, and a transient tool failure on the
+      // attempt after the approval appends `task.retry_scheduled` to that same Task —
+      // `9 gate.decided write@root#0`, `15 task.retry_scheduled write@root#0`. The fold
+      // read back `humanDecisions: []` and a `draft` ceiling for a run a human had
+      // approved; the identical non-flaky run read `approve` and `stable`.
+      //
+      // The failed attempt's model and tool calls really are invalid — that is the rule at
+      // the top of this file, and two runs of one strategy must not fork on a flaky
+      // network. A human's decision is not an attempt. It was made about the TASK, it is
+      // the highest-quality label the system ever gets, and a retry is not new information
+      // about it. A `route` cannot be here: it is appended by `task.committed`, and a
+      // retried attempt never commits.
+      s.actions = s.actions.filter((a) => a.kind === "gate");
       s.status = "open";
       continue;
     }
@@ -471,7 +500,7 @@ export function foldTrajectory(
   );
   const canonical = canonicalizeBranches(raw);
 
-  const bucket = opts.bucketInput?.(inputs) ?? digest(inputs).slice(7, 15);
+  const bucket = opts.bucketInput?.(inputs) ?? defaultBucket(inputs);
 
   return {
     runId,
@@ -515,6 +544,58 @@ export function foldTrajectory(
     fromUnpromotedCandidate:
       opts.promotedGraphHashes === undefined || !opts.promotedGraphHashes.has(graphHash),
   };
+}
+
+/**
+ * THE DEFAULT BUCKET IS THE INPUT'S SHAPE, and this is the difference between a promotion
+ * path that exists and one that is arithmetic nobody can reach.
+ *
+ * It used to be `digest(inputs).slice(7, 15)` — a digest of the whole input — so two runs
+ * were comparable only if their inputs were byte-identical. `isGolden` condition 4 needs 30
+ * comparable runs, and a code-review workflow reviews a different diff every time, so for
+ * every workflow whose inputs vary the cohort was permanently one. Measured on five live
+ * GLM-5.2 runs of one graph over five diffs: five distinct cohort keys, every one `n = 1`,
+ * `goldenBlockers: ["cohort large enough: n = 1 (need ≥ 30)"]`. Nothing was wrong with the
+ * scoring; the corpus could not assemble.
+ *
+ * `shapeOf` is already this file's privacy rule one level up — a step records `argsShape`,
+ * never arguments — and it is the same claim here: STRUCTURE generalises and values do not.
+ * `{diff:string}` is every run of a review workflow, which is exactly the set a person means
+ * by "the same kind of problem".
+ *
+ * WHAT IT COSTS, MEASURED. A ten-line diff and a ten-thousand-line diff have one shape, so
+ * `p50Cost` and `p50Wall` become medians over genuinely different work. Five real Engine runs
+ * of the walking skeleton over one to five documents (`test/evolution/cohort-bucket.test.ts`)
+ * now form ONE cohort of 5, with costs $0.000075 → $0.000375 around a p50 of $0.000225 — a 5x
+ * spread inside one cohort. Five runs whose OUTCOME is identical (1.000 each) score
+ * `0.833 0.767 0.700 0.700 0.700` instead of `0.700` five times: the cost term now reflects
+ * input size as well as quality, and that is the noise this trade buys.
+ *
+ * AND WHAT THE OLD DEFAULT COST, which is larger. `costNormalized` is
+ * `clamp01(cost / cohort.p50Cost)` and the term is `weights.cost * (1 - costNormalized)`, so in
+ * a cohort of ONE a run is compared against itself: `costNormalized` is exactly 1 — measured
+ * `[1, 1, 1, 1, 1]` for those same five runs scored alone — and the cost term contributes
+ * exactly 0, so all five scored `0.700`. Not because the ruler was precise: because 20% of the
+ * metric was structurally dead. `latencyNormalized` is the same construction over `p50Wall`
+ * and goes the same way on any run whose wall time is non-zero. A noisier ruler that exists
+ * beats an exact one no two runs ever stand on, and `bucketInput` is the seam for a deployment
+ * that needs finer.
+ *
+ * WHAT IT DOES NOT DO: it is not a constant. A different input shape is still a different
+ * cohort, which is what stops "make the cohort big enough" from becoming "compare everything
+ * to everything".
+ *
+ * Digested rather than used raw: `shapeOf` on an array union emits `|`, which is
+ * `cohortKeyOf`'s own separator, and a shape string is unbounded in length. The `shape:`
+ * prefix is deliberate — a cohort key that does not say which rule produced its bucket cannot
+ * be compared across a change to that rule, the same reason `weightsDigest` rides with a
+ * score. A bucket rule change reads as a different cohort instead of silently merging.
+ *
+ * No migration: a `Trajectory` is a pure fold, so historical journals re-derive under the new
+ * rule the moment they are folded again.
+ */
+function defaultBucket(inputs: Readonly<Record<string, unknown>>): string {
+  return `shape:${digest(shapeOf(inputs)).slice(7, 15)}`;
 }
 
 // ---------------------------------------------------------------------------

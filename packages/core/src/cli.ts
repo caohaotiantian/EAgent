@@ -68,6 +68,7 @@ import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId, Seq } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
+import { digest, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
 import { cohortKeyOf, DEFAULT_WEIGHTS, isGolden, measureCohort, promotionCeiling, scoreTrajectory } from "./evolution/score.ts";
 
@@ -101,6 +102,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
   loom score   <runId>                       judge a finished run against its cohort, and
                                              journal the verdict as evolution.scored
+               [--bucket MODE]               WHICH runs count as the same kind of problem.
+                                             shape (default) groups every run whose input has
+                                             the same structure; exact gives one cohort per
+                                             distinct input; fields:a,b groups on the digest
+                                             of the named input channels only
   loom cohort  <runId>                       read journaled scores back: this run's verdict and
                                              every run judged under the same key and weights
 
@@ -248,6 +254,7 @@ export function resourceRefsIn(text: string): readonly string[] {
 const KNOWN_FLAGS: readonly string[] = [
   "allow-exec",
   "as",
+  "bucket",
   "budget",
   "channels-file",
   "data-dir",
@@ -2985,9 +2992,19 @@ export async function main(argv: readonly string[]): Promise<number> {
         // folds its own successor hash from the journal; this lookup does not decide that.
         const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
         const graph = submitted === undefined ? undefined : index.get(submitted.payload.graphHash);
-        const t = foldTrajectory(events, { promotedGraphHashes, ...(graph === undefined ? {} : { graph }) });
+        // ONE BUCKET RULE, USED BY BOTH FOLDS. A cohort key is only meaningful if every
+        // member was bucketed by the same rule — folding this run under `--bucket` and its
+        // peers under the default would produce a key nothing else in the workspace can
+        // match, so the flag would report a cohort of one for the very runs it was asked to
+        // join. `cohortPeers` therefore takes it too, and a test counts the members.
+        const bucketInput = bucketFlag(args);
+        const t = foldTrajectory(events, {
+          promotedGraphHashes,
+          ...(graph === undefined ? {} : { graph }),
+          ...(bucketInput === undefined ? {} : { bucketInput }),
+        });
         const key = cohortKeyOf(t);
-        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes);
+        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, bucketInput);
         if (peers.truncated) {
           process.stderr.write(
             `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
@@ -3162,6 +3179,79 @@ function lastScore(events: readonly JournalEvent[]): EventPayloads["evolution.sc
   return found;
 }
 
+/** What `--bucket` builds: `FoldTrajectoryOptions["bucketInput"]`, named so it can be passed on. */
+type InputBucket = (inputs: Readonly<Record<string, unknown>>) => string;
+
+/**
+ * `--bucket`, THE SEAM THAT HAD NO CALLER.
+ *
+ * `FoldTrajectoryOptions.bucketInput` was declared precisely so a deployment could say what
+ * makes two runs comparable, and all three product-path callers omitted it — so every
+ * deployment got the fold's default and nothing could choose otherwise. This is the door.
+ *
+ * The default is `shape` and this returns `undefined` for it rather than restating the rule:
+ * the rule belongs to `trajectory.ts`, and a CLI that kept its own copy would be a second
+ * definition to drift.
+ *
+ * WHY `fields:` IS A DIGEST AND NEVER THE VALUES. `cohortKey` is journaled into
+ * `evolution.scored`, so a bucket built from `inputs["tenant"]` verbatim writes input values
+ * into the journal — a trajectory records `argsShape` and not arguments for exactly that
+ * reason, and a cohort key is no different. The names ARE in the key, in sorted order, because
+ * a bucket that cannot say what it grouped on cannot be compared across a change to the flag.
+ *
+ * A MODE NOBODY DEFINED IS REFUSED. Falling back to the default would silently score the run
+ * under a rule the operator did not ask for and print a cohort as though it answered them.
+ */
+function bucketFlag(args: Args): InputBucket | undefined {
+  const v = args.flags["bucket"];
+  if (v === undefined) return undefined;
+  if (v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--bucket needs a mode: ${v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `Omit it for the default, which is "shape".`,
+    );
+  }
+  // The fold's own default. Named here so an operator can write it down explicitly, and
+  // NOT reimplemented here — one definition, in trajectory.ts.
+  if (v === "shape") return undefined;
+  if (v === "exact") return (inputs) => `exact:${digest(inputs).slice(7, 15)}`;
+  if (v.startsWith("fields:")) {
+    const names = [
+      ...new Set(
+        v
+          .slice("fields:".length)
+          .split(",")
+          .map((x) => x.trim())
+          .filter((x) => x.length > 0),
+      ),
+    ].sort();
+    if (names.length === 0) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `--bucket fields: names no channel. Write --bucket fields:tenant,language, or omit the flag for "shape".`,
+      );
+    }
+    // A MISSING CHANNEL IS A BUCKET, NOT A CRASH — and the `undefined` is replaced rather
+    // than passed through. MEASURED: `digest([["tier", undefined, "undefined"]])` throws
+    // `undefined array element at [0][1]`, so naming a channel a run did not supply would have
+    // taken down `loom score` for that run with a canonicalization error about an array index.
+    // The SHAPE slot is what carries the distinction — `shapeOf(undefined)` is "undefined" and
+    // `shapeOf(null)` is "null", so an absent channel and an explicit null bucket apart.
+    const cell = (inputs: Readonly<Record<string, unknown>>, k: string): readonly [string, string, unknown] => {
+      const v = inputs[k];
+      return [k, shapeOf(v), v === undefined ? null : v];
+    };
+    return (inputs) => `fields[${names.join(",")}]:${digest(names.map((k) => cell(inputs, k))).slice(7, 15)}`;
+  }
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `--bucket "${v}" is not a mode this binary defines. Use "shape" (the default — every run whose ` +
+      `input has the same structure), "exact" (one cohort per distinct input, the rule before shape), ` +
+      `or "fields:a,b" (group on the named input channels only).`,
+  );
+}
+
 /**
  * Every OTHER run in this workspace that belongs to the same cohort, folded.
  *
@@ -3175,6 +3265,8 @@ async function cohortPeers(
   self: RunId,
   key: string,
   promotedGraphHashes: ReadonlySet<string>,
+  /** The SAME rule the run being judged was folded under. See the call site. */
+  bucketInput?: InputBucket,
 ): Promise<{ members: Trajectory[]; truncated: boolean }> {
   const summaries = await ws.store.listRuns(COHORT_SCAN_LIMIT);
   const members: Trajectory[] = [];
@@ -3184,7 +3276,7 @@ async function cohortPeers(
     if (events.length === 0) continue;
     // No graph: a peer contributes usage, policy and status to the medians, and none of those
     // needs the spec. A missing `promptRef` on a peer changes no median.
-    const t = foldTrajectory(events, { promotedGraphHashes });
+    const t = foldTrajectory(events, { promotedGraphHashes, ...(bucketInput === undefined ? {} : { bucketInput }) });
     if (cohortKeyOf(t) === key) members.push(t);
   }
   return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };
