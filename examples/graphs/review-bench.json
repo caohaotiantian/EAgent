@@ -1,0 +1,164 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "review-bench",
+    "project": "loom",
+    "version": 1,
+    "description": "Review diffs whose answer is known, and assert mechanically whether the review found them."
+  },
+  "policy": {
+    "posture": "out",
+    "budget": {
+      "costUsd": 2
+    },
+    "expansion": {
+      "maxNodes": 24,
+      "maxDepth": 1,
+      "maxFanout": 6,
+      "maxLoopIterations": 1
+    }
+  },
+  "channels": {
+    "cases": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "items": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "item": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "reviews": {
+      "type": "array",
+      "reduce": "append_ordered"
+    },
+    "verdicts": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "verdict": {
+      "type": "object",
+      "reduce": "replace"
+    }
+  },
+  "inputs": [
+    "cases"
+  ],
+  "outputs": [
+    "verdict"
+  ],
+  "nodes": [
+    {
+      "id": "fan",
+      "type": "function",
+      "reads": [
+        "cases"
+      ],
+      "writes": [
+        "items"
+      ],
+      "function": {
+        "ref": "function/bench-fan@stable"
+      }
+    },
+    {
+      "id": "review",
+      "type": "agent",
+      "reads": [
+        "item"
+      ],
+      "writes": [
+        "reviews"
+      ],
+      "policy": {
+        "budget": {
+          "costUsd": 0.3
+        }
+      },
+      "agent": {
+        "profile": "agent_profile/reviewer@stable",
+        "prompt": "prompt/review@stable",
+        "maxTurns": 1
+      }
+    },
+    {
+      "id": "gather",
+      "type": "join",
+      "reads": [
+        "reviews"
+      ],
+      "writes": [
+        "reviews"
+      ],
+      "join": {
+        "branches": [
+          "review"
+        ],
+        "mode": "all",
+        "onBranchError": "fail"
+      }
+    },
+    {
+      "id": "collate",
+      "type": "function",
+      "reads": [
+        "reviews"
+      ],
+      "writes": [
+        "verdicts"
+      ],
+      "function": {
+        "ref": "function/bench-collate@stable"
+      }
+    },
+    {
+      "id": "check",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check@stable",
+        "threshold": 0.5
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "f",
+      "from": "fan",
+      "to": "review",
+      "kind": "fanout",
+      "over": "items",
+      "as": "item",
+      "maxWidth": 6
+    },
+    {
+      "id": "j",
+      "from": "review",
+      "to": "gather",
+      "kind": "join"
+    },
+    {
+      "id": "c",
+      "from": "gather",
+      "to": "collate",
+      "kind": "seq"
+    },
+    {
+      "id": "k",
+      "from": "collate",
+      "to": "check",
+      "kind": "seq"
+    }
+  ]
+}

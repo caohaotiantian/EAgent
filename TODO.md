@@ -223,28 +223,53 @@ re-check, or the first real workload, found it — not the audit.
   remaining blocker is now honest — `n = 5 (need ≥ 30)` is "run it 25 more times", not a
   structural impossibility.
 
-- **`NEW` THE SCORE SATURATES, so inside a cohort it ranks cheapness and nothing else.**
-  Measured on those same five real runs once they shared a cohort: **every one has
-  `outcome: 1`**. With the outcome term pinned at its maximum, the only discrimination left is
-  cost — and `costNormalized` clamps at the cohort median, so the two cheapest runs rank
-  (0.763, 0.669) and **the other three tie at exactly 0.600 and are unrankable**.
-  `isGolden` condition 2 is "top decile of its cohort", so with a saturated outcome that
-  reads "the cheapest decile". A run that does LESS work scores better, which is the failure
-  mode CLAUDE.md names: a measurement gamed by the thing being measured.
-  The cause is not the bucket — it is that this workflow produces no ground-truth signal
-  (no assertion, no rubric, no downstream outcome), so `outcomeOf` has only S5 "the agent said
-  it was done" to read. **The fix is a workflow with a real signal, not a change to the scorer.**
-  Until one exists, the cohort ranks efficiency and should not be read as ranking quality. Measured on five real GLM-5.2 runs of the same
-  graph over five different diffs ($0.044, 510 s): five distinct `cohortKey`s, every one
-  `n = 1`, and the verdict says so — `goldenBlockers: ["cohort large enough: n = 1 (need ≥ 30)"]`.
-  `trajectory.ts:474` is `opts.bucketInput?.(inputs) ?? digest(inputs).slice(7, 15)`, so the
-  DEFAULT bucket is a digest of the whole input.
-  **The seam for this exists and has no caller:** `bucketInput` (`trajectory.ts:168`) is declared
-  precisely so a deployment can define a coarser bucket — "a small diff", "a large diff" — and all
-  three product-path callers omit it (`agent.ts:334`, `cli.ts:2988`, `cli.ts:3187`).
-  Consequence: **P3's promotion path is structurally unreachable for any workflow whose inputs
-  vary**, which is every real workflow. A code-review workflow reviews a different diff every
-  time, by definition. Nothing is wrong with the scoring; the corpus can never assemble.
+- **`NEW` THE SCORE SATURATES WHEN THE HUMAN ALWAYS SAYS YES, and then it ranks cheapness.**
+  Measured on five real runs sharing a cohort: **every one has `outcome: 1`**, so the only
+  discrimination left is cost — and `costNormalized` clamps at the cohort median, so the two
+  cheapest ranked (0.763, 0.669) and **the other three tied at exactly 0.600, unrankable**.
+  `isGolden` condition 2 is "top decile of its cohort", so a saturated outcome makes that read
+  "the cheapest decile": a run that does LESS work scores better.
+
+  **The cause, corrected 2026-08-26 after reading the signal list instead of running it.** The
+  first version of this entry said `outcomeOf` had only S5 — "the agent said it was done" — to
+  read. That is false: `SIGNAL_WEIGHTS.S5` is **0.0**, so S5 contributes nothing, ever, and
+  `outcomeOf` divides by present weight. What actually saturated it was **S2, the human gate
+  decision** — `DECISION_VALUE.approve = 1` at weight 0.9, and I approved every gate.
+
+  That is the more uncomfortable finding. CLAUDE.md calls a gate decision "the highest-quality
+  label the system ever gets", and it is — but an operator approving a report-generating workflow
+  approves nearly all of them, so the best label the system collects is also the one most likely
+  to be constant. **A workflow whose only signal is human approval cannot rank its own runs.**
+
+- **`NEW` A GROUND-TRUTH SIGNAL EXISTS AND DOMINATES — measured, not argued.** Built a benchmark
+  whose answer is known: six small diffs, three carrying a defect this codebase actually had
+  (`maxPosture` starting at `out`, `default: return "stop"`, `s.actions.length = 0`) and three
+  clean, with a FUNCTION evaluator comparing the review against the planted truth. Run against a
+  live GLM-5.2: found all three, missed none, cleared two of three clean diffs, one false alarm.
+  The score then read `S1 · value 0 · weight 1.0 · "0/1 assertions passed"` with **S2 and S5
+  dominated**, `outcome: 0`, `score: 0.1` — driven by correctness rather than by cheapness. That
+  is the saturation broken. `examples/graphs/review-bench.json` ships it.
+
+- **`NEW` A fan-out branch is exactly ONE node deep, so a GRADED ground-truth signal is not
+  expressible.** Trying to put a per-case evaluator between the fanned node and its join is
+  refused four ways, and the refusals are individually right and jointly a wall:
+  `GRAPH021_FANOUT_WITHOUT_JOIN` requires the join to name the FANNED node; `GRAPH008_BRANCH_NOT_CONNECTED`
+  requires a direct edge from that node to the join. The only shape that compiles hangs the
+  evaluator off the fanned node in parallel, where its output never reaches the join —
+  `GRAPH008_JOIN_WRITES_UNPRODUCED` says exactly why: "a barrier folds what its branches produced
+  and cannot make anything new."
+  Consequence: one evaluator after the join yields ONE bit for the whole run, so a benchmark
+  wanting `k/n` needs N evaluator nodes outside the fan-out — which the expansion ceiling then
+  bounds. Same family as §A.2's "you cannot fan out from a graph's entry": not a correctness bug,
+  a shape a user cannot write.
+
+- **`NEW` An `assertion` evaluator is BINARY by design, and that is a real constraint on
+  benchmarks.** The fold keeps only `pass`; a `score` on an assertion verdict is discarded
+  (`trajectory.ts`, the `isRubric` branch). Correct for an invariant — a must-pass is not a
+  grade — but it means one evaluator yields one bit. A benchmark wanting a GRADED ground-truth
+  signal needs one assertion per case, so S1 reads `k/n`. The ladder offers binary ground truth
+  (S1) or a graded model opinion (S4, a model judging a model at weight 0.3), and nothing in
+  between.
 
 ### Recorded, and deliberately not sequenced yet
 
