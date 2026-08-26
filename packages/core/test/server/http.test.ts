@@ -4426,6 +4426,14 @@ test("A 1 MB pem-SHAPED CHANNEL VALUE DOES NOT STALL THE PLANE — the only self
     // Planted through `store.append` rather than run through the graph: `run.submitted`'s
     // `inputs` fold straight into `p.channels` (`projection.ts`), which is the map
     // `summarise` sweeps, and no mock model has to be persuaded to emit a megabyte.
+    //
+    // THE HASH AND THE CHANNEL NAME ARE THE SKELETON'S OWN, and that is load-bearing now
+    // rather than incidental. `summarise` redacts per the classification the GRAPH declared,
+    // so the plant has to name a graph this plane holds and a channel that graph declares —
+    // `path`, a `string` with no `classification`, which is `internal`, the same sweep this
+    // test was written against. A plant naming `sha256:unused` and a channel called `big`
+    // measures the FAIL-CLOSED path instead (`[secret]`, every value withheld), which is a
+    // real behaviour and belongs in `stream-redaction.test.ts`, not in a DoS test.
     const runId = "run_pem_1mb" as RunId;
     await r.h.store.append({
       runId,
@@ -4436,8 +4444,8 @@ test("A 1 MB pem-SHAPED CHANNEL VALUE DOES NOT STALL THE PLANE — the only self
           actor: { kind: "system", component: "test" } satisfies Actor,
           payload: {
             workflow: "skeleton-summarize",
-            graphHash: "sha256:unused",
-            inputs: { big: pem },
+            graphHash: compileSkeleton(skeletonSpec()).graphHash,
+            inputs: { path: pem },
             idempotencyKey: "k",
             configDigest: "sha256:unused",
           },
@@ -4457,7 +4465,7 @@ test("A 1 MB pem-SHAPED CHANNEL VALUE DOES NOT STALL THE PLANE — the only self
     }, 10);
     const t0 = performance.now();
     const res = await fetch(`${r.base}/runs/${runId}`);
-    const body = (await json(res)) as { channels: { big: string } };
+    const body = (await json(res)) as { channels: { path: string } };
     const ms = performance.now() - t0;
     clearInterval(probe);
 
@@ -4467,7 +4475,7 @@ test("A 1 MB pem-SHAPED CHANNEL VALUE DOES NOT STALL THE PLANE — the only self
     // AND THE OPERATOR STILL SEES THE WHOLE VALUE. The bound is on the sweep, never on the
     // value; a console that silently loses everything past 8 KB would be this fix trading a
     // stall for a reader misled about the run.
-    assert.equal(body.channels.big, pem, "the channel value was truncated — the bound became a size policy");
+    assert.equal(body.channels.path, pem, "the channel value was truncated — the bound became a size policy");
   } finally {
     await r.close();
   }

@@ -106,6 +106,49 @@
  * to them and the ones addressed to nobody, filtered per gate — but within a gate the
  * redaction is the graph's, so two approvers on one gate see the same bytes.
  *
+ * **THAT PARAGRAPH WAS A PROMISE NOTHING KEPT, FOR AS LONG AS IT HAS BEEN WRITTEN HERE.**
+ * `redactPayload` was called on the event stream and on a projection's channels and outputs,
+ * and at NEITHER gate route: `GET /runs/:id/gates` and `GET /gates` each joined the broker's
+ * rendered payload straight onto the wire. Measured over real HTTP, one run, a channel
+ * declared `secret_ref` and read by a `human_gate` node — before, on both routes:
+ *
+ *     payload.state = {"apiKey":"sk-live-DO-NOT-DISCLOSE","note":"ordinary note", …}
+ *     payload.state = {"apiKey":"[secret]",              "note":"ordinary note", …}
+ *
+ * `gateWire` is what makes the paragraph true, and it is ONE function because there were two
+ * routes building the same object two ways — the drift that produced this bug one layer up,
+ * where `listRuns` was filtered at two of three sites. Read `redactGatePayload` for which
+ * payload shapes the claim covers and where an absent graph falls closed.
+ *
+ * **AND "REDACTED PER THE GRAPH'S DECLARED CLASSIFICATION" WAS NOT TRUE OF THE OTHER SIX
+ * ROUTES EITHER.** Fixing the two gate routes left every route that answers with a PROJECTION
+ * or with a JOURNAL EVENT sweeping at a blanket `internal`, which is the detector backstop
+ * alone: it catches a credential SHAPE and knows nothing about what the graph declared. So a
+ * `secret_ref` channel whose value is ordinary prose — a passphrase, a seed phrase, an
+ * internal URL — went out in full. Measured over real HTTP on one run, `vaultHint` declared
+ * `secret_ref` and `owner` declared `pii`:
+ *
+ *     GET /runs/:id           "channels":{…,"owner":"ada@example.com","vaultHint":"the vault …"}
+ *     GET /runs/:id/events    snapshot frame: the same object
+ *     GET /runs/:id/events    event frame, run.submitted: "inputs":{…,"vaultHint":"the vault …"}
+ *
+ * Both frame kinds on the SSE stream, and the four other projection routes with them. The
+ * event stream had the extra trap: `frame` redacted at `e.classification`, which READS like a
+ * lookup and is `internal` on every event this runtime has ever written, because nothing
+ * populates the field. `summarise` and `frame` now take the graph and reach the SAME
+ * `redactChannels` the gate routes reach; `#summary` is the one place the pairing lives,
+ * `CHANNEL_KEYED` names the five journal payload keys that are channel MAPS, and
+ * `CHANNEL_VALUED` names the one that is a `{channel, value}` PAIR. The second table exists
+ * because the first one's derivation — a grep for `Record<string, unknown>` — structurally
+ * could not see a pair, so a fan-out's per-branch item went out in the clear for a wave after
+ * the rest was closed. Read `CHANNEL_VALUED` for the re-derivation and its three legs.
+ *
+ * **AND A PROJECTION CARRIES CHANNEL DATA IN ITS `gates` SLICE TOO.** `GateRecord.writes` is
+ * an approver's `edit` — the channels a human rewrote, the same map `gate.decided.writes`
+ * carries on the stream — and `summarise` sent the gate records raw, so on all six of those
+ * routes the value came back in the SAME body whose `channels` two keys above already read
+ * `[secret]`. `gateRecordWire` closes it, and `gateWire`'s `{...g}` spread with it.
+ *
  * ## AND THE CALLER MAY BE A BROWSER SOMEBODY ELSE IS DRIVING
  *
  * Everything above reasons about who can reach the socket. On the supported open posture
@@ -147,7 +190,8 @@ import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
-import { gateDecisionOf, isSyntheticSubject, type GateDecision } from "../vocab.ts";
+import { gateDecisionOf, isSyntheticSubject, maxClassification, type Classification, type GateDecision } from "../vocab.ts";
+import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
 import { redactPayload } from "../security/redact.ts";
@@ -1033,6 +1077,32 @@ function allowedHosts(configured: readonly string[] | undefined): ReadonlySet<st
 }
 
 /**
+ * Is this bind address one only THIS MACHINE can reach?
+ *
+ * The predicate behind two decisions that must never disagree: which names a bind derives
+ * a `Host` allowlist for (`loopbackHosts`), and whether `listen` refuses to put a
+ * tokenless plane on it. They were going to be two texts kept in step — one here and one
+ * in `cli.ts` — and a perimeter check that is loopback for one of them and routable for
+ * the other is worse than either answer taken alone.
+ *
+ * Takes a BARE address: brackets stripped, lowercased. The whole of `127.0.0.0/8` because
+ * every one of those addresses routes to this host and nowhere else; `::1` because it is
+ * the same socket over IPv6; `localhost` because it is the name an operator types for
+ * both. `::ffff:127.0.0.1` is the IPv4-mapped spelling `server.address()` can hand back on
+ * a dual-stack accept, so it counts too.
+ *
+ * EVERYTHING ELSE IS NON-LOOPBACK, including a hostname this process could resolve. That
+ * is the fail-closed direction: `0.0.0.0` and `::` are every interface, a name resolves to
+ * whatever DNS says today, and the cost of being wrong in the other direction is a plane
+ * on a routable address that this file believed was private.
+ */
+function isLoopbackAddress(bare: string): boolean {
+  if (bare === "localhost" || bare === "::1") return true;
+  if (/^127\./.test(bare)) return true;
+  return /^::ffff:127\./.test(bare);
+}
+
+/**
  * The names a LOOPBACK bind answers to, or `undefined` for a bind that gets no check.
  *
  * The set is the bound address plus the other two spellings of "this machine", with and
@@ -1048,7 +1118,7 @@ function allowedHosts(configured: readonly string[] | undefined): ReadonlySet<st
  */
 function loopbackHosts(host: string, port: number): ReadonlySet<string> | undefined {
   const bare = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-  if (bare !== "localhost" && bare !== "::1" && !/^127\./.test(bare)) return undefined;
+  if (!isLoopbackAddress(bare)) return undefined;
   const names = new Set<string>();
   for (const h of [bare.includes(":") ? `[${bare}]` : bare, "localhost", "127.0.0.1", "[::1]"]) {
     names.add(h);
@@ -1682,6 +1752,12 @@ export class ControlPlane {
    * take it, while `"80"` (a string) reaches the OS and fails EACCES like any other
    * privileged port. It is caught and mapped here so the contract has one shape.
    *
+   * **A TOKENLESS PLANE IS REFUSED A NON-LOOPBACK ADDRESS.** `openToEveryCaller` and the
+   * bind address are only ever both in view here, and together they are the difference
+   * between a development convenience and an open control plane on the network. See the
+   * comment at the top of the body; the fix is a `token` or an `identity` source, and the
+   * default bind is unchanged.
+   *
    * **`close()` DURING A BIND IS A THIRD OUTCOME, and it used to be no outcome at all.**
    * Two settle paths — `'listening'` and `'error'` — cover the two ways a bind can end,
    * and there is a third way it can end: someone else takes the socket away. Node's
@@ -1693,12 +1769,45 @@ export class ControlPlane {
    * the missing `'error'` listener above, one event later. `'close'` is therefore the
    * third listener, and it rejects: nothing is bound and nothing will be.
    */
-  async listen(port: number, host = "127.0.0.1"): Promise<{ port: number }> {
+  async listen(port: number, host = "127.0.0.1"): Promise<{ port: number; host: string; loopback: boolean }> {
     if (this.#server !== undefined) {
       throw err.validation(
         CODES.E_CONFIG_INVALID,
         `this ControlPlane is already listening; a second listen() would leave the first socket bound with no way to reach it — ` +
           `close() can only ever close the last. Call \`await plane.close()\` first if you meant to rebind.`,
+      );
+    }
+    // **A TOKENLESS PLANE MAY NOT LEAVE THIS MACHINE**, and this is the one refusal in the
+    // class that is about WHERE the socket is rather than what is on it.
+    //
+    // `openToEveryCaller` means `#principal` admits every request as `service/UNIDENTIFIED`
+    // — so on a routable address, anyone who can reach the port can `POST /runs` (spend this
+    // deployment's provider budget), `POST /runs/:id/gates/:gateId` (approve any open human
+    // gate, which is the whole oversight perimeter), and `POST /runs/:id/commands`
+    // (`cancel`, `rewind`, `advance`). Those three are read off `#buildRoutes` rather than
+    // remembered: an earlier draft of this comment named `POST /runs/:id/decisions` and
+    // `DELETE /runs/:id`, and NEITHER ROUTE EXISTS. That is not a posture; it is the absence
+    // of one, and the default bind is the only thing that has ever stood in front of it.
+    //
+    // REFUSED RATHER THAN WARNED, unlike everything `announce` prints, because the two
+    // readings of `listen(0, "0.0.0.0")` on an open plane are "I am behind something that
+    // authenticates" and "I did not think about it", and only one of them survives being
+    // guessed at. The refusal has a fix that costs the first reading nothing: give the
+    // plane a `token` or an `identity` source. There is no deployment that NEEDS zero
+    // credential on a socket the network can reach.
+    //
+    // The empty string is caught here too, and it is the quiet one: `server.listen(port,
+    // "")` binds `::` — measured, every interface — so a `--host "$LOOM_HOST"` with the
+    // variable unset would otherwise WIDEN the perimeter by accident.
+    if (this.openToEveryCaller && !isLoopbackAddress(host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase())) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `refusing to bind ${host === "" ? '"" (which binds EVERY interface)' : host}:${port} — this ControlPlane has no token and no ` +
+          `identity source, so every caller is authorized. On a non-loopback address that hands POST /runs (spending this ` +
+          `deployment's provider budget), POST /runs/:id/gates/:gateId (approving any open human gate) and ` +
+          `POST /runs/:id/commands (cancel, rewind, advance) to anyone who can route to the port. ` +
+          `Give the plane a token or an identity source, or bind 127.0.0.1 — the default — and put a proxy in front of it.`,
+        { details: { host, port } },
       );
     }
     const server = createServer((req, res) => {
@@ -1793,7 +1902,13 @@ export class ControlPlane {
     // protect. Set before the first request can arrive — `listening` has fired, but the
     // event loop has not yet reached an accepted connection.
     this.#allowedHosts = this.#configuredHosts ?? loopbackHosts(host, bound);
-    return { port: bound };
+    // THE ADDRESS, READ BACK OFF THE SOCKET, for the reason `port` is: `listen(0)` learns
+    // its port from the OS and `listen(port, "localhost")` learns its address from the
+    // resolver, so what the caller ASKED for is not what a boot banner may print. `cli.ts`
+    // announces these two and warns on `loopback`; a banner that re-derived either from the
+    // flags could promise a posture this process does not have.
+    const boundHost = typeof address === "object" && address !== null ? address.address : host;
+    return { port: bound, host: boundHost, loopback: isLoopbackAddress(boundHost.replace(/^\[/, "").replace(/\]$/, "").toLowerCase()) };
   }
 
   /**
@@ -2180,10 +2295,47 @@ export class ControlPlane {
    * not hold that graph. And attaching the WRONG graph is not a risk this carries — `Engine`
    * refuses any graph that is not the one the run compiled, resources included.
    */
+  /**
+   * The compiled graph this plane holds for a HASH, or `undefined`.
+   *
+   * By hash and not by name because a run records the graph it compiled and never the key a
+   * deployment filed it under. `#graphs` is small — a deployment's inventory, not a run's —
+   * so a scan is the right shape and an index would be a cache nobody invalidates.
+   *
+   * SIX CALLERS AND FOUR OF THEM DECIDE A DISCLOSURE: the two gate routes, `#summary` (every
+   * route that answers with a projection) and `#streamEvents` all read a run's channel
+   * classifications through here, so a lookup that answered too generously would hand over
+   * the values it is meant to withhold — under a STRANGER's classifications, which is worse
+   * than falling closed and quieter. The other two are `#bindFromIndex`, which attaches, and
+   * `GET /graphs/by-hash/:hash`, which serves structure. That is why this is a method rather
+   * than a sixth copy of the `find`.
+   *
+   * PINNED BY `test/server/graph-by-hash.test.ts`, on a plane holding TWO graphs that disagree
+   * about one channel's classification with a run of each — because it had no test at all, and
+   * a verifier's mutant that ignored the hash and returned the first graph passed every
+   * redaction test in the tree. Every one of those rigs held exactly one graph.
+   */
+  #graphByHash(hash: string | undefined): RunGraph | undefined {
+    return hash === undefined ? undefined : Object.values(this.#graphs).find((g) => g.graphHash === hash);
+  }
+
+  /**
+   * A projection on its way to the wire, redacted by the graph THAT run compiled.
+   *
+   * FIVE ROUTES ANSWER WITH A PROJECTION and every one of them carries the run's channels:
+   * `GET /runs/:id`, the three `POST /runs/:id/commands` kinds, the gate-decision reply, and
+   * the SSE `snapshot` frame. The pairing of "summarise" with "look the graph up" is the part
+   * a sixth route would forget — `listRuns` filtered at two of three sites and the gate routes
+   * redacted at zero of two, both in this file, both this shape — so the pair lives here and a
+   * route may not spell it again.
+   */
+  #summary(p: RunProjection): unknown {
+    return summarise(p, this.#graphByHash(p.graphHash));
+  }
+
   async #bindFromIndex(runId: RunId): Promise<void> {
     const wanted = await this.#engine.compiledGraphHash(runId);
-    if (wanted === undefined) return;
-    const found = Object.values(this.#graphs).find((g) => g.graphHash === wanted);
+    const found = this.#graphByHash(wanted);
     if (found === undefined) return;
     this.#engine.attach(runId, found);
     // AND RE-ARM THE GATE CLOCK. `attach` binds the graph and restores nothing else, so a
@@ -2374,7 +2526,7 @@ export class ControlPlane {
         pattern: /^\/graphs\/by-hash\/([^/]+)$/,
         handle: async ({ res, params }) => {
           const hash = decodeURIComponent(params[0]!);
-          const graph = Object.values(this.#graphs).find((g) => g.graphHash === hash);
+          const graph = this.#graphByHash(hash);
           if (graph === undefined) throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no graph with hash ${hash}`);
           // Structure ONCE, keyed by hash: the client caches it and only deltas stream
           // afterwards. The GEOMETRY ships with it — positions and edge control points
@@ -2701,8 +2853,12 @@ export class ControlPlane {
             // asked. The rendered half lives in the broker's memory, so a run this process
             // never attached contributes the record and no payload.
             const rendered = new Map((await engine.openGates(summary.runId)).map((g) => [g.gateId, g] as const));
+            // PER RUN, because a cross-run queue spans graphs: the classification that decides
+            // what a payload may say is declared by the graph THAT run compiled, and hoisting
+            // this out of the loop would redact one run's channels by another's spec.
+            const graph = this.#graphByHash(p.graphHash);
             for (const g of wanted) {
-              out.push({ runId: summary.runId, ...g, payload: rendered.get(g.gateId)?.payload, deadline: rendered.get(g.gateId)?.deadline });
+              out.push({ runId: summary.runId, ...gateWire(g, rendered.get(g.gateId), graph) });
             }
           }
           // SAID OUT LOUD, because a queue that silently drops a question an approver is
@@ -2738,7 +2894,7 @@ export class ControlPlane {
           if (p === undefined || !ownsRun(p, mustAuth(auth))) {
             throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${params[0]} not found`);
           }
-          send(res, 200, summarise(p));
+          send(res, 200, this.#summary(p));
         },
       },
 
@@ -2782,18 +2938,18 @@ export class ControlPlane {
             case "cancel":
               // `checkedReason`, not `cmd.reason ?? "operator"` off a cast — the value is
               // journaled on `operator.command` and quoted into every gate this closes.
-              send(res, 200, summarise(await engine.cancel(runId, checkedReason(cmd["reason"], "operator"), by)));
+              send(res, 200, this.#summary(await engine.cancel(runId, checkedReason(cmd["reason"], "operator"), by)));
               return;
             case "rewind": {
               const atSeq: unknown = cmd["atSeq"];
               if (typeof atSeq !== "number") {
                 throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, "rewind requires atSeq");
               }
-              send(res, 200, summarise(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by)));
+              send(res, 200, this.#summary(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by)));
               return;
             }
             case "advance":
-              send(res, 200, summarise(await engine.advance(runId)));
+              send(res, 200, this.#summary(await engine.advance(runId)));
               return;
             default:
               throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `unknown command "${String(cmd["kind"])}"`);
@@ -2841,7 +2997,7 @@ export class ControlPlane {
           // carries its qualifier. `openGates` throws `E_RUN_NOT_FOUND` for a run this engine
           // has not attached — the state of every run after a restart — and the catch above
           // turns that into `[]`, so the queue then ranks NOTHING and the whole response is
-          // journal order. The residue is recorded in `05-RESOURCES-OBSERVABILITY.md` §3 with
+          // journal order. The residue is recorded in `design/loom/05-RESOURCES-OBSERVABILITY.md (deleted at f975f9f)` §3 with
           // the one export that closes it (`gateQueueOrder` is a pure function of the
           // projection and is module-private in `run/gates.ts`).
           //
@@ -2881,11 +3037,8 @@ export class ControlPlane {
           // `spansFrom`'s `startTime` sort. Ranked gates in the queue's order, then the rest
           // in journal order, and each gate is emitted exactly once.
           const byId = new Map(detailed.map((g) => [g.gateId, g]));
-          const wire = (g: (typeof open)[number]): unknown => ({
-            ...g,
-            payload: byId.get(g.gateId)?.payload,
-            deadline: byId.get(g.gateId)?.deadline,
-          });
+          const graph = this.#graphByHash(p.graphHash);
+          const wire = (g: (typeof open)[number]): unknown => gateWire(g, byId.get(g.gateId), graph);
           const gates = [
             ...open.filter((g) => ranked.has(g.gateId)).sort((a, b) => ranked.get(a.gateId)! - ranked.get(b.gateId)!),
             ...open.filter((g) => !ranked.has(g.gateId)),
@@ -2962,7 +3115,7 @@ export class ControlPlane {
           // per gate. An approver who answered one question was handed the whole run as the
           // reply. A door that refuses a read and then performs it in the response to a write
           // is not a door.
-          send(res, 200, ownsRun(p, mustAuth(auth)) ? summarise(p) : { runId, gateId, status: p.status, decision: decision.kind });
+          send(res, 200, ownsRun(p, mustAuth(auth)) ? this.#summary(p) : { runId, gateId, status: p.status, decision: decision.kind });
         },
       },
 
@@ -3224,6 +3377,18 @@ export class ControlPlane {
       throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
     }
 
+    // READ ONCE, HERE, AND NOT PER FRAME. `#graphByHash` scans the deployment's inventory,
+    // and this stream emits a frame per journal event — a run with a 10 000-event head would
+    // pay the scan 10 000 times for an answer that cannot change, because `graphHash` is
+    // fixed at submission and `Engine` refuses any graph that is not the one the run
+    // compiled. The hash comes off the projection this route already had to read for its
+    // ownership scope, so nothing extra is fetched.
+    //
+    // `undefined` — a run whose graph this deployment does not hold — is the fail-closed
+    // case, and what it costs is stated in `redactChannels`: the stream still delivers every
+    // event, its seq, its type and its actor; only the channel VALUES are withheld.
+    const graph = this.#graphByHash(scope.graphHash);
+
     const lastHeader = header(req, "last-event-id") ?? ctx.url.searchParams.get("lastEventId") ?? undefined;
     // AN EMPTY ID IS "I HAVE NOTHING", the same statement as no id at all — a client sends
     // it before it has ever received a frame. Everything else is PARSED rather than coerced.
@@ -3282,7 +3447,7 @@ export class ControlPlane {
     if (!resumable || head - lastSeq > hot) {
       const p = await this.#engine.projection(runId);
       if (p !== undefined) {
-        if (!write("snapshot", p.seq, summarise(p))) await drained(res);
+        if (!write("snapshot", p.seq, this.#summary(p))) await drained(res);
         sent = Math.max(sent, p.seq);
       }
     } else {
@@ -3291,7 +3456,7 @@ export class ControlPlane {
       // two spellings a later change can move apart, which is precisely how the live tail
       // below came to be reading the unvalidated one.
       for await (const e of this.#store.read(runId, resumed + 1)) {
-        if (!write("event", e.seq, frame(e))) await drained(res);
+        if (!write("event", e.seq, frame(e, graph))) await drained(res);
         sent = e.seq;
         // THE REPLAY BRANCH IS NOT THE COLD PATH IT SOUNDS LIKE: `lastSeq = 0` with a head
         // under `hotWindow` satisfies `resumable`, so EVERY fresh connection to a run with
@@ -3313,7 +3478,7 @@ export class ControlPlane {
     try {
       for await (const e of sub) {
         if (e.seq <= sent) continue;
-        if (!write("event", e.seq, frame(e))) await drained(res);
+        if (!write("event", e.seq, frame(e, graph))) await drained(res);
         if (res.writableEnded || res.destroyed) break;
         if (e.type === "run.completed" || e.type === "run.failed" || e.type === "run.cancelled") break;
       }
@@ -3568,45 +3733,388 @@ function send(res: ServerResponse, status: number, body: unknown): void {
  * one thread also carries every other request and every SSE frame. Nothing is truncated and
  * the classification arms are unaffected; what the bound costs is a detector run that BEGINS
  * past 8 KB in one leaf. See `DETECTORS` in `security/redact.ts`.
+ *
+ * **AND `e.classification` IS `internal` ON EVERY EVENT THIS RUNTIME HAS EVER WRITTEN.**
+ * `JournalEvent.classification` is populated at exactly one place — `journal/store.ts`'s
+ * `classification: e.classification ?? DEFAULT_CLASSIFICATION`, and `DEFAULT_CLASSIFICATION`
+ * is `"internal"` — because no appender anywhere sets the field. So "the event's own declared
+ * classification" was a blanket `internal` sweep wearing a lookup's clothes, and `internal` is
+ * the detector backstop alone. Measured over real HTTP on `GET /runs/:id/events`, a channel
+ * declared `secret_ref` whose value is deliberately NOT credential-shaped so the backstop has
+ * nothing to catch:
+ *
+ *     event run.submitted  "inputs":{…,"vaultHint":"the vault passphrase is …"}   ← before
+ *     event run.submitted  "inputs":{…,"vaultHint":"[secret]"}                    ← after
+ *
+ * `CHANNEL_KEYED` is what closes it, through the same `redactChannels` the two gate routes
+ * reach — not a third spelling. The declared classification is left in place for every other
+ * type: an event whose payload is not channel data has nothing a channel spec could say about
+ * it, and the day an appender starts setting the field it still decides.
  */
-function frame(e: JournalEvent): unknown {
+function frame(e: JournalEvent, graph: RunGraph | undefined): unknown {
+  const key = own(CHANNEL_KEYED, e.type);
+  const pair = own(CHANNEL_VALUED, e.type);
+  const p = e.payload;
   return {
     seq: e.seq,
     ts: e.ts,
     type: e.type,
     taskId: e.taskId,
     actor: e.actor,
-    payload: redactPayload(e.payload, e.classification),
+    payload:
+      (key === undefined && pair === undefined) || p === null || typeof p !== "object" || Array.isArray(p)
+        ? redactPayload(p, e.classification)
+        : // `fromEntries`, not a spread-and-overwrite: the same `__proto__` rule
+          // `redactGatePayload` states, one function over.
+          Object.fromEntries(
+            Object.entries(p as Record<string, unknown>).map(([k, v]) => [
+              k,
+              k === key
+                ? redactChannels(v, graph?.spec.channels)
+                : k === pair
+                  ? redactBinding(v, graph?.spec.channels)
+                  : redactPayload(v, e.classification),
+            ]),
+          ),
   };
 }
 
 /**
- * A projection trimmed for the wire.
+ * Event type → the ONE payload key under it whose value is a map keyed by CHANNEL NAME.
+ *
+ * THE SET IS NAMED RATHER THAN SNIFFED, because "a claim that names its members can be
+ * checked" and because a payload key that merely shares a name is not a channel map — the
+ * event TYPE is what decides.
+ *
+ * **HOW THE MEMBERS WERE FOUND, so the next person can re-derive them rather than trust this
+ * list.** THREE GREPS, ONE PER SHAPE A CHANNEL VALUE CAN TRAVEL IN — and the third is here
+ * because the first two versions of this note claimed one grep was the whole derivation. See
+ * `CHANNEL_VALUED` for what the missing legs cost. Leg 1, the map shape:
+ * `grep -an 'Record<string, unknown>' packages/core/src/journal/events.ts` returns
+ * seven declarations; five are channel maps and two are not:
+ *
+ *   - `run.submitted.inputs`   — `spec.inputs` ⊆ channel names.
+ *   - `task.committed.writes`  — a node's PROPOSED writes, before the reducer folds them.
+ *     Found by a test and not by reading: an earlier draft of this list had the reduced
+ *     value and not the proposal, and the same secret went out one event earlier.
+ *   - `state.reduced.values`   — the reducer's result. Its sibling `channels` field is the
+ *     list of NAMES, which is metadata, and stays as it is.
+ *   - `gate.decided.writes`    — an approver's EDIT. `allowEdit` names which channels a gate
+ *     may rewrite, so these are channel values written by a human; optional, and absent on
+ *     an ordinary approve.
+ *   - `run.completed.outputs`  — `collectOutputs`, which iterates `spec.outputs`.
+ *
+ *   - NOT `policy.escalated.detail` — a rule's evidence, keyed by whatever the rule reports.
+ *   - NOT `operator.command.args` — a command's arguments, keyed by parameter name.
+ *
+ * `channel.written` is absent for a different reason: it carries `valueDigest`, never a value.
+ *
+ * Legs 2 and 3 are `CHANNEL_VALUED`'s, and they cover the shapes this grep cannot see.
+ */
+const CHANNEL_KEYED: Readonly<Record<string, string>> = {
+  "run.submitted": "inputs",
+  "task.committed": "writes",
+  "state.reduced": "values",
+  "gate.decided": "writes",
+  "run.completed": "outputs",
+};
+
+/**
+ * Event type → the ONE payload key under it whose value is a `{channel, value}` PAIR.
+ *
+ * A SECOND TABLE BECAUSE THERE IS A SECOND SHAPE, and the first table's derivation could not
+ * see it. `CHANNEL_KEYED`'s members were found by grepping `journal/events.ts` for
+ * `Record<string, unknown>` — a search that is complete for MAP-shaped fields and blind to a
+ * single channel and its value declared as one pair. `task.ready.binding` is exactly that
+ * shape (`events.ts:168`, `{ readonly channel: string; readonly value: unknown }`), so
+ * `frame` swept it at `e.classification` — a blanket `internal`, the detector backstop —
+ * and a fan-out over a `secret_ref` channel put its per-branch item on the SSE stream in the
+ * clear. Measured over real HTTP on `GET /runs/:id/events`, `secrets` and `item` both
+ * declared `secret_ref`, before and after:
+ *
+ *     "type":"task.ready","payload":{"binding":{"channel":"item","value":"courier alpha knocks three times"},…}
+ *     "type":"task.ready","payload":{"binding":{"channel":"item","value":"[secret]"},…}
+ *
+ * **THE RE-DERIVATION, COVERING BOTH SHAPES AND A THIRD.** Leg 1 is `CHANNEL_KEYED`'s grep.
+ * Leg 2 finds every field that NAMES a channel —
+ * `grep -an channel packages/core/src/journal/events.ts | grep -a readonly` — six
+ * declarations, and the word means two different things among them:
+ *
+ *   - `task.ready.binding`            — a DATA channel and its value. The member below.
+ *   - `state.reduced.channels`        — the list of NAMES that moved. Metadata; stays.
+ *   - `channel.written`               — `{channel, reducer, valueDigest}`. A digest, never a value.
+ *   - `gate.delivered.channel`        — a DELIVERY channel: slack, email, console. Not a data
+ *     channel, and its `receipt` is the transport's id, not channel data.
+ *   - `gate.delivery_failed.channel`  — the same homonym.
+ *   - `gate.callback_rejected.channel`— the same homonym.
+ *
+ * Leg 3 catches a value declared with no channel at all: `grep -an ': unknown' events.ts`
+ * returns five hits, three of them field declarations — the pair above, plus
+ * `effect.completed.result` and `ErrorRecord.details`. NEITHER of those two is a member, and
+ * the reason is the same one: no channel NAMES them, so there is no declaration to look up and
+ * the detector sweep is the only mechanism they have ever had. That is a real limitation of
+ * the declared path, stated rather than papered over.
+ *
+ * `gate.raised` carries no channel data by construction — its own docstring: "the rendered
+ * `payload` deliberately stays out" — so it is on no leg of this derivation.
+ */
+const CHANNEL_VALUED: Readonly<Record<string, string>> = {
+  "task.ready": "binding",
+};
+
+/**
+ * One `{channel, value}` pair, its value redacted under the classification THAT channel's
+ * spec declared.
+ *
+ * IT IS `redactChannels` WITH ONE ENTRY, NOT A FOURTH SPELLING OF THE LOOKUP. The pair is
+ * rebuilt as a one-key map, pushed through the same function the gate routes and `summarise`
+ * reach, and unwrapped by VALUE rather than by key — so `__proto__` as a channel name cannot
+ * turn the unwrap into a prototype read, and every rule `redactChannels` states holds here
+ * unchanged: an undeclared name falls closed at `secret_ref`, a declared-but-unclassified one
+ * is `internal`, and a plane that does not hold the graph withholds the value.
+ *
+ * A FAN-OUT'S `as` IS A DECLARED CHANNEL, which is what makes that lookup the right one:
+ * `graph/validate.ts` refuses `GRAPH007_UNKNOWN_ITEM` — "the per-branch item is a real
+ * channel: the StateView has to serve it" — so the item channel carries its own
+ * `classification`. What this does NOT do is consult the `over` channel the items came from;
+ * a graph that fans a `secret_ref` list into a `public` item channel has declared that, and
+ * re-deciding it here would put this file in the business of overruling a graph's own
+ * declarations, which is `validate.ts`'s question and not the wire's.
+ *
+ * `channel` NOT BEING A STRING FALLS CLOSED. A journal is authoritative rather than
+ * well-formed: nothing here can look up a name that is not a name, and "refusing is always
+ * allowed; loosening never is".
+ */
+function redactBinding(pair: unknown, channels: Readonly<Record<string, { readonly classification?: Classification }>> | undefined): unknown {
+  if (pair === null || typeof pair !== "object" || Array.isArray(pair)) return redactPayload(pair, "internal");
+  const name = (pair as { readonly channel?: unknown }).channel;
+  const raw = (pair as { readonly value?: unknown }).value;
+  const value =
+    typeof name === "string"
+      ? Object.values(redactChannels({ [name]: raw }, channels) as Record<string, unknown>)[0]
+      : redactPayload(raw, "secret_ref");
+  // `fromEntries` over the WHOLE pair, so a field this runtime has not met yet is swept
+  // rather than dropped — and so the `__proto__` rule one function over holds here too.
+  return Object.fromEntries(
+    Object.entries(pair as Record<string, unknown>).map(([k, v]) => [k, k === "value" ? value : redactPayload(v, "internal")]),
+  );
+}
+
+/**
+ * The wire shape of an open gate, with its payload redacted per the GRAPH's declared
+ * classification.
+ *
+ * ONE FUNCTION BECAUSE THERE ARE TWO ROUTES. `GET /runs/:id/gates` joins the projection's
+ * gate to the broker's `byId` map and `GET /gates` joins it to `rendered`; the two built
+ * the same object independently and NEITHER redacted, while this file's header had claimed
+ * since it was written that both did. The defect one layer up is the same shape — `listRuns`
+ * filtered at two of three sites — so the join lives here and a route may not spell it again.
+ *
+ * WHAT IS REDACTED IS THE CHANNEL DATA, AND ONLY THAT. A gate record is what makes a queue
+ * usable — which node, which id, who may answer, when it expires — and none of it is channel
+ * data. Withholding it would answer a disclosure with a denial of oversight, which is the
+ * trade `GET /gates` exists to refuse.
+ */
+function gateWire(g: GateRecord, detail: GateSummary | undefined, graph: RunGraph | undefined): Record<string, unknown> {
+  return { ...gateRecordWire(g, graph), payload: redactGatePayload(detail?.payload, graph), deadline: detail?.deadline };
+}
+
+/**
+ * One `GateRecord` on its way to the wire, its ONE channel-keyed field redacted per the
+ * GRAPH's declared classification.
+ *
+ * **THE RECORD CARRIES CHANNEL DATA AND NOTHING TREATED IT AS SUCH.** `GateRecord.writes` is
+ * documented in `projection.ts` as "`edit` only: the channels the human wrote" — a map
+ * keyed by channel name, filled from `gate.decided.writes`, which `CHANNEL_KEYED` already
+ * names on the event stream. `summarise` served `Object.values(p.gates)` raw: not redacted
+ * per the graph, not even swept at `internal`. Measured over real HTTP, `receipt` declared
+ * `secret_ref` and the gate answered `{kind:"edit", writes:{receipt:…, summary:…}}` — one
+ * response body, before:
+ *
+ *     "gates":[{…,"writes":{"receipt":"the second courier knocks twice","summary":"ordinary note"}}]
+ *     "channels":{…,"receipt":"[secret]"},"outputs":{"receipt":"[secret]"}
+ *
+ * — two keys apart, the same value, one redacted and one not. After, the `gates` slice reads
+ * `"writes":{"receipt":"[secret]","summary":"ordinary note"}` and the rest of the record is
+ * unchanged. It reaches all six `#summary` routes: `GET /runs/:id`, the three command
+ * replies, the gate-decision reply and the SSE snapshot frame.
+ *
+ * ONE FUNCTION, TWO CALLERS, FOR THE REASON `gateWire` IS ONE FUNCTION. `gateWire` built the
+ * gate-route object with `{...g}` — the same unredacted spread — so the two gate routes had
+ * the same hole standing behind an `open`-only filter that keeps `writes` absent in practice.
+ * A redaction that depends on a filter elsewhere staying true is the shape of defect this
+ * file has now paid for three times, so the spread is gone and both callers come through here.
+ *
+ * EVERY OTHER FIELD IS METADATA THIS PROCESS AUTHORED — which node, which task, who may
+ * answer, when it expires, what was decided — and gets the `internal` sweep, exactly as the
+ * gate PAYLOAD's non-channel fields do in `redactGatePayload`. Withholding it would answer a
+ * disclosure with a denial of oversight. `justification` is the one field a HUMAN typed, and
+ * `internal` is all that is available for it: no channel names it, so there is no declaration
+ * to look up.
+ */
+function gateRecordWire(g: GateRecord, graph: RunGraph | undefined): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(g as unknown as Record<string, unknown>).map(([k, v]) => [
+      k,
+      k === "writes" ? redactChannels(v, graph?.spec.channels) : redactPayload(v, "internal"),
+    ]),
+  );
+}
+
+/**
+ * Redact a gate payload per the classification the GRAPH declared, NEVER per viewer.
+ *
+ * Per-graph rather than per-viewer is the deliberate choice and the header states it: two
+ * approvers on one gate see the same bytes. Per-viewer would make the question depend on who
+ * asked it — two approvers answering one gate would be answering two different renderings of
+ * it, with one `contentDigest` on the record and no way to say which rendering each of them
+ * read — and it would put the plane in the business of ranking approvers.
+ *
+ * WHAT THE DIGEST PINS IS NOT WHAT THIS SERVES, and that is worth saying rather than
+ * implying. `GateRecord.contentDigest` is the broker's digest of the payload it RENDERED,
+ * unredacted; every reader here sees one redaction of it. That is the same arrangement
+ * `frame` already has with a journal payload, and it is fine for what the digest is for —
+ * telling two raisings of one question apart — but it is not a receipt for the bytes a
+ * particular human read.
+ *
+ * A BLANKET `internal` SWEEP, THE WAY `summarise` REDACTS A PROJECTION'S CHANNELS, IS NOT A
+ * FIX HERE. `internal` is the detector backstop alone, so a `secret_ref` channel value comes
+ * through in full — measured over real HTTP on both routes before this existed. The declared
+ * classification is the mechanism `redact.ts` calls primary ("a lookup, not a guess"), and a
+ * gate is very often raised BECAUSE a channel is classified: `dataFloorOf` floors a node
+ * reading `secret_ref` at posture `in`. Serving that value in the clear at the gate the
+ * classification demanded is the one place it must not happen.
+ *
+ * THE SET THIS COVERS IS TWO PAYLOAD SHAPES, BOTH AUTHORED BY `run/engine.ts`, and they carry
+ * channel data under different keys belonging to different specs:
+ *
+ *   - `#gatePayload` → `state`, keyed by THIS graph's channels.
+ *   - `#runSubgraph`'s mirror gate → `channels`, keyed by the CHILD's channels — the whole
+ *     child channel map, not the child gate node's `reads` — declared in the spec frozen at
+ *     `graph.subgraphs[payload.subgraph]`. A parent may carry a secret it never classified,
+ *     so reading the parent's declarations for those names would answer `internal` for every
+ *     one of them.
+ *
+ * Every other field is metadata this process authored — node, task, posture, cost — and gets
+ * the `internal` sweep, which is what it got before and no less.
+ */
+function redactGatePayload(payload: unknown, graph: RunGraph | undefined): unknown {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return redactPayload(payload, "internal");
+  const ref = (payload as { readonly subgraph?: unknown }).subgraph;
+  // `fromEntries`, not `out[k] = v`: for the one key named `__proto__` an assignment sets the
+  // PROTOTYPE and drops the field — the defect `redact.ts`'s `put` exists for, and this
+  // rebuild would otherwise reintroduce it one function away.
+  return Object.fromEntries(
+    Object.entries(payload as Record<string, unknown>).map(([k, v]) => [
+      k,
+      k === "state"
+        ? redactChannels(v, graph?.spec.channels)
+        : k === "channels"
+          ? redactChannels(v, graph === undefined || typeof ref !== "string" ? undefined : own(graph.subgraphs, ref)?.channels)
+          : redactPayload(v, "internal"),
+    ]),
+  );
+}
+
+/**
+ * One channel map, each value redacted under the classification its own spec declared.
+ *
+ * ABSENT IS `secret_ref`, WHICH IS THE FAIL-CLOSED HALF AND THE ONLY ANSWER AVAILABLE. A
+ * plane that does not hold the graph a run compiled — a run submitted by another process,
+ * every run after a restart of a differently-configured plane — cannot know which of these
+ * names is a credential. "Refusing is always allowed; loosening never is": the alternative,
+ * falling back to `internal`, IS the leak being fixed. What it costs is bounded and visible —
+ * the gate, its approvers and its deadline all still arrive; only the values are withheld.
+ *
+ * A DECLARED channel with no `classification` is `internal`, the documented default, so an
+ * ordinary unclassified channel reaches the approver unchanged. Only an UNDECLARED name falls
+ * closed, because a name no spec accounts for is a name nothing has classified.
+ */
+function redactChannels(value: unknown, channels: Readonly<Record<string, { readonly classification?: Classification }>> | undefined): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return redactPayload(value, "internal");
+  const one = ([name, v]: readonly [string, unknown]): [string, unknown] => {
+    const declared = channels === undefined ? undefined : own(channels, name);
+    // A name no spec declares is a name nothing has classified.
+    if (declared === undefined || declared === null) return [name, redactPayload(v, "secret_ref")];
+    const c = declared.classification;
+    if (c === undefined) return [name, redactPayload(v, "internal")];
+    // THE MEMBERSHIP TEST IS `vocab.ts`'s, AND IT IS NOT SPELLED AGAIN HERE.
+    //
+    // `maxClassification` OVER ONE ARGUMENT IS EXACTLY THAT TEST: identity for each of the
+    // four, `secret_ref` for anything else, stated in its own docstring as "a classification
+    // this vocabulary cannot read is the most sensitive one there is". This line used to read
+    // `own(CLASSIFICATION_POSTURE_FLOOR, c) === undefined ? "secret_ref" : c` — a membership
+    // test written against a POSTURE-FLOOR table, which is a third spelling of a question
+    // `vocab.ts` already answers, in a tree that has just standardised on `isPosture` for the
+    // posture half. `vocab.ts` exports no `isClassification`; this is its equivalent.
+    //
+    // AND THE UNKNOWN WORD IS STILL REACHABLE, though the compiler now refuses it. `validate.ts`
+    // gained `GRAPH003_UNKNOWN_CLASSIFICATION` this same round, and it covers a resolved CHILD
+    // spec too — measured, a parent whose child declares `classification: "confidential"` no
+    // longer compiles. What it does not cover is the graph objects THIS class is handed:
+    // `ControlPlaneOptions.graphs` takes already-compiled `RunGraph`s and re-validates nothing,
+    // so a graph compiled by a build older than that check reaches this line with a word the
+    // vocabulary has never heard. Such a value reads as `internal` everywhere it is compared
+    // with `===`, which is `redact.ts`'s own fail-open; measured over real HTTP on exactly that
+    // shape, an unknown classification served its channel in the clear.
+    return [name, redactPayload(v, maxClassification(c))];
+  };
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(one));
+}
+
+/**
+ * An OWN property of a record, or `undefined` — never `Object.prototype`'s.
+ *
+ * The same rule `graphIn` spells for `#graphs`, and it matters more here: a bare
+ * `channels[name]` answers the `Object` FUNCTION for `constructor`, whose `classification` is
+ * `undefined`, which would read as "declared, unclassified" — a name nothing declared,
+ * treated as safe.
+ */
+function own<T>(rec: Readonly<Record<string, T>>, name: string): T | undefined {
+  return name !== "__proto__" && Object.prototype.hasOwnProperty.call(rec, name) ? rec[name] : undefined;
+}
+
+/**
+ * A projection trimmed for the wire, its channel values redacted per the GRAPH's declared
+ * classification.
  *
  * Task and gate maps are sent as arrays because a 500-branch run's task map is the
  * bulk of the payload and the client renders it as a list anyway.
+ *
+ * **THE `graph` ARGUMENT IS THE FIX FOR A DISCLOSURE, AND IT IS NOT OPTIONAL AT A CALL
+ * SITE.** Every caller reads it from `#graphByHash(p.graphHash)`; passing `undefined`
+ * deliberately is the fail-closed answer, not a shortcut. See `redactChannels`.
  */
-function summarise(p: import("../run/projection.ts").RunProjection): unknown {
+function summarise(p: import("../run/projection.ts").RunProjection, graph: RunGraph | undefined): unknown {
   return {
     runId: p.runId,
     status: p.status,
     seq: p.seq,
     graphHash: p.graphHash,
     posture: p.posture,
-    // Channel values reach a browser here, so they are swept on the way out. The
-    // per-channel classification lives in the GraphSpec; without it in hand the
-    // conservative `internal` sweep catches credential shapes in THE FIRST 8 KB of each
-    // string a model wrote — `redactPayload`'s default bound, and the word "still" used to
-    // stand where "the first 8 KB" is now, claiming the whole value.
+    // Channel values reach a browser here, so they are swept on the way out — PER THE
+    // CLASSIFICATION THE GRAPH DECLARED, through the same `redactChannels` the two gate
+    // routes reach. Both of these maps are keyed by channel name: `p.channels` is the
+    // channel state, and `p.outputs` is `collectOutputs`, which iterates `spec.outputs` —
+    // a subset of the same names. So one lookup table answers both.
     //
-    // THIS IS THE CALL SITE THE BOUND EXISTS FOR. A channel value is agent output of
-    // unbounded length; `pem` in `DETECTORS` is quadratic; and this handler is `await`-free
-    // through the sweep, so its cost is not this request's latency but every concurrent
-    // client's. Measured before the bound: benign 1 MB → 7 ms; pem-shaped 1 MB → 4767 ms,
-    // of which 4754 ms was event-loop lag. Pinned by *A 1 MB pem-SHAPED CHANNEL VALUE DOES
-    // NOT STALL THE PLANE* in `test/server/http.test.ts`.
-    channels: redactPayload(p.channels, "internal"),
-    outputs: redactPayload(p.outputs, "internal"),
+    // WHAT WAS HERE BEFORE WAS A BLANKET `internal` SWEEP, AND `internal` IS THE DETECTOR
+    // BACKSTOP ALONE. Measured over real HTTP on the SSE snapshot frame, one run, a channel
+    // declared `secret_ref` and a channel declared `pii`, neither value credential-shaped
+    // so the backstop had nothing to catch — before, and after:
+    //
+    //     "channels":{…,"owner":"ada@example.com","vaultHint":"the vault passphrase is …"}
+    //     "channels":{…,"owner":"pii:…:string",   "vaultHint":"[secret]"}
+    //
+    // THE 8 KB BOUND IS `redactPayload`'s AND STILL APPLIES: `redactChannels` calls it once
+    // per channel value. A channel value is agent output of unbounded length; `pem` in
+    // `DETECTORS` is quadratic; and this handler is `await`-free through the sweep, so its
+    // cost is not this request's latency but every concurrent client's. Measured before the
+    // bound: benign 1 MB → 7 ms; pem-shaped 1 MB → 4767 ms, of which 4754 ms was event-loop
+    // lag. Pinned by *A 1 MB pem-SHAPED CHANNEL VALUE DOES NOT STALL THE PLANE* in
+    // `test/server/http.test.ts`.
+    channels: redactChannels(p.channels, graph?.spec.channels),
+    outputs: redactChannels(p.outputs, graph?.spec.channels),
     usage: p.usage,
     reservedUsd: p.reservedUsd,
     budgetExhausted: p.budgetExhausted,
@@ -3621,7 +4129,12 @@ function summarise(p: import("../run/projection.ts").RunProjection): unknown {
       take: t.take,
       error: t.error,
     })),
-    gates: Object.values(p.gates),
+    // A GATE RECORD CARRIES CHANNEL DATA TOO, and this line used to serve it raw. `writes` is
+    // an approver's `edit` — the channels a human rewrote — and it went out unredacted on all
+    // six routes that answer with a projection, in the same body whose `channels` two keys
+    // above already read `[secret]`. See `gateRecordWire`, which both this and the two gate
+    // routes now reach.
+    gates: Object.values(p.gates).map((g) => gateRecordWire(g, graph)),
   };
 }
 
