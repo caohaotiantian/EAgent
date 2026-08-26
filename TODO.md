@@ -572,6 +572,36 @@ is a better view of nothing.
 
 ## D · Decisions that were blocked on the maintainer
 
+**Four more answered 2026-08-26**, unblocking nine §B entries that were decisions in disguise:
+
+4. **The operator intervention surface — build the FULL set: pause, resume, steer, kill.**
+   Not the minimal pause/resume I recommended. Two sub-decisions fall out and are mine to make
+   and record, because they were not asked:
+   - **`steer`** means an operator redirects a running graph onto edges the author declared.
+     It must NOT let an operator reach an edge the compiled graph does not contain — that is
+     `graph:mutate`, which is a capability the tenant either holds or does not, and routing
+     around it from the operator surface would be oversight loosening itself. So: steer is
+     confined to the compiled edge set, exactly as a `router` is.
+   - **`kill`** is `cancel` that does not wait for an in-flight effect to settle.
+     `run.cancelled.forced` — written once as `false` and read by nobody — is the field that was
+     left behind when somebody thought about this before, and it becomes its record.
+5. **A compensation edge fires on run failure AND on rewind.** Not run failure alone. The sharp
+   edge I flagged is now deliberate: **an operator inspecting history can trigger real-world
+   undo**, so rewind-compensation must be loud, gated by the same oversight floor an irreversible
+   action gets, and never silent.
+6. **`Budget.tokens` and `Budget.wallMs` bind, like cost.** The ceiling machinery already exists;
+   these fields simply never reached it. A token ceiling is the one an operator can reason about
+   when prices are unknown — the case hit for real against a GLM endpoint, where placeholder
+   prices had to be invented before the cost budget meant anything.
+7. **Payload externalisation gets built.** The hard one, and chosen over deferring: above a
+   threshold a payload leaves the journal and leaves a reference. `effect.completed` already
+   carries a `resultDigest`, so an externalised effect keeps its identity for free;
+   `task.committed` and `state.reduced` would each need one. The difficulty is stated in §A and
+   has not changed: `foldRun` is SYNCHRONOUS and hands channel values straight to node bodies, so
+   either the fold becomes async — touching engine, gates, replay and audit — or the projection
+   carries unresolved handles and replay's comparison learns to compare what they point at.
+   **Retention tiering is downstream of this and stays deferred until it lands.**
+
 **Three were answered 2026-08-25**, and the roadmap in `DESIGN.md` is built on them:
 
 1. **The first real workflow to port (D.1) — decided in principle: the next user is the
