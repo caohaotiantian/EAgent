@@ -341,6 +341,16 @@ interface Workspace {
   readonly hooks: HookRegistry;
   /** What this process may DO — the one list, derived from what it registered. */
   readonly granted: readonly string[];
+  /**
+   * The programs `proc.exec` may run, or `undefined` when the tool is not registered.
+   *
+   * Carried onto the Workspace for ONE reason: the boot banner names every guard that is off,
+   * and this is the guard whose absence is loudest and was the only one it did not name. A
+   * plane with `--allow-exec` has no filesystem jail — `--help` says so at the flag ("a child
+   * does its own open(), so allow-listing a shell dissolves the fs jail rather than narrowing
+   * it") and the banner said nothing.
+   */
+  readonly execAllowlist: readonly string[] | undefined;
   /** `undefined` when `--channels-file` was not given: no channels, and no callback route. */
   readonly delivery: DeliveryConfig | undefined;
   /** `undefined` when `--models-file` was not given: the mock is the only adapter. */
@@ -585,7 +595,7 @@ export function openWorkspace(
     sweep: { limit: GATE_CLOCK_LIMIT },
   });
 
-  return { root, dataDir, store, engine, bus, resolver, hooks, granted, delivery, models, close: () => store.close() };
+  return { root, dataDir, store, engine, bus, resolver, hooks, granted, execAllowlist: execPrograms, delivery, models, close: () => store.close() };
 }
 
 /**
@@ -813,6 +823,51 @@ export function readChannels(file: string): DeliveryConfig {
     publishesAddress: baseUrl !== undefined && answerable.length > 0,
     file: path,
   };
+}
+
+/**
+ * What the boot banner says about `proc.exec`, as a pure function of what was registered.
+ *
+ * SEPARATE FROM THE BANNER so the interesting half is testable without a socket. `serve` blocks,
+ * so a test that wants these lines otherwise has to spawn a process and race its stderr; the
+ * decision is worth checking directly, because the part most likely to be wrong is the
+ * interpreter list rather than the printing.
+ *
+ * TWO LINES, NOT ONE, and the split is the point. The first states what `proc.exec` being
+ * registered costs: a child does its own `open()` and its own `connect()`, so `assertWithin` and
+ * the `--egress` allowlist bind this plane's own tools and not the child. `--help` has said that
+ * at the flag for a long time; the banner did not. The second fires only for an INTERPRETER,
+ * because allow-listing `grep` narrows what a child may do and allow-listing `sh` names one entry
+ * and permits everything — an operator reading a one-line allowlist should be told which of the
+ * two they just did.
+ *
+ * WHAT IT DELIBERATELY DOES NOT SAY: that the plane is unsafe. `proc.exec` is irreversible, so it
+ * carries the oversight floor and gates before it runs. The banner reports a boundary that is
+ * open, not a run that is unsupervised, and conflating those is how a warning gets ignored.
+ */
+export function execWarnings(allowlist: readonly string[] | undefined): readonly string[] {
+  if (allowlist === undefined || allowlist.length === 0) return [];
+  const out = [
+    `! EXEC IS REGISTERED — proc.exec may run: ${allowlist.join(", ")}\n` +
+      `  A child process does its own open() and its own connect(), so the filesystem jail\n` +
+      `  (assertWithin) and the --egress allowlist bind this plane's OWN tools and not this\n` +
+      `  child. Every gate still holds: proc.exec is irreversible, so it gates before it runs.\n`,
+  ];
+  // Matched on the BASENAME, because `--allow-exec` matches a program by name and an operator
+  // writes the path they have. Version suffixes are included (`python3.11`) for the same reason:
+  // the thing that makes it an interpreter is not the digits.
+  const interpreters = allowlist.filter((p) => {
+    const base = p.split("/").pop() ?? p;
+    return /^(sh|bash|zsh|fish|dash|ksh|node|deno|bun|python\d*(\.\d+)?|perl|ruby|php|env|xargs|awk|sed)$/.test(base);
+  });
+  if (interpreters.length > 0) {
+    out.push(
+      `! …AND ${interpreters.join(", ")} RUNS ARBITRARY CODE — the allowlist names ` +
+        `${String(allowlist.length)} program(s)\n` +
+        `  and permits anything they can spawn. This is a containment boundary in name only.\n`,
+    );
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -2436,6 +2491,14 @@ function announce(
   if (plane.openToEveryCaller) {
     process.stderr.write("! NO TOKEN — every caller is authorized\n");
   }
+  // THE GUARD THIS BANNER DID NOT NAME, and it is the loudest one. Every other line here
+  // reports a guard that is off — no adapter, no identity source, no token — and
+  // `--allow-exec` turns off the most. A plane started with it printed nothing at all.
+  //
+  // READ OFF `execAllowlist` rather than off the flag, for the reason the address line is read
+  // off the socket: a tool that failed to register is not a boundary that is open.
+  for (const line of execWarnings(ws.execAllowlist)) process.stderr.write(line);
+
   // WHERE THE SOCKET IS, said as loudly as what is on it — because they compose, and the
   // composition is what decides the blast radius. A plane on 127.0.0.1 with no token is a
   // development convenience; the same plane on 0.0.0.0 is an open control plane on the

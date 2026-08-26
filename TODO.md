@@ -762,8 +762,18 @@ Kept because re-deriving these costs more than reading them, and each was a real
   one, which is what makes the compiled artifact meaningful.
 - **Custom user-authored reducers.** Arbitrary code inside the determinism boundary.
 - **Free-form agent chatter.** Makes termination unprovable and replay quadratic.
-- **seccomp / Landlock.** Platform-specific; subprocess isolation plus a filesystem jail plus an
-  egress allowlist covered the stated threat model.
+- **seccomp / Landlock.** Platform-specific. ~~subprocess isolation plus a filesystem jail plus
+  an egress allowlist covered the stated threat model.~~ **Corrected 2026-08-26: all three
+  mitigations are real, and the clause claiming they cover the threat model is false.** They bind
+  this plane's OWN tools — `runSandboxed` confines a process, `assertWithin` is applied by
+  `builtin/tools.ts` to its own path arguments, and `--egress` decides whether `net.fetch`
+  registers at all. **A child process does its own `open()` and its own `connect()`,** so
+  `proc.exec` is outside all three. `--help` has said exactly that at the flag for a long time
+  ("allow-listing a shell dissolves the fs jail rather than narrowing it") and
+  `sandbox/subprocess.ts` says it twice more. **The deferral of seccomp stands; the sentence did
+  not.** What was missing was not a mitigation but a SENTENCE AT THE MOMENT IT HAPPENS: the boot
+  banner names every guard that is off and did not name this one. It does now, and the decision
+  is a pure function (`execWarnings`) so the interpreter list is testable without a socket.
 - **Vendor callback parsing** (Slack, Teams, email). Delivery outward is built; the return trip
   needs per-vendor signature verification.
 
