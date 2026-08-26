@@ -1,0 +1,75 @@
+{
+  "$comment": [
+    "The referent for CLAUDE.md property 1. Read scripts/check-kernel.mjs for the argument.",
+    "",
+    "The criterion, applied to every file below and to every file NOT below: a file is kernel",
+    "iff it is the MECHANISM that makes one of CLAUDE.md's non-negotiables true, and an",
+    "extension must depend on it and cannot replace it. Fan-in did not decide this list;",
+    "errors.ts (38 importers) and vocab.ts (23) beat most of it and are deliberately out.",
+    "",
+    "`since` grandfathers history: the kernel became observable here, and the 289 commits",
+    "before it are not judged. Advancing `since` forward is a way to erase the debt census",
+    "without paying it — do it only when the range has actually been reviewed, and say so."
+  ],
+  "since": "86b84c9",
+  "files": [
+    {
+      "path": "packages/core/src/canonical.ts",
+      "why": "Content addressing. graph.hash, state.hash, ctx.hash, resource digests and effect result digests all come from here, so 'every nondeterministic call is recorded under a DERIVED key' is only as true as this file. Two values a reader would call equal must produce identical bytes."
+    },
+    {
+      "path": "packages/core/src/ids.ts",
+      "why": "Identity. A TaskId is nodeId@branchPath#iteration — a pure function of graph and branch coordinate, which is what makes journal appends and effect keys idempotent across retry, resume and replay. A random TaskId breaks replay silently."
+    },
+    {
+      "path": "packages/core/src/graph/spec.ts",
+      "why": "The single source artifact, consumed by all six layers with no layer keeping a private representation. It is the vocabulary the kernel and every extension both speak; graphHash = digest(spec) is the compiler's contract with the journal."
+    },
+    {
+      "path": "packages/core/src/journal/events.ts",
+      "why": "The closed vocabulary of durable facts. 'The journal is the only authoritative state' is a claim about THIS union: a new kind of durable fact must be a reviewable entry here, or subsystems invent private vocabularies and the log stops being a contract."
+    },
+    {
+      "path": "packages/core/src/journal/store.ts",
+      "why": "The durable write path: append is a compare-and-swap on expectedSeq, plus monotonic fencing tokens. That single decision converts at-least-once task execution into exactly-once state with no distributed lock. The INTERFACE is kernel; sqlite.ts and memory.ts are backends behind it, and are deliberately not."
+    },
+    {
+      "path": "packages/core/src/run/projection.ts",
+      "why": "The fold, journal to run state. It is what makes 'everything else is a projection you can rebuild' true rather than aspirational, and it is pure and synchronous so the claim can be checked."
+    },
+    {
+      "path": "packages/core/src/run/replay.ts",
+      "why": "'Replay serves the record.' An effect the journal does not contain is E_REPLAY_DIVERGENCE — a loud failure rather than a quiet live call. Property 3 rests on runs being replayable at all."
+    },
+    {
+      "path": "packages/core/src/run/policy.ts",
+      "why": "The single authorization decision point. 'Refusing is always allowed; loosening never is' is implemented here: no path reaches allow by omission, and reserve/settle is what keeps a fan-out from spending the same budget 25 times."
+    },
+    {
+      "path": "packages/core/src/run/gates.ts",
+      "why": "Durable human gates. 'Oversight only tightens' and 'a human may lower a posture; no automated path may' are decided here, and a gate that is a row plus a journal event rather than a Promise is what lets oversight survive a restart."
+    },
+    {
+      "path": "packages/core/src/run/engine.ts",
+      "why": "The executor. Three rules are enforced by construction rather than review: one tool dispatch path, work parallel but commits serialized through one queue with an explicit expectedSeq, and a fan-out's writes held until its join folds siblings in branch order. It is also the file this guard exists because of: 1,375 to 6,104 lines in 21 days, 28 of 69 feat commits."
+    }
+  ],
+  "notKernel": [
+    {
+      "path": "packages/core/src/errors.ts",
+      "why": "Highest fan-in in the package (38 importers) and still not kernel: it is data, not invariant. Adding an error code IS adding capability, and gating it would tax exactly the correct additions EAgent's line-count pin taxed. Same for vocab.ts."
+    },
+    {
+      "path": "packages/core/src/graph/validate.ts",
+      "why": "2,913 lines and 13 feat touches — the largest exclusion, and deliberate. It ENFORCES the spec but is not the spec, and its rules are supposed to grow one per feature. Pinning it would fire on every rule and teach nobody anything."
+    },
+    {
+      "path": "packages/core/src/run/delivery.ts",
+      "why": "3,791 lines, and no non-negotiable names it. It is a mechanism the engine uses, replaceable in principle. Listed here so the omission is a recorded decision rather than an oversight."
+    },
+    {
+      "path": "packages/core/src/journal/sqlite.ts",
+      "why": "A backend behind store.ts, along with memory.ts, retention.ts and audit.ts. The seam is the interface; that the backend is swappable is exactly what makes the list mean something."
+    }
+  ]
+}

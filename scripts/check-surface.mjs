@@ -18,7 +18,7 @@
  * boundary rather than a hole to close here: the two `tsc` projects in `npm run typecheck`
  * are the first `&&` arm of `npm run check` and catch shape changes by USING them — every
  * exported class is constructed somewhere, so a demotion fails the gate before this script
- * runs. 01-INTERFACES.md states the same boundary for readers of the design.
+ * runs. design/loom/01-INTERFACES.md (deleted at f975f9f) states the same boundary for readers of the design.
  *
  * THAT COMPENSATING CLAIM IS ITSELF GATED, by
  * `packages/core/test/surface-shape-is-covered.test.ts`. It used to carry a count here — "35 of
