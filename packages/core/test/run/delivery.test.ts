@@ -1601,11 +1601,31 @@ test("A RE-DELIVERED GATE IS THE SAME QUESTION, EVEN THOUGH ITS TOKENS ARE NOT",
   holderOf(shown, "employeeId")!["employeeId"] = "[secret]";
   assert.equal(digest(shown), asked.spy.seen[0]!.gate.contentDigest, "a non-null scalar leaf is the case that recomputes");
 
-  // WITH NOTHING HIDDEN IT IS THE JOURNAL'S OWN DIGEST, unchanged: "shown" and "raised" are
-  // the same payload, so there is no second meaning to invent.
+  // WITH NOTHING HIDDEN IT IS THE DIGEST OF THE PAYLOAD THAT WAS SENT — and that is now a
+  // DIFFERENT number from the journal's `contentDigest`, which is the one correction this block
+  // has taken since it was written. It used to assert the two were equal, and they were, because
+  // both were `digest(shown payload)`.
+  //
+  // The journal's field moved meaning deliberately: `contentDigest` is taken over
+  // `GateRequest.binding` so that `Engine`'s dispatch can RE-DERIVE it and refuse a payload that
+  // has changed since the approval — the TOCTOU that let an approved `SAFE` dispatch as `EVIL`.
+  // The displayed payload cannot be re-derived (it carries `costSoFarUsd`, and an `onGate` hook
+  // may have rewritten it), so one journaled digest cannot be both. This file's own subject is
+  // unaffected and is what the two assertions below keep: the digest a CHANNEL is handed
+  // describes the bytes that channel was sent, on both branches, computed here and never
+  // borrowed from the journal.
   const open = await gatedRun({ ...REDACTING, delivery: { channels: ["spy"] } }, { requester: question });
   const raised = (await open.engine.openGates(open.runId))[0]!;
-  assert.equal(open.spy.seen[0]!.gate.contentDigest, raised.contentDigest);
+  assert.equal(
+    open.spy.seen[0]!.gate.contentDigest,
+    digest(open.spy.seen[0]!.payload),
+    "the channel's digest is of the tree the channel was sent",
+  );
+  assert.notEqual(
+    open.spy.seen[0]!.gate.contentDigest,
+    raised.contentDigest,
+    "and it is NOT the journal's, which pins what the approval binds rather than what was shown",
+  );
 });
 
 test("THE DIGEST DESCRIBES THE BYTES THAT WERE SENT, NOT THE ONES THAT WERE RAISED", async () => {

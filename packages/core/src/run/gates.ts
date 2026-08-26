@@ -45,6 +45,26 @@ export interface GateRequest {
   readonly policyRef: string;
   /** Rendered server-side, so `contentDigest` pins what the approver actually saw. */
   readonly payload: unknown;
+  /**
+   * The half of `payload` an approval BINDS — what `contentDigest` is taken over when it is
+   * supplied, and what a re-derivation at dispatch time is compared against.
+   *
+   * IT EXISTS BECAUSE A PAYLOAD CAN CARRY TELEMETRY. The engine's gate payload includes
+   * `costSoFarUsd`, which is the run's cumulative spend and moves whenever any sibling
+   * commits: measured on a real Engine, a gate raised alongside one agent turn was shown
+   * `costSoFarUsd: 0` while the projection a dispatch re-derives from had already reached
+   * `0.000027`. `digest(payload)` therefore cannot be recomputed later, so a check built on
+   * it would refuse legitimate approvals — and a fail-closed check that fires on noise is a
+   * denial of service on the oversight path rather than a guard on it.
+   *
+   * So the caller says which part is the question and which part is the ticker. Whatever it
+   * names must be a pure function of graph, node, Task and channel state, or the check it
+   * enables cannot survive the restart invariant 1 requires it to survive.
+   *
+   * Omitted means the whole payload binds, which is right for any caller whose payload is
+   * already re-derivable, and is what every embedder driving the broker by hand gets.
+   */
+  readonly binding?: unknown;
   readonly approvers?: readonly string[];
   /**
    * Subjects barred from deciding this gate whatever else admits them — `gate.raised`'s
@@ -361,7 +381,7 @@ export class HumanGateBroker {
 
     const raisedAt = this.#now();
     const gateId = newGateId(raisedAt);
-    const contentDigest = digest(req.payload);
+    const contentDigest = bindingDigestOf(req);
     // THE SAME `isPositiveWholeMs` `ephemeralOf` APPLIES, AND THIS IS THE SOURCE THAT
     // OUTRANKS IT. `#deadlineOf` reads the JOURNALED deadline first and an operator's
     // re-supplied SLA last, so guarding only the last one left the strongest source
@@ -856,7 +876,7 @@ export class HumanGateBroker {
       // Not yet known — the append that made this gate durable has not been projected.
       // A channel does not need it; the projection is authoritative once it exists.
       raisedAtSeq: 0,
-      contentDigest: digest(req.payload),
+      contentDigest: bindingDigestOf(req),
       payload: req.payload,
       slaMs: req.slaMs,
       deadline,
@@ -2359,6 +2379,21 @@ function boundedLimit(supplied: number | undefined): number {
  * `raisedAtSeq` is `0` because the append has not happened; nothing here reads it, and
  * `#summarize` already carries the same placeholder for the same reason.
  */
+/**
+ * What `contentDigest` is taken over, in ONE place.
+ *
+ * Two sites compute it — `raise`, which journals it, and `#summarize`, which hands it to a
+ * console before any projection exists — and they have to agree, because the console shows
+ * the approver a digest and the journal is what a later dispatch checks against. Two
+ * spellings of one rule is the defect this file's `prospectiveRecord` next door already
+ * exists to prevent, arriving one field over.
+ *
+ * See `GateRequest.binding` for why the digest is not simply `digest(payload)`.
+ */
+function bindingDigestOf(req: GateRequest): string {
+  return digest(req.binding === undefined ? req.payload : req.binding);
+}
+
 function prospectiveRecord(
   req: GateRequest,
   gateId: GateId,

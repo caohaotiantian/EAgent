@@ -532,10 +532,22 @@ test("narrowGateRequest — exclusions only GROW, editable channels only SHRINK"
   assert.deepEqual(Object.keys(forged).sort(), ["allowEdit", "excludedApprovers", "payload"]);
 });
 
-test("`onGate` ENRICHES WHAT THE HUMAN SEES, and the digest pins the enriched payload", async () => {
-  // `gate.raised` carries `contentDigest`, not the payload — deliberately, so the record pins
-  // what the approver saw without duplicating it. So the observable proof that the enrichment
-  // reached the human is that the DIGEST MOVED: it is computed inside `raise`, after this hook.
+test("`onGate` ENRICHES WHAT THE HUMAN SEES, and does NOT thereby move what is BOUND", async () => {
+  // THE PROOF USED TO BE THE DIGEST, AND IT IS NOW THE PAYLOAD ITSELF, because the digest
+  // stopped being a proxy for the display and became the binding.
+  //
+  // `contentDigest` is taken over `GateRequest.binding` — the re-derivable half of the question
+  // — because `#approvalStillCovers` re-derives it at dispatch and refuses a payload that has
+  // changed since the approval. A hook's output cannot be re-derived at dispatch (an extension
+  // is not a pure function of the journal), so a digest that moved with the enrichment could not
+  // be checked against anything, and the CRITICAL finding it exists to close would still be open.
+  //
+  // The property that actually matters is unchanged and is asserted DIRECTLY below, off
+  // `openGates`, which is stronger than the digest ever was: the enrichment reaches the human.
+  // The second assertion is the new half — an extension may widen or narrow the VIEW and may not
+  // touch what the approval covers. An `onGate` hook that could move the binding would be an
+  // extension deciding what an approval authorizes, which is the direction "oversight only
+  // tightens" forbids.
   const gateSpec = (point: string) =>
     ({
       ...spec(point),
@@ -551,7 +563,7 @@ test("`onGate` ENRICHES WHAT THE HUMAN SEES, and the digest pins the enriched pa
       ],
     }) as unknown as GraphSpec;
 
-  const run = async (body?: HookBody): Promise<{ digest: string; applied: string[] }> => {
+  const run = async (body?: HookBody): Promise<{ digest: string; applied: string[]; payload: unknown }> => {
     const hooks = new HookRegistry();
     if (body !== undefined) hooks.register("hook/guard@stable", body);
     const store = new MemoryStateStore({ now: () => NOW });
@@ -578,7 +590,9 @@ test("`onGate` ENRICHES WHAT THE HUMAN SEES, and the digest pins the enriched pa
     for await (const ev of store.read(runId, 1)) {
       if (ev.type === "hook.applied") applied.push((ev.payload as { point: string }).point);
     }
-    return { digest: String(open.contentDigest), applied };
+    const shown = (await engine.openGates(runId)).find((g) => g.gateId === open.gateId);
+    assert.ok(shown, "the open gate must be listed with its rendered payload");
+    return { digest: String(open.contentDigest), applied, payload: shown.payload };
   };
 
   const plain = await run();
@@ -588,7 +602,14 @@ test("`onGate` ENRICHES WHAT THE HUMAN SEES, and the digest pins the enriched pa
 
   assert.deepEqual(plain.applied, [], "no hook, nothing journaled");
   assert.deepEqual(enriched.applied, ["onGate"], "the enrichment is journaled as onGate");
-  assert.notEqual(enriched.digest, plain.digest, "the digest must pin the ENRICHED payload, not the original");
+
+  // THE HUMAN SEES IT — the whole point of the hook, asserted on the bytes rather than on a hash.
+  assert.equal((plain.payload as Record<string, unknown>)["risk"], undefined, "nothing added it without the hook");
+  assert.equal((enriched.payload as Record<string, unknown>)["risk"], "high", "the enrichment must reach the approver");
+
+  // AND IT DOES NOT MOVE THE BINDING. Same node, same Task, same channel state, same arguments:
+  // the same action is authorized whatever the console was told about it.
+  assert.equal(enriched.digest, plain.digest, "an extension may change the VIEW and never what the approval binds");
 });
 
 // ── preNode ──────────────────────────────────────────────────────────────────

@@ -137,6 +137,7 @@ import {
   FunctionRegistry,
   ModelRegistry,
   ToolRegistry,
+  type FunctionBody,
   type FunctionOutcome,
   type Message,
   type ModelRequest,
@@ -406,6 +407,33 @@ function seedFromKey(key: string): number {
   return seed;
 }
 
+/**
+ * THE SEAM THAT MAKES `NodeSpec.timeoutMs` BOUND A SANDBOXED `function` BODY.
+ *
+ * `#withNodeDeadline` is a `Promise.race` on this thread. A body that never yields owns the
+ * thread, the timer cannot fire, and the Task's own deadline is not merely late — it is
+ * unreachable. Measured through `Engine.advance` on a graph declaring `timeoutMs: 200` with a
+ * body of `for (let i = 0; i < 4e9; i++)`: **2,332 ms, status `succeeded`.** The only bound in
+ * the product was a hardcoded 30s inside `resources/functions.ts` that no flag and no graph
+ * field reached.
+ *
+ * `vm`'s per-call `timeout` DOES terminate synchronous execution, and it is the only thing in
+ * this process that can. It is fixed when the realm is compiled, and nothing on the path from
+ * here to the compiler carries a node: `FunctionRegistry`'s loader seam is `(ref) => body`, and
+ * the CLI builds the loader at boot with no graph in hand. So a loaded body carries a request to
+ * recompile itself at another deadline, under this symbol — defined by `REBIND_DEADLINE` in
+ * `resources/functions.ts`, which is where the whole argument, and the list of what remains
+ * unbounded, is written down. `Symbol.for` on both sides rather than an export because
+ * `src/index.ts` re-exports that module wholesale into the pinned public surface.
+ *
+ * The two sides agree only by the string, so nothing here proves the bound is live.
+ * `test/run/function-timeout-bounded.test.ts` measures the wall clock through `Engine.advance`
+ * for exactly that reason: rename either side and it goes red.
+ */
+const REBIND_DEADLINE = Symbol.for("@loom/core:function.rebindDeadline");
+
+type Rebindable = { [REBIND_DEADLINE]?: (callTimeoutMs: number) => FunctionBody };
+
 const OUTCOME_KEYS = ["writes", "take", "retry"] as const;
 
 function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
@@ -584,6 +612,17 @@ interface NodeOutcome {
   readonly error?: LoomError;
   readonly gate?: {
     readonly payload: unknown;
+    /**
+     * What an approval of this gate BINDS — see `#gateBinding`.
+     *
+     * It rides on the outcome rather than being computed at `#commit`, and that is not
+     * arrangement: `payload` is rendered in the BODY phase, against the projection as it stood
+     * before this wave committed anything, and the binding has to be taken from the same
+     * projection or the approval would cover a state the approver was never shown.
+     *
+     * Absent on a MIRROR, which is the only gate whose payload comes from another run.
+     */
+    readonly binding?: unknown;
     readonly policyRef: string;
     readonly auth: GateAuthorization;
     /**
@@ -2498,6 +2537,8 @@ export class Engine {
       if (node.type === "human_gate" || settled.decision !== "approve") {
         return this.#applyGateDecision(settled, node, ctx.graph.plans[node.id]?.outboundEdges ?? []);
       }
+      const stale = this.#approvalStillCovers(ctx, p, node, task, settled);
+      if (stale !== undefined) return stale;
       return this.#dispatch(ctx, p, w);
     }
 
@@ -2603,6 +2644,7 @@ export class Engine {
         gate: {
           policyRef: node.humanGate?.ref ?? `policy:${node.id}`,
           payload: this.#gatePayload(ctx, p, node, task),
+          binding: this.#gateBinding(ctx, p, node, task),
           auth: gateAuthorizationOf(node, p),
           schedule: scheduleOf(node),
         },
@@ -2818,6 +2860,7 @@ export class Engine {
           gate: {
             policyRef: w.node.humanGate?.ref ?? "",
             payload: this.#gatePayload(ctx, p, w.node, w.task),
+            binding: this.#gateBinding(ctx, p, w.node, w.task),
             auth: gateAuthorizationOf(w.node, p),
             schedule: scheduleOf(w.node),
           },
@@ -2826,6 +2869,65 @@ export class Engine {
       case "subgraph":
         return this.#runSubgraph(ctx, p, w);
     }
+  }
+
+  /**
+   * DOES THE APPROVAL ON FILE STILL COVER WHAT THIS TASK IS ABOUT TO DO?
+   *
+   * The check the whole oversight layer was missing. An approval bound the graph and the Task;
+   * it never bound the ARGUMENTS, so anything that wrote a channel the gated node reads between
+   * the raise and the dispatch changed what ran — and `openGates` went on serving the raise-time
+   * payload under an unchanged digest, so the console kept showing the old question. Measured
+   * before this method existed, on a graph whose only extra node was an ordinary same-wave
+   * `function`: shown `state={"target":"SAFE"}`, tool received `body="EVIL"`, run `succeeded`.
+   *
+   * WHAT IT COVERS, named rather than claimed total: every gate this Engine raised for a node's
+   * own execution — the policy `gate` effect on `function`, `agent`, `evaluator`, `router`,
+   * `tool` and `subgraph` nodes. It does NOT cover a `human_gate` node (approving one completes
+   * it; nothing is dispatched, so there is no payload to drift) and it does NOT cover a MIRROR,
+   * which returns above: a mirror's payload is another run's channel state and cannot be
+   * re-derived here. That is not a hole — the child raises its own gate on the node that
+   * actually executes, and this same check runs there, in the child.
+   *
+   * A MISMATCH FAILS THE TASK. IT DOES NOT RE-RAISE, and the alternative was real: re-raising
+   * would show the human the new payload, which is the friendlier behaviour and the wrong one.
+   *
+   *   - It hands whoever can write the channel an unbounded supply of fresh approval requests
+   *     aimed at a human. Approval fatigue as an attack, with the run alive throughout.
+   *   - The second gate looks exactly like a first gate. Nothing the approver sees says an
+   *     earlier approval was just voided, and the one person deciding is the one not reading
+   *     the journal.
+   *   - It is the choice this file already makes next door. `#applyGateDecision` fails the Task
+   *     on a decision it cannot read rather than manufacturing a human's answer; the system does
+   *     not get to invent the second half of a conversation either.
+   *
+   * `E_GATE_REQUIRED`, so it is RUN-fatal rather than task-fatal, for the reason `sodOn` gives
+   * one screen down and `RUN_FATAL_CODES` gives at the top: an ordinary failed Task takes an
+   * `error` edge, and a join with `onBranchError: "skip"` absorbs it into a run that reports
+   * **succeeded**. A guard on the approval path that an error edge can route around is not a
+   * guard. Re-approving is then a deliberate human act through `rewind`, which is what it
+   * should cost.
+   */
+  #approvalStillCovers(
+    ctx: RunContext,
+    p: RunProjection,
+    node: NodeSpec,
+    task: TaskRecord,
+    gate: GateRecord,
+  ): NodeOutcome | undefined {
+    const now = digest(this.#gateBinding(ctx, p, node, task));
+    if (now === gate.contentDigest) return undefined;
+    return {
+      status: "failed",
+      writes: {},
+      usage: { ...ZERO_USAGE },
+      error: err.policy(
+        CODES.E_GATE_REQUIRED,
+        `gate "${gate.gateId}" approved a payload for node "${node.id}" that is no longer the one this task would execute — ` +
+          `it was approved at ${gate.contentDigest} and now derives ${now}, so the approval on file does not cover this action`,
+        { details: { nodeId: node.id, taskId: task.taskId, gateId: gate.gateId, approvedDigest: gate.contentDigest, currentDigest: now } },
+      ),
+    };
   }
 
   /**
@@ -3054,14 +3156,52 @@ export class Engine {
    * in one body return the same instant. That is correct for a deterministic step and it is the
    * property that makes replay total; a body needing elapsed real time is describing an effect,
    * and effects are declared.
+   *
+   * UNDER REPLAY THE LEASE IS SERVED, NOT FOLDED, and without that this whole argument was false
+   * on the one path it exists for. A replay runs its own shadow run: it appends its OWN
+   * `task.leased`, `RunLog` stamps every append `now: this.#now()` — `Date.now` on the CLI path,
+   * because `loom replay` injects no clock — and `prepare` prefers that caller value over the
+   * shadow store's. So the fold below read the REPLAY's wall clock, and two replays of one run
+   * answered 1204 ms apart, measured: the delta is just the pause between them, which is the
+   * point. `ReplayEffects.leaseAt` hands back the instant the RECORDING leased this
+   * `(taskId, attempt)`. A miss falls through to the shadow's own lease — the replay ran a body
+   * the recording did not — and is reported as `derivedClocks`, which is what makes
+   * `ReplayReport.hermetic` honest rather than optimistic.
    */
   #bodyClock(p: RunProjection, taskId: TaskId): () => number {
-    const at = p.tasks[taskId]?.lease?.at ?? p.startedAt;
+    const task = p.tasks[taskId];
+    const recorded = this.#replay?.leaseAt(taskId, task?.attempt ?? 1);
+    const at = recorded ?? task?.lease?.at ?? p.startedAt;
     return () => at;
   }
 
+  /**
+   * The body a node runs, compiled to the node's OWN deadline where that is possible.
+   *
+   * ONE HELPER, TWO CALLERS, and the reason is the one `#dispatch` gives about undeclared
+   * writes: "a check applied per-caller is a check that the next node type forgets."
+   * `#runFunction` and `#runEvaluator`'s assertion arm are the two places a `FunctionBody` is
+   * invoked, and every previous change to this contract — the seed, the clock, the outcome
+   * shape — landed at one of them a commit before the other.
+   *
+   * See `REBIND_DEADLINE` above for what the bound covers. Three cases end here:
+   *   - a sandboxed body with a declared `timeoutMs` — recompiled, and TERMINATED at that number;
+   *   - a sandboxed body with none — keeps `FunctionLoaderOptions.callTimeoutMs`, default 30s;
+   *   - a hand-registered body — host code, no realm, nothing to bound. Returned unchanged, and
+   *     `timeoutMs` bounds its Task's outcome and not the body. That is A13.
+   */
+  #functionBody(ref: string, node: NodeSpec): FunctionBody {
+    const body = this.functions.require(ref);
+    const rebind = (body as Rebindable)[REBIND_DEADLINE];
+    // `> 0` and not `!== undefined`: `vm` rejects a non-positive timeout outright, and a graph
+    // that declared one would lose the 30s default as well.
+    const ms = node.timeoutMs;
+    if (rebind === undefined || ms === undefined || !(ms > 0)) return body;
+    return rebind(ms);
+  }
+
   async #runFunction(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
-    const body = this.functions.require(w.node.function!.ref);
+    const body = this.#functionBody(w.node.function!.ref, w.node);
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
     const raw = (await body(view, {
       taskId: w.task.taskId,
@@ -3143,6 +3283,24 @@ export class Engine {
       const coord = encodeBranch(t.branch);
       if (t.state === "succeeded") {
         contributing.add(coord);
+        // A CONTRIBUTION THIS JOIN MAY FOLD IS ONE THAT WAS HELD FOR IT, and a member that
+        // already applied its own writes is not one. `#immediateReduce` applies a Task's
+        // writes at commit whenever `writesHeldForJoin` is false; folding those again here
+        // adds them to state a SECOND time, and every non-idempotent reducer —
+        // `append_ordered`, `sum` — silently doubles.
+        //
+        // A real fan-out never showed this, which is why it survived: its members sit at
+        // depth, `#immediateReduce` held them, and the join was their only application. The
+        // shape that breaks is a STATIC sibling-branch join — arms wired `kind: "join"` with
+        // no fan-out above them, so every member is at the root coordinate and every member
+        // already reduced. Measured on a real Engine before this line existed: three branches
+        // each writing one entry to an `append_ordered` channel produced SIX, and the run
+        // compiled and succeeded.
+        //
+        // Per member rather than per join, because the two can mix: a join whose `branches`
+        // names both a fanned-out node and a static sibling has some members held and some
+        // applied, and the base `stateAtPrefix` below already carries the applied ones.
+        if (!writesHeldForJoin(t.branch)) continue;
         for (const [channel, value] of Object.entries(t.writes)) {
           const list = byChannel.get(channel) ?? [];
           list.push({ branch: t.branch, nodeId: t.nodeId, iteration: t.iteration, value });
@@ -3243,7 +3401,7 @@ export class Engine {
   async #runEvaluator(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
     const ev = w.node.evaluator!;
     if (ev.kind === "assertion") {
-      const body = this.functions.require(ev.ref);
+      const body = this.#functionBody(ev.ref, w.node);
       const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
       // THE SAME CONTRACT, THE SAME CHECK. An `assertion` evaluator's ref IS a function body,
       // and this arm read `out.writes` exactly as `#runFunction` did — so the identical authoring
@@ -3629,6 +3787,14 @@ export class Engine {
           { taskId: w.task.taskId },
         ),
       );
+
+      // A TURN THAT DID NOT END BECAUSE THE MODEL WAS FINISHED IS NOT AN ANSWER — see
+      // `turnRefusal`. Checked AFTER the appends on purpose: the call happened and cost money,
+      // so `model.called` and `effect.completed` must record it, the reservation must settle at
+      // the real cost, and a replay must re-derive the same refusal from the same journal rather
+      // than find a turn that started and never finished.
+      const refusal = turnRefusal(finish, `node "${w.node.id}" turn ${String(turn)}`, (assistant?.content ?? "").length, turnUsage.outputTokens);
+      if (refusal !== undefined) return { status: "failed", writes: {}, usage, error: refusal };
 
       finalText = assistant?.content ?? finalText;
       const calls = assistant?.toolCalls ?? [];
@@ -4064,6 +4230,8 @@ export class Engine {
 
     const adapter = this.models.require();
     let summary = "";
+    let finish = "stop";
+    let outputTokens = 0;
     for await (const ev of adapter.stream(
       {
         model: "compaction",
@@ -4073,8 +4241,19 @@ export class Engine {
       },
       ctx.abort.signal,
     )) {
-      if (ev.type === "done") summary = ev.message.content;
+      if (ev.type === "done") {
+        summary = ev.message.content;
+        finish = ev.finishReason;
+        outputTokens = ev.usage.outputTokens;
+      }
     }
+    // THE SECOND SITE WITH THE SAME DEFECT, and the quieter one: a truncated summary is a
+    // silent DELETION of the prior turns it was folding, and the ladder writes it in their
+    // place with nothing to say the tail is missing. FX13 was found on the agent turn; this
+    // one had never been looked at. Raised before the journal append, unlike `#runAgent`'s:
+    // there is no answer to record here, only a replacement that must not be made.
+    const refusal = turnRefusal(finish, `node "${w.node.id}" context summary ${String(ordinal)}`, summary.length, outputTokens);
+    if (refusal !== undefined) throw refusal;
 
     await this.#serialize(() =>
       ctx.log.append(
@@ -4401,8 +4580,13 @@ export class Engine {
 
       // `onGate` — the human's view, narrowed. Only `payload`, `excludedApprovers` and
       // `allowEdit` are reachable: `approvers`, `defaultAction` and `onTimeout` carry AUTHORITY,
-      // and an extension that could add an approver would be granting it. Runs before `raise`,
-      // so `contentDigest` pins the payload the approver actually sees.
+      // and an extension that could add an approver would be granting it.
+      //
+      // It runs before `raise`, so a narrowed payload is the payload the approver sees — but
+      // `contentDigest` is taken over `binding` and NOT over this, which is the correction this
+      // comment used to have backwards. A hook that could shrink the payload could otherwise
+      // shrink what the approval covers, and "the approver saw less" must never mean "less is
+      // bound". What a hook narrows is the VIEW; what the approval binds is the engine's.
       //
       // Journaled through `ctx.log` directly rather than `#journalHooks`, which goes through
       // `#serialize`: this code path is already on that chain and awaiting a second entry from
@@ -4441,6 +4625,20 @@ export class Engine {
         nodeId: w.node.id,
         policyRef: outcome.gate!.policyRef,
         payload: view.payload,
+        // WHAT THE APPROVAL BINDS, and it is deliberately NOT `view.payload`. Two reasons, and
+        // both are why this is a separate field rather than a digest of the payload:
+        //
+        //   - the payload carries `costSoFarUsd`, which moves whenever any sibling commits, so
+        //     re-deriving it later is not possible (see `#gateBinding`);
+        //   - an `onGate` hook may have narrowed `view.payload`. Narrowing what a human is shown
+        //     must not narrow what the approval covers, or an extension could shrink the bound
+        //     set to nothing and hand every argument back to the race this closes.
+        //
+        // A MIRROR IS EXCLUDED. Its payload is the child run's channel state, nothing here can
+        // re-derive it, and binding it to this node's inputs would refuse every subgraph
+        // approval. The child raises its own gate on the node that executes, and
+        // `#approvalStillCovers` runs there.
+        ...(outcome.gate!.binding === undefined ? {} : { binding: outcome.gate!.binding }),
         allowEdit: view.allowEdit ?? auth.allowEdit,
         ...(auth.approvers.length === 0 ? {} : { approvers: auth.approvers }),
         // ABSENT stays absent and is never `[]` — a rule that bars nobody is a rule the
@@ -4908,7 +5106,12 @@ export class Engine {
     if (Object.keys(outcome.writes).length === 0) return undefined;
     // Inside a fan-out: hold. The join folds every sibling in branch order, so
     // applying now would make the result depend on completion order.
-    if (w.task.branch.segments.length > 0) return undefined;
+    //
+    // `#foldJoin` asks the SAME question of each member, through the same helper, and it has
+    // to be the same question: a Task this returns early for is one the join must fold, and a
+    // Task it applies is one the join must skip. Two spellings of one predicate is how the
+    // double-count got in — the fold had no predicate at all.
+    if (writesHeldForJoin(w.task.branch)) return undefined;
 
     const wave: Record<string, readonly Contribution[]> = {};
     for (const [channel, value] of Object.entries(outcome.writes)) {
@@ -5537,8 +5740,17 @@ export class Engine {
     return out;
   }
 
+  /**
+   * What the human is shown.
+   *
+   * `observedChannels`, NOT `node.reads`, and that is the same one-word correction the taint
+   * rule and `dataClassification` already carry two hundred lines up. A `tool` node's arguments
+   * are resolved against `scopeFor` — every channel, declared or not — so a channel named only
+   * in `tool.args` reaches the tool while being absent from `reads`. Rendering `reads` showed
+   * the approver a question that omitted the very value the tool was about to receive.
+   */
   #gatePayload(ctx: RunContext, p: RunProjection, node: NodeSpec, task: TaskRecord): unknown {
-    const view = viewFor(p, ctx.graph.spec.channels, task.branch, node.reads ?? []);
+    const view = viewFor(p, ctx.graph.spec.channels, task.branch, observedChannels(node));
     return {
       node: node.id,
       task: task.taskId,
@@ -5547,6 +5759,94 @@ export class Engine {
       state: Object.fromEntries(view.visible.map((c) => [c, view.get(c)])),
       costSoFarUsd: p.usage.costUsd,
     };
+  }
+
+  /**
+   * WHAT THE APPROVAL BINDS — the half of the payload that decides what will execute.
+   *
+   * README said "an approval binds the graph it was shown". It bound the graph and the Task
+   * and nothing else: `contentDigest` appeared in this file three times and all three were
+   * comments, so no code anywhere compared what an approver was shown against what was later
+   * dispatched. Measured on a real Engine before this existed — one gated `fs.write` whose
+   * `body` is `${target}`, one ordinary same-wave `function` node writing `target`:
+   *
+   *     gate payload shown : state={"target":"SAFE"}
+   *     tool received      : body="EVIL"
+   *     run                : succeeded
+   *
+   * Every member is a pure function of graph, node, Task and channel state, because
+   * `#dispatchApproved` re-derives this from a fresh projection — possibly in another process
+   * after a restart — and compares. That is why `costSoFarUsd` is in the PAYLOAD and not here:
+   * it is the run's cumulative spend, it moves whenever any sibling commits, and a check that
+   * fired on it would refuse honest approvals. See `GateRequest.binding`.
+   *
+   *   - `spec` is the node itself. `graph.mutated` only ever APPENDS nodes and edges, so an
+   *     existing node's digest is stable across a mutation — this pins the claim README makes,
+   *     at the one node the approval is actually about.
+   *   - `state` is the view HASH rather than the values: the binding is machine-read, and the
+   *     values are already in the payload the human reads.
+   *   - `args` is a digest for a stronger reason than compactness. Resolved arguments can hold
+   *     a `secret_ref` channel's value, and a gate payload is rendered to a human and handed
+   *     to a delivery dispatcher. A fingerprint binds what the tool will receive without
+   *     disclosing it.
+   *
+   * The `try` around the fingerprint is DEFENSIVE and is not known to be reachable from a
+   * graph — said plainly rather than dressed up as a measurement. `resolveArgs` does not throw
+   * on a missing channel (it yields `undefined` or leaves the literal); what can throw is
+   * `digest`, on a bigint, a symbol or a non-finite number — and a channel holding one of those
+   * could not have been committed, because the journal content-addresses every write. It is
+   * kept because raising a gate must not START failing for a graph that used to reach a human,
+   * and because the sentinel is deterministic: the same unresolvable argument produces the same
+   * string at dispatch, so the check passes and the node fails where it always failed, with its
+   * own error rather than with this one.
+   */
+  #gateBinding(ctx: RunContext, p: RunProjection, node: NodeSpec, task: TaskRecord): unknown {
+    const view = viewFor(p, ctx.graph.spec.channels, task.branch, observedChannels(node));
+    return {
+      node: node.id,
+      task: task.taskId,
+      spec: digest(node),
+      posture: ctx.graph.plans[node.id]?.posture ?? "out",
+      irreversibility: this.#irreversibilityOf(node),
+      state: view.hash,
+      ...(node.tool === undefined ? {} : { args: this.#argsFingerprint(ctx, p, node, task) }),
+      // DELEGATED INPUTS ARE ARGS TOO. `observedChannels` scans `reads` and `tool.args` only,
+      // and `validate.ts` checks a subgraph input's parent channel against `spec.channels`
+      // rather than against `reads` — so a graph may delegate a channel it never declares, and
+      // `state` above would not cover it. Measured before this line existed: an approver shown
+      // `state: {}` approved, a same-wave sibling wrote 999 to the delegated channel, and the
+      // child committed 1998. Same TOCTOU as the `tool.args` one, one field over.
+      ...(node.subgraph?.inputs === undefined ? {} : { delegated: this.#delegatedFingerprint(ctx, p, node, task) }),
+    };
+  }
+
+  /**
+   * The VALUES a subgraph node will hand its child, fingerprinted at the projection the approver
+   * was shown. Mirrors `#argsFingerprint` deliberately, including its failure shape.
+   */
+  #delegatedFingerprint(ctx: RunContext, p: RunProjection, node: NodeSpec, task: TaskRecord): string {
+    try {
+      const scope = scopeFor(p, ctx.graph.spec.channels, task.branch);
+      const inputs = node.subgraph?.inputs ?? {};
+      const bound: Record<string, unknown> = {};
+      for (const [childChannel, parentChannel] of Object.entries(inputs)) {
+        bound[childChannel] = (scope as Record<string, unknown>)[String(parentChannel)];
+      }
+      return digest(bound);
+    } catch (e) {
+      return `unresolved:${toLoomError(e).code}`;
+    }
+  }
+
+  #argsFingerprint(ctx: RunContext, p: RunProjection, node: NodeSpec, task: TaskRecord): string {
+    try {
+      const scope = scopeFor(p, ctx.graph.spec.channels, task.branch);
+      return digest(resolveArgs(node.tool?.args ?? {}, scope));
+    } catch (e) {
+      // Deterministic in the failure too: the code, not the message, because a message can
+      // carry a value and this string is compared across processes.
+      return `unresolved:${toLoomError(e).code}`;
+    }
   }
 }
 
@@ -5590,6 +5890,24 @@ function pick(obj: Readonly<Record<string, unknown>>, keys: readonly string[]): 
   const out: Record<string, unknown> = {};
   for (const k of keys) out[k] = obj[k];
   return out;
+}
+
+/**
+ * Does this Task HOLD its writes for a join, or apply them itself at commit?
+ *
+ * THE ONE PREDICATE, ASKED FROM BOTH SIDES. `#immediateReduce` asks "may I apply now?" and
+ * `#foldJoin` asks "was this already applied?", and those are the same question inverted —
+ * so they must be one function. They were not: only the first had a rule, and the fold
+ * re-applied every member it had no reason to skip.
+ *
+ * Depth is the whole answer. A Task inside a fan-out has a non-empty branch coordinate, its
+ * writes are held so its join can fold the siblings in branch order (associativity is what
+ * makes that equal a one-level fold), and applying at commit would make the result depend on
+ * which sibling finished first. A Task AT the root coordinate has no siblings to be ordered
+ * against, so it applies its own writes and there is nothing left for a join to fold.
+ */
+function writesHeldForJoin(branch: BranchCoordinate): boolean {
+  return branch.segments.length > 0;
 }
 
 function isDescendantBranch(prefix: string, candidate: string): boolean {
@@ -6101,4 +6419,68 @@ export type { GateDecision };
 function exceededLimitUsd(e: LoomError, spentUsd: number): number {
   const limit = (e.details as { readonly limit?: unknown } | undefined)?.limit;
   return typeof limit === "number" && Number.isFinite(limit) ? limit : spentUsd;
+}
+
+/**
+ * The verdict on a finished model turn: `undefined` when it is an answer, an error when it is not.
+ *
+ * FX13. A reasoning model called with an output ceiling below its reasoning budget answered
+ * `finish_reason: "max_tokens"` with `content: ""`. `#runAgent` read `finishReason` only to
+ * journal it, so the empty string was written to the node's channel, folded through a `join`,
+ * approved at a gate, written to disk — and the run reported `succeeded` under a report claiming
+ * three files reviewed, one of which had contributed nothing. Both adapters already DROP a
+ * truncated turn's partial tool calls (`providers/openai.ts`, `providers/anthropic.ts`), so a
+ * truncated turn always arrives with no calls and always ends the loop: the last thing standing
+ * between it and a channel was `parseOutput`, and a node with no `outputSchema` has no check
+ * there at all. `""` is valid free text.
+ *
+ * THE SET, NOT THE ONE REASON THAT WAS SEEN. `FinishReason` is
+ * `stop | tool_use | max_tokens | content_filter | refusal` (`run/registry.ts`); `mapFinish`
+ * reaches `max_tokens`/`tool_use`/`content_filter`/`stop` and `mapStop` reaches
+ * `max_tokens`/`tool_use`/`refusal`/`stop`. Two of those five are an answer. Everything else —
+ * including a reason no adapter in this tree produces, which the replay arm can still read off
+ * an older journal as a bare `string` — REFUSES. Fail closed on the unknown member is the whole
+ * reason this is a `switch` with a `default` and not `finish === "max_tokens"`.
+ *
+ * EMPTINESS IS NOT THE TEST. A turn cut at 4,000 characters is as incomplete as one cut at zero,
+ * and nothing downstream can tell which half went missing. Checking `content === ""` would close
+ * the case that was observed and leave the case that is worse: a partial answer that reads like
+ * a whole one.
+ *
+ * NOT RETRYABLE, DELIBERATELY. `validation` and `policy` are outside `RETRYABLE` (`errors.ts`)
+ * and `#retryDecision` returns early on `!error.retryable`, so no `retry` policy can re-enter
+ * this. That is the point: nothing about the request changed, so the provider truncates again at
+ * the same ceiling and the operator pays twice for the same non-answer. The fix is a bigger
+ * `maxTokens`, and the message says so. Continuing the ReAct loop was the other candidate and is
+ * worse: the truncated message carries no tool call to answer and no content to build on, so the
+ * next turn re-sends the same transcript under the same cap.
+ */
+function turnRefusal(finish: string, where: string, contentChars: number, outputTokens: number): LoomError | undefined {
+  const details = { where, finishReason: finish, contentChars, outputTokens };
+  switch (finish) {
+    case "stop":
+    case "tool_use":
+      return undefined;
+    case "max_tokens":
+      return err.validation(
+        CODES.E_PROVIDER_BAD_REQUEST,
+        `${where}: the model stopped at its output-token ceiling (finishReason "max_tokens") after ` +
+          `${String(outputTokens)} output tokens and ${String(contentChars)} characters of content. ` +
+          `This turn is truncated, not finished — raise the model's max output tokens; retrying at the same ceiling truncates again.`,
+        { details },
+      );
+    case "content_filter":
+    case "refusal":
+      return err.policy(
+        CODES.E_CONTENT_FILTERED,
+        `${where}: the provider ended the turn with finishReason "${finish}" and ${String(contentChars)} characters of content. ` +
+          `A refused turn is not an answer.`,
+        { details },
+      );
+    default:
+      // A reason this build does not know. It cannot be shown to be an answer, so it is not one.
+      return err.validation(CODES.E_PROVIDER_BAD_REQUEST, `${where}: unrecognized finishReason "${finish}"; refusing to treat it as an answer.`, {
+        details,
+      });
+  }
 }
