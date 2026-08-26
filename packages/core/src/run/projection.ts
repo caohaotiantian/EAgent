@@ -90,6 +90,16 @@ export interface TaskRecord {
    * this?" — so folding it in is what makes the scheduler seam usable at all.
    */
   readonly lease?: { readonly workerId: string; readonly at: number; readonly fencingToken: number };
+  /**
+   * WHAT THIS TASK HAS SPENT ACROSS ALL ITS ATTEMPTS, not what its last commit said.
+   *
+   * It used to be `task.committed.usage` assigned verbatim, which is a per-ATTEMPT summary
+   * and therefore two different lies about a retried Task: the first attempt's spend was
+   * overwritten by the second's, and an attempt that is retried appends no commit at all, so
+   * its spend was never here in the first place. It is now accumulated by the same fold that
+   * produces `RunProjection.usage` — see `chargeUsage` — so `Σ tasks[*].usage` and the run
+   * total agree by construction.
+   */
   readonly usage: UsageRecord;
 }
 
@@ -279,6 +289,12 @@ export interface RunProjection {
   readonly tasks: Readonly<Record<TaskId, TaskRecord>>;
   readonly gates: Readonly<Record<GateId, GateRecord>>;
 
+  /**
+   * THE RUN'S SPEND, FOLDED FROM THE EFFECT RECORDS — see `chargeUsage`.
+   *
+   * `wallMs` here is PROVIDER time and deliberately excludes tool time; the trajectory's
+   * `wallMs` deliberately includes it. See `chargeUsage` for why the two numbers differ.
+   */
   readonly usage: UsageRecord;
   /** Reserved-but-not-yet-settled spend. Non-zero mid-flight, zero at rest. */
   readonly reservedUsd: number;
@@ -351,6 +367,8 @@ interface MutableProjection {
   tasks: Record<TaskId, TaskRecord>;
   gates: Record<GateId, GateRecord>;
   usage: UsageRecord;
+  /** Per Task, everything already added to `usage` on its behalf. `chargeUsage` reads it. */
+  usageSeen: Record<TaskId, UsageRecord>;
   reservedUsd: number;
   escalations: Record<string, Posture>;
   ceilings: Record<string, Posture>;
@@ -484,6 +502,7 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     tasks: {},
     gates: {},
     usage: { ...ZERO_USAGE },
+    usageSeen: {},
     reservedUsd: 0,
     outputs: {},
     openEffects: new Set(),
@@ -579,6 +598,104 @@ function upsertTask(p: MutableProjection, id: TaskId, patch: Partial<TaskRecord>
     writes: {},
     usage: { ...ZERO_USAGE },
     ...patch,
+  };
+}
+
+/**
+ * SPEND IS FOLDED FROM THE EFFECT RECORDS, AND A RESTATEMENT CAN ONLY RAISE THE TOTAL.
+ *
+ * This fold used to read `task.committed.usage` and nothing else, and that number is a
+ * per-ATTEMPT summary the engine assembles. It under-states spend twice, both times in the
+ * rewarding direction:
+ *
+ * - It is `ZERO_USAGE` whenever an exception leaves `#executeTask`: `run/engine.ts` 2459
+ *   catches it and returns `{status:"failed", usage: ZERO_USAGE}`, discarding every turn the
+ *   task had already paid for. MEASURED end to end on this tree, one agent node whose second
+ *   turn is refused: `model.called $9` then `task.committed $0`, folding to `usage.costUsd 0`
+ *   beside a journal that says $9 — a projection contradicting its own log.
+ * - It is NOT APPENDED AT ALL for an attempt that is retried — `engine.ts` 4512 writes
+ *   `task.retry_scheduled` and no commit — so a Task whose first attempt burned $0.003 and
+ *   whose second succeeded for $0.003 folded to $0.003.
+ *
+ * THIS IS THE DANGEROUS HALF OF THAT DEFECT, not a reporting blemish. `engine.ts:1237`
+ * re-seeds `PolicyEngine.spentUsd` from `p.usage.costUsd` on the first attach after a
+ * restart, so every dollar missing here is a dollar REFUNDED to a resumed run's budget.
+ * Measured on this tree, over two real Engines and one journal (the fixture is
+ * `test/run/projection-usage.test.ts`): a $14-budget run whose first attempt burned $9 and
+ * was retried folded to `usage.costUsd 0` — the $9 is on `model.called` and there is no
+ * commit at all — so the second process restored $0, took two more turns, and the run
+ * SUCCEEDED having actually paid the provider $27, 1.9x its declared cap. Folding the effect
+ * records, the same second process is refused after one turn with `E_BUDGET_EXHAUSTED`.
+ *
+ * ── The three arms, and why there is a fourth ────────────────────────────────
+ *
+ * | Record | Contributes | Appended |
+ * |---|---|---|
+ * | `model.called` | the turn's whole bill | once per model turn |
+ * | `subgraph.completed` | the CHILD run's whole `usage` | once, when a child run SUCCEEDS |
+ * | `task.committed` / `run.completed` | only the EXCESS over what is already counted | a restatement |
+ *
+ * The excess arm is not the old defect returning. `chargeUsage` remembers, per Task,
+ * everything already added on its behalf, and a restatement adds only `max(0, stated −
+ * seen)` componentwise — so the ordinary paths, where the commit merely re-states the
+ * `model.called` rows, contribute nothing. What it keeps is the one dollar the journal
+ * states ONLY on a commit: `engine.ts` appends `subgraph.completed` on the SUCCESS path
+ * alone (3905), so a FAILED subgraph's child spend reaches the parent through
+ * `task.committed.usage` (3852) or not at all. Dropping the commit entirely would have
+ * opened a fresh refund path while closing two.
+ *
+ * Because `seen` is cumulative per Task rather than per attempt, a retried subgraph whose
+ * child cost grows from $1.00 to $1.50 across attempts charges $1.00 then $0.50 — the
+ * child's cumulative total, counted once.
+ *
+ * ── TOOL TIME IS DELIBERATELY NOT HERE, and the trajectory's is ──────────────
+ *
+ * `tool.called` carries `ms` and no money, and it is NOT an arm. A `UsageRecord` is one
+ * record about PROVIDER work, and this one is copied verbatim into `run.completed.usage`
+ * and into `subgraph.completed.usage`, which a PARENT run then adds to its own — so folding
+ * a child's local tool latency into `wallMs` would leave no field of a parent's `usage`
+ * answering "what did the provider bill". `evolution/trajectory.ts` folds the same journal
+ * and DOES add tool `ms`, because its `wallMs` feeds a latency term that is meant to measure
+ * what the run burned, and thirty seconds in a tool is burned. **The two numbers therefore
+ * differ on purpose, and a `wallMs` here that is smaller than the trajectory's is not a
+ * disagreement.** A run's elapsed duration is `endedAt − startedAt`, which is neither.
+ *
+ * STILL NOT COUNTED ANYWHERE, and out of this fold's reach because no event carries the
+ * money: `#summarizeEffect` (`engine.ts` 4074) calls the provider and journals
+ * `effect.started`/`effect.completed` with no `usage`, and a failed subgraph's child spend
+ * is only recoverable through the commit as above.
+ */
+function chargeUsage(p: MutableProjection, taskId: TaskId | undefined, u: UsageRecord): void {
+  const amount = finiteUsage(u);
+  p.usage = addUsage(p.usage, amount);
+  if (taskId === undefined) return;
+  p.usageSeen[taskId] = addUsage(p.usageSeen[taskId] ?? ZERO_USAGE, amount);
+  upsertTask(p, taskId, { usage: addUsage(p.tasks[taskId]?.usage ?? ZERO_USAGE, amount) });
+}
+
+/**
+ * A journal is written by an appender, and the types are a claim about that appender rather
+ * than about the bytes — so a hand-written or corrupted row can carry `NaN` or a string.
+ * One `NaN` dollar makes `p.usage.costUsd` `NaN` for the rest of the run, and every budget
+ * comparison against `NaN` is FALSE, which turns a cap into no cap on the resume path this
+ * fold feeds. A non-finite component is therefore dropped rather than propagated, and a
+ * negative one is dropped too: a refund is the direction that loosens.
+ */
+function finiteUsage(u: UsageRecord | undefined): UsageRecord {
+  if (u === null || typeof u !== "object") return { ...ZERO_USAGE };
+  const ok = (x: number): number => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
+  return { inputTokens: ok(u.inputTokens), outputTokens: ok(u.outputTokens), costUsd: ok(u.costUsd), wallMs: ok(u.wallMs) };
+}
+
+/** Componentwise `max(0, stated − seen)`: the part of a restatement nothing has counted. */
+function excessUsage(seen: UsageRecord, stated: UsageRecord | undefined): UsageRecord {
+  const over = (a: number, b: number): number => (b > a ? b - a : 0);
+  const s = finiteUsage(stated);
+  return {
+    inputTokens: over(seen.inputTokens, s.inputTokens),
+    outputTokens: over(seen.outputTokens, s.outputTokens),
+    costUsd: over(seen.costUsd, s.costUsd),
+    wallMs: over(seen.wallMs, s.wallMs),
   };
 }
 
@@ -680,7 +797,14 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "run.completed")) {
     p.status = "succeeded";
     p.outputs = { ...e.payload.outputs };
-    p.usage = e.payload.usage;
+    // A RESTATEMENT, NOT THE SOURCE. This was `p.usage = e.payload.usage` — an ASSIGNMENT,
+    // and a no-op only because the engine copies `p.usage` straight back out (`engine.ts`
+    // 5464). The moment the fold started counting the effect records the two could differ,
+    // and an assignment would have let the run total OVERWRITE the per-call sum, restoring
+    // the very under-count `chargeUsage` exists to close. It now adds only the excess, which
+    // is nothing on every journal this engine writes and is money on one written by an
+    // older build that had no `model.called` rows to fold.
+    chargeUsage(p, undefined, excessUsage(p.usage, e.payload.usage));
     p.endedAt = e.ts;
     return;
   }
@@ -729,9 +853,11 @@ function apply(p: MutableProjection, e: JournalEvent): void {
       take: e.payload.take as readonly EdgeId[],
       writes: e.payload.writes,
       attempt: e.payload.attempt,
-      usage: e.payload.usage,
     });
-    p.usage = addUsage(p.usage, e.payload.usage);
+    // `usage` IS A PER-ATTEMPT RESTATEMENT — see `chargeUsage`. Assigning it to the Task and
+    // adding it to the run was this fold's only source of spend, and it under-counted on
+    // every failure path that had already paid and on every attempt that was retried.
+    chargeUsage(p, e.taskId, excessUsage(p.usageSeen[e.taskId] ?? ZERO_USAGE, e.payload.usage));
     return;
   }
   if (isEvent(e, "task.failed") && e.taskId) {
@@ -770,6 +896,21 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   }
   if (isEvent(e, "effect.completed") || isEvent(e, "effect.failed")) {
     p.openEffects.delete(e.payload.key);
+    return;
+  }
+  if (isEvent(e, "model.called")) {
+    // THE TURN'S WHOLE BILL, counted where the call is recorded rather than where a later
+    // summary claims it. Appended once per model turn, and the only place the engine
+    // accumulates provider spend (`engine.ts` 3599 is its sole `addUsage`), so this arm and
+    // that accumulator see the same dollars.
+    chargeUsage(p, e.taskId, e.payload.usage);
+    return;
+  }
+  if (isEvent(e, "subgraph.completed")) {
+    // The child's own `model.called` rows are in the CHILD's journal, which this fold never
+    // reads, so this is the parent's only view of that spend — and the engine charges the
+    // parent's live budget from the same number (`engine.ts` 3918).
+    chargeUsage(p, e.taskId, e.payload.usage);
     return;
   }
 

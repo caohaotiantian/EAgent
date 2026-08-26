@@ -75,6 +75,19 @@ export interface TrajectoryStep {
   readonly stateOutHash: string;
   readonly actions: readonly TrajectoryAction[];
   readonly status: "succeeded" | "failed" | "skipped" | "cancelled" | "open";
+  /**
+   * The CHANNEL NAMES this step committed, sorted. Never the values — those are behind
+   * `observationDigest`, and a name is graph structure that `graphHash` already states.
+   *
+   * It is here because it is the only evidence in a journal that a `function`, `tool` or
+   * `router` node PRODUCED anything: those nodes bill nothing (`#runFunction` returns
+   * `ZERO_USAGE` and appends no `tool.called`), so a fold that counts only model and tool
+   * calls reads a whole function-only workflow as a run that did nothing. Measured on a real
+   * Engine before this field existed: a one-`function` graph that committed its declared
+   * output folded to `modelCalls 0, toolCalls 0`, scored 0, and was dropped from its own
+   * cohort — the same verdict as a body that returned `{}`.
+   */
+  readonly channelsWritten: readonly string[];
   /** Content-addressed; the payload itself lives in a blob store, not here. */
   readonly observationDigest: Digest;
 }
@@ -116,6 +129,21 @@ export interface Trajectory {
     readonly wallMs: number;
     readonly modelCalls: number;
     readonly toolCalls: number;
+    /**
+     * DISTINCT CHILD RUNS THIS RUN DELEGATED TO — the `childRunId`s named by
+     * `subgraph.started`, counted once each however many attempts named them.
+     *
+     * A parent's journal holds none of the child's `model.called` or `tool.called` rows by
+     * design — that is what keeps a parent's journal the size of the parent — so without
+     * this counter the multi-agent shape is indistinguishable from a run that called
+     * nothing. Measured on a real Engine before it existed: a parent of one `subgraph` node
+     * over a child of one `agent` node folded to `modelCalls 0, toolCalls 0` and scored 0
+     * while the identical INLINE graph scored 0.200.
+     *
+     * `subgraph.started` and not `subgraph.completed`: the engine appends the second on the
+     * success path only (`run/engine.ts:3958`), and a child that ran and failed still ran.
+     */
+    readonly subgraphRuns: number;
   };
   readonly policy: {
     readonly escalations: readonly string[];
@@ -138,7 +166,18 @@ export interface FoldTrajectoryOptions {
   readonly tenantTier?: string;
   /** Buckets an input into a comparable class. Default: the digest's first 8 chars. */
   readonly bucketInput?: (inputs: Readonly<Record<string, unknown>>) => string;
-  /** Graph hashes a human approved. Anything else marks the run as candidate output. */
+  /**
+   * Graph hashes a human approved. Anything else — INCLUDING not answering — marks the run as
+   * candidate output.
+   *
+   * Answer it. It reads as optional because `agent()` and the workflow tests fold journals for
+   * inspection rather than for the corpus, and a required field there would be ceremony; but a
+   * caller that does not name the promoted set has not certified anything, and the fold now
+   * says so. It used to say the opposite: `promotedGraphHashes !== undefined && !has(hash)` is
+   * `false` when the option is omitted, i.e. "produced by a promoted graph", so golden
+   * condition 5 — the one that stops the loop training on its own unreviewed output — passed
+   * vacuously for every caller in the tree.
+   */
   readonly promotedGraphHashes?: ReadonlySet<string>;
 }
 
@@ -175,8 +214,79 @@ export function foldTrajectory(
   let gatesRaised = 0;
   let modelCalls = 0;
   let toolCalls = 0;
+  let runTotal: UsageRecord | undefined;
+  const childRuns = new Set<string>();
   let stateHash = "";
-  const usage = { costUsd: 0, tokens: 0, wallMs: 0 };
+  /**
+   * SPEND IS FOLDED FROM THE EFFECT RECORDS, AND A RESTATEMENT CAN ONLY RAISE THE TOTAL —
+   * the same four arms, in the same order, as `run/projection.ts`'s `chargeUsage`.
+   *
+   * | Record | Contributes | Appended |
+   * |---|---|---|
+   * | `model.called` | the turn's whole bill | once per model turn |
+   * | `tool.called` | `ms` only, and NOT through `charge` — see below | once per tool call |
+   * | `subgraph.completed` | the CHILD run's whole `usage` | once, when a child run SUCCEEDS |
+   * | `task.committed` / `run.completed` | only the EXCESS over what is already counted | a restatement |
+   *
+   * The excess arm is the fix, and it is not the old defect coming back. Reading
+   * `task.committed.usage` VERBATIM was a regression, because that number is a per-ATTEMPT
+   * summary that under-states spend twice in the rewarding direction: it is `ZERO_USAGE`
+   * whenever an exception leaves `#executeTask` (`run/engine.ts:2487` discards every turn
+   * already paid for), and it is not appended at all for an attempt that is retried
+   * (`engine.ts:4565` writes `task.retry_scheduled` and no commit). Charging only
+   * `max(0, stated − seen)` componentwise, against a `seen` that is cumulative PER TASK,
+   * keeps both of those at zero — a commit that merely restates the `model.called` rows
+   * contributes nothing — while keeping the one dollar the journal states on a commit and
+   * nowhere else.
+   *
+   * THAT DOLLAR IS A FAILED SUBGRAPH'S CHILD SPEND. Dropping it was a 500× under-count in
+   * the loosening direction — a defect INTRODUCED by an earlier fix round here, not inherited:
+   * at `86b84c9` this fold charged `task.committed` too and over-counted instead.
+   * `engine.ts:3958` appends `subgraph.completed` on the SUCCESS path
+   * alone, so a failed subgraph states its child's cost on the failing `task.committed`
+   * (`engine.ts:3905`) or nowhere. MEASURED on one real Engine — a child that burns $5.00, a
+   * subgraph task that fails, an error edge to a $0.01 fallback agent, run succeeds — this fold
+   * read $0.01 against a projection of $5.01. Since cost is 20% of the score, the dominant
+   * move against the metric was *fail your subgraph and look cheap*, which is precisely the
+   * measurement gamed by the thing being measured that CLAUDE.md forbids.
+   *
+   * WHAT THIS STILL CANNOT SEE, because no record in a parent's journal carries it:
+   *
+   * - The TOKENS of a failed subgraph. `engine.ts:3905` builds that commit's usage as
+   *   `{...ZERO_USAGE, costUsd, wallMs}`, so the child's token count is stated nowhere in the
+   *   parent. Measured on the fixture above: `costUsd` 5.01 and `tokens` 10,000 — the
+   *   fallback's alone. Cost and wall time are right; tokens read low.
+   * - A subgraph whose parent Task never commits at all — an exception out of `#executeTask`
+   *   returns `ZERO_USAGE` — leaves no row stating the child's spend.
+   *
+   * Both are the same engine gap, and the honest fix is upstream: append `subgraph.completed`
+   * on the failure path too, carrying `childP.usage` whole. This fold cannot do it from here.
+   *
+   * ── TOOL TIME, and why it is not an arm ─────────────────────────────────────
+   *
+   * `tool.called.ms` is added to the reported `wallMs` and DELIBERATELY NOT to `seen`. A
+   * `UsageRecord` is a statement about PROVIDER work — `run.completed.usage` and
+   * `subgraph.completed.usage` are copied verbatim between runs — and it never contains local
+   * tool latency, so folding tool time into `seen` would mask real excess in a restatement.
+   * This `wallMs` still includes it, because it feeds a LATENCY term meant to measure what the
+   * run burned and thirty seconds in a tool is burned. `RunProjection.usage.wallMs` excludes
+   * it. **Expect this `wallMs` to be the larger; that is not a disagreement.** `costUsd`, by
+   * contrast, is now the SAME NUMBER as the projection's on every path, which is a property a
+   * test pins rather than a claim this comment makes.
+   */
+  const spend = { costUsd: 0, inputTokens: 0, outputTokens: 0, wallMs: 0 };
+  const seen = new Map<TaskId, Spend>();
+  /** Tool latency: reported, never `seen`. See above. */
+  let toolMs = 0;
+  const charge = (taskId: TaskId | undefined, u: Spend): void => {
+    const a = finiteSpend(u);
+    spend.costUsd += a.costUsd;
+    spend.inputTokens += a.inputTokens;
+    spend.outputTokens += a.outputTokens;
+    spend.wallMs += a.wallMs;
+    if (taskId === undefined) return;
+    seen.set(taskId, addSpend(seen.get(taskId) ?? ZERO_SPEND, a));
+  };
 
   const stepFor = (id: TaskId): RawStep => {
     let s = steps.get(id);
@@ -215,8 +325,12 @@ export function foldTrajectory(
     }
     if (isEvent(e, "run.completed")) {
       runStatus = "succeeded";
-      usage.costUsd += e.payload.usage.costUsd;
-      usage.wallMs = Math.max(usage.wallMs, e.payload.usage.wallMs);
+      // A FLOOR, NOT AN ARM. `run.completed.usage` is the run total the engine copies out of
+      // `p.usage`, so adding it outright double-counted every dollar; charged as excess AFTER
+      // the fold it can only raise a total the per-call records under-state, never inflate one
+      // they already state. Applied after the loop so the answer does not depend on this event
+      // being last.
+      runTotal = e.payload.usage;
       continue;
     }
     if (isEvent(e, "run.failed")) {
@@ -274,8 +388,8 @@ export function foldTrajectory(
     }
     if (isEvent(e, "model.called")) {
       modelCalls++;
-      usage.costUsd += e.payload.usage.costUsd;
-      usage.tokens += e.payload.usage.inputTokens + e.payload.usage.outputTokens;
+      // The turn's whole bill, counted where the call is recorded. See `spend` above.
+      charge(e.taskId, e.payload.usage);
       const node = opts.graph?.spec.nodes.find((x) => x.id === s.nodeId);
       const ref = node?.agent?.prompt ?? node?.evaluator?.ref;
       const resolved = opts.graph?.resolutionManifest.find((r) => r.ref === ref);
@@ -291,6 +405,9 @@ export function foldTrajectory(
     }
     if (isEvent(e, "tool.called")) {
       toolCalls++;
+      // No cost — a tool call's only price in the journal is its wall time, and that time is
+      // reported without ever entering `seen`. See `spend` above.
+      toolMs += typeof e.payload.ms === "number" && Number.isFinite(e.payload.ms) && e.payload.ms > 0 ? e.payload.ms : 0;
       // Attribute the call to the model turn that asked for it, when there was one:
       // "which phrasing produced which tool sequence" is the question D10.c asks.
       const lastModel = [...s.actions].reverse().find((a) => a.kind === "model");
@@ -312,7 +429,24 @@ export function foldTrajectory(
       s.stateOutHash = stateHash;
       s.writes = { ...e.payload.writes };
       if (e.payload.take.length > 0) s.actions.push({ kind: "route", taken: [...e.payload.take] });
-      usage.costUsd += e.payload.usage.costUsd;
+      // A RESTATEMENT, CHARGED AS EXCESS — never verbatim. See `spend` above for why the
+      // difference is the whole fix: verbatim under-counts, excess recovers a failed
+      // subgraph's child spend and contributes nothing on every other path.
+      charge(e.taskId, excessSpend(seen.get(e.taskId) ?? ZERO_SPEND, e.payload.usage));
+      continue;
+    }
+    if (isEvent(e, "subgraph.started")) {
+      // DELEGATION IS WORK, and this is the only row in a PARENT's journal that says a child
+      // run existed. Counted by `childRunId` so a subgraph re-entered by the parent's retry
+      // policy is one child, not several. See `Trajectory.usage.subgraphRuns`.
+      childRuns.add(e.payload.childRunId);
+      continue;
+    }
+    if (isEvent(e, "subgraph.completed")) {
+      // The child's own `model.called` rows are in the CHILD's journal, so this adds that
+      // run's spend to the parent exactly once rather than twice. The commit that follows
+      // restates the same money and is charged as excess, so it adds nothing.
+      charge(e.taskId, e.payload.usage);
       continue;
     }
     if (isEvent(e, "task.skipped")) {
@@ -324,6 +458,9 @@ export function foldTrajectory(
       continue;
     }
   }
+
+  // The floor, applied once the per-call arms are all in. See `run.completed` above.
+  if (runTotal !== undefined) charge(undefined, excessSpend(spend, runTotal));
 
   const nodeTypes = new Map<NodeId, NodeType>();
   for (const node of opts.graph?.spec.nodes ?? []) nodeTypes.set(node.id, node.type);
@@ -355,16 +492,83 @@ export function foldTrajectory(
       stateOutHash: s.stateOutHash,
       actions: s.actions,
       status: s.status,
+      // NAMES, never values — the values are the digest below. See `channelsWritten`.
+      channelsWritten: Object.keys(s.writes).sort(byCodeUnit),
       // The payload is REPLACED by its digest. Anything that wants the payload back
       // fetches it from the blob store under this key, subject to that store's rules.
       observationDigest: digest(s.writes),
     })),
     outcome: extractSignals(canonical, nodeTypes, runStatus),
-    usage: { ...usage, modelCalls, toolCalls },
+    usage: {
+      costUsd: spend.costUsd,
+      tokens: spend.inputTokens + spend.outputTokens,
+      // Provider wall time PLUS local tool time. See `spend` above for why only one of the
+      // two ever reaches `seen`.
+      wallMs: spend.wallMs + toolMs,
+      modelCalls,
+      toolCalls,
+      subgraphRuns: childRuns.size,
+    },
     policy: { escalations, violations, gatesRaised },
     inputDigest: digest(inputs),
+    // FAILS CLOSED: an unanswered promotion set is not a certificate of promotion.
     fromUnpromotedCandidate:
-      opts.promotedGraphHashes !== undefined && !opts.promotedGraphHashes.has(graphHash),
+      opts.promotedGraphHashes === undefined || !opts.promotedGraphHashes.has(graphHash),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Spend arithmetic
+// ---------------------------------------------------------------------------
+
+/** The four numbers a `UsageRecord` carries, as a mutable-free local. */
+interface Spend {
+  readonly costUsd: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly wallMs: number;
+}
+
+const ZERO_SPEND: Spend = { costUsd: 0, inputTokens: 0, outputTokens: 0, wallMs: 0 };
+
+/**
+ * A journal is written by an appender, and the types are a claim about that appender rather
+ * than about the bytes — a hand-written, replayed or corrupted row can carry `NaN`, a
+ * negative, or a string. One `NaN` dollar makes `costUsd` `NaN` for the rest of the fold, and
+ * every comparison against `NaN` is false, so a cohort's `p50Cost` and every score computed
+ * against it silently stop meaning anything. A non-finite component is dropped, and a negative
+ * one is dropped too: a refund is the direction that loosens. `run/projection.ts` fails closed
+ * the same way, for the same reason on the budget side.
+ */
+function finiteSpend(u: Spend | UsageRecord | undefined): Spend {
+  if (u === null || typeof u !== "object") return ZERO_SPEND;
+  const ok = (x: number): number => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0);
+  return {
+    costUsd: ok(u.costUsd),
+    inputTokens: ok(u.inputTokens),
+    outputTokens: ok(u.outputTokens),
+    wallMs: ok(u.wallMs),
+  };
+}
+
+function addSpend(a: Spend, b: Spend): Spend {
+  return {
+    costUsd: a.costUsd + b.costUsd,
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    wallMs: a.wallMs + b.wallMs,
+  };
+}
+
+/** Componentwise `max(0, stated − seen)`: the part of a restatement nothing has counted. */
+function excessSpend(seen: Spend, stated: UsageRecord | undefined): Spend {
+  const over = (a: number, b: number): number => (b > a ? b - a : 0);
+  const s = finiteSpend(stated);
+  return {
+    costUsd: over(seen.costUsd, s.costUsd),
+    inputTokens: over(seen.inputTokens, s.inputTokens),
+    outputTokens: over(seen.outputTokens, s.outputTokens),
+    wallMs: over(seen.wallMs, s.wallMs),
   };
 }
 

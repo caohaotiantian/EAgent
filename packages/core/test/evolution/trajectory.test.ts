@@ -32,8 +32,10 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, MockModelAdapter } from "../../src/run/registry.ts";
+import type { ModelEvent, ModelRequest } from "../../src/run/registry.ts";
 import { DOCS, compileSkeleton, harness, resolver } from "../run/skeleton.ts";
 import { digest } from "../../src/canonical.ts";
+import { agent } from "../../src/agent.ts";
 
 const n = (id: string): NodeId => id as NodeId;
 
@@ -231,7 +233,7 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
     cohort: { workflow: "w", graphHash: "h", tenantTier: "default", inputBucket: "b" },
     steps: [],
     outcome: { assertions: [], humanDecisions: [], rubrics: [], selfReported: false, runStatus: "succeeded" },
-    usage: { costUsd: 1, tokens: 100, wallMs: 1000, modelCalls: 1, toolCalls: 1 },
+    usage: { costUsd: 1, tokens: 100, wallMs: 1000, modelCalls: 1, toolCalls: 1 , subgraphRuns: 0 },
     policy: { escalations: [], violations: 0, gatesRaised: 1 },
     inputDigest: digest({}),
     fromUnpromotedCandidate: false,
@@ -322,7 +324,7 @@ test("S4 ALONE NEVER REACHES GOLDEN, no matter how high it scores", () => {
       selfReported: true,
       runStatus: "succeeded",
     },
-    usage: { costUsd: 0, tokens: 0, wallMs: 0, modelCalls: 1, toolCalls: 0 },
+    usage: { costUsd: 0, tokens: 0, wallMs: 0, modelCalls: 1, toolCalls: 0 , subgraphRuns: 0 },
     policy: { escalations: [], violations: 0, gatesRaised: 0 },
   });
   const scored = scoreTrajectory(t, cohort({ p90Score: 0 }));
@@ -370,7 +372,7 @@ test("all five conditions met ⇒ golden", () => {
       selfReported: true,
       runStatus: "succeeded",
     },
-    usage: { costUsd: 0.1, tokens: 10, wallMs: 100, modelCalls: 1, toolCalls: 1 },
+    usage: { costUsd: 0.1, tokens: 10, wallMs: 100, modelCalls: 1, toolCalls: 1 , subgraphRuns: 0 },
     policy: { escalations: [], violations: 0, gatesRaised: 0 },
   });
   const c = cohort({ p90Score: 0.5 });
@@ -392,7 +394,7 @@ test("measureCohort derives p50s and a p90 score from its own members", () => {
   const members = Array.from({ length: 30 }, (_, i) =>
     trajectory({
       runId: `run_${i}` as RunId,
-      usage: { costUsd: i / 10, tokens: 0, wallMs: i * 10, modelCalls: 1, toolCalls: 0 },
+      usage: { costUsd: i / 10, tokens: 0, wallMs: i * 10, modelCalls: 1, toolCalls: 0 , subgraphRuns: 0 },
       outcome: { assertions: [{ nodeId: n("v"), pass: i % 2 === 0 }], humanDecisions: [], rubrics: [], selfReported: false, runStatus: "succeeded" },
     }),
   );
@@ -505,6 +507,165 @@ test("THE CANONICALISER ORDERS BY CODE UNIT, NOT BY THE MACHINE'S COLLATION", ()
   assert.deepEqual(t.steps.map((s) => s.nodeId), ["Zebra", "apple"]);
 });
 
+// ── spend, folded once ───────────────────────────────────────────────────────
+
+test("TRAJECTORY SPEND EQUALS PROJECTION SPEND on one real run", async () => {
+  // The journal states the same money more than once — once per `model.called`, again on the
+  // `task.committed` that settles the task, again as the run total on `run.completed`. A fold
+  // that adds them reports 3x the spend and the scorer's cost term punishes a run for money
+  // nobody spent. The projection is the second reader of the same events and the number a user
+  // is shown; on a run with no tools and no subgraph the two must agree exactly.
+  //
+  // `now` ADVANCES, and the adapter reports a real per-turn `wallMs`, because the previous
+  // version of this test asserted `t.usage.wallMs === r.usage.wallMs` with both sides 0 — an
+  // assertion that cannot fail is not a control. `MockModelAdapter` hardcodes `wallMs: 0`, so
+  // the turn time comes from the wrapper below.
+  const TURN_MS = 37;
+  const a = agent({
+    prompt: "summarize the input",
+    model: "mock-1",
+    adapter: new TimedMockAdapter(TURN_MS, { script: () => ({ text: "done", inputTokens: 1000, outputTokens: 200 }) }),
+    now: clock(),
+  });
+
+  const r = await a.run("hello");
+  assert.equal(r.status, "succeeded");
+  assert.ok(r.usage.costUsd > 0, "a run that cost nothing cannot detect triple-counting");
+  assert.equal(r.usage.wallMs, TURN_MS, "the control has to be non-zero or the next line is vacuous");
+
+  const t = await a.trajectory(r.runId);
+  assert.equal(t.usage.costUsd, r.usage.costUsd, "one run, one bill");
+  assert.equal(t.usage.tokens, r.usage.inputTokens + r.usage.outputTokens);
+  assert.equal(t.usage.wallMs, r.usage.wallMs);
+});
+
+test("a FAILED run reports the wall time and the spend its tasks burned", () => {
+  // `run.failed` carries no usage, so a fold that reads its totals off `run.completed`
+  // reports a failure as free and instantaneous — which is exactly the run the score used
+  // to reward. This fixture states the same spend on BOTH the effect record and the commit,
+  // so it is also the double-count control: 0.002, not 0.004.
+  const spend = { inputTokens: 400, outputTokens: 100, costUsd: 0.002, wallMs: 1200 };
+  const t = foldTrajectory(
+    journal([
+      ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+      ev("model.called", { key: "m", provider: "mock", model: "m1", finishReason: "stop", usage: spend }, "work@root#0"),
+      ev("task.committed", { status: "failed", writes: {}, take: [], usage: spend, attempt: 1 }, "work@root#0"),
+      ev("run.failed", { error: { code: "E_INTERNAL", message: "boom", retryable: false } }),
+    ]),
+  );
+
+  assert.equal(t.outcome.runStatus, "failed");
+  assert.equal(t.usage.costUsd, 0.002, "counted once, not once per event that mentions it");
+  assert.equal(t.usage.wallMs, 1200, "a failure that escapes the latency term is a free failure");
+  assert.equal(t.usage.tokens, 500);
+});
+
+test("A FAILED ATTEMPT THAT SPENT MONEY IS BILLED FOR IT — audit F27's own shape", () => {
+  // The engine commits `ZERO_USAGE` on every failure path that already paid a provider — an
+  // expired lease, a policy denial, a rejected mutation. Folding spend from `task.committed`
+  // therefore reported `costUsd: 0` next to `modelCalls: 1`: one model call that cost nothing,
+  // a record that contradicts itself, and a metric that pays a run for money it burned.
+  const spend = { inputTokens: 1000, outputTokens: 500, costUsd: 0.25, wallMs: 900 };
+  const ZERO_SPEND = { inputTokens: 0, outputTokens: 0, costUsd: 0, wallMs: 0 };
+  const t = foldTrajectory(
+    journal([
+      ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+      ev("model.called", { key: "a@root#0/model/0", provider: "p", model: "m", finishReason: "stop", usage: spend }, "a@root#0"),
+      ev("task.committed", { status: "failed", writes: {}, take: [], usage: ZERO_SPEND, attempt: 1 }, "a@root#0"),
+      ev("run.failed", { error: { code: "E_LEASE_EXPIRED", message: "lease expired", retryable: false } }),
+    ]),
+  );
+
+  assert.equal(t.usage.modelCalls, 1, "control: the call is in the fold at all");
+  assert.equal(t.usage.costUsd, 0.25, "the provider was paid; the summary that says otherwise is a summary");
+  assert.equal(t.usage.tokens, 1500);
+  assert.equal(t.usage.wallMs, 900);
+});
+
+test("A RETRIED ATTEMPT'S SPEND IS NOT REFUNDED BY SUCCEEDING THE SECOND TIME", () => {
+  // A retryable failure appends `task.retry_scheduled` + `task.ready` and NO `task.committed`
+  // (`run/engine.ts` 4489-4515), so the first attempt's bill exists only on its `model.called`.
+  // A fold that reads commits reported half of what the run cost — under-counting in the
+  // direction that flatters the run, which is the direction that matters.
+  const turn = { inputTokens: 200, outputTokens: 100, costUsd: 0.003, wallMs: 400 };
+  const t = foldTrajectory(
+    journal([
+      ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+      ev("task.ready", { nodeId: "a", branchPath: "root", edgesIn: [] }, "a@root#0"),
+      ev("model.called", { key: "a@root#0/model/0", provider: "p", model: "m", finishReason: "stop", usage: turn }, "a@root#0"),
+      ev("task.retry_scheduled", { attempt: 1, afterMs: 10, code: "E_PROVIDER_UNAVAILABLE" }, "a@root#0"),
+      ev("task.ready", { nodeId: "a", branchPath: "root", edgesIn: [] }, "a@root#0"),
+      ev("model.called", { key: "a@root#0/model/1", provider: "p", model: "m", finishReason: "stop", usage: turn }, "a@root#0"),
+      ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: turn, attempt: 2 }, "a@root#0"),
+      ev("run.completed", { outputs: {}, usage: turn }),
+    ]),
+  );
+
+  assert.equal(t.outcome.runStatus, "succeeded");
+  assert.equal(t.usage.costUsd, 0.006, "two calls happened, so two calls are billed");
+  assert.equal(t.usage.tokens, 600);
+  assert.equal(t.usage.wallMs, 800);
+  // The RETRY RULE still holds on top of it: one step, two attempts, the discarded attempt's
+  // actions gone. Money is not an action, and it does not get discarded with them.
+  assert.equal(t.steps.length, 1);
+  assert.equal(t.steps[0]?.attempts, 2);
+});
+
+test("TOOL TIME IS BURNED TIME — the projection cannot see it, and the latency term should", () => {
+  // A `tool` node commits ZERO_USAGE and an agent's tool calls run BETWEEN model turns, so no
+  // `task.committed` anywhere carries a tool's milliseconds. Fold them and a run that spends
+  // thirty seconds in a tool stops looking instantaneous.
+  const turn = { inputTokens: 10, outputTokens: 10, costUsd: 0.001, wallMs: 100 };
+  const t = foldTrajectory(
+    journal([
+      ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+      ev("model.called", { key: "k0", provider: "p", model: "m", finishReason: "tool_use", usage: turn }, "a@root#0"),
+      ev("tool.called", { key: "k1", name: "http.get", version: "1", irreversibility: "none", idempotent: true, ok: true, ms: 2500, argsShape: "{url:string}" }, "a@root#0"),
+      ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: turn, attempt: 1 }, "a@root#0"),
+      ev("run.completed", { outputs: {}, usage: turn }),
+    ]),
+  );
+
+  assert.equal(t.usage.toolCalls, 1);
+  assert.equal(t.usage.wallMs, 2600, "100ms of model plus 2500ms of tool, and the commit knows only the 100");
+  assert.equal(t.usage.costUsd, 0.001, "a tool call carries no cost of its own, and inventing one would be a lie");
+});
+
+test("A SUBGRAPH'S CHILD SPEND IS COUNTED ONCE IN THE PARENT", () => {
+  // The child's own `model.called` rows are in the CHILD's journal, so `subgraph.completed` is
+  // the only place the parent's fold can see that money — and reading it here cannot
+  // double-count, because there is nothing here to double it with.
+  const child = { inputTokens: 50, outputTokens: 20, costUsd: 0.01, wallMs: 700 };
+  const t = foldTrajectory(
+    journal([
+      ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+      ev("subgraph.completed", { childRunId: "run_2", ref: "sub@stable", status: "succeeded", usage: child, outputs: ["out"] }, "s@root#0"),
+      ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: { ...child, inputTokens: 0, outputTokens: 0 }, attempt: 1 }, "s@root#0"),
+      ev("run.completed", { outputs: {}, usage: child }),
+    ]),
+  );
+
+  assert.equal(t.usage.costUsd, 0.01);
+  assert.equal(t.usage.tokens, 70);
+  assert.equal(t.usage.wallMs, 700);
+});
+
+test("CONDITION 5 IS NOT A FREE PASS — an unanswered promotion set means unpromoted", () => {
+  const events = journal([
+    ev("run.submitted", { workflow: "w", graphHash: "h", inputs: {}, idempotencyKey: "i", configDigest: "c" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: ZERO, attempt: 1 }, "work@root#0"),
+    ev("run.completed", { outputs: {}, usage: ZERO }),
+  ]);
+
+  assert.equal(
+    foldTrajectory(events).fromUnpromotedCandidate,
+    true,
+    "a caller who never named the promoted graphs has not certified this one",
+  );
+  assert.equal(foldTrajectory(events, { promotedGraphHashes: new Set(["h"]) }).fromUnpromotedCandidate, false);
+  assert.equal(foldTrajectory(events, { promotedGraphHashes: new Set(["other"]) }).fromUnpromotedCandidate, true);
+});
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 let seq = 0;
@@ -525,4 +686,30 @@ function journal(events: readonly Ev[]): JournalEvent[] {
         ...(e.taskId === undefined ? {} : { taskId: e.taskId as TaskId }),
       }) as unknown as JournalEvent,
   );
+}
+
+/** A monotonic test clock. `now: () => 1` makes every duration 0, which is unfalsifiable. */
+function clock(step = 1): () => number {
+  let t = 1_700_000_000_000;
+  return () => (t += step);
+}
+
+/**
+ * `MockModelAdapter` with `wallMs` on the turn.
+ *
+ * It exists because the shipped mock hardcodes `usage.wallMs: 0` (`run/registry.ts`), so every
+ * assertion about model wall time made through it compares 0 to 0. Wrapping rather than
+ * changing that adapter keeps every other suite's numbers where they were.
+ */
+class TimedMockAdapter extends MockModelAdapter {
+  readonly #ms: number;
+  constructor(ms: number, opts: ConstructorParameters<typeof MockModelAdapter>[0]) {
+    super(opts);
+    this.#ms = ms;
+  }
+  override async *stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    for await (const e of super.stream(req, signal)) {
+      yield e.type === "done" ? { ...e, usage: { ...e.usage, wallMs: this.#ms } } : e;
+    }
+  }
 }

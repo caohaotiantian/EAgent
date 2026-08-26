@@ -581,6 +581,54 @@ test("task.cancelled-not-after-commit — a cancel stops work, it does not un-la
   assert.deepEqual(rulesHit(stopped), [], "cancelling work that never landed is the whole point of the event");
 });
 
+test("evolution.score-completed-matches-the-run — both directions", () => {
+  // A score is a pure function of a fold of this journal, so a journalled score that disagrees
+  // with the journal is a forgery. The full recomputation rule cannot live in `journal/` — it
+  // would have to import `evolution/`, and the kernel's vocabulary must not depend on an
+  // extension. What IS checkable here with no dependency is the half that decides WHICH of two
+  // very different zeroes a `score: 0` is: "the run was bad" or "the run never got anywhere".
+  const scored = (completed: boolean): JournalEvent =>
+    ev("evolution.scored", {
+      cohortKey: "w|sha256:g|t|b",
+      score: 0,
+      outcome: 0,
+      components: { costNormalized: 0, latencyNormalized: 0, humanEffortSaved: 1, completed, delivered: false },
+      weightsDigest: "sha256:w",
+      ceiling: "draft",
+    });
+
+  // Claims it completed; the journal never says so.
+  const liesUp = fixture(() => [
+    ev("run.failed", { error: { class: "internal", code: "E_INTERNAL", message: "x", retryable: false } }),
+    scored(true),
+  ]);
+  assert.deepEqual(
+    rulesHit(liesUp),
+    ["evolution.score-completed-matches-the-run"],
+    "a failed run scored as completed — the flattering zero",
+  );
+
+  // Claims it did not complete; the journal says it did. Caught too, because a score that
+  // under-states is still a score that disagrees with the record.
+  const liesDown = fixture(() => [DONE(), scored(false)]);
+  assert.deepEqual(
+    rulesHit(liesDown),
+    ["evolution.score-completed-matches-the-run"],
+    "a completed run scored as incomplete",
+  );
+
+  // The control: agreement in both directions trips nothing.
+  assert.deepEqual(rulesHit(fixture(() => [DONE(), scored(true)])), [], "completed and says so");
+  assert.deepEqual(
+    rulesHit(fixture(() => [
+      ev("run.failed", { error: { class: "internal", code: "E_INTERNAL", message: "x", retryable: false } }),
+      scored(false),
+    ])),
+    [],
+    "did not complete and says so",
+  );
+});
+
 // ── and the gate that keeps the rule set honest ─────────────────────────────
 
 test("EVERY AUDIT RULE HAS A FIXTURE THAT TRIPS IT", () => {

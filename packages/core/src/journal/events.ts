@@ -663,6 +663,113 @@ export interface EventPayloads {
   "operator.command": { readonly kind: string; readonly args: Readonly<Record<string, unknown>> };
   "config.reloaded": { readonly before: string; readonly after: string };
   "hook.applied": { readonly ref: string; readonly point: string; readonly changed: boolean };
+
+  // ── evolution ────────────────────────────────────────────────────────────
+  /**
+   * A FINISHED RUN WAS JUDGED, and this is the judgement.
+   *
+   * WHY IT IS A ROW HERE rather than a table, a file, or a return value — the three tests this
+   * docstring sets for a new member of the vocabulary:
+   *
+   * 1. IT CANNOT BE REBUILT BY FOLDING ANYTHING ELSE. A score is a function of (trajectory,
+   *    cohort, weights). The trajectory folds from this journal, but the COHORT is a population
+   *    that grows with every later run, so the same fold re-run next week answers a different
+   *    question: `p50Cost`, `p50Wall`, `p50Gates` and above all `p90Score` — the bar
+   *    `isGolden` condition 2 has to clear — all move. "Judged 0.412 against n=34 under weights
+   *    W, on this date" is not recoverable later at any price. Everything else in this map is a
+   *    fact the run PRODUCED; this is a fact somebody DERIVED about it, and it is durable for
+   *    the same reason `gate.decided` is: the derivation cannot be repeated.
+   * 2. NOTHING ELSE HERE CAN CARRY IT. `run.completed` says what happened, `task.committed` says
+   *    what a step wrote; neither has a place for how well any of it rated, and widening one of
+   *    them to hold a verdict would make a lifecycle row mean two things.
+   * 3. IT IS THE FACT A LATER RUN READS. CLAUDE.md property 3 — "a later run is measurably
+   *    better because of an earlier one" — needs the earlier run's verdict to survive a restart,
+   *    and the journal is the only authoritative state. A score kept anywhere else is exactly
+   *    the private vocabulary the header of this file refuses.
+   *
+   * WRITTEN INTO THE JUDGED RUN'S OWN JOURNAL, after it is terminal. It transitions nothing and
+   * `run/projection.ts` folds it into nothing — the same standing `gate.delivered` and
+   * `gate.batch_decided` have, and the reason a score cannot alter what the run did.
+   *
+   * RE-SCORING APPENDS AGAIN, and that is the design. A cohort of 3 and a cohort of 300 are
+   * different rulers, and the honest record is both readings in order; a reader takes the LAST.
+   *
+   * `weights` AND `weightsDigest`, which is one fact twice on purpose. The digest is the join
+   * key — `scoreTrajectory` REFUSES a cohort measured under a different one, and a reader
+   * comparing across a weight change is the quiet way a self-improving system convinces itself
+   * it improved — while the four numbers are what makes the row readable a year later without
+   * the code that produced it.
+   *
+   * `goldenBlockers` names the conditions that FAILED, because a verdict that cannot say why is
+   * not a verdict, and `golden: false` with no reason is unarguable-with. Empty iff `golden`.
+   *
+   * `ceiling` is `promotionCeiling`'s answer — the most a run with these signals may ever
+   * justify. It is recorded rather than re-derived because it is the oversight-relevant half:
+   * S4-only is capped at canary whatever the score says, and a ceiling nobody wrote down is a
+   * ceiling the next reader raises by accident.
+   *
+   * S3 (downstream acceptance) is absent from `signals` unless the scorer was handed one — it
+   * is a fact about the 72 hours after the run, which this journal cannot know.
+   *
+   * TYPES ARE PRIMITIVE AND STAY PRIMITIVE. `signals[].id` is a string, not `SignalId`, and the
+   * shapes are inline rather than imported: this file is the kernel's vocabulary and must not
+   * take a dependency on an extension in `evolution/`, which is free to add a signal, rename a
+   * component or change its weights without a kernel edit.
+   */
+  "evolution.scored": {
+    /** `workflow|graphHash|tenantTier|inputBucket`. Scores compare only within one. */
+    readonly cohortKey: string;
+    readonly score: number;
+    /** The ladder's verdict, hoisted out of `components` because condition 1 reads it alone. */
+    readonly outcome: number;
+    /**
+     * WHY THE SCORE IS THAT NUMBER — and above all, which of the two zeroes this is.
+     *
+     * `score: 0` has two entirely different causes: the run was bad, or the run never got
+     * anywhere. `completed` (it reached `succeeded`) and `delivered` (it also DID something —
+     * a model turn, a tool call, a child run, a committed channel, a verdict) separate them,
+     * and `scoreTrajectory` reports both for exactly this reason. A journaled verdict that
+     * cannot say which zero it is would be unarguable-with, which is the one thing a verdict
+     * must never be.
+     *
+     * The three normalized terms are ratios to the cohort medians recorded below, so a reader
+     * can re-derive the arithmetic from this row alone: `score = Σ weightᵢ · termᵢ`, zeroed
+     * unless `delivered`.
+     */
+    readonly components: {
+      readonly costNormalized: number;
+      readonly latencyNormalized: number;
+      readonly humanEffortSaved: number;
+      readonly completed: boolean;
+      readonly delivered: boolean;
+    };
+    readonly signals: readonly {
+      readonly id: string;
+      readonly value: number;
+      readonly weight: number;
+      readonly evidence: string;
+    }[];
+    readonly weights: {
+      readonly outcome: number;
+      readonly cost: number;
+      readonly latency: number;
+      readonly humanEffort: number;
+    };
+    readonly weightsDigest: string;
+    /** The ruler as it stood at judgement time — the part that is gone by the next reading. */
+    readonly cohort: {
+      readonly n: number;
+      readonly p50CostUsd: number;
+      readonly p50WallMs: number;
+      readonly p50Gates: number;
+      readonly p90Score: number;
+    };
+    readonly golden: boolean;
+    /** The conditions that failed, by name. Empty iff `golden`. */
+    readonly goldenBlockers: readonly string[];
+    readonly ceiling: "draft" | "canary" | "stable";
+    readonly requiresHumanSignOff: boolean;
+  };
 }
 
 export type EventType = keyof EventPayloads;
@@ -682,6 +789,7 @@ export const EVENT_TYPES = [
   "budget.reserved", "budget.settled", "budget.exhausted",
   "graph.mutated", "subgraph.started", "subgraph.completed", "checkpoint.created", "checkpoint.restored",
   "operator.command", "config.reloaded", "hook.applied",
+  "evolution.scored",
 ] as const satisfies readonly EventType[];
 
 // ---------------------------------------------------------------------------

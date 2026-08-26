@@ -456,7 +456,7 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   // from the has-an-appender check, and from D3.10's documented vocabulary. FOUR gates, every
   // one of them iterating this array, all switched off for that one type by an omission.
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
-  assert.equal(EVENT_TYPES.length, 52, "update this count when the vocabulary grows, deliberately");
+  assert.equal(EVENT_TYPES.length, 53, "update this count when the vocabulary grows, deliberately");
 
   // THE MISSING DIRECTION, ENFORCED BY THE COMPILER RATHER THAN COUNTED. `Exclude` is empty
   // exactly when every `EventPayloads` key appears in the array; when it is not, this fails to

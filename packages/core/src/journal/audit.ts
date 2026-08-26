@@ -59,6 +59,7 @@ export const AUDIT_RULES = [
   "state.chain-is-unbroken",
   "state.root-writes-are-reduced",
   "edge.taken-belongs-to-its-node",
+  "evolution.score-completed-matches-the-run",
 ] as const;
 
 export type AuditRule = (typeof AUDIT_RULES)[number];
@@ -130,6 +131,19 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const unrunnable = new Map<AuditRule, string>();
 
   const add = (rule: AuditRule, seq: number, detail: string): void => void violations.push({ rule, seq, detail });
+
+  /**
+   * Did this run reach `run.completed`? Read by the `evolution.scored` rule below.
+   *
+   * WHY THE AUDIT CARES ABOUT A SCORE AT ALL. A score is a pure function of a fold of this
+   * journal, so in principle the whole thing is recomputable and any journalled score that
+   * disagrees is a forgery. That rule is the one CLAUDE.md property 3 actually needs and it is
+   * NOT written here, because recomputing means importing `evolution/`, and `journal/` must not
+   * depend on an extension. What IS checkable with no dependency is the half that decides which
+   * of two very different zeroes a `score: 0` is — and it is checkable against the journal's own
+   * terminal event rather than against the scorer's opinion of it.
+   */
+  let runCompleted = false;
 
   // A REWIND NEVER EDITS HISTORY — it appends a marker, and the fold suppresses what it undid.
   // Reading raw events meant a run rewound past an approval and re-approved looked like a double
@@ -246,6 +260,26 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           if (child !== want) {
             add("subgraph.child-id-is-derived", seq, `child run id "${child}" is not the derived "${want}" — replay cannot find it`);
           }
+        }
+        break;
+      }
+      case "run.completed": {
+        runCompleted = true;
+        break;
+      }
+      case "evolution.scored": {
+        const components = p["components"];
+        if (typeof components !== "object" || components === null) break;
+        const claimed = (components as Record<string, unknown>)["completed"];
+        if (typeof claimed !== "boolean") break;
+        saw.add("evolution.score-completed-matches-the-run");
+        if (claimed !== runCompleted) {
+          add(
+            "evolution.score-completed-matches-the-run",
+            seq,
+            `a score claims completed=${claimed} for a run the journal says ${runCompleted ? "DID" : "did NOT"} complete — ` +
+              `the two zeroes a score can have are "the run was bad" and "the run never got anywhere", and this event names the wrong one`,
+          );
         }
         break;
       }
