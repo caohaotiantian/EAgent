@@ -371,7 +371,22 @@ export interface ModelRequest {
   readonly maxTokens?: number;
 }
 
-export type FinishReason = "stop" | "tool_use" | "max_tokens" | "content_filter" | "refusal";
+/**
+ * Why a model turn ended.
+ *
+ * `unknown:${string}` CARRIES THE PROVIDER'S OWN WORD, and it exists because both shipped
+ * adapters used to end their mapper with `default: return "stop"`. That laundered every reason
+ * this build does not know into the one value that means "this is a finished answer" — so
+ * `turnRefusal`'s fail-closed `default:` arm in the engine was unreachable from either adapter,
+ * and a truncated or paused turn with empty content was written to a channel as `""` with the
+ * run reporting `succeeded`. Anthropic's documented set already includes `pause_turn` ("the model
+ * paused and can be resumed"), which is precisely a non-answer.
+ *
+ * Keeping the raw word rather than collapsing to a bare `"unknown"` is what lets the refusal say
+ * WHICH reason it did not recognise, which is the difference between a diagnosable deployment and
+ * a mystery.
+ */
+export type FinishReason = "stop" | "tool_use" | "max_tokens" | "content_filter" | "refusal" | `unknown:${string}`;
 
 export type ModelEvent =
   | { readonly type: "text_delta"; readonly text: string }

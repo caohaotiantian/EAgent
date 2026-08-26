@@ -119,8 +119,11 @@ export class OpenAIAdapter implements ModelAdapter {
     // `{}`, so the engine dispatched the tool with EMPTY arguments and called it a clean
     // `tool_use`. `fs.write` with `{}` is not a smaller version of the intended write.
     //
-    // So a truncated turn keeps `max_tokens` and drops its partial calls. The node then fails
-    // its schema check with a real reason instead of half-executing.
+    // So a truncated turn keeps `max_tokens` and drops its partial calls, and the engine refuses
+    // it — `turnRefusal` in `run/engine.ts`. The claim this comment used to make, that "the node
+    // then fails its schema check", was only true of a node that DECLARES an `outputSchema`: FX13
+    // was a node with none, and `""` is valid free text. Reporting the reason faithfully is this
+    // file's whole job; acting on it is the engine's.
     const truncated = finishReason === "max_tokens";
     const message: Message = {
       role: "assistant",
@@ -189,8 +192,15 @@ function mapFinish(reason: string): FinishReason {
       return "tool_use";
     case "content_filter":
       return "content_filter";
-    default:
+    // The legacy spelling of `tool_calls`, still returned by some OpenAI-compatible endpoints.
+    case "function_call":
+      return "tool_use";
+    case "stop":
       return "stop";
+    default:
+      // NOT `"stop"`. See `FinishReason`: mapping an unknown reason to "stop" tells the engine
+      // this turn is a finished answer, and the engine believes it.
+      return `unknown:${reason}`;
   }
 }
 

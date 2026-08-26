@@ -205,8 +205,11 @@ export class AnthropicAdapter implements ModelAdapter {
     // `{}`, so the engine dispatched the tool with EMPTY arguments and called it a clean
     // `tool_use`. `fs.write` with `{}` is not a smaller version of the intended write.
     //
-    // So a truncated turn keeps `max_tokens` and drops its partial calls. The node then fails
-    // its schema check with a real reason instead of half-executing.
+    // So a truncated turn keeps `max_tokens` and drops its partial calls, and the engine refuses
+    // it — `turnRefusal` in `run/engine.ts`. The claim this comment used to make, that "the node
+    // then fails its schema check", was only true of a node that DECLARES an `outputSchema`: FX13
+    // was a node with none, and `""` is valid free text. Reporting the reason faithfully is this
+    // file's whole job; acting on it is the engine's.
     const truncated = finishReason === "max_tokens";
     const message: Message = {
       role: "assistant",
@@ -286,8 +289,16 @@ function mapStop(reason: string): FinishReason {
       return "tool_use";
     case "refusal":
       return "refusal";
-    default:
+    // THE TWO NORMAL ENDINGS, named rather than defaulted. `end_turn` is the ordinary one and
+    // `stop_sequence` is a caller-supplied stop being hit; both are finished answers.
+    case "end_turn":
+    case "stop_sequence":
       return "stop";
+    default:
+      // NOT `"stop"`. Anything outside the documented set — `pause_turn` among them, which means
+      // "the model paused and can be resumed" — is not an answer, and saying so is the engine's
+      // job rather than this mapper's.
+      return `unknown:${reason}`;
   }
 }
 
