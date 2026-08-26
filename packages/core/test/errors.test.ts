@@ -58,8 +58,8 @@ test("http status is class-driven, not code-driven", () => {
   assert.equal(httpStatusFor(err.policy(CODES.E_CAP_DENIED, "")), 403);
   assert.equal(httpStatusFor(err.notFound(CODES.E_RUN_NOT_FOUND, "")), 404);
   assert.equal(httpStatusFor(err.conflict(CODES.E_IDEMPOTENCY_MISMATCH, "")), 409);
-  assert.equal(httpStatusFor(err.exhausted(CODES.E_ADMISSION_REJECTED, "")), 429);
-  assert.equal(httpStatusFor(err.unavailable(CODES.E_SECRET_UNAVAILABLE, "")), 503);
+  assert.equal(httpStatusFor(err.exhausted(CODES.E_BUDGET_EXHAUSTED, "")), 429);
+  assert.equal(httpStatusFor(err.unavailable(CODES.E_PROVIDER_OVERLOADED, "")), 503);
   assert.equal(httpStatusFor(err.timeout(CODES.E_TOOL_TIMEOUT, "")), 504);
   assert.equal(httpStatusFor(err.internal(CODES.E_INTERNAL, "")), 500);
 });

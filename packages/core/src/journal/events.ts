@@ -11,6 +11,20 @@
  * would let subsystems invent private vocabularies and the log would stop being a
  * contract.
  *
+ * REMOVING A ROW IS THE SAME ACT IN THE OTHER DIRECTION, and it is allowed. This file is
+ * kernel (`scripts/kernel.json`) because the union is what makes "the journal is the only
+ * authoritative state" a claim about something; a member nothing appends is not a durable
+ * fact but a plan for one, and it costs more than it looks. `run/projection.ts` grows a fold
+ * arm for it, so the fold reads like proof that something writes it; `journal/audit.ts` grew
+ * two rules over such types and reported them `checked` on every terminal run while being
+ * permanently inert. So the test for a row here is a WRITER, not a design — and a row that
+ * loses its last writer is removed by the change that removed it, not excused.
+ *
+ * `config.reloaded` was removed under that rule (see the operator section). Five more members
+ * have no appender and are pinned, decided, and blocked in `test/registries.test.ts`; two of
+ * those five — `budget.reserved` and `budget.settled` — are decided WIRE, because
+ * `PolicyEngine` holds a reservation in memory that a crashed worker cannot recover by
+ * folding, which is the non-negotiable this union exists to serve.
  */
 
 import type { LoomError } from "../errors.ts";
@@ -151,6 +165,20 @@ export interface EventPayloads {
     readonly clean: boolean;
     /** Effects that started but whose outcome was never recorded. Never claim these did not happen. */
     readonly unknownEffects: readonly string[];
+    /**
+     * DECIDED FOR DELETION, AND BLOCKED ON THREE FILES THIS FIELD CANNOT REACH.
+     *
+     * It is written exactly once, as the literal `false` (`run/engine.ts:1846`), read by
+     * nothing, and named by no document. `clean` already carries the fact an operator asks
+     * for — whether the run stopped with its effects accounted for — and a second boolean
+     * that is always `false` reads like a forced cancel is a thing this engine can do.
+     *
+     * Removing it is not a one-file edit: dropping a REQUIRED payload field turns each
+     * existing literal into an excess-property error, so the change is
+     * `run/engine.ts:1846`, `test/telemetry/spans.test.ts:64` and
+     * `test/run/gate-claim.test.ts:368`, together, in one commit. Left declared rather than
+     * made optional on purpose — optional-and-unread is the same zombie wearing a `?`.
+     */
     readonly forced: boolean;
   };
 
@@ -659,9 +687,15 @@ export interface EventPayloads {
     readonly newRunId?: RunId;
   };
 
-  // ── operator + config ────────────────────────────────────────────────────
+  // ── operator + hooks ─────────────────────────────────────────────────────
+  //
+  // `config.reloaded` was here, with `{before, after}` digests, and was deleted rather than
+  // excused: there is no reload path in `src/` — no signal handler, no admin endpoint, no
+  // caller — and no work item anywhere plans one (`TODO.md` does not contain the word). A row
+  // in a CLOSED vocabulary is a promise that a fact of that kind is recorded, and this one
+  // recorded nothing while reading, to anyone folding the log, like proof that reloads are
+  // audited. When a reload path is built, its event is one line here in the same change.
   "operator.command": { readonly kind: string; readonly args: Readonly<Record<string, unknown>> };
-  "config.reloaded": { readonly before: string; readonly after: string };
   "hook.applied": { readonly ref: string; readonly point: string; readonly changed: boolean };
 
   // ── evolution ────────────────────────────────────────────────────────────
@@ -788,7 +822,7 @@ export const EVENT_TYPES = [
   "policy.decided", "policy.escalated", "policy.deescalated",
   "budget.reserved", "budget.settled", "budget.exhausted",
   "graph.mutated", "subgraph.started", "subgraph.completed", "checkpoint.created", "checkpoint.restored",
-  "operator.command", "config.reloaded", "hook.applied",
+  "operator.command", "hook.applied",
   "evolution.scored",
 ] as const satisfies readonly EventType[];
 

@@ -51,10 +51,16 @@ type Excuse =
 
 const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: string }>> = {
   // ── nothing writes these ────────────────────────────────────────────────────
+  //
+  // Each of these five now carries a DECISION and what it is blocked on, in
+  // `registries.test.ts` — two are `wire`, two are `delete`, one is `wire` behind the join
+  // accounting. The sixth, `config.reloaded`, was excused here and is gone: nothing in the
+  // tree referred to it and no work item planned a reload path, so the row was a promise the
+  // log could not keep. An excuse that a rule set can hold forever is what this file exists
+  // to make uncomfortable; an excuse that names the file blocking it is one that can end.
   "budget.reserved": { kind: "never-appended", why: "PolicyEngine.reserve holds the reservation in memory and journals nothing" },
   "budget.settled": { kind: "never-appended", why: "PolicyEngine.settle, same: the balance moves in memory only" },
   "channel.written": { kind: "never-appended", why: "writes ride on task.committed.writes; the per-channel event has no appender" },
-  "config.reloaded": { kind: "never-appended", why: "there is no reload path in src/ at all — no SIGHUP handler, no admin endpoint" },
   "task.skipped": { kind: "never-appended", why: "no appender; the skip arm resolves the task without its own event" },
   "task.started": { kind: "never-appended", why: "no appender; task.leased is the observable start" },
 

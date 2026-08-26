@@ -456,7 +456,11 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   // from the has-an-appender check, and from D3.10's documented vocabulary. FOUR gates, every
   // one of them iterating this array, all switched off for that one type by an omission.
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
-  assert.equal(EVENT_TYPES.length, 53, "update this count when the vocabulary grows, deliberately");
+  // 53 → 52: `config.reloaded` was DELETED from the vocabulary, not renamed. It had no
+  // appender, no reader, and no planned reload path anywhere in the tree, so the row
+  // promised a durable fact the log never recorded. A count moving down is the same
+  // deliberate act as a count moving up, and this line is where it is seen.
+  assert.equal(EVENT_TYPES.length, 52, "update this count when the vocabulary changes, deliberately");
 
   // THE MISSING DIRECTION, ENFORCED BY THE COMPILER RATHER THAN COUNTED. `Exclude` is empty
   // exactly when every `EventPayloads` key appears in the array; when it is not, this fails to

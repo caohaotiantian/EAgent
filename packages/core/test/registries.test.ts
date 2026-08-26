@@ -23,11 +23,25 @@
  * deliberate decision to declare a name before its call site, which is allowed and must be seen.
  * Every entry carries a reason, and the reason is length-checked, because "TODO" is how a pin
  * becomes a graveyard.
+ *
+ * AND A REASON IS NOT ENOUGH, WHICH IS WHAT THE GRAVEYARD ACTUALLY LOOKED LIKE. These lists held
+ * sixteen members — ten codes, six event types — every one of them with a sentence beside it that
+ * no event could ever make false. A pin like that does its job in one direction only: it catches
+ * the member that CHANGES, and protects the member that never does. Ten of the sixteen were
+ * deleted for that reason and are named where they were declared; the six that stand carry a
+ * CONDITION as well as a reason, and each condition is a claim about the tree that the work
+ * landing will break:
+ *
+ *   - `E_JOIN_TIMEOUT` stands while no executor reads a join deadline.
+ *   - each unappended event type stands while the files blocking its decision still name it.
+ *
+ * A blocked decision is not the same thing as an excuse. It says what should happen, who has to
+ * do it, and what will make this test demand it.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +50,7 @@ import { EVENT_TYPES } from "../src/journal/events.ts";
 import { ESCALATION_RULES } from "../src/run/escalation.ts";
 
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
+const PKG_DIR = fileURLToPath(new URL("../", import.meta.url));
 
 function sourceFiles(dir = SRC_DIR, out: string[] = []): readonly string[] {
   for (const name of readdirSync(dir)) {
@@ -93,17 +108,33 @@ const reasonsAreReal = (rows: readonly { readonly why: string }[], what: string)
 
 // ── error codes ──────────────────────────────────────────────────────────────
 
-const NEVER_RAISED: readonly string[] = [
-  "E_ADMISSION_REJECTED", // nothing admits, so nothing rejects — see TODO.md §A
-  "E_CHECKPOINT_NOT_FOUND",
-  "E_INSUFFICIENT_COHORT",
-  "E_JOIN_TIMEOUT", // the join timeout field is accepted and enforced by nothing
-  "E_LEASE_LOST", // the STORE raises this; nothing in src/ raises it directly
-  "E_POLICY_UNAVAILABLE",
-  "E_SECRET_UNAVAILABLE",
-  "E_STORAGE_FULL",
-  "E_TOOL_NOT_IDEMPOTENT",
-  "E_TOO_LATE",
+/**
+ * THE CODES NOTHING RAISES. There is one, and its excuse has a condition that can fail.
+ *
+ * There were TEN, each with a sentence beside it and no way for any of those sentences to
+ * stop being true. Nine were deleted; `errors.ts`'s `CODES` docstring names them and says why
+ * each was a promise rather than a plan — briefly: three named a condition the tree ALREADY
+ * raises under another code or deliberately does not raise at all (`E_FENCING_STALE` for a
+ * lost lease, `E_GATE_ALREADY_RESOLVED` for too late, a `goldenBlocker` for a thin cohort),
+ * and the rest named a seam that does not exist (no secret resolver, no remote policy service,
+ * no checkpoint addressed by id, no capacity mapping, no admission control).
+ *
+ * WHAT MAKES THE SURVIVOR DIFFERENT, and it is not that its subject is more important: a file
+ * this list cannot edit NAMES it, in a recorded reversal — `graph/spec.ts`, on
+ * `JoinNode.timeoutMs`: "when the deadline lands, this becomes required again,
+ * `E_JOIN_TIMEOUT` leaves `NEVER_RAISED`". Deleting a code another module promises by name is
+ * how a docstring becomes a lie. So it stands, and the test below states the condition it
+ * stands ON — that no executor reads a join deadline — so the excuse expires by the work
+ * landing rather than by somebody remembering.
+ */
+const NEVER_RAISED: readonly { readonly code: string; readonly why: string }[] = [
+  {
+    code: "E_JOIN_TIMEOUT",
+    why:
+      "`graph/spec.ts` names it in the recorded reversal for `JoinNode.timeoutMs`, which is declared and read by no executor; " +
+      "`graph/validate.ts:1697` warns an author that the barrier has no deadline. The code goes when the deadline lands, " +
+      "and the test below is that condition rather than a date",
+  },
 ];
 
 test("THE CODES NOTHING RAISES ARE EXACTLY THE ONES PINNED HERE", () => {
@@ -115,8 +146,66 @@ test("THE CODES NOTHING RAISES ARE EXACTLY THE ONES PINNED HERE", () => {
   const unraised = [...declaredCodes].filter((c) => !referenced.has(c)).sort();
   assert.deepEqual(
     unraised,
-    [...NEVER_RAISED].sort(),
+    NEVER_RAISED.map((e) => e.code).sort(),
     "a code became raisable (or stopped being raised) — reconcile what promised it, then update this list",
+  );
+});
+
+test("every unraised code is one this file can name a reason for", () => {
+  reasonsAreReal(NEVER_RAISED, "NEVER_RAISED");
+  const unknown = NEVER_RAISED.map((e) => e.code).filter((c) => !declaredCodes.has(c));
+  assert.deepEqual(unknown, [], "pinned as never-raised but not a declared error code at all");
+});
+
+/**
+ * The condition `E_JOIN_TIMEOUT`'s excuse rests on, as a predicate over the tree.
+ *
+ * "No EXECUTOR reads a join deadline" and not "nothing reads it": `graph/validate.ts:1693`
+ * reads `join.timeoutMs` today, to WARN that nobody enforces it, and `graph/spec.ts:699` lists
+ * the field name. Both of those are the field being declared and refused, which is the state
+ * the excuse describes; a read under `src/run/` is the field being USED, which is the state
+ * that ends it.
+ *
+ * Passed the texts rather than reading files itself, so the self-test below can hand it a
+ * synthetic tree and prove it is capable of answering `true`. A condition that cannot fail is
+ * an indefinite pass wearing a function.
+ */
+function anExecutorReadsAJoinDeadline(texts: Iterable<readonly [string, string]>): boolean {
+  for (const [file, text] of texts) {
+    if (!file.includes("/run/")) continue;
+    for (const line of text.split("\n")) {
+      if (line.includes("timeoutMs") && line.includes("join")) return true;
+    }
+  }
+  return false;
+}
+
+test("E_JOIN_TIMEOUT'S EXCUSE STILL HOLDS — no executor reads a join deadline", () => {
+  assert.equal(
+    anExecutorReadsAJoinDeadline(CODE_TEXT),
+    false,
+    "something under src/run/ now reads a join's timeoutMs — the deadline landed, so E_JOIN_TIMEOUT must be raised " +
+      "where it fires and leave NEVER_RAISED, and graph/spec.ts's reversal note goes with it",
+  );
+});
+
+test("and that condition is one that can fail", () => {
+  // The real function, not a restatement of it: asserting a copy is how a gate that stopped
+  // discriminating keeps reporting success.
+  assert.equal(
+    anExecutorReadsAJoinDeadline([["src/run/engine.ts", "const ms = join.timeoutMs ?? Infinity;"]]),
+    true,
+    "an executor reading a join deadline must be detected",
+  );
+  assert.equal(
+    anExecutorReadsAJoinDeadline([["src/graph/validate.ts", "if (join.timeoutMs !== undefined) {"]]),
+    false,
+    "the validator's refusal of the field is not an executor reading it",
+  );
+  assert.equal(
+    anExecutorReadsAJoinDeadline([["src/run/engine.ts", "if (w.node.timeoutMs !== undefined) {"]]),
+    false,
+    "a NODE timeout, which IS enforced, must not be mistaken for a join deadline",
   );
 });
 
@@ -135,27 +224,77 @@ test("THE OTHER DIRECTION: EVERY CODE src/ USES IS A CODE errors.ts DECLARES", (
 
 // ── event types ──────────────────────────────────────────────────────────────
 
-const NEVER_APPENDED: readonly { readonly type: string; readonly why: string }[] = [
+/**
+ * THE TYPES NOTHING APPENDS — each with a DECISION, and each decision with a condition that
+ * ends the row.
+ *
+ * There were six, each excused indefinitely. `config.reloaded` is gone: nothing in the tree
+ * referred to it, no reload path exists, and no work item plans one, so it was a row in a
+ * closed vocabulary promising a fact nobody records. The five left cannot be settled from
+ * this package's registry files alone — every one needs `run/projection.ts` (kernel),
+ * `run/engine.ts`, `evolution/trajectory.ts`, `telemetry/spans.ts` or a suite owned
+ * elsewhere — so each carries what it is waiting for, by path.
+ *
+ * `blockedOn` IS THE EXPIRY, and it works in the direction that actually decays. An excuse
+ * dies when its own reason does: the moment the last file listed stops mentioning the type,
+ * the decision below is no longer blocked and this test fails until somebody executes it.
+ * That is the failure mode this list has already had once — `journal/audit.ts` carried two
+ * rules over never-appended types, reported them `checked` on every terminal run, and nothing
+ * connected the excuse to the rule.
+ *
+ * `type: "…"` spelling is load-bearing: `journal/audit-coverage.test.ts` parses this block for
+ * it, so the two registries cannot drift into disagreeing about who is unappended.
+ */
+const NEVER_APPENDED: readonly {
+  readonly type: string;
+  readonly decision: "wire" | "delete";
+  readonly why: string;
+  /** Paths, relative to `packages/core/`, that must change before the decision can be executed. */
+  readonly blockedOn: readonly string[];
+}[] = [
   {
     type: "budget.reserved",
-    why: "the policy engine holds a reservation in memory and journals nothing, so a crashed worker's reservation cannot be recovered by folding",
+    decision: "wire",
+    why:
+      "CLAUDE.md's first non-negotiable, exactly: a decision reads a value the journal cannot reconstruct. `PolicyEngine.reserve` " +
+      "holds the reservation in memory, so a crashed worker's reservation is unrecoverable by folding, and `projection.ts:1112` " +
+      "already folds `reservedUsd` from this event — it folds zero. The appender belongs at the engine's `ctx.policy.reserve` call site",
+    blockedOn: ["src/run/policy.ts", "src/run/engine.ts", "src/run/projection.ts"],
   },
-  { type: "budget.settled", why: "same as budget.reserved: the balance moves in memory only, with no durable record of the movement" },
   {
-    type: "channel.written",
-    why: "a reduction is journaled whole as state.reduced; there is no per-channel event, so the fold for this type is unreachable",
-  },
-  {
-    type: "config.reloaded",
-    why: "there is no reload path in src/ at all — no signal handler, no admin endpoint — so nothing can announce one",
+    type: "budget.settled",
+    decision: "wire",
+    why:
+      "the other half of the same reservation, folded at `projection.ts:1116`, and the same restart hole: the balance moves in " +
+      "memory with no durable record of the movement. One change with budget.reserved, or the fold releases what it never took",
+    blockedOn: ["src/run/policy.ts", "src/run/engine.ts", "src/run/projection.ts"],
   },
   {
     type: "task.skipped",
-    why: "nothing marks a Task skipped, so the skipped task state is unreachable, which also makes a join's branch-error accounting count a population that cannot exist",
+    decision: "wire",
+    why:
+      "the skipped STATE is read three times — the join's branch-error accounting in `engine.ts`, `trajectory.ts` and `spans.ts` — " +
+      "and cannot be set, so `onBranchError: \"fail\"` counts a population that cannot exist. The appender belongs where " +
+      "`#absorbedByJoin` contains a failed branch: that is the moment a Task is skipped rather than failed",
+    blockedOn: ["src/run/engine.ts", "src/run/projection.ts", "src/evolution/trajectory.ts", "src/telemetry/spans.ts"],
+  },
+  {
+    type: "channel.written",
+    decision: "delete",
+    why:
+      "its only reader is a fold arm whose whole body is `Nothing to fold` — the authoritative value rides on " +
+      "`task.committed.writes`, and a per-channel audit row that nothing writes audits nothing. Deleting it means dropping that " +
+      "arm and two `server/http.ts` docstring mentions in the same change",
+    blockedOn: ["src/run/projection.ts", "src/server/http.ts"],
   },
   {
     type: "task.started",
-    why: "leasing is the start and no code distinguishes the two; delete it, or make leasing and starting different facts",
+    decision: "delete",
+    why:
+      "leasing IS the start and no code distinguishes them. It has already cost a silent false negative: " +
+      "`test/run/advance-reentrancy.test.ts` filters the journal for this type, so its headline assertion — every Task starts " +
+      "once — compares 0 to 0 on a run that leases 7 times. Fixing that test to read `task.leased` unblocks the deletion",
+    blockedOn: ["test/run/advance-reentrancy.test.ts", "test/scale.test.ts"],
   },
 ];
 
@@ -180,6 +319,26 @@ test("every unappended event type is one this file can name a reason for", () =>
   const known = new Set<string>(EVENT_TYPES);
   const unknown = NEVER_APPENDED.map((e) => e.type).filter((t) => !known.has(t));
   assert.deepEqual(unknown, [], "pinned as never-appended but not a declared event type at all");
+});
+
+test("EVERY EXCUSE IS STILL BLOCKED — the moment it is not, the decision must be executed", () => {
+  // The condition, not a date. Each row says what it is waiting for; when the last file
+  // listed stops mentioning the type, nothing is holding the decision up any more and this
+  // goes red. An excuse must not outlive its own reason — that is how six of these came to
+  // stand for as long as they did.
+  const stale: string[] = [];
+  for (const row of NEVER_APPENDED) {
+    assert.ok(row.blockedOn.length > 0, `${row.type}: a decision with nothing blocking it is a decision to execute now`);
+    const holding = row.blockedOn.filter((rel) => {
+      const full = join(PKG_DIR, rel);
+      assert.ok(existsSync(full), `${row.type} is blocked on ${rel}, which is not in the tree`);
+      return readFileSync(full, "utf8").includes(row.type);
+    });
+    if (holding.length === 0) {
+      stale.push(`${row.type}: nothing in ${row.blockedOn.join(", ")} mentions it any more — ${row.decision} it`);
+    }
+  }
+  assert.deepEqual(stale, [], "an excuse outlived its reason");
 });
 
 // ── escalation rules ─────────────────────────────────────────────────────────
@@ -230,6 +389,32 @@ test("ONE FILE OWNS THE TELEMETRY VOCABULARY", () => {
     }
   }
   assert.deepEqual(offenders, [], "a loom.* telemetry name is spelled outside telemetry/spans.ts");
+});
+
+// ── the ratchet ──────────────────────────────────────────────────────────────
+
+test("NEITHER EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () => {
+  // THE HOLE THE REST OF THIS FILE DOES NOT CLOSE, and the one that produced sixteen members.
+  // Every check above compares the set of unwritten members to a pinned list, so the way to
+  // pass is to add the member to the list — with a fat reason, which `reasonsAreReal` will
+  // happily accept, and which is exactly how each of the sixteen got in. A reason is an
+  // argument that a name may be declared early; it is not a bound on how often that argument
+  // may be made.
+  //
+  // A floor, not an equality, in the direction that matters: wiring or deleting a member and
+  // shrinking these lists must not cost a test edit. Growing them must, and must be argued in
+  // a commit message rather than a string. `audit-coverage.test.ts` holds the same ratchet
+  // over its `todo` excuses for the same reason.
+  assert.ok(
+    NEVER_RAISED.length <= 1,
+    `${NEVER_RAISED.length} error codes are declared with no raiser; it was TEN before the sweep and is ` +
+      `ONE now — raise the new one where it belongs, or do not declare it until you do`,
+  );
+  assert.ok(
+    NEVER_APPENDED.length <= 5,
+    `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX and is FIVE — ` +
+      `journal/events.ts is kernel, and a closed vocabulary that only ever grows is not one`,
+  );
 });
 
 test("the registries are non-empty, so none of the above can pass vacuously", () => {

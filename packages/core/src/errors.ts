@@ -228,13 +228,27 @@ const CLASSES: ReadonlySet<ErrorClass> = new Set<ErrorClass>([
  * The stable machine codes that cross layer boundaries. Adding one is additive;
  * changing the class of an existing one is a breaking change, because
  * `retry.onlyIf` lists and HTTP status mappings depend on it.
+ *
+ * A CODE ARRIVES WITH ITS RAISER, IN THE SAME CHANGE. Nine were declared ahead of one and
+ * every one of them was still waiting when it was deleted: `E_ADMISSION_REJECTED`,
+ * `E_CHECKPOINT_NOT_FOUND`, `E_INSUFFICIENT_COHORT`, `E_LEASE_LOST`, `E_POLICY_UNAVAILABLE`,
+ * `E_SECRET_UNAVAILABLE`, `E_STORAGE_FULL`, `E_TOOL_NOT_IDEMPOTENT`, `E_TOO_LATE`. Three of
+ * them were not waiting on anything — the condition they name is already raised under
+ * another code (`E_FENCING_STALE` for a lost lease, `E_GATE_ALREADY_RESOLVED` for too late)
+ * or is deliberately not an error at all (a small cohort is a named `goldenBlocker`; a
+ * non-idempotent tool is a `#retryDecision` of "no"). A second spelling of a live decision is
+ * worse than no spelling: it invites the next author to raise the one nothing catches.
+ *
+ * Adding a code costs one line at the moment of first use, and this file is deliberately NOT
+ * kernel (`scripts/kernel.json`: "Adding an error code IS adding capability") — so declaring
+ * one early saves nothing and promises something. `registries.test.ts` pins the unraised set,
+ * which is `E_JOIN_TIMEOUT` alone, and says there why that one is allowed to stand.
  */
 export const CODES = {
   // validation
   E_GRAPH_INVALID: "E_GRAPH_INVALID",
   E_CHANNEL_UNDECLARED: "E_CHANNEL_UNDECLARED",
   E_CONTEXT_OVERFLOW: "E_CONTEXT_OVERFLOW",
-  E_TOOL_NOT_IDEMPOTENT: "E_TOOL_NOT_IDEMPOTENT",
   E_TOOL_SCHEMA_INVALID: "E_TOOL_SCHEMA_INVALID",
   E_PROVIDER_BAD_REQUEST: "E_PROVIDER_BAD_REQUEST",
   E_ROUTE_INVALID: "E_ROUTE_INVALID",
@@ -268,8 +282,6 @@ export const CODES = {
   E_NOT_AUTHORIZED: "E_NOT_AUTHORIZED",
   E_HUMAN_APPROVAL_REQUIRED: "E_HUMAN_APPROVAL_REQUIRED",
   E_EVAL_REGRESSION: "E_EVAL_REGRESSION",
-  E_INSUFFICIENT_COHORT: "E_INSUFFICIENT_COHORT",
-  E_POLICY_UNAVAILABLE: "E_POLICY_UNAVAILABLE",
   /** A channel did not accept a gate. NEVER an approval — see run/delivery.ts. */
   E_GATE_DELIVERY_FAILED: "E_GATE_DELIVERY_FAILED",
 
@@ -278,7 +290,6 @@ export const CODES = {
   E_RESOURCE_YANKED: "E_RESOURCE_YANKED",
   E_TOOL_NOT_FOUND: "E_TOOL_NOT_FOUND",
   E_GATE_NOT_FOUND: "E_GATE_NOT_FOUND",
-  E_CHECKPOINT_NOT_FOUND: "E_CHECKPOINT_NOT_FOUND",
   E_RUN_NOT_FOUND: "E_RUN_NOT_FOUND",
   /**
    * The control plane has no route for this method and path.
@@ -295,13 +306,11 @@ export const CODES = {
   E_SEQ_CONFLICT: "E_SEQ_CONFLICT",
   E_FENCING_STALE: "E_FENCING_STALE",
   E_IDEMPOTENCY_MISMATCH: "E_IDEMPOTENCY_MISMATCH",
-  E_LEASE_LOST: "E_LEASE_LOST",
   /** A WORM store was asked to overwrite a record with different content. */
   E_AUDIT_IMMUTABLE: "E_AUDIT_IMMUTABLE",
   E_GATE_ALREADY_RESOLVED: "E_GATE_ALREADY_RESOLVED",
   E_ILLEGAL_TRANSITION: "E_ILLEGAL_TRANSITION",
   E_RESTORE_ILLEGAL: "E_RESTORE_ILLEGAL",
-  E_TOO_LATE: "E_TOO_LATE",
   /**
    * A body reached a nondeterminism seam with no journaled effect behind it.
    *
@@ -320,7 +329,6 @@ export const CODES = {
 
   // exhausted
   E_BUDGET_EXHAUSTED: "E_BUDGET_EXHAUSTED",
-  E_ADMISSION_REJECTED: "E_ADMISSION_REJECTED",
   E_PROVIDER_RATE_LIMIT: "E_PROVIDER_RATE_LIMIT",
   E_EXPANSION_EXHAUSTED: "E_EXPANSION_EXHAUSTED",
   E_QUORUM_UNREACHABLE: "E_QUORUM_UNREACHABLE",
@@ -340,11 +348,9 @@ export const CODES = {
    * the body asked and the graph declined.
    */
   E_FUNCTION_UNAVAILABLE: "E_FUNCTION_UNAVAILABLE",
-  E_SECRET_UNAVAILABLE: "E_SECRET_UNAVAILABLE",
   E_PROVIDER_OVERLOADED: "E_PROVIDER_OVERLOADED",
   E_PROVIDER_TRANSPORT: "E_PROVIDER_TRANSPORT",
   E_TOOL_SOURCE_UNAVAILABLE: "E_TOOL_SOURCE_UNAVAILABLE",
-  E_STORAGE_FULL: "E_STORAGE_FULL",
 
   // timeout
   E_TOOL_TIMEOUT: "E_TOOL_TIMEOUT",
