@@ -458,6 +458,15 @@ Each was verified against the code, not remembered.
   policy that is visible in the compiled artifact, then remove the hidden sleep.** Doing the
   second alone turns a recoverable rate limit into a failed run on the project's headline path.
 
+  **HALF ONE LANDED 2026-08-26.** `NodePlan.retry` carries the effective policy, `loom compile`
+  prints it with its source, and an author's declaration is never touched. Measured on the
+  shipped graphs: `retry review (default): maxAttempts=3 backoff=exponential initialMs=1000
+  maxMs=30000 onlyIf=any-retryable`. A `subgraph` node gets one too, for a reason the engine
+  already documented and nobody had wired: `#runSubgraph` returns retryable-`unavailable` for a
+  child that is still working and names the parent's policy as what re-enters it — latent while
+  no node had a default, and made ordinary by giving agent nodes one. Half two — releasing the
+  slot — is next.
+
   Worth naming as a defect CLASS rather than an instance: *a complete mechanism with no caller,
   because a lower layer silently pre-empted it.* That is §B's shape hiding under an §A symptom,
   and it is the second time this programme has found one (the other was `LeasedScheduler`).
