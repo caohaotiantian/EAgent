@@ -4,7 +4,8 @@ Orientation for whoever works on this next. **The code is the source of truth.**
 disagrees with the code, the code wins — fix this file.
 
 Keep it short. Everything here is either the goal, a principle, or a fact you need in the first
-five minutes. Work items live in `TODO.md`; decisions live in the commit history.
+five minutes. Work items live in `TODO.md`; the roadmap is `DESIGN.md`'s Sequence; decisions
+live in the commit history and in `docs/`.
 
 ---
 
@@ -30,6 +31,20 @@ Mechanically this means: **a change that adds capability should not touch the ke
 that is a signal the kernel is missing a seam, and the seam is the thing to design. A kernel that
 grows a feature per use case is a kernel nobody can depend on.
 
+**The kernel is a named list of ten files**, in `scripts/kernel.json`, each with a written reason
+it is there — the criterion is *this file is the mechanism that makes one of the non-negotiables
+below true, and an extension must depend on it and cannot replace it*. `scripts/check-kernel.mjs`
+runs the test: a `feat` commit touching one of them fails the gate unless it carries a
+`Kernel-seam:` trailer saying which seam was missing. `fix` may touch the kernel freely — fixing
+it is what a kernel is for. That trailer is the escape hatch and also the ledger:
+`git log --grep='^Kernel-seam:'` is the running count of every time the kernel absorbed a feature,
+and it is not a number anyone can quietly reset.
+
+Until `packages/eagent` was deleted, that sentence had no referent here at all and the test could
+be quoted but never run; the one P1 gate that did run, `check-surface.mjs`, pins the exported NAME
+SET and reported green on the day `run/engine.ts` crossed 6,100 lines. The list says nothing about
+whether `engine.ts` should be split — see its header for three arguments against.
+
 ### 2 · Unlimited extensibility
 
 Everything that is not the kernel is an extension, and extensions can reach everywhere the kernel
@@ -53,7 +68,9 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 - **The journal is the only authoritative state.** Everything else is a projection you can rebuild
   by folding it. If a decision reads a value, the journal must be able to reconstruct that value —
   including across a restart. This has been violated five times and each violation silently
-  switched off a guard.
+  switched off a guard. **The five are named** in
+  `packages/core/test/run/oversight-survives-restart.test.ts` — cite that file rather than
+  repeating the number, which nothing else here could check.
 - **Every nondeterministic call is recorded under a derived key, and replay serves the record.**
   Derived, never random: an id you cannot recompute breaks replay.
 - **Oversight only tightens.** Nothing raises its own permissions. A human may lower a posture; no
@@ -72,17 +89,23 @@ and the measurement has to be one that cannot be gamed by the thing being measur
   can.
 - Every module says *why it exists* at the top, not what it does.
 - Tests are offline and deterministic — no network, no API key, no wall-clock dependence.
-- `grep -a` always; macOS grep silently skips files with non-ASCII bytes, and this tree has them.
+- `grep -a` always. A plain grep can silently skip a file, and empty output is not evidence of
+  absence. The trigger is a **NUL byte**, not non-ASCII; **six** tracked files have one, listed in
+  `docs/todo-recheck-2026-08-25.md` §F. Do not count them with grep — a NUL file is only reported
+  when it also matches your pattern, so grep undercounts and the count moves with the search term.
 - Commits land under the human author's identity only. No assistant attribution, no co-author
-  trailers, no assistant links.
+  trailers, no assistant links in commit bodies or pull requests.
 
 ## Layout
 
 ```
 packages/core/     the runtime. Zero runtime dependencies. src/ + test/
-packages/eagent/   the agent kernel and its extensions. May take dependencies.
-scripts/           build and the two guards that are worth their cost
+                   Ten of its files are the kernel; scripts/kernel.json names them and says why.
+scripts/           build and the three guards that are worth their cost:
+                   zero-dep, surface (the exported name set), kernel (the pinned file list)
+DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
+docs/              dated records: audit findings and backlog re-checks, with reproductions
 .agent/<task>/     per-task working state (gitignored)
 ```
 

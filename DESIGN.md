@@ -88,7 +88,10 @@ and the runtime hands the body a bound, keyed, retryable invoker per declared na
 capability and declaring a journaled effect become the same act.** That turns "every
 nondeterministic call is journaled" from a rule people must remember into a structural property —
 which matters because the memory-only-state class has been violated five times, every time by a
-field somebody forgot to journal.
+field somebody forgot to journal — the five are named in
+`packages/core/test/run/oversight-survives-restart.test.ts`. A sixth has not been added, but
+member #3 (accumulated spend) has since regressed one layer down: the restore arm works and the
+projection it restores from does not fold `model.called`. See `TODO.md` §A0.
 
 ### D3 · The clock is bound to the journal, not recorded
 
@@ -199,12 +202,159 @@ harness and LangChain's Deep Agents converged on independently.
 
 ## Sequence
 
-1. **Declared effects (D2).** The structural fix; everything else is easier after it.
-2. **Realm determinism (D3).** Clock bound to the journal, `Date` restored.
-3. **The one-line surface (D1).** The thing that makes the first five minutes work.
-4. **Divergence is terminal and loud.** A replay that cannot proceed must not retry forever.
-5. **Labels on branch coordinates (D4).**
-6. **The extension surface and its version pin (D5).**
-7. **Self-improvement behind a frozen gate (D6).**
+**Rewritten 2026-08-25**, after an audit and a re-check of every backlog item by running it.
+The previous list had no done markers at all; the DONE that a measurement falsified was in
+`TODO.md` §G, not here. And its item 5 named "labels on branch coordinates" — the option D4's
+own heading rejects and which §G records as tried and reverted.
+
+**Every item names a command that FAILS today and passes when the item is done.** An item that
+cannot fail is a wish, not a roadmap entry. Evidence for each is in `TODO.md` §A0 and
+`docs/audit-2026-08-25.md`; the ones marked `gated` are held by
+`docs/audit-2026-08-25.md`, which also records the five gated cases that fired as each was
+fixed, and why only executable ones survived.
+
+**Landed.** D1, the one-line surface — the hello-world gets the journal, replay, gates and the
+budget ceiling without the caller learning the graph. That one is wholly done.
+
+**Landed in part**, and `TODO.md` §G carries the qualifiers this list must not drop: D2 declared
+effects is done for `function` nodes and still open for `evaluator` bodies and for the sandbox;
+replay divergence is terminal **for the recorded-effect path** only, which was item 4.
+
+### 1 · Oversight correctness — this gates everything below it
+
+Two defects break the property the product is pitched on and the invariant this document calls
+non-negotiable ("refusing is always allowed; loosening never is"). Nothing else is worth
+sequencing above them, and neither was in the backlog before today.
+
+A declared posture is discarded when its VALUE is out of vocabulary — `posture: "strict"`
+compiles `ok` and runs at `out` — and the unknown-FIELD check does not reach inside `policy` or
+`budget`, so `posturr: "out"` also compiles `ok`. An author loses a declared `posture: "in"` by
+misspelling either half. Separately, an approval binds the graph and the task but never the
+args, so a concurrent write changes what the approved node executes.
+
+*Fails today:* a test asserting `compile` REFUSES `policy: {posture: "strict"}` and
+`policy: {posturr: "out"}` — both of which `compile` now refuses.
+
+### 2 · The instrument for everything outside one process
+
+The structural finding of the audit: **every surviving defect class is restart, scale, or a
+second machine**, and the project has no instrument that reaches any of them. 3587 tests run
+offline, in-process, in ten seconds, with no restart and no second host — excellent inside that
+boundary and blind outside it. Four confirmed defects live there: the gate clock arming an
+unfiltered run set, the 200-run window starving the oldest run, the loopback bind, and the
+budget refunded across a restart because `foldRun` never folds `model.called`.
+
+One scenario reaches all four at once.
+
+*Fails today:* a script that starts `serve` over a journal holding more than 200 runs and one
+open gate, restarts the process, and answers that gate from a second host.
+
+### 3 · Finish realm determinism (D3)
+
+The thesis of this document is determinism by controlling the realm. It holds for `function`
+bodies and does not hold at the edges: `ctx.now()` does not reproduce (two replays of one
+run return different values, tracking the wall clock — the shadow run appends its own
+`task.leased` stamped by the live clock), `loom replay`
+builds its engine with no hooks so a hooked run replays a different program, and hook bodies get
+the real unseeded `Math.random()` while `hooks.ts:89` claims they get no randomness.
+
+*Fails today:* two replays of one run returning the same `ctx.now()`.
+
+### 4 · Port one real workflow
+
+The maintainer's decision, 2026-08-25, and now the ordering constraint for everything after it.
+Nothing has yet used this system for something somebody actually needed; every clause of the bar
+is verified by running, which is not the same evidence. This is also what produces the corpus
+item 5 requires.
+
+**DONE 2026-08-25.** A review workflow over this repo's own diff — fan-out to one `agent` node
+per changed file, `join`, collate, `human_gate`, then an irreversible `fs.write` — run against a
+live GLM-5.2. Measured: 3 model calls, 5,718 in / 28,944 out, $0.046, 456 s. The run stopped at
+the gate with the file ABSENT, wrote it on approval, and then **replayed with no API key and no
+base URL in the environment: `match: true, hermetic: true`, with the deleted output file NOT
+re-created.** That is the whole thesis — a run that cost money replays for free, offline, without
+a credential, and does not repeat its side effect.
+
+**What it cost to learn what a test could not.** The first attempt produced a report of nothing:
+the model spent its entire token budget reasoning and returned empty content under
+`finish_reason: "max_tokens"`, and the runtime wrote `""` to the channel and called the run
+`succeeded`. Two defects, both in `TODO.md` §A0, neither reachable from any offline test. This is
+the item's real return: not that the mechanism works, but that one real workload found in eight
+minutes what 2,215 tests could not.
+
+### 5 · Close the self-improvement loop (D6)
+
+Not deferred any longer — closed, per the maintainer's decision. (This is a different sense of
+"frozen" from D6's: the eval set stays frozen before the candidate exists, unchanged.) **Metric before corpus, as a hard ordering
+inside this item:** the score currently prefers failure 0.400 to 0.100 because `readSignals`
+never reads `runStatus`, and `trajectory.usage` triple-counts spend. Every trajectory captured
+under an inverted metric is a poisoned label, so accumulating a corpus first is harmful rather
+than merely premature — which corrects `TODO.md` §E's stated deferral reason, whose whole
+premise was a correct scorer and a short sample.
+
+Then: a journal event that can carry a score, a verb that reads one, and one cohort where a
+later run is measurably better because of an earlier one.
+
+**MECHANISM DONE 2026-08-26; THE DEMONSTRATION IS BLOCKED, and by something worth knowing.**
+Built and driven on a real corpus: five live GLM-5.2 runs of one graph over five different diffs
+($0.044, 510 s), each scored through `loom score`, each verdict journalled as `evolution.scored`
+(event row 53, with an audit rule that refuses a score claiming a completion the journal denies),
+each read back through `loom cohort`. Every run scored 0.6 with `delivered: true`.
+
+**What it cannot yet do, measured rather than assumed.** All five landed in DIFFERENT cohorts of
+one, because `cohortKeyOf` includes an input bucket that defaults to a digest of the whole input.
+`isGolden` needs thirty. So promotion is unreachable for any workflow whose inputs vary — which is
+every real workflow. The `bucketInput` seam exists for exactly this and has no caller. See
+`TODO.md` §A0. **This is the item's remaining work, and it is one seam, not a redesign.**
+
+*Fails today:* thirty runs of one workflow sharing a cohort key, and a candidate promoted over
+them because it measurably beat the baseline.
+
+### 6 · Cut `packages/eagent` to its tag and delete it
+
+The maintainer's decision, 2026-08-25. It is 43% of the test suite (1,547 of 3587), imports
+nothing into core, and carries a divergent toolchain (Node 22 against 24, TS 5.7 against 5.9).
+Its CLI instructs `npm i -g eagent`, which is a real published package owned by an unrelated
+maintainer. Deleting it also frees the word **kernel** to mean `packages/core`, which is what
+makes item 7 possible at all.
+
+*Fails today:* `npm test` reporting a single package's count, and `git ls-files packages/eagent`
+returning nothing.
+
+### 7 · Give "the kernel" a referent, and gate it (P1)
+
+Only possible after 6, because "the kernel" currently names the package being deleted.
+`grep -rani kernel packages/core/src/` returns one hit, about the OS kernel. Meanwhile
+`engine.ts` went 1,375 to 6,104 lines in 21 days, was touched by 28 of the 69 `feat` commits on
+this branch, and has never been reduced by more than 32 lines in a single commit — while the one
+running P1 gate measures name-set stability and reported green the day it crossed 6,100.
+
+Pin a file list and fail when a `feat` diff touches it — the surface guard's shape, applied to
+what P1 actually names. Note what the audit did NOT establish: whether `engine.ts` is
+decomposable. Its header gives three structural arguments for co-location. **Making the boundary
+observable is orderable; splitting the engine is not, yet.**
+
+*Fails today:* a guard that fails when a `feat` commit touches a pinned kernel file list.
+
+### 8 · The extension surface and its version pin (D5)
+
+Unchanged in intent. One thing the audit sharpened: the closure is real and undocumented. A
+non-committer can add graphs, prompts, profiles, subgraphs, sandboxed functions, sandboxed
+hooks, MCP tools and OpenAI-wire providers without forking; an in-process tool, a new wire
+protocol, a delivery channel, a node type, a reducer or a ninth hook point all require a fork.
+That is a defensible trade — replay depends on closed vocabularies — but it is stated as a bound
+only in `TODO.md`, and "unlimited extensibility" appears unqualified above.
+
+*Fails today:* an example hook file and an example function body in the tree, with the required
+shape named in `--help` and in the loader's error text rather than in one source comment.
+**Ordering note:** the tree's only `examples/` directory is `packages/eagent/examples/`, which
+item 6 deletes. Either this item lands first, or item 6 carries the examples across.
+
+### Deliberately not sequenced
+
+**Distribution** — LICENSE, publishing, a stranger-facing install. It follows from the first-user
+decision: the next user is the maintainer porting a workflow, not a stranger who found the repo.
+`TODO.md` §A0 records the missing LICENSE as a defect; THIS paragraph is where the choice to
+leave it unsequenced is recorded. Revisit when item 4 lands.
 
 Open items and known defects live in `TODO.md`.

@@ -1,21 +1,289 @@
 # TODO
 
-**Captured 2026-08-25, before the sweep.** The design corpus that held this backlog
-(`design/loom/`, 14 documents; `packages/eagent/docs/`, 55) is being retired, so this file is
-written to be **self-contained**: every item carries its own substance rather than a pointer into
-a document that will not exist.
+**Re-checked 2026-08-25 by running, not by reading.** Every item in A–H below carries a
+verdict and the command that produced it; the tables at the head of each section are the
+index. 107 items were checked, 106 of them by executing something — 19 DONE, 52 still open,
+30 partial, 2 wrong, 2 stale, 2 with no mechanical truth value.
 
-Nothing here is a plan. It is the set of things that were true about the code on the day the
-redesign started, so that the redesign can decide each one deliberately instead of rediscovering
-it. **An item surviving into the new design is a choice; an item being dropped is also a choice.**
-Mark them off either way.
+**State at re-check:** 58 source files in `packages/core`, 106 in `packages/eagent` (65
+extensions); 3587 tests passing (core 2040, eagent 1,547); zero-dep and public-surface guards
+green at 524 exports.
 
-State at capture: 259 test files, 57 source files in `packages/core`, 106 in `packages/eagent`
-(65 extensions), 3570 tests passing, zero-dep and public-surface guards green.
+Nothing here is a plan. **An item surviving is a choice; an item being dropped is also a
+choice.** The roadmap lives in `DESIGN.md`'s Sequence, not here.
+
+Two files carry the rest: **`docs/audit-2026-08-25.md`** holds the complete set of 77 audit
+findings, including the tail that changes nothing and the 3 that were refuted, so the set
+can be named rather than asserted. It also records what became of the **gated tier**: five
+findings were held by cases that asserted the defect still reproduced, so each failed loudly the
+moment it was fixed. All five fired by 2026-08-26 and the file is gone.
 
 ---
 
+## A0 · From the 2026-08-25 audit — what changes what you would do
+
+20 agents over 9 dimensions, each dimension's findings then attacked by an independent
+verifier that rewrote 42 of 74 claims and moved severity on 48. What follows is the subset
+that changes an action. **`REPRO`** meant a case that EXECUTED the finding and failed when it was
+fixed; all five such cases have now fired and been retired — see `docs/audit-2026-08-25.md`.
+**`CITED`** means file:line at sha `86b84c9`, checked by reading. **`NEW`** means the backlog
+re-check, or the first real workload, found it — not the audit.
+
+### The oversight floor can be lost silently, three ways
+
+- ~~**A declared posture is discarded when its VALUE is out of vocabulary.**~~ **FIXED
+  2026-08-25.** `maxPosture`/`postureRank`/`isLoosening`/`maxClassification` now rank an
+  unreadable member at the **strongest**, not at nothing, and `compile` refuses an
+  out-of-vocabulary `policy.posture` with `GRAPH003_UNKNOWN_POSTURE` naming the legal values.
+  No throw was introduced in the folds — a journaled event carrying a bad value still folds,
+  which is why the fold tightens rather than refuses. **Residue, still open:**
+  `ToolRegistry.register` validates no manifest field, so `irreversibility: "nuclear"` is still
+  accepted — it now floors that node at `in` rather than `out`, which is fail-closed but is not
+  validation. Original finding:
+  `maxPosture` (`vocab.ts:29`) starts at `out` and replaces only when
+  `POSTURE_RANK[p] > POSTURE_RANK[best]`; a miss is `undefined`, and `undefined > 0` is
+  false. So `policy: {posture: "strict"}` compiles **`ok`** and runs at `out` — the weakest
+  posture — and `isLoosening("in", "IN")` returns `false`, so the guard cannot see it.
+  Nothing in the tree checks membership: there is no `isPosture`. The same shape holds for
+  `Classification` and `IrreversibilityClass`.
+- ~~**The unknown-FIELD check does not reach inside `policy` or `budget`.**~~ **FIXED
+  2026-08-25** at both graph and node scope, for `policy`, `policy.budget` and
+  `policy.expansion` — six scopes now, not four. **Residue, deliberately re-scoped rather than
+  closed:** the same hole remains for `retry` and every other nested block, which `NODE_FIELDS`'
+  own docstring already names. Original finding: §A.1 records
+  this as DONE "at all four scopes" and it is DONE for the node block — `policyy` is caught
+  with a suggested fix. But `policy: {posturr: "out"}` compiles `ok`, and
+  `budget: {nonsense: 5}` compiles `ok`. Combined with the entry above, an author loses a
+  declared `posture: "in"` by misspelling either the key or the value, and both compile
+  clean. This is the family §A.1 was written to close.
+- ~~**An approval binds the graph and the task, never the args.**~~ **FIXED 2026-08-25.** An
+  approval now binds a digest of what it will execute — node spec, posture, irreversibility, the
+  observed state, a `tool.args` fingerprint and (added after a verifier found the hole) a
+  subgraph's delegated inputs. A payload that changed between approval and dispatch fails the
+  task with `E_GATE_REQUIRED`, reporting both digests. Original finding: `engine.ts:2482`
+  reads the settled gate and `:2501` dispatches, with no comparison of the payload between
+  them; the three `contentDigest` mentions in `engine.ts` (`:1466`, `:1650`, `:4405`) are all
+  **comments**, so nothing executable pins the payload at dispatch. A concurrent write to a
+  channel the gated node reads changes what the approved node executes, while `openGates`
+  keeps serving the raise-time payload under an unchanged digest.
+
+### The journal is not authoritative for spend
+
+- ~~**`foldRun` never folds `model.called`.**~~ **FIXED 2026-08-25**, and this was the dangerous
+  half: `engine.ts` restores the policy's spend from the projection on resume, so the under-count
+  refunded budget across a restart (measured 4.8x overrun). Original finding: Spend IS journaled
+  (`events.ts:264-270`, appended at `engine.ts:3599`) but the projection folds only
+  `task.committed.usage` (`projection.ts:734`), so the spend of any task that retried or
+  threw is absent — and `Engine.attach` re-seeds `PolicyEngine` from that projection
+  (`engine.ts:1237`), refunding it on restart. **This is not a sixth member of §F.1's
+  class. It is member #3 (accumulated spend) failing at a different layer:** the restore
+  arm exists and works; what it restores from is incomplete. Same defect with no restart
+  at all — reported run cost under-reports what the provider billed.
+
+### Replay is less hermetic than it reports
+
+- ~~**`ctx.now()` does not reproduce.**~~ **FIXED 2026-08-25.** Original finding: Two replays of one run returned values
+  apart — the delta is whatever pause sat between them (1161 ms, 1206 ms and 1208 ms in three
+  separate runs), which is the point: the value tracks the wall clock, not the recording.
+  `replayRun` fixes the shadow store's clock (`replay.ts:439`), but the
+  shadow run appends its own `task.leased` stamped by the replay engine's wall clock
+  (`engine.ts:2443`), so the shadow clock is never reached. **§G records the opposite as
+  DONE**; that entry is corrected below.
+- ~~**`loom replay` builds its engine with no `hooks`**~~ **FIXED 2026-08-25** — a replay now
+  runs the same program it recorded. Original finding: builds its engine with no `hooks` (`cli.ts:2534`), so
+  `#hooksFor` returns `[]` at all eight points and a replay of a hooked run executes a
+  different program than the recording.
+- ~~**Hook bodies get the real, unseeded `Math.random()`.**~~ **FIXED 2026-08-25**, and the
+  embedder `globals` seam that beat every shadow was closed with it. Original finding: `HOOK_BRIDGE`
+  (`hook-loader.ts:53-66`) omits the reseeding that `ARGUMENT_BRIDGE` gives `function`
+  bodies, while `hooks.ts:89` claims "No clock and no randomness". The realm control for
+  node bodies is real; the extension surface is exempt from it.
+
+### Two things that are silently wrong at run time
+
+- ~~**A static sibling-branch join at the ROOT coordinate double-counts every branch.**~~
+  **FIXED 2026-08-25.** Original finding:
+  `#immediateReduce` (`engine.ts:4902-4919`) already reduces each branch's writes, then
+  `#foldJoin`'s root path (`engine.ts:3184-3205`) folds the same `t.writes` again. Measured:
+  three branches produced **six** entries in an `append_ordered` channel; the join's own
+  `task.committed` carries `writes:{}` while its `state.reduced` carries 6. Any non-idempotent
+  reducer (`append_ordered`, `sum`) double-counts, and the graph compiles `ok`.
+  **Scope matters and was checked twice:** a real fan-out → join does NOT double-count —
+  `#immediateReduce` holds only at depth (`engine.ts:4911`) — so testing the obvious shape
+  will suggest this finding is false. Found by driving a neighbouring shape of the fan-out
+  claim in §A, which is §F.5 working exactly as written.
+- ~~**Gate payloads are served verbatim.**~~ **FIXED 2026-08-25**, on all six `#summary` routes
+  plus the SSE stream and `task.ready.binding.value` — three more leaks than the first fix found.
+  Original finding: `http.ts:104` states they "are redacted
+  per the GRAPH's declared classification". `redactPayload` is called at `3579`, `3608`,
+  `3609` — journal events, channels, outputs — and at neither gate route (`2705`, `2886`).
+  A `secret_ref` channel was returned in full over real HTTP.
+
+### The self-improvement metric is inverted
+
+- **PARTLY FIXED 2026-08-25 — a failed run no longer outscores a successful one**, because
+  `readSignals` now reads `runStatus`. **The pathology moved rather than closing:** measured on
+  the fixed tree, a no-op SUCCESS that delivers nothing scores **0.400** while a real success
+  spending the cohort median with no ground-truth signal scores **0.100**. The dominant strategy
+  went from "fail immediately" to "succeed immediately without doing anything", because the cost
+  and latency terms credit cheapness rather than efficiency. A second fix is in flight.
+  Original finding:
+  `readSignals` (`score.ts:131`) never reads `t.outcome.runStatus` — the trajectory
+  captures it (`trajectory.ts:96`) and nothing consumes it — so a run that fails fast pays
+  no cost or latency penalty and still collects `humanEffortSaved = 1`. Separately,
+  `trajectory.usage` triple-counts spend (folded at `model.called`, `task.committed` and
+  `run.completed`): measured 0.001 on the projection against 0.003 on the trajectory.
+  `isGolden` condition 2 is `score >= cohort.p90Score` over exactly these numbers.
+  **This inverts §E.3's deferral reason**, which presupposes a correct scorer and a short
+  sample. Until the metric is fixed, capture is harmful: every trajectory is a poisoned
+  label.
+
+### One window starves two mechanisms
+
+- ~~**`armForeignGates` filters where its two siblings do not.**~~ **FIXED 2026-08-25**, and the
+  `armed` map is pruned and pinned. Original finding: `cli.ts:2056` calls
+  `listRuns(DEFAULT_RUN_CLOCK_LIMIT)` unfiltered; `gates.ts:2193` and `http.ts:2682` both
+  pass `{raisedAGate: true}`. The fix landed twelve hours after the site that missed it.
+  Past the window a restarted plane sees an old gate and cannot arm it, so the sweep
+  expires it and `onTimeout: "escalate"` behaves as `fail` — a human question journaled as
+  timed out with a false reason, no tier ever fired.
+- ~~**The same 200-run window starves the oldest run.**~~ **FIXED 2026-08-25.** Original finding: With 201 live runs, `listRuns(200)`
+  is `ORDER BY run_id DESC LIMIT ?` (`sqlite.ts:427`/`:432`), so the oldest is never projected,
+  never rehydrated and never advanced — it waits for a hand-posted `{"kind":"advance"}`.
+  §E.2 defers "deciding which runs a worker considers" as needing a coordinator; that
+  decision has in fact already shipped, as a silent starvation policy.
+
+### The service is single-machine
+
+- ~~**`loom serve` binds loopback and there is no `--host`.**~~ **FIXED 2026-08-26** — `--host`
+  exists, loopback stays the default, and binding a wider interface is announced at boot.
+  Original finding: `http.ts:1696` is
+  `listen(port, host = "127.0.0.1")`; `cli.ts:2320` passes no host; `--host 0.0.0.0` is
+  refused with `E_CONFIG_INVALID: unknown flag`. So ~1,400 lines of inbound callback
+  perimeter — `SignedWebhookChannel.parseCallback`, `timingSafeStringEqual`, the 10-member
+  `CALLBACK_REJECTIONS` taxonomy, the unauthenticated `CALLBACK_PATH` — cannot be reached
+  by the Slack button they exist for. README:64-68 "run it as a service" is a
+  single-machine claim as written.
+
+### Kernel stability has no referent, and nothing observes the growth
+
+- ~~**P1's mechanical test names a set that does not exist in `packages/core`.**~~ **FIXED
+  2026-08-25** — `scripts/kernel.json` pins 10 files with a stated criterion and its exclusions,
+  and `scripts/check-kernel.mjs` runs in `npm run check`. Possible only because `packages/eagent`,
+  which owned the word, was deleted the same day. Original finding:
+  `grep -rani kernel packages/core/src/` returns one hit, about the OS kernel; the only
+  referent repo-wide assigns "the agent kernel" to `packages/eagent`. By the charitable
+  proxy: **28 of the 69 `feat` commits on this branch** touched `run/engine.ts` (25 of the
+  most recent 60 — `docs/audit-2026-08-25.md` reports the narrower window), and it went
+  1,375 → 6,104 lines in 21 days, never reduced by more than 32 lines in one commit.
+  The one running P1 gate measures name-set stability and reported green the day
+  `engine.ts` crossed 6,100 lines.
+
+### A routing decision reads the prototype
+
+- ~~**A router `when` expression reaches `Object.prototype`.**~~ **FIXED 2026-08-26**, and it was
+  worse than reported: the same prototype read was in the VALIDATOR, where `channels["constructor"]`
+  resolved to `Object` and `GRAPH004`'s unknown-channel check silently accepted `constructor`,
+  `toString` and `valueOf` as declared channels — the compiler's teeth, bypassable by naming a
+  prototype key. Original finding: `graph/expr.ts:481`
+  resolves member access as a bare `o[e.prop]`, so `a.constructor`, `a.__proto__` and
+  `a.hasOwnProperty` all resolve on any object. `checkExpr("a.constructor != null", …)` is
+  `ok` and evaluates `true` for every object, including one with no such data key. A router
+  testing field presence on untrusted JSON is reading the prototype, not the data — and a
+  router chooses which edge runs.
+
+### Found by the first real workload, 2026-08-25
+
+- ~~**A truncated model turn is written as `""` and the run reports `succeeded`.**~~ **FIXED
+  2026-08-26**, and a verifier found the fix reached only half the problem: both shipped adapters
+  ended their finish-reason mapper with `default: return "stop"`, laundering every reason this
+  build does not know into the one value meaning "finished answer" — so the engine's fail-closed
+  arm was unreachable from either adapter. `FinishReason` now carries `` `unknown:${string}` ``
+  so the provider's own word reaches the refusal message. Anthropic's documented set already
+  contains `pause_turn`, which is not an answer. Original finding: Found by
+  running a real review workflow against a live GLM-5.2, not by any test. The provider returned
+  `finish_reason: "max_tokens"` with `content: ""`; the journal recorded
+  `{"content":"","finishReason":"max_tokens","usage":{"outputTokens":16001}}`, and that empty
+  string was written to the node's channel, folded through a `join`, collated, **shown to a human
+  at a gate, approved, and written to disk** — with the run reporting `succeeded`. The report read
+  `filesReviewed: 3, clean: 2`: one of three contributed nothing and nothing anywhere said so.
+  Two of the three turns in the same run finished normally, so this is a per-turn truncation
+  treated as a successful empty answer, not an outage. Fix in flight.
+- **`NEW` Nothing warns that `defaultMaxTokens` is too small for the model.** The operator had to
+  read a SQLite journal to discover it. GLM-5.2 reasons at roughly 17:1 against content, so a
+  4,096 cap never reached content at all; 16,000 still truncated one of three.
+
+### Found by driving the evolution loop on a real corpus, 2026-08-26
+
+- **`NEW` `cohortKeyOf` includes the input digest, so every run on a different input is its own
+  cohort of one — and `isGolden` needs thirty.** Measured on five real GLM-5.2 runs of the same
+  graph over five different diffs ($0.044, 510 s): five distinct `cohortKey`s, every one
+  `n = 1`, and the verdict says so — `goldenBlockers: ["cohort large enough: n = 1 (need ≥ 30)"]`.
+  `trajectory.ts:474` is `opts.bucketInput?.(inputs) ?? digest(inputs).slice(7, 15)`, so the
+  DEFAULT bucket is a digest of the whole input.
+  **The seam for this exists and has no caller:** `bucketInput` (`trajectory.ts:168`) is declared
+  precisely so a deployment can define a coarser bucket — "a small diff", "a large diff" — and all
+  three product-path callers omit it (`agent.ts:334`, `cli.ts:2988`, `cli.ts:3187`).
+  Consequence: **P3's promotion path is structurally unreachable for any workflow whose inputs
+  vary**, which is every real workflow. A code-review workflow reviews a different diff every
+  time, by definition. Nothing is wrong with the scoring; the corpus can never assemble.
+
+### Recorded, and deliberately not sequenced yet
+
+These are confirmed and carried in `docs/audit-2026-08-25.md`, and no roadmap item owns them.
+Naming that here rather than letting them sit unowned:
+
+- **`F36` PARTLY CLOSED 2026-08-25.** A node's declared `timeoutMs` now compiles into the realm's
+  `vm` timeout, so a SYNCHRONOUS body is terminated at the declared number: a spin went
+  2,332 ms/`succeeded` -> 206 ms/`failed`, and `while(true){}` went 30,005 ms/`E_INTERNAL` ->
+  206 ms/`E_TASK_TIMEOUT`. `vm`'s timeout covers synchronous execution only, so an ASYNC body is
+  now REFUSED rather than silently unbounded. Still open: actually bounding an async body, which
+  needs a process boundary. Original finding: Node `timeoutMs` and the vm call timeout are both defeated by a single `await`.**
+  Measured: a 36-second body on a 200 ms deadline reporting `succeeded`; with an `await`, still
+  spinning at 70 s. Against CLAUDE.md's bar — "watch it, stop it" — this is the sharpest gap
+  here, and it belongs in Sequence 2 once that item has a harness to run it in.
+- **`F19` A retry erases the human gate decision from the trajectory** — the highest-value
+  label the system collects, deleted by the normalisation rule that claims to preserve strategy
+  identity. Belongs to Sequence 5; its verifier could not drive the live engine into the state,
+  so it is `unverified`, not confirmed.
+- **`F17` PARTLY CLOSED 2026-08-25** — `evolution.scored` is a journal event (row 53, with an
+  audit rule that refuses a score claiming a completion the journal denies) and a CLI verb reads
+  one. Still open: nothing yet CHANGES a later run because of an earlier one, which needs the
+  real runs of Sequence 4. Original finding: Sequence 5's "a verb that reads one" is the fix;
+  recorded so the gap has a name.
+- ~~**`F41` Gate payloads served verbatim**~~ **FIXED 2026-08-25** — see the entry above; it
+  turned out to be four routes, not two.
+- ~~**17 source comments cite design documents deleted at `f975f9f`**~~ **FIXED 2026-08-25** —
+  every citation now reads `design/loom/NN-NAME.md (deleted at f975f9f)`, so it is self-describing
+  rather than dangling. Original finding: 17 comments cited —
+  `01-INTERFACES.md`, `02-EXECUTION-GRAPH.md`, `06-EVOLUTION.md` and five more, across
+  `validate.ts`, `subprocess.ts`, `gate.ts`, `redact.ts`, `http.ts`, `hooks.ts`,
+  `policy.ts`, `delivery.ts`, `resources/hook-loader.ts` and `scripts/check-surface.mjs` — ten
+  files, seventeen occurrences.
+- **`CITED` No `LICENSE` at the repository root.** The `loom` branch dropped the one `init`
+  carries; neither the root manifest nor `packages/core` declares a license.
+- ~~**The `tui` removal is an unfinished transaction**~~ **MOOT 2026-08-25** — `packages/eagent`,
+  which contained every one of those files, was deleted. Original finding:, all of it inside
+  `packages/eagent/` — the ROOT README has no occurrence of "tui" and there is no root
+  CHANGELOG, so check the right files. `packages/eagent/README.md:84` still says
+  `npm --prefix tui install` (ENOENT), `packages/eagent/CHANGELOG.md:25-31` still calls `tui/`
+  the installable product, and several `packages/eagent/src` docstrings still describe it as
+  live. The guard misses all of it because it only forbids `src/tui/`.
+
+---
 ## A · Defects and unguarded behaviour
+
+**Re-checked 2026-08-25 — 4 items: 1 DONE · 2 partial · 1 open.** One line each; the command,
+the output and the full finding for every item are in
+[`docs/todo-recheck-2026-08-25.md`](docs/todo-recheck-2026-08-25.md#section-h).
+
+| item | verdict | finding |
+|---|---|---|
+| `H.1` `packages/eagent/tui` — **deleted** as part of this … | partial | COUNT WRONG: 'two tests that assert the directory exists' is ONE. |
+| `H.2` The web frontend was already designed once and closed, … | partial | Accurate, and now sharper than written: the terminal client was dropped 2026-07-27, REBUILT two days later as e9b8701 'feat(phase2): the tui/ package …. |
+| `H.3` `bin/loom` is gitignored and goes stale on any source … | open | Standing condition, correctly stated, and it bit during this audit — the checked-out binary is already 109s behind src at HEAD. |
+| `H.4` Commits land under the human author's identity only. No … | **DONE** | NOT A BACKLOG ITEM — it is a standing project rule already stated at CLAUDE.md:76-77, so TODO.md:310-311 is a duplicate of a contract file and will …. |
+
 
 **The whole product path has now been walked end to end**, on a real graph through `bin/loom`:
 author → `compile` → `run` → gate → `gates` → `approve` → `replay` → `audit` → `trace`. What it
@@ -31,8 +299,11 @@ established, each checked rather than assumed:
 - fan-out → join → serialise → write produces the right bytes, with `${reviews | json}` doing the
   serialising and no helper node.
 
-Two defects came out of the last two steps, which is where they always are. See the `trace`
-entries below. The remaining known gap on this path is the inert join `timeoutMs`, which
+Two defects came out of the last two steps, which is where they always are. They were fixed
+directly and never written down — `9b1efd5` (`trace` printed neither `node.id` nor
+`branch.path`) and `1d59621` (a millisecond cannot order Tasks). **The sentence that used to
+point at "the `trace` entries below" was born dangling**: the commit that added this preamble
+added no such entries. The remaining known gap on this path is the inert join `timeoutMs`, which
 `loom compile` correctly warns about.
 
 
@@ -90,7 +361,10 @@ Each was verified against the code, not remembered.
   beside `REQUIRED_FIELDS` and is cross-checked against the interfaces it enumerates, because an
   allow-list that falls behind refuses correct graphs — worse than the hole it closed. It caught an
   invalid `humanGate: {prompt}` in a test graph of mine on its first run.
-  **Now closed at all four scopes** — see the entry above. The node's own fields turned out to hold
+  **Now closed at all four scopes** — see the entry above. **Qualified 2026-08-25:** "all four
+  scopes" means the node's top-level fields, `GraphSpec`, node blocks and edges. It does NOT
+  reach inside `policy` or `budget`: `policy: {posturr: "out"}` and `budget: {nonsense: 5}` both
+  compile `ok`. See §A0 — that hole is the same family this entry closed one level up. The node's own fields turned out to hold
   the worst instance in the family, `policyy` losing a declared `posture: "in"` in silence.
 - **The journal amplifies a payload by `2N+2`.** **BOUNDED, NOT FIXED.** `prepare` now refuses a
   single canonical payload above 8 MiB (`E_PAYLOAD_TOO_LARGE`), which stops the runaway — a 256 MiB
@@ -122,8 +396,12 @@ Each was verified against the code, not remembered.
   is the most consequential live defect in the list.
 - **No circuit breaker.** Nothing measures a source's health and nothing withholds an unhealthy
   one. `SourceHealth` appears nowhere in the code.
-- **A subgraph's cost ceiling binds nothing.** A child run's spend is settled *after* it finishes,
-  so there is no point at which a cap could refuse rather than report.
+- ~~**A subgraph's cost ceiling binds nothing.**~~ **WRONG, re-checked 2026-08-25.** There is a
+  point at which the cap refuses rather than reports: `engine.ts:3726` computes
+  `slice = ctx.policy.remainingUsd * share`, journals it as `subgraph.started.budgetUsd`, and
+  passes it to both `#contextFor` (:3764) and `submit({budgetUsd: slice})` (:3770) — so the CHILD
+  gets its own `PolicyEngine` bounded by the slice and refuses mid-run. The original claim
+  described settlement, which happens after, and concluded nothing bound before.
 - **`reads` is not enforced as the read set.** The compile rule covers edge conditions and router
   cases but never tool arguments, so a template can name a channel the node did not declare.
 - **`reachableToolNames` does not descend into a subgraph**, so a subgraph node is classified
@@ -140,6 +418,25 @@ Each was verified against the code, not remembered.
 
 ## B · Declared and wired to nothing
 
+**Re-checked 2026-08-25 — 13 items: 4 partial · 9 open.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `B.1` **Compensation edges** — a compile-time rollback proof and | open | Accurate in all three halves. The only edge kinds skipped in #edgesToTake are `error` and `compensation`; `loop`, `conditional` and the default arm all push edges, so the fall… |
+| `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | open | Claim holds. Two omissions: (a) it is now a compile WARNING, so an author is told; (b) a stale comment contradicts this — packages/core/test/run/skeleton.ts:81-82 says a join … |
+| `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | open | Confirmed. `.wallMs` occurs 10 times in core/src but every one is UsageRecord.wallMs (vocab.ts:335, evolution/score.ts:212, run/escalation.ts:212, …), never Budget.wallMs. |
+| `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
+| `B.5` **Retention tiering** — proven by test, zero callers, so a | open | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. |
+| `B.6` **The evolution subsystem is now REACHABLE but not wired.* | open | Every clause checks out. Members of "still uncalled" — cohort measurement: measureCohort, cohortKeyOf, isGolden, scoreTrajectory, readSignals, outcomeOf; promotion ceilings an… |
+| `B.7` **Quorum, delegation and trust-tier approvals** — delibera | open | Confirmed, all four shapes. "trust-tier" is ApprovalSpec `mode: "tiered"`. The refusals are at graph/validate.ts:1997-2002 (mode), :2003 (k), :2044-2046 (delegation), and each… |
+| `B.8` **The operator intervention surface** — no pause, resume,  | partial | Four of the five named verbs are genuinely absent (pause, resume, steer, kill) and cancel does exist, so that half stands. "redirect" is wrong: a human answering a gate can re… |
+| `B.9` **The agent-to-agent mailbox** — designed, unbuilt; the ed | open | Both halves confirmed. `mailbox` is a declared effect kind with no writer, which is the same defect class as B.12's event types but is not covered by either registry there. |
+| `B.10` **A worker pool for CPU-bound function bodies** — declared | open | Confirmed, including "blocks the event loop and every task in the wave", which validate.ts:1451-1455 records as measured (1.997x wall for two independent cpuBound nodes). |
+| `B.11` **`run.cancelled.forced`** — written once as `false`, read | open | All three clauses hold exactly. Checking the word case-insensitively mattered here: the only near-hits in the docs are the substring inside "enforced". |
+| `B.12` **Eleven error codes and six event types with no writer**, | partial | Seventeen facts expanded. The event-type half is exactly right — six, members as listed. The error-code half is stale by one: TEN, not eleven, since 069faf4. The bullet was tr… |
+| `B.13` **Nine declared-and-unread schema fields** beyond the abov | partial | SECOND HALF EXACTLY RIGHT and enumerable: commit 3fa3d51 "fix(vocab): a docstring that names a consumer it does not have" names precisely these four as "the four core ones ...… |
+
+
 Mechanism that exists in the schema or the types and executes nowhere. Each is a place a reader
 believes a feature is present.
 
@@ -149,7 +446,10 @@ believes a feature is present.
 - **`Budget.tokens` and `Budget.wallMs`** — declared, never read; only cost binds.
 - **`preAuthorization`** — a whole risk envelope (cost ceiling, blast radius, tool scope, data
   classification, allowed side effects, audit completeness, demotion triggers) that is not a field
-  of the graph schema at all, so declaring one is silence.
+  of the graph schema at all. ~~so declaring one is silence.~~ **The operative complaint is stale
+  (2026-08-25):** `GRAPH020_UNKNOWN_FIELD` now makes an undeclared key a hard compile error that
+  names the field, so declaring one is a refusal, not silence. Note the limit — the check does not
+  reach INSIDE `policy` or `budget`; see §A0.
 - **Retention tiering** — proven by test, zero callers, so a journal never leaves the hot tier and
   grows without bound.
 - **The evolution subsystem is now REACHABLE but not wired.** `agent().trajectory(runId)` folds a
@@ -158,29 +458,111 @@ believes a feature is present.
   under roughly thirty scored trajectories per cohort any candidate is fitted to noise.
 - **Quorum, delegation and trust-tier approvals** — deliberate compile errors rather than silent
   downgrades. Implementing one means deleting its refusal in the same change.
-- **The operator intervention surface** — no pause, resume, steer, redirect or kill; cancel exists.
+- **The operator intervention surface** — no pause, resume, steer or kill. **Corrected
+  2026-08-25:** `cancel` exists, and so do two more that the bullet missed — a human answering a
+  gate can **redirect** the run onto chosen outgoing edges, wired end to end, and `rewind` is
+  built (`engine.ts:1830`). Four verbs absent, three present.
 - **The agent-to-agent mailbox** — designed, unbuilt; the edge kinds are seven with no eighth.
 - **A worker pool for CPU-bound function bodies** — declared on the schema, warns at compile that
   it does nothing; a long body blocks the event loop and every task in the wave with it.
 - **`run.cancelled.forced`** — written once as `false`, read by nobody, named by no document.
-- **Eleven error codes and six event types with no writer**, each excused in a registry.
-- **Nine declared-and-unread schema fields** beyond the above, and four constants whose docstrings
-  claimed a consumer they did not have (now corrected in place).
+- **Ten error codes and six event types with no writer**, each excused in a registry.
+  **Recounted 2026-08-25:** the event-type half is exactly right; the error-code half was stale by
+  one — `E_TOOL_SCHEMA_INVALID` gained a raiser in `069faf4` and the count was not updated. Both
+  sets are pinned as exact sets with length-checked reasons in `registries.test.ts`.
+- **Four constants whose docstrings claimed a consumer they did not have** (now corrected in
+  place) — exactly right and enumerable; `3fa3d51` names them.
+  ~~**Nine declared-and-unread schema fields** beyond the above~~ — **withdrawn 2026-08-25: the
+  count matches no enumerable set.** The graph schema yields five; event payloads yield fifteen
+  more. By §F.8's own rule this was a count nobody could check. Re-derive it against a named
+  scope or drop it.
 
 ## C · Unbuilt observability, which several other items depend on
 
-- **Eight span names are designed and unbuilt**, and roughly fifteen documented span attributes are
-  never set by anything.
-- **Two documented reversal conditions are percentiles over spans nobody emits**, so each currently
-  reads as a check that passed.
+**Re-checked 2026-08-25 — 13 items: 2 partial · 10 open · 1 stale.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `C.1` **Eight span names are designed and unbuilt** | open | COUNT IS EXACTLY RIGHT: 8. The members are recoverable only from git history (design corpus deleted at f975f9f, an ancestor of HEAD; `git show f975f9f^:packages/core/test/docs… |
+| `C.1.1` loom.request | open | Registry reason: no journal event covers ingress; first append is run.submitted. |
+| `C.1.2` loom.compile | open | Its attributes did not vanish: run.compiled folds graph.nodes/graph.edges/resources.pinned onto loom.run (spans.ts:426). |
+| `C.1.3` loom.schedule.admit | open | Consistent with section A: admission control is itself unbuilt, so there is no event to fold. |
+| `C.1.4` loom.schedule.pick | open | This is the one the deleted 05 doc flagged as marked in two documents but absent from its own inventory table; it is nonetheless a genuine ninth-name gap and is correctly insi… |
+| `C.1.5` loom.context.assemble | open | run/context.ts assembles but journals nothing, so the fold has no input. |
+| `C.1.6` loom.effect | open | A naive `grep -c loom.effect` returns nonzero and would wrongly read as built. Every effect folds into loom.model or loom.tool at spans.ts:712 — including `kind: "subgraph"`, … |
+| `C.1.7` loom.scheduler.tick | open | There is no tick loop to instrument, so this is a design gap, not a wiring gap. |
+| `C.1.8` loom.replay | open | Distinct from `loom.replayed`, which the deleted registry classes as an attribute — see C.2. A replay run journals like any other, so a trace cannot tell a replayed run from a… |
+| `C.2` roughly fifteen documented span attributes are never set b | partial | THE COUNT IS WRONG UNDER EVERY SCOPING, and the direction depends on scope. The 11 truly-never-set on built spans: budget.cost_usd, trigger.kind (loom.run); node.type (loom.ta… |
+| `C.3` **Two documented reversal conditions are percentiles over  | stale | The two conditions are real and were identifiable — DL-1 at design/loom/08-PLAN.md:178 ("measure `loom.scheduler.tick` p99") and D12.8 at design/loom/07-CONFIG-DEPLOY.md:394 —… |
+| `C.4` **A trace cannot follow a subgraph.** The journal records  | open | Both halves confirmed exactly as written. The journal side is real — journal/events.ts:620-631 declares `subgraph.started`/`subgraph.completed`, each with `readonly childRunId… |
+| `C.5` **No scheduler-tick telemetry**, so queue behaviour is unm | partial | FIRST HALF STILL-OPEN, SECOND HALF WRONG. No scheduler-tick telemetry: confirmed — `loom.scheduler.tick` is emitted nowhere and run/scheduler.ts contains no tick loop to instr… |
+
+
+- **Eight span names are designed and unbuilt** — count verified exactly. ~~roughly fifteen
+  documented span attributes~~ → **eleven**, recounted 2026-08-25 and enumerated:
+  `budget.cost_usd`, `trigger.kind`, `node.type`, `capability`, `gen_ai.request.max_tokens`,
+  `loom.replayed` (two spans), `tool.attempt`, `tool.source`, `reducers`, `gate.posture`,
+  `gate.batched`. Two the old count included (`state.hash.before`/`after`) ARE set — on
+  `loom.state.reduce`, not on the span the source table blamed.
+- ~~**Two documented reversal conditions are percentiles over spans nobody emits**, so each
+  currently reads as a check that passed.~~ **STALE 2026-08-25.** Both conditions lived in
+  `design/loom/08-PLAN.md` and `07-CONFIG-DEPLOY.md`, deleted at `f975f9f`. The underlying gap is
+  real — `loom.scheduler.tick` is still emitted nowhere — but there is no longer a document in
+  which either condition reads as a passing check.
 - **A trace cannot follow a subgraph.** The journal records the child run id; no span is built from
   it, so a parent trace offers no route to its child.
-- **No scheduler-tick telemetry**, so queue behaviour is unmeasurable.
+- **No scheduler-tick telemetry.** `loom.scheduler.tick` is emitted nowhere and `run/scheduler.ts`
+  has no tick loop to instrument. ~~so queue behaviour is unmeasurable.~~ **Corrected 2026-08-25:**
+  per-task queue wait already IS measurable — `task.ready` and `task.leased` are journaled for
+  every task and `spans.ts:677` attaches `task.leased` as a span event, so the p99 is a fold over
+  what is already emitted. What is missing is scheduler-level behaviour, not queue behaviour.
 
 **This block gates the UI direction.** A richer operator surface over a plane that is not emitting
 is a better view of nothing.
 
 ## D · Decisions that were blocked on the maintainer
+
+**Three were answered 2026-08-25**, and the roadmap in `DESIGN.md` is built on them:
+
+1. **The first real workflow to port (D.1) — decided in principle: the next user is the
+   maintainer, porting one real workflow.** Not a stranger who finds the repo. This is now the
+   ordering constraint for everything after it, and it demotes distribution (LICENSE,
+   publishing, stranger-facing examples) below the line for now. **Which workflow is still
+   open** — that half of D.1 stands.
+2. **The self-improvement subsystem — close the loop, do not freeze it.** With a hard ordering
+   inside: fix the metric before accumulating any corpus, because the metric currently prefers
+   failure and every trajectory captured under it is a poisoned label. See §A0.
+3. **`packages/eagent` — cut to tag `eagent-v1` and delete.** Nothing in this file decided its
+   fate before today, which the audit flagged. Deleting it also frees the word "kernel" to mean
+   `packages/core`, which is what makes the P1 guard possible at all.
+
+**Re-checked 2026-08-25 — 22 items: 3 DONE · 4 partial · 15 open.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `D.0` Twenty-one, escalated 2026-08-24. Two are now answered | **DONE** | THE COUNT IS RIGHT, which is worth saying because the section never enumerates it. Expanded members of the run-on, in order, become D.6–D.19 below; the two answered become D.2… |
+| `D.1` **The first real workflow to port.** Nobody has yet used t | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the only run that ever reached durable storage is a one-node graph named "g" with empty inputs that FAILED before running a body; no graph… |
+| `D.2` **The real numbers** — tenants, concurrent runs, runs/day, | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the word 'tenants' has no referent in the running system — `TenantId` is declared and used nowhere, and no tenant column reaches the sqlit… |
+| `D.3` **When a compensation edge fires** — on task failure, on r | open | (i) DECISION: OPEN — today the answer is 'never, on any of the three'. (ii) OBSERVABLE: a live engine run whose tool node throws leaves the compensation target with no Task at… |
+| `D.4` **Rate-limit backpressure and admission control** — see A. | open | (i) DECISION: OPEN, and the first half is confirmed a live bug. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? YES. `hold()` (http.ts:512) awaits inline in postJso… |
+| `D.5` **The identity and permission source of truth** for approv | open | (i) DECISION: OPEN. (ii) OBSERVABLE: an approvers list naming a group or a role compiles clean and can never be satisfied, because the runtime check is exact string equality —… |
+| `D.6` which approval callback is mandatory | open | (i) DECISION: OPEN. (ii) OBSERVABLE: of the three DeliveryChannels that ship, exactly one can be answered. `channel.parseCallback !== undefined` IS the answerability test (del… |
+| `D.7` providers required at launch | partial | (i) DECISION: half ANSWERED IN CODE, half OPEN. The launch set is closed and ENFORCED at boot — `PROVIDERS` (cli.ts:815) is exactly {anthropic, openai}, and OpenAIAdapter with… |
+| `D.8` what a join timeout does | partial | (i) DECISION: the SILENT half is closed, the RUNTIME half is OPEN. GRAPH008_JOIN_TIMEOUT_INERT (validate.ts:1429-1435) now warns 'which no executor reads — this barrier has no… |
+| `D.9` whether a function body's output becomes a journaled effec | open | (i) DECISION: OPEN — today it does NOT. (ii) OBSERVABLE, and it is the sharpest one in this section: a replay that reports `hermetic: true` re-executed the function body LIVE.… |
+| `D.10` the `preAuthorization` envelope | partial | (i) DECISION: OPEN — no envelope exists. (ii) OBSERVABLE: declaring one is no longer uniformly silent. GRAPH020 now REFUSES `preAuthorization` at the graph root and on a node,… |
+| `D.11` token and wall-clock budgets | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the flagship shipped workflow declares a 400k-token and 5-minute ceiling and compiles with ZERO diagnostics — neither binds anything, and … |
+| `D.12` the subgraph span | open | (i) DECISION: OPEN. (ii) OBSERVABLE: `loom trace <runId>` can print a parent run's tree and has no route into the child's, because the span builder never mentions subgraphs — … |
+| `D.13` a CPU worker pool | partial | (i) DECISION: OPEN; the silent half is closed. (ii) OBSERVABLE: `FunctionNode.cpuBound` (spec.ts:88) is read only by the diagnostic that refuses to let an author believe in it… |
+| `D.14` retention tiering | open | (i) DECISION: OPEN. (ii) OBSERVABLE: `TierManager`, `MemoryTierStore` and `tierFor` are exercised only by the test that proves them. Nothing in the engine, the CLI or the cont… |
+| `D.15` quorum and delegation | open | (i) DECISION: OPEN, and deliberately refused rather than silently downgraded. (ii) OBSERVABLE: a graph asking for two approvers fails to compile, so the decision has a price a… |
+| `D.16` `run.cancelled.forced` | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the field is written by exactly one site as a constant `false` and read by nothing — so `run.cancelled` carries a boolean that has never o… |
+| `D.17` the operator surface | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the whole operator vocabulary over HTTP is three verbs — cancel, rewind, advance (http.ts:2780-2797) — and five of the words §B names are … |
+| `D.18` the mailbox | open | (i) DECISION: OPEN. (ii) OBSERVABLE: `mailbox` is a legal value of `effect.started.kind` that nothing can ever produce — so a reader of events.ts believes agent-to-agent messa… |
+| `D.19` the circuit breaker | open | (i) DECISION: OPEN. (ii) OBSERVABLE: nothing measures a provider's health and nothing withholds an unhealthy one, so a source that is failing every call is retried at full rat… |
+| `D.20` Two are now answered — the UI is the web console | **DONE** | (i) DECISION: ANSWERED, and the answer is load-bearing rather than declarative. (ii) OBSERVABLE: an unauthenticated GET / on a live control plane serves 25 KB of console HTML … |
+| `D.21` and the terminal client is deleted | **DONE** | (i) DECISION: ANSWERED, by deletion, with a commit that says why. (ii) OBSERVABLE: no TUI source, no ink dependency and no release script remain; the four TUI design documents… |
+
 
 Twenty-one, escalated 2026-08-24. Two are now answered — the UI is the web console, and the
 terminal client is deleted. The rest stand, and the redesign may dissolve several of them rather
@@ -202,6 +584,20 @@ circuit breaker.
 
 ## E · Deferred on purpose, with the reason — do not silently revive
 
+**Re-checked 2026-08-25 — 8 items: 4 partial · 3 open · 1 n/a.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `E.1` **Distributed deployment.** A distributed v1 by a small te | partial | SECOND HALF IS FALSE AS WRITTEN. 'The interfaces are shaped for it' HOLDS: run/scheduler.ts is an explicit documented seam, and the journal conformance suite really does run a… |
+| `E.2` **Partition assignment and cross-run fairness.** Deciding  | partial | THE NORMATIVE HALF HOLDS; THE IMPLIED FACTUAL HALF IS FALSE. 'Partition assignment across workers needs a coordinator' is still true and still unbuilt. But 'deciding which run… |
+| `E.3` **Automated candidate generation, canaries and auto-promot | open | THE REASON'S PRESUPPOSITION IS FALSE. `OutcomeSignals.runStatus` is captured by the fold (trajectory.ts:96, set at :217/:223/:227) and then read by nothing: `readSignals` (sco… |
+| `E.4` **Subtractive graph mutation.** Additive-only keeps the ex | open | REASON HOLDS, verified rather than read. The superset property is real: base node specs survive a mutation deepEqual-identical, and there is no expressible removal — an unknow… |
+| `E.5` **Custom user-authored reducers.** Arbitrary code inside t | open | REASON HOLDS. The reducer set is closed at the type level, re-checked at compile time by name against REDUCER_NAMES, and there is no registration seam anywhere in either packa… |
+| `E.6` **Free-form agent chatter.** Makes termination unprovable  | n/a | UNVERIFIABLE because the reason is a complexity claim about a mechanism that does not exist — there is no chatter to replay, so 'replay quadratic' has no measurable referent, … |
+| `E.7` **seccomp / Landlock.** Platform-specific; subprocess isol | partial | 'PLATFORM-SPECIFIC' HOLDS (both seccomp and Landlock are Linux-only; this tree runs darwin) and the three mitigations are real and tested. 'COVERED THE STATED THREAT MODEL' IS… |
+| `E.8` **Vendor callback parsing** (Slack, Teams, email). Deliver | partial | BOTH CLAUSES ARE OFF, IN OPPOSITE DIRECTIONS. 'Delivery outward is built' holds for the two HTTP-webhook vendors (Slack, Teams) via the generic WebhookChannel, but NOT for ema… |
+
+
 Kept because re-deriving these costs more than reading them, and each was a real decision.
 
 - **Distributed deployment.** A distributed v1 by a small team yields a distributed prototype, not a
@@ -221,12 +617,40 @@ Kept because re-deriving these costs more than reading them, and each was a real
 
 ## F · Hard-won facts worth carrying forward
 
+**Re-checked 2026-08-25 — 15 items: 6 DONE · 5 partial · 4 open.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `F.1` **Every durable fact must be rebuildable by folding the lo | **DONE** | THE COUNT IS ENUMERABLE AND IS ENUMERATED IN THE TREE — the task's premise is wrong. packages/core/test/run/oversight-survives-restart.test.ts:4-19 names all five: (1) PolicyE… |
+| `F.2` **A vocabulary with two representations will drift**, and  | **DONE** | MEMBER LIST REFRESHED. packages/core/test/registries.test.ts:10-15 names four vocabularies; live sizes measured by importing the sources: CODES = 68, EVENT_TYPES = 52, ESCALAT… |
+| `F.3` **A guard's permissive branch is where the surprise lives. | open | VIOLATED-AGAIN, 1 new instance: 086e13b (2026-08-25), promotion criteria 9 and 10 in packages/core/src/evolution/gate.ts. Sharpest fact available: the property was first WRITT… |
+| `F.4` **Mutation-test every guard.** Several tests in this codeb | partial | THE HALF THAT HOLDS: the practice is real but narrow — 7 of 268 test files record having been mutation-tested (predicate-on-throws, workspace-documents, known-flags, spans, ov… |
+| `F.5` **Driving beats sweeping.** Every wave that found real def | partial | COUNT REFRESHED and the asymmetry widened, not narrowed. In the f3c20ea..HEAD window the driving side kept producing: 069faf4 (2026-08-25) says in its own body "FOUND BY USING… |
+| `F.6` **A test built from the same mental model as the fix certi | open | VIOLATED-AGAIN, 1 new instance: ab329be (2026-08-25), the declared-effects feature. The test was written from the same model as the feature ("a gate must stop the charge") and… |
+| `F.7` **Reproduce by running, not by reading** — including when  | open | VIOLATED-AGAIN, live in the tree at HEAD. f975f9f's commit message asserts "51 source and test files had citations into it; those are stripped" — that claim was written rather… |
+| `F.8` **Name the set a claim covers.** "This boundary is total"  | partial | HOLDS where it was written for, VIOLATED at the top of the very file that states it. The exemplar is in-tree and enumerable: spec.ts:807-810 names all four members and even re… |
+| `F.9` **A self-describing claim has no fixed point.** State the  | partial | HELD exactly where the lesson was applied. The docstrings at spec.ts:791 and 821-823 state the PROPERTY ("every hit is a declaration, the surface pin, or prose; none is a read… |
+| `F.10` **`node:vm` is not a sandbox** — it is scoping. Untrusted  | **DONE** | HELD, and the tree carries the property correctly at all five live sites: packages/core/src/resources/realm.ts:18-24 ("## This is NOT a security boundary, and says so… Untrust… |
+| `F.11` **Absence is not zero, and an empty allow-list is the perm | **DONE** | HELD in both places I could reach it, and each keeps the two cases distinct rather than collapsing them. The `=== undefined \|\|` shape appears 56 times across 20 core source … |
+| `F.12` **Approve means "go ahead", not "consider it done"** — on  | open | COUNT REFRESHED: NodeType has 8 members (packages/core/src/graph/spec.ts:76-84 — function, agent, tool, router, join, evaluator, human_gate, subgraph), so "every node type exc… |
+| `F.13` **A terminal operation is not final until every producer o | **DONE** | HELD with both arms and a negative control. NEWEST INSTANCE: 5b5c496 (2026-08-24, "a cancel stops the tasks too") — #commit returned early on a terminal run so an in-flight Ta… |
+| `F.14` **Cross-realm values look identical and are not**; assert  | **DONE** | HELD, every clause verified independently. (a) cross-realm array: `instanceof Array` false and `getPrototypeOf !== Array.prototype`, so the prototype IS the discriminator; (b)… |
+| `F.15` **macOS `grep` silently skips files containing non-ASCII b | partial | WRONG on both halves of the stated cause, though the prescription survives. (1) The trigger is a NUL byte, not non-ASCII: the five files are packages/core/src/evolution/trajec… |
+
+
 The archive is being deleted. These are the parts that cost real debugging time and would cost it
 again. **They are stated as properties to preserve, not as history to honour.**
 
 1. **Every durable fact must be rebuildable by folding the log.** Five separate in-memory fields
    held state a decision read, with no fold behind them; each one silently switched a guard off
    across a restart. The unit that needs a restore path is the *producer*, not the field.
+   **The five are enumerated** — `packages/core/test/run/oversight-survives-restart.test.ts:1-20`
+   names them: PolicyEngine escalations, human ceilings, accumulated spend, the taint set, and
+   E4's failure streak. Cite that file rather than repeating the number; `CLAUDE.md:55` and
+   `DESIGN.md:90` carry the same count and had no way to be checked against anything.
+   **A sixth has NOT been added. Member #3 has regressed at a different layer:** the restore arm
+   for accumulated spend exists and works, but the projection it restores from never folds
+   `model.called` — so spend is missing before restore runs. See §A0.
 2. **A vocabulary with two representations will drift**, and every gate walking the wrong one is
    silently switched off. Prefer a form the type checker can walk; where a test must do it, gate
    all representations as one set and read them from the source.
@@ -254,10 +678,30 @@ again. **They are stated as properties to preserve, not as history to honour.**
 13. **A terminal operation is not final until every producer of the state it ends is stopped.**
 14. **Cross-realm values look identical and are not**; assert on the prototype, and know that
     `Array.isArray` is realm-agnostic and throws on a revoked proxy.
-15. **macOS `grep` silently skips files containing non-ASCII bytes.** Always `grep -a`; empty
-    output from a plain grep is not evidence of absence.
+15. **A plain `grep` can silently skip a file, and empty output is not evidence of absence.**
+    Always `grep -a`. **The stated cause was wrong, corrected 2026-08-25:** the trigger is a NUL
+    byte, not non-ASCII — `/usr/bin/grep` (BSD) matches accented text fine — and it affects 5
+    tracked files. In this environment `grep` is also a shell-snapshot function rather than BSD
+    grep, which is where the *silence* comes from. The prescription survives its explanation,
+    which is why the error propagated for so long without breaking anything.
 
 ## G · From the 2026 field survey — new work the redesign creates
+
+**Re-checked 2026-08-25 — 10 items: 1 DONE · 5 partial · 3 open · 1 WRONG.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `G.2` ~~**Clock bound to the journal (D3).**~~ **DONE for `ctx.n | **WRONG** | The DONE does not hold. The mechanism is half-built: `#bodyClock` (engine.ts:3058-3061) does read `p.tasks[taskId].lease.at`, and projection.ts:720 does fold that from the jou… |
+| `G.3` **The one-line agent surface (D1).** `agent({model, tools, | **DONE** | Verdict it DONE — the bullet is unmarked and should be struck. `packages/core/src/agent.ts` exists, is exported from the public surface (`packages/core/src/index.ts:10  export… |
+| `G.1` ~~**Declared effects (D2).**~~ **DONE for `function` nodes | partial | The DONE holds on all five clauses it names, and BOTH "still open" riders check out. `reachableToolNames` does include function effects (spec.ts:850), which is the single rout… |
+| `G.4` **Divergence must be terminal and loud.** The known failur | partial | TERMINAL AND LOUD: already true for the recorded-effect path, so that half of the bullet is stale as a work item. `E_REPLAY_DIVERGENCE` is in `RUN_FATAL_CODES` (engine.ts:265-… |
+| `G.5` **Two-axis labels (D4).** Integrity × confidentiality, mos | partial | Four sub-claims, three verdicts. (a) "Integrity × confidentiality" — BOTH AXES NOW EXIST: `tainted`/`applyTaint` for integrity and `carriesSecret`/`applySecretFlow` for confid… |
+| `G.6` **Prompt text into the artifact hash (D7).** A prompt edit | partial | FIRST HALF TRUE, SECOND HALF FALSE. Prompt text is genuinely not in the artifact hash — `graphHash: digest(spec)` (compile.ts:158) digests the spec, and a ref'd prompt's text … |
+| `G.7` **Payload externalisation.** Above a byte threshold a payl | open | Reproduced exactly as written. `MAX_PAYLOAD_BYTES = 8 * 1024 * 1024` (journal/store.ts:179) and `boundedPayload` THROWS above it (store.ts:214-221); the code's own comment at … |
+| `G.8` **Proposed-API mechanism and a version pin (D5).** | open | Both halves of D5 are unbuilt. There is no proposed-API declaration file, no opt-in, and no publish-time refusal for an extension that uses one; and there is no runtime versio… |
+| `G.9` **One retry budget per run**, decremented across every lay | open | The work item stands: no run-scoped retry budget exists, so nothing decrements across layers. On the RATIONALE, which is a three-member aggregate — I confirmed two of the thre… |
+| `G.ids` Each traces to a decision in `DESIGN.md`. | partial | Every id cited in G resolves, and every subject matches: D1 "The default surface is one line" ↔ the one-line agent surface; D2 "Effects are DECLARED, not called" ↔ declared ef… |
+
 
 Each traces to a decision in `DESIGN.md`.
 
@@ -271,15 +715,22 @@ Each traces to a decision in `DESIGN.md`.
   synchronously inside `vm.runInContext` and cannot await, so `ctx.effects` is honestly absent
   there rather than broken — giving a sandboxed body effects means an async bridge, which is its
   own design.
-- ~~**Clock bound to the journal (D3).**~~ **DONE for `ctx.now`** — a body's clock is the task's
-  journaled `task.leased` timestamp, so it reproduces on replay with nothing new written. Two
-  reads in one body return the same instant, which is the property that makes replay total.
+- **Clock bound to the journal (D3). NOT DONE — the strikethrough was removed 2026-08-25.**
+  A body's clock does read the task's journaled `task.leased` timestamp (`engine.ts:3058`,
+  folded at `projection.ts:720`), and two reads in one body do return the same instant. But it
+  **does not reproduce on replay**: the shadow run appends its OWN `task.leased`, stamped by the
+  replay engine's wall clock (`engine.ts:2443`), so `replay.ts:439`'s shadow clock is never
+  reached. Measured: two replays of one run return different values, differing by whatever pause
+  separated them. The half that is built is the half
+  inside a single run; the property that makes replay total is the one that is missing.
   **Still open: `Date` in the realm.** It stays absent, and the reason changed — not "no seed
   could make it reproducible" but "a frozen `Date` that silently never advances is more
   surprising than an absent one". Restoring it means binding the whole constructor to `ctx.now`.
   Bind `Temporal` in the same change when it becomes a default global.
-- **The one-line agent surface (D1).** `agent({model, tools, prompt})` compiling to a one-node
-  graph, so the journal, replay, gates and budgets apply to the hello-world.
+- ~~**The one-line agent surface (D1).**~~ **DONE, re-checked 2026-08-25.** `agent({prompt,
+  tools, adapter})` compiles to a one-node graph and is exported from the public surface
+  (`index.ts:10`); `packages/core/test/agent.test.ts` proves each clause — one-node graph,
+  journal + replay, gates, budget ceiling. The bullet was never struck.
 - **Divergence must be terminal and loud.** The known failure mode of every replay-based runtime
   is a silent stall: the task retries forever without entering a failed state. A repeated
   divergence signature with no forward progress needs its own terminal state.
@@ -300,6 +751,16 @@ Each traces to a decision in `DESIGN.md`.
 
 ## H · Housekeeping carried into the sweep
 
+**Re-checked 2026-08-25 — 4 items: 1 DONE · 2 partial · 1 open.**
+
+| item | verdict | what running it showed |
+|---|---|---|
+| `H.1` `packages/eagent/tui` — **deleted** as part of this sweep. | partial | COUNT WRONG: 'two tests that assert the directory exists' is ONE. At 3e5e4bb^ the only existence assertion on the directory is zero-dep.test.ts:140 `assert.ok(existsSync(tuiPk… |
+| `H.2` The web frontend was already designed once and closed, and | partial | Accurate, and now sharper than written: the terminal client was dropped 2026-07-27, REBUILT two days later as e9b8701 'feat(phase2): the tui/ package -- Ink + React over the z… |
+| `H.3` `bin/loom` is gitignored and goes stale on any source edit | open | Standing condition, correctly stated, and it bit during this audit — the checked-out binary is already 109s behind src at HEAD. packages/core/test/readme-gaps.test.ts:331-333 … |
+| `H.4` Commits land under the human author's identity only. No as | **DONE** | NOT A BACKLOG ITEM — it is a standing project rule already stated at CLAUDE.md:76-77, so TODO.md:310-311 is a duplicate of a contract file and will drift from it (it already h… |
+
+
 - `packages/eagent/tui` — **deleted** as part of this sweep. Its removal breaks two tests that
   assert the directory exists, and touches the package guide, the README, the architecture doc, a
   release script and a display-surface test. It is a transaction, not a delete.
@@ -307,5 +768,7 @@ Each traces to a decision in `DESIGN.md`.
   once, in July 2026. That history is being retired with the rest — noted only so the sweep does
   not treat the leftovers as live work.
 - `bin/loom` is gitignored and goes stale on any source edit; nothing rebuilds it automatically.
-- Commits land under the human author's identity only. No assistant attribution, no co-author
-  trailers, no assistant links in commit bodies or pull requests.
+- ~~Commits land under the human author's identity only.~~ **Moved out 2026-08-25** — this is a
+  standing project rule, not backlog, and it already lives at `CLAUDE.md:76-77`. The two copies
+  had drifted (this one carried an extra "in commit bodies or pull requests" clause). `CLAUDE.md`
+  is the single copy; the extra clause was folded into it.
