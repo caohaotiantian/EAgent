@@ -67,11 +67,21 @@ import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
 import type { GateId, RunId, Seq } from "./ids.ts";
-import type { HumanActor, SubmittedBy } from "./journal/events.ts";
+import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
+import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
+import { cohortKeyOf, DEFAULT_WEIGHTS, isGolden, measureCohort, promotionCeiling, scoreTrajectory } from "./evolution/score.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
   loom serve   [--workspace .] [--port 8787] [--token T]   start the control plane
+               [--host 127.0.0.1]                          WHICH interface. The default is
+                                                           loopback: nothing off this
+                                                           machine can reach the plane,
+                                                           which also means no Slack
+                                                           button can answer a gate. A
+                                                           non-loopback host needs --token
+                                                           or --identity-file — it is
+                                                           refused without one
                [--identity-file identities.json]           who may approve, one token each
                [--channels-file channels.json]             how gates reach humans, and how
                                                            humans answer them
@@ -89,6 +99,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
+  loom score   <runId>                       judge a finished run against its cohort, and
+                                             journal the verdict as evolution.scored
+  loom cohort  <runId>                       read journaled scores back: this run's verdict and
+                                             every run judged under the same key and weights
 
   --help            print this and exit — also "loom help", and valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
@@ -242,6 +256,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "grant",
   "graph",
   "help",
+  "host",
   "identity-file",
   "input",
   "mcp-file",
@@ -557,6 +572,10 @@ export function openWorkspace(
     // systemFloor defaults to `on`: everything is observable and interruptible,
     // and irreversibility classes still force a gate where one is warranted.
       policy: { granted },
+    // EXPLICIT, so `armForeignGates` can hold the same number. The sweep's window and the
+    // arming's window are the same window or the clock has a hole in it — see
+    // `GATE_CLOCK_LIMIT`, which is the only place either of them reads it from.
+    sweep: { limit: GATE_CLOCK_LIMIT },
   });
 
   return { root, dataDir, store, engine, bus, resolver, hooks, granted, delivery, models, close: () => store.close() };
@@ -1920,6 +1939,62 @@ function httpPort(args: Args): number {
   return port;
 }
 
+/** Which interface `serve` binds when nobody says otherwise — loopback, and it stays loopback. */
+const DEFAULT_HOST = "127.0.0.1";
+
+/**
+ * WHICH INTERFACE, and the reason there was no flag for it until there was a defect.
+ *
+ * The perimeter this opens is real: `SignedWebhookChannel.parseCallback`, the
+ * `CALLBACK_REJECTIONS` taxonomy, `GateCallbackRouter`'s per-run admission cap and the
+ * deliberately-unauthenticated `CALLBACK_PATH` exist so a Slack button can answer a human
+ * gate — and on a loopback bind Slack cannot reach any of it. `loom serve --host 0.0.0.0`
+ * was `E_CONFIG_INVALID: unknown flag: --host`, so the only deployment that could use that
+ * route was one behind a tunnel somebody set up by hand and nothing told them they needed.
+ *
+ * **THE DEFAULT DOES NOT MOVE.** Binding a wider interface is a security decision and it
+ * is now spelled as one: an explicit flag, a boot line that names the address actually
+ * bound, and `ControlPlane.listen`'s refusal to put a TOKENLESS plane on a routable
+ * address at all.
+ *
+ * THE TWO SLIPS `--port` AND `--token` GUARD AGAINST BOTH LAND WORSE HERE, because for this
+ * flag the accident WIDENS the perimeter rather than narrowing or moving it. Both measured
+ * against `node:net` on this platform:
+ *
+ *   - `--host` with no value is `true` from `parseArgs`, and the flag's value is then the
+ *     four-letter name "true": `server.listen(0, "true")` → `getaddrinfo ENOTFOUND true`,
+ *     so the process dies at the bind naming a host the operator never typed.
+ *   - `--host ""` — what `--host "$LOOM_HOST"` produces when the variable is unset — is
+ *     the dangerous one, and it is silent. Measured against `node:net` on this platform:
+ *     `server.listen(0, "")` binds `address: "::"`, which is EVERY interface. So the one
+ *     shape of this flag an operator can produce by doing nothing at all is the widest bind
+ *     there is, arrived at from the safest default there is.
+ *
+ * Anything else is handed to `listen` as written and diagnosed there: a bind failure is a
+ * different failure from a bad flag value (`httpPort`'s docstring makes the same
+ * distinction, having once claimed otherwise), and `ControlPlane.listen` rejects with an
+ * `E_CONFIG_INVALID` naming the address.
+ */
+function httpHost(args: Args): string {
+  const raw = args.flags["host"];
+  if (raw === undefined) return DEFAULT_HOST;
+  const refuse: (why: string) => never = (why) => {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--host ${why}. Omit it for the default of ${DEFAULT_HOST} — loopback, reachable only from this machine — ` +
+        `or name an interface such as 0.0.0.0 on purpose, which also needs --token or --identity-file.`,
+    );
+  };
+  if (raw === true) refuse('was given with no value at all, and a missing value would become the literal name "true"');
+  if (raw === "") {
+    refuse(
+      'was given an empty value (`--host "$LOOM_HOST"` does this when the variable is unset), and an empty host binds ' +
+        "EVERY interface — the widest bind there is, reached by leaving a variable unset",
+    );
+  }
+  return raw;
+}
+
 /**
  * THE GATE CLOCK, started — because a deadline nothing checks is not a deadline.
  *
@@ -1956,16 +2031,57 @@ function httpPort(args: Args): number {
  * `unref` so the timer alone never holds the process open: the listening socket is what
  * keeps `serve` alive, and once that is closed the clock must not be the reason we linger.
  */
+/** How many runs one run-clock tick folds. The gate sweeper bounds itself for the same reason. */
+const DEFAULT_RUN_CLOCK_LIMIT = 200;
+
 /**
- * Advance runs whose backoff has elapsed. The gate clock's counterpart, and it did not exist.
+ * HOW DEEP THE ROTATION MAY REACH, and the honest name for what is left of the old bound.
  *
- * `Engine.advance` RETURNS while a Task is in backoff, so something has to come back once the
- * clock has moved. `loom run` does that for the run it submitted — and nothing did it for a run
- * submitted over HTTP. Reproduced by a reviewer: a `POST /runs` whose node retries sat `running`
- * with `attempt 1` eighteen seconds after `retryAfter` elapsed, and moved only when a human
- * POSTed `{"kind":"advance"}` by hand, once per attempt. `loom serve`'s own banner promises a gate
- * clock and says nothing about runs, so a deployment following the README's opening line had runs
- * that hold a leased Task forever with no clock and no notification.
+ * The window rotates now, so `limit` no longer decides WHICH runs are reachable — only how
+ * many are folded per tick. Something still has to, because `listRuns` takes a count and no
+ * cursor: reaching offset N costs a listing of N+limit summary rows, and "no ceiling" is a
+ * tick whose cost grows with the number of runs a deployment has ever journaled.
+ *
+ * 10 000 is a choice, not a measurement: it is two orders above the per-tick fold budget, it
+ * is a row scan of `run_head` rather than of the journal, and a deployment with more than
+ * that many runs whose graphs this process holds has a coordinator-shaped problem (TODO §E.2)
+ * that a call-site rotation should not pretend to solve. What is NOT acceptable is reaching
+ * it silently, which is exactly how the old 200 shipped — so `RunClockTick.truncated` carries
+ * it out and `startRunClock` says it on stderr, once.
+ */
+export const RUN_CLOCK_SCAN_CEILING = 10_000;
+
+/** Where the next tick's window starts. One per clock, carried across ticks. */
+export interface RunClockRotation {
+  offset: number;
+}
+
+/**
+ * What one tick saw. TWO FIELDS, BOTH READ — `startRunClock` acts on `truncated` and
+ * `test/deployment/run-clock-window.test.ts` asserts on `visited`. A tick that also reported
+ * what it ADVANCED would be the natural third, and it is left out until something reads it:
+ * this file has enough declared-and-unread surface in its history already.
+ */
+export interface RunClockTick {
+  /** The runs this tick's window covered, in listing order. */
+  readonly visited: readonly RunId[];
+  /**
+   * The window ran into the scan ceiling, so a run older than it — IF there is one — is out
+   * of reach of this clock entirely. Conservative at the exact boundary: a store holding
+   * precisely `ceiling` runs reports `true` and is hiding nothing.
+   */
+  readonly truncated: boolean;
+}
+
+/**
+ * ONE TICK OF THE RUN CLOCK: advance the runs whose backoff has elapsed, over a ROTATING window.
+ *
+ * THE CLOCK ITSELF, first, because it did not exist either. `Engine.advance` RETURNS while a
+ * Task is in backoff, so something has to come back once the clock has moved. `loom run` does
+ * that for the run it submitted — and nothing did it for a run submitted over HTTP. Reproduced
+ * by a reviewer: a `POST /runs` whose node retries sat `running` with `attempt 1` eighteen
+ * seconds after `retryAfter` elapsed, and moved only when a human POSTed `{"kind":"advance"}`
+ * by hand, once per attempt.
  *
  * ONLY RUNS WITH A DUE RETRY, which is what keeps this from fighting whoever else is driving.
  * A run being actively advanced does not sit with an elapsed `retryAfter`; and if two processes
@@ -1976,32 +2092,104 @@ function httpPort(args: Args): number {
  * journaled, so re-attaching means finding the graph whose hash the journal names; a deployment
  * that has not published it cannot advance that run, and saying nothing is better than failing a
  * run this process simply cannot see.
+ *
+ * THE DEFECT THIS FIXES IS A SCHEDULING POLICY NOBODY CHOSE. The tick took
+ * `listRuns(limit)` — `ORDER BY run_id DESC LIMIT ?` — so with more than `limit` runs the
+ * oldest was never listed, never projected and never advanced. Measured on a
+ * `SqliteStateStore` with 201 run heads: `listRuns(200)` returns 200 rows, the newest present
+ * and the oldest absent. A run in that position sits in backoff until a human POSTs
+ * `{"kind":"advance"}` to it by hand — and `TODO.md` §E.2 still records "which runs a worker
+ * considers" as an open question, which it was not: it had already shipped as starvation.
+ *
+ * SO THE WINDOW MOVES. Each tick folds `rows.slice(offset)` and the offset advances by
+ * `limit`, wrapping when the listing runs out. Work per tick is unchanged — at most `limit`
+ * projections — and every run within `RUN_CLOCK_SCAN_CEILING` is reached within
+ * `ceil(N / limit)` ticks when no new runs arrive.
+ *
+ * WHAT IT DOES NOT PROMISE, said plainly because a fairness claim that overstates itself is
+ * worse than the bound it replaced:
+ *
+ *   - Nothing here is fair against a STREAM of new submissions. New runs land at the head, so
+ *     a run can be pushed below a window that has already passed it and wait a further lap.
+ *     Bounded-lap fairness, not FIFO.
+ *   - A run past the ceiling is not reached at all, and `truncated` is how a deployment finds
+ *     that out. THE REAL FIX IS A CURSOR — `listRuns(after)`, so a tick can page rather than
+ *     re-scan — and it belongs in `StateStore` with a conformance test behind it. When that
+ *     lands, this rotation is the thing to delete.
+ *   - Two processes rotating over one store do not coordinate. They never did; every write a
+ *     tick causes still compare-and-swaps on the seq its decision was taken at, so the loser
+ *     writes nothing. That is the same argument `GateSweeper` makes for itself.
+ *
+ * `now` is a parameter for the reason every clock in this codebase is: a tick that read
+ * `Date.now()` internally could not be driven by a test that has not slept.
  */
-/** How many runs one run-clock tick folds. The gate sweeper bounds itself for the same reason. */
-const DEFAULT_RUN_CLOCK_LIMIT = 200;
+export async function runClockTick(
+  ws: Workspace,
+  rot: RunClockRotation,
+  limit: number,
+  now: number = Date.now(),
+  /** Injected for the same reason `now` is: the shipped value cannot be reached by a test
+   * that is not willing to journal ten thousand runs, and an untested bound is a bound
+   * nobody knows the behaviour of. */
+  ceiling: number = RUN_CLOCK_SCAN_CEILING,
+): Promise<RunClockTick> {
+  // ONE LISTING, NOT `offset` OF THEM. `listRuns` takes a count and no cursor, so reaching
+  // row `offset` means asking for `offset + limit` rows and dropping the ones already
+  // visited. That is the cost the ceiling exists to bound.
+  const scan = Math.min(rot.offset + limit, ceiling);
+  const rows = (await ws.store.listRuns(scan)).slice(rot.offset);
+  // WRAP AT THE END OF THE LISTING OR AT THE CEILING, and the two are different facts: a short
+  // window means this deployment has fewer runs than the offset implies (a full lap is done);
+  // a window that filled while sitting ON the ceiling means there may be runs below it this
+  // clock cannot see, which is the one an operator has to be told about.
+  // `rot.offset + rows.length` is what the LISTING returned, before the slice — the quantity
+  // that says whether it filled. Written that way rather than as `rows.length === limit`
+  // because the two differ for a caller whose `limit` is itself above the ceiling, and that
+  // spelling reported "nothing hidden" for a window that could see nothing else.
+  const truncated = scan === ceiling && rot.offset + rows.length === ceiling;
+  rot.offset = rows.length < limit || scan === ceiling ? 0 : rot.offset + limit;
+
+  // LAZY, because the rotation makes this run more often and `graphsByHash` re-reads and
+  // RE-COMPILES every graph in the workspace. A tick with nothing due should cost a listing
+  // and a fold per run in view, and no compiles at all.
+  let index: ReadonlyMap<string, RunGraph> | undefined;
+  for (const row of rows) {
+    const p = await ws.engine.projection(row.runId);
+    if (p === undefined || p.status !== "running") continue;
+    const due = Object.values(p.tasks).some((t) => t.state === "ready" && t.retryAfter !== undefined && t.retryAfter <= now);
+    if (!due) continue;
+    index ??= graphsByHash(ws).index;
+    const wanted = await ws.engine.compiledGraphHash(row.runId);
+    const graph = wanted === undefined ? undefined : index.get(wanted);
+    if (graph === undefined) continue;
+    ws.engine.attach(row.runId, graph);
+    await ws.engine.rehydrateGates(row.runId);
+    await ws.engine.advance(row.runId);
+  }
+  return { visited: rows.map((r) => r.runId), truncated };
+}
 
 function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop(): void } {
   let running = false;
   let failing = false;
+  const rot: RunClockRotation = { offset: 0 };
+  let toldAboutCeiling = false;
   const tick = (): void => {
     if (running) return;
     running = true;
     void (async () => {
-      const rows = await ws.store.listRuns(limit);
-      const { index } = graphsByHash(ws);
-      for (const row of rows) {
-        const p = await ws.engine.projection(row.runId);
-        if (p === undefined || p.status !== "running") continue;
-        const due = Object.values(p.tasks).some(
-          (t) => t.state === "ready" && t.retryAfter !== undefined && t.retryAfter <= Date.now(),
+      const t = await runClockTick(ws, rot, limit);
+      // ONCE, for the reason the outage lines above are once: a deployment big enough to hit
+      // the ceiling hits it every lap, and a line per tick is how an operator learns to stop
+      // reading stderr. It is not an outage — nothing is failing — so it does not use the
+      // `failing` latch, and it is not retracted either: the condition is a size, not a fault.
+      if (t.truncated && !toldAboutCeiling) {
+        toldAboutCeiling = true;
+        process.stderr.write(
+          `! RUN CLOCK SCAN CEILING REACHED (${RUN_CLOCK_SCAN_CEILING} runs) — runs older than that are NOT being\n` +
+            `  advanced by this process. Their journals are intact; they resume when a caller POSTs\n` +
+            `  {"kind":"advance"}, or when their runs are archived out of the window.\n`,
         );
-        if (!due) continue;
-        const wanted = await ws.engine.compiledGraphHash(row.runId);
-        const graph = wanted === undefined ? undefined : index.get(wanted);
-        if (graph === undefined) continue;
-        ws.engine.attach(row.runId, graph);
-        await ws.engine.rehydrateGates(row.runId);
-        await ws.engine.advance(row.runId);
       }
     })().then(
       () => {
@@ -2030,6 +2218,26 @@ function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop():
 }
 
 /**
+ * HOW MANY GATED RUNS THE GATE CLOCK HOLDS IN VIEW — for BOTH of its halves.
+ *
+ * It is passed to `new Engine({ sweep: { limit } })` and read by `armForeignGates`, and that
+ * is the whole point: the arming and the sweeping are one clock, and a window one of them
+ * computes differently is a gate that is watched and cannot be armed. `GateSweeper` bounds
+ * itself at 500 by default; this makes that number explicit at the deployment layer that
+ * actually owns the tick, rather than a default this file cannot see.
+ *
+ * It bounds GATED runs, not runs — the listing both halves take is `{ raisedAGate: true }` —
+ * so the residual hole is a deployment holding more than this many gates open at once. Size
+ * it above the number of simultaneous open gates your SLA policy expects.
+ *
+ * EXPORTED so `test/deployment/gate-clock-armed-prune.test.ts` can size its two batches off
+ * it rather than off a copy of the number. The `armed` prune below is load-bearing only past
+ * this many GATED runs — under it the filter alone holds the map down — so a test that
+ * hardcoded 500 would quietly stop covering the prune the day this number moved.
+ */
+export const GATE_CLOCK_LIMIT = 500;
+
+/**
  * ARM THE GATES THIS PROCESS DID NOT RAISE, or the sweep expires what it should escalate.
  *
  * `GateSweeper` reads its `DeliverySpec` from the broker's in-memory record, which only the
@@ -2047,13 +2255,50 @@ function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop():
  * `gate.delivered` and only then `gate.timeout`; raised by `loom run` it journals `gate.raised`,
  * `run.suspended`, `gate.timeout`.
  *
+ * IT MUST ARM EXACTLY WHAT THE SWEEP SWEEPS, and it did not: two clocks over two different
+ * sets, drifting on both axes at once.
+ *
+ *   - THE FILTER. `GateSweeper.sweep` and the console's queue route both list
+ *     `{ raisedAGate: true }` — ordered by the most recent `gate.raised` — and this site
+ *     listed unfiltered, which is `ORDER BY run_id DESC`. So past the window a restarted
+ *     plane SAW a gate (the sweep's listing found it) and could not ARM it (this one did
+ *     not), which is the worst of the three possible combinations: the sweep then holds no
+ *     `DeliverySpec`, `#fireTimeout` takes its `spec === undefined` arm, and the gate is
+ *     EXPIRED at the first deadline with the journaled reason "exhausted its escalation
+ *     chain with no decision" — false, on a gate nobody was ever paged about. `onTimeout:
+ *     "escalate"` behaving as `fail` is precisely what `GRAPH014_SLA_INVALID` refuses a
+ *     graph at compile time to prevent.
+ *   - THE SIZE, which fixing the filter alone would have left. The sweeper's own default is
+ *     `DEFAULT_SWEEP_LIMIT = 500`; this site used the RUN clock's 200. So `GATE_CLOCK_LIMIT`
+ *     is declared once here, passed to `new Engine({ sweep: { limit } })` in
+ *     `openWorkspace`, and read back here. The two calls cannot disagree because there is
+ *     one number and this file owns both ends of it.
+ *
+ * Reproduced before the fix by `test/deployment/gate-clock-restart.test.ts`: one gated run,
+ * `GATE_CLOCK_LIMIT + 20` later ungated ones, a restart, and the journal reads
+ * `… gate.raised, run.suspended, gate.timeout, run.failed` where it must read `gate.escalated`.
+ * That count is sized off the window ON PURPOSE — at its original 250 the listing here still
+ * had free slots, and deleting the filter from this line left the test green.
+ *
  * MEMOISED ON `headSeq`, because the fold this costs is the one `ControlPlane` declined to pay
  * per request — "a fold per candidate run, and it is NOT the shape `GateSweeper` pays". Keyed on
  * the head rather than the run id so a run that raises a SECOND gate later is armed again, and
  * memoised even when the graph is missing so an unservable run cannot cost a fold every tick.
+ *
+ * AND PRUNED, which is a SEPARATE decision from the filter and needs its own evidence: the
+ * filter decides what a tick LOOKS at, the prune decides what the map REMEMBERS between ticks.
+ * `test/deployment/gate-clock-armed-prune.test.ts` turns the window over twice with 1,040 gated
+ * runs and measures both ends — 1,000 entries with these two lines gone, and one fold per run
+ * per idle tick if they clear the map instead of narrowing it.
  */
-async function armForeignGates(ws: Workspace, armed: Map<RunId, Seq>): Promise<void> {
-  const rows = await ws.store.listRuns(DEFAULT_RUN_CLOCK_LIMIT);
+export async function armForeignGates(ws: Workspace, armed: Map<RunId, Seq>): Promise<void> {
+  // THE SAME QUESTION THE SWEEP ASKS, ASKED THE SAME WAY. See `GATE_CLOCK_LIMIT`.
+  const rows = await ws.store.listRuns(GATE_CLOCK_LIMIT, { raisedAGate: true });
+  // PRUNED TO THE WINDOW, like `GateSweeper`'s `live` map and unlike this one until now: it
+  // was only ever written, so a plane that is up for a month held one entry per run it had
+  // ever listed, to answer a question about runs the clock stopped watching long ago.
+  const inView = new Set(rows.map((r) => r.runId));
+  for (const runId of armed.keys()) if (!inView.has(runId)) armed.delete(runId);
   let index: ReadonlyMap<string, RunGraph> | undefined;
   for (const row of rows) {
     if (armed.get(row.runId) === row.headSeq) continue;
@@ -2137,10 +2382,23 @@ function startGateClock(ws: Workspace, everyMs: number): { readonly everyMs: num
  *     change. Reading a value off a constructed object is the stronger technique; where it
  *     is unavailable, a refusal at parse time is what is left.
  */
-function announce(plane: ControlPlane, ws: Workspace, opts: ControlPlaneOptions, sweepMs: number, port: number): void {
+function announce(
+  plane: ControlPlane,
+  ws: Workspace,
+  opts: ControlPlaneOptions,
+  sweepMs: number,
+  bound: { readonly port: number; readonly host: string; readonly loopback: boolean },
+): void {
   const delivery = ws.delivery;
   const identity = opts.identity;
-  process.stdout.write(`loom listening on http://127.0.0.1:${port}\n`);
+  const { port, host, loopback } = bound;
+  // THE ADDRESS THIS LINE NAMES USED TO BE THE STRING `127.0.0.1`, hardcoded, which was
+  // true only because nothing could bind anything else. It is now read back off the socket
+  // — the same mechanism as `port`, and for the same reason: `--host localhost` binds
+  // whatever the resolver says, so the flag is not the address.
+  //
+  // Bracketed when it is IPv6, because `http://::1:8787` is not a URL anyone can paste.
+  process.stdout.write(`loom listening on http://${host.includes(":") ? `[${host}]` : host}:${port}\n`);
   process.stdout.write(`  data:   ${ws.dataDir}\n`);
   process.stdout.write(`  graphs: ${Object.keys(opts.graphs ?? {}).join(", ") || "(none)"}\n`);
   process.stdout.write(`  who:    ${identity === undefined ? "(nobody — no identity source)" : identity.name}\n`);
@@ -2170,6 +2428,24 @@ function announce(plane: ControlPlane, ws: Workspace, opts: ControlPlaneOptions,
 
   if (plane.openToEveryCaller) {
     process.stderr.write("! NO TOKEN — every caller is authorized\n");
+  }
+  // WHERE THE SOCKET IS, said as loudly as what is on it — because they compose, and the
+  // composition is what decides the blast radius. A plane on 127.0.0.1 with no token is a
+  // development convenience; the same plane on 0.0.0.0 is an open control plane on the
+  // network, and `ControlPlane.listen` refuses that pair outright rather than printing
+  // anything. What is left to say here is the pair this file DOES allow: a tokened plane
+  // that anything routable can now reach.
+  //
+  // `bound.loopback` and not a second look at the flag: it is computed from the address
+  // `server.address()` reported, so this line cannot claim a posture the socket does not
+  // have — the property `announce`'s own docstring exists to state.
+  if (!loopback) {
+    process.stderr.write(
+      `! NON-LOOPBACK BIND — ${host}:${port} is reachable from the network, not just this machine.\n` +
+        `  The bearer token and every gate decision cross this socket in CLEARTEXT: there is no TLS in this\n` +
+        `  process, so put a terminating proxy in front of it. The DNS-rebinding Host check does not apply on a\n` +
+        `  routable bind (a caller who can reach the port did not need rebinding), and cross-site checks still do.\n`,
+    );
   }
   // AUTHENTICATION IS NOT AUTHORIZATION, said where the operator who configured
   // `--identity-file` will read it. Runs ARE scoped to the submitting principal now, so
@@ -2316,11 +2592,12 @@ export async function main(argv: readonly string[]): Promise<number> {
         // constructor, and the clock's and the port's, here.
         const everyMs = gateClockInterval(args);
         const wanted = httpPort(args);
+        const wantedHost = httpHost(args);
         const plane = new ControlPlane(opts);
-        const { port } = await plane.listen(wanted);
+        const bound = await plane.listen(wanted, wantedHost);
         const clock = startGateClock(ws, everyMs);
         const runs = startRunClock(ws, everyMs, DEFAULT_RUN_CLOCK_LIMIT);
-        announce(plane, ws, opts, clock.everyMs, port);
+        announce(plane, ws, opts, clock.everyMs, bound);
         // SIGINT IS AN EVENT HANDLER, so nothing above it catches, and its exit code is
         // the only thing a supervisor reads. Both facts live in `serveUntilInterrupt`,
         // which returns what this command should exit with — see its docstring for why a
@@ -2535,6 +2812,17 @@ export async function main(argv: readonly string[]): Promise<number> {
             tools: ws.engine.tools,
             functions: ws.engine.functions,
             models: ws.engine.models,
+            // THE WORKSPACE'S HOOKS, or the replay runs a DIFFERENT PROGRAM than the recording.
+            // `Engine.#hooks` is `undefined` when none is passed and `#hooksFor` then answers `[]`
+            // at all eight points, so this omission silently un-installed every extension for the
+            // duration of a replay. Measured on a run whose `preNode` hook skipped a node and
+            // supplied `out` via `overrideWrites`: replayed without hooks the node EXECUTED,
+            // failed, and the report read
+            // `✗ state.reduced : expected {"note":"n","out":{"skipped":true}}, got {"note":"n"}` —
+            // `match: false` blamed on the run, when the replayer was what differed. Same class as
+            // the policy line below, one field over. `agent.ts` gets it right structurally by
+            // handing `replayRun` the very object it built the live Engine from.
+            hooks: ws.hooks,
             // THE RUN'S OWN POLICY, not the engine's default. `EngineOptions.policy` defaults to
             // `granted: ["*"]`, and this call passed none — so a replay held every capability
             // whatever the original run held. A run whose tool was DENIED replayed ALLOWED, and
@@ -2663,6 +2951,169 @@ export async function main(argv: readonly string[]): Promise<number> {
         return report.violations.length === 0 ? 0 : 1;
       }
 
+      // JUDGE A FINISHED RUN, AND WRITE THE VERDICT DOWN. `scoreTrajectory`, `measureCohort`,
+      // `isGolden` and `promotionCeiling` were correct, tested, and reachable from nothing a
+      // person can run — the same standing `foldTrajectory` had before `agent.trajectory`
+      // existed. This is the door, and the append is the half that makes it a LOOP rather than
+      // a report: the verdict outlives the process that computed it, so a later run can read it.
+      //
+      // THE COHORT IS BUILT HERE, NOT PASSED IN. A score means nothing except against a
+      // population, and the population is this workspace's other runs of the same cohort key.
+      // That is why the run being judged is a member of its own cohort: `measureCohort` needs it
+      // in the medians it is measured against, and leaving it out would score every run against
+      // a ruler that excluded exactly one run — itself.
+      case "score": {
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const events = await journalOf(ws, runId);
+        // An empty read is not an unscoreable run, it is a run that is not here — `audit`'s
+        // lesson, and `gates`'s before it.
+        if (events.length === 0) {
+          process.stderr.write(`no journal for run ${runId} in this workspace (${ws.root})\n`);
+          return 1;
+        }
+        // THE PROMOTED SET, AND WHY IT IS THIS SET. `isGolden` condition 5 refuses to learn from
+        // a run produced by a graph no human approved, and it reads
+        // `Trajectory.fromUnpromotedCandidate`, which is `true` whenever the fold is given no
+        // promoted set at all — so a caller that omits it certifies nothing and the condition
+        // fails closed. For the CLI the answer is mechanical: a graph published in
+        // `<workspace>/graphs/` was put there by a person, and a successor graph reached through
+        // `graph.mutated` at runtime was not. A graph run from a path outside `graphs/` is
+        // therefore NOT promoted, which is the conservative reading and the correct one.
+        const { index } = graphsByHash(ws);
+        const promotedGraphHashes = new Set(index.keys());
+        // The AUTHORED graph, for `promptRef` and node types only. A run that mutated its graph
+        // folds its own successor hash from the journal; this lookup does not decide that.
+        const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+        const graph = submitted === undefined ? undefined : index.get(submitted.payload.graphHash);
+        const t = foldTrajectory(events, { promotedGraphHashes, ...(graph === undefined ? {} : { graph }) });
+        const key = cohortKeyOf(t);
+        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes);
+        if (peers.truncated) {
+          process.stderr.write(
+            `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
+          );
+        }
+        const cohort = measureCohort(key, [t, ...peers.members]);
+        const scored = scoreTrajectory(t, cohort);
+        const verdict = isGolden(t, scored, cohort);
+        const ceiling = promotionCeiling(scored.signals);
+        // A RUN THAT HAS NOT FINISHED SCORES 0 BY THE FLOOR, and that 0 is about the run's
+        // state, not its quality. The row says so — `components.completed` is journaled for
+        // exactly this — but the person at the terminal is reading a number, so say it here
+        // too. Not a refusal: a verdict on an unfinished run is a real thing to record, and
+        // re-scoring after it finishes appends the later reading.
+        if (!scored.components.completed) {
+          process.stderr.write(
+            `! run ${runId} is "${t.outcome.runStatus}", not succeeded — its outcome is 0 because it has not finished, ` +
+              `which is a different fact from having finished badly. Re-score it once it is terminal.\n`,
+          );
+        }
+        const payload: EventPayloads["evolution.scored"] = {
+          cohortKey: scored.cohortKey,
+          score: scored.score,
+          outcome: scored.outcome,
+          components: {
+            costNormalized: scored.components.costNormalized,
+            latencyNormalized: scored.components.latencyNormalized,
+            humanEffortSaved: scored.components.humanEffortSaved,
+            completed: scored.components.completed,
+            delivered: scored.components.delivered,
+          },
+          signals: scored.signals.map((s) => ({ id: s.id, value: s.value, weight: s.weight, evidence: s.evidence })),
+          weights: DEFAULT_WEIGHTS,
+          weightsDigest: scored.weightsDigest,
+          cohort: {
+            n: cohort.n,
+            p50CostUsd: cohort.p50Cost,
+            p50WallMs: cohort.p50Wall,
+            p50Gates: cohort.p50Gates,
+            p90Score: cohort.p90Score,
+          },
+          golden: verdict.golden,
+          // The conditions that FAILED. `golden: false` with nothing behind it is a verdict
+          // nobody can argue with, which is the one thing a verdict must never be.
+          goldenBlockers: verdict.conditions.filter((c) => !c.pass).map((c) => `${c.name}: ${c.detail}`),
+          ceiling: ceiling.channel,
+          requiresHumanSignOff: ceiling.requiresHumanSignOff,
+        };
+        // A COMPONENT APPENDED THIS, and the actor says so. The `evolution` arm of `Actor` means
+        // "a candidate proposed it" and would need an `engineVersion` this path does not have;
+        // a `human` actor would claim a person made a judgement that arithmetic made.
+        await ws.store.append({
+          runId,
+          expectedSeq: await ws.store.head(runId),
+          events: [{ type: "evolution.scored", payload, actor: SYSTEM_ACTOR("evolution-score") }],
+        });
+        process.stdout.write(`${JSON.stringify({ runId, ...payload }, null, 2)}\n`);
+        return 0;
+      }
+
+      // READ A JOURNALED VERDICT BACK — the other half, and the one that makes the row worth
+      // writing. It RE-DERIVES NOTHING: every number printed here was read out of a journal,
+      // because a reader that recomputes would answer with today's cohort and call it the
+      // judgement, which is precisely the drift `weightsDigest` exists to catch.
+      case "cohort": {
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const events = await journalOf(ws, runId);
+        if (events.length === 0) {
+          process.stderr.write(`no journal for run ${runId} in this workspace (${ws.root})\n`);
+          return 1;
+        }
+        const mine = lastScore(events);
+        if (mine === undefined) {
+          // NOT AN EMPTY COHORT. "This run was never judged" and "this run was judged and has no
+          // peers" are different facts, and answering the first with the second is how a loop
+          // reports progress it never measured.
+          process.stderr.write(
+            `run ${runId} carries no journaled score, which is a different answer from "it scored badly" ` +
+              `or "its cohort is empty". Judge it first: loom score ${runId}\n`,
+          );
+          return 1;
+        }
+        const summaries = await ws.store.listRuns(COHORT_SCAN_LIMIT);
+        const members: { runId: string; score: number; outcome: number; golden: boolean; ceiling: string }[] = [];
+        // EXCLUDED, AND COUNTED. A score computed under different weights is a different metric —
+        // `scoreTrajectory` throws E_COHORT_INVALIDATED rather than compare across one — so those
+        // members cannot join this list. Silently dropping them would make a cohort look smaller
+        // for a reason nothing on the page states.
+        let excludedForWeights = 0;
+        let sawSelf = false;
+        for (const s of summaries) {
+          const sc = s.runId === runId ? mine : lastScore(await journalOf(ws, s.runId));
+          if (sc === undefined || sc.cohortKey !== mine.cohortKey) continue;
+          if (sc.weightsDigest !== mine.weightsDigest) {
+            excludedForWeights++;
+            continue;
+          }
+          if (s.runId === runId) sawSelf = true;
+          members.push({ runId: s.runId, score: sc.score, outcome: sc.outcome, golden: sc.golden, ceiling: sc.ceiling });
+        }
+        // The run asked about is always in its own cohort, even when the scan window did not
+        // reach it — a listing bound must not change what a run belongs to.
+        if (!sawSelf) {
+          members.push({ runId, score: mine.score, outcome: mine.outcome, golden: mine.golden, ceiling: mine.ceiling });
+        }
+        members.sort((a, b) => b.score - a.score || (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+        process.stdout.write(
+          `${JSON.stringify(
+            {
+              runId,
+              cohortKey: mine.cohortKey,
+              weightsDigest: mine.weightsDigest,
+              scored: mine,
+              members,
+              excludedForWeights,
+              // The scan is bounded, so say when the bound was reached rather than presenting a
+              // truncated cohort as the whole one.
+              truncated: summaries.length >= COHORT_SCAN_LIMIT,
+            },
+            null,
+            2,
+          )}\n`,
+        );
+        return 0;
+      }
+
       default:
         process.stderr.write(`unknown command "${args.command}"\n\n${USAGE}`);
         return 2;
@@ -2673,6 +3124,70 @@ export async function main(argv: readonly string[]): Promise<number> {
     for (const c of mcp) c.close();
     ws.close();
   }
+}
+
+// ── evolution: the read side ────────────────────────────────────────────────
+
+/**
+ * How many runs a cohort scan reads before it stops.
+ *
+ * A cohort is assembled by FOLDING other runs' journals, one read per run, so this is a real
+ * cost and not a paper one. The number is the same order as `DEFAULT_RUN_CLOCK_LIMIT` (200) and
+ * `GATE_CLOCK_LIMIT` (500) for the same reason those exist: an unbounded scan on a workspace
+ * with a year of runs is a command that appears to hang.
+ *
+ * REACHING IT IS REPORTED, never absorbed — both verbs say so, because a cohort quietly cut to
+ * its newest 500 members has a different `p90Score`, and `p90Score` is the bar `isGolden`
+ * condition 2 clears. A truncation nobody is told about lowers a promotion bar.
+ */
+const COHORT_SCAN_LIMIT = 500;
+
+/** The whole journal of one run, in order. Every read side here starts with this. */
+async function journalOf(ws: Workspace, runId: RunId): Promise<JournalEvent[]> {
+  const events: JournalEvent[] = [];
+  for await (const e of ws.store.read(runId, 1)) events.push(e);
+  return events;
+}
+
+/**
+ * The LAST `evolution.scored` row in a journal, or `undefined` if the run was never judged.
+ *
+ * The last one and not the first: re-scoring appends again by design — a cohort of 3 and a
+ * cohort of 300 are different rulers — so the newest row is the current verdict and the older
+ * ones are the history of how it was reached.
+ */
+function lastScore(events: readonly JournalEvent[]): EventPayloads["evolution.scored"] | undefined {
+  let found: EventPayloads["evolution.scored"] | undefined;
+  for (const e of events) if (isEvent(e, "evolution.scored")) found = e.payload;
+  return found;
+}
+
+/**
+ * Every OTHER run in this workspace that belongs to the same cohort, folded.
+ *
+ * Trajectories rather than journaled scores, because `measureCohort` measures a POPULATION —
+ * medians of cost, wall time and gates over the runs themselves. Reading peers' journaled
+ * scores instead would measure the population as it was last judged, which is a different set
+ * and a staler one.
+ */
+async function cohortPeers(
+  ws: Workspace,
+  self: RunId,
+  key: string,
+  promotedGraphHashes: ReadonlySet<string>,
+): Promise<{ members: Trajectory[]; truncated: boolean }> {
+  const summaries = await ws.store.listRuns(COHORT_SCAN_LIMIT);
+  const members: Trajectory[] = [];
+  for (const s of summaries) {
+    if (s.runId === self) continue;
+    const events = await journalOf(ws, s.runId);
+    if (events.length === 0) continue;
+    // No graph: a peer contributes usage, policy and status to the medians, and none of those
+    // needs the spec. A missing `promptRef` on a peer changes no median.
+    const t = foldTrajectory(events, { promotedGraphHashes });
+    if (cohortKeyOf(t) === key) members.push(t);
+  }
+  return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };
 }
 
 function requirePositional(args: Args, i: number, what: string): string {
