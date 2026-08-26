@@ -14,7 +14,8 @@
  * span far larger than what was asked for is `disproportionate`. Both are refusals, not
  * best-effort guesses — the tool reports them and changes nothing.
  *
- * FORKED from `packages/eagent/src/extensions/lib/edit-match.ts` (same repo), unchanged
+ * FORKED from `packages/eagent/src/extensions/lib/edit-match.ts` at tag `eagent-v1` — that
+ * package was deleted from this tree on 2026-08-25, so the path resolves only at the tag
  * except for this docstring and the explicit `undefined` guards Loom's
  * `noUncheckedIndexedAccess` requires. It was chosen first of the whole 21k-LOC extension
  * tree because it is pure: zero imports, zero clock, zero randomness, so it carries none of

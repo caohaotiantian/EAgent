@@ -42,7 +42,7 @@ import type { TaskId } from "../ids.ts";
  * There was briefly a SECOND list, `WIRED_POINTS`, because the design named nine points and the
  * engine dispatched fewer; the compiler refused the difference so no intermediate state could
  * lie. It is gone because the difference is gone: eight are built and the ninth, `prePlan`, is
- * refuted rather than pending (see 03-RUNTIME.md D6.9). `test/run/hooks.test.ts` reads the
+ * refuted rather than pending (see design/loom/03-RUNTIME.md (deleted at f975f9f) D6.9). `test/run/hooks.test.ts` reads the
  * engine's SOURCE to check every point here is really dispatched, which is a stronger guarantee
  * than a hand-kept list and cannot drift from it.
  */

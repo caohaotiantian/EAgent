@@ -1993,7 +1993,7 @@ export class GateDispatcher {
     //
     // THE FIRST FIX HANDED OVER A TOKEN OF THE DIGEST, and it cost the field the one
     // property it is kept for. `contentDigest` is "the same question you were asked before"
-    // — 04-OVERSIGHT.md D7.3 defines it as the sha256 of the payload SHOWN TO THE HUMAN —
+    // — design/loom/04-OVERSIGHT.md (deleted at f975f9f) D7.3 defines it as the sha256 of the payload SHOWN TO THE HUMAN —
     // and a token is process-scoped, so a gate re-delivered after a restart read as a
     // different question. What the field is FOR was traded away to protect it.
     //

@@ -1,0 +1,58 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "fan-out-join",
+    "project": "examples",
+    "version": 1,
+    "description": "Split a document into lines, count each line in parallel, fold the counts back in branch order."
+  },
+  "policy": {
+    "posture": "out",
+    "expansion": { "maxNodes": 16, "maxDepth": 1, "maxFanout": 8, "maxLoopIterations": 1 }
+  },
+  "channels": {
+    "document": { "type": "string", "reduce": "replace" },
+    "chunks": { "type": "array", "reduce": "replace" },
+    "chunk": { "type": "string", "reduce": "replace" },
+    "counts": { "type": "array", "reduce": "append_ordered" },
+    "report": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["document"],
+  "outputs": ["report"],
+  "nodes": [
+    {
+      "id": "plan",
+      "type": "function",
+      "reads": ["document"],
+      "writes": ["chunks"],
+      "function": { "ref": "function/plan@stable" }
+    },
+    {
+      "id": "count",
+      "type": "function",
+      "reads": ["chunk"],
+      "writes": ["counts"],
+      "function": { "ref": "function/count@stable" }
+    },
+    {
+      "id": "gather",
+      "type": "join",
+      "reads": ["counts"],
+      "writes": ["counts"],
+      "join": { "branches": ["count"], "mode": "all", "onBranchError": "fail" }
+    },
+    {
+      "id": "summarise",
+      "type": "function",
+      "reads": ["counts"],
+      "writes": ["report"],
+      "function": { "ref": "function/summarise@stable" }
+    }
+  ],
+  "edges": [
+    { "id": "fan", "from": "plan", "to": "count", "kind": "fanout", "over": "chunks", "as": "chunk", "maxWidth": 8 },
+    { "id": "collect", "from": "count", "to": "gather", "kind": "join" },
+    { "id": "then", "from": "gather", "to": "summarise", "kind": "seq" }
+  ]
+}

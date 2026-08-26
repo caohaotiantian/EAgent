@@ -336,13 +336,18 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
   },
   {
     row: "Gates",
-    claims: "3400+ tests across both packages",
+    claims: "1900+ tests",
     probe: () => {
       // A FLOOR in the prose, so growth costs no doc edit. The number in the README must be at
       // or below what the suite actually holds — checked against the test files rather than a
       // second hard-coded figure, which would be the same drift one level over.
-      const m = /(\d[\d,]*)\+ tests across both packages/.exec(README);
-      assert.ok(m, "the Gates row must state a floor like `3400+ tests`");
+      //
+      // ANCHORED TO THE GATES ROW, not to the whole README. The phrase used to end "across both
+      // packages", which made it unique; `packages/eagent` was deleted on 2026-08-25 and the
+      // shorter phrase would otherwise bind to the first `N+ tests` anywhere in the file.
+      const gatesRow = README.split("\n").find((l) => /^\|\s*\*\*Gates\*\*\s*\|/.test(l)) ?? "";
+      const m = /(\d[\d,]*)\+ tests/.exec(gatesRow);
+      assert.ok(m, "the Gates row must state a floor like `1900+ tests`");
       const stated = Number(m[1]!.replace(/,/g, ""));
       const actual = globSync(fileURLToPath(new URL("../../*/test/**/*.test.ts", import.meta.url)))
         .map((f) => (readFileSync(f, "utf8").match(/^test\(/gm) ?? []).length)

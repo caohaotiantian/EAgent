@@ -8,7 +8,8 @@
  * dissolves the filesystem jail rather than narrowing it. These do the same work in Node,
  * inside the jail, with no allowlist entry required.
  *
- * FORKED from `packages/eagent/src/extensions/search.ts` (same repo) — `globToRegExp` and the
+ * FORKED from `packages/eagent/src/extensions/search.ts` at tag `eagent-v1` (that package was
+ * deleted from this tree on 2026-08-25, so the path resolves only at the tag) — `globToRegExp` and the
  * traversal — with two changes that are not stylistic:
  *
  *  1. **The deny-list reaches the walk.** EAgent has no notion of one; Loom's jail root

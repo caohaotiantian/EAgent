@@ -18,7 +18,8 @@
  * error result rather than a crash. The server is a different program written by somebody
  * else; the only thing its enumeration proves is what it *claims*.
  *
- * FORKED IN PART from `packages/eagent/src/extensions/mcp.ts` (same repo) — the bounded line
+ * FORKED IN PART from `packages/eagent/src/extensions/mcp.ts` at tag `eagent-v1` (that package
+ * was deleted from this tree on 2026-08-25, so the path resolves only at the tag) — the bounded line
  * reader below is its design, unchanged, because it gets the one property that matters right.
  *
  * A FORK RATHER THAN AN IMPORT, and it stays one. `@loom/core` has zero runtime dependencies

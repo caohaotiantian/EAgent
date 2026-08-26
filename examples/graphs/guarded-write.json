@@ -1,0 +1,29 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "guarded-write",
+    "project": "examples",
+    "version": 1,
+    "description": "One tool node, and a preTool hook that refuses to let a secret reach the disk."
+  },
+  "policy": { "posture": "out", "capabilities": ["fs:write"] },
+  "hooks": { "preTool": ["hook/no-secrets@stable"] },
+  "channels": {
+    "note": { "type": "string", "reduce": "replace" },
+    "written": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["note"],
+  "outputs": ["written"],
+  "nodes": [
+    {
+      "id": "save",
+      "type": "tool",
+      "reads": ["note"],
+      "writes": ["written"],
+      "unhandled": true,
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "notes/note.txt", "body": "${note}" } }
+    }
+  ],
+  "edges": []
+}

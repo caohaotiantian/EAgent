@@ -1,0 +1,193 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "self-review",
+    "project": "loom",
+    "version": 1,
+    "description": "Review this repo's own diff: one agent per changed file, folded, gated, written."
+  },
+  "policy": {
+    "posture": "on",
+    "capabilities": [
+      "fs:write"
+    ],
+    "budget": {
+      "costUsd": 2
+    },
+    "expansion": {
+      "maxNodes": 24,
+      "maxDepth": 1,
+      "maxFanout": 6,
+      "maxLoopIterations": 1
+    }
+  },
+  "channels": {
+    "diff": {
+      "type": "string",
+      "reduce": "replace"
+    },
+    "files": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "file": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "reviews": {
+      "type": "array",
+      "reduce": "append_ordered"
+    },
+    "report": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "written": {
+      "type": "object",
+      "reduce": "replace"
+    }
+  },
+  "inputs": [
+    "diff"
+  ],
+  "outputs": [
+    "report",
+    "written"
+  ],
+  "nodes": [
+    {
+      "id": "plan",
+      "type": "function",
+      "reads": [
+        "diff"
+      ],
+      "writes": [
+        "files"
+      ],
+      "function": {
+        "ref": "function/review-plan@stable"
+      }
+    },
+    {
+      "id": "review",
+      "type": "agent",
+      "reads": [
+        "file"
+      ],
+      "writes": [
+        "reviews"
+      ],
+      "agent": {
+        "profile": "agent_profile/reviewer@stable",
+        "prompt": "prompt/review@stable",
+        "maxTurns": 1
+      },
+      "policy": {
+        "budget": {
+          "costUsd": 0.25
+        }
+      }
+    },
+    {
+      "id": "gather",
+      "type": "join",
+      "reads": [
+        "reviews"
+      ],
+      "writes": [
+        "reviews"
+      ],
+      "join": {
+        "branches": [
+          "review"
+        ],
+        "mode": "all",
+        "onBranchError": "fail"
+      }
+    },
+    {
+      "id": "collate",
+      "type": "function",
+      "reads": [
+        "reviews"
+      ],
+      "writes": [
+        "report"
+      ],
+      "function": {
+        "ref": "function/review-collate@stable"
+      }
+    },
+    {
+      "id": "approve",
+      "type": "human_gate",
+      "reads": [
+        "report"
+      ],
+      "writes": [],
+      "humanGate": {
+        "ref": "oversight/ship@stable",
+        "approval": {
+          "mode": "single",
+          "approvers": [
+            "u:deepsky"
+          ]
+        }
+      }
+    },
+    {
+      "id": "write",
+      "type": "tool",
+      "reads": [
+        "report"
+      ],
+      "writes": [
+        "written"
+      ],
+      "tool": {
+        "name": "fs.write",
+        "version": "1.0",
+        "args": {
+          "path": "out/review.json",
+          "body": "${report | json}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "fan",
+      "from": "plan",
+      "to": "review",
+      "kind": "fanout",
+      "over": "files",
+      "as": "file",
+      "maxWidth": 6
+    },
+    {
+      "id": "collect",
+      "from": "review",
+      "to": "gather",
+      "kind": "join"
+    },
+    {
+      "id": "fold",
+      "from": "gather",
+      "to": "collate",
+      "kind": "seq"
+    },
+    {
+      "id": "gate",
+      "from": "collate",
+      "to": "approve",
+      "kind": "seq"
+    },
+    {
+      "id": "ship",
+      "from": "approve",
+      "to": "write",
+      "kind": "seq"
+    }
+  ]
+}

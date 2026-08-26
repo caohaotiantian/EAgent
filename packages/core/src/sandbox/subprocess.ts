@@ -658,7 +658,7 @@ export async function runSandboxed(opts: SandboxOptions, signal: AbortSignal): P
    * and still raises the reason it was killing for. Closing our read end may well break
    * the child's next write, and that is a side effect, not a claim — an effect whose
    * outcome is unknown recorded as "did not happen" is the most expensive lie this system
-   * can tell (01-INTERFACES.md D3.20).
+   * can tell (design/loom/01-INTERFACES.md (deleted at f975f9f) D3.20).
    *
    * THE `'error'` LISTENERS STAY ATTACHED, and that is the whole care in this function.
    * Destroying a pipe is one of the moments one fires; removing them here would re-open
@@ -752,7 +752,7 @@ export async function runSandboxed(opts: SandboxOptions, signal: AbortSignal): P
      * has already run for `timeoutMs`, `E_TOOL_SOURCE_UNAVAILABLE "could not spawn"` reads
      * as **DID NOT HAPPEN**, and an effect whose outcome is unknown recorded as
      * never-started is the single most expensive lie this system can tell
-     * (01-INTERFACES.md D3.20; 03-RUNTIME.md D4 deviation 1 records it as UNKNOWN).
+     * (design/loom/01-INTERFACES.md (deleted at f975f9f) D3.20; design/loom/03-RUNTIME.md (deleted at f975f9f) D4 deviation 1 records it as UNKNOWN).
      *
      * SETTLING IS HALF OF IT. `fail` frees the *run*; `cleanup`'s `release` frees the
      * *host*, which for a long time it did not — the pipes went on flowing into a capture

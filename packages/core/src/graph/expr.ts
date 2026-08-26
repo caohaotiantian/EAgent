@@ -230,7 +230,9 @@ export function parseExpr(src: string): Expr {
       if (t.v === "null") return { k: "lit", v: null };
       if (peek().t === "op" && (peek() as { v: string }).v === "(") {
         pos++;
-        if (!(t.v in BUILTINS)) {
+        // `in` walks the prototype chain, so `toString(1)` / `hasOwnProperty()` were once
+        // accepted as builtin CALLS and then failed with "takes undefined argument(s)".
+        if (!Object.hasOwn(BUILTINS, t.v)) {
           throw syntax(src, t.i, `unknown function "${t.v}" (builtins: ${Object.keys(BUILTINS).join(", ")})`);
         }
         const fn = t.v as BuiltinName;
@@ -313,7 +315,10 @@ export function inferType(e: Expr, channels: Readonly<Record<string, Ty>>, error
       return e.v === null ? "null" : (typeof e.v as Ty);
 
     case "ref": {
-      const t = channels[e.name];
+      // Own-property only, for the same reason `evaluate` is: `channels["constructor"]` found
+      // `Object` on the prototype, so GRAPH004's unknown-channel check — its teeth — silently
+      // accepted `constructor`, `toString`, `valueOf` and friends as declared channels.
+      const t = own(channels, e.name) as Ty | undefined;
       if (t === undefined) {
         errors.push({ message: `unknown channel "${e.name}"` });
         return "unknown";
@@ -475,11 +480,11 @@ export function evaluate(e: Expr, scope: Readonly<Record<string, unknown>>): unk
     case "lit":
       return e.v;
     case "ref":
-      return scope[e.name];
+      return own(scope, e.name);
     case "member": {
       const o = evaluate(e.obj, scope);
       if (o === null || o === undefined || typeof o !== "object") return undefined;
-      return (o as Record<string, unknown>)[e.prop];
+      return own(o, e.prop);
     }
     case "index": {
       const o = evaluate(e.obj, scope);
@@ -493,7 +498,7 @@ export function evaluate(e: Expr, scope: Readonly<Record<string, unknown>>): unk
         const n = typeof i === "number" ? (i < 0 ? o.length + i : i) : NaN;
         return Number.isInteger(n) ? o[n] : undefined;
       }
-      if (typeof o === "object") return (o as Record<string, unknown>)[String(i)];
+      if (typeof o === "object") return own(o, String(i));
       return undefined;
     }
     case "unary": {
@@ -584,6 +589,33 @@ function evalCall(e: Extract<Expr, { k: "call" }>, scope: Readonly<Record<string
       return false;
     }
   }
+}
+
+/**
+ * Read a key the way DATA has keys: OWN, and STORED — never inherited, never computed.
+ *
+ * A plain `o[key]` walks the prototype chain, so `payload.constructor` on untrusted JSON
+ * answered with `Object`, `payload.__proto__` with `Object.prototype`, and
+ * `payload.hasOwnProperty` with a function — every one of them non-null, for EVERY object.
+ * A router `when` testing field presence therefore did not test the data at all: it asked a
+ * question whose answer was fixed before the payload existed, and a router chooses which edge
+ * runs. Absence is the right answer because a prototype key is not absence of a new kind: the
+ * same `undefined` a missing channel yields, so `lt`, `arith` and `truthy` already handle it.
+ *
+ * A key an author genuinely wrote still reads. `yaml.ts` deliberately admits `constructor` and
+ * `__proto__` as ordinary keys (`test/graph/yaml.test.ts`), so shadowing must WORK — which is
+ * why this is own-property access and not a denylist of the four famous names. A denylist would
+ * also miss `toString`, `valueOf`, `isPrototypeOf`, and whatever a later Node adds.
+ *
+ * The descriptor, rather than `Object.hasOwn(o, key) && o[key]`, because an own ACCESSOR would
+ * run user code and could throw — and this evaluator's contract, one paragraph up, is that it
+ * is total and side-effect free. Own getters do not appear in JSON, so nothing legitimate is
+ * lost by declining to invoke them.
+ */
+function own(o: object, key: string): unknown {
+  const d = Object.getOwnPropertyDescriptor(o, key);
+  if (d === undefined) return undefined;
+  return "value" in d ? d.value : undefined;
 }
 
 function truthy(v: unknown): boolean {
