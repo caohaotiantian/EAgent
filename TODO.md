@@ -664,6 +664,57 @@ circuit breaker.
 
 ## E · Deferred on purpose, with the reason — do not silently revive
 
+**FOUR OF THESE EIGHT ARE REVIVED, 2026-08-26, because their stated REASON is false.** That is
+what this section is for. "Do not silently revive" is not "never revive" — the reason IS the
+deferral, so a reason that stops being true takes the deferral with it. Reading the label instead
+of testing the reason is how a deferral becomes a permanent exemption nobody re-examines.
+
+- **E.1 · Distributed deployment — REVIVED, and it is a §B item hiding here.** "The interfaces
+  are shaped for it; nothing is built" is false in its second half. `LeasedScheduler`
+  (`run/scheduler.ts`) implements two of the three distributed behaviours its own docstring names
+  — skip live leases, reclaim expired ones — with 13 contention tests exercising them against
+  folded journals for two workers. It has **zero callers outside its own file**: `cli.ts` never
+  names a Scheduler, so `loom serve` always runs `InProcessScheduler`. This is the exact
+  "declared and wired to nothing" defect §B exists to name, sitting in the section that says not
+  to look at it. Either plug it in or delete it; both are decisions, and neither is the current
+  state.
+- **E.2 · Partition assignment — REVIVED in its factual half.** "Deciding which runs a worker
+  considers needs a coordinator" is still true and still unbuilt. But that decision had already
+  shipped as a silent newest-200-first starvation policy, which was fixed on 2026-08-26. The
+  normative half stands; the sentence needs to stop implying nothing decides it.
+- **E.3 · Automated candidate generation — REVIVED.** The reason presupposed a correct scorer and
+  a short sample: "under roughly thirty scored trajectories per cohort, any candidate is fitted
+  to noise." The scorer was inverted (a failed run outscored a successful one) and is now fixed,
+  and the cohort could not assemble at all until the bucket seam was wired. The sample argument
+  survives; the premise it rested on did not, so the deferral has to be re-argued rather than
+  inherited.
+- **E.7 · seccomp / Landlock — REVIVED, and this one is a false safety claim.**
+  "Platform-specific" holds. **"Subprocess isolation plus a filesystem jail plus an egress
+  allowlist covered the stated threat model" does not.** Measured: one allow-listed binary read
+  outside the jail and opened an arbitrary socket, bypassing two of the three mitigations. The
+  tree already contradicts the claim twice in its own words — `sandbox/subprocess.ts` says the
+  jail "is the CALLER'S to apply", and the proc-exec test header says that once a subprocess is
+  reachable, "deny and the branch overlay are advisory". The deferral of seccomp may still be
+  right; **the sentence claiming the threat model is covered is not, and that is the part that
+  gets believed.**
+- **E.8 · Vendor callback parsing — REVIVED, wrong in both directions.** Signature verification
+  is built, wired and tested — `SignedWebhookChannel` implements Slack's exact scheme end to end.
+  What is actually missing is per-vendor payload SHAPE parsing, and an email transport that does
+  not exist at all (`email` is only an `Actor.via` label). The entry names the wrong blocker.
+
+**Three still hold, verified rather than read:** E.4 subtractive mutation (the superset property
+is real and removal is unrepresentable in the mutation type), E.5 custom reducers (the set is
+closed at the type level with no registration seam anywhere) — though see the note below —
+E.6 free-form chatter (its precondition holds; the reason itself names no measurable referent).
+
+**E.5 is worth re-examining on the merits.** Its reason is "arbitrary code inside the determinism
+boundary" — and that boundary now exists and is proven: a seeded PRNG from a journaled draw, a
+clock bound to a journaled task boundary, `Date` and `Intl` absent, an embedder `globals` seam
+that refuses a governed name. A user-authored reducer would run under exactly the machinery that
+was not there when the deferral was written. Property 2 says extensibility should be unlimited;
+a closed reducer set is one of the six things the audit found still require a fork.
+
+
 **Re-checked 2026-08-25 — 8 items: 4 partial · 3 open · 1 n/a.**
 
 | item | verdict | what running it showed |
