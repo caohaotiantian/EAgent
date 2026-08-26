@@ -3,9 +3,6 @@
   "references": [
     {
       "path": "./packages/core"
-    },
-    {
-      "path": "./packages/eagent"
     }
   ]
 }

@@ -82,7 +82,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Determinism** | Seeded `Math.random`, a clock bound to the task's journaled lease timestamp. Two reads of the time inside one body return the same instant |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 3400+ tests across both packages, offline, no API key; zero-dep and public-surface guards |
+| **Gates** | `npm run check` — 1900+ tests, offline, no API key; zero-dep and public-surface guards. One package, and it has no runtime dependencies to audit |
 
 ## What does not work yet
 
@@ -167,6 +167,31 @@ Three things that command does not do, and each was a real defect:
   its `prompt/` and `subgraph/` refs;
 - `--as u:bob` is refused, because the gate names who may answer it.
 
+## Examples that run
+
+[`examples/`](examples/) is a workspace, not a snippet dump: copy the directory, `cd` into it,
+and every command in [`examples/README.md`](examples/README.md) works offline with no key.
+`packages/core/test/examples-run.test.ts` executes all of it on every `npm run check`, so an
+example that stops working stops the build.
+
+- **`graphs/fan-out-join.json`** — the fan-out → branch-ordered join above, end to end:
+  `loom compile`, `loom run`, and a `loom replay` that comes back `{"match": true}`.
+- **`resources/function/*.js`** — a `function` node body: `(view, ctx) => ({writes})`, what the
+  realm does and does not contain, and why `ctx.effects` refuses inside a sandboxed body.
+- **`resources/hook/no-secrets.js`** — a `preTool` hook that blocks a credential before it
+  reaches the disk.
+
+Two rules that fail a first attempt, stated here because both used to live only in a source
+comment:
+
+- **A `resources/function/*.js` or `resources/hook/*.js` file is a BARE FUNCTION EXPRESSION.**
+  The loader evaluates `(<the file>)`, so `module.exports = function (…) {…};` is a syntax
+  error — `Unexpected token ';'` — before your code runs. No `module.exports`, no
+  `export default`, no wrapper.
+- **The edge from a join's arm into the join must be `"kind": "join"`.** A `seq` edge leaves the
+  join inside the fan-out and is refused with `GRAPH008_HELD_JOIN_UNCOLLECTED`; no edge at all
+  is `GRAPH008_BRANCH_NOT_CONNECTED`.
+
 ## Why this exists
 
 The predecessor, **EAgent**, is a minimalist agent kernel with an excellent extension
@@ -184,6 +209,8 @@ four.
 - [`CLAUDE.md`](CLAUDE.md) — the goal, the three properties, and the working rules. Short on
   purpose.
 - [`TODO.md`](TODO.md) — everything unfinished, written to be self-contained.
+- [`examples/README.md`](examples/README.md) — a runnable workspace: a fan-out → join graph, a
+  `function` body, a `hook` body. Every command in it is executed by the test suite.
 - The commit history is the record of why. There is no separate design corpus: the previous
   one (14 architecture documents, a defect register and a journal) was **deliberately deleted
   on 2026-08-25** because its accumulated history was steering the work more than the goal was.
@@ -198,31 +225,33 @@ packages/core/     the Loom engine — zero runtime dependencies
   src/providers/     Anthropic, OpenAI, fallback chains, cassettes
   src/server/        control plane + embedded console
   src/security/      redaction, SecretValue
-packages/eagent/   the agent kernel and its 65 extensions
+examples/          a runnable workspace — the graph, function and hook bodies, executed by
+                   packages/core/test/examples-run.test.ts
 scripts/           CI guards and the binary build
 ```
 
-## EAgent, the predecessor — now a package here
+## EAgent, the predecessor — archived, not vendored
 
-EAgent is the harness Loom grew out of: a minimalist agent kernel with an excellent extension
-surface. It is **in this repository**, at `packages/eagent/`, and is developed here.
-
-```bash
-npm run eagent            # its CLI
-npm run check             # one gate covers both packages
-```
-
-It was conformed to Loom's toolchain on the way in — `.ts` import specifiers, no parameter
-properties, no `tsx` loader — so both suites run under the same `node --test`. It keeps its own
-dependencies (`jiti`); only `@loom/core` is bound by the zero-dependency rule, and core does not
-import it.
+EAgent is the harness Loom grew out of: a minimalist agent kernel with an excellent
+extension surface. It is **not in this branch.** It lived at `packages/eagent/` until it was
+deleted, because `@loom/core` imported nothing from it while 43% of the test suite and the
+repo's only runtime dependency (`jiti`) were spent defending it.
 
 `loom` is an **orphan branch** that shares no history with `init` by design. `init`, tagged
-`eagent-v1`, is where EAgent's own history stayed:
+`eagent-v1`, is where EAgent's history stayed — as a standalone repository, so its sources are
+at `src/`, not under any `packages/` prefix:
 
 ```bash
 git show eagent-v1                    # the annotated archive tag
-git worktree add ../eagent-ref init   # read it side-by-side
+git show eagent-v1:src/kernel/agent.ts
+git worktree add ../eagent-ref eagent-v1   # read it side-by-side
 ```
 
-That worktree is historical reference only. EAgent is edited at `packages/eagent/`, not there.
+Three of core's files are forks of EAgent originals — `globToRegExp`
+(`builtin/search-match.ts`), the edit matcher (`builtin/edit-match.ts`), and the bounded MCP
+line reader (`mcp/client.ts`). Each carries a `FORKED from` header naming its original, and
+the original stays readable at the tag, so the two can still be diffed rather than trusted:
+
+```bash
+git diff eagent-v1:src/extensions/lib/edit-match.ts packages/core/src/builtin/edit-match.ts
+```

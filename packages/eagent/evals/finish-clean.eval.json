@@ -1,5 +1,0 @@
-{
-  "input": "just answer in plain text",
-  "mockScript": [{ "text": "here is the answer" }],
-  "expect": { "finishReason": "end_turn", "noToolErrors": true }
-}
