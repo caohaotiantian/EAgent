@@ -22,15 +22,18 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { main, openWorkspace, parseArgs } from "../../src/cli.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { createHookLoader } from "../../src/resources/hook-loader.ts";
 import { ResourceStore } from "../../src/resources/store.ts";
-import type { HookContext } from "../../src/run/hooks.ts";
+import { HOOK_POINTS, type HookContext } from "../../src/run/hooks.ts";
 
 const ACTOR = { kind: "human", id: "u:test" } as const;
 
@@ -342,4 +345,278 @@ test("DELETING A HOOK BODY UNDER A LIVE GATE NAMES THE FILE, not just the run", 
   } finally {
     w.dispose();
   }
+});
+
+// ── randomness: the other half of `HookContext`'s docstring ─────────────────
+//
+// `run/hooks.ts` says a hook body gets "No clock and no randomness: see invariant 4." The clock
+// half was true — `safeGlobals` binds `Date` to `undefined`. The randomness half was not: `Math`
+// is in the realm, `functions.ts` replaces its `random` with a seeded PRNG and `HOOK_BRIDGE` did
+// not, so a hook reached the platform's. Measured through `main()` on the fixture below, before
+// `DENY_RANDOM`: `n = 0.22702972986496206`, then `n = 0.5441905981534036`, same graph, same
+// bytes, two runs.
+
+test("A HOOK CANNOT REACH Math.random — INCLUDING ONE THAT CAPTURES IT AT LOAD TIME", () => {
+  // The capture is why the stub is spliced ahead of the body instead of installed by
+  // `HOOK_BRIDGE`: `compileRealm` evaluates the body FIRST and the bridge SECOND, so a stub
+  // written in the bridge can be lifted out from under itself by exactly this resource.
+  const store = storeWith(`(function () {
+    var captured = Math.random;
+    return function () {
+      var reached = [];
+      var probe = function (label, get) { try { get(); reached.push(label); } catch (e) {} };
+      probe("captured", function () { return captured(); });
+      probe("Math.random", function () { return Math.random(); });
+      probe("globalThis.Math.random", function () { return globalThis.Math.random(); });
+      return { reached: reached, floor: Math.floor(2.7) };
+    };
+  })()`);
+  const body = createHookLoader({ store }).load("hook/memo@stable")!;
+  // `floor: 2` is the CONTROL for this one: `Math` itself is still there, so a hook that buckets
+  // a memo key or clamps a backoff is unaffected. Deleting `Math` outright would pass the first
+  // half of this assertion and fail the second.
+  assert.deepEqual(body({}, CTX), { reached: [], floor: 2 });
+});
+
+test("the refusal NAMES the capability, and points at a route that EXISTS", () => {
+  // A THROWING STUB, NOT AN OMISSION — the treatment `functions.ts` settled on for `ctx.effects`.
+  // An absent `Math` dies with "Cannot read properties of undefined (reading 'random')", which
+  // sends an author hunting for a typo in their own code.
+  //
+  // AND IT MUST NOT NAME `ctx.seed`. The first version of this message said "Draw it in a
+  // function node, where ctx.seed makes it reproducible". A hook body never sees that field —
+  // `HOOK_BRIDGE` builds `{point, runId, taskId, signal}` — and neither does a FUNCTION body:
+  // `functions.ts` sends `seed` in the payload expressly NOT on the ctx, because the bridge
+  // consumes it to reseed `Math.random` and drops it. The advice named a field in neither realm,
+  // which is worse than no advice: it reads as "you are one property away".
+  const store = storeWith(`() => ({ r: Math.random() })`);
+  const body = createHookLoader({ store }).load("hook/memo@stable")!;
+  assert.throws(
+    () => body({}, CTX),
+    (e: unknown) => {
+      const m = String(e);
+      assert.ok(m.includes("E_EFFECT_UNAVAILABLE"), m);
+      assert.ok(!m.includes("ctx.seed"), `the refusal must not send an author after a field that does not exist: ${m}`);
+      assert.ok(m.includes("function node"), m);
+      assert.ok(m.includes(`effectKey(taskId, "random", 0)`), m);
+      assert.ok(m.includes("hook input"), m);
+      assert.ok(!m.includes("Cannot read properties of undefined"), m);
+      return true;
+    },
+  );
+});
+
+test("EVERY FIELD THE REFUSAL PROMISES IS REALLY THERE — `ctx` is exactly what it says", () => {
+  // The control for the assertion above. Saying "ctx is {point, runId, taskId, signal} and
+  // nothing more" is the same class of claim as the one it replaced, so it is checked against
+  // the realm rather than against `HOOK_BRIDGE`'s source.
+  const store = storeWith(`(input, ctx) => ({ keys: Object.keys(ctx).sort(), seed: typeof ctx.seed })`);
+  const body = createHookLoader({ store }).load("hook/memo@stable")!;
+  assert.deepEqual(body({}, { ...CTX, taskId: "task_1" as never }), {
+    keys: ["point", "runId", "signal", "taskId"],
+    seed: "undefined",
+  });
+});
+
+test("THE REFUSAL IS IDENTICAL AT ALL EIGHT POINTS — including the one nobody hears", () => {
+  // `onComplete` is the OBSERVER point, and a hook that draws there fails INVISIBLY: measured
+  // through `main()` on a graph declaring `hooks: {onComplete: [...]}` whose body calls
+  // `Math.random()`, the run exits 0, prints `"status": "succeeded"`, and writes nothing to
+  // stderr. That silence is NOT this loader and NOT `runObservers`, which already returns the
+  // refs that threw precisely "so the caller can surface them without failing the run". It is
+  // `engine.ts`'s `onComplete` dispatch discarding that return value.
+  //
+  // So this test pins the half that IS the loader's, and it is the half the engine fix depends
+  // on: the stub fires at `onComplete` exactly as at the other seven, with the same message. If
+  // the guard were ever loosened at observer points — the alternative rejected in `DENY_RANDOM` —
+  // this goes red rather than the defect landing under cover of a point nobody watches.
+  const store = storeWith(`() => ({ r: Math.random() })`);
+  const body = createHookLoader({ store }).load("hook/memo@stable")!;
+  const messages = HOOK_POINTS.map((point) => {
+    try {
+      body({}, { ...CTX, point });
+      return `NO REFUSAL AT ${point}`;
+    } catch (e) {
+      return String((e as Error).message);
+    }
+  });
+  assert.equal(messages.length, 8, "if a ninth point is wired, it needs a decision here too");
+  for (const [i, m] of messages.entries()) {
+    assert.ok(m.includes("E_EFFECT_UNAVAILABLE"), `${HOOK_POINTS[i]}: ${m}`);
+  }
+  assert.equal(new Set(messages).size, 1, `all eight refusals must read the same: ${JSON.stringify(messages)}`);
+});
+
+test("a body that overwrites Math.random does not change what the NEXT call sees", () => {
+  // Bodies are cached per DIGEST, so "the next call" is routinely another Run. `HOOK_BRIDGE`
+  // re-installs the stub per call for the same reason `ARGUMENT_BRIDGE` reseeds per call.
+  const store = storeWith(`function (input) {
+    if (input.first) { Math.random = function () { return 0.5; }; return { r: Math.random() }; }
+    try { return { r: Math.random() }; } catch (e) { return { refused: String(e).indexOf("E_EFFECT_UNAVAILABLE") >= 0 }; }
+  }`);
+  const body = createHookLoader({ store }).load("hook/memo@stable")!;
+  assert.deepEqual(body({ first: true }, CTX), { r: 0.5 }, "a body may of course use its own arithmetic");
+  assert.deepEqual(body({}, CTX), { refused: true }, "and it does not persist into the next call");
+});
+
+const RANDOM_MEMO = `function (input, ctx) { return { skip: true, reason: "memoised", overrideWrites: { n: Math.random() } }; }`;
+
+test("TWO RUNS OF ONE GRAPH: a hook drawing randomness REFUSES BOTH TIMES, identically", async () => {
+  const w = workspace();
+  try {
+    const file = seed(w.dir);
+    writeFileSync(join(w.dir, "resources", "hook", "memo.js"), RANDOM_MEMO);
+    const first = await cli(["run", file, "--workspace", w.dir]);
+    const second = await cli(["run", file, "--workspace", w.dir]);
+    const summaries = [first, second].map((r) => {
+      assert.equal(r.code, 1, `a hook that cannot decide must fail its Task: ${r.out}${r.err}`);
+      return JSON.parse(r.out) as { status: string; outputs: Record<string, unknown>; error: { message: string } };
+    });
+    for (const s of summaries) {
+      assert.equal(s.status, "failed");
+      assert.deepEqual(s.outputs, {}, "and it must not have written the draw it was refused");
+      assert.ok(s.error.message.includes("E_EFFECT_UNAVAILABLE"), s.error.message);
+      assert.ok(s.error.message.includes("hook/memo@stable"), s.error.message);
+      assert.ok(s.error.message.includes("preNode"), s.error.message);
+    }
+    // The point of running it TWICE: before the fix these two differed, and differing is the
+    // defect. Identical refusals are what "no randomness" looks like from outside.
+    assert.equal(summaries[0]!.error.message, summaries[1]!.error.message);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE CONTROL: the same wiring, a hook that draws nothing, and it really does fire", async () => {
+  // Without this, the test above cannot tell "the hook was refused randomness" from "the hook
+  // never ran" — which is the failure this whole file exists to close, and which looks identical
+  // from outside. Same graph, same point, same `overrideWrites` channel that carried the draw.
+  const w = workspace();
+  try {
+    const file = seed(w.dir);
+    for (const _ of [1, 2]) {
+      const r = await cli(["run", file, "--workspace", w.dir]);
+      assert.equal(r.code, 0, r.err);
+      // 41 is the HOOK's answer; 1 is the node's own. The hook fires, and both runs agree.
+      assert.equal((JSON.parse(r.out) as { outputs: { n: number } }).outputs.n, 41);
+    }
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── the clock: the OTHER other half of `HookContext`'s docstring ────────────
+//
+// The comment above says "The clock half was true — `safeGlobals` binds `Date` to `undefined`."
+// That was wrong, and it was wrong in this file. `Date` is one of two clocks in a `vm` context:
+// `Intl.DateTimeFormat.prototype.format` called with NO ARGUMENT reads the wall clock, and `Intl`
+// was ambient. Measured through `main()` on the fixture below, before `realm.ts` shadowed it:
+// `n = "8/25/2026, 11:16:07 AM"`, then `n = "8/25/2026, 11:16:09 AM"`, same graph, same bytes.
+// `test/resources/realm-has-no-clock.test.ts` covers the realm; this covers the product.
+
+const CLOCK_MEMO = `function (input, ctx) {
+  return { skip: true, reason: "memoised", overrideWrites: { n: new Intl.DateTimeFormat("en-US", { timeZone: "UTC", timeStyle: "medium" }).format() } };
+}`;
+
+test("TWO RUNS OF ONE GRAPH: a hook reading the CLOCK refuses both times, identically", async () => {
+  const w = workspace();
+  try {
+    const file = seed(w.dir);
+    writeFileSync(join(w.dir, "resources", "hook", "memo.js"), CLOCK_MEMO);
+    const runs = [await cli(["run", file, "--workspace", w.dir]), await cli(["run", file, "--workspace", w.dir])];
+    const summaries = runs.map((r) => {
+      assert.equal(r.code, 1, `a hook that cannot decide must fail its Task: ${r.out}${r.err}`);
+      return JSON.parse(r.out) as { status: string; outputs: Record<string, unknown>; error: { message: string } };
+    });
+    for (const s of summaries) {
+      assert.equal(s.status, "failed");
+      assert.deepEqual(s.outputs, {}, "and it must not have written the timestamp it was refused");
+      assert.ok(s.error.message.includes("hook/memo@stable"), s.error.message);
+      assert.ok(s.error.message.includes("preNode"), s.error.message);
+      // The shape of the refusal is `Intl` being `undefined`, the same treatment `Date` has had
+      // since the first realm — so the author sees their OWN expression named, not the guard:
+      // "Cannot read properties of undefined (reading 'DateTimeFormat')".
+      //
+      // A throwing stub would read better, and that is the argument `DENY_RANDOM` makes two
+      // screens up for `Math.random`. It was REJECTED here for one concrete reason rather than a
+      // taste one: `test/resources/functions.test.ts` asserts `typeof Date === "undefined"`
+      // inside a body, so `Date`'s treatment is pinned by a test, and stubbing `Intl` alone would
+      // leave the realm's two clocks refusing in two different shapes. Both or neither, and
+      // "both" is a change to a pinned behaviour — recorded rather than half-done.
+      assert.ok(/DateTimeFormat/.test(s.error.message), s.error.message);
+      assert.ok(!/Intl is not defined/.test(s.error.message), "the namespace is shadowed, not deleted from scope");
+    }
+    // Before the fix these two differed. Differing IS the defect: it is a hook putting an
+    // unjournaled, unreplayable value into a declared channel through `overrideWrites`.
+    assert.equal(summaries[0]!.error.message, summaries[1]!.error.message);
+  } finally {
+    w.dispose();
+  }
+});
+
+
+// ── `console` IS AMBIENT AND INERT, which is not what the rejection said ─────
+//
+// `DENY_RANDOM`'s docstring records a REJECTED relaxation — letting `Math.random` through at
+// observer points — "so nobody re-proposes it", and one of the three counts it rested on was a
+// measured claim nobody had measured: that `console` is ambient in the realm, so an `onComplete`
+// body doing `console.log(Math.random())` "writes nondeterministic bytes onto the very stream
+// `loom run` prints its JSON summary on."
+//
+// Half of that is true and the load-bearing half is false. `vm.createContext({})` DOES bind a
+// `console` whose `log` is a function — but it reaches neither stdout nor stderr nor fd 1. A
+// permanently-recorded rejection resting on a false premise is worse than no rejection, because
+// the next reader who checks it discards the two counts that are sound along with the one that
+// is not. This pins the corrected sentence so it cannot rot back.
+
+const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
+const execFileAsync = promisify(execFile);
+
+test("A HOOK BODY CANNOT WRITE A BYTE — `console` is bound in the realm, and goes nowhere", async () => {
+  // A REAL SUBPROCESS, deliberately. The `cli()` helper above replaces `process.stdout.write`,
+  // which a raw fd-1 write would walk straight past — so an in-process test could not tell
+  // "inert" from "intercepted", and inert is the claim. This is fd 1 and fd 2 as the OS sees them.
+  const w = workspace();
+  try {
+    // `preNode`, not `onComplete`: a filter's answer is READ, so `n === 41` proves the body
+    // actually ran. At `onComplete` the engine discards the result and a body that never fired
+    // would produce the same empty streams — the test would pass while asserting nothing.
+    writeFileSync(
+      join(w.dir, "resources", "hook", "memo.js"),
+      `function (input, ctx) {
+         console.log("HOOK-BYTES-MARKER-STDOUT");
+         console.error("HOOK-BYTES-MARKER-STDERR");
+         return { skip: true, reason: "tapped", overrideWrites: { n: 41 } };
+       }`,
+    );
+    writeFileSync(join(w.dir, "resources", "function", "bump.js"), BUMP);
+    const file = join(w.dir, "g.json");
+    writeFileSync(file, JSON.stringify(GRAPH));
+
+    const { stdout, stderr } = await execFileAsync(process.execPath, [CLI, "run", file, "--workspace", w.dir]);
+
+    assert.equal(
+      (JSON.parse(stdout) as { outputs: { n: number } }).outputs.n,
+      41,
+      "the hook must have FIRED — 41 is its answer, 1 is the node's",
+    );
+    assert.equal(stdout.includes("HOOK-BYTES-MARKER"), false, "console.log in a hook must not reach fd 1");
+    assert.equal(stderr.includes("HOOK-BYTES-MARKER"), false, "console.error in a hook must not reach fd 2");
+    assert.equal(stderr, "", "and nothing else may appear there either");
+  } finally {
+    w.dispose();
+  }
+});
+
+test("…and it is BOUND, not missing — the half of the rejection's premise that was true", () => {
+  // The distinction the corrected docstring turns on. If `console` were absent, a body doing
+  // `console.log(x)` would THROW, and at seven of eight points that fails the Task — which is a
+  // different behaviour to document and a different thing for an author to hit.
+  const store = storeWith(`(input, ctx) => ({
+    typeofConsole: typeof console,
+    typeofLog: typeof console.log,
+    returned: console.log("nowhere") === undefined
+  })`);
+  const body = createHookLoader({ store }).load("hook/memo@stable")!;
+  assert.deepEqual(body({}, CTX), { typeofConsole: "object", typeofLog: "function", returned: true });
 });

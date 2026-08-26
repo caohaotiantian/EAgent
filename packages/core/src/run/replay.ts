@@ -110,10 +110,27 @@ export class ReplayEffects {
   /** Keys that started with no terminal record — the honest third outcome. */
   readonly #unknown = new Set<string>();
   readonly #served = new Set<string>();
+  /**
+   * The recorded body clock, `${taskId}#${attempt}` → the `task.leased` timestamps in journal
+   * order. See `leaseAt`; it is not an effect and deliberately does not live with them.
+   */
+  readonly #leases = new Map<string, number[]>();
+  /** Keys `leaseAt` could not answer. See `derivedClocks`. */
+  readonly #clockDerived = new Set<string>();
 
   static fromEvents(events: Iterable<JournalEvent>): ReplayEffects {
     const r = new ReplayEffects();
     for (const e of events) {
+      // NOT AN EFFECT, CARRIED WITH THEM. `FunctionContext.now` is the task's lease instant, and
+      // the recording already holds it — so replay serves it here rather than journaling a new
+      // `clock` effect, which would be replay appending nondeterminism to reach determinism.
+      if (isEvent(e, "task.leased") && e.taskId !== undefined) {
+        const k = `${e.taskId}#${e.payload.attempt}`;
+        const q = r.#leases.get(k);
+        if (q === undefined) r.#leases.set(k, [e.ts]);
+        else q.push(e.ts);
+        continue;
+      }
       if (isEvent(e, "effect.started")) r.#unknown.add(e.payload.key);
       else if (isEvent(e, "effect.completed")) {
         r.#unknown.delete(e.payload.key);
@@ -206,6 +223,49 @@ export class ReplayEffects {
     return this.#served.has(key);
   }
 
+  /**
+   * The instant the RECORDING leased this task, for the body's `ctx.now()`.
+   *
+   * WHY THIS EXISTS. `Engine.#bodyClock` binds `FunctionContext.now` to the task's journaled
+   * lease timestamp, which is reproducible for a live run and was NOT for a replay: the shadow
+   * run appends its OWN `task.leased`, `RunLog` stamps it `now: this.#now()`, and `prepare` gives
+   * that caller-supplied value priority over the store's clock — so the replay Engine's wall
+   * clock reached the body and two replays of one run answered differently. Measured before the
+   * fix: 1204 ms apart, which is just the pause between them.
+   *
+   * THE COORDINATE IS `(taskId, attempt)`, and both halves are load-bearing. `TaskId` is derived
+   * (`nodeId@branchPath#iteration`) so it is the same string in both runs despite the two runIds;
+   * `attempt` distinguishes a retry, whose lease is a DIFFERENT instant, from the first try.
+   *
+   * CONSUMED IN JOURNAL ORDER rather than read, because the pair is not unique over a journal: a
+   * rewind can undo a lease and the task is leased again at the same attempt. `#bodyClock` is
+   * called exactly once per execution of a `function` or `evaluator{assertion}` task, so the Nth
+   * execution is answered with the Nth recorded lease.
+   *
+   * `undefined` means the recording has no such lease left to serve — the replay ran a body the
+   * recording did not. That is a divergence, and it is recorded rather than papered over: the
+   * caller falls back to the shadow's own lease and `derivedClocks` reports it.
+   */
+  leaseAt(taskId: TaskId, attempt: number): number | undefined {
+    const key = `${taskId}#${attempt}`;
+    const at = this.#leases.get(key)?.shift();
+    if (at === undefined) {
+      this.#clockDerived.add(key);
+      return undefined;
+    }
+    return at;
+  }
+
+  /**
+   * Body clocks the recording could not answer, as `taskId#attempt`.
+   *
+   * Non-empty means at least one body read a time this replay RE-DERIVED instead of serving —
+   * which is what `ReplayReport.hermetic` claims did not happen.
+   */
+  get derivedClocks(): readonly string[] {
+    return [...this.#clockDerived].sort();
+  }
+
   /** Recorded effects the replay never asked for — a divergence in the other direction. */
   get unserved(): readonly string[] {
     return [...this.#completed.keys()].filter((k) => !this.#served.has(k)).sort();
@@ -280,7 +340,14 @@ export interface ReplayReport {
    */
   readonly unservedEffects: readonly string[];
   /**
-   * No RECORDED effect had an unrecorded outcome.
+   * Nothing this replay needed had to be RE-DERIVED instead of served from the record.
+   *
+   * Two things can falsify it, and both are "the journal could not answer":
+   *   - a recorded effect that started and never recorded an outcome (`unknownOutcomes`) — the
+   *     original process died mid-call, and replay cannot invent what the world did;
+   *   - a body clock the recording has no lease for (`ReplayEffects.derivedClocks`) — the replay
+   *     ran a `function` or `evaluator{assertion}` body the recording did not lease at that
+   *     attempt, so `ctx.now()` came from the shadow's own lease rather than from history.
    *
    * NOT "nothing ran live", which is how it reads and how it was read. `function` and
    * assertion bodies compute no effect key, so they never appear in `unknownOutcomes` and
@@ -436,6 +503,17 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     );
   }
 
+  // THIS CLOCK NEVER REACHES AN EVENT, and for four commits it was mistaken for the thing that
+  // made replay's clock reproducible. `MemoryStateStore`'s `now` is only consulted when an append
+  // arrives with none, and `RunLog` passes `now: this.#now()` on EVERY append while `prepare`
+  // gives the caller priority (`journal/store.ts`) — so every shadow event is stamped by the
+  // replay Engine's clock, not this one. It is kept because a store with no clock is a store that
+  // falls back to `Date.now` for a direct `store.append`, and the shadow should not; the body
+  // clock is served by `ReplayEffects.leaseAt`, which is where that fix actually lives.
+  //
+  // The Engine's own `#now` is deliberately NOT frozen here. `#pickReady` gates a backed-off task
+  // on `t.retryAfter <= now()` and `retryAfter` is *now + backoff*, so a frozen clock leaves every
+  // retrying task permanently in the future and the replay stalls.
   const shadow = new MemoryStateStore({ now: opts.engine.now ?? (() => original.startedAt) });
   // THE SHADOW GETS ITS OWN BROKER, always. `Engine` builds one when none is supplied, and that
   // is what a replay must have: a broker carries a dispatcher, and `sweepTimeouts` — which this
@@ -595,8 +673,10 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     replayed,
     unservedEffects: unserved,
     // Non-hermetic when the recorded run had effects with no outcome: replay cannot
-    // invent what the world did while the process was dying.
-    hermetic: effects.unknownOutcomes.length === 0,
+    // invent what the world did while the process was dying — or when a body read a clock
+    // this recording could not answer, which is the same statement one field over. See
+    // `ReplayEffects.derivedClocks` and `ReplayReport.hermetic`.
+    hermetic: effects.unknownOutcomes.length === 0 && effects.derivedClocks.length === 0,
     graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound },
     reboundEffects: rebound,
   };

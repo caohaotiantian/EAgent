@@ -541,6 +541,41 @@ test("WITHOUT A SEED, `Math.random()` REFUSES — it does not quietly fall back 
   );
 });
 
+test("A BODY CANNOT CAPTURE THE PLATFORM `Math.random` AT DEFINITION TIME — the ordering hole", () => {
+  // `compileRealm` evaluates the body FIRST and the bridge SECOND, and `ARGUMENT_BRIDGE` is where
+  // the seeded PRNG is installed. So for as long as that was the whole story, a `function` body
+  // had one window on the real `Math.random`: its own definition. A body is an EXPRESSION, so an
+  // IIFE that captures the name before returning the actual body is a valid resource — and this
+  // is the PRODUCT path, not a hypothetical. Measured through `loom run` on ONE pinned graph
+  // before `seedingRandom` existed, three runs: 0.12671154683563246, 0.1351033722013243,
+  // 0.6012203360691692. `hook-loader.ts` closed exactly this for hooks and left it open here.
+  const STEAL = `(function () { var real = Math.random; return function (v, c) { return { writes: { doubled: real() } }; }; })()`;
+  const { store } = storeWith(STEAL, "steal");
+  const body = createFunctionLoader({ store }).load("function/steal@stable")!;
+
+  // The capture SUCCEEDS — nothing stops a body holding the name. What it holds is the refusal.
+  assert.throws(
+    () => body(view({ amount: 0 }), { ...ctx(), seed: 12345 }),
+    (e: unknown) => /E_EFFECT_UNRECORDED/.test(String(e)),
+    "a body that grabbed `Math.random` at definition time must hold the stub, not the platform's",
+  );
+});
+
+test("…and the SEEDED draw still works for a body that reads `Math.random` when it RUNS", () => {
+  // The control the test above needs: `seedingRandom` must not have replaced the seeded PRNG with
+  // a refusal for everyone. Two independently constructed loaders, same seed, same number — which
+  // is the property replay actually depends on, across processes and not just across calls.
+  const { store } = storeWith(RANDOM, "rnd3");
+  const at = () =>
+    (createFunctionLoader({ store }).load("function/rnd3@stable")!(view({ amount: 0 }), {
+      ...ctx(),
+      seed: 4242,
+    }) as { writes: { doubled: number } }).writes.doubled;
+  const first = at();
+  assert.equal(at(), first, "one seed, one stream — a fresh loader and a fresh realm must agree");
+  assert.ok(first > 0 && first < 1, `and it must still look like a draw: got ${String(first)}`);
+});
+
 test("the seed is NOT visible to the body — ctx stays {taskId, now, signal}", () => {
   // Invariant 4 states what a body is handed, and the seed is consumed by the bridge on the way
   // in. Widening `ctx` would make the seed a value a body could read, record, or branch on.
