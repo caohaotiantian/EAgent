@@ -26,11 +26,112 @@ import {
   type ExpansionBudget,
   type GraphSpec,
   type NodePlan,
+  type NodeSpec,
   type ResolvedRef,
+  type RetryPolicy,
   type RunGraph,
   observedChannels,
 } from "./spec.ts";
 import { indexGraph, validateGraph, type Diagnostic, type ValidationContext } from "./validate.ts";
+
+/**
+ * The retry policy a provider-calling node gets when its author declared none.
+ *
+ * NOT EXPORTED. `scripts/surface.json` pins the package's exported name set, and this is an
+ * implementation of a default rather than a piece of vocabulary a caller needs — what a caller
+ * needs is the effective policy, and that is on `NodePlan.retry` where it can be READ.
+ *
+ * `maxAttempts: 3` — one attempt and two retries. Two covers the case that actually happens (one
+ * rate limit, one blip); more turns an unhealthy provider into a slow, expensive failure, and the
+ * engine adds no jitter, so every client's curve is identical and a longer one means more clients
+ * arriving together.
+ *
+ * `initialMs: 1000` rather than `#retryDecision`'s bare `?? 500`, because a provider's rate-limit
+ * window is measured in seconds. It is only ever the floor: the engine takes
+ * `max(curve, retry-after)`, so a provider that SAYS when it will serve us again always wins.
+ *
+ * NO `onlyIf`, which is the interesting half. Narrowing to `E_PROVIDER_RATE_LIMIT` would leave
+ * `E_PROVIDER_OVERLOADED` (529/503/502/504) and `E_PROVIDER_TRANSPORT` (408/425) unretried, and
+ * those are the transient failures that actually dominate. The retryable class is already
+ * `{exhausted, unavailable, timeout}` and `#retryDecision` already subtracts three things from
+ * it — a non-retryable class, `RUN_FATAL_CODES`, and a non-idempotent tool that already reached
+ * its sandbox — so what is left reaching an agent node is transient-provider-shaped by
+ * construction. `onlyIf` stays available to an author who wants the narrow policy; a default
+ * never widens one.
+ */
+const DEFAULT_PROVIDER_RETRY: RetryPolicy = {
+  maxAttempts: 3,
+  backoff: "exponential",
+  initialMs: 1_000,
+  maxMs: 30_000,
+};
+
+/** See `reEntersAChild`: a parent polling a working child, not a call being repeated. */
+const DEFAULT_SUBGRAPH_RETRY: RetryPolicy = {
+  maxAttempts: 20,
+  backoff: "exponential",
+  initialMs: 250,
+  maxMs: 5_000,
+};
+
+/**
+ * Whether this node can reach a model provider, and therefore whether the default applies.
+ *
+ * ESTABLISHED BY READING THE EXECUTOR, not by assuming. `this.models` is consulted at exactly
+ * three places in `run/engine.ts`: its constructor, `#runAgent`, and `#summarizeEffect` — and
+ * `#summarizeEffect` is only reached from inside an agent task's context assembly. `#runEvaluator`
+ * has two arms: `assertion` runs a `FunctionBody` and touches no provider, while `rubric`
+ * delegates to `#runAgent`. So the set is an `agent` node and a `rubric` evaluator, which is also
+ * the predicate `cli.ts` already uses to decide whether a graph "will actually reach a model".
+ *
+ * A `tool` NODE IS DELIBERATELY OUT, including one whose tool speaks HTTP. Its transport belongs
+ * to whoever wrote the tool, the manifest describes irreversibility rather than retryability, and
+ * the engine already treats a started non-idempotent tool effect as unretryable. Defaulting here
+ * would be Loom deciding on an extension's behalf that its side effect is safe to repeat. A tool
+ * node that wants retry declares one.
+ *
+ * A `function` node is out because a deterministic throw throws again: retrying it spends the
+ * budget and hides the bug.
+ */
+function reachesProvider(n: NodeSpec): boolean {
+  return n.type === "agent" || (n.type === "evaluator" && n.evaluator?.kind === "rubric");
+}
+
+/**
+ * A `subgraph` node needs a retry policy for a DIFFERENT reason, and it is the engine's own.
+ *
+ * `#runSubgraph` returns `E_SUBGRAPH_FAILED` as retryable-`unavailable` when the child is not
+ * terminal, and says why in as many words: "the parent's own retry policy re-enters this node,
+ * which re-advances the child, which is precisely the 'come back later' this needs." A child in
+ * retry backoff, or one starved by `maxParallelism`, comes back `running` — and with no policy
+ * on the parent, `#retryDecision` returns early and the RUN FAILS on a child that was about to
+ * continue.
+ *
+ * That was latent before provider nodes had a default: no node had one, so a child was rarely
+ * mid-backoff. Giving `agent` nodes a default makes "the child is still working" the ordinary
+ * case, so this stops being latent — the fix creates the exposure and must carry it.
+ *
+ * MORE ATTEMPTS THAN A PROVIDER GETS, and a shorter ceiling. Re-entry is cheap (it re-advances a
+ * projection, it does not call anything) and a legitimate child can take far longer than three
+ * exponential backoffs allow — three attempts topping out at 30 s would fail a child that is
+ * merely slow, which is the opposite of the point.
+ */
+function reEntersAChild(n: NodeSpec): boolean {
+  return n.type === "subgraph";
+}
+
+/**
+ * The retry policy this node will actually run under.
+ *
+ * A FLOOR FOR NODES THAT DECLARED NOTHING, never an override and never a merge. A merge would
+ * silently widen an author who wrote `maxAttempts: 1` — and "oversight only tightens" has a
+ * sibling here: a default may add a policy where there was none, and may not touch one there is.
+ */
+function effectiveRetry(n: NodeSpec): RetryPolicy | undefined {
+  if (n.retry !== undefined) return n.retry;
+  if (reachesProvider(n)) return DEFAULT_PROVIDER_RETRY;
+  return reEntersAChild(n) ? DEFAULT_SUBGRAPH_RETRY : undefined;
+}
 
 export type CompileInput = Omit<ValidationContext, "depth" | "expanding">;
 
@@ -131,6 +232,7 @@ export function compile(input: CompileInput): CompileResult {
     // graph-binding check reads as "the compiled oversight FLOOR", so leaving it computed off
     // the declared set leaves a second, quieter answer to the question the engine just fixed.
     const dataFloor = dataFloorOf(spec.channels, n);
+    const retry = effectiveRetry(n);
 
     plans[n.id] = {
       id: n.id,
@@ -147,6 +249,7 @@ export function compile(input: CompileInput): CompileResult {
         n.policy?.posture ?? "out",
       ),
       layoutRank: layoutRanks.get(n.id) ?? 0,
+      ...(retry === undefined ? {} : { retry }),
     };
   }
 

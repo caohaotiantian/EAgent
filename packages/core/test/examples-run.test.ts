@@ -122,6 +122,25 @@ test("every example graph compiles", async () => {
   }
 });
 
+test("`loom compile` SAYS what retry policy each provider-calling node will run under", async () => {
+  // The default a graph never declared is the one an operator most needs to see, and this is the
+  // only place the product shows it. `self-review.json` declares no `retry` anywhere — `grep -a`
+  // over every example returns nothing — so every line below is the compiler's own answer.
+  const ws = workspace();
+  try {
+    const r = await loom(ws.dir, ["compile", graphFile(ws.dir, "self-review.json")]);
+    assert.equal(r.code, 0, `${r.out}${r.err}`);
+    assert.match(r.out, /^ok\n/, "the verdict stays on the first line");
+    assert.match(r.out, /retry review \(default\): maxAttempts=3 backoff=exponential initialMs=1000 maxMs=30000 onlyIf=any-retryable/);
+    // A node that cannot reach a provider is silent — this is a list of what WILL happen, not a
+    // census. `write` is a tool node and `plan` a function node.
+    assert.doesNotMatch(r.out, /retry write/);
+    assert.doesNotMatch(r.out, /retry plan/);
+  } finally {
+    ws.dispose();
+  }
+});
+
 test("fan-out → join produces the report examples/README.md prints", async () => {
   const ws = workspace();
   try {

@@ -4876,7 +4876,16 @@ export class Engine {
     w: Wave,
     outcome: NodeOutcome,
   ): { afterMs: number; code: string } | undefined {
-    const policy = w.node.retry;
+    // THE COMPILED POLICY, NOT THE AUTHORED ONE. This read `w.node.retry` — a field an author
+    // sets and nothing computes — so on every graph this product ships (four examples, zero
+    // `"retry"` between them, and `agent()`'s own compiled spec) `policy` was `undefined` and
+    // this whole function returned on its first line. The requeue exit below had never run for
+    // a rate limit; a hidden sleep in the HTTP transport was standing in for it.
+    //
+    // `plans[id].retry` is `node.retry ?? <default for the type>`, so the `??` here is not a
+    // second answer — a plan's value already contains the author's. It covers only a `RunGraph`
+    // whose `plans` a caller assembled without the compiler.
+    const policy = ctx.graph.plans[w.node.id]?.retry ?? w.node.retry;
     const error = outcome.error;
     if (policy === undefined || error === undefined) return undefined;
 

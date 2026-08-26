@@ -554,6 +554,21 @@ export interface NodePlan {
   readonly outboundEdges: readonly EdgeId[];
   /** Effective posture after the `max` fold over every declared level. */
   readonly posture: Posture;
+  /**
+   * The retry policy that will ACTUALLY be used, or absent when this node is not retried.
+   *
+   * The second effective-after-fold value on this record, and it is here for the same reason
+   * `posture` is: the engine must not be the only thing that knows. `Engine.#retryDecision`
+   * read `NodeSpec.retry` — an authored field that no shipped graph, and not `agent()`'s own
+   * compiled spec, ever set — so the requeue path was unreachable in the product while a
+   * hidden sleep inside the HTTP transport quietly stood in for it. An effective policy a
+   * reader cannot see in the artifact is that same defect one layer up, so the compiler folds
+   * `NodeSpec.retry ?? <default for the node's type>` to here and `loom compile` prints it.
+   *
+   * DERIVED, and therefore outside `graphHash` like every other field on this record: the
+   * same authored spec keeps the identity it already had on every journal.
+   */
+  readonly retry?: RetryPolicy;
   /** Rank for the UI's layered layout, so the browser never runs graph layout. */
   readonly layoutRank: number;
 }

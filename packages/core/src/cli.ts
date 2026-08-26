@@ -1725,6 +1725,37 @@ function grantFlag(args: Args): readonly string[] {
     .filter((c) => c !== "");
 }
 
+/**
+ * Say what retry policy each node will ACTUALLY run under, and where it came from.
+ *
+ * UNCONDITIONAL, not behind a flag. The policy this prints is a compiled DEFAULT for any
+ * provider-calling node whose author declared nothing, and a default an operator has to know to
+ * ask about is a hidden default with extra steps — which is precisely the shape of the bug that
+ * put it here: the HTTP transport slept on a 429 inside the worker slot, nothing above it could
+ * see that, and so nobody noticed that the engine's own requeue path had never once run.
+ *
+ * Printed after `ok`, so `examples-run.test.ts`'s `/^ok/` and every operator's eye still find
+ * the verdict on the first line. Nodes with no policy are silent: this is a list of what WILL
+ * happen, not a census of the graph.
+ */
+function printRetryPlan(graph: RunGraph): void {
+  for (const n of graph.spec.nodes) {
+    const retry = graph.plans[n.id]?.retry;
+    if (retry === undefined) continue;
+    const source = n.retry === undefined ? "default" : "declared";
+    const parts = [
+      `maxAttempts=${retry.maxAttempts}`,
+      `backoff=${retry.backoff ?? "exponential"}`,
+      `initialMs=${retry.initialMs ?? 500}`,
+      `maxMs=${retry.maxMs ?? 30000}`,
+      // Absent means the whole retryable class, and saying so beats an empty field a reader has
+      // to know the default for.
+      `onlyIf=${retry.onlyIf === undefined ? "any-retryable" : retry.onlyIf.join(",")}`,
+    ];
+    process.stdout.write(`  retry ${n.id} (${source}): ${parts.join(" ")}\n`);
+  }
+}
+
 /** How many times `loom run` will wait out a backoff before giving up and saying so. */
 const MAX_BACKOFF_WAITS = 64;
 
@@ -2651,8 +2682,9 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     switch (args.command) {
       case "compile": {
-        loadGraph(ws, requirePositional(args, 0, "a graph file"));
+        const compiled = loadGraph(ws, requirePositional(args, 0, "a graph file"));
         process.stdout.write("ok\n");
+        printRetryPlan(compiled);
         return 0;
       }
 
