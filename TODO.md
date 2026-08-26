@@ -614,14 +614,28 @@ is a better view of nothing.
    these fields simply never reached it. A token ceiling is the one an operator can reason about
    when prices are unknown — the case hit for real against a GLM endpoint, where placeholder
    prices had to be invented before the cost budget meant anything.
-7. **Payload externalisation gets built.** The hard one, and chosen over deferring: above a
-   threshold a payload leaves the journal and leaves a reference. `effect.completed` already
-   carries a `resultDigest`, so an externalised effect keeps its identity for free;
-   `task.committed` and `state.reduced` would each need one. The difficulty is stated in §A and
-   has not changed: `foldRun` is SYNCHRONOUS and hands channel values straight to node bodies, so
-   either the fold becomes async — touching engine, gates, replay and audit — or the projection
-   carries unresolved handles and replay's comparison learns to compare what they point at.
+7. **Payload externalisation gets built, as HANDLES IN THE PROJECTION** — decided 2026-08-26,
+   and the fork was not about effort. Above a threshold a payload leaves the journal and leaves a
+   `{ref, digest}`; **`foldRun` stays pure and synchronous**, and the engine resolves exactly the
+   channels a node DECLARED it reads before invoking the body, so `view.get()` stays synchronous
+   and a body still sees a plain value.
+
+   **Why not an async fold**, which is the simpler mental model: `scripts/kernel.json` pins
+   `run/projection.ts` *because* "it is pure and synchronous so the claim can be checked". An
+   async `foldRun` trades away the stated reason it is kernel, and makes `engine`, `gates` and
+   `replay` async at every projection read. The hook for the chosen shape already exists —
+   `viewFor(p, channels, branch, node.reads ?? [])` is already how all three body-invoking sites
+   build a view.
+
+   **THIS REORDERS THE BACKLOG.** "`reads` is not enforced as the read set" (§A) stops being
+   tidiness and becomes a **prerequisite**: under handles, a channel a node did not declare is
+   one the engine cannot resolve, so an undeclared read goes from untidy to unresolvable. Build
+   the enforcement first.
+
+   `effect.completed` already carries a `resultDigest`, so an externalised effect keeps its
+   identity for free; `task.committed` and `state.reduced` each need one.
    **Retention tiering is downstream of this and stays deferred until it lands.**
+
 
 **Three were answered 2026-08-25**, and the roadmap in `DESIGN.md` is built on them:
 
