@@ -13,6 +13,7 @@
  */
 
 import { mkdirSync, readFileSync, readdirSync, existsSync, type Dirent } from "node:fs";
+import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 
 import { InProcessEventBus } from "./bus.ts";
@@ -336,6 +337,39 @@ export function parseArgs(argv: readonly string[]): Args {
   return { command: positional[0] ?? "help", positional: positional.slice(1), flags };
 }
 
+/**
+ * WHAT THIS PLANE CALLS ITSELF WHEN IT TAKES A LEASE, and until this line every plane
+ * everywhere called itself the same thing.
+ *
+ * `Engine` defaults `workerId` to `"worker-0"` (engine.ts) and `cli.ts` never passed one —
+ * `/usr/bin/grep -acn workerId packages/core/src/cli.ts` printed 0. `LeasedScheduler.select`
+ * decides mutual exclusion with `if (held.workerId === input.workerId) return true;`, whose
+ * purpose is "my own lease, take it back" after a retry or a resolved gate. With one name
+ * shared by every process, that line reads a LIVE FOREIGN lease as its own. Driven against a
+ * live `worker-0` lease taken at 1000, asked at 1100 with `leaseMs` 30000:
+ *
+ *     asked as "worker-0":  ["t"]      ← what every `loom` process asked
+ *     asked as "worker-B":  []         ← what `contention.test.ts` asks
+ *
+ * So cross-process exclusion was off by construction, and the suite's only two-worker test
+ * could not see it because it hands its two workers distinct ids.
+ *
+ * DERIVED FROM THE PROCESS, NOT RANDOM — and the distinction CLAUDE.md draws is the reason
+ * it may be derived from the process at all. "Every nondeterministic call is recorded under a
+ * DERIVED key" is a rule about REPLAY keys: an id you cannot recompute breaks replay. A lease
+ * identity is not one. Nothing hashes it, no effect key contains it, and `replay.ts` states
+ * that a replayed run appends its OWN `task.leased` rather than matching the original's. What
+ * it must be is UNIQUE among everything holding leases on one journal at one instant, which
+ * `hostname:pid` gives across machines and processes and the counter gives across two
+ * `openWorkspace` handles in one process — a shape the deployment harness produces on purpose
+ * and a `loom run` beside a `loom serve` produces by accident.
+ */
+let workspaceOrdinal = 0;
+function planeWorkerId(): string {
+  workspaceOrdinal += 1;
+  return `${hostname()}:${String(process.pid)}:${String(workspaceOrdinal)}`;
+}
+
 interface Workspace {
   readonly root: string;
   readonly dataDir: string;
@@ -578,6 +612,9 @@ export function openWorkspace(
   const engine = new Engine({
     store,
     bus,
+    // A NAME OF ITS OWN, so a live lease held by another plane is another plane's. See
+    // `planeWorkerId` for the measurement that says why the default could not stay.
+    workerId: planeWorkerId(),
     resolver,
     tools,
     functions,
