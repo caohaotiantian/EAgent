@@ -54,6 +54,7 @@ export const AUDIT_RULES = [
   "run.terminal-is-last-and-once",
   "gate.decided-once",
   "call-pairs-with-its-effect",
+  "compensation.names-a-recorded-call",
   "gate.raise-has-a-decision",
   "subgraph.start-and-completion-pair",
   "subgraph.child-id-is-derived",
@@ -245,6 +246,8 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const startedAttempt = new Map<string, number>();
   const startedKind = new Map<string, string>();
   const completions = new Map<string, number>();
+  /** Seqs that carry a `tool.called` — what `compensation.names-a-recorded-call` checks against. */
+  const toolCalledSeqs = new Set<number>();
   const openGates = new Map<string, number>();
   const raisedGates = new Set<string>();
   const commits = new Map<string, number>();
@@ -349,15 +352,43 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         const key = str(p["key"]);
         if (key === undefined) break;
         saw.add("call-pairs-with-its-effect");
-        const want = e.type === "model.called" ? "model" : "tool";
+        if (e.type === "tool.called") toolCalledSeqs.add(seq);
+        // A SET, NOT ONE NAME, and only for `tool.called`. A compensation dispatches through
+        // `Engine.#invokeTool` like any other tool — it is the same call with the same journal
+        // triple — but it keys into the `compensate` namespace, because its ordinal is the SEQ
+        // of the call it undoes rather than a position in a body's sequence. Comparing against
+        // the literal "tool" would report every rollback as a ledger/mechanism disagreement.
+        // Deriving `want` from the key instead would make this rule vacuous: that comparison IS
+        // `effect.kind-matches-its-key`, one case above.
+        const want = e.type === "model.called" ? ["model"] : ["tool", "compensate"];
         const started = startedAttempt.has(key);
         if (!started) {
           add("call-pairs-with-its-effect", seq, `${e.type} for "${key}" with no effect.started — replay cannot reproduce it`);
-        } else if (startedKind.get(key) !== want) {
+        } else if (!want.includes(startedKind.get(key) ?? "")) {
           add(
             "call-pairs-with-its-effect",
             seq,
-            `${e.type} for "${key}", whose effect declared kind "${String(startedKind.get(key))}" rather than "${want}"`,
+            `${e.type} for "${key}", whose effect declared kind "${String(startedKind.get(key))}" rather than ${want.join(" or ")}`,
+          );
+        }
+        break;
+      }
+      // A ROLLBACK CLAIM ABOUT A CALL THE JOURNAL DOES NOT CARRY IS A LIE, and it is the exact
+      // shape this feature has to be protected from: `compensation.recorded` is where a run says
+      // "this effect is undone", and the whole reason it is keyed by SEQ rather than by effect
+      // key is that a seq is unique per append. A record naming a seq that is not a `tool.called`
+      // — or one that has not happened yet — means the identity has drifted from the thing it
+      // identifies, and `run/compensation.ts`'s `settled` fold would then skip the wrong call:
+      // a rollback that looks done.
+      case "compensation.recorded": {
+        const at = p["compensatesSeq"];
+        if (typeof at !== "number") break;
+        saw.add("compensation.names-a-recorded-call");
+        if (!toolCalledSeqs.has(at)) {
+          add(
+            "compensation.names-a-recorded-call",
+            seq,
+            `compensates seq ${String(at)}, which is not an earlier tool.called in this run`,
           );
         }
         break;

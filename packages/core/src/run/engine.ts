@@ -112,6 +112,7 @@ import {
   type TimeoutAction,
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
+import { BLOCK_REASON, attemptable, planCompensation, type CompensationStep } from "./compensation.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type BudgetLimits, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 import { HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type GateView, type HookPoint, type NodeDecision, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
@@ -975,6 +976,145 @@ export class Engine {
       if (hit !== undefined) return hit;
     }
     return undefined;
+  }
+
+  /**
+   * RUN THE ROLLBACK. This is the half of compensation that was never built.
+   *
+   * `graph/validate.ts` has proved since GRAPH012 that a declared rollback exists, and the only
+   * place compensation reached the runtime was `rewind`'s REFUSAL to cross an uncompensated
+   * effect. So the shipped feature was "we refuse because you have no compensation", never "we
+   * ran your compensation". `run/compensation.ts` decides what to undo and in what order; this
+   * decides nothing and performs, which is the split that lets the plan be inspected without
+   * letting anything act.
+   *
+   * THROUGH `#invokeTool`, WHICH IS THE WHOLE POINT. A compensation runs a tool, so it is
+   * validated, filtered by `preTool`, judged by `PolicyEngine.decide` and held for the
+   * intervention window exactly like any other call — and `nodeApproved` is FALSE, always. A
+   * rollback is not a human's yes to anything: the human, if there was one, approved the action
+   * being undone. So an undo that policy answers `gate` is REFUSED and journaled `failed`,
+   * which is the answer that keeps this from being the back door that performs an irreversible
+   * action a gate would have stopped. `GRAPH012_COMPENSATION_VISIBLE` warns about exactly that
+   * tool at compile time; this is where the warning is enforced rather than repeated.
+   *
+   * THE UNDO'S ARGUMENTS ARE THE COMPENSATED CALL'S RECORDED `details`, and nothing else could
+   * work. `tool.called` carries `argsShape` and `argsDigest` — a shape and a digest, never the
+   * values, because "the arguments are not in the journal anywhere else and putting them here
+   * would make every journal a copy of the production data" — so the original arguments are
+   * genuinely unrecoverable. `details` is: it is on the recorded `ToolResult` in
+   * `effect.completed`, and it is documented as "for renderers and telemetry, never sent to the
+   * model", which makes it exactly the right channel for an undo record. `fs.write` already
+   * writes one on purpose — it captures the prior content into `details.previous` "so
+   * `fs.restore` has something to restore to" — and `fs.restore`'s parameters are `{path,
+   * previous}`. That handshake existed and had no caller. This is the caller.
+   *
+   * A CALL WHOSE RESULT IS NOT IN THE JOURNAL IS `not_attempted`, not a guess. That covers the
+   * honest gap `#unfinishedToolEffect` names: `effect.started` with no live `effect.completed`
+   * means the tool threw, or the process died mid-call, and the journal cannot say what the
+   * world did. Dispatching an undo on no record would be inventing the arguments.
+   *
+   * SEQUENTIAL, never `Promise.all`. The order is the feature — see `run/compensation.ts` — and
+   * a rollback fired concurrently has no order at all. It also appends its record per step
+   * rather than in one batch at the end, so a process that dies halfway leaves the steps it
+   * finished settled: the resumed rollback re-plans from the journal and skips them.
+   */
+  async #compensate(
+    ctx: RunContext,
+    p: RunProjection,
+    trigger: "run_failed" | "rewind",
+    sinceSeq = 0,
+  ): Promise<{ readonly compensated: number; readonly failed: number; readonly notAttempted: number }> {
+    const events: JournalEvent[] = [];
+    for await (const ev of ctx.log.read(1 as Seq)) events.push(ev);
+    const plan = planCompensation({ events, tools: this.tools, sinceSeq });
+    const tally = { compensated: 0, failed: 0, notAttempted: 0 };
+    if (plan.steps.length === 0) return tally;
+
+    // ONE suppression-aware pass for every result the rollback needs, not one per step. This is
+    // the same `last live wins` scan `#invokeTool` serves on, and it has to be: an undo built
+    // from a result a rewind threw away would restore the state the operator rejected.
+    const wanted = new Set(attemptable(plan).map((s) => s.compensates));
+    const recorded =
+      wanted.size === 0 ? new Map<string, unknown>() : await this.#completedEffects(ctx, (k) => wanted.has(k));
+
+    for (const step of plan.steps) {
+      const outcome = await this.#compensateOne(ctx, p, step, recorded);
+      if (outcome.outcome === "compensated") tally.compensated++;
+      else if (outcome.outcome === "failed") tally.failed++;
+      else tally.notAttempted++;
+      await this.#serialize(() =>
+        ctx.log.append([
+          {
+            type: "compensation.recorded",
+            payload: {
+              compensates: step.compensates,
+              compensatesSeq: step.seq,
+              tool: step.tool,
+              ...(step.undo === undefined ? {} : { undo: step.undo }),
+              outcome: outcome.outcome,
+              ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+              trigger,
+            },
+            actor: SYSTEM_ACTOR("compensator"),
+            ...(step.taskId === undefined ? {} : { taskId: step.taskId }),
+          },
+        ]),
+      );
+    }
+    return tally;
+  }
+
+  /**
+   * One step, decided and performed. Split out so the record-append above has ONE writer.
+   *
+   * Every arm that returns without dispatching returns a REASON. The three states this feature
+   * lives or dies on are only three if `not_attempted` says why it was not attempted — "no
+   * compensation is declared" and "the tool that would undo it is gone from the registry" are
+   * different problems for whoever reads the run, and collapsing them loses the one that is
+   * fixable.
+   */
+  async #compensateOne(
+    ctx: RunContext,
+    p: RunProjection,
+    step: CompensationStep,
+    recorded: ReadonlyMap<string, unknown>,
+  ): Promise<{ readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string }> {
+    if (step.undo === undefined) return { outcome: "not_attempted", reason: BLOCK_REASON[step.blocked ?? "no_compensation"](step) };
+
+    const task = step.taskId === undefined ? undefined : p.tasks[step.taskId];
+    if (task === undefined) {
+      return {
+        outcome: "not_attempted",
+        reason: `the task that called "${step.tool}" is not in the projection, so the undo has no task to run under`,
+      };
+    }
+    const undo = this.tools.get(step.undo);
+    if (undo === undefined) {
+      // Re-checked here and not merely in the planner: the registry is mutable and the plan was
+      // built before the first step ran. Fail closed rather than `require`, which throws.
+      return { outcome: "not_attempted", reason: `compensation tool "${step.undo}" is not registered` };
+    }
+
+    const result = recorded.get(step.compensates);
+    if (result === undefined) {
+      return {
+        outcome: "not_attempted",
+        reason: `no live \`effect.completed\` is recorded for ${step.compensates}, so the undo record ("details") does not exist`,
+      };
+    }
+    const details = (result as { readonly details?: unknown }).details;
+    const args = details !== null && typeof details === "object" ? (details as Record<string, unknown>) : {};
+
+    // `step.seq` AS THE ORDINAL, which is what makes the key derived rather than merely stable.
+    // The seq of the `tool.called` being undone is unique per append and recomputable from the
+    // journal alone, so a replay and a resumed rollback both land on the same key — and a
+    // rewind-then-redo produces a NEW seq, so its fresh write gets its own undo rather than
+    // being served the old one's.
+    const out = await this.#invokeTool(ctx, p, task, undo, args, step.seq, false, "compensate");
+    if (out.isError === true) {
+      return { outcome: "failed", reason: `"${step.undo}" did not undo "${step.tool}": ${out.content}` };
+    }
+    return { outcome: "compensated" };
   }
 
   /**
@@ -2076,7 +2216,11 @@ export class Engine {
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as
     // something held it. `#logFor` is the writer for exactly this case.
-    const ctx = { log: this.#runs.get(runId)?.log ?? this.#logFor(runId) };
+    // The live context, when this engine still holds one. Kept separately from `ctx` because a
+    // rewind can DISPATCH now — see the compensation block below — and dispatching needs the
+    // graph, the policy engine and the abort signal, none of which are in the journal.
+    const live = this.#runs.get(runId);
+    const ctx = { log: live?.log ?? this.#logFor(runId) };
 
     // A BOUNDARY BELOW THE RUN'S FIRST EVENT ERASES THE RUN, AND NOTHING BRINGS IT BACK.
     //
@@ -2288,6 +2432,72 @@ export class Engine {
           `${offending.irreversibility}, and declares no compensation`,
         { details: { runId, atSeq, seq: offending.seq, tool: offending.name, ranIn: offending.runId } },
       );
+    }
+
+    // WHAT THE ROLLBACK WOULD DO, COMPUTED BEFORE ANYTHING IS DONE — and after the refusal
+    // above, deliberately. A rewind that is going to be refused must undo NOTHING: unwinding
+    // half a run and then declining to rewind it leaves the operator worse off than either
+    // answer alone, and they never asked for the half.
+    const preRewind: JournalEvent[] = [];
+    for await (const e of ctx.log.read(1 as Seq)) preRewind.push(e);
+    const plan = planCompensation({ events: preRewind, tools: this.tools, sinceSeq: atSeq });
+    const plannedUndo = attemptable(plan);
+
+    // UNDO WHAT THE REWIND IS ABOUT TO HIDE.
+    //
+    // A rewind suppresses the RECORD of an effect; it has never touched the effect. That
+    // asymmetry is the whole reason the refusal above exists — but the refusal only covers
+    // `irreversible` and `externally_visible`, so a `reversible_write` was crossed silently and
+    // the file stayed written. `fs.write` declares `fs.restore` for exactly this and nothing had
+    // ever called it. Scoped to `atSeq` for the same reason the refusal is: only effects this
+    // rewind would actually suppress are its business.
+    //
+    // BEFORE THE MARKER, NOT AFTER, and the ordering is load-bearing twice over.
+    //
+    // MEASURED FIRST. Moving this call below the append undoes NOTHING AT ALL — not "less", not
+    // "in the wrong order": world `[1, 2]` afterwards, and every step recorded `not_attempted`.
+    // The marker is what creates the suppressed range `(atSeq, marker)`, and the undo arguments
+    // come from `#completedEffects`, which honours suppression. So the moment the marker exists,
+    // every `effect.completed` the rollback needs is hidden and there is no `details` to build an
+    // undo from. The rollback has to read the record before the record is taken away.
+    //
+    // AND THE CRASH CASES AGREE. Undo-then-mark that dies in between leaves a journal that is not
+    // rewound and a world partly unwound — the operator's second rewind re-plans, sees the
+    // `compensation.recorded` rows, skips them and finishes. Mark-then-undo that dies in between
+    // leaves a journal claiming the rewind happened over a world that still holds every effect,
+    // and nothing is coming back for it. One is recoverable; the other is a lie.
+    //
+    // The records therefore land INSIDE what becomes the suppressed range, which is why
+    // `planCompensation` reads `compensation.recorded` WITHOUT suppression — a record of an undo
+    // is not a thing to be undone, and suppressing it would make the next pass do it all again.
+    //
+    // A DETACHED RUN CANNOT DISPATCH, SO IT IS REFUSED RATHER THAN CROSSED. `rewind` deliberately
+    // works with no `RunContext` — "the runs most worth rewinding are the FINISHED ones" — but a
+    // tool call needs the graph, which is not in the journal, only its hash. Rewinding anyway
+    // would be the loosening: suppressing effects nothing is going to undo. `attach` is the fix
+    // and the message says so.
+    if (plannedUndo.length > 0 && live === undefined) {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: ${String(plannedUndo.length)} recorded effect(s) after it declare a ` +
+          `compensation (${[...new Set(plannedUndo.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}), and ` +
+          `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
+          `rewinding without them would hide the record and leave the effects standing`,
+        { details: { runId, atSeq, pending: plannedUndo.length } },
+      );
+    }
+    // EVERY STEP, NOT ONLY THE DISPATCHABLE ONES. The condition is `plan.steps`, not
+    // `plannedUndo`: a step nothing can undo still has to be JOURNALED as `not_attempted`, or the
+    // three states collapse back to two on this path while holding on the other. A rewind that
+    // crosses a `reversible_write` whose tool declares no compensation is exactly the case an
+    // operator has to be told about, and it is the case with no `attemptable` step in it.
+    //
+    // THE ONE REMAINING SILENCE, named rather than implied: a DETACHED run whose steps are all
+    // blocked journals nothing, because `#compensate` dispatches through `#invokeTool` and takes
+    // a `RunContext` it has no way to build. The refusal above does not cover it either — there
+    // is nothing to dispatch, so there is nothing to be unable to dispatch.
+    if (plan.steps.length > 0 && live !== undefined) {
+      await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
     }
 
     await this.#serialize(() =>
@@ -4795,8 +5005,21 @@ export class Engine {
      *  asked, said yes. Only a `tool` node can claim it; an agent's tool choice was never
      *  seen by that chain. */
     nodeApproved = false,
+    /**
+     * Which effect NAMESPACE this dispatch keys into. `tool` is a call the graph asked for;
+     * `compensate` is one undoing a call the graph already made.
+     *
+     * TWO NAMESPACES BECAUSE THE ORDINALS MEAN DIFFERENT THINGS. A tool ordinal is positional —
+     * where the call sat in the body's sequence — and a compensation's is the SEQ of the
+     * `tool.called` it undoes. Sharing one namespace would let a body's second call and the undo
+     * of the call at seq 1 collide on `taskId:tool:1`, and serve-by-key would hand one of them
+     * the other's result. `kind` travels into `effect.started` as well as into the key, because
+     * `journal/audit.ts`'s `effect.kind-matches-its-key` checks exactly that the two agree — they
+     * were separate lists once and two of four sites had already drifted.
+     */
+    effectKind: "tool" | "compensate" = "tool",
   ): Promise<ToolResult> {
-    const key = effectKey(task.taskId, "tool", ordinal);
+    const key = effectKey(task.taskId, effectKind, ordinal);
 
     // 0 — THE CALL THAT ALREADY HAPPENED. This is the payoff of serve-by-key and the reason
     // `#retryDecision` can now narrow: a Task that ran this tool, completed it, and then failed
@@ -4970,7 +5193,7 @@ export class Engine {
 
     await this.#serialize(() =>
       ctx.log.append(
-        [{ type: "effect.started", payload: { key, kind: "tool", attempt: 1 }, actor: SYSTEM_ACTOR("tool-executor"), taskId: task.taskId }],
+        [{ type: "effect.started", payload: { key, kind: effectKind, attempt: 1 }, actor: SYSTEM_ACTOR("tool-executor"), taskId: task.taskId }],
         { taskId: task.taskId },
       ),
     );
@@ -6160,6 +6383,19 @@ export class Engine {
     );
     if (failed.length > 0) {
       const first = failed[0]!;
+      // THE RUN IS ABOUT TO FAIL, SO ROLL BACK WHAT IT DID — before `run.failed`, because
+      // `run.failed` is terminal and `isTerminal(p.status)` is what every entry point checks
+      // before doing anything. A rollback appended after it would be work on a run the rest of
+      // the engine has agreed is over.
+      //
+      // THIS ARM ONLY, and that is a named limit rather than an oversight. It is the arm that
+      // means "a node failed and the graph declared no handler for it", which is the failure a
+      // compensation edge is written for. The other two `run.failed` sites in this method — an
+      // unmaterialised fan-out, and `E_OUTPUT_MISSING` — are Loom disagreeing with itself, and
+      // the budget/fatal floor at the top of `advance` fails a run that may still have leased
+      // tasks in flight; rolling back underneath a live task would race the thing it is undoing.
+      // Those are not compensated today. `TODO.md` §B.1 carries the gap.
+      await this.#compensate(ctx, p, "run_failed");
       await this.#serialize(() =>
         ctx.log.append([
           ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),

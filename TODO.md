@@ -854,7 +854,7 @@ Each was verified against the code, not remembered.
 
 | item | verdict | what running it showed |
 |---|---|---|
-| `B.1` **Compensation edges** — a compile-time rollback proof and | open | Accurate in all three halves. The only edge kinds skipped in #edgesToTake are `error` and `compensation`; `loop`, `conditional` and the default arm all push edges, so the fall… |
+| `B.1` **Compensation edges** — a compile-time rollback proof and | **done, partly** | Was accurate in all three halves; two of them are now closed. Rollback RUNS on run failure and on rewind (`run/compensation.ts` + `Engine.#compensate`), in three journaled states. `#edgesToTake` still skips `compensation` — deliberately, see the body entry — and four narrower gaps are named there. |
 | `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | open | Claim holds. Two omissions: (a) it is now a compile WARNING, so an author is told; (b) a stale comment contradicts this — packages/core/test/run/skeleton.ts:81-82 says a join … |
 | `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (f2f24f8). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
 | `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
@@ -872,8 +872,29 @@ Each was verified against the code, not remembered.
 Mechanism that exists in the schema or the types and executes nowhere. Each is a place a reader
 believes a feature is present.
 
-- **Compensation edges** — a compile-time rollback proof and a rewind refusal exist; execution
-  falls through and does nothing.
+- **Compensation** — ~~a compile-time rollback proof and a rewind refusal exist; execution falls
+  through and does nothing.~~ **Rollback now RUNS** (2026-08-28): `run/compensation.ts` plans it
+  and `Engine.#compensate` performs it, in reverse-seq order, through `#invokeTool` with
+  `nodeApproved: false`, journaled as `compensation.recorded` in three states —
+  `compensated` / `failed` / `not_attempted` with a reason. Two triggers are wired: a run failing
+  on a node with no handler, and a rewind (which now refuses a DETACHED run rather than hiding
+  records of effects it cannot undo — `attach(runId, graph)` first). Idempotence is the journal,
+  keyed by the seq of the call being undone.
+  **What is still not built**, named rather than implied:
+  - `#edgesToTake` still has `case "compensation": break;` and that is deliberate — rollback is
+    journal-driven, because an effect needs undoing whether or not an author drew an edge to it,
+    and an edge names a NODE while a rollback must name a CALL. A compensation edge remains a
+    compile-time declaration. Whether an author should ALSO get a graph-level cleanup node on
+    failure is an open design question, not a wiring gap.
+  - The other three `run.failed` sites — an unmaterialised fan-out and `E_OUTPUT_MISSING`, which
+    are Loom disagreeing with itself, and the budget/fatal floor at the top of `advance`, which
+    can fail a run with tasks still leased.
+  - Child runs. `#uncompensatedIrreversible` follows `subgraph.started` into them; the planner
+    reads one journal.
+  - `JoinNode.onBranchError: "compensate"` is still refused at compile
+    (`GRAPH008_COMPENSATE_UNIMPLEMENTED`); a branch failing is neither trigger.
+  - A DETACHED run whose steps are all blocked journals nothing, because appending the
+    `not_attempted` rows goes through a `RunContext` that cannot be rebuilt without the graph.
 - **`JoinNode.timeoutMs`** — a barrier waits forever however small a number is written.
 - ~~**`Budget.tokens` and `Budget.wallMs`** — declared, never read; only cost binds.~~ **Both
   bind** as of f2f24f8: run and node ceilings, `budget.exhausted` now says which dimension, and

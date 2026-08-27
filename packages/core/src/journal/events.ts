@@ -269,7 +269,7 @@ export interface EventPayloads {
    */
   "effect.started": {
     readonly key: string;
-    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "clock" | "random" | "mailbox";
+    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "clock" | "random" | "mailbox" | "compensate";
     readonly attempt: number;
   };
   "effect.completed": { readonly key: string; readonly result: unknown; readonly resultDigest: string };
@@ -347,6 +347,47 @@ export interface EventPayloads {
      * precedent — same family, same trade, already made.
      */
     readonly argsDigest: string;
+  };
+
+  /**
+   * ONE RECORDED EFFECT'S ROLLBACK — attempted and undone, attempted and failed, or never
+   * attempted at all.
+   *
+   * THREE STATES, IN ONE EVENT, AND THAT IS THE POINT. A rollback that can only say "done" or
+   * say nothing reports a clean rollback it did not achieve, which is precisely what "refusing
+   * is always allowed; loosening never is" forbids at the one moment it matters most. So
+   * `not_attempted` is a written fact with a reason on it, not an absence: "this write stands,
+   * and here is why nothing undid it" is what an operator reading a failed run needs, and it is
+   * the sentence a two-state design deletes.
+   *
+   * `compensatesSeq` IS THE IDENTITY, not `compensates`. The effect key is positional —
+   * `taskId:tool:<ordinal>` — and a rewind-then-redo appends a second `tool.called` under the
+   * SAME key, so a reader keying on it would treat the redo's fresh write as already rolled
+   * back. A seq is unique per append. `run/compensation.ts` folds these into `settled` and that
+   * fold is the whole of the idempotence: a compensation that ran, crashed before its next
+   * step, and is resumed after a restart is not run a second time, because the journal — not a
+   * flag in a process that is gone — is what remembers.
+   *
+   * NO ARGUMENTS AND NO RESULT. The undo is dispatched through `#invokeTool` like any other
+   * tool, so it writes its own `effect.started`/`tool.called`/`effect.completed` triple under
+   * key `taskId:compensate:<compensatesSeq>` and this event does not duplicate them. What is
+   * here is the JUDGEMENT that triple cannot carry: whether the effect it undoes is now
+   * believed gone.
+   */
+  "compensation.recorded": {
+    /** The effect key of the call being undone — for a reader, never for identity. */
+    readonly compensates: string;
+    /** The seq of the `tool.called` being undone. Unique per append; this is the identity. */
+    readonly compensatesSeq: number;
+    /** The tool that ran and is being undone. */
+    readonly tool: string;
+    /** The tool that undid it. Absent iff `outcome` is `not_attempted`. */
+    readonly undo?: string;
+    readonly outcome: "compensated" | "failed" | "not_attempted";
+    /** Why. Required for everything except a plain success, where there is nothing to say. */
+    readonly reason?: string;
+    /** What triggered the rollback — a failed run, or an operator's rewind. */
+    readonly trigger: "run_failed" | "rewind";
   };
 
   // ── oversight ────────────────────────────────────────────────────────────
@@ -874,6 +915,7 @@ export const EVENT_TYPES = [
   "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending", "fanout.planned",
   "state.reduced", "channel.written",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
+  "compensation.recorded",
   "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.callback_rejected",
   "gate.decided", "gate.batch_decided", "gate.deduped", "gate.timeout", "gate.escalated", "gate.reminded",
   "gate.claimed", "gate.cancelled",
