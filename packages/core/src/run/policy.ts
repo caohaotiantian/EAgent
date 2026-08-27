@@ -21,6 +21,7 @@
 import { CODES, err, type LoomError } from "../errors.ts";
 import type { NodeId, RunId, TaskId } from "../ids.ts";
 import {
+  type UsageRecord,
   CLASSIFICATION_POSTURE_FLOOR,
   CLASS_DEFAULT_POSTURE,
   isLoosening,
@@ -75,13 +76,36 @@ export interface Reservation {
   readonly id: string;
   readonly scope: string;
   readonly amountUsd: number;
+  /**
+   * OPTIONAL, because a hand-built `Reservation` is a shape callers already construct
+   * (`test/run/budget.test.ts` settles one that was never reserved, to prove that is a
+   * no-op). Absent reads as zero, so an old caller reserves no tokens and settles the
+   * real ones — the direction that tightens.
+   */
+  readonly amountTokens?: number;
 }
 
 export interface BudgetLimits {
   /** Per run. `undefined` means unbounded, which the compiler warns about. */
   readonly runUsd?: number;
   readonly tenantUsd?: number;
+  /**
+   * `inputTokens + outputTokens` per run, folded from the journal exactly as dollars are.
+   * `cacheReadTokens`, `cacheWriteTokens` and `reasoningTokens` are deliberately NOT in the
+   * sum: `UsageRecord` documents the first two as disjoint from `inputTokens` and the third
+   * as a SUBSET of `outputTokens`, so adding them would either double-count or invent
+   * tokens, and a ceiling that counts a token twice refuses work that fit.
+   */
+  readonly runTokens?: number;
+  /**
+   * PROVIDER TIME PER RUN, not elapsed time. See `settle` for what that costs and why the
+   * other reading was refused.
+   */
+  readonly runWallMs?: number;
 }
+
+/** The units a ceiling can be expressed in — `graph/spec.ts`'s `POLICY_FIELDS.budget`. */
+type BudgetDimension = "costUsd" | "tokens" | "wallMs";
 
 export interface PolicyEngineOptions {
   /** Capability patterns the tenant holds. Trailing `*` is a prefix wildcard. */
@@ -372,6 +396,26 @@ export class PolicyEngine {
   readonly #reservations = new Map<string, Reservation>();
   #spentUsd = 0;
   #reservedUsd = 0;
+  /**
+   * THE OTHER TWO THIRDS OF THE DECLARED TRIPLE. `graph/spec.ts` has listed
+   * `["costUsd", "tokens", "wallMs"]` in `POLICY_FIELDS.budget` for the whole project and
+   * only the first was ever read: `/usr/bin/grep -arn 'budget\.tokens|budget\.wallMs'`
+   * over `src/run/` returned nothing, so an author writing `budget: {tokens: 200000}` got
+   * a clean compile and no ceiling — the same silence `Engine.submit`'s own comment
+   * already condemns for dollars ("compile clean, and spend without limit").
+   *
+   * `#reservedWallMs` DOES NOT EXIST, and that is the one place this departs from the
+   * dollar pattern. A reservation is a worst-case debit taken BEFORE the call, and there
+   * is no worst case for duration: nothing can say how long a provider will take until it
+   * has taken it. Reserving a made-up number would refuse work that fits; reserving zero
+   * is check-then-act, which this file's own header calls wrong under fan-out. So wallMs
+   * is settle-only, and the overshoot is bounded by the calls already in flight when the
+   * ceiling is crossed — one wave, not one run. Stated rather than hidden: a wallMs
+   * ceiling stops the NEXT call, it does not abort the current ones.
+   */
+  #spentTokens = 0;
+  #reservedTokens = 0;
+  #spentWallMs = 0;
   #reservationSeq = 0;
 
   constructor(opts: PolicyEngineOptions) {
@@ -561,12 +605,25 @@ export class PolicyEngine {
     readonly escalations: Readonly<Record<string, Posture>>;
     readonly ceilings: Readonly<Record<string, Posture>>;
     readonly spentUsd: number;
+    /**
+     * BOTH OPTIONAL, and absent means zero rather than "unknown". A caller that restores
+     * dollars and not tokens hands the run its full token budget back, which is exactly the
+     * refund this method exists to close — so the ceiling is only as sound as its caller.
+     * There is one caller, `Engine.#advanceSerially`, and it passes all three from the same
+     * `RunProjection.usage` it reads `spentUsd` from.
+     */
+    readonly spentTokens?: number;
+    readonly spentWallMs?: number;
   }): void {
     for (const [scope, to] of Object.entries(state.escalations)) {
       this.#escalations.set(scope, maxPosture(this.#escalations.get(scope) ?? "out", to));
     }
     for (const [scope, to] of Object.entries(state.ceilings)) this.#ceilings.set(scope, to);
     this.#spentUsd = round6(Math.max(this.#spentUsd, state.spentUsd));
+    // `max`, like the dollars above and for the same reason: arriving here twice must not
+    // lower a running total, and a restore that ADDED would double-count on the second call.
+    this.#spentTokens = Math.max(this.#spentTokens, state.spentTokens ?? 0);
+    this.#spentWallMs = Math.max(this.#spentWallMs, state.spentWallMs ?? 0);
   }
 
   /** Restore the computed floor by removing a human ceiling. Always allowed: it tightens. */
@@ -589,7 +646,11 @@ export class PolicyEngine {
    * returns the unused remainder, so 25 concurrent branches cannot each see the same
    * balance and collectively overspend.
    */
-  reserve(scope: string, estimateUsd: number): Reservation {
+  reserve(scope: string, estimateUsd: number, estimateTokens = 0): Reservation {
+    // ALL THREE CEILINGS ARE CHECKED BEFORE ANY OF THEM IS DEBITED. A throw between two
+    // debits would leave a reservation nothing will ever settle, and `#reservedUsd` only
+    // falls in `settle` — so the run would carry a permanent phantom charge and refuse work
+    // it could afford. Every `throw` below therefore precedes every mutation.
     const limit = this.#budget.runUsd;
     const committed = this.#spentUsd + this.#reservedUsd;
     if (limit !== undefined && committed + estimateUsd > limit + 1e-9) {
@@ -597,21 +658,80 @@ export class PolicyEngine {
         CODES.E_BUDGET_EXHAUSTED,
         `reserving $${estimateUsd.toFixed(4)} would exceed the $${limit.toFixed(2)} budget ` +
           `($${this.#spentUsd.toFixed(4)} spent, $${this.#reservedUsd.toFixed(4)} reserved)`,
-        { details: { scope, limit, spent: this.#spentUsd, reserved: this.#reservedUsd, requested: estimateUsd } },
+        {
+          details: { dimension: "costUsd", scope, limit, spent: this.#spentUsd, reserved: this.#reservedUsd, requested: estimateUsd },
+        },
       );
     }
-    const r: Reservation = { id: `res-${this.#reservationSeq++}`, scope, amountUsd: estimateUsd };
+    const tokenLimit = this.#budget.runTokens;
+    const tokensCommitted = this.#spentTokens + this.#reservedTokens;
+    if (tokenLimit !== undefined && tokensCommitted + estimateTokens > tokenLimit) {
+      throw err.exhausted(
+        CODES.E_BUDGET_EXHAUSTED,
+        `reserving ${String(estimateTokens)} tokens would exceed the ${String(tokenLimit)}-token budget ` +
+          `(${String(this.#spentTokens)} spent, ${String(this.#reservedTokens)} reserved)`,
+        {
+          details: {
+            dimension: "tokens",
+            scope,
+            limit: tokenLimit,
+            spent: this.#spentTokens,
+            reserved: this.#reservedTokens,
+            requested: estimateTokens,
+          },
+        },
+      );
+    }
+    const msLimit = this.#budget.runWallMs;
+    // SETTLED-ONLY, for the reason `#spentWallMs` gives: there is nothing to reserve. The
+    // comparison is `>=`, not `>`, so a ceiling reached exactly stops the next call — with
+    // no reservation making the check conservative, an off-by-one in the loosening
+    // direction is the one this cannot afford.
+    if (msLimit !== undefined && this.#spentWallMs >= msLimit) {
+      throw err.exhausted(
+        CODES.E_BUDGET_EXHAUSTED,
+        `${String(this.#spentWallMs)} ms of provider time has reached the ${String(msLimit)} ms budget`,
+        { details: { dimension: "wallMs", scope, limit: msLimit, spent: this.#spentWallMs, reserved: 0, requested: 0 } },
+      );
+    }
+    const r: Reservation = { id: `res-${this.#reservationSeq++}`, scope, amountUsd: estimateUsd, amountTokens: estimateTokens };
     this.#reservations.set(r.id, r);
     this.#reservedUsd = round6(this.#reservedUsd + estimateUsd);
+    this.#reservedTokens += estimateTokens;
     return r;
   }
 
-  settle(reservation: Reservation, actualUsd: number): void {
+  /**
+   * Release the reservation and charge what the call really cost.
+   *
+   * A bare number still means DOLLARS ONLY — the shape every caller used before tokens and
+   * wall time were counted, kept so that `settle(r, 0)` on a failed call still reads as
+   * "this cost nothing". A `UsageRecord` charges all three.
+   *
+   * WHAT `wallMs` MEANS HERE, and it is a choice with a price. It is the PROVIDER's own
+   * reported duration, summed — the same number `run/projection.ts`'s `chargeUsage` folds
+   * and copies into `run.completed.usage`. It is NOT the run's elapsed time, deliberately:
+   * a run suspended overnight on a human gate would accrue a night of "wall time" it did
+   * not work, and a `wallMs` ceiling would then kill runs whose only fault was waiting for
+   * a person — the exact behaviour oversight exists to permit. The price is the other
+   * direction: a run that spends an hour in a tool loop accrues ZERO here, because
+   * `tool.called` carries `ms` and is deliberately not an arm of `chargeUsage`. So this
+   * ceiling bounds what the PROVIDER burned, and a deployment that needs to bound the wall
+   * clock needs a different mechanism than a `UsageRecord`.
+   */
+  settle(reservation: Reservation, actual: number | UsageRecord): void {
     const held = this.#reservations.get(reservation.id);
     if (held === undefined) return; // already settled; settling twice is a no-op
     this.#reservations.delete(reservation.id);
     this.#reservedUsd = Math.max(0, round6(this.#reservedUsd - held.amountUsd));
-    this.#spentUsd = round6(this.#spentUsd + actualUsd);
+    this.#reservedTokens = Math.max(0, this.#reservedTokens - (held.amountTokens ?? 0));
+    if (typeof actual === "number") {
+      this.#spentUsd = round6(this.#spentUsd + actual);
+      return;
+    }
+    this.#spentUsd = round6(this.#spentUsd + actual.costUsd);
+    this.#spentTokens += billedTokens(actual);
+    this.#spentWallMs += actual.wallMs;
   }
 
   get spentUsd(): number {
@@ -620,18 +740,52 @@ export class PolicyEngine {
   get reservedUsd(): number {
     return this.#reservedUsd;
   }
+  get spentTokens(): number {
+    return this.#spentTokens;
+  }
+  get spentWallMs(): number {
+    return this.#spentWallMs;
+  }
   /** What a new reservation could still take. Never negative. */
   get remainingUsd(): number {
     const limit = this.#budget.runUsd;
     if (limit === undefined) return Number.POSITIVE_INFINITY;
     return Math.max(0, round6(limit - this.#spentUsd - this.#reservedUsd));
   }
-  /** True once 80 % of the budget is committed — escalation rule E2. */
+  /**
+   * True once 80 % of ANY declared ceiling is committed — escalation rule E2.
+   *
+   * Widened from dollars alone when tokens and wall time became ceilings, and widening it
+   * only tightens: E2 RAISES a posture, so a run near its token ceiling now escalates where
+   * it previously did not. An `||` fold rather than a max, because a run about to be
+   * refused for tokens is near its limit whatever its dollars say.
+   */
   get nearLimit(): boolean {
-    const limit = this.#budget.runUsd;
-    if (limit === undefined) return false;
-    return this.#spentUsd + this.#reservedUsd >= limit * 0.8;
+    const near = (spent: number, limit: number | undefined): boolean => limit !== undefined && spent >= limit * 0.8;
+    return (
+      near(this.#spentUsd + this.#reservedUsd, this.#budget.runUsd) ||
+      near(this.#spentTokens + this.#reservedTokens, this.#budget.runTokens) ||
+      near(this.#spentWallMs, this.#budget.runWallMs)
+    );
   }
+}
+
+/**
+ * The BILLED token count of a `UsageRecord`: `inputTokens + outputTokens`, and nothing else.
+ *
+ * `UsageRecord` documents `cacheReadTokens` and `cacheWriteTokens` as DISJOINT from
+ * `inputTokens`, and `reasoningTokens` as a SUBSET of `outputTokens` — so a sum over every
+ * token-shaped field would double-count the third and add two the provider reports
+ * separately. A ceiling that over-counts refuses work that fit, which is the one direction a
+ * limit must not move on its own.
+ *
+ * NOT EXPORTED, and `run/engine.ts` spells the same sum out at its one node-ceiling site
+ * rather than importing it: `src/index.ts` re-exports this module with `export *`, so every
+ * exported name here lands on the pinned public surface, and a two-term sum is not worth a
+ * permanent API promise.
+ */
+function billedTokens(u: UsageRecord): number {
+  return u.inputTokens + u.outputTokens;
 }
 
 function matches(patterns: readonly string[], capability: string): boolean {

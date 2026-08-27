@@ -652,7 +652,30 @@ export interface EventPayloads {
   // ── budget ───────────────────────────────────────────────────────────────
   "budget.reserved": { readonly scope: string; readonly amountUsd: number; readonly remainingUsd: number; readonly warn: boolean };
   "budget.settled": { readonly scope: string; readonly reservedUsd: number; readonly actualUsd: number };
-  "budget.exhausted": { readonly scope: string; readonly limitUsd: number; readonly action: string };
+  /**
+   * A ceiling refused work.
+   *
+   * `dimension` and `limit` exist because this row could only ever say WHICH NUMBER in
+   * dollars, while `graph/spec.ts`'s `POLICY_FIELDS.budget` has declared three ceilings —
+   * `costUsd`, `tokens`, `wallMs` — for the whole project. Once the other two bind, a row
+   * carrying `limitUsd` alone cannot tell an auditor whether a run died for money, for
+   * tokens or for provider time, and "the budget stopped it" is not an answer anyone can
+   * act on.
+   *
+   * BOTH OPTIONAL, and absent reads as `costUsd`: that is what every row already in a
+   * journal means, and rewriting the past to say so is not something an append-only log
+   * can do. `limitUsd` stays REQUIRED for the same reason — it is what the existing readers
+   * (`test/run/budget-declared.test.ts`) fold — and on a non-dollar refusal it carries the
+   * exposure rather than a ceiling, exactly as `exceededLimitUsd`'s fallback already does
+   * when an error arrives without a limit.
+   */
+  "budget.exhausted": {
+    readonly scope: string;
+    readonly limitUsd: number;
+    readonly action: string;
+    readonly dimension?: "costUsd" | "tokens" | "wallMs";
+    readonly limit?: number;
+  };
 
   // ── graph + checkpoints ──────────────────────────────────────────────────
   /**
