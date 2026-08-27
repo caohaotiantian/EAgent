@@ -372,7 +372,7 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
       assert.match(SRC("graph/spec.ts"), /readonly effects\?: readonly string\[\]/, "FunctionNode must declare effects");
       assert.match(SRC("graph/spec.ts"), /node\.function\?\.effects/, "and reachableToolNames must see them");
       assert.match(SRC("run/engine.ts"), /#effectsFor\(/, "the engine must bind them");
-      assert.match(SRC("run/engine.ts"), /this\.#invokeTool\(ctx, w\.task, tool, args, ordinal\+\+, true\)/, "…through the one dispatch path, claiming the node's own approval");
+      assert.match(SRC("run/engine.ts"), /this\.#invokeTool\(ctx, p, w\.task, tool, args, ordinal\+\+, true\)/, "…through the one dispatch path, claiming the node's own approval");
     },
   },
   {

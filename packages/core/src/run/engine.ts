@@ -3009,6 +3009,147 @@ export class Engine {
   }
 
   /**
+   * The recorded result of an effect that already ran and was NOT undone, or `undefined`.
+   *
+   * THIS IS THE RULE, AND IT USED TO BE ONE EXCEPTION. Effect keys are derived — `taskId:kind:
+   * ordinal` — and replay served every one of the five kinds from the record. The LIVE path
+   * served exactly `random`, so a Task that failed after its tool had already succeeded
+   * re-entered that tool on the retry. `#retryDecision` had to refuse the retry outright to
+   * keep a non-idempotent tool from ringing the bell twice; with this, the refusal narrows to
+   * the case it cannot cover.
+   *
+   * THE GATE IS THE FOLD, NOT THE RAW JOURNAL, and that is what makes it correct in both
+   * directions. `startedEffects` comes from `everStarted`, folded over LIVE events — so a
+   * rewind that suppressed this effect leaves the key absent and the caller performs it afresh,
+   * while a re-run whose effect was never undone reuses the recorded one. Reading the raw
+   * journal to decide would serve a value a rewind had undone.
+   *
+   * `undefined` FOR STARTED-BUT-NEVER-COMPLETED. A process can die between the two appends;
+   * the honest answer is that we do not know what the world did, and every caller falls through
+   * and performs the effect again rather than failing the Task. That is the one hole
+   * serve-by-key does not close, and `#unfinishedToolEffect` is where it is paid for.
+   *
+   * LIVE ONLY. Under `#replay` each call site serves from `ReplayEffects` and journals into the
+   * shadow run, which is what keeps the two journals structurally comparable — see the note in
+   * `#randomSeedEffect` about span counts.
+   *
+   * COSTS NOTHING ON A FIRST EXECUTION: the key cannot be in `startedEffects` before the effect
+   * has started, so the journal scan happens only on a re-execution.
+   *
+   * Returns a WRAPPER rather than the value, so a recorded `null` is not confused with "no
+   * record". Callers narrow `result` to what their own kind writes; nothing widens to fit.
+   */
+  /**
+   * A served TOOL effect, bound to what was called and not only to where it sat.
+   *
+   * THE HOLE THIS CLOSES, found by a verifier and reproduced: a tool effect key is POSITIONAL —
+   * `taskId:tool:<ordinal>` — so it says where a call sat in the body's sequence and nothing
+   * about what it was. A `function` node declaring `effects: ["pay.charge", "audit.log"]` whose
+   * body calls `pay.charge` first on attempt 1 and `audit.log` first on attempt 2 collides at
+   * ordinal 0, and a key-only serve hands the second call the FIRST one's result. The same
+   * collision is what let the narrowed non-idempotent refusal pass a charge that then ran twice
+   * under a different ordinal.
+   *
+   * IDENTITY IS (name, version, argsDigest) AND IT COMES OFF `tool.called`, which is keyed
+   * identically and already carried the first two. `argsDigest` is a digest of the arguments the
+   * CALLER asked for — `rawArgs`, not the post-guard `final.value` — because that is the only
+   * one that exists at this point in the call, and comparing anything else would be comparing
+   * two different things. Values are never stored, for the reason `argsShape` gives.
+   *
+   * A MISMATCH IS NOT AN ERROR HERE. It means the body made a different call at this position,
+   * which is a body that does not reproduce — real, and not this function's to judge. It simply
+   * declines to serve, and the call is performed.
+   */
+  async #servedToolEffect(
+    ctx: RunContext,
+    p: RunProjection,
+    key: string,
+    identity: { readonly name: string; readonly version: string; readonly argsDigest: string },
+  ): Promise<{ readonly result: unknown } | undefined> {
+    const served = await this.#servedEffect(ctx, p, key);
+    if (served === undefined) return undefined;
+    let called: { name: string; version: string; argsDigest: string } | undefined;
+    for await (const e of ctx.log.read(1 as Seq)) {
+      if (isEvent(e, "tool.called") && e.payload.key === key) {
+        called = { name: e.payload.name, version: e.payload.version, argsDigest: e.payload.argsDigest };
+      }
+    }
+    if (called === undefined) return undefined;
+    const same =
+      called.name === identity.name && called.version === identity.version && called.argsDigest === identity.argsDigest;
+    if (same) return served;
+
+    // A MISMATCH IS DETECTED DIVERGENCE, and for a non-idempotent tool it FAILS CLOSED.
+    //
+    // The key is positional, so this position carrying a different call means the body did not
+    // reproduce its sequence — and the danger is not the served value, it is the ordinal that
+    // moved. If `pay.charge` was ordinal 0 on attempt 1 and ordinal 1 on attempt 2, nothing is
+    // recorded at its new position, so performing it charges a second time. Declining to serve
+    // is necessary and not sufficient.
+    //
+    // Refusing is always allowed; loosening never is. A body that reproduces never reaches this
+    // line; one that does not has forfeited the only thing that made re-execution safe, and the
+    // honest answer is to stop rather than to guess which of the two calls was the real one.
+    // Idempotent tools are exempt because a second call is harmless by their own declaration —
+    // which is what that flag on the manifest MEANS, and the one place it is load-bearing.
+    // THE TOOL AT RISK IS THE RECORDED ONE, not the requested one. A first version asked whether
+    // the call being made NOW is non-idempotent, and measured wrong: the body swapped an
+    // idempotent `a.second` into ordinal 0, which is harmless to serve or perform — while the
+    // non-idempotent `a.first` it displaced moved to ordinal 1, where nothing is recorded, and
+    // was performed a SECOND time. Journal: ["a.first","a.second","a.first"]. What the mismatch
+    // proves is that this position's recorded call has moved, so the question is whether THAT
+    // call can survive being made again.
+    if (identityMismatchIsFatal(this.tools.get(called.name))) {
+      throw err.validation(
+        CODES.E_EFFECT_UNRECORDED,
+        `node re-execution diverged: effect ${key} recorded ${called.name}@${called.version} and this attempt asked for ` +
+          `${identity.name}@${identity.version}. The recorded call is non-idempotent and its position moved, so it cannot ` +
+          `be shown not to act twice; ` +
+          `so the task fails rather than acting twice. Make the body's call sequence reproducible.`,
+        { details: { key, recorded: called.name, requested: identity.name } },
+      );
+    }
+    return undefined;
+  }
+
+  async #servedEffect(ctx: RunContext, p: RunProjection, key: string): Promise<{ readonly result: unknown } | undefined> {
+    if (this.#replay !== undefined) return undefined;
+    if (!p.startedEffects.includes(key)) return undefined;
+    const done = await this.#completedEffects(ctx, (k) => k === key);
+    return done.has(key) ? { result: done.get(key) } : undefined;
+  }
+
+  /**
+   * The LAST LIVE `effect.completed` result per accepted key.
+   *
+   * LAST, and live, because a key can legitimately carry two completions: a rewind suppresses
+   * the first, the redo appends a second. A first-match scan — which is what the seed's inline
+   * version did — hands back the value the rewind undid. The suppression rule is
+   * `projection.ts`'s `suppressedRanges` verbatim: `(atSeq, markerSeq)`, both ends exclusive.
+   * It is recomputed here rather than imported so this stays a single pass over the journal
+   * with no second buffer of every event.
+   */
+  async #completedEffects(ctx: RunContext, accept: (key: string) => boolean): Promise<Map<string, unknown>> {
+    const hits: { seq: number; key: string; result: unknown }[] = [];
+    const undone: [number, number][] = [];
+    for await (const e of ctx.log.read(1 as Seq)) {
+      if (isEvent(e, "checkpoint.restored")) {
+        if (e.payload.mode !== "rewind") continue;
+        const at = (e.payload as { atSeq?: number }).atSeq;
+        if (typeof at === "number") undone.push([at, e.seq]);
+        continue;
+      }
+      if (isEvent(e, "effect.completed") && accept(e.payload.key)) hits.push({ seq: e.seq, key: e.payload.key, result: e.payload.result });
+    }
+    const out = new Map<string, unknown>();
+    for (const h of hits) {
+      if (undone.some(([from, to]) => h.seq > from && h.seq < to)) continue;
+      out.set(h.key, h.result);
+    }
+    return out;
+  }
+
+  /**
    * The seed a body's `Math.random` is built from — drawn once per task, journaled, replayed.
    *
    * `Math` reaches a `function` realm whole while `Date` is bound to `undefined`, and that
@@ -3028,26 +3169,14 @@ export class Engine {
   async #randomSeedEffect(ctx: RunContext, p: RunProjection, w: Wave): Promise<number> {
     const key = effectKey(w.task.taskId, "random", 0);
 
-    // ALREADY DRAWN AND NOT UNDONE — serve it, and append nothing. This is what a stable effect
-    // key is FOR: `ids.ts` says the key excludes the attempt "so a tool that supports
-    // server-side idempotency dedupes for free", and a random draw is the least idempotent
-    // operation there is unless something dedupes it here.
-    //
-    // The condition is the fold and not the raw journal, which is what makes it correct in both
-    // directions. `startedEffects` comes from `everStarted`, folded over LIVE events — so a
-    // rewind that suppressed this effect leaves the key absent and the body gets a fresh stream,
-    // while a re-run whose effect was never undone reuses the recorded one. Without it, the
-    // second case appended a second `effect.completed` under one key in one attempt and
-    // `auditRun` reported the run unhealthy, correctly: the auditor already discounts a rewind
-    // through `suppressedRanges`, and what it saw was a re-do of something still standing.
-    if (this.#replay === undefined && p.startedEffects.includes(key)) {
-      for await (const e of ctx.log.read(1 as Seq)) {
-        if (isEvent(e, "effect.completed") && e.payload.key === key) return Number(e.payload.result);
-      }
-      // Started and never completed — a process died between the two appends. Fall through and
-      // draw again rather than fail the task: the half-written effect is exactly the state a
-      // fresh draw is for, and `effect.completion-has-a-start` stays satisfied either way.
-    }
+    // ALREADY DRAWN AND NOT UNDONE — serve it, and append nothing. `#servedEffect` is the
+    // general form of what used to be written out here, and the seed is now one of its five
+    // callers rather than the only place a live re-execution declined to repeat itself. A
+    // `undefined` answer covers both "never started" and "started and never completed", and
+    // the fall-through below is right for both: a half-written effect is exactly the state a
+    // fresh draw is for, and `effect.completion-has-a-start` stays satisfied either way.
+    const served = await this.#servedEffect(ctx, p, key);
+    if (served !== undefined) return Number(served.result);
 
     // JOURNALED ON REPLAY TOO, which is the MODEL path's shape and not `#summarizeEffect`'s.
     // Those two differ and the difference is visible: a replay branch that returns before the
@@ -3115,7 +3244,7 @@ export class Engine {
    * has — measured there as one `gate.raised` and one `gate.decided` against two executions. The
    * declared set bounds WHICH tools, never how many times.
    */
-  #effectsFor(ctx: RunContext, w: Wave): Readonly<Record<string, (args: unknown) => Promise<ToolResult>>> | undefined {
+  #effectsFor(ctx: RunContext, p: RunProjection, w: Wave): Readonly<Record<string, (args: unknown) => Promise<ToolResult>>> | undefined {
     const declared = w.node.function?.effects ?? [];
     if (declared.length === 0) return undefined;
 
@@ -3131,7 +3260,7 @@ export class Engine {
           const why = `tool "${name}" is declared by node "${w.node.id}" but not registered in this process`;
           return { content: why, isError: true, error: err.validation(CODES.E_TOOL_NOT_FOUND, why) };
         }
-        return this.#invokeTool(ctx, w.task, tool, args, ordinal++, true);
+        return this.#invokeTool(ctx, p, w.task, tool, args, ordinal++, true);
       };
     }
     return bound;
@@ -3209,7 +3338,7 @@ export class Engine {
       now: this.#bodyClock(p, w.task.taskId),
       seed: await this.#randomSeedEffect(ctx, p, w),
       ...(() => {
-        const e = this.#effectsFor(ctx, w);
+        const e = this.#effectsFor(ctx, p, w);
         return e === undefined ? {} : { effects: e };
       })(),
     })) as unknown;
@@ -3370,7 +3499,7 @@ export class Engine {
     const args = resolveArgs(spec.args ?? {}, scope);
 
     // `true`: this node already ran the full guard chain in `#executeTask`.
-    const result = await this.#invokeTool(ctx, w.task, tool, args, 0, true);
+    const result = await this.#invokeTool(ctx, p, w.task, tool, args, 0, true);
     if (result.isError === true) {
       return {
         status: "failed",
@@ -3557,7 +3686,7 @@ export class Engine {
         dropBelowPriority: 35,
         // The summarizer is an EFFECT, so replay serves the same summary and rung 3
         // stays deterministic.
-        summarize: (text) => this.#summarizeEffect(ctx, w, text),
+        summarize: (text) => this.#summarizeEffect(ctx, p, w, text),
       },
     );
 
@@ -3583,7 +3712,7 @@ export class Engine {
       // defect `boundTurns` exists to close: measured, 127,513 tokens posted against a 100,000
       // budget, no rung, no `E_CONTEXT_OVERFLOW`, run `succeeded`.
       const bounded = await boundTurns(messages, Math.max(0, this.#contextTokens - estimateTokens(systemPrompt)), (text) =>
-        this.#summarizeEffect(ctx, w, text, turn),
+        this.#summarizeEffect(ctx, p, w, text, turn),
       );
       messages = [...bounded.messages];
       if (bounded.overBudget) {
@@ -3692,26 +3821,41 @@ export class Engine {
         return { status: "failed", writes: {}, usage, error: le };
       }
       const key = effectKey(w.task.taskId, "model", turn);
+      // SERVED, NOT RE-ASKED. A turn this Task already completed and never undid is handed
+      // back from the record — no request, no second bill, and no second `effect.completed`
+      // under one key. This is also what makes serving a TOOL sound: the tool ordinal is the
+      // call's index in the model's returned array, so the transcript has to be the same
+      // transcript, and it is only the same transcript if the turns that built it are served
+      // too. Attempt 2 therefore re-derives attempt 1 exactly, up to the first effect with no
+      // recorded outcome — which is precisely replay's semantics, on the live path.
+      const servedTurn = await this.#servedEffect(ctx, p, key);
       let turnUsage: UsageRecord = { ...ZERO_USAGE };
       let assistant: Message | undefined;
       let finish = "stop";
 
-      await this.#serialize(() =>
-        ctx.log.append(
-          [
-            {
-              type: "effect.started",
-              payload: { key, kind: "model", attempt: 1 },
-              actor: SYSTEM_ACTOR("agent"),
-              taskId: w.task.taskId,
-            },
-          ],
-          { taskId: w.task.taskId },
-        ),
-      );
+      if (servedTurn === undefined) {
+        await this.#serialize(() =>
+          ctx.log.append(
+            [
+              {
+                type: "effect.started",
+                payload: { key, kind: "model", attempt: 1 },
+                actor: SYSTEM_ACTOR("agent"),
+                taskId: w.task.taskId,
+              },
+            ],
+            { taskId: w.task.taskId },
+          ),
+        );
+      }
 
       try {
-        if (this.#replay !== undefined) {
+        if (servedTurn !== undefined) {
+          const rec = servedTurn.result as RecordedModelTurn;
+          assistant = { role: "assistant", content: rec.content, ...(rec.toolCalls === undefined ? {} : { toolCalls: rec.toolCalls }) };
+          finish = rec.finishReason;
+          turnUsage = rec.usage;
+        } else if (this.#replay !== undefined) {
           // Served, not called. `adapter.stream` is never reached, so replay makes
           // no network request and costs nothing.
           const rec = this.#replay.require(key) as { result: RecordedModelTurn & { provider?: string } };
@@ -3740,7 +3884,11 @@ export class Engine {
         throw le;
       }
 
-      ctx.policy.settle(reservation, turnUsage.costUsd);
+      // A SERVED TURN COST NOTHING THIS TIME. The reservation is released at zero, so the run's
+      // spend is not charged twice for one call; the task-local `usage` still accumulates the
+      // recorded turn, which is what keeps the node ceiling and `excessUsage` reading the same
+      // numbers on attempt 2 that they read on attempt 1.
+      ctx.policy.settle(reservation, servedTurn === undefined ? turnUsage.costUsd : 0);
       usage = addUsage(usage, turnUsage);
 
       // `postModel` — BEFORE the append, so the journal records what the filter produced and
@@ -3748,45 +3896,50 @@ export class Engine {
       // write would leave the unredacted text durable, which is the opposite of the point.
       if (assistant !== undefined) assistant = await this.#filterHook(ctx, w.task, "postModel", assistant);
 
-      await this.#serialize(() =>
-        ctx.log.append(
-          [
-            // `*.called` BEFORE `effect.completed`: the span fold closes the effect
-            // span on `completed`, so attributes attached afterwards would be dropped.
-            {
-              type: "model.called",
-              payload: {
-                key,
-                provider: adapter?.provider ?? recordedProvider,
-                // `shaped`, not `req`: a `preModel` filter may have rewritten the model, and
-                // journaling the pre-filter value records a call nobody made.
-                model: shaped.model,
-                finishReason: finish,
-                usage: turnUsage,
-              },
-              actor: SYSTEM_ACTOR("agent"),
-              taskId: w.task.taskId,
-            },
-            {
-              type: "effect.completed",
-              // The WHOLE turn, not just the text: replay has to reproduce tool calls
-              // and accounting, not merely the prose.
-              payload: (() => {
-                const rec: RecordedModelTurn = {
-                  content: assistant?.content ?? "",
+      // A SERVED TURN IS ALREADY IN THE JOURNAL, once. Appending here would put a second
+      // `effect.completed` under one key in one attempt — the state `auditRun` reports as
+      // unhealthy, correctly, because it is a re-do of something still standing.
+      if (servedTurn === undefined) {
+        await this.#serialize(() =>
+          ctx.log.append(
+            [
+              // `*.called` BEFORE `effect.completed`: the span fold closes the effect
+              // span on `completed`, so attributes attached afterwards would be dropped.
+              {
+                type: "model.called",
+                payload: {
+                  key,
+                  provider: adapter?.provider ?? recordedProvider,
+                  // `shaped`, not `req`: a `preModel` filter may have rewritten the model, and
+                  // journaling the pre-filter value records a call nobody made.
+                  model: shaped.model,
                   finishReason: finish,
                   usage: turnUsage,
-                  ...(assistant?.toolCalls === undefined ? {} : { toolCalls: assistant.toolCalls }),
-                };
-                return { key, result: rec, resultDigest: digest(rec) };
-              })(),
-              actor: SYSTEM_ACTOR("agent"),
-              taskId: w.task.taskId,
-            },
-          ],
-          { taskId: w.task.taskId },
-        ),
-      );
+                },
+                actor: SYSTEM_ACTOR("agent"),
+                taskId: w.task.taskId,
+              },
+              {
+                type: "effect.completed",
+                // The WHOLE turn, not just the text: replay has to reproduce tool calls
+                // and accounting, not merely the prose.
+                payload: (() => {
+                  const rec: RecordedModelTurn = {
+                    content: assistant?.content ?? "",
+                    finishReason: finish,
+                    usage: turnUsage,
+                    ...(assistant?.toolCalls === undefined ? {} : { toolCalls: assistant.toolCalls }),
+                  };
+                  return { key, result: rec, resultDigest: digest(rec) };
+                })(),
+                actor: SYSTEM_ACTOR("agent"),
+                taskId: w.task.taskId,
+              },
+            ],
+            { taskId: w.task.taskId },
+          ),
+        );
+      }
 
       // A TURN THAT DID NOT END BECAUSE THE MODEL WAS FINISHED IS NOT AN ANSWER — see
       // `turnRefusal`. Checked AFTER the appends on purpose: the call happened and cost money,
@@ -3808,7 +3961,7 @@ export class Engine {
       // and becomes arrival-ordered the moment intra-turn calls run in parallel, which is
       // invariant 7's failure mode wearing a different hat.
       for (const [i, call] of calls.entries()) {
-        const result = await this.#runAgentToolCall(ctx, w, call, allowed, nodeApproved, callsSoFar + i);
+        const result = await this.#runAgentToolCall(ctx, p, w, call, allowed, nodeApproved, callsSoFar + i);
         messages.push({ role: "tool", content: result.content, toolCallId: call.id });
       }
       callsSoFar += calls.length;
@@ -3863,6 +4016,26 @@ export class Engine {
     // every side effect it had.
     if (this.#replay !== undefined) {
       const recorded = this.#replay.require(key).result as { writes: Record<string, unknown> };
+      return { status: "succeeded", writes: { ...recorded.writes }, usage: { ...ZERO_USAGE } };
+    }
+
+    // AND THE SAME ON THE LIVE PATH, which is safe here for a reason worth writing down,
+    // because "serve the record instead of re-entering the child" is exactly wrong for a child
+    // that is only half done — the parent's retry re-enters precisely to advance it.
+    //
+    // It cannot happen. The three exits below that leave a child unfinished — `awaiting_gate`,
+    // not terminal (retryable-unavailable), and terminal-but-not-succeeded — all return BEFORE
+    // the append, and that append writes `effect.started` and `effect.completed` in ONE batch.
+    // So this key being in `startedEffects` means one thing only: the child reached
+    // `succeeded` and these writes are its mapped outputs. A half-done child never put the key
+    // there, so nothing here can suppress the re-entry it needs.
+    //
+    // What this DOES fix is the mirror of the seed's case: a parent that got past its child and
+    // then failed used to re-enter, take the `existing !== undefined` branch, re-derive the same
+    // writes, and append a SECOND pair under one key.
+    const served = await this.#servedEffect(ctx, p, key);
+    if (served !== undefined) {
+      const recorded = served.result as { writes: Record<string, unknown> };
       return { status: "succeeded", writes: { ...recorded.writes }, usage: { ...ZERO_USAGE } };
     }
 
@@ -4224,9 +4397,14 @@ export class Engine {
    * asked for a different one. Invariant 3 is the general form — a key that does not
    * distinguish two calls is not derived, it is merely stable.
    */
-  async #summarizeEffect(ctx: RunContext, w: Wave, text: string, ordinal = 0): Promise<string> {
+  async #summarizeEffect(ctx: RunContext, p: RunProjection, w: Wave, text: string, ordinal = 0): Promise<string> {
     const key = effectKey(w.task.taskId, "summarize", ordinal);
     if (this.#replay !== undefined) return String(this.#replay.require(key).result);
+    // A ladder rung is a model call like any other, and a re-execution that folds the same
+    // prefix asks the same question. Serving it keeps the compaction deterministic across
+    // attempts — which the transcript downstream of it depends on.
+    const served = await this.#servedEffect(ctx, p, key);
+    if (served !== undefined) return String(served.result);
 
     const adapter = this.models.require();
     let summary = "";
@@ -4269,6 +4447,7 @@ export class Engine {
 
   async #runAgentToolCall(
     ctx: RunContext,
+    p: RunProjection,
     w: Wave,
     call: ModelToolCall,
     allowed: ReadonlySet<string>,
@@ -4286,7 +4465,7 @@ export class Engine {
       const why = `unknown tool "${call.name}"`;
       return { content: why, isError: true, error: err.validation(CODES.E_TOOL_NOT_FOUND, why) };
     }
-    return this.#invokeTool(ctx, w.task, tool, call.arguments, ordinal, nodeApproved);
+    return this.#invokeTool(ctx, p, w.task, tool, call.arguments, ordinal, nodeApproved);
   }
 
   // ── THE single tool dispatch path ─────────────────────────────────────────
@@ -4299,6 +4478,10 @@ export class Engine {
    */
   async #invokeTool(
     ctx: RunContext,
+    /** The projection as it stood when this ATTEMPT began — the set of effects a re-execution
+     *  may be served from. Taken as a parameter rather than re-projected, because a fresh fold
+     *  mid-attempt would include this attempt's own appends. */
+    p: RunProjection,
     task: TaskRecord,
     tool: ToolDefinition,
     rawArgs: unknown,
@@ -4309,6 +4492,35 @@ export class Engine {
     nodeApproved = false,
   ): Promise<ToolResult> {
     const key = effectKey(task.taskId, "tool", ordinal);
+
+    // 0 — THE CALL THAT ALREADY HAPPENED. This is the payoff of serve-by-key and the reason
+    // `#retryDecision` can now narrow: a Task that ran this tool, completed it, and then failed
+    // for some other reason gets the recorded result back instead of a second real invocation.
+    //
+    // BEFORE THE GUARDS, not after, and deliberately. Validation, policy, the gate and the hold
+    // all decide whether this call MAY happen; it already did. Re-deciding could only refuse an
+    // action that is done, handing the model an error for a charge that went through — the
+    // worst of the available answers.
+    //
+    // The name is still pushed below, because `#recordEvidence` deletes `ctx.toolCalls` per
+    // attempt: without it the retry's n-gram would be missing every call it was served, and E5
+    // would judge a sequence the node did not make.
+    //
+    // A RECORDED ERROR IS NOT A RECORDED ACTION — see `isServedToolResult`. Serving one would
+    // turn every retry of a briefly-unreachable source into a no-op loop that re-reads the same
+    // failure until `maxAttempts`, which is the layer retry exists for. Measured: three suites
+    // went red on exactly that, `tool-refusal-class`'s control among them.
+    const served = await this.#servedToolEffect(ctx, p, key, {
+      name: tool.name,
+      version: tool.version,
+      argsDigest: digest(rawArgs ?? {}),
+    });
+    if (served !== undefined && isServedToolResult(served.result)) {
+      const calls = ctx.toolCalls.get(task.taskId) ?? [];
+      calls.push(tool.name);
+      ctx.toolCalls.set(task.taskId, calls);
+      return served.result as ToolResult;
+    }
 
     // 1 — validate
     const first = validate(tool.parameters, rawArgs);
@@ -4510,6 +4722,7 @@ export class Engine {
               ok: result.isError !== true,
               ms: this.#now() - started,
               argsShape: shapeOf(final.value),
+              argsDigest: digest(rawArgs ?? {}),
             },
             actor: SYSTEM_ACTOR("tool-executor"),
             taskId: task.taskId,
@@ -4669,11 +4882,11 @@ export class Engine {
     // rather than concurrency (D6.3 level 3).
     let suppressionRows: readonly NewEvent[] = [];
     if (outcome.status === "failed") {
-      const policyRetry = this.#retryDecision(ctx, p, w, outcome);
+      const policyRetry = await this.#retryDecision(ctx, p, w, outcome);
       // `onError` — consulted ONLY when the policy already said yes, so a hook can suppress a
-      // retry but never resurrect one. Re-running a non-idempotent tool that already reached its
-      // sandbox is the case `#retryDecision` refuses on purpose, and an extension able to
-      // override that refusal would be the most dangerous thing on this bus.
+      // retry but never resurrect one. Re-running a non-idempotent tool that reached its sandbox
+      // and left no completion is the case `#retryDecision` refuses on purpose, and an extension
+      // able to override that refusal would be the most dangerous thing on this bus.
       const narrowed = policyRetry === undefined ? { changedBy: [] } : await this.#narrowRetry(ctx, w, policyRetry);
       const retry = narrowed.retry;
       // THE HOOK'S RECORD RIDES THE SAME BATCH AS ITS EFFECT, and it has to. `#journalHooks`
@@ -4866,16 +5079,16 @@ export class Engine {
    * Three independent refusals, each for a different reason:
    *   - a NON-RETRYABLE class (validation, policy) will fail identically next time;
    *   - a RUN-FATAL code is not about this Task at all;
-   *   - a NON-IDEMPOTENT tool that already reached its sandbox may have done its
-   *     work. Retrying is the dangerous option, so the answer is no, and the run
-   *     takes its error edge or surfaces the gap.
+   *   - a NON-IDEMPOTENT tool that reached its sandbox and left NO completion may have
+   *     done its work anyway. Retrying is the dangerous option, so the answer is no, and
+   *     the run takes its error edge or surfaces the gap.
    */
-  #retryDecision(
+  async #retryDecision(
     ctx: RunContext,
     p: RunProjection,
     w: Wave,
     outcome: NodeOutcome,
-  ): { afterMs: number; code: string } | undefined {
+  ): Promise<{ afterMs: number; code: string } | undefined> {
     // THE COMPILED POLICY, NOT THE AUTHORED ONE. This read `w.node.retry` — a field an author
     // sets and nothing computes — so on every graph this product ships (four examples, zero
     // `"retry"` between them, and `agent()`'s own compiled spec) `policy` was `undefined` and
@@ -4914,7 +5127,16 @@ export class Engine {
     // Only refuse once the call REACHED the sandbox. A failure before that (schema
     // validation, a policy deny) touched nothing, so retrying it is safe even for a
     // non-idempotent tool.
-    if (nonIdempotentReachable && this.#toolEffectStarted(p, w.task.taskId)) return undefined;
+    //
+    // NARROWED FROM "STARTED" TO "STARTED AND NOT COMPLETED", which is what `#invokeTool`'s
+    // serve-by-key bought. A tool effect that COMPLETED is handed back from the record on the
+    // next attempt and its body is never entered, so re-running the Task cannot ring the bell
+    // twice — and that is the whole case this refusal was blocking: a charge that went through
+    // followed by a 429 on the next turn, which is the shape the rate-limit work kept failing
+    // on. What serve-by-key cannot cover is the other half: `effect.started` with no
+    // `effect.completed` — the tool threw, or the process died mid-call — where the world may
+    // already have changed and the record cannot say. There the refusal stands, unchanged.
+    if (nonIdempotentReachable && (await this.#unfinishedToolEffect(ctx, p, w.task.taskId)) !== undefined) return undefined;
 
     const initial = policy.initialMs ?? 500;
     const max = policy.maxMs ?? 30_000;
@@ -4942,15 +5164,28 @@ export class Engine {
   }
 
   /**
-   * True when this Task already started a TOOL effect.
+   * The first TOOL effect of this Task that started and has no live completion, if any.
    *
-   * The narrower question, and the one the non-idempotent retry refusal wants: a model
-   * call that started and failed touched nothing outside Loom, so it says nothing about
-   * whether a tool may have. The broader `${taskId}:` form this replaced matched
-   * `:model:` too, which cost an agent its retry policy on a transport blip.
+   * Two narrowings, each paid for by a defect. `:tool:` and not `${taskId}:`, because a model
+   * call that started and failed touched nothing outside Loom — the broad form cost an agent
+   * its retry policy on a transport blip. And "unfinished" and not "started", because
+   * `#invokeTool` now serves a COMPLETED tool effect from the record rather than re-entering
+   * the body: a completed call cannot happen twice, so it is no longer a reason to refuse.
+   *
+   * What is left is the honest gap. `effect.started` with no `effect.completed` means the
+   * journal cannot say what the world did — the tool threw after its request was sent, or the
+   * process died between the two appends — and for a non-idempotent tool that is the case
+   * where retrying is the dangerous option.
    */
-  #toolEffectStarted(p: RunProjection, taskId: TaskId): boolean {
-    return p.startedEffects.some((k) => k.startsWith(`${taskId}:tool:`));
+  async #unfinishedToolEffect(ctx: RunContext, p: RunProjection, taskId: TaskId): Promise<string | undefined> {
+    const prefix = `${taskId}:tool:`;
+    const started = p.startedEffects.filter((k) => k.startsWith(prefix));
+    if (started.length === 0) return undefined;
+    const done = await this.#completedEffects(ctx, (k) => k.startsWith(prefix));
+    // THE SAME PREDICATE `#invokeTool` SERVES ON, and it has to be the same one or the two
+    // halves disagree: a call this refusal treated as finished but the next attempt re-performs
+    // is precisely the double-charge the refusal exists to stop.
+    return started.find((k) => !done.has(k) || !isServedToolResult(done.get(k)));
   }
 
   /**
@@ -5863,6 +6098,18 @@ export class Engine {
 // Free helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Is a divergence at this effect position fatal?
+ *
+ * Only for a tool whose own manifest says a second call is NOT harmless. `idempotent: true` is a
+ * promise by the tool author that repeating the call costs nothing, and this is the one decision
+ * that promise is load-bearing for. An unknown tool is treated as non-idempotent: a name the
+ * registry cannot resolve is not evidence of safety.
+ */
+function identityMismatchIsFatal(tool: ToolDefinition | undefined): boolean {
+  return tool?.idempotent !== true;
+}
+
 /** Abort-aware sleep: an interrupt ends the hold immediately rather than after it. */
 function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
@@ -6464,6 +6711,23 @@ function exceededLimitUsd(e: LoomError, spentUsd: number): number {
  * worse: the truncated message carries no tool call to answer and no content to build on, so the
  * next turn re-sends the same transcript under the same cap.
  */
+/**
+ * Whether a recorded tool result may stand in for a re-call.
+ *
+ * `effect.completed` is appended for a tool that RETURNED, including one that returned
+ * `isError: true` — a throw takes the `effect.failed` arm instead. So "there is a completion"
+ * is not the same question as "the call succeeded", and only the second one licenses serving.
+ *
+ * A tool author writes `isError` when their source was briefly unreachable, and the node's
+ * retry is the answer to that. Handing the retry the recorded failure makes it re-read the
+ * same sentence up to `maxAttempts` and never touch the source — retry present, retry
+ * useless. The same predicate decides the non-idempotent refusal, because a call that will be
+ * re-performed is a call that may ring the bell twice.
+ */
+function isServedToolResult(result: unknown): boolean {
+  return typeof result === "object" && result !== null && (result as { isError?: unknown }).isError !== true;
+}
+
 function turnRefusal(finish: string, where: string, contentChars: number, outputTokens: number): LoomError | undefined {
   const details = { where, finishReason: finish, contentChars, outputTokens };
   switch (finish) {

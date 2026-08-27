@@ -312,6 +312,23 @@ export interface EventPayloads {
      * production data the tools were called with.
      */
     readonly argsShape: string;
+    /**
+     * A digest of the argument VALUES — never the values, and not the same claim as `argsShape`.
+     *
+     * WHY BOTH. `argsShape` answers "what kind of call was this", for an operator reading a
+     * trace. This answers "was it THE SAME call", for the executor deciding whether a recorded
+     * completion may be served back to a re-execution instead of re-performing it. A tool effect
+     * key is POSITIONAL — `taskId:tool:<ordinal>` — so it binds where a call sat in the body's
+     * sequence and nothing about what it was. A body that calls `pay.charge` first on one
+     * attempt and `audit.log` first on the next collides at ordinal 0, and without this field
+     * the second attempt is handed the first's result.
+     *
+     * A DIGEST AND NOT THE VALUES, for exactly the reason `argsShape` gives: the arguments are
+     * not in the journal anywhere else and putting them here would make every journal a copy of
+     * the production data the tools were called with. `effect.completed.resultDigest` is the
+     * precedent — same family, same trade, already made.
+     */
+    readonly argsDigest: string;
   };
 
   // ── oversight ────────────────────────────────────────────────────────────
