@@ -354,7 +354,7 @@ test("a malformed suite certifies nothing, so it blocks promotion too", () => {
 
 test("every criterion reports a readable detail, pass or fail", () => {
   const v = gateCandidate({ ...baseInput, candidate: report() });
-  assert.equal(v.checks.length, 11);
+  assert.equal(v.checks.length, 12);
   for (const c of v.checks) assert.ok(c.detail.length > 0, c.id);
 });
 
@@ -453,4 +453,44 @@ test("a HUMAN-WRITTEN suite has a different lineage by construction, not a missi
   assert.equal(ten.pass, true);
   assert.match(ten.detail, /not agent-generated/);
   assert.equal(v.promote, true);
+});
+
+// ── the two floors, both absolute ────────────────────────────────────────────
+//
+// Every other criterion in `gateCandidate` is a RATIO or a comparison against the
+// baseline, so a tie satisfies all of them. That leaves two ways to be promoted for
+// having demonstrated nothing, and both were reachable: driven before these landed,
+// two reports at `passRate 0` promoted with all eleven checks green, and
+// `validateSuite` called a suite with no cases at all valid.
+
+test("a candidate that passed NOTHING is refused, however badly the baseline did", () => {
+  const nothing = (o: Partial<EvalReport> = {}): EvalReport =>
+    ({ suite: "s", suiteVersion: 1, suiteFrozenAt: 1_000, cases: [], passed: 0, total: 3, passRate: 0,
+       mustPassFailures: [], totalCostUsd: 0.001, p95WallMs: 10, suiteValid: true, suiteIssues: [], ...o }) as EvalReport;
+
+  const tie = gateCandidate({ ...baseInput, baseline: nothing(), candidate: nothing() });
+  assert.equal(tie.promote, false, "0 of 3 is not a promotion, even against a baseline that also managed 0");
+  const floor = tie.checks.find((c) => c.id === "2a-candidate-earned-it");
+  assert.equal(floor?.pass, false);
+  assert.match(floor!.detail, /candidate passed 0 of 3/);
+  // The RELATIVE check still reads it as a tie — which is the point: the floor is the
+  // only thing standing between "nobody passed anything" and a promotion.
+  assert.equal(tie.checks.find((c) => c.id === "2-non-inferior")?.pass, true);
+
+  // It cannot block a real improvement: an improvement passes something by definition.
+  const better = gateCandidate({ ...baseInput, baseline: nothing(), candidate: nothing({ passed: 3, passRate: 1 }) });
+  assert.equal(better.checks.find((c) => c.id === "2a-candidate-earned-it")?.pass, true);
+  assert.equal(better.promote, true, JSON.stringify(better.checks.filter((c) => !c.pass)));
+});
+
+test("a suite with no cases certifies nothing, whatever composition says", () => {
+  const { suiteValid, suiteIssues } = validateSuite({ name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [] });
+  assert.equal(suiteValid, false);
+  assert.deepEqual(suiteIssues, ["a suite with no cases certifies nothing"]);
+  // `minCases` defaults to 0, so `0 < 0` is false and every other clause iterates an
+  // empty list. Declaring the default explicitly must not buy the empty suite a pass.
+  assert.equal(
+    validateSuite({ name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [], composition: { minCases: 0 } }).suiteValid,
+    false,
+  );
 });

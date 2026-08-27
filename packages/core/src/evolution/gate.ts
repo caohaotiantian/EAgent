@@ -338,6 +338,12 @@ export function validateSuite(suite: EvalSuite): { suiteValid: boolean; suiteIss
   const minFail = suite.composition?.minFailureCases ?? 0;
 
   if (suite.cases.length < min) issues.push(`only ${suite.cases.length} cases, minimum ${min}`);
+  // AN EMPTY SUITE IS NOT A SUITE, and `minCases` defaults to 0 so nothing else here says so.
+  // Driven: `validateSuite({… cases: []})` returned `{suiteValid: true, suiteIssues: []}`, and a
+  // valid empty suite certifies a candidate on an exam with no questions — every report it
+  // produces has `passRate 0` for BOTH graphs, which `2-non-inferior` reads as a tie. This is
+  // the same argument the vacuous-case check below already makes, one level up.
+  if (suite.cases.length === 0) issues.push("a suite with no cases certifies nothing");
   const must = suite.cases.filter((c) => c.mustPass).length;
   if (must < minMust) issues.push(`only ${must} must-pass cases, minimum ${minMust}`);
   const failureCases = suite.cases.filter((c) => c.expect.status === "failed").length;
@@ -453,6 +459,21 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
       input.candidate.mustPassFailures.length === 0
         ? "all must-pass cases passed"
         : `must-pass failures: ${input.candidate.mustPassFailures.join(", ")}`,
+  });
+
+  // NON-INFERIORITY IS RELATIVE, AND 0 IS NON-INFERIOR TO 0. Driven before this check existed:
+  // two reports both at `passRate 0` promoted, all eleven checks green, because every other
+  // check is a RATIO or a comparison and a tie satisfies them all. A promotion is meant to be
+  // evidence that something works; a candidate that got nothing right is not that, whatever the
+  // baseline managed. The floor is absolute so it cannot be lowered by a worse baseline, and it
+  // cannot block a real improvement — an improvement passes something by definition.
+  checks.push({
+    id: "2a-candidate-earned-it",
+    pass: input.candidate.passed > 0,
+    detail:
+      input.candidate.passed > 0
+        ? `candidate passed ${String(input.candidate.passed)} of ${String(input.candidate.total)}`
+        : `candidate passed 0 of ${String(input.candidate.total)} — a promotion certifies that something WORKS, and nothing here did`,
   });
 
   const delta = input.candidate.passRate - input.baseline.passRate;
