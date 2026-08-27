@@ -16,6 +16,26 @@
 import { CODES, LoomError, err, isLoomError, toLoomError } from "../errors.ts";
 import { redact } from "../security/redact.ts";
 
+/**
+ * The output-token ceiling a request carries when neither the caller nor the adapter row named
+ * one. Both adapters end `req.maxTokens ?? opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS`.
+ *
+ * IT IS HERE RATHER THAN IN EACH ADAPTER because a THIRD reader appeared: `cli.ts` prints this
+ * number at boot when a `--models-file` adapter row states no `defaultMaxTokens`, and a banner
+ * that names a ceiling the request body does not use is worse than no banner. It was written as
+ * a bare `4096` in four places across the two provider files — `estimateOf` and `#body` in each
+ * — so the reservation and the request could already have disagreed.
+ *
+ * WHY THE NUMBER IS WORTH PRINTING. A reasoning model spends output tokens on reasoning before
+ * it emits any content, and the ceiling covers both. Measured against a live GLM-5.2: a turn
+ * ended `finishReason "max_tokens"` with `outputTokens 32001` and `contentChars 0` — the whole
+ * budget went to reasoning and the answer was empty. At 4,096 that model never reached content
+ * at all. This constant is NOT a claim about what any model needs; it is the number an operator
+ * gets when they say nothing, which is the only threshold this repo can state without inventing
+ * one.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
 export interface HttpOptions {

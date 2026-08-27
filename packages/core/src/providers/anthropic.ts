@@ -31,7 +31,7 @@ import type {
   ModelToolCall,
   ToolSpec,
 } from "../run/registry.ts";
-import { normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
 
 export interface AnthropicOptions extends HttpOptions {
   readonly apiKey: string;
@@ -243,7 +243,7 @@ export class AnthropicAdapter implements ModelAdapter {
   }
 
   estimateOf(req: ModelRequest): number {
-    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? 4096;
+    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: maxOut });
   }
 
@@ -251,7 +251,7 @@ export class AnthropicAdapter implements ModelAdapter {
     const messages = req.messages.map((m) => toAnthropicMessage(m));
     const body: Record<string, unknown> = {
       model: req.model,
-      max_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? 4096,
+      max_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       stream: true,
       // `cache_control` on the last system block marks the stable prefix. It is
       // stable here because context is rebuilt from declared projections, not

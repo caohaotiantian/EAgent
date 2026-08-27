@@ -18,7 +18,7 @@ import type {
   ModelToolCall,
   ToolSpec,
 } from "../run/registry.ts";
-import { normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
 import { round6, roughTokens } from "./anthropic.ts";
 
 export interface OpenAIOptions extends HttpOptions {
@@ -140,7 +140,7 @@ export class OpenAIAdapter implements ModelAdapter {
   }
 
   estimateOf(req: ModelRequest): number {
-    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? 4096;
+    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: maxOut });
   }
 
@@ -172,7 +172,7 @@ export class OpenAIAdapter implements ModelAdapter {
       // Without this many OpenAI-compatible servers omit usage entirely, and cost
       // accounting silently reports zero.
       stream_options: { include_usage: true },
-      max_completion_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? 4096,
+      max_completion_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       messages,
     };
     if (req.tools.length > 0) body["tools"] = req.tools.map(toOpenAITool);

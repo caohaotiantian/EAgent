@@ -47,7 +47,7 @@ import {
 } from "./run/registry.ts";
 import { AnthropicAdapter } from "./providers/anthropic.ts";
 import { OpenAIAdapter } from "./providers/openai.ts";
-import type { HttpOptions } from "./providers/http.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, type HttpOptions } from "./providers/http.ts";
 import { replayRun } from "./run/replay.ts";
 import {
   BearerTokenIdentity,
@@ -1014,6 +1014,14 @@ export interface ModelConfig {
   readonly routes: readonly string[];
   /** Routes whose model has no price, so every call on them costs a journaled `0`. */
   readonly unpriced: readonly string[];
+  /**
+   * Adapter rows that state no `defaultMaxTokens`, so every call they serve runs at
+   * `DEFAULT_MAX_OUTPUT_TOKENS` — a number this repo picked and, until `modelWarnings`, never
+   * printed. ADAPTER names rather than route keys because the field lives on the adapter row:
+   * that is the line an operator has to edit, and a list of the eight routes reaching one
+   * adapter would say the same thing eight times.
+   */
+  readonly unsetCeilings: readonly string[];
   readonly file: string;
 }
 
@@ -1087,6 +1095,8 @@ export function readModels(
   }
 
   const adapters = new Map<string, ModelAdapter>();
+  /** Adapter names whose row omitted `defaultMaxTokens`. See `ModelConfig.unsetCeilings`. */
+  const unsetCeilings: string[] = [];
   rows.forEach((raw, i) => {
     const where = `adapters[${i}]`;
     const row = raw as Record<string, unknown> | null;
@@ -1148,6 +1158,12 @@ export function readModels(
         ? {}
         : { defaultMaxTokens: wholePositive(row["defaultMaxTokens"], `${where} ("${name}") "defaultMaxTokens"`, refuse) }),
     };
+    // RECORDED HERE, where the ROW is in hand. The constructed adapter keeps its options
+    // private, so after this loop there is no way to ask one whether the number it will send
+    // was chosen or inherited — and that distinction is the whole warning: `modelWarnings`
+    // fires on silence and never on a value, because a threshold applied to a ceiling the
+    // operator picked is a banner line operators learn to skip.
+    if (row["defaultMaxTokens"] === undefined) unsetCeilings.push(name);
     try {
       adapters.set(name, provider === "anthropic" ? new AnthropicAdapter(common) : new OpenAIAdapter({ ...common, provider: name }));
     } catch (e) {
@@ -1253,6 +1269,7 @@ export function readModels(
         .filter((t) => adapters.get(t.adapter)?.priceOf(t.model, { inputTokens: 1e6, outputTokens: 1e6 }) === 0)
         .map((t) => `${key} → ${t.adapter}/${t.model}`);
     }),
+    unsetCeilings,
     file: path,
   };
 }
@@ -1999,7 +2016,12 @@ async function startAndDrive(
 }
 
 /**
- * What this process will actually do to a model call, said where the operator will read it.
+ * What this process will actually do to a model call, decided as a pure function of the config.
+ *
+ * SEPARATE FROM THE WRITE, for the reason `execWarnings` is: the interesting half is WHICH lines
+ * a configuration earns, and asserting that through `serve` means spawning a process and racing
+ * its stderr. Before this split the decision went straight to `process.stderr` and only the
+ * no-adapter line had ever been asserted on, through the CLI, in `cli.test.ts`.
  *
  * IT LIVED ONLY IN `serve`'s BANNER. `loom run` — the door a first-time user goes through, and the
  * one CI drives — printed NOTHING: a graph full of agent nodes returned `"[mock] {…}"`, exit 0,
@@ -2011,26 +2033,61 @@ async function startAndDrive(
  * and the cohort baseline. A run that called no provider still moves the numbers a later run is
  * judged against.
  *
- * On stderr, never stdout: `loom run` prints a JSON document there and a caller pipes it.
+ * EVERY LINE HERE REPORTS A NUMBER OR A GUARD THAT IS NOT WHAT THE OPERATOR THINKS IT IS, and
+ * none of them second-guesses a value the operator wrote down. That is the rule the third line
+ * had to be designed around — see the comment above it.
  */
-function warnAboutModels(models: ModelConfig | undefined, command: string): void {
+export function modelWarnings(models: ModelConfig | undefined, command: string): readonly string[] {
   if (models === undefined) {
-    process.stderr.write(
+    return [
       `! NO MODEL ADAPTER — the only registered adapter is the offline mock, so every agent node and every rubric\n` +
         `  evaluator returns canned text. Runs will look successful.\n` +
         `  fix: loom ${command} --models-file <file> with {"adapters":[{"provider":"anthropic"}],"routes":{…}}\n`,
-    );
-    return;
+    ];
   }
+  const out: string[] = [];
   if (models.unpriced.length > 0) {
     const n = models.unpriced.length;
-    process.stderr.write(
+    out.push(
       `! NO PRICE FOR ${n} ROUTE${n === 1 ? "" : "S"} — every call on ${n === 1 ? "it" : "them"} is journaled as costing 0,\n` +
         `  so a graph's policy.budget.costUsd and --budget cannot bind and /health reports a spend that did not happen:\n` +
         models.unpriced.map((r) => `    ${r}\n`).join("") +
         `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter in ${models.file}\n`,
     );
   }
+  // THE CEILING NOBODY CHOSE. A live GLM-5.2 turn ended `finishReason "max_tokens"` with
+  // `outputTokens 32001` and `contentChars 0` — the whole budget went to reasoning and the answer
+  // was empty. `turnRefusal` in `run/engine.ts` makes that a clean refusal instead of a silently
+  // empty answer, which is the fix for the symptom; it still costs a real call to find out. The
+  // operator got there by trying 4,096 — which never reached content at all — then 16,000, which
+  // still truncated one turn of three, reading a SQLite journal between attempts.
+  //
+  // WHY IT FIRES ON SILENCE AND NEVER ON A VALUE. A ceiling the operator wrote down is a decision
+  // this file has no evidence to overrule: nothing here knows a route's model, let alone how that
+  // model splits output between reasoning and content, and a banner line that fires on a correct
+  // configuration is a line operators learn to skip. What it CAN say without inventing a
+  // threshold is that a row named no ceiling and inherited one. `defaultMaxTokens: 1` therefore
+  // gets nothing, and that is deliberate — it is a choice, and a wrong choice is a different
+  // defect from an invisible default.
+  if (models.unsetCeilings.length > 0) {
+    const n = models.unsetCeilings.length;
+    out.push(
+      `! NO OUTPUT-TOKEN CEILING SET ON ${n} ADAPTER${n === 1 ? "" : "S"} — ${n === 1 ? "it sends" : "they send"} ` +
+        `max output tokens = ${String(DEFAULT_MAX_OUTPUT_TOKENS)}, this binary's\n` +
+        `  default and not a number you chose: ${models.unsetCeilings.join(", ")}\n` +
+        `  A reasoning model spends this budget on reasoning BEFORE it emits content, and the ceiling covers both.\n` +
+        `  Measured on a live one: a turn ended finishReason "max_tokens" with outputTokens 32001 and ZERO characters\n` +
+        `  of content. Setting this too low does not shorten the answer, it deletes it — the turn is refused as\n` +
+        `  E_PROVIDER_BAD_REQUEST after the call has already been paid for.\n` +
+        `  fix: add "defaultMaxTokens": <n> to that adapter in ${models.file}\n`,
+    );
+  }
+  return out;
+}
+
+/** `modelWarnings`, on stderr — never stdout: `loom run` prints a JSON document there and a caller pipes it. */
+function warnAboutModels(models: ModelConfig | undefined, command: string): void {
+  for (const line of modelWarnings(models, command)) process.stderr.write(line);
 }
 
 /**
