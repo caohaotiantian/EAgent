@@ -166,14 +166,24 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   // `compensation` is not forward flow, and including it would make almost every graph
   // look cyclic.
   //
-  // NOTHING TRAVERSES ONE. `Engine.#edgesToTake` has `case "compensation": break;`, and
-  // the error path takes `kind === "error"` edges only — which is why GRAPH008 refuses
-  // `onBranchError: "compensate"` outright rather than letting it read as a rollback. A
-  // compensation edge is a DECLARATION, and it earns its place as one: GRAPH012 refuses
-  // an edge whose target tool declares no undo, and GRAPH010 reads it to order two
-  // writers. It is NOT what lets `rewind` cross an irreversible effect — `rewind` reads
+  // NOTHING TRAVERSES ONE, AND THAT IS STILL TRUE NOW THAT ROLLBACK RUNS.
+  // `Engine.#edgesToTake` still has `case "compensation": break;`, and the error path
+  // still takes `kind === "error"` edges only — which is why GRAPH008 refuses
+  // `onBranchError: "compensate"` outright rather than letting it read as a rollback.
+  //
+  // What changed is what a declared compensation DOES, not how an edge is walked. Rollback
+  // is driven by the JOURNAL, not by the graph: `Engine.#compensate` folds the run's
+  // `tool.called` rows through `run/compensation.ts` and undoes them in reverse seq order,
+  // on run failure and on rewind. It has to be journal-driven — an effect that happened
+  // needs undoing whether or not an author drew an edge to it, and an edge names a NODE
+  // while a rollback has to name a CALL (the third of five parallel writes has no edge of
+  // its own). So a compensation edge remains a DECLARATION and still earns its place as
+  // one: GRAPH012 refuses an edge whose target tool declares no undo, and GRAPH010 reads
+  // it to order two writers.
+  //
+  // It is still NOT what lets `rewind` cross an effect: `rewind` reads
   // `ToolDefinition.compensation` from the registry, and a graph with no compensation
-  // edges at all rewinds exactly the same.
+  // edges at all rewinds — and now rolls back — exactly the same.
   const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation");
   const loopEdges = spec.edges.filter((e) => e.kind === "loop");
 
@@ -1445,7 +1455,14 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     const join = n.join;
     if (join === undefined) continue;
 
-    // `compensate` NAMES AN EXECUTOR THAT DOES NOT EXIST.
+    // `compensate` IS NOT WIRED TO THE EXECUTOR THAT NOW EXISTS.
+    //
+    // The refusal stands and the reason has narrowed. There IS a rollback executor now —
+    // `Engine.#compensate`, driven by the journal, on run failure and on rewind — but nothing
+    // routes a join's `onBranchError` into it, and a BRANCH failing is neither of those two
+    // triggers. So the behaviour this refusal describes is unchanged: accepting the word would
+    // still get the author `skip`. What would be dishonest now is the old reason, so the
+    // message says "is not wired to it" rather than "does not exist".
     //
     // It was accepted and then treated as an exact synonym for `skip`, with no
     // diagnostic — so an author who asked for their failed branch to be rolled back got
@@ -1457,7 +1474,7 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       d.push({
         severity: "error",
         code: "GRAPH008_COMPENSATE_UNIMPLEMENTED",
-        message: `join "${n.id}" sets onBranchError: "compensate", but no compensation executor exists — it would behave exactly as "skip"`,
+        message: `join "${n.id}" sets onBranchError: "compensate", but a join's branch failure is not wired to the rollback executor (which runs on run failure and on rewind) — it would behave exactly as "skip"`,
         at: { nodeId: n.id },
         fix: `set onBranchError: "skip" to accept partial evidence, or "fail" to stop the run`,
       });
@@ -2049,11 +2066,23 @@ function rule011And012ErrorPaths(
 
     // A DECLARED COMPENSATION MUST NAME A TOOL THAT EXISTS.
     //
-    // The only runtime effect a declared compensation has today is to REMOVE a refusal:
-    // `Engine.rewind` will not cross an uncompensated irreversible effect, and it decides
-    // that by asking whether the field is present. So `compensation: {tool: "noop"}` —
-    // or a name with a typo in it — buys a legal rewind that undoes nothing. Presence is
-    // not a promise; a registered tool is the least this can check.
+    // THE NAME IS NOW DISPATCHED, not merely inspected, and this check got stronger rather
+    // than weaker for it. It used to be that the only runtime effect of a declared
+    // compensation was to REMOVE a refusal — `Engine.rewind` would not cross an
+    // uncompensated irreversible effect and decided that by asking whether the field was
+    // present — so `compensation: {tool: "noop"}`, or a name with a typo in it, bought a
+    // legal rewind that undid nothing.
+    //
+    // `Engine.#compensate` now looks the name up in the registry and runs it. An
+    // unregistered name no longer buys a silent pass — `run/compensation.ts` blocks the step
+    // `unknown_compensation` and it is journaled
+    // `compensation.recorded{outcome: "not_attempted", reason: "…is not registered"}` — but
+    // it still buys a rewind that undoes nothing, because a step with no undo to dispatch is
+    // not something a rewind can refuse on. It is now LOUD rather than silent, which is a
+    // smaller claim than "prevented", and catching it at COMPILE is what actually prevents
+    // it. The alternative is learning at rollback time that the undo does not exist, which
+    // is the worst available moment. Presence is still not a promise; a registered tool is
+    // still the least this can check.
     const undo = tools[manifest.compensation.tool];
     if (undo === undefined) {
       d.push({

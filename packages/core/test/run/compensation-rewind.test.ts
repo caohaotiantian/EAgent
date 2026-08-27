@@ -65,6 +65,17 @@ function engineOn(store: MemoryStateStore, world: World): Engine {
       return { content: `deleted ${String(row)}` };
     },
   } as ToolDefinition);
+  // Mutates, and declares no undo. The third state exists for this tool.
+  tools.register({
+    name: "note.append",
+    version: "1.0",
+    description: "append to a log nothing can undo",
+    capabilities: [],
+    irreversibility: "reversible_write",
+    idempotent: true,
+    parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    execute: () => ({ content: "noted", writes: { out: { noted: true } } }),
+  } as ToolDefinition);
   return new Engine({
     store,
     bus: new InProcessEventBus({ store }),
@@ -173,6 +184,56 @@ test("A SECOND REWIND TO THE SAME BOUNDARY DOES NOT UNDO ANYTHING TWICE", async 
   // the journal is what remembers: a flag on the engine would survive this and not a restart.
   await r.engine.rewind(r.runId, r.before, "again");
   assert.deepEqual(r.world.undone, [2, 1], "the second rewind found both calls already settled");
+});
+
+test("AN EFFECT NOTHING CAN UNDO IS STILL RECORDED, EVEN WHEN NO STEP DISPATCHES", async () => {
+  // The path this covers had the three states collapsing back to two on rewind, and only on
+  // rewind: the rollback was gated on there being something ATTEMPTABLE, so a run whose only
+  // effect was un-undoable ran no rollback and journaled nothing. "This write stands and nobody
+  // tried to undo it" is exactly the sentence an operator needs before they decide what the
+  // rewind actually bought them, and it is the sentence a dispatch-gated rollback deletes.
+  const store = new MemoryStateStore({ now: () => NOW });
+  const world: World = { rows: [], undone: [] };
+  const engine = engineOn(store, world);
+  const only: unknown = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "rewind-nothing-to-undo", project: "comp", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["seed"],
+    outputs: ["out"],
+    nodes: [
+      {
+        id: "note",
+        type: "tool",
+        reads: ["seed"],
+        writes: ["out"],
+        tool: { name: "note.append", version: "1.0", args: { text: "cannot be undone" } },
+        retry: { maxAttempts: 1 },
+      },
+    ],
+    edges: [],
+  };
+  const graph = compileOrThrow({ spec: only as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+  for (let i = 0; i < 6; i++) {
+    const p = await engine.advance(runId);
+    if (p.status === "succeeded" || p.status === "failed") break;
+  }
+  const evs = await journal(store, runId);
+  const call = evs.find((e) => e.type === "tool.called");
+  assert.notEqual(call, undefined, "the note really was written");
+
+  await engine.rewind(runId, (call!.seq - 2) as Seq, "undo it if you can");
+
+  const recs = (await journal(store, runId)).filter((e) => e.type === "compensation.recorded");
+  assert.equal(recs.length, 1, "one recorded call, one decision about it");
+  const p = recs[0]!.payload as { outcome: string; reason?: string; undo?: string; trigger: string };
+  assert.equal(p.outcome, "not_attempted");
+  assert.equal(p.trigger, "rewind");
+  assert.equal(p.undo, undefined, "there is no undo tool to name");
+  assert.match(p.reason ?? "", /declares no compensation/, "and the record says so, rather than saying nothing");
 });
 
 test("A DETACHED RUN IS REFUSED RATHER THAN CROSSED", async () => {

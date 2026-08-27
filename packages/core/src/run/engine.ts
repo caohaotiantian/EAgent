@@ -2235,7 +2235,8 @@ export class Engine {
     // answer alone, and they never asked for the half.
     const preRewind: JournalEvent[] = [];
     for await (const e of ctx.log.read(1 as Seq)) preRewind.push(e);
-    const plannedUndo = attemptable(planCompensation({ events: preRewind, tools: this.tools, sinceSeq: atSeq }));
+    const plan = planCompensation({ events: preRewind, tools: this.tools, sinceSeq: atSeq });
+    const plannedUndo = attemptable(plan);
 
     // UNDO WHAT THE REWIND IS ABOUT TO HIDE.
     //
@@ -2270,17 +2271,27 @@ export class Engine {
     // tool call needs the graph, which is not in the journal, only its hash. Rewinding anyway
     // would be the loosening: suppressing effects nothing is going to undo. `attach` is the fix
     // and the message says so.
-    if (plannedUndo.length > 0) {
-      if (live === undefined) {
-        throw err.conflict(
-          CODES.E_RESTORE_ILLEGAL,
-          `cannot rewind to ${atSeq}: ${String(plannedUndo.length)} recorded effect(s) after it declare a ` +
-            `compensation (${[...new Set(plannedUndo.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}), and ` +
-            `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
-            `rewinding without them would hide the record and leave the effects standing`,
-          { details: { runId, atSeq, pending: plannedUndo.length } },
-        );
-      }
+    if (plannedUndo.length > 0 && live === undefined) {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: ${String(plannedUndo.length)} recorded effect(s) after it declare a ` +
+          `compensation (${[...new Set(plannedUndo.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}), and ` +
+          `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
+          `rewinding without them would hide the record and leave the effects standing`,
+        { details: { runId, atSeq, pending: plannedUndo.length } },
+      );
+    }
+    // EVERY STEP, NOT ONLY THE DISPATCHABLE ONES. The condition is `plan.steps`, not
+    // `plannedUndo`: a step nothing can undo still has to be JOURNALED as `not_attempted`, or the
+    // three states collapse back to two on this path while holding on the other. A rewind that
+    // crosses a `reversible_write` whose tool declares no compensation is exactly the case an
+    // operator has to be told about, and it is the case with no `attemptable` step in it.
+    //
+    // THE ONE REMAINING SILENCE, named rather than implied: a DETACHED run whose steps are all
+    // blocked journals nothing, because `#compensate` dispatches through `#invokeTool` and takes
+    // a `RunContext` it has no way to build. The refusal above does not cover it either — there
+    // is nothing to dispatch, so there is nothing to be unable to dispatch.
+    if (plan.steps.length > 0 && live !== undefined) {
       await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
     }
 
