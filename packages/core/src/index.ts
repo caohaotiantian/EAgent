@@ -17,6 +17,7 @@ export * from "./journal/events.ts";
 export * from "./journal/retention.ts";
 export * from "./journal/store.ts";
 export * from "./journal/memory.ts";
+export * from "./journal/payloads.ts";
 export * from "./journal/sqlite.ts";
 
 export * from "./state/channels.ts";
@@ -31,6 +32,7 @@ export * from "./graph/mutate.ts";
 
 export * from "./schema.ts";
 export * from "./run/projection.ts";
+export * from "./run/externalise.ts";
 export * from "./run/log.ts";
 export * from "./journal/audit.ts";
 export * from "./run/hooks.ts";
