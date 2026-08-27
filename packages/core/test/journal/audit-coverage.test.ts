@@ -73,9 +73,19 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   // ── genuinely nothing to relate ─────────────────────────────────────────────
   "run.compiled": { kind: "no-relation", why: "carries the graph hash; that binding is checked by replay and by #assertBound, not by a sequence relation" },
   "run.suspended": { kind: "no-relation", why: "a suspend/resume pair is a lifecycle nicety, not an obligation — a run may end suspended" },
+  // `run.failed` and `run.cancelled` LEFT THIS LIST, and what they said while they were on it
+  // was false. The entry read "a terminal marker; the auditor reads its ABSENCE (via
+  // run.completed) to decide whether `eventually` rules apply" — i.e. there is no relation to
+  // check. There is: a run reaches a terminal state ONCE, and nothing that moves it may follow.
+  // Falsified by producing a journal with two `run.failed` rows in it — two planes over one
+  // SQLite file, `Promise.allSettled` over two decisions on one gate — which `loom audit`
+  // called `ok`, exit 0. `run.terminal-is-last-and-once` constrains all three terminals now.
+  //
+  // `run.resumed` stays, and its reason is not "a terminal marker": it is that a resume with
+  // no prior suspend is genuinely legal. It is no longer the shape it was excused NEXT to,
+  // though — a second `run.resumed` beside a second `gate.decided` is now caught, one rule
+  // over, by `run.terminal-is-last-and-once` and `gate.decided-once` respectively.
   "run.resumed": { kind: "no-relation", why: "a resume with no prior suspend is legal: a fresh process attaching a live run appends one" },
-  "run.failed": { kind: "no-relation", why: "a terminal marker; the auditor reads its ABSENCE (via run.completed) to decide whether `eventually` rules apply" },
-  "run.cancelled": { kind: "no-relation", why: "terminal marker, same as run.failed" },
   "task.retry_scheduled": { kind: "no-relation", why: "advisory: the lease that follows is what actually re-runs the task" },
   "task.progress": { kind: "no-relation", why: "free-form progress text from a tool; constrains nothing" },
   "action.pending": { kind: "no-relation", why: "an intervention-window marker; the hold either elapses or is interrupted, and both are legal" },

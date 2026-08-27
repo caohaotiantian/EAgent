@@ -76,8 +76,17 @@ test("`checked` means the rule SAW EVIDENCE, not that the switch statement ran",
   assert.deepEqual(r.violations, []);
   assert.deepEqual(
     [...r.checked].sort(),
-    ["effect.completed-once-per-attempt", "effect.completion-has-a-start", "effect.kind-matches-its-key", "run.submitted-is-first-and-once"],
-    "the three effect rules, plus the submission rule every real journal gives evidence for",
+    [
+      "effect.completed-once-per-attempt",
+      "effect.completion-has-a-start",
+      "effect.kind-matches-its-key",
+      "run.submitted-is-first-and-once",
+      "run.terminal-is-last-and-once",
+    ],
+    // The terminal rule joined the submission rule for the same reason: `DONE()` is a
+    // `run.completed`, which IS the evidence. A journal with no end gives it none, and it is
+    // reported skipped there — asserted three tests down.
+    "the three effect rules, plus the two lifecycle rules every terminal journal gives evidence for",
   );
   const why = new Map(r.skipped.map((s) => [s.rule, s.why]));
   assert.ok(why.has("policy.deescalation-is-human"), "a rule with no evidence is SKIPPED, not checked");
@@ -308,6 +317,143 @@ test("A PARTIAL JOURNAL IS NOT A MALFORMED ONE — the submission rule stands do
     r.skipped.some((s) => s.rule === "run.submitted-is-first-and-once" && s.why.includes("seq 1")),
     "and it says WHY it stood down",
   );
+});
+
+// ── the three at-most-once rules only a SECOND WRITER breaks ─────────────────
+//
+// Every fixture below is a journal `src/` cannot write today and could write yesterday. They
+// were driven, not imagined: two `openWorkspace` planes over one SQLite file, both armed,
+// `Promise.allSettled` over a reject from one and an approve from the other, produced
+// `gate.decided 2 | run.resumed 2 | task.leased 3 | task.committed 2 | run.failed 2` — and
+// `loom audit` on that journal reported `ok — 11 rule(s) checked, 10 skipped`, exit 0. It
+// caught `task.committed-once` and nothing else.
+
+test("gate.decided-once — one gate, two contradictory answers, both durable", () => {
+  // The shape the write door used to allow: `resolve` checked the gate at `p.seq` and wrote
+  // through the RETRYING `log.append`, so two people answering the same open gate in the same
+  // instant both landed. The fold shows the first and the record holds both, which is why the
+  // AUDITOR is the thing that has to say so.
+  const twice = fixture(() => [
+    ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "approve@root#0" }),
+    ev("gate.raised", { gateId: "g1", nodeId: "approve", policyRef: "p", contentDigest: "d" }, { taskId: "approve@root#0" }),
+    ev("gate.decided", { gateId: "g1", decision: "reject", latencyMs: 1 }, { actor: HUMAN, taskId: "approve@root#0" }),
+    ev("gate.decided", { gateId: "g1", decision: "approve", latencyMs: 1 }, { actor: HUMAN, taskId: "approve@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(twice), ["gate.decided-once"]);
+
+  // A TIMEOUT AFTER A DECISION IS THE SAME DEFECT ONE DOOR OVER: a sweeper that expires a gate
+  // somebody already answered. `gate.raised-is-resolved` cannot see it — the gate IS resolved.
+  const decidedThenExpired = fixture(() => [
+    ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "approve@root#0" }),
+    ev("gate.raised", { gateId: "g1", nodeId: "approve", policyRef: "p", contentDigest: "d" }, { taskId: "approve@root#0" }),
+    ev("gate.decided", { gateId: "g1", decision: "approve", latencyMs: 1 }, { actor: HUMAN, taskId: "approve@root#0" }),
+    ev("gate.timeout", { gateId: "g1", action: "fail" }, { taskId: "approve@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(decidedThenExpired), ["gate.decided-once"]);
+
+  // THE LEGITIMATE NEIGHBOUR IT MUST NOT FIRE ON, and it is the reason `gate.deduped` is
+  // excluded from the set by name. `HumanGateBroker.raise` writes raise → deduped → decided as
+  // ONE append for a NEW gate whose answer was inherited from another; the `gate.deduped` names
+  // the source and closes nothing. A rule that counted it would fire on a saturation-control
+  // path the product takes on purpose.
+  const deduped = fixture(() => [
+    ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "approve@root#0" }),
+    ev("gate.raised", { gateId: "g2", nodeId: "approve", policyRef: "p", contentDigest: "d" }, { taskId: "approve@root#0" }),
+    ev("gate.deduped", { gateId: "g2", ofGateId: "g1", contentDigest: "d", decision: "approve" }, { taskId: "approve@root#0" }),
+    ev("gate.decided", { gateId: "g2", decision: "approve", latencyMs: 0 }, { actor: HUMAN, taskId: "approve@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(deduped), [], "a deduped gate is raised, annotated and decided ONCE");
+
+  // …and two DIFFERENT gates each decided once is the ordinary batch.
+  const twoGates = fixture(() => [
+    ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "a@root#0" }),
+    ev("gate.raised", { gateId: "g1", nodeId: "a", policyRef: "p", contentDigest: "d" }, { taskId: "a@root#0" }),
+    ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "b@root#0" }),
+    ev("gate.raised", { gateId: "g2", nodeId: "b", policyRef: "p", contentDigest: "d" }, { taskId: "b@root#0" }),
+    ev("gate.batch_decided", { batchId: "b1", gateIds: ["g1", "g2"], decision: "approve", latencyMs: 1 }, { actor: HUMAN }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(twoGates), [], "one batch decision closing two gates closes each of them once");
+});
+
+test("run.terminal-is-last-and-once — a run that ended twice, and a run that kept going after it ended", () => {
+  // THE MIRROR OF `run.submitted-is-first-and-once`, which guarded the START while the END was
+  // guarded by nothing. `audit-coverage.test.ts` excused `run.failed` as "a terminal marker; the
+  // auditor reads its ABSENCE… to decide whether `eventually` rules apply" — a claim falsified by
+  // producing a journal with two of them.
+  const endedTwice = fixture(() => [
+    ev("run.failed", { error: { code: "E_X", message: "x" } }),
+    ev("run.failed", { error: { code: "E_X", message: "x" } }),
+  ]);
+  assert.deepEqual(rulesHit(endedTwice), ["run.terminal-is-last-and-once"]);
+
+  // TWO DIFFERENT terminals is the same defect and the worse-looking one: a run both cancelled
+  // and completed says two incompatible things about whether the work happened.
+  const cancelledThenCompleted = fixture(() => [ev("run.cancelled", { reason: "stop" }), ev("run.completed", { outputs: {}, usage: {} })]);
+  assert.deepEqual(rulesHit(cancelledThenCompleted), ["run.terminal-is-last-and-once"]);
+
+  // THE HALF THE SECOND PLANE ACTUALLY PRODUCED: the run failed while the first plane's tool was
+  // still running, and the tool's own rows landed AFTER the terminal event.
+  const workAfterTheEnd = fixture(() => [
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "apply@root#0" }),
+    ev("run.failed", { error: { code: "E_OUTPUT_MISSING", message: "x" } }),
+    ev("run.resumed", { by: "gate" }, { actor: HUMAN }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "apply@root#0" }),
+  ]);
+  const after = audit(workAfterTheEnd).violations.filter((v) => v.rule === "run.terminal-is-last-and-once");
+  assert.deepEqual(rulesHit(workAfterTheEnd), ["run.terminal-is-last-and-once"]);
+  assert.equal(after.length, 2, "BOTH later events are named, not just the first — an operator needs the extent");
+
+  // WHAT IT DELIBERATELY DOES NOT CLAIM, and the two neighbours that would have made it fire on
+  // healthy runs. `evolution.scored` is appended after `run.completed` on purpose —
+  // `test/cli/evolution-score.test.ts` asserts `loom audit` exits 0 over exactly that journal —
+  // and an inbound callback rejected after a run ends is a refusal that changed nothing.
+  const scoredAfterwards = fixture(() => [
+    DONE(),
+    ev("evolution.scored", { suite: "s", outcome: 1, components: { completed: true }, weightsDigest: "d" }),
+    ev("gate.callback_rejected", { channel: "slack", reason: "run_not_found" }),
+  ]);
+  assert.deepEqual(rulesHit(scoredAfterwards), [], "an event outside the named ADVANCES_A_RUN set is not this rule's business");
+});
+
+test("task.leased-once — two fencing tokens for one attempt", () => {
+  // The missing mirror of `effect.completed-once-per-attempt`. `#runWaveInner` journals
+  // `attempt: w.task.attempt + 1` read from the fold, so ONE writer's re-lease always carries a
+  // HIGHER attempt. Two writers both fold attempt 1 and both journal 2 — measured, with two
+  // planes over one journal, as `13:task.leased {"attempt":2}` and `14:task.leased {"attempt":2}`.
+  const twoTokens = fixture(() => [
+    ev("task.leased", { workerId: "a", attempt: 2 }, { taskId: "apply@root#0" }),
+    ev("task.leased", { workerId: "b", attempt: 2 }, { taskId: "apply@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 2 }, { taskId: "apply@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(twoTokens), ["task.leased-once"]);
+
+  // THE LEGITIMATE NEIGHBOUR: a retry. The attempt increments, and this is the shape half this
+  // file exists to keep quiet about — a rule that fires on a retry gets switched off.
+  const retried = fixture(() => [
+    ev("task.leased", { workerId: "a", attempt: 1 }, { taskId: "apply@root#0" }),
+    ev("task.failed", { error: { code: "E_X", message: "x" }, attempt: 1 }, { taskId: "apply@root#0" }),
+    ev("task.retry_scheduled", { attempt: 1, delayMs: 10 }, { taskId: "apply@root#0" }),
+    ev("task.leased", { workerId: "a", attempt: 2 }, { taskId: "apply@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 2 }, { taskId: "apply@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(retried), [], "a retry re-leases at a HIGHER attempt, by construction");
+
+  // …and two different TASKS at the same attempt number are unrelated, which is the ordinary
+  // parallel wave.
+  const wave = fixture(() => [
+    ev("task.leased", { workerId: "a", attempt: 1 }, { taskId: "left@root#0" }),
+    ev("task.leased", { workerId: "a", attempt: 1 }, { taskId: "right@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "left@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "right@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(wave), [], "one attempt each, on two tasks");
 });
 
 test("call-pairs-with-its-effect — a call the journal describes and replay cannot reproduce", () => {

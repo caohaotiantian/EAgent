@@ -49,7 +49,10 @@ export const AUDIT_RULES = [
   "task.cancelled-not-after-commit",
   "task.leased-precedes-commit",
   "task.leased-is-resolved",
+  "task.leased-once",
   "run.submitted-is-first-and-once",
+  "run.terminal-is-last-and-once",
+  "gate.decided-once",
   "call-pairs-with-its-effect",
   "gate.raise-has-a-decision",
   "subgraph.start-and-completion-pair",
@@ -97,6 +100,64 @@ export interface AuditOptions {
 }
 
 const POSTURE_RANK: Readonly<Record<string, number>> = { out: 0, on: 1, in: 2 };
+
+/**
+ * THE THREE AT-MOST-ONCE RULES ONLY A SECOND WRITER BREAKS, and the asymmetry that hid them.
+ *
+ * `run.submitted-is-first-and-once` guards the START of a run and nothing guarded the END.
+ * `effect.completed-once-per-attempt` guards an effect and nothing guarded the LEASE that
+ * licenses it. `gate.decision-has-a-raise` guards that a decision had a question and nothing
+ * guarded that the question was answered once. Every one of the missing halves is invisible
+ * to a single writer — one process cannot decide one gate twice — so 2,289 in-process tests
+ * could not have found them. Two planes over one journal produce all three at once:
+ *
+ *     gate.decided 2 | run.resumed 2 | task.leased 3 | task.committed 2 | run.failed 2
+ *
+ * and `loom audit` on that journal reported `ok — 11 rule(s) checked, 10 skipped`, exit 0.
+ * It caught exactly one of the five contradictions (`task.committed-once`) and called the
+ * rest fine.
+ *
+ * WHAT `run.terminal-is-last-and-once` DOES NOT CLAIM, because a rule that fires on a healthy
+ * run gets switched off — this file's own first lesson. "Nothing after the end" is FALSE as
+ * written: `evolution.scored` is appended after `run.completed` on purpose and `loom audit`
+ * over exactly that journal is asserted to exit 0 in `test/cli/evolution-score.test.ts`; an
+ * inbound `gate.callback_rejected` legitimately lands on a run that has already ended. So the
+ * second half of this rule is over a NAMED SET — the events that MOVE A RUN FORWARD, below —
+ * and an event outside that set following a terminal one is not checked here at all. The
+ * first half, at most one terminal event, is over every run and has no exceptions.
+ */
+const ADVANCES_A_RUN: ReadonlySet<string> = new Set([
+  "run.started",
+  "run.suspended",
+  "run.resumed",
+  "task.ready",
+  "task.leased",
+  "task.committed",
+  "task.failed",
+  "task.cancelled",
+  "state.reduced",
+  "effect.started",
+  "effect.completed",
+  "effect.failed",
+  "model.called",
+  "tool.called",
+  "gate.raised",
+  "gate.decided",
+  "gate.batch_decided",
+  "gate.timeout",
+  "gate.escalated",
+]);
+
+/**
+ * The four events that take a gate OUT of `open`, which is a one-way door.
+ *
+ * `gate.deduped` is deliberately absent and it is the only judgement call here. It does not
+ * close a gate: `HumanGateBroker.raise` writes it BETWEEN the `gate.raised` and the
+ * `gate.decided` of a NEW gate whose answer was inherited, on that new gate's id, and
+ * `projection.ts` folds no arm for it at all. The `gate.decided` beside it is the closure,
+ * and that one is counted.
+ */
+const CLOSES_A_GATE: ReadonlySet<string> = new Set(["gate.decided", "gate.batch_decided", "gate.timeout", "gate.cancelled"]);
 
 /** Total reads. A journal this cannot parse is exactly the journal it exists to diagnose. */
 function obj(v: unknown): Record<string, unknown> | undefined {
@@ -172,9 +233,40 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const childStarts = new Map<string, number>();
   const escalatedTo = new Map<string, string>();
   const submissions: number[] = [];
+  /** `${taskId}#${attempt}` → the seq that leased it. */
+  const leasedAttempts = new Map<string, number>();
+  /** gateId → the seq and event type that took it out of `open`. */
+  const gateClosures = new Map<string, { seq: number; type: string }>();
+  /** The FIRST terminal event, so a second one is reported against the end that really happened. */
+  let terminalAt: { seq: number; type: string } | undefined;
 
   for (const e of live) {
     const seq = Number(e.seq);
+
+    // ── run.terminal-is-last-and-once ──────────────────────────────────────────────────
+    // Read before the payload, and outside the switch, because it is a claim about POSITION
+    // rather than about content: a terminal event with an unreadable payload still ended the
+    // run, and every later event is still after it.
+    if (e.type === "run.completed" || e.type === "run.failed" || e.type === "run.cancelled") {
+      saw.add("run.terminal-is-last-and-once");
+      if (terminalAt === undefined) {
+        terminalAt = { seq, type: e.type };
+      } else {
+        add(
+          "run.terminal-is-last-and-once",
+          seq,
+          `the run already ended at seq ${String(terminalAt.seq)} with ${terminalAt.type}, and ends again here with ${e.type} — a run reaches a terminal state once`,
+        );
+      }
+    } else if (terminalAt !== undefined && ADVANCES_A_RUN.has(e.type)) {
+      saw.add("run.terminal-is-last-and-once");
+      add(
+        "run.terminal-is-last-and-once",
+        seq,
+        `${e.type} at seq ${String(seq)} moves a run that ended at seq ${String(terminalAt.seq)} with ${terminalAt.type}`,
+      );
+    }
+
     const p = obj(e.payload);
     if (p === undefined) continue;
 
@@ -367,6 +459,27 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         if (e.taskId !== undefined) {
           leased.add(String(e.taskId));
           openLeases.set(String(e.taskId), seq);
+          // THE MISSING MIRROR OF `effect.completed-once-per-attempt`. `#runWaveInner`
+          // journals `attempt: w.task.attempt + 1`, read from the fold, so ONE writer's
+          // re-lease — a retry, a stranded lease reclaimed, a task returned to `ready` by a
+          // decided gate — always carries a HIGHER attempt. Two writers both fold `attempt`
+          // 1 and both journal 2, which is what makes this the shape only a second plane
+          // reaches: the lease's seq is the fencing token, so two leases for one attempt are
+          // two tokens for one unit of work, and `task.leased-precedes-commit` is satisfied
+          // by either of them.
+          const attempt = typeof p["attempt"] === "number" ? p["attempt"] : 1;
+          const key = `${String(e.taskId)}#${String(attempt)}`;
+          saw.add("task.leased-once");
+          const prior = leasedAttempts.get(key);
+          if (prior !== undefined) {
+            add(
+              "task.leased-once",
+              seq,
+              `task "${String(e.taskId)}" was leased for attempt ${String(attempt)} at seq ${String(prior)} and again here — two fencing tokens for one attempt`,
+            );
+          } else {
+            leasedAttempts.set(key, seq);
+          }
         }
         break;
       }
@@ -414,6 +527,26 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           // nothing read the record back to confirm the door held.
           if (!raisedGates.has(s)) {
             add("gate.decision-has-a-raise", seq, `${e.type} for gate "${s}", which was never raised in this run`);
+          }
+          // AND THE DOOR OUT OF `open` IS ONE-WAY. `projection.ts` folds every one of these
+          // arms only from `open`, so a second closure changes nothing a reader sees — which
+          // is exactly why the journal has to say it happened. Reproduced with two planes
+          // over one SQLite file: one gate, `gate.decided` twice, a reject and an approve,
+          // both by the same subject, and the fold showed the first while the record held
+          // both. `gates.ts` now commits at `p.seq` so this build cannot write it; a store
+          // written by an older one already has.
+          if (CLOSES_A_GATE.has(e.type)) {
+            saw.add("gate.decided-once");
+            const closed = gateClosures.get(s);
+            if (closed !== undefined) {
+              add(
+                "gate.decided-once",
+                seq,
+                `gate "${s}" left "open" at seq ${String(closed.seq)} with ${closed.type} and leaves it again here with ${e.type}`,
+              );
+            } else {
+              gateClosures.set(s, { seq, type: e.type });
+            }
           }
           openGates.delete(s);
         }
