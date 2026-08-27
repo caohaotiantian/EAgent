@@ -480,6 +480,19 @@ Naming that here rather than letting them sit unowned:
   `npm --prefix tui install` (ENOENT), `packages/eagent/CHANGELOG.md:25-31` still calls `tui/`
   the installable product, and several `packages/eagent/src` docstrings still describe it as
   live. The guard misses all of it because it only forbids `src/tui/`.
+- **`NEW` `loom score` REPORTS OUTCOME 0 FOR A RUN WHOSE GRAPH IT CANNOT RESOLVE**, which is
+  indistinguishable from a run that failed every assertion. `extractSignals` reads the assertion
+  evaluator nodes out of the SPEC, and `score` resolves a run's spec from the workspace's
+  `graphs/`. A candidate graph lives in `candidates/`, so it does not resolve. Driven, same run
+  and same command, twice: with the graph absent, `"signals": []`, outcome 0, score 0.111; with
+  the file copied into `graphs/`, `{"id":"S1","value":1,"evidence":"6/6 assertions passed"}`,
+  outcome 1, score 0.700. Every candidate cohort therefore scores near zero until somebody
+  notices, and nothing says why. **The third folded-without-its-graph defect in one session** —
+  the other two were `cohortPeers` folding peers without a spec (fixed, 7227a74) and this one's
+  own cousin in `loom score`'s judged run (already fixed). It must REFUSE: a measurement that
+  cannot find what it is measuring has not measured anything, and "when a guard cannot decide it
+  fails closed" applies to the scorer exactly as it applies to the gate. Evidence:
+  `docs/evolution-loop-2026-08-27.md` §4.
 
 ---
 ## A · Defects and unguarded behaviour
