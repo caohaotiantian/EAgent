@@ -1,0 +1,299 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "review-bench",
+    "project": "loom",
+    "version": 3,
+    "description": "CANDIDATE: the reviewer prompt tells the model to read what a diff REMOVES."
+  },
+  "policy": {
+    "posture": "out",
+    "budget": {
+      "costUsd": 2
+    },
+    "expansion": {
+      "maxNodes": 32,
+      "maxDepth": 1,
+      "maxFanout": 6,
+      "maxLoopIterations": 1
+    }
+  },
+  "channels": {
+    "cases": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "items": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "item": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "reviews": {
+      "type": "array",
+      "reduce": "append_ordered"
+    },
+    "verdicts": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "verdict0": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "verdict1": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "verdict2": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "verdict3": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "verdict4": {
+      "type": "object",
+      "reduce": "replace"
+    },
+    "verdict5": {
+      "type": "object",
+      "reduce": "replace"
+    }
+  },
+  "inputs": [
+    "cases"
+  ],
+  "outputs": [
+    "verdict0",
+    "verdict1",
+    "verdict2",
+    "verdict3",
+    "verdict4",
+    "verdict5"
+  ],
+  "nodes": [
+    {
+      "id": "fan",
+      "type": "function",
+      "reads": [
+        "cases"
+      ],
+      "writes": [
+        "items"
+      ],
+      "function": {
+        "ref": "function/bench-fan@stable"
+      }
+    },
+    {
+      "id": "review",
+      "type": "agent",
+      "reads": [
+        "item"
+      ],
+      "writes": [
+        "reviews"
+      ],
+      "policy": {
+        "budget": {
+          "costUsd": 0.3
+        }
+      },
+      "agent": {
+        "profile": "agent_profile/reviewer@stable",
+        "prompt": "prompt/review-v2@stable",
+        "maxTurns": 1
+      }
+    },
+    {
+      "id": "gather",
+      "type": "join",
+      "reads": [
+        "reviews"
+      ],
+      "writes": [
+        "reviews"
+      ],
+      "join": {
+        "branches": [
+          "review"
+        ],
+        "mode": "all",
+        "onBranchError": "fail"
+      }
+    },
+    {
+      "id": "collate",
+      "type": "function",
+      "reads": [
+        "reviews"
+      ],
+      "writes": [
+        "verdicts"
+      ],
+      "function": {
+        "ref": "function/bench-collate@stable"
+      }
+    },
+    {
+      "id": "check0",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict0"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check-0@stable",
+        "threshold": 0.5
+      }
+    },
+    {
+      "id": "check1",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict1"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check-1@stable",
+        "threshold": 0.5
+      }
+    },
+    {
+      "id": "check2",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict2"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check-2@stable",
+        "threshold": 0.5
+      }
+    },
+    {
+      "id": "check3",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict3"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check-3@stable",
+        "threshold": 0.5
+      }
+    },
+    {
+      "id": "check4",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict4"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check-4@stable",
+        "threshold": 0.5
+      }
+    },
+    {
+      "id": "check5",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "verdicts"
+      ],
+      "writes": [
+        "verdict5"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-check-5@stable",
+        "threshold": 0.5
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "f",
+      "from": "fan",
+      "to": "review",
+      "kind": "fanout",
+      "over": "items",
+      "as": "item",
+      "maxWidth": 6
+    },
+    {
+      "id": "j",
+      "from": "review",
+      "to": "gather",
+      "kind": "join"
+    },
+    {
+      "id": "c",
+      "from": "gather",
+      "to": "collate",
+      "kind": "seq"
+    },
+    {
+      "id": "k0",
+      "from": "collate",
+      "to": "check0",
+      "kind": "seq"
+    },
+    {
+      "id": "k1",
+      "from": "collate",
+      "to": "check1",
+      "kind": "seq"
+    },
+    {
+      "id": "k2",
+      "from": "collate",
+      "to": "check2",
+      "kind": "seq"
+    },
+    {
+      "id": "k3",
+      "from": "collate",
+      "to": "check3",
+      "kind": "seq"
+    },
+    {
+      "id": "k4",
+      "from": "collate",
+      "to": "check4",
+      "kind": "seq"
+    },
+    {
+      "id": "k5",
+      "from": "collate",
+      "to": "check5",
+      "kind": "seq"
+    }
+  ]
+}
