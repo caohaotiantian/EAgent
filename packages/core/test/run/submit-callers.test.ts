@@ -53,7 +53,11 @@ const CALLERS: Readonly<Record<string, { readonly sites: number; readonly why: s
     why:
       "supplies it ONLY with `--as`. The CLI authenticates nobody, so inventing a subject " +
       "would be the synthetic-subject failure the perimeter refuses one door over; recording " +
-      "none leaves the run in the permissive set.",
+      "none leaves the run in the permissive set. TWO verbs start runs — `loom run` and " +
+      "`loom promote --against-cohort`, which re-runs a candidate on recorded inputs — and " +
+      "they share `startAndDrive` so the answer is given once rather than twice. Keeping this " +
+      "at one site is the point: a second submit added beside it would be a second chance to " +
+      "forget.",
   },
   "run/engine.ts": {
     sites: 1,
