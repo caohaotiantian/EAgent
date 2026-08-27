@@ -178,7 +178,7 @@ const TERMINALS: readonly { readonly status: RunStatus; readonly event: NewEvent
     status: "cancelled",
     event: {
       type: "run.cancelled",
-      payload: { clean: true, unknownEffects: [], forced: false },
+      payload: { clean: true, unknownEffects: [] },
       actor: SYSTEM_ACTOR("operator"),
     },
   },
@@ -561,7 +561,7 @@ test("NO STATUS TRANSITION IS LEGAL FROM A TERMINAL STATE", async () => {
     { type: "run.resumed", payload: { by: "gate" }, actor: SYSTEM_ACTOR("gate-broker") },
     { type: "run.completed", payload: { outputs: { x: 1 }, usage: ZERO_USAGE }, actor: SYSTEM_ACTOR("executor") },
     { type: "run.failed", payload: { error: { class: "timeout", code: CODES.E_GATE_EXPIRED, message: "expired", retryable: false } }, actor: SYSTEM_ACTOR("gate-broker") },
-    { type: "run.cancelled", payload: { clean: true, unknownEffects: [], forced: false }, actor: SYSTEM_ACTOR("operator") },
+    { type: "run.cancelled", payload: { clean: true, unknownEffects: [] }, actor: SYSTEM_ACTOR("operator") },
   ];
 
   for (const first of TERMINALS) {
@@ -595,7 +595,7 @@ test("THE SWEEP DOES NOT FAIL A RUN THAT ALREADY ENDED", async () => {
   const gateId = await broker.raise(log, request({ slaMs: 60_000, onTimeout: "fail" }));
   // The legacy shape, written by hand: cancel WITHOUT closing the gate.
   await log.append([
-    { type: "run.cancelled", payload: { clean: true, unknownEffects: [], forced: false }, actor: SYSTEM_ACTOR("operator") },
+    { type: "run.cancelled", payload: { clean: true, unknownEffects: [] }, actor: SYSTEM_ACTOR("operator") },
   ]);
 
   const before = (await broker.project(log))!;

@@ -61,7 +61,7 @@ const ready = ev(2, "task.ready", { nodeId: "approve", branchPath: "", edgesIn: 
 const raised = ev(3, "gate.raised", { gateId: GATE, nodeId: "approve", policyRef: "p", contentDigest: "sha256:abc" });
 
 /** The run's own terminal event, late enough that "closed at end of journal" is visible. */
-const cancelledRun = ev(9, "run.cancelled", { clean: true, unknownEffects: [], forced: false }, { taskId: null });
+const cancelledRun = ev(9, "run.cancelled", { clean: true, unknownEffects: [] }, { taskId: null });
 
 function gateSpan(events: readonly JournalEvent[]): Span {
   const spans = spansFrom(events);

@@ -1843,7 +1843,6 @@ export class Engine {
           payload: {
             clean: (p?.unknownEffects ?? []).length === 0,
             unknownEffects: p?.unknownEffects ?? [],
-            forced: false,
           },
           actor: by,
         },

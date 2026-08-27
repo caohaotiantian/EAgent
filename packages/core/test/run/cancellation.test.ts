@@ -211,7 +211,7 @@ test("resolve REFUSES ON A TERMINAL RUN, whatever the gate's own state says", as
   await log.append([
     {
       type: "run.cancelled",
-      payload: { clean: true, unknownEffects: [], forced: false },
+      payload: { clean: true, unknownEffects: [] },
       actor: SYSTEM_ACTOR("operator"),
     },
   ]);

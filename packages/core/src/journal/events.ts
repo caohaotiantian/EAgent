@@ -165,21 +165,6 @@ export interface EventPayloads {
     readonly clean: boolean;
     /** Effects that started but whose outcome was never recorded. Never claim these did not happen. */
     readonly unknownEffects: readonly string[];
-    /**
-     * DECIDED FOR DELETION, AND BLOCKED ON THREE FILES THIS FIELD CANNOT REACH.
-     *
-     * It is written exactly once, as the literal `false` (`run/engine.ts:1846`), read by
-     * nothing, and named by no document. `clean` already carries the fact an operator asks
-     * for — whether the run stopped with its effects accounted for — and a second boolean
-     * that is always `false` reads like a forced cancel is a thing this engine can do.
-     *
-     * Removing it is not a one-file edit: dropping a REQUIRED payload field turns each
-     * existing literal into an excess-property error, so the change is
-     * `run/engine.ts:1846`, `test/telemetry/spans.test.ts:64` and
-     * `test/run/gate-claim.test.ts:368`, together, in one commit. Left declared rather than
-     * made optional on purpose — optional-and-unread is the same zombie wearing a `?`.
-     */
-    readonly forced: boolean;
   };
 
   // ── task lifecycle ───────────────────────────────────────────────────────

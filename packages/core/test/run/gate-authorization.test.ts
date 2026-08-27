@@ -587,7 +587,7 @@ test("A RUN THAT ENDED MID-TIMEOUT GETS NO EXPIRY WRITTEN ON TOP OF IT", async (
           events: [
             {
               type: "run.cancelled",
-              payload: { clean: true, unknownEffects: [], forced: false },
+              payload: { clean: true, unknownEffects: [] },
               actor: SYSTEM_ACTOR("operator"),
             },
           ],

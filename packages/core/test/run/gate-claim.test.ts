@@ -365,7 +365,7 @@ test("A CLAIM REFUSES ON A TERMINAL RUN, WHATEVER THE GATE ROW SAYS", async () =
   await b.log.append([
     {
       type: "run.cancelled",
-      payload: { clean: true, unknownEffects: [], forced: false },
+      payload: { clean: true, unknownEffects: [] },
       actor: SYSTEM_ACTOR("test"),
     },
   ]);

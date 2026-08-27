@@ -685,7 +685,7 @@ test("A CANCELLED RUN WITH AN OPEN GATE IS NOT ADMITTED — the status half of t
   await new RunLog(r.runId, { store: r.h.store, bus: r.h.bus }).append([
     {
       type: "run.cancelled",
-      payload: { clean: true, unknownEffects: [], forced: false },
+      payload: { clean: true, unknownEffects: [] },
       actor: SYSTEM_ACTOR("operator"),
     },
   ]);
