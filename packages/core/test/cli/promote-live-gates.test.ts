@@ -1,5 +1,5 @@
 /**
- * `L4-gated-at-least-as-much` HAD NO FIXTURE THAT COULD FAIL IT.
+ * THE LIVE PROMOTION DOOR'S TWO BLIND SPOTS, BOTH OF WHICH NEEDED A GRAPH THAT RAISES A GATE.
  *
  * `promote-live.test.ts` drives `loom promote --against-cohort` on a two-node graph that gates
  * nothing. Every assertion there is honest and none of them touches oversight, so
@@ -12,8 +12,8 @@
  *     # pass 8   fail 0
  *
  * A guard nothing would notice the deletion of is not a guard. This suite is the fixture that
- * notices, and the same deletion turns the test below red — the mutation is recorded in the
- * commit that added it.
+ * notices, and the same deletion turns test 1 below red — the mutation is recorded in the commit
+ * that added it.
  *
  * ── Why the deleted clause is not redundant with `6-oversight-diff` ─────────────
  *
@@ -21,9 +21,21 @@
  * so a candidate that DELETES a `human_gate` should be caught there. It is not.
  * `rule014And019Oversight` iterates `for (const n of spec.nodes)` over the CANDIDATE's nodes and
  * looks each one up in `baselinePostures`; a node the baseline had and the candidate does not is
- * never visited, so `GRAPH014_OVERSIGHT_LOOSENED` cannot fire for it. The test asserts that
+ * never visited, so `GRAPH014_OVERSIGHT_LOOSENED` cannot fire for it. Test 1 asserts that
  * directly: `6-oversight-diff` reports "no posture lowered" on a candidate that removed the only
  * gate in the graph. The journal comparison is the only thing that sees it.
+ *
+ * ── Test 2: the same fixture, pointed at the other blind spot ───────────────────
+ *
+ * NO GRAPH THAT RAISES A BLOCKING GATE CAN BE PROMOTED LIVE, and the refusal used to blame the
+ * wrong thing. `driveToRest` returns the moment the projection stops being `running`, so a
+ * candidate run parked on a `human_gate` comes back non-terminal, becomes an `unmeasured` entry,
+ * and `L2-every-input-measured` refuses. That refusal is correct and stays — a run nobody has
+ * answered is not a measurement — but it reported "a missing measurement", pointing an operator
+ * at a provider outage that never happened. Test 2 holds down that the cause is now named: the
+ * status is the run's own `awaiting_gate` rather than a hardcoded word, the gate and its node are
+ * on the page, and the message does not end on `loom approve` — answering these gates would not
+ * help, because the next promotion starts fresh runs that park in the same place.
  *
  * ── Offline, and structurally so ────────────────────────────────────────────────
  *
@@ -58,8 +70,8 @@ const BASE_PROMPT = "You are a helper. Say something about the question you are 
 /**
  * The candidate instruction. It carries the marker the stub answers precisely to, and it is
  * DELIBERATELY NO LONGER than the incumbent, so `5-prompt-size` is not what refuses anything
- * here. The whole point of the test is that the candidate is genuinely BETTER: a refusal over a
- * candidate nobody wanted proves nothing.
+ * here. The whole point of both tests is that the candidate is genuinely BETTER: a refusal over
+ * a candidate nobody wanted proves nothing.
  */
 const BETTER_PROMPT = "PRECISE-MODE. Answer the question exactly.\n";
 
@@ -269,6 +281,7 @@ interface Decision {
   readonly mode?: string;
   readonly promote: boolean;
   readonly paired?: { n: number; lower95: number };
+  readonly unmeasured?: { baselineRunId: string; candidateRunId: string; status: string }[];
   readonly checks: { id: string; ran: boolean; pass: boolean; detail: string }[];
 }
 
@@ -335,6 +348,48 @@ test("a candidate that removed the human gate is measurably better and is refuse
       ["L4-gated-at-least-as-much"],
       r.out,
     );
+    assert.equal(d.promote, false, r.out);
+    assert.equal(r.code, 1, r.err);
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── 2 · a candidate that KEEPS the gate, and cannot be judged at all ─────────
+
+test("a candidate whose runs park on a human gate is refused for waiting on a person, by name", async () => {
+  const w = await workspace();
+  try {
+    const r = await cli(liveArgs(w.dir, w.runIds[0]!, "gated-v2.json"));
+    const d = decisionOf(r.out);
+
+    // NOTHING WAS MEASURED. Every candidate run stops at the gate this process cannot answer,
+    // so there is no pair and no arithmetic — the refusal has to come from somewhere else.
+    assert.equal(d.paired?.n, 0, r.out);
+    assert.equal(d.unmeasured?.length, 6, r.out);
+
+    // THE STATUS IS THE RUN'S OWN, NOT A HARDCODED WORD. It used to be the string "incomplete"
+    // written at the call site regardless of what the run was doing, which is how a run waiting
+    // on a person came to be reported as a measurement that went missing.
+    for (const u of d.unmeasured ?? []) assert.equal(u.status, "awaiting_gate", JSON.stringify(u));
+
+    // AND THE REFUSAL NAMES THE CAUSE. `L2-every-input-measured` is still what refuses — this is
+    // not a loosening — but an operator reading it is now told that the runs are waiting on a
+    // human, which gate on which node, and that answering them will not make this command work.
+    const l2 = check(d, "L2-every-input-measured");
+    assert.equal(l2.ran, true, l2.detail);
+    assert.equal(l2.pass, false, l2.detail);
+    assert.match(l2.detail, /WAITING ON A PERSON, not missing/, l2.detail);
+    assert.match(l2.detail, /node "approve" is open/, l2.detail);
+    assert.match(l2.detail, new RegExp(`${w.runIds[0]!}`), l2.detail);
+    // AND IT DOES NOT PROMISE A PATH THAT DOES NOT WALK. Answering these gates by hand would not
+    // make the next promotion work — it starts its own runs — and the message says so rather than
+    // ending on `loom approve`.
+    assert.match(l2.detail, /the next promotion starts fresh runs that park in the same place/, l2.detail);
+    // THE OLD, WRONG CAUSE IS GONE. It read "…→incomplete … a missing measurement", which sent an
+    // operator looking for a provider outage that never happened.
+    assert.doesNotMatch(l2.detail, /a missing measurement/, l2.detail);
+
     assert.equal(d.promote, false, r.out);
     assert.equal(r.code, 1, r.err);
   } finally {

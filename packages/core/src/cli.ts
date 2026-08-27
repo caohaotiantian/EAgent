@@ -4088,17 +4088,22 @@ function runsFlag(args: Args): number | undefined {
  *
  * `decided` and `cancelled` are the resolved states, exactly as `ungatedActions` treats them: a
  * cancelled gate is one whose work never ran.
+ *
+ * `status` rides along because it comes out of the SAME fold. A candidate run that did not finish
+ * has to be described to `L2-every-input-measured`, and the call site used to describe it with the
+ * literal `"incomplete"` — a word no run ever holds. Folding it here means the run's status and
+ * its gate state are read from one projection of one journal rather than two.
  */
-function gateShapeOf(events: readonly JournalEvent[]): { decidedNodes: Set<string>; unresolved: string[] } {
+function gateShapeOf(events: readonly JournalEvent[]): { status: string; decidedNodes: Set<string>; unresolved: string[] } {
   const decidedNodes = new Set<string>();
   const unresolved: string[] = [];
   const p = foldRun(events);
-  if (p === undefined) return { decidedNodes, unresolved };
+  if (p === undefined) return { status: "incomplete", decidedNodes, unresolved };
   for (const g of Object.values(p.gates)) {
     if (g.state === "decided") decidedNodes.add(g.nodeId);
     else if (g.state !== "cancelled") unresolved.push(`gate "${g.gateId}" on node "${g.nodeId}" is ${g.state}`);
   }
-  return { decidedNodes, unresolved };
+  return { status: p.status, decidedNodes, unresolved };
 }
 
 /** The middle value, or `null` when there is nothing to take a median of. */
@@ -4312,7 +4317,20 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     // missing measurement — see `L2-every-input-measured` for why it is neither a zero nor a
     // silent drop, and why a FAILED run is paired rather than excused.
     if (candT.outcome.runStatus === "incomplete") {
-      unmeasured.push({ baselineRunId: t.runId, candidateRunId: runId, status: "incomplete" });
+      // WHY IT DID NOT FINISH, AND IT IS NOT ALWAYS THE SAME REASON. This pushed the literal
+      // `"incomplete"` — the fold's word for "no terminal event", not the run's own status — so
+      // a candidate PARKED ON A HUMAN GATE was reported to `L2-every-input-measured` as a
+      // measurement that went missing. Every graph with a `human_gate` lands here: `driveToRest`
+      // returns the moment the projection stops being `running`, and this process may not answer
+      // a gate on a person's behalf. Fail-closed and therefore safe, but the operator was told
+      // the wrong cause. Both fields come off the run's OWN journal, folded once.
+      const shape = gateShapeOf(candEvents);
+      unmeasured.push({
+        baselineRunId: t.runId,
+        candidateRunId: runId,
+        status: shape.status,
+        ...(shape.unresolved.length === 0 ? {} : { openGates: shape.unresolved }),
+      });
       continue;
     }
 

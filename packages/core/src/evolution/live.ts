@@ -71,8 +71,17 @@ export interface LivePair {
 export interface Unmeasured {
   readonly baselineRunId: RunId;
   readonly candidateRunId: RunId;
-  /** The candidate run's non-terminal status, verbatim. */
+  /** The candidate run's non-terminal status, folded from its own journal. */
   readonly status: string;
+  /**
+   * The gates still waiting on a person, when that is why the run stopped.
+   *
+   * PRESENT MEANS A DIFFERENT KIND OF FAILURE, and the distinction is the whole reason the field
+   * exists: a run parked here is not a measurement that went missing, it is a run doing exactly
+   * what its graph told it to do. Absent means the run stalled for some other reason, which is
+   * the case `L2` was originally written for.
+   */
+  readonly openGates?: readonly string[];
 }
 
 /**
@@ -314,6 +323,27 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
   //
   // The cost of this direction, stated: one flaky provider call refuses the whole promotion.
   // That is the fail-closed direction and it is cheap to retry.
+  //
+  // ── A RUN WAITING ON A PERSON IS NOT A MISSING MEASUREMENT ────────────────────
+  //
+  // The refusal was right and its REASON was wrong, which is its own defect: every candidate run
+  // of a graph containing a `human_gate` parks, is non-terminal, and was reported here as "a
+  // missing measurement" — telling an operator to look for a provider outage that never happened
+  // and hiding the fact that a whole class of graph is unpromotable by this mode. Driven on a
+  // gated fixture in `test/cli/promote-live-gates.test.ts`; before this branch existed the six
+  // entries all read `→incomplete`, a word no run's status ever holds.
+  //
+  // WHAT THIS DOES NOT DO, and the alternative is recorded because it is the tempting one:
+  // auto-resolve the gates the baseline also raised and decided the same way. That is the live
+  // door answering a gate on a human's behalf, and "a human may lower a posture; no automated
+  // path may" is the rule it would break — the candidate's own oversight decision would be made
+  // by the thing being judged. So the message names the gate instead, and it does NOT tell the
+  // operator to go and answer these ones: the runs are this command's own, and the next
+  // invocation starts fresh runs that park in the same place. Saying "approve them and retry"
+  // would be a path that does not walk.
+  const parked = input.unmeasured.filter((u) => (u.openGates?.length ?? 0) > 0);
+  const stalled = input.unmeasured.filter((u) => (u.openGates?.length ?? 0) === 0);
+  const listOf = (us: readonly Unmeasured[]): string => us.map((u) => `${u.baselineRunId}→${u.status}`).join(", ");
   checks.push({
     id: "L2-every-input-measured",
     ran: true,
@@ -322,8 +352,19 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
       input.unmeasured.length === 0
         ? "every selected input produced a terminal candidate run"
         : `${String(input.unmeasured.length)} of ${String(input.pairs.length + input.unmeasured.length)} selected input(s) ` +
-          `left the candidate non-terminal (${input.unmeasured.map((u) => `${u.baselineRunId}→${u.status}`).join(", ")}) — ` +
-          `a missing measurement, which is neither a zero nor an absence`,
+          `left the candidate non-terminal. ` +
+          (parked.length === 0
+            ? ""
+            : `${String(parked.length)} of those are WAITING ON A PERSON, not missing: ` +
+              `${parked.map((u) => `${u.baselineRunId}→${u.candidateRunId} ${u.status} (${(u.openGates ?? []).join("; ")})`).join(", ")}. ` +
+              `This mode cannot judge a graph that stops for a human — it starts its own runs and may not answer ` +
+              `their gates, and answering these would not help, because the next promotion starts fresh runs that ` +
+              `park in the same place. ` +
+              (stalled.length === 0 ? "" : "The rest stalled for another reason: ")) +
+          (stalled.length === 0
+            ? ""
+            : `${parked.length === 0 ? `(${listOf(stalled)}) — ` : `${listOf(stalled)} — `}` +
+              `a missing measurement, which is neither a zero nor an absence`),
   });
 
   checks.push({
