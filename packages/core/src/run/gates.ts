@@ -25,7 +25,7 @@
  */
 
 import { digest } from "../canonical.ts";
-import { CODES, err, toLoomError } from "../errors.ts";
+import { CODES, err, isLoomError, toLoomError } from "../errors.ts";
 import { gateDecisionOf, type GateDecision, type GateDecisionKind } from "../vocab.ts";
 import type { BatchingSpec, DedupeSpec } from "../graph/spec.ts";
 import { newGateId, type GateId, type NodeId, type RunId, type Seq, type TaskId } from "../ids.ts";
@@ -268,6 +268,24 @@ interface EphemeralGate {
    */
   readonly slaMs?: number;
 }
+
+/**
+ * A lap of `resolve` whose conditional commit lost the race, distinguished from a decision.
+ *
+ * A sentinel and not an exception, because it is not an error condition: it is the head
+ * having moved, which is what a compare-and-swap is FOR. `resolve` is the only reader.
+ */
+const SEQ_CONFLICT = Symbol("gate-decision-seq-conflict");
+
+/**
+ * How many times `resolve` may re-read, re-check and re-commit before it gives up.
+ *
+ * The same bound `RunLog.append` uses for the same reason: a conflict means a real writer
+ * got there first, so a lap is progress somebody else made, and an unbounded loop would
+ * turn a busy run into a spin. Exhausting it is `E_SEQ_CONFLICT` — a refusal, which is the
+ * direction a guard is allowed to fail in.
+ */
+const MAX_DECISION_LAPS = 8;
 
 /**
  * In-process gate broker over the journal.
@@ -1005,8 +1023,59 @@ export class HumanGateBroker {
    * rule held exactly for the door that remembered to check it — and not for the HTTP
    * control plane, the CLI, or the console. Callers may keep their own checks as
    * defence in depth; none of them may be the only one.
+   *
+   * IT GOES OUT THE CONDITIONAL DOOR, and for eight months it did not. `RunLog` has two,
+   * and their docstrings say which is which: `append` "retries on seq conflict because the
+   * events are unconditional", `commit` "NEVER retries — the caller decided something was
+   * true at `expectedSeq`… the primitive that turns at-least-once execution into
+   * exactly-once state". Everything this method does before the write is a decision
+   * conditional on the head: the run is not terminal AT `p.seq`, the gate is open AT
+   * `p.seq`. It then wrote through `append`, which re-reads the head and tries again — so
+   * two writers who both read `open` both landed, and the journal, which is the only
+   * authoritative state, held two contradictory decisions on one gate.
+   *
+   * REPRODUCED, two planes over one SQLite journal (`openWorkspace` twice on one directory,
+   * `Promise.allSettled` over a reject and an approve). Both calls returned FULFILLED and
+   * the journal read:
+   *
+   *   gate.decided 2 | run.resumed 2 | task.leased 3 | task.committed 2 | run.failed 2
+   *
+   * `projection.ts` already carried the diagnosis in prose — "`resolve` checks the gate at
+   * `p.seq` and then appends through the RETRYING `log.append`, so two people answering the
+   * same open gate in the same instant both land and the LAST one won" — and the fold was
+   * hardened against it while the write was left alone. A projection that cannot be fooled
+   * by a journal that is already wrong is not the same as a journal that is right.
+   *
+   * THE RETRY IS HERE AND IT IS NOT A RE-COMMIT. `commit` never retries, so a conflict must
+   * come back to the top: re-project, re-check the run and the gate against the NEW head,
+   * re-validate, re-commit. A bare `commit` at a refreshed seq would be the original defect
+   * with an extra step. A conflict raised by an unrelated append — another gate on the same
+   * run, a `gate.delivered` from the sweeper — is served by the next lap; a conflict raised
+   * by somebody else's decision on THIS gate meets `gate.state !== "open"` on the next lap
+   * and becomes `E_GATE_ALREADY_RESOLVED`, which is the right answer and the one the
+   * concurrent case never used to give.
+   *
+   * The idempotency entry is written before the commit and REMOVED on a conflict. It is
+   * what makes a double-click one decision, so it must exist while the write is in flight;
+   * a lap that wrote nothing must not leave the second attempt answering "already done"
+   * about a decision that never landed.
    */
   async resolve(log: RunLog, input: ResolveInput): Promise<{ resolved: boolean }> {
+    for (let attempt = 0; ; attempt++) {
+      const outcome = await this.#resolveOnce(log, input);
+      if (outcome !== SEQ_CONFLICT) return outcome;
+      if (attempt + 1 >= MAX_DECISION_LAPS) {
+        throw err.conflict(
+          CODES.E_SEQ_CONFLICT,
+          `gate "${input.gateId}" on run ${log.runId} could not be decided in ${MAX_DECISION_LAPS} attempts — the journal head moved under every one`,
+          { details: { gateId: input.gateId } },
+        );
+      }
+    }
+  }
+
+  /** One lap of `resolve`: read the head, decide against it, write conditional on it. */
+  async #resolveOnce(log: RunLog, input: ResolveInput): Promise<{ resolved: boolean } | typeof SEQ_CONFLICT> {
     const p = await this.project(log);
     // `gateOf`, NEVER a bare index. `p.gates["__proto__"]` answers with `Object.prototype`,
     // so a gate nobody raised used to reach the state check below and come back
@@ -1072,7 +1141,18 @@ export class HumanGateBroker {
 
     this.#idempotency.set(idemKey, checked.decision.kind);
 
-    await log.append([decidedEvent(gate, checked, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
+    try {
+      await log.commit(p.seq, [decidedEvent(gate, checked, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
+    } catch (e) {
+      // NOTHING LANDED, so nothing may be remembered as landed. Leaving the entry behind
+      // would make the retry — and every later redelivery of the same decision — answer
+      // `{ resolved: false }` about an event no journal holds.
+      if (isLoomError(e) && e.code === CODES.E_SEQ_CONFLICT) {
+        this.#idempotency.delete(idemKey);
+        return SEQ_CONFLICT;
+      }
+      throw e;
+    }
 
     await this.#announceRemainder(log, p, gate);
     this.#releasePayload(gate.gateId);

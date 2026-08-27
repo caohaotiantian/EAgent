@@ -1037,12 +1037,19 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "gate.decided")) {
     // ONLY FROM `open`, for the reason spelled out on `gate.cancelled` below: D7.3's other
     // three states are terminal for the gate, and a second transition does not retract the
-    // first one. This arm used to fold over ANY state, and it is reachable — `resolve`
-    // checks the gate at `p.seq` and then appends through the RETRYING `log.append`, so two
-    // people answering the same open gate in the same instant both land and the LAST one
-    // won. A rejection overwritten by an approval made against the same question is the
-    // whole defect; a gate a cancel had just closed reading back `decided` is the same
-    // event one door over.
+    // first one. This arm used to fold over ANY state, and a journal that reached it was
+    // reachable from `src/`: `resolve` checked the gate at `p.seq` and then appended
+    // through the RETRYING `log.append`, so two people answering the same open gate in the
+    // same instant both landed and the LAST one won. A rejection overwritten by an approval
+    // made against the same question is the whole defect; a gate a cancel had just closed
+    // reading back `decided` is the same event one door over.
+    //
+    // `resolve` now commits at `p.seq` — the door that never retries — so the second writer
+    // is refused instead of appended, and this arm no longer has a producer inside this
+    // build. It stays because it still has two: a cancel that closes the gate first (the
+    // door one over), and a store written by an older build, whose rows are already on disk
+    // and are not migrated by fixing the writer. A rule that holds only for logs this
+    // version produced is not a rule.
     const g = gateIn(p.gates, e.payload.gateId);
     if (g?.state !== "open") return;
     p.gates[e.payload.gateId] = {

@@ -667,13 +667,20 @@ async function leafGate(): Promise<{
   return { r, runId, log, broker, gate: openOf((await r.engine.projection(runId))!) };
 }
 
-test("TWO DECISIONS ON ONE GATE: THE FIRST ONE STANDS", async () => {
-  // Reachable through `src/` today, with no hand-written journal and no crash: `resolve`
-  // reads the gate, finds it open, and then appends — and `log.append` RETRIES on a seq
-  // conflict, because it is built for facts rather than for decisions conditional on the
-  // head. Two people answering the same gate in the same instant therefore both land, and
-  // the fold applied whichever arrived LAST. A rejection could be overwritten by an
-  // approval that was made against the same open gate.
+test("TWO DECISIONS ON ONE GATE: THE SECOND ONE IS REFUSED, AND WRITES NOTHING", async () => {
+  // WHAT THIS FILE USED TO ASSERT HERE, and why it changed. `resolve` read the gate, found
+  // it open, and then wrote through `log.append` — which RETRIES on a seq conflict, because
+  // it is built for facts rather than for decisions conditional on the head. So two people
+  // answering the same gate in the same instant BOTH LANDED: this test asserted "both calls
+  // were accepted" and "two decisions reached the journal", and the property it protected
+  // was only that the FOLD picked the first of the two. That is a projection defending
+  // itself against a journal that is already wrong, and the journal is the only
+  // authoritative state.
+  //
+  // `resolve` now goes out `log.commit(p.seq, …)`, the door whose docstring says it never
+  // retries, so the loser of the race re-reads, sees a gate that is no longer open, and is
+  // refused. The fold's first-one-wins arm is still real and still tested — one test down,
+  // against a hand-built journal, because `src/` can no longer produce that journal.
   const { r, runId, log, broker, gate } = await leafGate();
 
   const results = await Promise.allSettled([
@@ -685,11 +692,41 @@ test("TWO DECISIONS ON ONE GATE: THE FIRST ONE STANDS", async () => {
       idempotencyKey: "no",
     }),
   ]);
-  assert.equal(results.filter((x) => x.status === "fulfilled").length, 2, "both calls were accepted");
+  assert.equal(results.filter((x) => x.status === "fulfilled").length, 1, "exactly one of two concurrent answers may be accepted");
+  const refused = results.find((x) => x.status === "rejected") as PromiseRejectedResult | undefined;
+  assert.notEqual(refused, undefined, "the other must be REFUSED, not silently dropped");
+  assert.ok(isLoomError(refused!.reason), `the refusal must be a Loom error: ${String(refused!.reason)}`);
+  assert.equal(refused!.reason.code, CODES.E_GATE_ALREADY_RESOLVED, "…and it must say the gate is no longer open");
+
+  // THE HALF THAT MAKES IT A TEST OF THE WRITE DOOR AND NOT OF THE ERROR MESSAGE. A
+  // `resolve` that threw after appending would satisfy every line above.
+  const journal = await events(r.store, runId);
+  assert.equal(journal.filter((ev) => ev.type === "gate.decided").length, 1, "one decision in the journal, not two");
+  assert.equal(journal.filter((ev) => ev.type === "run.resumed").length, 1, "…and one resume beside it, not two");
+});
+
+test("A JOURNAL THAT ALREADY HOLDS TWO DECISIONS STILL READS BACK AS THE FIRST", async () => {
+  // The fold arm the test above used to cover, kept, and now reached the way residual 4's
+  // neighbour reaches its own: by writing the journal by hand. A store written by an older
+  // build contains exactly this shape — the write door is what changed, not the rows that
+  // are already on disk — so "the read model carries the first decision" has to stay true
+  // for a log this version would refuse to produce. A rule that holds only for logs this
+  // version writes is not a rule.
+  const { r, runId, log, broker, gate } = await leafGate();
+  await broker.resolve(log, { gateId: gate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "yes" });
+
+  await log.append([
+    {
+      type: "gate.decided",
+      payload: { gateId: gate.gateId, decision: "reject", latencyMs: 0 },
+      actor: lead,
+      taskId: gate.taskId,
+    },
+    { type: "run.resumed", payload: { by: "gate" }, actor: lead },
+  ]);
 
   const decisions = (await events(r.store, runId)).filter((ev) => ev.type === "gate.decided");
-  assert.equal(decisions.length, 2, "the shape under test: two decisions reached the journal");
-
+  assert.equal(decisions.length, 2, "the precondition: a journal with two decisions on one gate");
   const p = (await r.engine.projection(runId))!;
   assert.equal(
     p.gates[gate.gateId]?.decision,
