@@ -112,7 +112,7 @@ import {
   type TimeoutAction,
 } from "./gates.ts";
 import { RunLog } from "./log.ts";
-import { PolicyEngine, classificationOf, isHardToUndo, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
+import { PolicyEngine, classificationOf, isHardToUndo, type BudgetLimits, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 import { HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type GateView, type HookPoint, type NodeDecision, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
 // would be a real module cycle.
@@ -1175,7 +1175,25 @@ export class Engine {
       // larger — `#contextFor` overwrites `runUsd` with whatever it is handed.
       this.#policyOpts.budget?.runUsd,
     );
-    const ctx = this.#contextFor(runId, input.graph, budgetUsd);
+    // AND THE OTHER TWO THIRDS OF THE SAME DECLARATION. `graph/spec.ts` lists
+    // `["costUsd", "tokens", "wallMs"]`, and until now the loop above ran for the first
+    // alone: `budget: {tokens: 200000}` compiled clean and bound nothing, which is the same
+    // silence the comment above condemns one paragraph earlier for dollars.
+    //
+    // Same fold, deliberately, rather than a second shape: three sources and the SMALLEST
+    // present one wins, so a graph may lower an operator's ceiling and never raise it. There
+    // is no `input.budgetTokens`/`input.budgetWallMs` sibling for `budgetUsd` because the one
+    // caller that passes it is `#runSubgraph`, carving a DOLLAR slice for a child — a run
+    // ceiling in the other two dimensions is not sliced, and a child therefore inherits its
+    // parent's tokens and time only through `subgraph.completed`, which folds the child's whole
+    // usage into the parent AFTER it finishes. Stated because it is a real gap, not a design.
+    const budgetTokens = minDefined(input.graph.spec.policy?.budget?.tokens, this.#policyOpts.budget?.runTokens);
+    const budgetWallMs = minDefined(input.graph.spec.policy?.budget?.wallMs, this.#policyOpts.budget?.runWallMs);
+    const ctx = this.#contextFor(runId, input.graph, {
+      ...(budgetUsd === undefined ? {} : { runUsd: budgetUsd }),
+      ...(budgetTokens === undefined ? {} : { runTokens: budgetTokens }),
+      ...(budgetWallMs === undefined ? {} : { runWallMs: budgetWallMs }),
+    });
 
     // Durable at ACK: run.submitted + the compiled graph + the manifest. NOT any
     // execution — a 202 means "this WILL run", never "this HAS run".
@@ -1273,7 +1291,18 @@ export class Engine {
       // a posture and only adds spend, so arriving here twice cannot loosen anything.
       if (!ctx.policySeeded) {
         ctx.policySeeded = true;
-        ctx.policy.restore({ escalations: p.escalations, ceilings: p.ceilings, spentUsd: p.usage.costUsd });
+        // ALL THREE DIMENSIONS FROM ONE `UsageRecord`. `p.usage` is the fold `chargeUsage`
+        // builds out of the effect records, so tokens and provider time are reconstructible
+        // across a restart for exactly the reason dollars are — no new durable state, no new
+        // event. Restoring dollars alone would have handed a resumed run its full TOKEN budget
+        // back, which is this same invariant broken in a new dimension.
+        ctx.policy.restore({
+          escalations: p.escalations,
+          ceilings: p.ceilings,
+          spentUsd: p.usage.costUsd,
+          spentTokens: p.usage.inputTokens + p.usage.outputTokens,
+          spentWallMs: p.usage.wallMs,
+        });
         // AND THE EVIDENCE `#recordEvidence` HOLDS — the taint set and E4's failure streak.
         // Both lived only on `RunContext`, so a crash, a deploy or a `loom serve` restart
         // deleted them: E8 between the tainting write and the hard-to-undo action — measured,
@@ -2280,7 +2309,7 @@ export class Engine {
    * and it is the only one available without pattern arithmetic nobody should have to reason
    * about at a security boundary.
    */
-  #contextFor(runId: RunId, graph: RunGraph, budgetUsd?: number, inherited?: readonly string[]): RunContext {
+  #contextFor(runId: RunId, graph: RunGraph, limits?: BudgetLimits, inherited?: readonly string[]): RunContext {
     const existing = this.#runs.get(runId);
     if (existing !== undefined) return existing;
     const own = graph.spec.policy?.capabilities;
@@ -2303,7 +2332,11 @@ export class Engine {
       policy: new PolicyEngine({
         ...this.#policyOpts,
         ...(grantBound === undefined ? {} : { allowlist: grantBound }),
-        ...(budgetUsd === undefined ? {} : { budget: { ...this.#policyOpts.budget, runUsd: budgetUsd } }),
+        // MERGED OVER the deployment's own limits, never replacing them: `submit` has already
+        // min-folded each dimension against `#policyOpts.budget`, so a key present here is a
+        // ceiling that is at most the operator's. A dimension the fold left undefined is absent
+        // from `limits` entirely and the deployment's own number survives the spread.
+        ...(limits === undefined ? {} : { budget: { ...this.#policyOpts.budget, ...limits } }),
         onEscalate: (rule, from, to, scope, detail) => {
           ctx.escalationWrites.push(
             this.#serialize(() =>
@@ -3777,12 +3810,73 @@ export class Engine {
             `node "${w.node.id}" would exceed its $${nodeCapUsd.toFixed(2)} budget ` +
               `($${usage.costUsd.toFixed(4)} spent by this task, $${estimateUsd.toFixed(4)} estimated for this turn)`,
             {
-              details: { scope: `node:${w.node.id}`, limit: nodeCapUsd, spent: usage.costUsd, reserved: 0, requested: estimateUsd },
+              details: {
+                dimension: "costUsd",
+                scope: `node:${w.node.id}`,
+                limit: nodeCapUsd,
+                spent: usage.costUsd,
+                reserved: 0,
+                requested: estimateUsd,
+              },
             },
           );
         }
 
-        reservation = ctx.policy.reserve(`node:${w.node.id}`, estimateUsd);
+        // THE SAME CEILING IN TOKENS. `estimateTurnTokens` is the worst case for THIS request —
+        // the transcript that is about to be sent, plus the output ceiling — so the refusal
+        // lands before the provider is reached rather than after it bills, which is the whole
+        // difference between a budget and a receipt.
+        //
+        // `inputTokens + outputTokens` and nothing else, matching `PolicyEngine`'s
+        // `billedTokens`: `UsageRecord` calls the cache fields disjoint from `inputTokens` and
+        // `reasoningTokens` a subset of `outputTokens`, so a wider sum would double-count one
+        // and add two the provider bills separately, and a ceiling that over-counts refuses work
+        // that fit.
+        const estimateTokensForTurn = estimateTurnTokens(shaped);
+        const nodeCapTokens = w.node.policy?.budget?.tokens;
+        const taskTokens = usage.inputTokens + usage.outputTokens;
+        if (nodeCapTokens !== undefined && taskTokens + estimateTokensForTurn > nodeCapTokens) {
+          throw err.exhausted(
+            CODES.E_BUDGET_EXHAUSTED,
+            `node "${w.node.id}" would exceed its ${String(nodeCapTokens)}-token budget ` +
+              `(${String(taskTokens)} spent by this task, ${String(estimateTokensForTurn)} estimated for this turn)`,
+            {
+              details: {
+                dimension: "tokens",
+                scope: `node:${w.node.id}`,
+                limit: nodeCapTokens,
+                spent: taskTokens,
+                reserved: 0,
+                requested: estimateTokensForTurn,
+              },
+            },
+          );
+        }
+
+        // AND IN PROVIDER TIME, which is the one that cannot be estimated. There is no worst
+        // case for a duration until the call has been made, so this is settled-only: it stops
+        // the turn AFTER the ceiling is crossed and never the turn that crosses it. A node with
+        // `maxTurns: 1` therefore has no wall-time bound at all, which is stated rather than
+        // papered over — see `PolicyEngine.settle` for the same limitation at the run ceiling.
+        const nodeCapWallMs = w.node.policy?.budget?.wallMs;
+        if (nodeCapWallMs !== undefined && usage.wallMs >= nodeCapWallMs) {
+          throw err.exhausted(
+            CODES.E_BUDGET_EXHAUSTED,
+            `node "${w.node.id}" has spent ${String(usage.wallMs)} ms of provider time, reaching its ${String(nodeCapWallMs)} ms budget`,
+            {
+              details: {
+                dimension: "wallMs",
+                scope: `node:${w.node.id}`,
+                limit: nodeCapWallMs,
+                spent: usage.wallMs,
+                reserved: 0,
+                requested: 0,
+              },
+            },
+          );
+        }
+
+        reservation = ctx.policy.reserve(`node:${w.node.id}`, estimateUsd, estimateTokensForTurn);
         // Checked at RESERVE as well as at commit. Under reserve-worst-case, committed
         // exposure peaks at the reservation and falls back when `settle` credits the
         // real cost — so a check only at commit sees the trough and never fires. "80%
@@ -3810,7 +3904,15 @@ export class Engine {
                 // instead of reporting the budget failure it actually had. That was unreachable
                 // while `reserve` was the only thing that could throw here, because a reservation
                 // cannot exceed a limit that does not exist. A node ceiling can, and did.
-                payload: { scope: `run:${ctx.runId}`, limitUsd: exceededLimitUsd(le, ctx.policy.spentUsd), action },
+                // AND WHICH OF THE THREE IT WAS. `limitUsd` alone could not tell an auditor
+                // whether the run died for money, for tokens or for provider time; the two
+                // fields below are read off the same `details` every throw site now sets.
+                payload: {
+                  scope: `run:${ctx.runId}`,
+                  limitUsd: exceededLimitUsd(le, ctx.policy.spentUsd),
+                  action,
+                  ...exceededDimension(le),
+                },
                 actor: SYSTEM_ACTOR("policy"),
                 taskId: w.task.taskId,
               },
@@ -3888,7 +3990,7 @@ export class Engine {
       // spend is not charged twice for one call; the task-local `usage` still accumulates the
       // recorded turn, which is what keeps the node ceiling and `excessUsage` reading the same
       // numbers on attempt 2 that they read on attempt 1.
-      ctx.policy.settle(reservation, servedTurn === undefined ? turnUsage.costUsd : 0);
+      ctx.policy.settle(reservation, servedTurn === undefined ? turnUsage : 0);
       usage = addUsage(usage, turnUsage);
 
       // `postModel` — BEFORE the append, so the journal records what the filter produced and
@@ -4107,7 +4209,7 @@ export class Engine {
       // "Never widened" has to survive delegation or it means nothing, which is precisely the
       // shape T6 turned out to be: a guarantee a child escaped. The parent's own `subgraph`
       // node reaches no tool, so the COMPILE-time check cannot see this one at all.
-      this.#contextFor(childRunId, childGraph, slice, ctx.grantBound);
+      this.#contextFor(childRunId, childGraph, slice === undefined ? undefined : { runUsd: slice }, ctx.grantBound);
       await this.submit({
         graph: childGraph,
         inputs,
@@ -4248,7 +4350,11 @@ export class Engine {
     // The child's spend counts against the parent's budget. Without this a graph could
     // exceed its declared cost by nesting, which is the one thing GRAPH009 proves at
     // compile time cannot happen.
-    ctx.policy.settle(ctx.policy.reserve(`subgraph:${w.node.id}`, 0), childP.usage.costUsd);
+    // THE WHOLE RECORD, so the child's tokens and provider time reach the parent's ceilings the
+    // way its dollars already did — and so that `PolicyEngine`'s three totals agree with the
+    // `p.usage` a restart re-seeds them from, which folds `subgraph.completed` into all four
+    // fields at once.
+    ctx.policy.settle(ctx.policy.reserve(`subgraph:${w.node.id}`, 0), childP.usage);
 
     return { status: "succeeded", writes, usage };
   }
@@ -5321,7 +5427,20 @@ export class Engine {
     const committed = ctx.policy.spentUsd + ctx.policy.reservedUsd;
     this.#escalate(ctx, "budget_warning", undefined, {
       spentUsd: Number(committed.toFixed(6)),
-      remainingUsd: Number(ctx.policy.remainingUsd.toFixed(6)),
+      // DROPPED WHEN THERE IS NO DOLLAR CEILING. `remainingUsd` is `Infinity` whenever the
+      // deployment set no `runUsd`, and `canonicalize` refuses a non-finite number on the
+      // durable write path. That was unreachable while `nearLimit` consulted `runUsd` alone —
+      // no dollar ceiling meant no warning — and became reachable the moment it started firing
+      // for tokens and provider time too: measured as `E_INTERNAL: non-finite number Infinity
+      // at detail.remainingUsd` killing `WALL TIME SURVIVES A RESTART TOO`, a run whose only
+      // declared ceiling was `wallMs`. The same defect `exceededLimitUsd` already fixed one
+      // field over, and the same fix: write the number when there is one.
+      ...(Number.isFinite(ctx.policy.remainingUsd) ? { remainingUsd: Number(ctx.policy.remainingUsd.toFixed(6)) } : {}),
+      // The other two totals, because E2 now fires for them: a row saying only "80% of the
+      // budget" cannot tell a reader which of three budgets, and the escalation is supposed to
+      // be the thing that says why.
+      spentTokens: ctx.policy.spentTokens,
+      spentWallMs: ctx.policy.spentWallMs,
     });
   }
 
@@ -6681,8 +6800,64 @@ export type { GateDecision };
  */
 function exceededLimitUsd(e: LoomError, spentUsd: number): number {
   const limit = (e.details as { readonly limit?: unknown } | undefined)?.limit;
+  // A NON-DOLLAR REFUSAL NAMES NO DOLLAR CEILING, so it takes the fallback below and this row's
+  // `limitUsd` carries the run's exposure rather than a limit — the same honest answer the
+  // fallback already gave for an error that arrived without the field. `dimension` and `limit`
+  // are what say which number actually bound; see `exceededDimension`.
+  const dimension = (e.details as { readonly dimension?: unknown } | undefined)?.dimension;
+  if (dimension !== undefined && dimension !== "costUsd") return spentUsd;
   return typeof limit === "number" && Number.isFinite(limit) ? limit : spentUsd;
 }
+
+/**
+ * WHICH of the declared triple refused the work, for the journal.
+ *
+ * Built conditionally rather than defaulted, for two reasons that point the same way.
+ * `exactOptionalPropertyTypes` is on, so an explicit `dimension: undefined` is not the shape an
+ * absent key has; and `budget.exhausted` rows already in journals carry neither field, so ABSENT
+ * has to keep meaning `costUsd` — an append-only log cannot go back and say so. A `limit` that is
+ * not a finite number is dropped rather than written, because `canonicalize` refuses a non-finite
+ * number on the durable write path and a budget failure that fails to journal is worse than one
+ * that journals less.
+ */
+function exceededDimension(e: LoomError): { readonly dimension?: "costUsd" | "tokens" | "wallMs"; readonly limit?: number } {
+  const d = (e.details as { readonly dimension?: unknown; readonly limit?: unknown } | undefined) ?? {};
+  if (d.dimension !== "costUsd" && d.dimension !== "tokens" && d.dimension !== "wallMs") return {};
+  return {
+    dimension: d.dimension,
+    ...(typeof d.limit === "number" && Number.isFinite(d.limit) ? { limit: d.limit } : {}),
+  };
+}
+
+/**
+ * The WORST-CASE billed tokens of one model request, for the reservation.
+ *
+ * The input side is measurable — it is the transcript about to be posted — and the output side is
+ * not, so it is bounded by the request's own `maxTokens` and by `DEFAULT_MAX_OUTPUT_TOKENS` when
+ * the request declares none. `MockModelAdapter.estimateOf` prices exactly this sum, which is why
+ * the number matches what the dollar reservation already assumes rather than inventing a second
+ * story about the same request.
+ *
+ * OVER-ESTIMATING IS THE SAFE DIRECTION and under-estimating is not: a reservation exists so that
+ * 25 fan-out branches cannot each see the same remaining balance, and one that is too small lets
+ * them through. `estimateTokens` is chars/4, so a request full of long tokens estimates low —
+ * the padding from `maxTokens` is what keeps the reservation conservative in that case.
+ */
+function estimateTurnTokens(req: ModelRequest): number {
+  let n = estimateTokens(req.system);
+  for (const m of req.messages) n += estimateTokens(m.content);
+  for (const t of req.tools) n += estimateTokens(t.name) + estimateTokens(t.description);
+  return n + (req.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS);
+}
+
+/**
+ * What a request with no declared `maxTokens` is assumed to be able to emit.
+ *
+ * The same 1,024 `MockModelAdapter.estimateOf` uses for the dollar estimate, so the two
+ * reservations describe one request. It is deliberately a floor on the ESTIMATE and not a cap on
+ * the request: nothing here limits what the provider may return.
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
 
 /**
  * The verdict on a finished model turn: `undefined` when it is an answer, an error when it is not.
