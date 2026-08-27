@@ -426,20 +426,31 @@ takes a cohort and never a set of inputs, `--runs` says how many and never which
 recordings used are the oldest by runId. Picking a candidate to match the corpus remains a thing
 a human can do, and nothing mechanical stops it.
 
-*Fails today:* a candidate promoted over that cohort **against a live provider** because it
-measurably beat the baseline. The mechanism is now there and the exam is frozen by construction;
-what is missing is a run of it with a key. The command is
+**DONE 2026-08-27. A CANDIDATE WAS PROMOTED OVER THE COHORT, LIVE.** The clause that had
+stood since this list was rewritten is met, and `docs/evolution-loop-2026-08-27.md` carries the
+whole record.
 
-```
-loom promote <candidate.json> --against-cohort <runId> --runs N \
-  --workspace <ws> --models-file <models.json> --as <you>
-```
+    loom promote candidates/review-bench-v3.json --against-cohort <runId> --runs 20 \
+      --workspace <ws> --models-file <glm.json> --as caohaotiantian        -> exit 0
 
-exit 0 promotes, 1 refuses, and the verdict lands on `operator.command` with `mode:
-"live-cohort"`. Offline the whole loop closes —
-`node --test packages/core/test/evolution/close-the-loop.test.ts`, 284 ms — the live mode's own
-mechanism is driven in `test/cli/promote-live.test.ts` (8 tests, ~600 ms, stub provider), and
-live, `examples/demo/close-the-loop.sh` now runs end to end and refuses.
+    ✓ L1-paired-improvement   paired mean Δscore 0.1356 (sd 0.0767, n 20), one-sided 95%
+                              lower bound 0.1059 — needs > 0. Sign test 20W/0L/0T, p 0.0000
+    ✓ 3-cost                  cost ratio 0.58× — $0.304869 vs $0.527962
+    ✓ 5-prompt-size           growth 136.7%, bought by a paired mean above the bloat offset
+    ⊘ 8-determinism           DID NOT RUN, and is not reported as passed
+
+The candidate is a PROMPT — identical graph, identical functions, one changed ref — which is the
+case D6 aims at and the replayed door structurally cannot see. It was committed at `67c8ab8`
+before it was ever run, on the argument that a diff's removed lines carry removed guarantees, and
+not iterated afterwards. The journaled row carries `mode: "live-cohort"`, the cohort's
+statistics, every pair, and `checksNotRun`, and holds no suite fields at all, so a live
+certificate cannot be mistaken for a replayed one.
+
+**What this cost and what it does not prove.** $1.29 for the corpora plus $0.30 for the
+promotion. n=20 pairs at ONE input shape, each run once, so within-input model variance is folded
+into the between-graph difference — the conservative direction, and the 20–0 sweep is well clear
+of it, but a corpus of one input shape is not a corpus of many. The decision rule's weaknesses
+are in `TODO.md` with the two things that would strengthen it.
 
 ### 6 · Cut `packages/eagent` to its tag and delete it
 

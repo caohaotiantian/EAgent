@@ -98,3 +98,58 @@ over them, and S5 — the model's own report that it is done — carries weight 
               --input "$(cat bench-cases.json)"
     loom score <runId> --workspace <ws>      # needs the graph in graphs/, see §4
     loom cohort <runId> --workspace <ws>
+
+---
+
+## 6 · The promotion, through the verb
+
+`loom promote --against-cohort` judges a candidate by RUNNING it on inputs taken out of the
+baseline recordings, and comparing the PAIRED score differences. It exists because the replayed
+door serves every model turn from the recording, so a prompt candidate replays byte-identically
+and that door can only refuse it.
+
+    node packages/core/src/cli.ts promote candidates/review-bench-v3.json \
+      --against-cohort 01M11C1S4E6G48HGWVH0W6ZG7X --runs 20 \
+      --workspace <ws> --models-file <glm.json> --as caohaotiantian
+    EXIT=0
+
+    ✓ 3-cost                     cost ratio 0.58× (max 1.1×) — $0.304869 vs $0.527962
+    ✓ 5-prompt-size              prompt growth 136.7% (bought by the paired mean)
+    ✓ 6-oversight-diff           no posture lowered
+    ⊘ 8-determinism              DID NOT RUN … It is not reported as passed
+    ✓ L1-paired-improvement      paired mean Δscore 0.1356 (sd 0.0767, n 20),
+                                 one-sided 95% lower bound 0.1059 — needs > 0.
+                                 Sign test 20W/0L/0T, p 0.0000
+    ✓ L2-every-input-measured    every selected input produced a terminal candidate run
+    ✓ L3-paired-count            20 paired measurement(s) (need ≥ 6)
+    ✓ L4-gated-at-least-as-much  the candidate gated everywhere the baseline did
+    ✓ L5-candidate-earned-it     the candidate scored above 0 on 20 of 20 input(s)
+    "promote": true
+
+Read back out of the journal on the anchor run:
+
+    mode          live-cohort
+    promote       true
+    checksNotRun  ["8-determinism"]
+    cohort        {n: 32, p50CostUsd: 0.021457, p90Score: 0.744, weightsDigest: sha256:61a833d4…}
+    paired        {n: 20, mean: 0.135576, sd: 0.076671, lower95: 0.105934,
+                   wins: 20, losses: 0, ties: 0, signTestP: 0.000001}
+    actor         {kind: human, subject: caohaotiantian, via: console}
+
+and carrying no suite fields, so a live certificate cannot be read as a replayed one.
+
+**A twenty-to-nothing sweep.** Every one of the twenty inputs scored higher under the candidate.
+The bound is what gates — `lower95 > 0`, strictly, because `>= -margin` certifies "we could not
+detect harm", which is a different sentence from "measurably beat".
+
+## 7 · What it still does not prove
+
+- **One input shape.** All 20 pairs are the same six diffs. Pairing removes input variance that
+  is not there, and each input was run ONCE, so within-input model nondeterminism is folded into
+  the between-graph difference. The sweep is well clear of it; a wider corpus would still be a
+  different and better claim.
+- **`8-determinism` did not run** and cannot in this mode. The verdict says so in three places.
+- **`L4-gated-at-least-as-much` has no end-to-end coverage** — see `TODO.md` §A0. This graph
+  raises no gates, so it passed vacuously here.
+- **A graph that DOES raise a blocking gate cannot be promoted through this door at all**, and
+  the refusal blames a missing measurement rather than a waiting human. Also §A0.
