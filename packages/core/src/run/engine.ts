@@ -1202,8 +1202,25 @@ export class Engine {
       ctx.streaks.record(nodeId, ev.payload.status !== "failed");
       const node = ctx.index.byId.get(nodeId);
       if (node === undefined) continue;
-      applyTaint(ctx.tainted, node, ev.payload.writes);
-      applySecretFlow(ctx.carriesSecret, node, ev.payload.writes, ctx.graph.spec.channels);
+      // AN EXTERNALISED CHANNEL IS STILL A WRITE, and this fold is the only place that could
+      // forget it. Payload externalisation moves a large value out of `writes` and leaves a
+      // `PayloadRef` under the same channel name in `external` — so a fold reading `writes`
+      // alone sees a node that wrote nothing, and the taint and secret-carry sets come back
+      // from a restart SHORT. Reproduced by this lane's reviewer: an irreversible tool ran
+      // under a human de-escalation with no gate and no escalation, because the channel that
+      // should have been tainted was the one that had been externalised.
+      //
+      // The live path (`#recordEvidence`) is not affected and must not be "fixed" to match: it
+      // folds `outcome.writes` BEFORE the journal write externalises anything, so it already
+      // sees every channel. This is a restart-only gap, which is the class
+      // `test/run/oversight-survives-restart.test.ts` exists to name.
+      //
+      // Both folds read `Object.keys` and never a value, so a `PayloadRef` standing in for the
+      // bytes is exact rather than an approximation — the channel NAME is the whole input.
+      const written =
+        ev.payload.external === undefined ? ev.payload.writes : { ...ev.payload.writes, ...ev.payload.external };
+      applyTaint(ctx.tainted, node, written);
+      applySecretFlow(ctx.carriesSecret, node, written, ctx.graph.spec.channels);
     }
   }
 

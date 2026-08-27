@@ -24,6 +24,7 @@ import {
 } from "../../src/run/escalation.ts";
 import { postureRank } from "../../src/vocab.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
+import { memoryPayloads } from "../../src/journal/payloads.ts";
 import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ToolManifestLite } from "../../src/graph/validate.ts";
@@ -299,6 +300,12 @@ const ANSWER: MockScript = (_req, turn) =>
   turn % 2 === 0
     ? { toolCalls: [{ id: "c", name: "net.fetch", arguments: {} }], finishReason: "tool_use" }
     : { text: JSON.stringify({ ok: true }), finishReason: "stop" };
+
+/** Over EXTERNALISE_ABOVE_BYTES (64 KiB), so the write leaves `writes` and becomes a handle. */
+const BIG_ANSWER: MockScript = (_req, turn) =>
+  turn % 2 === 0
+    ? { toolCalls: [{ id: "c", name: "net.fetch", arguments: {} }], finishReason: "tool_use" }
+    : { text: JSON.stringify({ ok: true, filler: "x".repeat(80 * 1024) }), finishReason: "stop" };
 
 const compileEsc = (s: GraphSpec = spec()) =>
   compileOrThrow({ spec: s, resolver: resolver(), tools: TOOLS, tenantCapabilities: CAPS });
@@ -823,4 +830,54 @@ test("EVERY escalation names its rule in the journal", async () => {
       `"${rule}" is not a rule in the table — an anonymous escalation is indistinguishable from a bug`,
     );
   }
+});
+
+test("E8 — TAINT SURVIVES A RESTART FOR AN EXTERNALISED CHANNEL TOO", async () => {
+  // THE SIXTH MEMBER, and it is not a new counter — it is the same counter losing its input
+  // because the payload shape changed underneath it. Payload externalisation moves a channel
+  // value over 64 KiB out of `task.committed.writes` and leaves a `PayloadRef` under the same
+  // name in `.external`. `#restoreEvidence` folded `writes` alone, so a restart rebuilt the
+  // taint set WITHOUT the externalised channel — and the charge ran under a human
+  // de-escalation with no gate and no escalation.
+  //
+  // The sibling above passes and could not catch this: its `notes` is small, so nothing is
+  // externalised and `writes` still carries the channel. The size IS the test.
+  const shared = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const payloads = memoryPayloads();
+  const proc = (): Rig =>
+    rig(BIG_ANSWER, { store: shared, bus: new InProcessEventBus({ store: shared }), sleep: async () => {}, payloads });
+
+  const graph = compileEsc(
+    spec({
+      nodes: [
+        ...spec().nodes.filter((x) => x.id === "gather"),
+        { id: n("ask"), type: "human_gate", reads: ["goal"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+        { id: n("charge"), type: "tool", reads: ["notes"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
+      ],
+      edges: [
+        { id: e("go"), from: n("gather"), to: n("ask"), kind: "seq" },
+        { id: e("go2"), from: n("ask"), to: n("charge"), kind: "seq" },
+      ],
+    }),
+  );
+
+  const first = proc();
+  const runId = await first.engine.submit({ graph, inputs: { goal: "x" } });
+  await first.engine.deescalate(runId, `run:${runId}`, "on", "watching", { kind: "human", id: "u:alice" });
+  const parked = await first.engine.advance(runId);
+  assert.equal(parked.status, "awaiting_gate", "process 1 parks on the unrelated gate");
+
+  // PRECONDITION: the channel really was externalised, or this test is the sibling above
+  // wearing a longer name.
+  const beforeRestart = await first.engine.projection(runId);
+  assert.ok(beforeRestart?.external["notes"] !== undefined, "precondition: `notes` must be externalised");
+
+  const second = proc();
+  second.engine.attach(runId, graph);
+  const gateId = Object.values(parked.gates).find((g) => g.state === "open")!.gateId;
+  await second.engine.resolveGate(runId, { gateId, decision: { kind: "approve" }, actor: { kind: "human", subject: "u:alice", via: "console" }, idempotencyKey: "k1" });
+  const p = await second.engine.advance(runId);
+
+  assert.equal(p.status, "awaiting_gate", `the charge must still gate after a restart: ${p.status}`);
+  assert.deepEqual(second.ran, [], "and the charge has not happened");
 });
