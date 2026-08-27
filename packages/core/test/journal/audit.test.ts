@@ -367,16 +367,25 @@ test("gate.decided-once — one gate, two contradictory answers, both durable", 
   ]);
   assert.deepEqual(rulesHit(deduped), [], "a deduped gate is raised, annotated and decided ONCE");
 
-  // …and two DIFFERENT gates each decided once is the ordinary batch.
+  // …and the ordinary batch, IN THE SHAPE `decideBatch` ACTUALLY WRITES IT. This fixture used
+  // to hold a bare `gate.batch_decided` with no per-member rows, which is a journal `src/`
+  // never produces — so it reported the batch neighbour safe while the real path violated five
+  // times over. `HumanGateBroker.decideBatch` writes one `gate.decided` PER MEMBER and THEN
+  // one `gate.batch_decided` naming every member in `gateIds`: the roll-up is a summary of
+  // closures that already happened, never a closure of its own. The live counterpart of this
+  // fixture drives the real engine — see gate-saturation.test.ts, "A HEALTHY BATCH APPROVAL
+  // PASSES auditRun".
   const twoGates = fixture(() => [
     ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "a@root#0" }),
     ev("gate.raised", { gateId: "g1", nodeId: "a", policyRef: "p", contentDigest: "d" }, { taskId: "a@root#0" }),
     ev("policy.decided", { decision: "allow", posture: "on", reasons: [] }, { taskId: "b@root#0" }),
     ev("gate.raised", { gateId: "g2", nodeId: "b", policyRef: "p", contentDigest: "d" }, { taskId: "b@root#0" }),
+    ev("gate.decided", { gateId: "g1", decision: "approve", latencyMs: 1 }, { actor: HUMAN, taskId: "a@root#0" }),
+    ev("gate.decided", { gateId: "g2", decision: "approve", latencyMs: 1 }, { actor: HUMAN, taskId: "b@root#0" }),
     ev("gate.batch_decided", { batchId: "b1", gateIds: ["g1", "g2"], decision: "approve", latencyMs: 1 }, { actor: HUMAN }),
     DONE(),
   ]);
-  assert.deepEqual(rulesHit(twoGates), [], "one batch decision closing two gates closes each of them once");
+  assert.deepEqual(rulesHit(twoGates), [], "the roll-up beside its members closes each gate exactly once");
 });
 
 test("run.terminal-is-last-and-once — a run that ended twice, and a run that kept going after it ended", () => {

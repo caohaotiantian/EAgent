@@ -31,6 +31,7 @@ import type { BatchingSpec, DedupeSpec, GraphSpec, HumanGateNode, RunGraph } fro
 import { newRunId, type EdgeId, type GateId, type NodeId, type RunId, type Seq, type TaskId } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { auditRun } from "../../src/journal/audit.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { ConsoleChannel, GateDispatcher, type DeliveryChannel } from "../../src/run/delivery.ts";
 import { HumanGateBroker, type GateBatch, type GateRequest } from "../../src/run/gates.ts";
@@ -2348,4 +2349,40 @@ test("EACH MEMBER KEEPS ITS OWN CLOCK, AND THE BATCH SHOWS THE EARLIEST", async 
     [b.clock.t + 90_000, b.clock.t + 30_000],
     "and the journal still carries one deadline per gate, which is what the sweep reads",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The auditor must not fire on the product's own healthy output
+// ---------------------------------------------------------------------------
+
+test("A HEALTHY BATCH APPROVAL PASSES `auditRun` — the roll-up is not a second closure", async () => {
+  // `gate.decided-once` counts the events that take a gate out of `open`. `decideBatch`
+  // writes one `gate.decided` per member AND one `gate.batch_decided` naming every member
+  // in `gateIds`, so a set holding both closed each of the five gates twice and `loom
+  // audit` exited 1 on a run this very engine had just written. The roll-up is a summary
+  // of rows that already closed their own gates, never an independent closure.
+  const r = rig(fanoutGatedSpec({ batching: BATCHING }));
+  const runId = await parkAll(r);
+  const batch = (await r.engine.openGateBatches(runId))[0]!;
+  await r.engine.resolveGateBatch(runId, {
+    batchId: batch.batchId,
+    decision: { kind: "approve" },
+    actor: alice,
+    idempotencyKey: "one-click",
+    expectManifest: batch.manifestDigest,
+  });
+
+  const events: JournalEvent[] = [];
+  for await (const e of r.store.read(runId, 1 as Seq)) events.push(e);
+  // Non-vacuous: the rule has to have SEEN this journal, or a green report means nothing.
+  const report = auditRun(events);
+  assert.ok(report.checked.includes("gate.decided-once"), "the rule must have examined this journal");
+  assert.deepEqual(
+    report.violations.filter((v) => v.rule === "gate.decided-once"),
+    [],
+    `a healthy batch approval must not violate: ${JSON.stringify(report.violations)}`,
+  );
+  // And the roll-up really is present, or this test is asserting about a shape that never occurs.
+  assert.equal(events.filter((e) => e.type === "gate.batch_decided").length, 1);
+  assert.equal(events.filter((e) => e.type === "gate.decided").length, 5);
 });

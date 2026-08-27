@@ -28,6 +28,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { HumanGateBroker, type GateRequest } from "../../src/run/gates.ts";
 import { RunLog } from "../../src/run/log.ts";
 import { replayRun } from "../../src/run/replay.ts";
+import { auditRun } from "../../src/journal/audit.ts";
 import {
   DOCS,
   SKELETON_TENANT_CAPS,
@@ -481,6 +482,35 @@ test("…but the timeout path still answers its own gate", async () => {
 
   const seq = await events({ store }, RUN);
   assert.equal(seq.some((e) => e.type === "gate.decided"), true, "the declared default still decided a restricted gate");
+});
+
+test("A HEALTHY default_action SWEEP PASSES `auditRun` — the timeout row is not a closure", async () => {
+  // `gate.timeout{default_action}` and the `gate.decided` that answers it are ONE append,
+  // for the same gate, on purpose — gates.ts merged them to delete the window a second
+  // sweeper raced in. A `gate.decided-once` rule that counted `gate.timeout` as a closure
+  // therefore fired on every healthy SLA expiry. gates.ts says which of the two moves the
+  // gate where it writes them: the timeout row "is folded as a deliberate no-op — the gate
+  // stays `open` and its deadline does not move". Only `fail` ends a gate by itself.
+  const { store, log, clock } = brokerRig();
+  const broker = new HumanGateBroker({ now: () => clock.t });
+  await broker.raise(
+    log,
+    request({ approvers: ["u:alice"], slaMs: 60_000, onTimeout: "default_action", defaultAction: { kind: "approve" } }),
+  );
+  await broker.sweepTimeouts(log, 1_060_000);
+
+  const seq = await events({ store }, RUN);
+  // The shape this is about has to actually be in the journal, or the assertion is vacuous.
+  assert.equal(seq.filter((e) => e.type === "gate.timeout").length, 1);
+  assert.equal(seq.filter((e) => e.type === "gate.decided").length, 1);
+
+  const report = auditRun(seq);
+  assert.ok(report.checked.includes("gate.decided-once"), "the rule must have examined this journal");
+  assert.deepEqual(
+    report.violations.filter((v) => v.rule === "gate.decided-once"),
+    [],
+    `a healthy default_action sweep must not violate: ${JSON.stringify(report.violations)}`,
+  );
 });
 
 // ── the sweep is a sweep: one gate cannot stop it ────────────────────────────

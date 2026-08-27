@@ -157,7 +157,31 @@ const ADVANCES_A_RUN: ReadonlySet<string> = new Set([
  * `projection.ts` folds no arm for it at all. The `gate.decided` beside it is the closure,
  * and that one is counted.
  */
-const CLOSES_A_GATE: ReadonlySet<string> = new Set(["gate.decided", "gate.batch_decided", "gate.timeout", "gate.cancelled"]);
+/**
+ * Does THIS event take a gate out of `open` ON ITS OWN?
+ *
+ * Not "does it mention a gate being closed", which is what the first version asked and why
+ * it fired on healthy journals the product itself writes. Two of those writes name a gate
+ * that a DIFFERENT row in the SAME append is closing:
+ *
+ *   - `gate.batch_decided` is a ROLL-UP. `HumanGateBroker.decideBatch` writes one
+ *     `gate.decided` per member and THEN one `gate.batch_decided` listing every member in
+ *     `gateIds`, so counting both closed each member twice. Driven: a healthy batch approval
+ *     produced `gate.decided-once` violations and `loom audit` exited 1 on its own output.
+ *   - `gate.timeout{default_action}` is folded as a DELIBERATE NO-OP, and `gates.ts` says so
+ *     where it writes it — "the gate stays `open` and its deadline does not move". The
+ *     `decidedEvent` beside it in the same append is what closes the gate. `escalate` is the
+ *     same shape: it moves to the next tier and the gate stays open. Only `fail` ends a gate
+ *     by itself, and it does so without any `gate.decided`.
+ *
+ * Narrowing this does not weaken the property the rule exists for. Two planes both answering
+ * one gate write two `gate.decided` rows, and that is still counted twice.
+ */
+function closesAGate(type: string, payload: Record<string, unknown>): boolean {
+  if (type === "gate.decided" || type === "gate.cancelled") return true;
+  if (type !== "gate.timeout") return false;
+  return str(payload["action"]) === "fail";
+}
 
 /** Total reads. A journal this cannot parse is exactly the journal it exists to diagnose. */
 function obj(v: unknown): Record<string, unknown> | undefined {
@@ -535,7 +559,7 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           // both by the same subject, and the fold showed the first while the record held
           // both. `gates.ts` now commits at `p.seq` so this build cannot write it; a store
           // written by an older one already has.
-          if (CLOSES_A_GATE.has(e.type)) {
+          if (closesAGate(e.type, p)) {
             saw.add("gate.decided-once");
             const closed = gateClosures.get(s);
             if (closed !== undefined) {
