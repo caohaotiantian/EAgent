@@ -381,6 +381,32 @@ closed and the next member will look like one of these.
   tested. Both are policy that replay does not exercise. Naming them because "the gate now sees
   prompt candidates" is easy to over-read.
 
+  **`loom promote --against-cohort` sees both, and that is not the same as closing this.** The
+  live mode RUNS the candidate, so a turn it does not take is a turn nobody pays for and a budget
+  it lowers is a ceiling a real adapter tests. But it is a different door with a different cost —
+  real money, a real provider, and a verdict that carries `checksNotRun: ["8-determinism"]` — so
+  the OFFLINE gate is still blind to these two, which is what this entry says. It stays open.
+
+- **`NEW` — JUDGING A CANDIDATE LIVE IS BUILT, AND ITS DECISION RULE IS WEAK AT SMALL n.**
+  `loom promote <candidate> --against-cohort <runId> [--runs N]` reads the baseline cohort out of
+  the journal, takes the inputs out of `run.submitted.inputs`, runs the candidate on them, and
+  decides on a one-sided 95 % lower bound on the PAIRED score differences. `MIN_PAIRED_RUNS` is 6,
+  argued from the exact sign test (n = 4 tops out at p = 0.0625, so no result at four pairs can
+  clear 0.05). At six pairs the t bound assumes roughly symmetric differences and there is no way
+  to check that from six observations. Two things that would strengthen it and are unowned:
+  a Wilcoxon signed-rank bound (uses magnitudes AND is distribution-free; needs an exact
+  null distribution table, which is a page of numerics under the zero-dependency rule), and
+  repeated runs per input so within-input model variance is separable from between-graph
+  difference. Both are real work and neither is required for the mechanism to be honest, because
+  the verdict journals `n`, `sd` and `signTestP` and a reader can disagree with it.
+
+- **`NEW` STILL OPEN — THE LIVE MODE'S COST CHECK DIVIDES TOTALS, like the replayed one.**
+  `3-cost` is `Σcandidate / Σbaseline ≤ 1.1` in both modes, where D10.d says medians. Pairing now
+  makes the median EXPRESSIBLE — the CLI computes and journals `medianCostRatio` — and it is
+  reported rather than gated, because a pair whose baseline cost $0 makes the ratio undefined and
+  a check that sometimes has no answer is worse than one clear rule. Deciding whether the median
+  should gate, and what an undefined pair does to it, belongs to whoever owns D10.d.
+
 - **`NEW` STILL OPEN — `gateCandidate` PROMOTES A CANDIDATE THAT PASSES NOTHING.** `2-non-inferior`
   is a non-inferiority test and returns `pass: true` at "0.0% vs 0.0%"; `validateSuite`'s
   `minMustPass` defaults to 0. Driven through the shipped `loom promote` on the real review-bench
@@ -403,7 +429,11 @@ closed and the next member will look like one of these.
   run, with `caseRunIds` naming all of them. No kernel edit and no `Kernel-seam:` trailer — which
   was the right trade for a first demonstration and is not an answer to the question. Whether the
   kernel needs a graph-scoped durable fact, and whether that is one event type or a second
-  keyspace, is unowned.
+  keyspace, is unowned. **The live mode makes the same borrow and is now the SECOND caller**: it
+  anchors on the first SELECTED baseline run and names every pair's `baselineRunId`. Never on a
+  candidate run — those were produced by a graph no human approved, and hanging the record of a
+  judgement inside the thing being judged is a different defect. Two callers borrowing one
+  coordinate is the argument for deciding this rather than a reason to.
 
 - **`NEW` STILL OPEN — `run.compiled` CARRIES NODE COUNTS, NOT THE SPEC.** `{graphHash, nodes,
   edges, resolutionManifest}` — so a trajectory's S1/S4/S5 depend on a file on disk, and
