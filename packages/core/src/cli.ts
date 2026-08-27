@@ -375,6 +375,17 @@ export function parseArgs(argv: readonly string[]): Args {
  * `hostname:pid` gives across machines and processes and the counter gives across two
  * `openWorkspace` handles in one process — a shape the deployment harness produces on purpose
  * and a `loom run` beside a `loom serve` produces by accident.
+ *
+ * WHAT THIS BUYS TODAY, AND WHAT IT DOES NOT. The exclusion arm above is in
+ * `LeasedScheduler.select`, and `new LeasedScheduler` appears ZERO times in `src/`:
+ * `Engine` takes `opts.scheduler ?? new InProcessScheduler()` and `openWorkspace` passes no
+ * scheduler, so nothing on the product path reaches that line. Naming the plane does not
+ * switch cross-process exclusion on; it makes the identity CORRECT for the day something
+ * wires the leased scheduler, and — the part that pays now — it puts a real name in
+ * `task.leased.workerId`, so a journal written by two planes says WHICH plane did what
+ * instead of attributing everything to one `worker-0`. `test/deployment/two-planes.test.ts`
+ * reads those names back out of the journal and is the reason this is not speculative.
+ * The scheduler having no caller is TODO.md §E.1, and it is that item, not this one.
  */
 let workspaceOrdinal = 0;
 function planeWorkerId(): string {
@@ -3551,8 +3562,33 @@ export async function main(argv: readonly string[]): Promise<number> {
         // residual tension is real and is written down rather than solved: `StateStore` is keyed
         // by runId, so a fact whose subject is a GRAPH has to borrow some run's coordinate. It
         // borrows the FIRST CASE's, and `caseRunIds` names all of them.
-        const anchor = suite.cases[0]?.runId;
-        if (anchor !== undefined && (await journalOf(ws, anchor)).length > 0) {
+        // WHERE THE DECISION IS WRITTEN, and it is written or the promotion does not stand.
+        //
+        // The anchor used to be `suite.cases[0]` and the append was wrapped in "…if that run
+        // happens to have a journal". A suite whose FIRST case names a missing recording, while
+        // its others replay and pass, therefore granted a promotion and recorded nothing —
+        // exit 0, stdout silent, and no row anywhere for a reader to find. The journal is the
+        // only authoritative state, so a promotion nobody can reconstruct is not one.
+        //
+        // Any case with a journal will do: they are all recordings this promotion was judged
+        // over, and the decision names its own suite. If NONE has one, that is refused below
+        // rather than skipped — a guard that cannot record its decision fails closed.
+        let anchor: RunId | undefined;
+        for (const c of suite.cases) {
+          if ((await journalOf(ws, c.runId)).length > 0) {
+            anchor = c.runId;
+            break;
+          }
+        }
+        if (anchor === undefined) {
+          process.stderr.write(
+            `refusing to certify: no case in suite "${suite.name}" v${String(suite.version)} names a run with a journal ` +
+              `in ${ws.dataDir}, so this decision cannot be recorded and nothing could audit it later. ` +
+              `Freeze the suite against runs from THIS workspace, or point --workspace at the one that holds them.\n`,
+          );
+          return 2;
+        }
+        {
           await ws.store.append({
             runId: anchor,
             expectedSeq: await ws.store.head(anchor),

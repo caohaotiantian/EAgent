@@ -435,8 +435,10 @@ API. Neither is buildable today and the reason is measured, not aesthetic:
 
 - There is nothing to pin. `GRAPH_API_VERSION` accepts exactly one value; `loom.dev/v2` and a
   missing field both fail `GRAPH000_API_VERSION`. No default has changed that an old graph would
-  want preserved, so the event would be written by every run and read by nothing — the
-  `run.cancelled.clean` shape already flagged for deletion in `journal/events.ts`.
+  want preserved, so the event would be written by every run and read by nothing — the shape
+  `run.cancelled.forced` is already DECIDED FOR DELETION in `journal/events.ts`: written
+  once as the literal `false`, read by nothing, named by no document. (Its neighbour `clean`
+  is the field that survives, because an operator does ask what it answers.)
 - "An extension using a proposed API cannot be published" has no publish boundary to attach to.
   `@stable` here means a file landed in `resources/<kind>/` and `readResources` picked it up at
   boot. There is no registry and no publish step to refuse at.

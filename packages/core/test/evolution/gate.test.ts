@@ -6,6 +6,7 @@
  */
 
 import test from "node:test";
+import { sameContent } from "../../src/canonical.ts";
 import assert from "node:assert/strict";
 
 import { gateCandidate, runEvalSuite, validateSuite, type EvalReport, type EvalSuite } from "../../src/evolution/gate.ts";
@@ -493,4 +494,34 @@ test("a suite with no cases certifies nothing, whatever composition says", () =>
     validateSuite({ name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [], composition: { minCases: 0 } }).suiteValid,
     false,
   );
+});
+
+test("a channel expectation is compared by CANONICAL form, not by the order its author typed", async () => {
+  // `EvalCase.expect.channels` says "Compared by canonical form" and was compared with
+  // `JSON.stringify`, which preserves insertion order. A suite naming the same expected value
+  // with its keys in another order failed the case — and told its author the CANDIDATE
+  // differed, which is the one thing that had not happened.
+  const h = harness();
+  const runId = await recordRun(h);
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: { name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [{ id: "a", mustPass: true, runId, expect: {} }] },
+    graph: compileSkeleton(),
+    engine: engineOf(h),
+  });
+  const produced = report.cases[0]!.replay.replayed.channels["merged"] as Record<string, unknown>;
+  assert.ok(produced !== undefined && Object.keys(produced).length > 1, "need a multi-key object to reorder");
+
+  // Same entries, reversed insertion order — the only difference.
+  const reordered = Object.fromEntries(Object.entries(produced).reverse());
+  assert.notEqual(JSON.stringify(produced), JSON.stringify(reordered), "the orders really do differ as text");
+
+  const r = await runEvalSuite({
+    store: h.store,
+    suite: { name: "s", version: 1, frozen: true, frozenAt: 1_000, cases: [{ id: "a", mustPass: true, runId, expect: { channels: { merged: reordered } } }] },
+    graph: compileSkeleton(),
+    engine: engineOf(h),
+  });
+  assert.deepEqual(r.cases[0]!.reasons, [], "same content in another key order is the same content");
+  assert.equal(r.passRate, 1);
 });

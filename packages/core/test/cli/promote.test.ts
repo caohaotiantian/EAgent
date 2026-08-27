@@ -352,3 +352,41 @@ test("loom promote: the two shapes that would make a promotion vacuous are refus
     w.dispose();
   }
 });
+
+test("loom promote: a decision it cannot record is refused, not granted quietly", async () => {
+  // The anchor used to be `suite.cases[0]` and the append was conditional on that ONE run
+  // having a journal. A suite whose first case names a recording this workspace does not
+  // hold — while its other cases replay and pass — therefore granted a promotion, exited 0,
+  // and wrote no row anywhere. The journal is the only authoritative state, so that is a
+  // decision that did not happen wearing the exit code of one that did.
+  const w = workspace();
+  try {
+    const ids = await record(w.dir, 3);
+    const suite = freeze(w.dir, ids);
+    const cand = join(w.dir, "candidates", "bench-v2.json");
+    const base = join(w.dir, "graphs", "bench.json");
+
+    // (1) FIRST case missing, the rest real: the promotion still stands and is still recorded,
+    // on a case that HAS a journal. This is the case that used to promote silently.
+    const ghostFirst = join(w.dir, "ghost-first.json");
+    const parsed = JSON.parse(readFileSync(suite, "utf8")) as { cases: { runId: string }[] };
+    writeFileSync(ghostFirst, JSON.stringify({ ...parsed, cases: [{ ...parsed.cases[0], runId: "01AAAAAAAAAAAAAAAAAAAAAAAA" }, ...parsed.cases.slice(1)] }));
+    // The VERDICT is not the point here and is allowed to go either way — the missing case is
+    // `mustPass`, so `1-must-pass` refuses it, and a refusal is journaled exactly as a grant is.
+    // What is being pinned is that the decision LANDS SOMEWHERE, on a run this workspace holds.
+    await cli(["promote", cand, "--baseline", base, "--suite", ghostFirst, "--workspace", w.dir]);
+    const recorded = (await Promise.all(ids.map((id) => promotionRows(w.dir, id)))).flat();
+    assert.equal(recorded.length, 1, "the decision is recorded on a run this workspace actually holds");
+    assert.equal(recorded[0]!.kind, "evolution.promote");
+
+    // (2) EVERY case missing: nothing can carry the decision, so it is refused rather than
+    // granted — and the refusal says how to fix it.
+    const allGhosts = join(w.dir, "all-ghosts.json");
+    writeFileSync(allGhosts, JSON.stringify({ ...parsed, cases: parsed.cases.map((c, i) => ({ ...c, runId: `01AAAAAAAAAAAAAAAAAAAAAAA${String.fromCharCode(65 + i)}` })) }));
+    const r2 = await cli(["promote", cand, "--baseline", base, "--suite", allGhosts, "--workspace", w.dir]);
+    assert.notEqual(r2.code, 0, `an unrecordable decision must not exit 0:\n${r2.out}${r2.err}`);
+    assert.match(`${r2.out}${r2.err}`, /cannot be recorded/);
+  } finally {
+    w.dispose();
+  }
+});

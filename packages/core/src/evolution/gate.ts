@@ -20,6 +20,7 @@
  *
  */
 
+import { sameContent } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import type { RunId } from "../ids.ts";
 import type { StateStore } from "../journal/store.ts";
@@ -191,7 +192,12 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
     reasons.push(`status ${p.status}, expected ${c.expect.status}`);
   }
   for (const [channel, want] of Object.entries(c.expect.channels ?? {})) {
-    if (JSON.stringify(p.channels[channel]) !== JSON.stringify(want)) {
+    // `sameContent`, not `JSON.stringify` — which is KEY-ORDER SENSITIVE, while
+    // `EvalCase.expect.channels` says one line up that it is "compared by canonical form".
+    // Measured: two suites naming the same expected verdict with `{pass, score}` and
+    // `{score, pass}` disagreed, so a case failed for the order its author typed the keys in
+    // and the suite author was told the CANDIDATE differed.
+    if (!sameContent(p.channels[channel], want)) {
       reasons.push(`channel "${channel}" differs`);
     }
   }

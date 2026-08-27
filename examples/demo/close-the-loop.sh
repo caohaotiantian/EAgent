@@ -108,21 +108,28 @@ node -e '
     detail:`${c.id}: ${c.defect?"FOUND":"correctly clean"}`,
   }]));
   writeFileSync(out,JSON.stringify({
-    name:"review-bench", version:1, frozen:true, frozenAt:Date.now(), generatedBy:"maintainer",
+    name:"review-bench", version:1, frozen:true, frozenAt:Date.now(), generatedBy:"corpus:review-bench",
     cases:picked.map((runId,i)=>({ id:`c${i}`, runId, mustPass:i<2, expect:{status:"succeeded", channels:truth} })),
     composition:{minCases:6,minMustPass:2},
   },null,2));
   console.log(`  frozen over ${picked.length} recordings -> ${out}`);
 ' "$OUT/ids.json" "$WS/bench-cases.json" "$OUT/suite.json"
+echo "  generatedBy is the CORPUS, not the maintainer, and that is not cosmetic: check"
+echo "  10-separate-lineage refuses a suite and a candidate written by the same hand, so"
+echo "  naming both \"maintainer\" would fail the promotion by construction however good the"
+echo "  candidate was. These cases ARE recordings — nobody wrote them — so the corpus is also"
+echo "  the true answer. Drop --proposed-by entirely and 9 and 10 skip instead, which is the"
+echo "  documented human path."
 echo "  NOTE: this writes a MAXIMAL exam — every case, every diff correct. That is the honest"
 echo "  starting point and probably not the one to promote against: a model that gets 5 of 6"
 echo "  right fails every case of it. Open $OUT/suite.json and decide what correct means before"
 echo "  anybody proposes a candidate. Deciding it afterwards is the exam written for a student."
 echo "  Driven offline against the mock, where the model flags nothing, this exact shape gives:"
 echo "    ✗ 1-must-pass  must-pass failures: c0, c1"
-echo "    ✓ 2-non-inferior  pass rate 0.0% vs baseline 0.0% (Δ 0.0pp)     ← and note that this"
-echo "  PASSES at 0 vs 0. \`gateCandidate\` is a non-inferiority test; the must-pass floor is what"
-echo "  refuses a candidate nothing measured. exit=1."
+echo "    ✓ 2-non-inferior  pass rate 0.0% vs baseline 0.0% (Δ 0.0pp)     ← still a PASS, because"
+echo "  every comparison in \`gateCandidate\` is a ratio and a tie satisfies all of them. Two"
+echo "  absolute floors are what refuse a candidate that measured nothing: 1-must-pass, and"
+echo "  2a-candidate-earned-it (candidate passed 0 of 6). exit=1."
 
 echo "== 5 · promote — replay only, no model, no tool"
 set +e
