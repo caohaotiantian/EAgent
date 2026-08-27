@@ -340,6 +340,24 @@ export interface RunProjection {
    */
   readonly fanouts: Readonly<Record<string, { readonly nodeId: NodeId; readonly width: number }>>;
   readonly suspendedReason?: "gate" | "operator" | "budget" | "backoff";
+  /**
+   * AN OPERATOR STOPPED THIS RUN, and only an operator starts it again.
+   *
+   * SEPARATE FROM `status` ON PURPOSE, and the separation is the whole guard. A pause
+   * writes `run.suspended{reason:"operator"}`, which folds `status` to `interrupted` — and
+   * `status` is not a durable record of that decision, because `gate.decided` ships an
+   * unconditional `run.resumed`, so answering ANY open gate folds the run straight back to
+   * `running`. A pause that lived in `status` alone would therefore be lifted by a human
+   * answering an unrelated question, and the work the operator stopped would run. That is
+   * "no automated path may loosen" broken by a path nobody would call a permission change.
+   *
+   * So this is its own fact, set by `run.suspended{reason:"operator"}` and cleared by
+   * `run.resumed{by:"operator"}` and by nothing else: a `by:"gate"` or `by:"timer"` resume
+   * moves `status` and leaves this standing. `Engine.#advanceSerially` reads THIS, not the
+   * status, and a run whose gate has been answered while paused therefore sits at
+   * `running` with `paused: true` until a human says otherwise.
+   */
+  readonly paused: boolean;
 }
 
 interface MutableProjection {
@@ -379,6 +397,7 @@ interface MutableProjection {
   budgetExhausted: boolean;
   fanouts: Record<string, { nodeId: NodeId; width: number }>;
   suspendedReason?: "gate" | "operator" | "budget" | "backoff";
+  paused: boolean;
 }
 
 /**
@@ -510,6 +529,7 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     escalations: {},
     ceilings: {},
     budgetExhausted: false,
+    paused: false,
     sawSubmitted: false,
     fanouts: {},
   };
@@ -535,6 +555,7 @@ function freeze(p: MutableProjection): RunProjection {
     unknownEffects: [...p.openEffects].sort(),
     startedEffects: [...p.everStarted].sort(),
     budgetExhausted: p.budgetExhausted,
+    paused: p.paused,
     fanouts: { ...p.fanouts },
     ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
     ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
@@ -776,6 +797,9 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "run.suspended")) {
     p.status = e.payload.reason === "gate" ? "awaiting_gate" : "interrupted";
     p.suspendedReason = e.payload.reason;
+    // The operator's suspension is ALSO recorded off `status`, because `status` is about to
+    // be moved by the first `run.resumed` any subsystem writes. See `RunProjection.paused`.
+    if (e.payload.reason === "operator") p.paused = true;
     return;
   }
   if (isEvent(e, "run.resumed")) {
@@ -792,6 +816,11 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     // projection nobody can use to diagnose one.
     p.status = "running";
     delete p.suspendedReason;
+    // ONLY AN OPERATOR CLEARS AN OPERATOR'S PAUSE. `by` is `"gate"` for every resume the
+    // gate broker writes and `"timer"` for the sweeper's — both automated, both arriving
+    // without anybody deciding the run should carry on. Taking the status back is right
+    // (the gate really was answered); taking the pause back is the loosening this refuses.
+    if (e.payload.by === "operator") p.paused = false;
     return;
   }
   if (isEvent(e, "run.completed")) {

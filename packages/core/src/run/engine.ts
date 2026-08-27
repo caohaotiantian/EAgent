@@ -1301,7 +1301,12 @@ export class Engine {
       // fix and is its own change: `openGates` in particular would have to rebuild a
       // rendered payload from the log rather than read it from the broker. Until then
       // retirement is the caller's call, which is why `forget` is public.
-      if (isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") {
+      // `p.paused` IS READ HERE AND NOT `p.status`. An operator pause folds the status to
+      // `interrupted`, which the next clause already stops on — but a `gate.decided` landing
+      // afterwards carries an unconditional `run.resumed` and folds it back to `running`, and
+      // then this loop would dispatch the wave the operator stopped. The pause is a separate
+      // durable fact for exactly that reason; see `RunProjection.paused`.
+      if (p.paused || isTerminal(p.status) || p.status === "awaiting_gate" || p.status === "interrupted") {
         // Only TERMINAL. `awaiting_gate` and `interrupted` are runs that will be driven
         // again, and their context holds the taint set, the leases and the expression cache
         // that driving them needs.
@@ -1849,6 +1854,97 @@ export class Engine {
         },
       ]),
     );
+  }
+
+  /**
+   * STOP TAKING NEW WORK, AND LOSE NOTHING THAT IS ALREADY IN FLIGHT.
+   *
+   * The difference from `cancel` is what it does NOT do: no `ctx.abort.abort()`, no gate
+   * closure, no cascade, no terminal event. A wave that is running when this lands runs to
+   * completion and commits — `#advanceSerially` re-projects at the top of every iteration,
+   * so the pause is observed between waves and never inside one. That is the only place a
+   * pause can be honest: aborting mid-effect is `cancel`'s job and it already reports what it
+   * could not account for.
+   *
+   * IT IS TWO APPENDS AND NO PROCESS STATE, which is what makes it survive a restart and
+   * makes a run paused by one plane behave identically on another:
+   *
+   *   - `operator.command{kind:"pause"}` — WHO did it and why, so a reader can tell from the
+   *     journal alone that a human stopped this rather than the scheduler running dry.
+   *   - `run.suspended{reason:"operator"}` — the durable status fact. Both members were in
+   *     the vocabulary already with every writer in `src/` passing `"gate"`.
+   *
+   * NO GRAPH REQUIRED, for `cancel`'s reason: this runs no node code, so a run whose graph
+   * has drifted out from under the process is still stoppable. A run with no journal is
+   * `E_RUN_NOT_FOUND`; a run that has ended is `E_ILLEGAL_TRANSITION` rather than a silent
+   * no-op, because an operator who is told "paused" about a run that already wrote the file
+   * has been told something false.
+   *
+   * IDEMPOTENT: a second pause on a paused run appends nothing. Two `run.suspended` rows
+   * would read, to anyone folding the log, like two separate interventions.
+   */
+  async pause(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
+    const p = await this.#requireLive(runId, "pause");
+    if (p.paused) return p;
+    const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
+    await this.#serialize(() =>
+      log.append([
+        { type: "operator.command", payload: { kind: "pause", args: { reason } }, actor: by },
+        { type: "run.suspended", payload: { reason: "operator" }, actor: by },
+      ]),
+    );
+    return (await this.projection(runId))!;
+  }
+
+  /**
+   * Hand a paused run back its work.
+   *
+   * REFUSES A RUN THAT IS NOT PAUSED, and that refusal is the interesting half. `run.resumed`
+   * folds `status` to `running` unconditionally — it has to, because the gate broker writes it
+   * to end a gate suspension — so calling this on a run sitting at `awaiting_gate` would take
+   * it out of `awaiting_gate` with the gate still open and unanswered. Nothing about that is a
+   * decision an operator made; it is a fold's side effect. `resume` is therefore defined only
+   * as the inverse of `pause`, and "the run is stuck on something else" gets a refusal that
+   * names what it is stuck on rather than an unblock nobody asked for.
+   */
+  async resume(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
+    const p = await this.#requireLive(runId, "resume");
+    if (!p.paused) {
+      throw err.conflict(
+        CODES.E_ILLEGAL_TRANSITION,
+        `run ${runId} is not paused (it is ${p.status}${p.suspendedReason === undefined ? "" : `, suspended on ${p.suspendedReason}`}); resume undoes a pause and nothing else`,
+        { details: { runId, status: p.status } },
+      );
+    }
+    const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
+    await this.#serialize(() =>
+      log.append([
+        { type: "operator.command", payload: { kind: "resume", args: { reason } }, actor: by },
+        { type: "run.resumed", payload: { by: "operator" }, actor: by },
+      ]),
+    );
+    return (await this.projection(runId))!;
+  }
+
+  /**
+   * The projection of a run an operator command may legally act on, or a refusal.
+   *
+   * Shared by `pause` and `resume` so the two cannot drift on which states they accept —
+   * "a rule enforced by convention at each call site is not a rule". It deliberately does
+   * NOT require attachment: see `cancel` for the measured case where demanding a graph made
+   * a stranded run inescapable by every exit at once.
+   */
+  async #requireLive(runId: RunId, verb: string): Promise<RunProjection> {
+    const p = await this.projection(runId);
+    if (p === undefined) {
+      throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`, { details: { runId } });
+    }
+    if (isTerminal(p.status)) {
+      throw err.conflict(CODES.E_ILLEGAL_TRANSITION, `run ${runId} has already ${p.status}; it cannot be ${verb}d`, {
+        details: { runId, status: p.status },
+      });
+    }
+    return p;
   }
 
   /** A writer for a run this engine holds no context for. */
