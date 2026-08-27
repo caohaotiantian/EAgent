@@ -314,6 +314,58 @@ const SHAPE_RULE =
   "(input, ctx) => {…} for a hook body. module.exports, export default and any top-level " +
   "statement are errors before the body ever runs — the file is EVALUATED, not imported";
 
+/**
+ * The other rule that belongs at the seam, and was enforced in one loader of two.
+ *
+ * F36 lived inside `functions.ts`'s `ARGUMENT_BRIDGE` as in-context JavaScript.
+ * `hook-loader.ts` contained ZERO occurrences of the word `async`, and both call this function
+ * — so the paragraph above, about two copies of one rule eventually stating two different
+ * things, had already come true about this one.
+ *
+ * WHY AN ASYNC BODY CANNOT BE ALLOWED, in the words of the thing that measured it: `vm`'s
+ * per-call `timeout` is the only interrupt this platform offers and it covers SYNCHRONOUS
+ * execution only. An async body satisfies it by returning at its first `await`, and the
+ * continuation resumes on the microtask queue where no timer, no `AbortSignal` and no deadline
+ * reach it. Re-measured HERE, through the hook loader, because a rule moved on the strength of
+ * an argument made about the other caller is a rule nobody has checked: with
+ * `callTimeoutMs: 100` and a body spinning `for (let n = 0; n < 4e9; n++) {}` after an
+ * `await 0`, the call returned `{"spun":true}` normally at 1,949 ms; the identical body written
+ * synchronously threw `Script execution timed out after 100ms` at 103 ms.
+ *
+ * THE SECOND HARM IS THIS FILE'S OWN. `intoHostRealm` rebuilds a cross-realm object with the
+ * host's intrinsics and passes anything else through untouched — and a cross-realm `Promise` is
+ * "anything else", so `await` unwraps it after the rebuild is already behind it. Measured on one
+ * hook loader: an async body's resolved object gave
+ * `Object.getPrototypeOf(v) === Object.prototype` → `false`, the sync body → `true`. The leak
+ * this module exists to close, reopened by the shape it did not refuse.
+ *
+ * TWO PREDICATES, because each catches a body the other misses, measured across a `vm`
+ * boundary: an async function with an own `constructor` property answers `Nope` to
+ * `.constructor.name` and `[object AsyncFunction]` to `Object.prototype.toString`; one with an
+ * own `Symbol.toStringTag` answers the other way round. NOT A SECURITY CHECK either way — a
+ * code resource is A13 trusted and could defeat both. What this catches is the MISTAKE, and the
+ * mistake is the whole failure mode.
+ *
+ * AT LOAD RATHER THAN AT CALL, because the CLI compiles every published body at boot
+ * (`cli.ts` `registerFunctions`) — so the message reaches an operator's terminal instead of
+ * hanging a run that has already spent money.
+ */
+function isAsyncBody(value: unknown): boolean {
+  const ctor = (value as { constructor?: { name?: unknown } }).constructor;
+  const byName = typeof ctor?.name === "string" && ctor.name.startsWith("Async");
+  return byName || Object.prototype.toString.call(value).startsWith("[object Async");
+}
+
+const ASYNC_RULE =
+  "an async function body cannot be bounded by any deadline. The vm timeout that enforces a " +
+  "node's timeoutMs and a hook's callTimeoutMs covers synchronous execution only, so a body " +
+  "that awaits keeps running after its caller has given up, with nothing able to stop it — " +
+  "measured at callTimeoutMs 100, a body spinning after `await 0` returned at 1,949 ms where " +
+  "the same body written synchronously was terminated at 103 ms. What it resolves to also " +
+  "reaches the host un-rebuilt, carrying this context's prototypes. Write the body " +
+  "synchronously. A body that must wait on something is describing an effect, and effects " +
+  "belong on a tool node";
+
 export function compileRealm(opts: RealmOptions): RealmCall {
   // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
   // Seeding it with host objects is what opened the bridge the first time.
@@ -369,6 +421,12 @@ export function compileRealm(opts: RealmOptions): RealmCall {
       // parsed cleanly, and the only useful thing to say is what the file was supposed to be.
       `${opts.what} resource "${opts.label}" evaluated to ${typeof value}, not a function — ${SHAPE_RULE}`,
     );
+  }
+  // ONE RULE, BOTH LOADERS. See `ASYNC_RULE`. Checked here rather than in each bridge because
+  // `functions.ts` had it and `hook-loader.ts` did not, which is the SHAPE_RULE argument three
+  // paragraphs up playing out on a second rule.
+  if (isAsyncBody(value)) {
+    throw err.validation(CODES.E_RESOURCE_INVALID, `${opts.what} resource "${opts.label}": ${ASYNC_RULE}.`);
   }
   if (typeof (context as Record<string, unknown>)[opts.entry] !== "function") {
     // A bridge that did not define its entry would fail later as `__loomInvoke is not

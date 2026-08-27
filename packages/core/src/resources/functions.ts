@@ -40,8 +40,9 @@
  * while (true) {} })` under `timeoutMs: 200` produced no output at all and was still spinning
  * when the harness SIGKILLed the process at 25s — the engine's node deadline could not even
  * report, because a spinning microtask never hands the loop back. So an async body is refused
- * at LOAD (see `ARGUMENT_BRIDGE`), and a synchronous body that RETURNS a thenable is refused
- * when it returns.
+ * at LOAD — by `realm.ts`'s `ASYNC_RULE`, at the seam BOTH loaders call, because this rule used
+ * to live in `ARGUMENT_BRIDGE` below and therefore did not exist for hook bodies at all — and a
+ * synchronous body that RETURNS a thenable is refused when it returns, here.
  *
  * WHAT IS STILL UNBOUNDED, stated plainly because a half-guard that reads as a whole one is
  * worse than none:
@@ -281,32 +282,15 @@ function seedingRandom(source: string): string {
  */
 const ARGUMENT_BRIDGE = `
 (function () {
-  // AN ASYNC BODY IS REFUSED AT LOAD, because nothing in this process can bound one.
+  // THE ASYNC REFUSAL USED TO LIVE HERE, and being here is why it covered function bodies and
+  // not hook bodies — \`hook-loader.ts\` had zero occurrences of the word. It is \`realm.ts\`'s
+  // \`ASYNC_RULE\` now, at the seam both loaders call, next to \`SHAPE_RULE\`, which is there for
+  // the identical reason and whose docstring already cited this exact divergence.
   //
-  // The vm timeout is the only interrupt the platform offers and it covers SYNCHRONOUS
-  // execution only. An async body satisfies it by returning at its first await, and the
-  // continuation resumes on the microtask queue, where no timer and no AbortSignal reach it.
-  // Measured: a body of the form "async (view) => { await 0; while (true) {} }" under a
-  // declared node timeoutMs of 200 printed nothing at all and was still spinning when the
-  // harness SIGKILLed the process at 25 seconds — the engine's own node deadline could not
-  // even report, because a spinning microtask never hands the loop back to a timer.
-  //
-  // AT LOAD RATHER THAN AT CALL, because the CLI compiles every published body at boot
-  // (cli.ts registerFunctions) — so the message reaches an operator's terminal instead of
-  // hanging a run that has already spent money.
-  //
-  // NOT A SECURITY CHECK. A body is A13 trusted code and could hide behind a shadowed
-  // constructor; what this catches is the MISTAKE, and the mistake is the whole failure mode.
-  var bodyCtor = globalThis.__loomBody && globalThis.__loomBody.constructor;
-  if (bodyCtor && typeof bodyCtor.name === "string" && bodyCtor.name.indexOf("Async") === 0) {
-    throw new Error(
-      "an async function body cannot be bounded by any deadline. The vm timeout that enforces " +
-      "a node's timeoutMs covers synchronous execution only, so a body that awaits keeps " +
-      "running after its node has failed and holds the process open with nothing able to stop " +
-      "it. Write the body synchronously. A body that must wait on something is describing an " +
-      "effect, and effects belong on a tool node."
-    );
-  }
+  // The move also widened it. This check read \`__loomBody.constructor.name\`, which an own
+  // \`constructor\` property defeats — measured, an async body carrying one answered \`Nope\` and
+  // loaded clean. The seam reads that AND \`Object.prototype.toString\`, and each catches a body
+  // the other misses.
   var has = Object.prototype.hasOwnProperty;
   // \`Math\` here is the CONTEXT'S own, so nothing host-side is in reach.
   //
@@ -504,7 +488,7 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
       });
       // A THENABLE IS REFUSED, and the refusal is honest about what it does not fix.
       //
-      // `ARGUMENT_BRIDGE` refuses an `async` body at load; this is the other shape — a plain
+      // `realm.ts` refuses an `async` body at load; this is the other shape — a plain
       // function that RETURNS a promise. The vm timeout is satisfied the moment it returns, so
       // whatever the continuation does is beyond every deadline in this process. Refusing gives
       // the node a NAMED failure instead of the engine awaiting a promise that may never settle.

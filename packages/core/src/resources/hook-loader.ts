@@ -24,6 +24,25 @@
  * does not hold at all. An extension that needs to reach the world does it as a TOOL, behind a
  * manifest and a capability, where the policy engine can see it.
  *
+ * ## The deadline, and the shape that used to escape it here and not next door
+ *
+ * `callTimeoutMs` is `vm`'s per-call `timeout`, and `vm` interrupts SYNCHRONOUS execution only.
+ * An ASYNC body satisfies it by returning at its first `await`; the continuation resumes on the
+ * microtask queue where no timer, no `AbortSignal` and no deadline reach it. `functions.ts` has
+ * argued that and refused the shape since F36 — and this file contained ZERO occurrences of the
+ * word `async`, so a hook body could do what a function body could not. Measured here, with
+ * `callTimeoutMs: 100` and a body spinning `for (let n = 0; n < 4e9; n++) {}` after an `await 0`:
+ * it returned normally at 1,949 ms, where the identical body written synchronously was
+ * terminated at 103 ms. A second harm was this loader's alone: `intoHostRealm` passes a
+ * cross-realm `Promise` through untouched, so an async body's resolved object reached the host
+ * with the vm context's prototypes — `Object.getPrototypeOf(v) === Object.prototype` was `false`
+ * for an async body and `true` for a sync one.
+ *
+ * The refusal is now `realm.ts`'s `ASYNC_RULE`, at the seam both loaders call and next to
+ * `SHAPE_RULE`, whose docstring had already named this exact divergence as the thing two copies
+ * of one rule produce. Nothing in THIS file enforces it, deliberately: a third copy is how it
+ * would drift again.
+ *
  * ## What it does not do
  *
  * `pins` mirrors `FunctionLoaderOptions.pins` and, like it, is not wired by the default CLI
