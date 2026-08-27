@@ -4876,8 +4876,38 @@ export class Engine {
       };
     }
 
+    // A CHILD'S OUTPUT MAY BE A HANDLE, and mapping it out unresolved hands the parent a
+    // `{$payload: …}` reference wearing the shape of an answer — the run then reports
+    // `succeeded` on the wrong value, which is worse than failing.
+    //
+    // `#resolveReads`'s docstring enumerates the two ways a channel is read without being in
+    // `observedChannels` and says `externalisableChannels` removes both from the eligible set.
+    // Both of those are INPUTS. This is the other direction: the child externalised its own
+    // channel on its own journal, under its own `RunId`, and the exclusion at the parent's end
+    // cannot reach it. So it is resolved here, against the CHILD's run id, which is the only
+    // id its payloads were stored under.
+    //
+    // NO STORE PLUS A HANDLE IS A REFUSAL, the same rule and the same code `#resolveReads`
+    // uses: the value exists and is simply not reachable from this process, and handing the
+    // parent the handle would let it succeed on a reference.
     const writes: Record<string, unknown> = {};
-    for (const [parentCh, childCh] of Object.entries(sub.outputs)) writes[parentCh] = childP.channels[childCh];
+    for (const [parentCh, childCh] of Object.entries(sub.outputs)) {
+      const ref = childP.external[childCh];
+      if (ref === undefined) {
+        writes[parentCh] = childP.channels[childCh];
+        continue;
+      }
+      const store = this.#payloads;
+      if (store === undefined) {
+        throw err.internal(
+          CODES.E_PAYLOAD_UNRESOLVED,
+          `subgraph "${sub.ref}" maps its channel "${childCh}" out to "${parentCh}", and the child externalised ` +
+            `that value — this engine was constructed with no \`payloads\` store, so it cannot be read back`,
+          { details: { nodeId: w.node.id, childRunId, childChannel: childCh, parentChannel: parentCh } },
+        );
+      }
+      writes[parentCh] = await store.get(childRunId, ref);
+    }
 
     await this.#serialize(() =>
       ctx.log.append(

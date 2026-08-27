@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { memoryPayloads, type PayloadStore } from "../../src/journal/payloads.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
@@ -111,7 +112,7 @@ interface Rig {
   readonly charges: number[];
 }
 
-function rig(child: GraphSpec, opts: { budgetUsd?: number } = {}): Rig {
+function rig(child: GraphSpec, opts: { budgetUsd?: number; payloads?: PayloadStore } = {}): Rig {
   const now = (): number => 1_700_000_000_000;
   const store = new MemoryStateStore({ now });
   const tools = new ToolRegistry();
@@ -139,6 +140,7 @@ function rig(child: GraphSpec, opts: { budgetUsd?: number } = {}): Rig {
     now,
     resolver: resolverWith(child),
     policy: { granted: ["pay"], systemFloor: "out", budget: { runUsd: opts.budgetUsd ?? 10 } },
+    ...(opts.payloads === undefined ? {} : { payloads: opts.payloads }),
   });
   return { engine, store, charges };
 }
@@ -1075,4 +1077,43 @@ test("E8 — A SUBGRAPH'S OUTPUT IS UNTRUSTED, so the parent cannot charge on it
 
   assert.equal(p.status, "awaiting_gate", `the parent must gate on the child's output: ${p.status}`);
   assert.deepEqual(r.charges, [], "and nothing was charged");
+});
+
+test("A CHILD'S EXTERNALISED CHANNEL REACHES THE PARENT AS A VALUE, NOT AS A HANDLE", async () => {
+  // `#runSubgraph` mapped the child's channels out with
+  // `writes[parentCh] = childP.channels[childCh]`. When the child externalised that channel its
+  // value is not in `channels` at all — it is a `PayloadRef` in `childP.external` — so the
+  // parent was handed a reference wearing the shape of an answer and the run reported
+  // `succeeded` on it. Succeeding on the wrong value is worse than failing.
+  //
+  // THE FIXTURE HAS TO MAP A NON-OUTPUT CHANNEL, and that is the whole reachability argument.
+  // `externalisableChannels` deletes every name in `spec.outputs`, so a child's declared
+  // OUTPUT is never externalised and mapping one out is always safe. But
+  // `graph/validate.ts:2846` requires only `Object.hasOwn(child.channels, childCh)` — a
+  // channel, not an output — so a subgraph may map out a channel the child never declared as
+  // an output, and that one IS eligible. `receipt` is exactly that channel here.
+  const BIG = "y".repeat(200_000);
+  const payloads = memoryPayloads();
+  const child: GraphSpec = {
+    ...childSpec(),
+    nodes: [
+      { id: n("double"), type: "function", reads: ["amount"], writes: ["doubled"], function: { ref: "function/double@stable" } },
+      { id: n("aside"), type: "function", reads: ["amount"], writes: ["receipt"], function: { ref: "function/aside@stable" } },
+    ],
+    edges: [{ id: e("a"), from: n("double"), to: n("aside"), kind: "seq" as const }],
+  };
+  const parent = parentSpec({}, { result: "receipt" });
+
+  const r = rig(child, { payloads });
+  r.engine.functions.register("function/double@stable", () => ({ writes: { doubled: 42 } }));
+  r.engine.functions.register("function/aside@stable", () => ({ writes: { receipt: { big: BIG } } }));
+
+  const runId = await r.engine.submit({ graph: compileParent(child, parent), inputs: { total: 21 } });
+  const p2 = await r.engine.advance(runId);
+
+  assert.equal(p2.status, "succeeded", JSON.stringify(p2.error ?? {}));
+  // The precondition FIRST, or a pass here means only that nothing was externalised.
+  const childP = await r.engine.projection(`${runId}~delegate@root#0` as RunId);
+  assert.ok(childP?.external["receipt"] !== undefined, "precondition: the child externalised `receipt`");
+  assert.deepEqual(p2.channels["result"], { big: BIG }, "the parent must hold the child's VALUE, not its handle");
 });
