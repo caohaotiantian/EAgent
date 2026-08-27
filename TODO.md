@@ -898,10 +898,33 @@ believes a feature is present.
   under roughly thirty scored trajectories per cohort any candidate is fitted to noise.
 - **Quorum, delegation and trust-tier approvals** — deliberate compile errors rather than silent
   downgrades. Implementing one means deleting its refusal in the same change.
-- **The operator intervention surface** — no pause, resume, steer or kill. **Corrected
+- **The operator intervention surface** — ~~no pause, resume, steer or kill~~. **Corrected
   2026-08-25:** `cancel` exists, and so do two more that the bullet missed — a human answering a
   gate can **redirect** the run onto chosen outgoing edges, wired end to end, and `rewind` is
-  built (`engine.ts:1830`). Four verbs absent, three present.
+  built. **Built 2026-08-28**, at the engine, the CLI and `POST /runs/:id/commands` together:
+  - **`pause` / `resume`** — journaled facts, not a flag in a process. `run.suspended{reason:
+    "operator"}` and `run.resumed{by:"operator"}` were in the vocabulary with no appender. A
+    pause stops the NEXT wave and lets the one in flight commit, survives a restart, and is a
+    folded fact of its OWN (`RunProjection.paused`) rather than the `interrupted` status —
+    because `gate.decided` ships an unconditional `run.resumed`, so a pause living in the status
+    would be lifted by a human answering an unrelated question. `resume` refuses a run that is
+    not paused; `pause` refuses one that has ended.
+  - **`steer`** — per §D.4, confined to the compiled edge set. Refuses an edge that does not
+    leave the named node (checked at the door AND where the edge would be taken), an empty
+    route, a run this process holds no graph for, and **a non-human caller** — over HTTP the
+    same request is 200 for a person and 403 for a shared bearer token, while that same
+    anonymous caller may still `cancel`. Takes effect on the next node DISPATCHED, so the
+    workflow is pause → steer → resume.
+  - **`kill` was NOT built, and the reason is measured**, not asserted:
+    `test/run/cancel-does-not-wait.test.ts`. §D.4 defines it as "`cancel` that does not wait for
+    an in-flight effect to settle", and `cancel` does not wait — it returns while a tool body is
+    still inside itself, declares the run cancelled at a lower seq than that effect's
+    completion, and reports the effect in `unknownEffects` with `clean: false`. There is no
+    drain for a second verb to skip, so shipping one would be a second name for `cancel`.
+    **`run.cancelled.forced` is left standing for the maintainer**: its own docstring says
+    "decided for deletion" and §D.4 assigns it to `kill`, and those cannot both be acted on by
+    whoever last read one of them. What was corrected is that docstring's enumeration — it named
+    three files carrying the literal and there are seven, nine sites.
 - **The agent-to-agent mailbox** — designed, unbuilt; the edge kinds are seven with no eighth.
 - **A worker pool for CPU-bound function bodies** — declared on the schema, warns at compile that
   it does nothing; a long body blocks the event loop and every task in the wave with it.

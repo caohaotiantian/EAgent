@@ -184,7 +184,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import { SubscriberOverflowError, type EventBus } from "../bus.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
-import type { GateId, RunId } from "../ids.ts";
+import type { EdgeId, GateId, NodeId, RunId } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
@@ -2940,6 +2940,45 @@ export class ControlPlane {
               // journaled on `operator.command` and quoted into every gate this closes.
               send(res, 200, this.#summary(await engine.cancel(runId, checkedReason(cmd["reason"], "operator"), by)));
               return;
+            // NEITHER NEEDS THE BIND ABOVE, the same as `cancel`: both are a projection and two
+            // appends. They are here rather than behind a second route because "what a human
+            // did to this run" is one audit question, and `operator.command` is one answer.
+            case "pause":
+              send(res, 200, this.#summary(await engine.pause(runId, checkedReason(cmd["reason"], "operator"), by)));
+              return;
+            case "resume":
+              send(res, 200, this.#summary(await engine.resume(runId, checkedReason(cmd["reason"], "operator"), by)));
+              return;
+            case "steer": {
+              // SHAPE CHECKED HERE, LEGALITY CHECKED IN THE ENGINE. This route's job is to
+              // refuse a body that is not a steer at all; whether the edges leave the node is
+              // a question only the compiled graph answers, and `Engine.steer` asks it.
+              const nodeId: unknown = cmd["node"];
+              const take: unknown = cmd["take"];
+              if (typeof nodeId !== "string") {
+                throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `steer requires "node": the node whose route is overridden`);
+              }
+              if (!Array.isArray(take) || !take.every((t) => typeof t === "string")) {
+                throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `steer requires "take": an array of edge ids`);
+              }
+              // `by` IS THE CALLER, and `Engine.steer` refuses a non-human one. A plane
+              // authenticated by a service token therefore cannot steer, which is the point:
+              // an operator may take a route with less oversight on it because they are a
+              // person, and `commandActor` is where that person's identity comes from.
+              send(
+                res,
+                200,
+                this.#summary(
+                  await engine.steer(
+                    runId,
+                    { nodeId: nodeId as NodeId, take: take as EdgeId[] },
+                    checkedReason(cmd["reason"], "operator"),
+                    by as HumanActor,
+                  ),
+                ),
+              );
+              return;
+            }
             case "rewind": {
               const atSeq: unknown = cmd["atSeq"];
               if (typeof atSeq !== "number") {
@@ -4118,6 +4157,12 @@ function summarise(p: import("../run/projection.ts").RunProjection, graph: RunGr
     usage: p.usage,
     reservedUsd: p.reservedUsd,
     budgetExhausted: p.budgetExhausted,
+    // ON THE WIRE BECAUSE `status` CANNOT CARRY IT. A run paused while it was waiting on a
+    // gate that has since been answered reads `running` and takes no work — see
+    // `RunProjection.paused` for why the pause is deliberately not the status. A console
+    // that showed `running` alone would report the opposite of what is true, and the
+    // operator who paused it has no other way to confirm the pause landed.
+    paused: p.paused,
     unknownEffects: p.unknownEffects,
     error: p.error,
     tasks: Object.values(p.tasks).map((t) => ({

@@ -67,7 +67,7 @@ import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
-import type { GateId, RunId, Seq } from "./ids.ts";
+import type { EdgeId, GateId, NodeId, RunId, Seq } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
@@ -114,6 +114,12 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
+  loom pause   <runId> --as ID [--reason WHY]              take no NEW work; keep what is
+                                                           in flight. Survives a restart
+  loom resume  <runId> --as ID [--reason WHY]              undo a pause, and only a pause
+  loom steer   <runId> --node ID --take E,E --as ID        put a node on edges the AUTHOR
+               [--reason WHY]                               declared; an invented one is
+                                                            refused. Needs the graph
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
@@ -327,6 +333,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "input",
   "mcp-file",
   "models-file",
+  "node",
   "out",
   "port",
   "proposed-by",
@@ -335,6 +342,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "runs",
   "suite",
   "sweep-ms",
+  "take",
   "token",
   "workspace",
 ];
@@ -3253,6 +3261,58 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           via: "cli",
         });
         process.stdout.write(`${JSON.stringify({ runId, status: p.status }, null, 2)}\n`);
+        return 0;
+      }
+
+      case "pause":
+      case "resume": {
+        // NEITHER NEEDS A GRAPH, for `cancel`'s reason one case up: both are a projection and
+        // two appends, and the runs most worth stopping are the ones whose graph has drifted
+        // out from under the process holding them.
+        //
+        // ONE CASE FOR BOTH, because the only difference is which method is called and every
+        // other line — the runId, the `--reason` guard against a bare flag journaling the four
+        // letters "true", the actor, the output — is a place the two could silently disagree.
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const raw = args.flags["reason"];
+        const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
+        const actor = { kind: "human", subject: subjectFlag(args), via: "cli" } as const;
+        const p =
+          args.command === "pause"
+            ? await ws.engine.pause(runId, reason, actor)
+            : await ws.engine.resume(runId, reason, actor);
+        // `paused` IS PRINTED AND `status` IS NOT ENOUGH. A run paused while it was waiting on
+        // a gate that has since been answered reads `running` and takes no work, which is the
+        // point of the pause being a fact of its own; printing only the status would tell the
+        // operator the opposite of what is true.
+        process.stdout.write(`${JSON.stringify({ runId, status: p.status, paused: p.paused }, null, 2)}\n`);
+        return 0;
+      }
+
+      case "steer": {
+        // THE ONE OPERATOR VERB THAT NEEDS THE GRAPH, and the workspace lookup is what supplies
+        // it — `Engine.steer` refuses a run this process has not attached, because the declared
+        // edge set it confines the operator to lives in the compiled artifact and there is
+        // nothing else to check a route against.
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const nodeId = args.flags["node"];
+        if (typeof nodeId !== "string" || nodeId.trim() === "") {
+          throw err.validation(CODES.E_CONFIG_INVALID, "steer needs --node NODE_ID: the node whose route is being overridden");
+        }
+        const take = listFlag(args, "take", "one or more edge ids") ?? [];
+        const raw = args.flags["reason"];
+        const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
+        // BIND FIRST, or every steer on a restarted workspace answers "not attached" — which is
+        // the honest answer only when the graph is genuinely absent, and here it is on disk.
+        const wanted = await ws.engine.compiledGraphHash(runId);
+        const found = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
+        if (found !== undefined) ws.engine.attach(runId, found);
+        const p = await ws.engine.steer(runId, { nodeId: nodeId as NodeId, take: take as EdgeId[] }, reason, {
+          kind: "human",
+          subject: subjectFlag(args),
+          via: "cli",
+        });
+        process.stdout.write(`${JSON.stringify({ runId, node: nodeId, take, status: p.status }, null, 2)}\n`);
         return 0;
       }
 
