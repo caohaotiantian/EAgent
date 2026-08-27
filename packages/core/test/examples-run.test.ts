@@ -305,17 +305,18 @@ test("`module.exports` in a FUNCTION file is refused at compile too, not left to
 test("an assertion evaluator's ref is a function body, and a malformed one is refused as well", async () => {
   // `#functionBody` has two callers — `#runFunction` and `#runEvaluator`'s assertion arm — and
   // every previous change to this contract landed at one of them a commit before the other.
-  // review-bench names `function/bench-check@stable` from an `evaluator`, so the second caller
-  // has a shipped example to check it against.
+  // review-bench names `function/bench-check-0@stable` from an `evaluator`, so the second caller
+  // has a shipped example to check it against. The ref must be one the GRAPH actually reaches:
+  // an unreferenced resource is `! skipping`, exit 0, and this assertion would pass vacuously.
   const ws = workspace();
   try {
     writeFileSync(
-      join(ws.dir, "resources", "function", "bench-check.js"),
+      join(ws.dir, "resources", "function", "bench-check-0.js"),
       "module.exports = function (view, ctx) { return {}; };\n",
     );
     const r = await loom(ws.dir, ["compile", graphFile(ws.dir, "review-bench.json")]);
     assert.notEqual(r.code, 0, `compile must refuse, got code ${r.code}:\n${r.out}${r.err}`);
-    assert.match(`${r.out}${r.err}`, /function\/bench-check@stable/);
+    assert.match(`${r.out}${r.err}`, /function\/bench-check-0@stable/);
   } finally {
     ws.dispose();
   }
