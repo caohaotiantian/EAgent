@@ -449,7 +449,6 @@
   "measureCohort",
   "messageTokens",
   "modelFrames",
-  "modelWarnings",
   "narrowErrorDecision",
   "narrowGateRequest",
   "narrowNodeDecision",
