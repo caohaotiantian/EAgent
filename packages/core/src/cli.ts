@@ -114,6 +114,9 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
+  loom pause   <runId> --as ID [--reason WHY]              take no NEW work; keep what is
+                                                           in flight. Survives a restart
+  loom resume  <runId> --as ID [--reason WHY]              undo a pause, and only a pause
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
@@ -3253,6 +3256,31 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           via: "cli",
         });
         process.stdout.write(`${JSON.stringify({ runId, status: p.status }, null, 2)}\n`);
+        return 0;
+      }
+
+      case "pause":
+      case "resume": {
+        // NEITHER NEEDS A GRAPH, for `cancel`'s reason one case up: both are a projection and
+        // two appends, and the runs most worth stopping are the ones whose graph has drifted
+        // out from under the process holding them.
+        //
+        // ONE CASE FOR BOTH, because the only difference is which method is called and every
+        // other line — the runId, the `--reason` guard against a bare flag journaling the four
+        // letters "true", the actor, the output — is a place the two could silently disagree.
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const raw = args.flags["reason"];
+        const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
+        const actor = { kind: "human", subject: subjectFlag(args), via: "cli" } as const;
+        const p =
+          args.command === "pause"
+            ? await ws.engine.pause(runId, reason, actor)
+            : await ws.engine.resume(runId, reason, actor);
+        // `paused` IS PRINTED AND `status` IS NOT ENOUGH. A run paused while it was waiting on
+        // a gate that has since been answered reads `running` and takes no work, which is the
+        // point of the pause being a fact of its own; printing only the status would tell the
+        // operator the opposite of what is true.
+        process.stdout.write(`${JSON.stringify({ runId, status: p.status, paused: p.paused }, null, 2)}\n`);
         return 0;
       }
 
