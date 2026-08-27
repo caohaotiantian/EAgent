@@ -172,9 +172,16 @@ export interface PreparedEvent {
  * clipped payload is journaled as a value that is not the value, and replay compares digests, so
  * truncating converts a loud failure into a silent divergence.
  *
- * **THIS IS A BOUND, NOT THE FIX.** It stops a runaway; it does nothing about the amplification,
- * which needs payload externalisation — a reference above a threshold, resolved on read. That is
- * a real change to a synchronous fold and is recorded in `TODO.md` rather than half-done here.
+ * **THIS IS A BOUND, NOT THE FIX**, and the fix now exists beside it. This still stops a runaway
+ * and still knows nothing about the amplification; what addresses that is `journal/payloads.ts` —
+ * a reference above 64 KiB, resolved before a node body runs. The two thresholds are deliberately
+ * unrelated numbers with the same boundary rule: `<=` passes here, and a value of exactly
+ * `EXTERNALISE_ABOVE_BYTES` stays inline there.
+ *
+ * NOTHING BELOW READS THE PAYLOAD STORE, and that is the point. Externalisation happens in the
+ * ENGINE, before `append` is called, so a payload arriving here is already whatever it is going to
+ * be and this bound still weighs the bytes that will actually be written. An event carrying a
+ * handle is a small event, so the two guards do not have to be told about each other.
  */
 const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
