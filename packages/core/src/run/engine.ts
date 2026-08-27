@@ -1927,6 +1927,87 @@ export class Engine {
   }
 
   /**
+   * PUT A RUNNING GRAPH ONTO A DIFFERENT EDGE ITS AUTHOR DECLARED.
+   *
+   * `TODO.md` §D.4 fixes the shape: steer is "confined to the compiled edge set, exactly as a
+   * `router` is", and it must not reach an edge the compiled graph does not contain — that is
+   * `graph:mutate`, a capability a tenant either holds or does not, and reaching it from the
+   * operator surface would be oversight routing around itself.
+   *
+   * FOUR REFUSALS, in the order they are checked and in the order of what each would break:
+   *
+   *   1. A NON-HUMAN CALLER — `E_HUMAN_APPROVAL_REQUIRED`, and there is deliberately no
+   *      `SYSTEM_ACTOR` default the way `cancel` has one. Confinement to the declared set is
+   *      what makes a steer legitimate, and it is not the whole story: an author may declare
+   *      one arm carrying a `human_gate` and one without, and forcing the ungated arm lowers
+   *      the oversight this run would otherwise have had. A HUMAN MAY DO THAT — "a human may
+   *      lower a posture" — and no automated path may, which is why the actor is the first
+   *      thing checked rather than a parameter with a convenient default.
+   *   2. A RUN THIS PROCESS HOLDS NO GRAPH FOR — `E_RUN_NOT_FOUND`, via `#require`. This is
+   *      where `steer` parts company with `cancel` and `pause`, which work detached on purpose
+   *      because they are a projection and two appends. The declared edge set lives in the
+   *      COMPILED graph; with no graph there is nothing to confine the operator to, and a
+   *      guard that cannot decide fails closed rather than guessing.
+   *   3. AN EDGE THAT DOES NOT LEAVE THAT NODE — `E_ROUTE_INVALID`, quoting the declared set.
+   *      `#activate` looks an edge id up in the WHOLE graph's edge table, so a `take` naming
+   *      another node's edge activates that node's target and jumps everything in between, a
+   *      `human_gate` included. That hole was found on the body path (`#strayRoute`) and on
+   *      the human path (`#applyGateDecision`); this is the third producer and it gets the
+   *      same rule. It is checked TWICE — here, so the operator is told at the door, and again
+   *      at the moment the edge would be taken, because that second check is the one a caller
+   *      who wrote the journal directly cannot skip.
+   *   4. AN EMPTY `take` — `E_ROUTE_INVALID`. "Go nowhere" is a run that stops with no
+   *      terminal event; stopping a run is `cancel`, which reports what it left unaccounted
+   *      for instead of leaving a reader to infer it.
+   *
+   * IT STANDS UNTIL IT IS REPLACED, and it is read when the node is DISPATCHED — so a node
+   * already executing does not see it. The workflow is `pause` → `steer` → `resume`, which is
+   * also the only version of it in which an operator is deciding against a state that is
+   * holding still. A second steer on the same node replaces the first: that is somebody
+   * changing their mind, not two routes.
+   */
+  async steer(
+    runId: RunId,
+    route: { readonly nodeId: NodeId; readonly take: readonly EdgeId[] },
+    reason: string,
+    by: HumanActor,
+  ): Promise<RunProjection> {
+    if (by.kind !== "human") {
+      throw err.policy(
+        CODES.E_HUMAN_APPROVAL_REQUIRED,
+        `steering run ${runId} chooses a route the program would otherwise choose for itself, and may pick an arm carrying less oversight; only a human may do that`,
+        { details: { runId, actor: by } },
+      );
+    }
+    await this.#requireLive(runId, "steer");
+    const ctx = this.#require(runId);
+    const outbound = (ctx.index.outbound.get(route.nodeId) ?? []).map((e) => e.id);
+    // A NODE THAT IS NOT IN THE GRAPH LANDS HERE TOO, with an empty declared set and the same
+    // code. It is the same fact — this run has no such route — and answering it with a second
+    // error class would only tell a caller which of two ways they were wrong.
+    const invented = route.take.filter((id) => !outbound.includes(id));
+    if (route.take.length === 0 || invented.length > 0) {
+      throw err.policy(
+        CODES.E_ROUTE_INVALID,
+        route.take.length === 0
+          ? `a steer must name at least one edge; to stop run ${runId} use cancel, which reports what it left unaccounted for`
+          : `node "${route.nodeId}" has no outgoing edge ${invented.map((i) => `"${i}"`).join(", ")} (declared: ${outbound.map((o) => `"${o}"`).join(", ") || "none"})`,
+        { details: { runId, nodeId: route.nodeId, take: route.take, declared: outbound } },
+      );
+    }
+    await this.#serialize(() =>
+      ctx.log.append([
+        {
+          type: "operator.command",
+          payload: { kind: "steer", args: { nodeId: route.nodeId, take: [...route.take], reason } },
+          actor: by,
+        },
+      ]),
+    );
+    return (await this.#project(ctx))!;
+  }
+
+  /**
    * The projection of a run an operator command may legally act on, or a refusal.
    *
    * Shared by `pause` and `resume` so the two cannot drift on which states they accept —
@@ -2886,7 +2967,23 @@ export class Engine {
     const skipped = await this.#preNode(ctx, w);
     if (skipped !== undefined) return skipped;
 
-    const outcome = await this.#withNodeDeadline(ctx, w, () => this.#dispatchBody(ctx, p, w));
+    const body = await this.#withNodeDeadline(ctx, w, () => this.#dispatchBody(ctx, p, w));
+
+    // AN OPERATOR'S ROUTE REPLACES THE NODE'S OWN, and it is applied HERE rather than at commit
+    // so that it falls under the stray-edge check below like every other producer's `take`.
+    // `Engine.steer` already refused an edge that does not leave this node; this side is what
+    // holds for a journal that was not written by `steer` — a hand-appended `operator.command`,
+    // or one from a build whose graph had an edge this one does not.
+    //
+    // SUCCEEDED ONLY. A failed node routes along its `error` edges, and an operator who chose
+    // a route for the successful case did not thereby choose one for the failure — overriding
+    // there would send a failure down a path written for an answer.
+    // AN OWN PROPERTY, NEVER `Object.prototype`'s. A node legitimately named `constructor` or
+    // `toString` would otherwise read back a FUNCTION from the empty steer map and route on it —
+    // an operator override nobody issued, on the one node whose name made it up.
+    const steer = Object.prototype.hasOwnProperty.call(p.steers, w.node.id) ? p.steers[w.node.id] : undefined;
+    const outcome =
+      steer === undefined || body.status !== "succeeded" ? body : { ...body, take: steer };
 
     // AN UNDECLARED ROUTE IS THE SAME CLASS AS AN UNDECLARED WRITE, and this wrapper is where
     // that class is refused — for the reason the check below already gives: "a check applied
