@@ -419,3 +419,29 @@ test("CONTROL · --proposed-by CANNOT BE THE IDENTITY THAT WRITES THE EXAMS", as
     (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /reserved/.test(e.message),
   );
 });
+
+test("a --bucket the corpus was not scored under names ITSELF, instead of blaming the verdicts", async () => {
+  // The eligibility loop excludes four ways and counted three. The fourth —
+  // `sc.cohortKey !== key` — is the one an operator triggers by accident, because `--bucket`
+  // recomputes the key: ask for a mode the corpus was not SCORED under and every member drops.
+  // The summary then reported them under "carry no journaled verdict" and sent the operator to
+  // re-run `loom score`, when the verdicts were there all along under another key.
+  const c = await scoredCorpus();
+  const out = join(c.dir, "wrong-bucket.json");
+  await assert.rejects(
+    () => freeze(c.dir, c.ids[0]!, out, ["--bucket", "fields:no-such-channel"]),
+    (e: unknown) => {
+      if (!isLoomError(e) || e.code !== CODES.E_CONFIG_INVALID) return false;
+      // The count is the whole corpus, not zero — this is what fails if the exclusion goes back
+      // to being silent and its members are miscounted as unjudged.
+      assert.match(e.message, new RegExp(`${String(c.ids.length)} were judged under a DIFFERENT cohort key`));
+      assert.match(e.message, /0 run\(s\) carry no journaled verdict/, "and they are NOT blamed on missing verdicts");
+      // The key itself is printed: "yours differs from theirs" is only actionable when a reader
+      // can see which segment moved.
+      assert.match(e.message, /other key\(s\) present:/);
+      assert.match(e.message, /re-score them under the same/);
+      return true;
+    },
+  );
+  assert.equal(existsSync(out), false, "no suite file on a refusal");
+});

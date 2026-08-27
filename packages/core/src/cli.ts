@@ -4426,6 +4426,13 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   }
   const eligible: Selectable[] = [];
   let unjudged = 0;
+  // COUNTED, LIKE ITS THREE NEIGHBOURS. This exclusion was the only silent one, and it is the
+  // one an operator triggers by accident: `--bucket` recomputes the key, so asking for a mode
+  // the corpus was NOT scored under drops every member — and the summary then blamed "no
+  // journaled verdict", sending the operator to re-run `loom score` when the verdicts were
+  // there all along under another key.
+  let otherKey = 0;
+  const otherKeysSeen = new Set<string>();
   let excludedForWeights = 0;
   let undelivered = 0;
   for (const t of [anchorT, ...peers.members]) {
@@ -4439,7 +4446,11 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       unjudged++;
       continue;
     }
-    if (sc.cohortKey !== key) continue;
+    if (sc.cohortKey !== key) {
+      otherKey++;
+      otherKeysSeen.add(sc.cohortKey);
+      continue;
+    }
     if (sc.weightsDigest !== anchorScore.weightsDigest) {
       excludedForWeights++;
       continue;
@@ -4474,8 +4485,16 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       CODES.E_CONFIG_INVALID,
       `cohort "${key}" yields ${String(eligible.length)} case(s) and a frozen suite needs at least ` +
         `${String(MIN_SUITE_CASES)}: ${String(unjudged)} run(s) carry no journaled verdict, ${String(excludedForWeights)} ` +
-        `were scored under different weights, ${String(undelivered)} finished without delivering work. Cases come from ` +
-        `evolution.scored rows and nothing else, so the fix is to judge the cohort: loom score <runId>.`,
+        `were scored under different weights, ${String(undelivered)} finished without delivering work, ` +
+        `${String(otherKey)} were judged under a DIFFERENT cohort key. Cases come from evolution.scored rows and ` +
+        `nothing else, so the fix is to judge the cohort: loom score <runId>.` +
+        // NAMED, not just counted. The keys differ in one segment and reading them side by side is
+        // what tells an operator whether they mistyped a bucket or are pointed at the wrong corpus.
+        (otherKey > 0
+          ? ` The ${String(otherKeysSeen.size)} other key(s) present: ${[...otherKeysSeen].sort().slice(0, 3).join(", ")}` +
+            `${otherKeysSeen.size > 3 ? ", …" : ""}. If those are the runs you meant, re-score them under the same ` +
+            `--bucket you are freezing with, or drop the flag from both.`
+          : ""),
     );
   }
 
