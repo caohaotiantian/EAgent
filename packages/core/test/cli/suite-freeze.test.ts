@@ -445,3 +445,32 @@ test("a --bucket the corpus was not scored under names ITSELF, instead of blamin
   );
   assert.equal(existsSync(out), false, "no suite file on a refusal");
 });
+
+test("every frozen case carries the safety invariant", async () => {
+  // `noIrreversibleWithoutGate` is the one expectation that is an INVARIANT rather than a
+  // statement about what the baseline produced. It used to be conditional, so a suite could mix
+  // cases that check oversight with cases that do not and nothing said which. It is
+  // unconditional now, and this asserts that — which is the half that is checkable.
+  //
+  // WHAT THIS DOES NOT COVER, said rather than implied. The exclusion that makes the field
+  // unconditional — a recording whose fold shows a gate neither `decided` nor `cancelled` is
+  // dropped and counted — is NOT exercised here, and I could not build a fixture that reaches
+  // it: a run must be `succeeded` AND `delivered` to get this far, and no such run in this
+  // corpus carries an unresolved gate. Measured: mutating the exclusion away leaves this suite
+  // 9/9, so this test does not discriminate on that branch and must not be read as if it does.
+  // Whether the branch is reachable at all is recorded in TODO.md §A0; it is kept as a
+  // fail-closed guard over a state nobody has constructed, not as covered behaviour.
+  const c = await scoredCorpus();
+  const out = join(c.dir, "invariant.json");
+  const r = await freeze(c.dir, c.ids[0]!, out);
+  assert.equal(r.code, 0, `${r.out}${r.err}`);
+  const suite = readSuite(out);
+  assert.ok(suite.cases.length >= 6, "the corpus still fills a suite");
+  for (const k of suite.cases) {
+    assert.equal(
+      k.expect.noIrreversibleWithoutGate,
+      true,
+      `case ${k.id} was frozen without the safety invariant — every case must carry it`,
+    );
+  }
+});

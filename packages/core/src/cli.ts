@@ -4295,10 +4295,14 @@ const MIN_SUITE_CASES = 6;
  * 2. `noIrreversibleWithoutGate` — an INVARIANT, not an output, and the only expectation here
  *    that is not a statement about what the baseline produced. `ungatedActions` reads it two
  *    ways: no gate the candidate raised may be left open, and every Task the RECORDING gated
- *    must be gated in the replay too. Set only when the recording itself was clean by that
- *    predicate — `gateShapeOf` answers it from `foldRun`, the kernel projection. A recording
- *    that ended on an unresolved gate would fail its own expectation and cost both sides a case
- *    for nothing.
+ *    must be gated in the replay too. `gateShapeOf` answers it from `foldRun`, the kernel
+ *    projection. **It is set on EVERY case**, and a recording that could not carry it — one that
+ *    ended on an unresolved gate, which would fail its own expectation — is EXCLUDED and counted
+ *    rather than admitted without it. The first version admitted it and omitted the field, which
+ *    cost a case nothing and cost the suite something worse: cases that check oversight and
+ *    cases that do not, mixed, with nothing saying which. A regression floor with unmarked gaps
+ *    is not a floor. The count appears in the refusal beside its three neighbours, so a corpus
+ *    that cannot fill a suite says which of the four reasons emptied it.
  * 3. `channels` — **only on the golden cases, and only the channels the grader did not write.**
  *
  * The cost of (3) is the one the lane has to state rather than hide: an expectation taken from
@@ -4432,6 +4436,12 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   // journaled verdict", sending the operator to re-run `loom score` when the verdicts were
   // there all along under another key.
   let otherKey = 0;
+  // A CASE THAT CANNOT CARRY THE SAFETY INVARIANT IS NOT A CASE, it is a quieter one. The first
+  // version kept such a recording and simply omitted `noIrreversibleWithoutGate`, so a frozen
+  // suite silently mixed cases that check oversight with cases that do not, and nothing told the
+  // operator which. Excluded and counted instead, like its three neighbours: a suite is a
+  // regression floor, and a floor with unmarked gaps in it is the shape this repo keeps finding.
+  let unresolvedGate = 0;
   const otherKeysSeen = new Set<string>();
   let excludedForWeights = 0;
   let undelivered = 0;
@@ -4465,13 +4475,19 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     const pinned = Object.fromEntries(
       Object.entries(recorded).filter(([c]) => !graderWrote.has(c) && !inputChannels.has(c)),
     );
+    if (gates.unresolved.length > 0) {
+      unresolvedGate++;
+      continue;
+    }
     eligible.push({
       runId,
       score: sc.score,
       golden: sc.golden,
       expect: {
         status: "succeeded",
-        ...(gates.unresolved.length === 0 ? { noIrreversibleWithoutGate: true } : {}),
+        // UNCONDITIONAL now. Every case in a frozen suite carries the invariant, so a reader
+        // does not have to check which ones do.
+        noIrreversibleWithoutGate: true,
         ...(sc.golden && Object.keys(pinned).length > 0 ? { channels: pinned } : {}),
       },
     });
@@ -4486,6 +4502,7 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       `cohort "${key}" yields ${String(eligible.length)} case(s) and a frozen suite needs at least ` +
         `${String(MIN_SUITE_CASES)}: ${String(unjudged)} run(s) carry no journaled verdict, ${String(excludedForWeights)} ` +
         `were scored under different weights, ${String(undelivered)} finished without delivering work, ` +
+        `${String(unresolvedGate)} ended on an unresolved gate and so cannot carry the safety invariant, ` +
         `${String(otherKey)} were judged under a DIFFERENT cohort key. Cases come from evolution.scored rows and ` +
         `nothing else, so the fix is to judge the cohort: loom score <runId>.` +
         // NAMED, not just counted. The keys differ in one segment and reading them side by side is

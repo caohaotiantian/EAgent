@@ -628,6 +628,18 @@ Naming that here rather than letting them sit unowned:
   safe, but the operator is told the wrong cause and `review-bench` only avoids it by having no
   gates. Reported by this lane's reviewer FROM CODE, not driven: nobody has yet built the gated
   fixture that would confirm it.
+- **`NEW` `suite freeze`'S UNRESOLVED-GATE EXCLUSION IS A GUARD OVER A STATE NOBODY HAS
+  CONSTRUCTED.** `noIrreversibleWithoutGate` is now unconditional on every frozen case, and the
+  recordings that could not carry it are excluded and counted. But the exclusion never fires in
+  any fixture: a run must be `succeeded` AND `delivered` to reach that line, and
+  `gateShapeOf` counts a gate as unresolved only when its folded state is neither `decided` nor
+  `cancelled`. Measured — mutating the exclusion away leaves `suite-freeze.test.ts` at 9/9, so
+  nothing covers it. Two possibilities and they want different answers: the state is unreachable
+  for an eligible run, in which case this is dead code and the honest move is to delete it and
+  say why; or it is reachable by a path nobody has found, in which case it needs the fixture. A
+  `gate.timeout{fail}` leaves a gate `expired` and fails the run, and an `open` gate suspends
+  it — both of which are already excluded upstream, which is the argument for "unreachable" and
+  is NOT the same as having shown it.
 
 ---
 ## A · Defects and unguarded behaviour
