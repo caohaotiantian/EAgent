@@ -2187,10 +2187,17 @@ const DEFAULT_RUN_CLOCK_LIMIT = 200;
  */
 export const RUN_CLOCK_SCAN_CEILING = 10_000;
 
-/** Where the next tick's window starts. One per clock, carried across ticks. */
-export interface RunClockRotation {
-  offset: number;
-}
+/**
+ * HOW LONG ONE POSITION OF THE WINDOW LASTS, in milliseconds of wall clock.
+ *
+ * The window used to be a counter in the clock's own closure — `const rot = { offset: 0 }`,
+ * built fresh by `startRunClock` at every boot. It is a period instead, because the offset is
+ * now DERIVED from `now` rather than remembered, and a derivation needs a unit. `serve` passes
+ * its own `--sweep-ms`, so one tick advances the window by exactly one lap and the coverage
+ * argument is the one the counter had. This default exists for a caller that has no period of
+ * its own; nothing in `src/` takes it.
+ */
+export const RUN_CLOCK_LAP_MS = 1_000;
 
 /**
  * What one tick saw. TWO FIELDS, BOTH READ — `startRunClock` acts on `truncated` and
@@ -2237,10 +2244,30 @@ export interface RunClockTick {
  * `{"kind":"advance"}` to it by hand — and `TODO.md` §E.2 still records "which runs a worker
  * considers" as an open question, which it was not: it had already shipped as starvation.
  *
- * SO THE WINDOW MOVES. Each tick folds `rows.slice(offset)` and the offset advances by
- * `limit`, wrapping when the listing runs out. Work per tick is unchanged — at most `limit`
- * projections — and every run within `RUN_CLOCK_SCAN_CEILING` is reached within
- * `ceil(N / limit)` ticks when no new runs arrive.
+ * SO THE WINDOW MOVES — AND IT MOVES BY THE CLOCK, NOT BY A COUNTER. This is the second
+ * defect and it hid inside the fix for the first. The rotation was `const rot = { offset: 0 }`
+ * built by `startRunClock`, mutated in place, and reconstructed by nothing: a value a decision
+ * reads that the journal cannot rebuild across a restart, which is CLAUDE.md's first
+ * non-negotiable and the class `oversight-survives-restart.test.ts` names. Measured on a
+ * 250-run journal at `limit` 200, with the control beside it:
+ *
+ *     CONTROL long-lived rot: oldest run reached on tick 1
+ *     RESTARTED rot:          oldest run reached on boot -1     (never, over 20 boots)
+ *
+ * So the 200-run starvation was fixed for a plane that stays up and unfixed for one that
+ * restarts — which is the shape a crash-looping or frequently-redeployed plane always has,
+ * and the one nothing could see: all three tests in `run-clock-window.test.ts` held ONE `rot`
+ * across every tick.
+ *
+ * The offset is now `(floor(now / lapMs) * limit) mod N`, wrapping at the end of the listing
+ * rather than resetting. Nothing is remembered, so a plane that restarts between every tick
+ * computes the same window a plane that stayed up would have, and two planes over one store
+ * agree without coordinating. Work per tick is unchanged — at most `limit` projections.
+ *
+ * WHY THAT REACHES EVERY RUN, and it is arithmetic rather than a hope: consecutive positions
+ * are exactly `limit` apart around a ring of `N`, and a given run sits inside a window for
+ * `limit` consecutive positions, so one of any `ceil(N / limit)` successive ticks contains it.
+ * That is the same guarantee the counter had, and it now survives a restart.
  *
  * WHAT IT DOES NOT PROMISE, said plainly because a fairness claim that overstates itself is
  * worse than the bound it replaced:
@@ -2248,48 +2275,73 @@ export interface RunClockTick {
  *   - Nothing here is fair against a STREAM of new submissions. New runs land at the head, so
  *     a run can be pushed below a window that has already passed it and wait a further lap.
  *     Bounded-lap fairness, not FIFO.
+ *   - The guarantee is over TICKS THAT ADVANCE `now` BY `lapMs`. A clock whose ticks arrive at
+ *     an exact multiple of `lapMs` steps by that multiple, and a step that shares a factor with
+ *     `N / limit` visits a subset of the positions — `startRunClock` passes its OWN period as
+ *     `lapMs` precisely so the ordinary step is one.
  *   - A run past the ceiling is not reached at all, and `truncated` is how a deployment finds
  *     that out. THE REAL FIX IS A CURSOR — `listRuns(after)`, so a tick can page rather than
  *     re-scan — and it belongs in `StateStore` with a conformance test behind it. When that
  *     lands, this rotation is the thing to delete.
- *   - Two processes rotating over one store do not coordinate. They never did; every write a
- *     tick causes still compare-and-swaps on the seq its decision was taken at, so the loser
- *     writes nothing. That is the same argument `GateSweeper` makes for itself.
+ *   - Two processes rotating over one store do not coordinate — they now agree, which is not
+ *     the same thing and is not better: they scan the same window and duplicate the folds.
+ *     Every write a tick causes still compare-and-swaps on the seq its decision was taken at,
+ *     so the loser writes nothing. That is the same argument `GateSweeper` makes for itself.
  *
  * `now` is a parameter for the reason every clock in this codebase is: a tick that read
- * `Date.now()` internally could not be driven by a test that has not slept.
+ * `Date.now()` internally could not be driven by a test that has not slept. It is load-bearing
+ * twice over here — it is also what the window is derived FROM.
  */
+/**
+ * Which rows of a listing of `n` this instant's window covers — the whole of the rotation.
+ *
+ * SEPARATE FROM THE TICK because it is the part with an argument in it, and an argument
+ * belongs somewhere a test can put numbers into directly rather than through a store.
+ *
+ * IT WRAPS RATHER THAN RESETTING, and that is not cosmetic. A window that stopped at the end
+ * of the listing would spend `laps - 1` ticks out of every `laps` doing nothing on a
+ * deployment whose run count is not a multiple of `limit`; wrapping means every tick folds a
+ * full window and the ring has no seam. Returned as INDICES so the caller keeps the rows.
+ */
+export function runClockWindow(n: number, limit: number, now: number, lapMs: number): readonly number[] {
+  if (n <= 0 || limit <= 0) return [];
+  if (limit >= n) return Array.from({ length: n }, (_, i) => i);
+  // `Math.max(0, now)` and `Math.max(1, lapMs)`: a clock that has been handed a negative
+  // instant or a zero period is a caller's bug, and the answer to it is the first window
+  // rather than a NaN that silently folds nothing.
+  const lap = Math.floor(Math.max(0, now) / Math.max(1, lapMs));
+  const offset = (lap * limit) % n;
+  return Array.from({ length: limit }, (_, i) => (offset + i) % n);
+}
+
 export async function runClockTick(
   ws: Workspace,
-  rot: RunClockRotation,
   limit: number,
   now: number = Date.now(),
   /** Injected for the same reason `now` is: the shipped value cannot be reached by a test
    * that is not willing to journal ten thousand runs, and an untested bound is a bound
    * nobody knows the behaviour of. */
   ceiling: number = RUN_CLOCK_SCAN_CEILING,
+  lapMs: number = RUN_CLOCK_LAP_MS,
 ): Promise<RunClockTick> {
-  // ONE LISTING, NOT `offset` OF THEM. `listRuns` takes a count and no cursor, so reaching
-  // row `offset` means asking for `offset + limit` rows and dropping the ones already
-  // visited. That is the cost the ceiling exists to bound.
-  const scan = Math.min(rot.offset + limit, ceiling);
-  const rows = (await ws.store.listRuns(scan)).slice(rot.offset);
-  // WRAP AT THE END OF THE LISTING OR AT THE CEILING, and the two are different facts: a short
-  // window means this deployment has fewer runs than the offset implies (a full lap is done);
-  // a window that filled while sitting ON the ceiling means there may be runs below it this
-  // clock cannot see, which is the one an operator has to be told about.
-  // `rot.offset + rows.length` is what the LISTING returned, before the slice — the quantity
-  // that says whether it filled. Written that way rather than as `rows.length === limit`
-  // because the two differ for a caller whose `limit` is itself above the ceiling, and that
-  // spelling reported "nothing hidden" for a window that could see nothing else.
-  const truncated = scan === ceiling && rot.offset + rows.length === ceiling;
-  rot.offset = rows.length < limit || scan === ceiling ? 0 : rot.offset + limit;
+  // THE WHOLE REACHABLE SET, IN ONE LISTING, and it is not the cost it looks like. `LIMIT` is
+  // a cap and not a fetch count: a store holding three runs answers `listRuns(10_000)` with
+  // three rows. The old shape asked for `offset + limit` and paid the same worst case on its
+  // deepest lap; what it bought by paying less on shallow laps was an offset it had to
+  // REMEMBER, which is the defect. This asks once and derives.
+  const rows = await ws.store.listRuns(ceiling);
+  // A LISTING THAT FILLED THE CEILING means there may be runs below it this clock cannot see,
+  // which is the one thing an operator has to be told about. Conservative at the exact
+  // boundary: a store holding precisely `ceiling` runs reports `true` and is hiding nothing.
+  const truncated = rows.length >= ceiling;
+  const window = runClockWindow(rows.length, limit, now, lapMs);
+  const visible = window.map((i) => rows[i]!);
 
   // LAZY, because the rotation makes this run more often and `graphsByHash` re-reads and
   // RE-COMPILES every graph in the workspace. A tick with nothing due should cost a listing
   // and a fold per run in view, and no compiles at all.
   let index: ReadonlyMap<string, RunGraph> | undefined;
-  for (const row of rows) {
+  for (const row of visible) {
     const p = await ws.engine.projection(row.runId);
     if (p === undefined || p.status !== "running") continue;
     const due = Object.values(p.tasks).some((t) => t.state === "ready" && t.retryAfter !== undefined && t.retryAfter <= now);
@@ -2302,19 +2354,23 @@ export async function runClockTick(
     await ws.engine.rehydrateGates(row.runId);
     await ws.engine.advance(row.runId);
   }
-  return { visited: rows.map((r) => r.runId), truncated };
+  return { visited: visible.map((r) => r.runId), truncated };
 }
 
 function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop(): void } {
   let running = false;
   let failing = false;
-  const rot: RunClockRotation = { offset: 0 };
+  // NOTHING IS CARRIED ACROSS TICKS ANY MORE, and that is the point. This closure used to hold
+  // `const rot = { offset: 0 }` — process memory that decided which runs got advanced, rebuilt
+  // at every boot, reconstructed by nothing. `toldAboutCeiling` and `failing` below are memos
+  // over what to SAY, not over what to do: losing them costs a repeated line, not a starved run.
   let toldAboutCeiling = false;
   const tick = (): void => {
     if (running) return;
     running = true;
     void (async () => {
-      const t = await runClockTick(ws, rot, limit);
+      // ITS OWN PERIOD AS THE LAP, so one tick advances the window by exactly one window.
+      const t = await runClockTick(ws, limit, Date.now(), RUN_CLOCK_SCAN_CEILING, everyMs);
       // ONCE, for the reason the outage lines above are once: a deployment big enough to hit
       // the ceiling hits it every lap, and a line per tick is how an operator learns to stop
       // reading stderr. It is not an outage — nothing is failing — so it does not use the
