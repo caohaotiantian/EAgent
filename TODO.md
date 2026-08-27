@@ -272,9 +272,20 @@ closed and the next member will look like one of these.
   `filesReviewed: 3, clean: 2`: one of three contributed nothing and nothing anywhere said so.
   Two of the three turns in the same run finished normally, so this is a per-turn truncation
   treated as a successful empty answer, not an outage. Fix in flight.
-- **`NEW` Nothing warns that `defaultMaxTokens` is too small for the model.** The operator had to
-  read a SQLite journal to discover it. GLM-5.2 reasons at roughly 17:1 against content, so a
-  4,096 cap never reached content at all; 16,000 still truncated one of three.
+- ~~**Nothing warns that `defaultMaxTokens` is too small for the model.**~~ **PARTLY FIXED
+  2026-08-27**, and the half that is NOT fixed is named below. The boot banner now says when an
+  adapter row stated no `defaultMaxTokens` and therefore inherited
+  `DEFAULT_MAX_OUTPUT_TOKENS` (4096) — a number written in four places across the two provider
+  files and printed nowhere. It fires on SILENCE and never on a value: nothing in the binary
+  knows a route's model or how that model splits output between reasoning and content, so a
+  threshold on a ceiling the operator chose would be noise, and `defaultMaxTokens: 1` gets
+  nothing. **STILL OPEN: an operator who states a number that is too small is told nothing**,
+  before or after — the measured shape of the truncation (`finishReason "max_tokens"` with
+  `contentChars 0`, which means the budget never reached content at all rather than that the
+  answer was clipped) is available to `turnRefusal` in `run/engine.ts` and is not used to say so.
+  Original finding: the operator had to read a SQLite journal to discover it. GLM-5.2 reasons at
+  roughly 17:1 against content, so a 4,096 cap never reached content at all; 16,000 still
+  truncated one of three.
 
 ### Found by driving the evolution loop on a real corpus, 2026-08-26
 
@@ -491,8 +502,22 @@ Naming that here rather than letting them sit unowned:
   `validate.ts`, `subprocess.ts`, `gate.ts`, `redact.ts`, `http.ts`, `hooks.ts`,
   `policy.ts`, `delivery.ts`, `resources/hook-loader.ts` and `scripts/check-surface.mjs` — ten
   files, seventeen occurrences.
-- **`NEW` F36'S ASYNC REFUSAL IS IN ONE LOADER OF TWO, and the hole it closed is open one
-  directory over.** `resources/functions.ts:302-308` refuses an async body at LOAD with
+- ~~**F36'S ASYNC REFUSAL IS IN ONE LOADER OF TWO, and the hole it closed is open one
+  directory over.**~~ **FIXED 2026-08-27.** Driven both ways first, because if an async hook
+  body merely WORKED then `functions.ts`'s refusal was the thing to question. It works —
+  `runFilters` awaits, and the resolved value arrives — and it is harmful twice: at
+  `callTimeoutMs: 100` a body spinning after `await 0` returned at 1,949 ms where the same body
+  written synchronously was terminated at 103 ms, and the resolved object skips `intoHostRealm`
+  (`getPrototypeOf(v) === Object.prototype` was `false` for async, `true` for sync), so a
+  vm-context object reached the host. The rule is `realm.ts`'s `ASYNC_RULE` now, beside
+  `SHAPE_RULE`, and `ARGUMENT_BRIDGE`'s copy is DELETED rather than joined by a second — both
+  loaders emit one sentence, pinned byte-for-byte apart from the kind by
+  `test/resources/async-body-refused-at-the-seam.test.ts`. Moving it host-side also widened it:
+  the old in-context check read `.constructor.name` alone, which an own `constructor` property
+  defeats. **The residual, unchanged:** a SYNCHRONOUS hook body that RETURNS a promise is still
+  not refused — `functions.ts` catches that second shape when the body returns and the hook
+  loader has no equivalent. Original finding: `resources/functions.ts:302-308` refuses an async
+  body at LOAD with
   "an async function body cannot be bounded by any deadline". `resources/hook-loader.ts` has
   **zero** occurrences of the string `async` (`/usr/bin/grep -acn async` → 0). Driven, one
   source, both loaders:
@@ -511,8 +536,12 @@ Naming that here rather than letting them sit unowned:
   `resources/realm.ts`. **Its fix is a REFUSAL on config that loads today** — an async hook body
   someone wrote yesterday stops loading — so it wants its own `fix:` commit with this
   reproduction in the body, and it is not something a version pin may grandfather.
-- **`CITED` No `LICENSE` at the repository root.** The `loom` branch dropped the one `init`
-  carries; neither the root manifest nor `packages/core` declares a license.
+- ~~**No `LICENSE` at the repository root.**~~ **FIXED 2026-08-27.** `init`'s MIT file recovered
+  verbatim — `git show init:LICENSE`, same sha256 — with its copyright line ("2026 EAgent
+  contributors") deliberately left alone, and `"license": "MIT"` added to both manifests.
+  DESIGN.md's "Deliberately not sequenced" paragraph had bundled the LICENSE with publishing and
+  a stranger-facing install and cited this entry; it keeps its decision about those two and
+  drops the LICENSE, which never depended on them.
 - ~~**The `tui` removal is an unfinished transaction**~~ **MOOT 2026-08-25** — `packages/eagent`,
   which contained every one of those files, was deleted. Original finding:, all of it inside
   `packages/eagent/` — the ROOT README has no occurrence of "tui" and there is no root
