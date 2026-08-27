@@ -137,6 +137,18 @@ export interface CompensationInput {
  * decision an operator has to be able to inspect BEFORE anything runs, and a function that can
  * only be observed by letting it act is not one anybody will trust with an undo.
  */
+/**
+ * The `kind` segment of `${taskId}:${kind}:${ordinal}`, read from the RIGHT.
+ *
+ * The same shape `journal/audit.ts` reads, and for the same reason: a taskId cannot contain a
+ * colon (`graph/validate.ts` raises GRAPH003_BAD_ID for one in a node id, and a branch path is
+ * `root/e0[0]`), so the last two segments are the kind and the ordinal whatever the id does.
+ */
+function kindOfKey(key: string): string | undefined {
+  const parts = key.split(":");
+  return parts.length < 3 ? undefined : parts[parts.length - 2];
+}
+
 export function planCompensation(input: CompensationInput): CompensationPlan {
   const since = input.sinceSeq ?? 0;
   const candidates: CompensationStep[] = [];
@@ -151,6 +163,19 @@ export function planCompensation(input: CompensationInput): CompensationPlan {
     const p = e.payload;
     if (e.seq <= since) continue;
     if (p.irreversibility === "read_only") continue;
+    // AN UNDO IS NOT A CANDIDATE FOR BEING UNDONE. A compensation dispatch appends its own
+    // `tool.called`, and the undo tool is irreversible about as often as the tool it reverses —
+    // so a plan built over the whole journal listed the rollback's own steps as things to roll
+    // back. It does not bite on the first pass, where the undo lands after the plan was built;
+    // it bites on a RESUMED rollback, where a crash between two steps means the next
+    // `planCompensation` reads a journal that already contains them. Reproduced by this lane's
+    // reviewer with a store that throws right after the first `compensation.recorded` lands.
+    //
+    // Keyed on the EFFECT KIND, not the tool name: `effectKey(taskId, "compensate", n)` is what
+    // `#invokeTool` writes for this path and nothing else writes it, whereas a tool name can
+    // legitimately appear on both sides — the same `fs.delete` may be somebody's action and
+    // somebody else's undo.
+    if (kindOfKey(p.key) === "compensate") continue;
 
     const manifest = input.tools.get(p.name);
     const undo = manifest?.compensation?.tool;

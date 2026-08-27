@@ -25,6 +25,7 @@ import type { Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { resolver } from "./skeleton.ts";
+import { planCompensation } from "../../src/run/compensation.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -284,4 +285,44 @@ test("A COMPENSATION IS NOT RUN TWICE — THE JOURNAL, NOT A FLAG, IS WHAT REMEM
   await r.engine.advance(runId);
   await r.engine.advance(runId);
   assert.deepEqual(r.world.undone, [2, 1], "and a second and third `advance` must not undo anything again");
+});
+
+test("A ROLLBACK RESUMED AFTER A CRASH DOES NOT UNDO ITS OWN UNDOS", () => {
+  // `planCompensation` walked every non-`read_only` `tool.called` — including the ones a
+  // compensation dispatch writes for itself. It does not bite on the first pass, where the undo
+  // lands after the plan was built. It bites on a RESUMED rollback: a crash between two steps
+  // means the next plan reads a journal that already contains them, and an undo tool is
+  // irreversible about as often as the tool it reverses. So the refund got refunded.
+  const tools = new ToolRegistry();
+  const charge: ToolDefinition = {
+    name: "pay.charge", version: "1.0", description: "take money", capabilities: ["pay"],
+    irreversibility: "irreversible", idempotent: false, parameters: { type: "object", properties: {} },
+    compensation: { tool: "pay.refund" }, execute: () => ({ content: "ok" }),
+  };
+  const refund: ToolDefinition = {
+    name: "pay.refund", version: "1.0", description: "give it back", capabilities: ["pay"],
+    // IRREVERSIBLE ON PURPOSE — a refund is not read-only, which is exactly why the old filter
+    // picked it up. A test whose undo were `read_only` would pass without the fix.
+    irreversibility: "irreversible", idempotent: false, parameters: { type: "object", properties: {} },
+    execute: () => ({ content: "ok" }),
+  };
+  tools.register(charge);
+  tools.register(refund);
+
+  const called = (seq: number, key: string, name: string): JournalEvent =>
+    ({ seq: seq as Seq, type: "tool.called", taskId: "t@root#0",
+       payload: { key, name, version: "1.0", argsShape: "{}", argsDigest: "sha256:x", irreversibility: "irreversible", ok: true, ms: 1 } }) as unknown as JournalEvent;
+
+  const journal = [
+    called(10, "t@root#0:tool:0", "pay.charge"),
+    // what the rollback got through before the crash
+    called(11, "t@root#0:compensate:0", "pay.refund"),
+  ];
+
+  const plan = planCompensation({ events: journal, tools, sinceSeq: 0 });
+  assert.deepEqual(
+    plan.steps.map((s) => s.tool),
+    ["pay.charge"],
+    `only the original action is a candidate: ${JSON.stringify(plan.steps.map((s) => s.tool))}`,
+  );
 });
