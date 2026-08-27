@@ -721,6 +721,13 @@ export function readIdentities(file: string): IdentitySource {
  * dangerous but about it being INVISIBLE: `GateDispatcher` keys its channels by name in a
  * `Map`, so a second row called `slack` silently replaces the first and one configured
  * channel never delivers anything, with nothing anywhere saying so.
+ *
+ * **EVERY CHANNEL HERE IS AN HTTP WEBHOOK, and a `"kind"` is refused rather than ignored.** The
+ * name `slack` above is a label on a URL, not a transport: this function builds `WebhookChannel`
+ * or `SignedWebhookChannel` and there is no third branch. Measured before the refusal existed,
+ * `"kind"` set to `"slack"`, `"carrier-pigeon"`, `"webhook"` and `"email"` — all four accepted,
+ * all four the identical notify-only webhook. See the check itself for why `"webhook"` is
+ * refused with the rest.
  */
 export function readChannels(file: string): DeliveryConfig {
   const path = resolve(file);
@@ -762,6 +769,32 @@ export function readChannels(file: string): DeliveryConfig {
     if (typeof url !== "string" || url === "") refuse(`${where} ("${name}") needs a non-empty string "url" to deliver to`);
     if (seen.has(name)) refuse(`${where} repeats the channel name "${name}" — a dispatcher keys channels by name, so one of them would never deliver`);
     seen.add(name);
+
+    // A `kind` WAS READ AND THROWN AWAY. Driven through this function before this refusal
+    // existed, four values — "slack", "carrier-pigeon", "webhook", "email" — and ALL FOUR were
+    // accepted and ALL FOUR produced the identical plain notify-only `WebhookChannel`,
+    // indistinguishable from a row with no `kind` at all. "carrier-pigeon" is the one that shows
+    // what the field constrained: nothing.
+    //
+    // So an operator writing `"kind": "email"` has a file that reads as configured and a
+    // deployment that quietly POSTs JSON at a URL. That is the failure this whole reader is
+    // named for, arriving through a field it never looked at — and it is the same trade
+    // `readModels` already makes for an unknown provider ("refused rather than skipped, because
+    // a skipped adapter is a deployment that boots looking configured").
+    //
+    // `"webhook"` IS REFUSED TOO. There is no `kind` vocabulary to be right about — this reader
+    // builds one transport — so accepting the "correct" spelling would advertise a set that does
+    // not exist, and the next operator would reasonably try the next member of it.
+    if (row["kind"] !== undefined) {
+      refuse(
+        `${where} ("${name}") declares "kind": ${JSON.stringify(row["kind"])}, and there is no "kind" field — ` +
+          `it was read by nothing, so every value produced the same plain HTTP webhook. This file configures ` +
+          `HTTP webhooks and only those: the URL decides where a gate goes, and "callbackSecret" is the one ` +
+          `switch — present makes the channel ANSWERABLE (a SignedWebhookChannel with an inbound callback ` +
+          `route), absent makes it notify-only. Remove the field. A transport that is not an HTTP webhook ` +
+          `is not configurable here at all, and silently accepting a name for one is worse than saying so.`,
+      );
+    }
 
     const common: WebhookChannelOptions = {
       name,
