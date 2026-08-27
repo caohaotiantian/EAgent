@@ -542,9 +542,14 @@ across versions.
 
 ### Deliberately not sequenced
 
-**Distribution** — LICENSE, publishing, a stranger-facing install. It follows from the first-user
+**Distribution** — publishing and a stranger-facing install. It follows from the first-user
 decision: the next user is the maintainer porting a workflow, not a stranger who found the repo.
-`TODO.md` §A0 records the missing LICENSE as a defect; THIS paragraph is where the choice to
-leave it unsequenced is recorded. Revisit when item 4 lands.
+THIS paragraph is where the choice to leave it unsequenced is recorded. Revisit when item 4 lands.
+
+The LICENSE was part of this bundle and is no longer: it is at the repository root, recovered
+byte-for-byte from `init` rather than chosen here, and declared in both manifests. Being
+unsequenced was the argument for not designing a distribution story; it was never an argument for
+a tree whose terms nobody can read, and the two had been bundled because the LICENSE arrived in
+the same paragraph as the work it does not actually depend on.
 
 Open items and known defects live in `TODO.md`.
