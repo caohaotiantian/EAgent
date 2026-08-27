@@ -243,6 +243,8 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
     policy: { escalations: [], violations: 0, gatesRaised: 1 },
     inputDigest: digest({}),
     fromUnpromotedCandidate: false,
+    /** The fold had the graph; `score.ts` refuses to call a `false` here a measurement. */
+    specResolved: true,
     ...over,
   };
 }
@@ -495,6 +497,23 @@ test("an assertion evaluator yields S1; a rubric evaluator yields S4", async () 
 
   // 1.0·1 + 0.3·0.2 over 1.3 — the assertion dominates, which is the ladder working.
   assert.ok(Math.abs(outcomeOf(readSignals(t)) - (1 + 0.3 * 0.2) / 1.3) < 1e-9);
+  assert.equal(t.specResolved, true, "the control for the fold below");
+
+  // …AND WITHOUT THE GRAPH THE SAME JOURNAL HAS NO LADDER AT ALL. `extractSignals` keys on
+  // node types and node types come from `spec.nodes`, so both verdicts vanish and the run
+  // reads exactly like one that failed every assertion. This is the fold half of the defect
+  // `loom score` refused for: a candidate graph lives in candidates/, never resolves out of
+  // `<workspace>/graphs/`, and scored 0.111 instead of 0.700 on the same journal.
+  const blind = foldTrajectory(events);
+  assert.deepEqual(blind.outcome.assertions, [], "no spec, no assertion — the verdict is still in `writes`");
+  assert.deepEqual(blind.outcome.rubrics, []);
+  assert.equal(blind.outcome.selfReported, false);
+  assert.equal(outcomeOf(readSignals(blind)), 0, "which reads as outcome 0, the number a total failure earns");
+  assert.equal(
+    blind.specResolved,
+    false,
+    "so the fold has to say which zero it is; score.ts refuses to call this a measurement",
+  );
 });
 
 test("THE CANONICALISER ORDERS BY CODE UNIT, NOT BY THE MACHINE'S COLLATION", () => {

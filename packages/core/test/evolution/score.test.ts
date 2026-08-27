@@ -64,6 +64,9 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
     policy: { escalations: [], violations: 0, gatesRaised: 0 },
     inputDigest: digest({}),
     fromUnpromotedCandidate: false,
+    // The fold had the graph. A fixture that said otherwise would be scoring a run nobody
+    // measured, which is what `specResolved` exists to refuse — see the tests that set it false.
+    specResolved: true,
     ...over,
   };
 }
@@ -328,4 +331,106 @@ test("a cohort of nothing but failures measures nothing, and n = 0 blocks golden
   assert.equal(c.p90Score, 0);
   const t = trajectory({ outcome: signals({ assertions: [{ nodeId: n("v"), pass: true }] }) });
   assert.equal(isGolden(t, scoreTrajectory(t, c), c).conditions.find((x) => x.id === 4)?.pass, false);
+});
+
+// ── a score that could not find what it was scoring ──────────────────────────
+
+test("AN UNMEASURED RUN IS TOLD APART FROM A RUN THAT FAILED EVERY ASSERTION", () => {
+  // The two verdicts the product could not distinguish, side by side. Both read `outcome 0`;
+  // only one of them is a statement about the run. Driven live before this existed, same run
+  // and same command twice (docs/evolution-loop-2026-08-27.md §4): the graph absent from
+  // graphs/ gave `"signals": []`, outcome 0, score 0.111; the graph present gave
+  // `S1 "6/6 assertions passed"`, outcome 1, score 0.700 — so every candidate cohort, whose
+  // graph lives in candidates/, read as worthless.
+  const c = cohort();
+  const failedEveryAssertion = trajectory({
+    outcome: signals({ assertions: [{ nodeId: n("v"), pass: false }] }),
+  });
+  // What the fold produces without the graph: `extractSignals` keys on node types and has
+  // none, so the assertion that DID run leaves no trace at all.
+  const noSpec = trajectory({ specResolved: false });
+
+  const bad = scoreTrajectory(failedEveryAssertion, c);
+  const unmeasured = scoreTrajectory(noSpec, c);
+
+  assert.equal(bad.outcome, 0, "the control: a real 0/1 is a real zero");
+  assert.equal(unmeasured.outcome, 0, "and the unmeasured run reads the same number");
+  assert.equal(bad.components.specResolved, true, "…so the NUMBER is not what separates them");
+  assert.equal(unmeasured.components.specResolved, false, "the marker is");
+
+  // AND IT IS NOT A LOW SCORE, IT IS NO SCORE. The measured failure keeps its efficiency
+  // credit — it delivered work and spent the cohort median doing it — and the unmeasured run
+  // keeps nothing, because there is nothing for efficiency to be a ratio to.
+  assert.ok(bad.score > 0, `a measured failure keeps its efficiency terms, got ${bad.score}`);
+  assert.equal(unmeasured.score, 0, "a failed measurement earns nothing at all");
+
+  // THE VERDICT SAYS WHY, in words that name the cause and not the symptom.
+  const six = isGolden(noSpec, unmeasured, c).conditions.find((x) => x.id === 6)!;
+  assert.equal(six.pass, false);
+  assert.ok(six.detail.includes(noSpec.graphHash), `the blocker must name the graph: ${six.detail}`);
+  assert.equal(
+    isGolden(failedEveryAssertion, bad, c).conditions.find((x) => x.id === 6)!.pass,
+    true,
+    "and it must not fire on a run whose signals WERE readable and simply failed",
+  );
+});
+
+test("A GATE DECISION IS NOT A WHOLE OUTCOME when the rest of the ladder is unreadable", () => {
+  // S2 is the one rung that survives a missing spec: `gate.decided` is a journal row and needs
+  // no node type. So a run whose evaluator verdicts were unreadable would have reported the
+  // human's approval as if it were the ENTIRE outcome — a fragment of the ladder presented as
+  // all of it, and `outcomeOf` divides by the weights PRESENT, so the fragment reads 1.0.
+  const c = cohort();
+  const approved = signals({ humanDecisions: [{ nodeId: n("g"), decision: "approve", latencyMs: 10 }] });
+  const withSpec = scoreTrajectory(trajectory({ outcome: approved }), c);
+  const without = scoreTrajectory(trajectory({ outcome: approved, specResolved: false }), c);
+
+  assert.equal(withSpec.outcome, 1, "the control: an approval read with the graph in hand is an outcome of 1");
+  assert.equal(without.outcome, 0, "without the graph it is a fragment, and a fragment is not an outcome");
+  assert.deepEqual(
+    without.signals.map((s) => s.id),
+    ["S2"],
+    "the reading is still reported as evidence; it is the OUTCOME that is withheld",
+  );
+});
+
+test("AN UNMEASURED PEER IS NOT A MEMBER — it neither counts toward n nor sets the bar", () => {
+  // `measureCohort`'s docstring table, run. The same thirty runs three ways; only whether the
+  // fold had their graph differs. The middle case is what shipped: thirty runs nobody could
+  // measure certified "cohort large enough" and set a promotion bar of ZERO that all thirty
+  // then tied. That is the vacuous bar this file's `didWork` section refused once already,
+  // arriving through a different door.
+  const member = (i: number, specResolved: boolean): Trajectory =>
+    trajectory({
+      runId: `run_${i}` as RunId,
+      specResolved,
+      usage: { costUsd: 0.001 * (i + 1), tokens: 100, wallMs: 100 * (i + 1), modelCalls: 1, toolCalls: 0, subgraphRuns: 0 },
+    });
+  const measured = Array.from({ length: 30 }, (_, i) => member(i, true));
+  const specless = Array.from({ length: 30 }, (_, i) => member(i, false));
+
+  const good = measureCohort("k", measured);
+  assert.deepEqual(
+    { n: good.n, p50Cost: Number(good.p50Cost.toFixed(4)), p90Score: Number(good.p90Score.toFixed(3)) },
+    { n: 30, p50Cost: 0.015, p90Score: 0.34 },
+    "the control, and the row every other row is read against",
+  );
+
+  const none = measureCohort("k", specless);
+  assert.equal(none.n, 0, "a population of runs nobody measured is not a population");
+  assert.equal(none.p90Score, 0);
+  assert.equal(
+    isGolden(specless[0]!, scoreTrajectory(specless[0]!, none), none).conditions.find((x) => x.id === 4)!.pass,
+    false,
+    "condition 4 refuses the cohort rather than certifying it against a bar of zero",
+  );
+  assert.equal(
+    specless.filter((m) => isGolden(m, scoreTrajectory(m, none), none).conditions.find((x) => x.id === 2)!.pass).length,
+    30,
+    "…and it has to be condition 4 that stops it, because a bar of zero is one every member ties",
+  );
+
+  const mixed = measureCohort("k", [...measured.slice(0, 15), ...specless.slice(15)]);
+  assert.equal(mixed.n, 15, "n counts runs that were measured, not journal rows");
+  assert.equal(Number(mixed.p50Cost.toFixed(4)), 0.008, "and the medians are medians of those");
 });
