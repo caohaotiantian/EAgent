@@ -209,6 +209,7 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
   if (c.expect.identicalToRecording === true && !report.match) {
     reasons.push("replay diverged from the recorded run");
   }
+  for (const r of unexercised(report)) reasons.push(r);
 
   return {
     id: c.id,
@@ -219,6 +220,67 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
     wallMs: p.usage.wallMs,
     replay: report,
   };
+}
+
+/**
+ * The reasons this case measured the RECORDING rather than the candidate.
+ *
+ * THE DEFECT THIS EXISTS FOR, DRIVEN. `runCase` replays a recorded run against the candidate
+ * graph, and every model turn is served from the recording by `effectKey(taskId, "model",
+ * turn)` — a key built from `nodeId@branch#iteration` and the turn number, carrying no prompt,
+ * no request and no graph hash. A candidate whose only change is `agent.prompt` therefore
+ * replays byte-identically. Measured on the walking skeleton, three cases, `gateCandidate`
+ * with all eleven checks and every input supplied honestly:
+ *
+ *     baseline                  -> passRate 1  cost 0.001125
+ *     agent prompt re-pointed   -> passRate 1  cost 0.001125  PROMOTE=true
+ *     live model calls made by either evaluation: 0
+ *
+ * The replay KNEW: `report.match` was `false` and `report.graph.match` was `false`. `runCase`
+ * read neither, because neither is evidence of a defect — a candidate is a different graph by
+ * definition and divergence from the recording is what a candidate is FOR. See
+ * `EvalCase.expect.identicalToRecording`. So the fix is not to read those two; it is to read
+ * the narrower question replay can now answer.
+ *
+ * TWO REASONS, BOTH FAILING CLOSED.
+ *
+ * `reboundEffects` names keys where the recording and the replay made DIFFERENT CALLS — a
+ * recorded answer handed to a question nobody asked. That is not a candidate being measured;
+ * it is a candidate being certified against somebody else's transcript, and D6 defines
+ * self-improvement as text-space optimisation, so this is the case the gate is aimed at.
+ *
+ * `unverifiedModelEffects` names keys where the RECORDING predates
+ * `model.called.requestDigest`, so the two journals cannot say whether the calls agreed. That
+ * is refused only when the graph is not the recorded one: a same-graph replay has nothing that
+ * could have changed the request, and refusing there would break every replay-verification
+ * fixture over an older corpus for no property gained. A DIFFERENT graph over an old recording
+ * is the case that cannot be decided, and "when a guard cannot decide, it fails closed".
+ *
+ * WHAT THIS DOES NOT CATCH, so that nobody reads it as more than it is. A candidate that
+ * lowers `agent.maxTurns` asks the same question on the turns it does take, so its turn-0
+ * digest matches and only the later recorded turns go unserved — measured, it still promotes,
+ * one turn cheaper. A candidate that lowers a node's `policy.budget` is invisible for a
+ * different reason: replay has no adapter, so `estimateOf` is 0 and the ceiling is never
+ * tested. Both are policy that replay does not exercise, and neither is a question a request
+ * digest can answer.
+ */
+function unexercised(report: ReplayReport): string[] {
+  const out: string[] = [];
+  for (const r of report.reboundEffects) {
+    out.push(
+      `the recorded ${r.field} result for "${r.key}" was served to a different call — ` +
+        `recorded ${r.recorded}, replayed ${r.replayed}, so this case measured the recording and not the candidate`,
+    );
+  }
+  if (!report.graph.match && report.unverifiedModelEffects.length > 0) {
+    out.push(
+      `this candidate is a different graph (recorded ${report.graph.recorded}, replayed ${report.graph.replayed}) and ` +
+        `${String(report.unverifiedModelEffects.length)} model effect(s) in the recording carry no requestDigest ` +
+        `(${report.unverifiedModelEffects.slice(0, 3).join(", ")}), so nothing here can tell whether the candidate ` +
+        `asked what the recording asked — re-record the corpus, or judge this candidate live`,
+    );
+  }
+  return out;
 }
 
 /**

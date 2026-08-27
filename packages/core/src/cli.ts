@@ -72,6 +72,7 @@ import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type Journa
 import { digest, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
 import { cohortKeyOf, DEFAULT_WEIGHTS, isGolden, measureCohort, promotionCeiling, scoreTrajectory } from "./evolution/score.ts";
+import { gateCandidate, runEvalSuite, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -116,6 +117,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              of the named input channels only
   loom cohort  <runId>                       read journaled scores back: this run's verdict and
                                              every run judged under the same key and weights
+  loom promote <candidate.json|yaml>         judge a candidate graph against a baseline over a
+               --baseline <graph.json|yaml>  frozen suite of RECORDED runs, replayed offline.
+               --suite <suite.json>          No model is called and no tool runs. Prints the
+               [--proposed-by ID]            eleven promotion checks and journals the decision
+                                             as operator.command on the first case's run.
+                                             Exit 0 promotes, 1 refuses. The suite must have
+                                             been frozen BEFORE the candidate was proposed —
+                                             an exam written for a known student is not one
 
   --help            print this and exit — also "loom help", and valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
@@ -261,6 +270,7 @@ export function resourceRefsIn(text: string): readonly string[] {
 const KNOWN_FLAGS: readonly string[] = [
   "allow-exec",
   "as",
+  "baseline",
   "bucket",
   "budget",
   "channels-file",
@@ -276,8 +286,10 @@ const KNOWN_FLAGS: readonly string[] = [
   "mcp-file",
   "models-file",
   "port",
+  "proposed-by",
   "reason",
   "reject",
+  "suite",
   "sweep-ms",
   "token",
   "workspace",
@@ -3291,7 +3303,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           ...(bucketInput === undefined ? {} : { bucketInput }),
         });
         const key = cohortKeyOf(t);
-        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, bucketInput);
+        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, index, bucketInput);
         if (peers.truncated) {
           process.stderr.write(
             `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
@@ -3418,6 +3430,144 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 0;
       }
 
+      // THE DOOR ON THE PROMOTION GATE, and it is the whole reason the gate exists.
+      //
+      // `gateCandidate`, `runEvalSuite` and `requirePromotable` had ZERO callers outside
+      // `src/evolution/` and `test/` — the same standing `scoreTrajectory` had before `loom
+      // score` existed, and cli.ts's `score` comment says what that costs: arithmetic that is
+      // "correct, tested, and reachable from nothing a person can run". `node cli.ts promote`
+      // answered `unknown command "promote"`, exit 2.
+      //
+      // FOUR OF `PromotionInput`'s FIELDS ARE MEASURED HERE, NOT TAKEN AS FLAGS. A gate whose
+      // inputs the caller asserts is not a gate:
+      //
+      //   deterministic          — the candidate's suite is run TWICE and the two reports'
+      //                            replayed channels and statuses compared, case by case.
+      //   postureDiffNonNegative — the candidate spec is recompiled with `baselinePostures`
+      //                            taken from the baseline's `plans`, the `graph/mutate.ts:180`
+      //                            pattern. GRAPH014 / E_OVERSIGHT_LOOSENED answers it.
+      //   promptGrowth           — the compiled artifacts carry their prompts (`RunGraph
+      //                            .documents`), so this is the byte delta over the refs the
+      //                            two graphs' AGENT nodes name, not a number anybody typed.
+      //   proposedAt             — now. `9-suite-predates-candidate` is a timestamp comparison
+      //                            and it is the rule that makes an AI-authored suite safe, so
+      //                            the candidate cannot be given a date it prefers.
+      //
+      // WHAT IT DELIBERATELY DOES NOT DO: it does not publish the winner. Promotion stays a
+      // human putting the file in `<workspace>/graphs/`, which is what `loom score` already
+      // reads as the promoted set. A verb that copied the graph on a pass would let one command
+      // change what the next thirty runs are allowed to learn from.
+      //
+      // THREE OF THE ELEVEN CHECKS ARE WEAKER THAN D10.d SAYS, and shipping this door makes
+      // them the product's promotion criteria, so they are said out loud rather than
+      // discovered: `2-non-inferior` is a bare point estimate and not McNemar's paired test
+      // with a 95% lower bound; `3-cost` divides TOTALS where D10.d says medians, and
+      // `EvalReport` carries no median so the stricter reading is not expressible; `7-safety`
+      // greps case reasons for the substring `irreversible`.
+      case "promote": {
+        const candidateFile = requirePositional(args, 0, "a candidate graph file");
+        const baseline = loadGraph(ws, requireFileFlag(args, "baseline"), false);
+        const candidate = loadGraph(ws, candidateFile, false);
+        const suite = readSuite(requireFileFlag(args, "suite"));
+        const proposedBy = proposedByFlag(args);
+        // `false`: neither graph is being introduced to the workspace. `loom promote` judges a
+        // candidate, and a candidate is by definition not published — see the note above about
+        // not publishing the winner.
+        if (candidate.graphHash === baseline.graphHash) {
+          throw err.validation(
+            CODES.E_CONFIG_INVALID,
+            `the candidate and the baseline are the same graph (${candidate.graphHash}). ` +
+              `A promotion decision over two identical graphs measures nothing, and reporting ` +
+              `"non-inferior" for it would be true and useless.`,
+          );
+        }
+        const engine = {
+          tools: ws.engine.tools,
+          functions: ws.engine.functions,
+          models: ws.engine.models,
+          // The workspace's hooks and the run's own grants, for the reason `loom replay` gives
+          // one case over: a replay without them runs a DIFFERENT PROGRAM than the recording
+          // and then blames the run for the difference.
+          hooks: ws.hooks,
+          policy: { granted: ws.granted },
+        };
+
+        const baseReport = await runEvalSuite({ store: ws.store, suite, graph: baseline, engine });
+        const candReport = await runEvalSuite({ store: ws.store, suite, graph: candidate, engine });
+        const candAgain = await runEvalSuite({ store: ws.store, suite, graph: candidate, engine });
+
+        const verdict = gateCandidate({
+          baseline: baseReport,
+          candidate: candReport,
+          proposedAt: Date.now(),
+          ...(proposedBy === undefined ? {} : { proposedBy }),
+          promptGrowth: promptGrowthOf(baseline, candidate),
+          postureDiffNonNegative: posturesHoldOf(ws, baseline, candidate),
+          deterministic: sameOutcome(candReport, candAgain),
+        });
+
+        for (const c of [...verdict.checks].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+          process.stdout.write(`${c.pass ? "✓" : "✗"} ${c.id.padEnd(24)} ${c.detail}\n`);
+        }
+        for (const c of candReport.cases.filter((x) => !x.pass)) {
+          process.stdout.write(`  · case ${c.id} failed — ${c.reasons.join("; ")}\n`);
+        }
+
+        // THE POPULATION THE DECISION WAS MADE OVER, so "promoted over them" is a fact on the
+        // page rather than a claim in a commit message. Folded with each case run's own authored
+        // graph, the same way `loom score` folds — see `cohortPeers`.
+        const { index } = graphsByHash(ws);
+        const keys = new Map<string, number>();
+        for (const c of suite.cases) {
+          const events = await journalOf(ws, c.runId);
+          if (events.length === 0) continue;
+          const sub = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+          const g = sub === undefined ? undefined : index.get(sub.payload.graphHash);
+          const key = cohortKeyOf(foldTrajectory(events, { ...(g === undefined ? {} : { graph: g }) }));
+          keys.set(key, (keys.get(key) ?? 0) + 1);
+        }
+
+        const decision = {
+          promote: verdict.promote,
+          suite: suite.name,
+          suiteVersion: suite.version,
+          suiteFrozenAt: suite.frozenAt,
+          baselineGraphHash: baseline.graphHash,
+          candidateGraphHash: candidate.graphHash,
+          baseline: { passRate: baseReport.passRate, passed: baseReport.passed, total: baseReport.total, costUsd: baseReport.totalCostUsd },
+          candidate: { passRate: candReport.passRate, passed: candReport.passed, total: candReport.total, costUsd: candReport.totalCostUsd },
+          caseRunIds: suite.cases.map((c) => c.runId),
+          // A suite whose cases come from more than one cohort is not wrong, but it is a
+          // different claim, and a report that hid it would let "promoted over one cohort of
+          // thirty" be said about six unrelated runs.
+          cohorts: [...keys].map(([key, n]) => ({ key, cases: n })),
+          checks: verdict.checks.map((c) => ({ id: c.id, pass: c.pass, detail: c.detail })),
+        };
+        process.stdout.write(`\n${JSON.stringify(decision, null, 2)}\n`);
+
+        // JOURNALED ON `operator.command`, WHICH IS WHAT HAPPENED — a person ran a command.
+        // Deliberately NOT a new `evolution.promoted` row: `journal/events.ts` is a kernel file
+        // and the `Kernel-seam:` ledger is not a number to raise for a first demonstration. The
+        // residual tension is real and is written down rather than solved: `StateStore` is keyed
+        // by runId, so a fact whose subject is a GRAPH has to borrow some run's coordinate. It
+        // borrows the FIRST CASE's, and `caseRunIds` names all of them.
+        const anchor = suite.cases[0]?.runId;
+        if (anchor !== undefined && (await journalOf(ws, anchor)).length > 0) {
+          await ws.store.append({
+            runId: anchor,
+            expectedSeq: await ws.store.head(anchor),
+            events: [
+              {
+                type: "operator.command",
+                payload: { kind: "evolution.promote", args: decision },
+                actor: { kind: "human", subject: subjectFlag(args), via: "console" },
+              },
+            ],
+          });
+        }
+        return verdict.promote ? 0 : 1;
+      }
+
       default:
         process.stderr.write(`unknown command "${args.command}"\n\n${USAGE}`);
         return 2;
@@ -3540,18 +3690,201 @@ function bucketFlag(args: Args): InputBucket | undefined {
 }
 
 /**
+ * Who is proposing this candidate, or nobody.
+ *
+ * It is not decoration: `10-separate-lineage` refuses a candidate whose proposer is the suite's
+ * own generator, and `9-suite-predates-candidate` is SKIPPED when no proposer is named — the
+ * gate's own reading of "a human driving this by hand answers for the timing themselves". So
+ * naming a proposer here makes the gate STRICTER, never looser, which is why the flag is
+ * optional and its absence is not filled in with a default.
+ *
+ * The `true`/`""` refusal is the `String(true)` family every other value flag in this file
+ * already refuses: `--proposed-by` with no value would otherwise read as the proposer literally
+ * named "true", and a lineage check against a name nobody chose certifies nothing.
+ */
+function proposedByFlag(args: Args): string | undefined {
+  const v = args.flags["proposed-by"];
+  if (v === undefined) return undefined;
+  if (v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--proposed-by needs an identifier: ${v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `It is compared against the suite's generator, so it would otherwise read as the proposer "true". ` +
+        `Omit it when a human is driving this by hand.`,
+    );
+  }
+  return v;
+}
+
+/**
+ * A frozen `EvalSuite` off disk, refusing the shapes that would make a promotion vacuous.
+ *
+ * `validateSuite` inside `runEvalSuite` already reports composition problems, and its verdict
+ * reaches `gateCandidate` as check `0-suite`. What it cannot do is answer a file that is not a
+ * suite at all: a JSON object missing `cases` reads as a suite of zero cases, and a suite of
+ * zero cases has `passRate: 0` on BOTH sides, which `2-non-inferior` scores as Δ 0.0pp and
+ * passes. So the shape is refused here, at the door, rather than promoted with a pass rate over
+ * nothing.
+ *
+ * `frozen: true` is a literal in the type and is checked as one. It is the field that says a
+ * human meant this file to be an exam rather than a scratch list.
+ */
+function readSuite(file: string): EvalSuite {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--suite ${file} is not readable JSON: ${(e as Error).message}`);
+  }
+  const s = parsed as Partial<EvalSuite>;
+  const problems: string[] = [];
+  if (typeof s?.name !== "string" || s.name === "") problems.push('"name" must be a non-empty string');
+  if (typeof s?.version !== "number") problems.push('"version" must be a number');
+  if (s?.frozen !== true) problems.push('"frozen" must be true — a suite that is not frozen is not an exam');
+  if (typeof s?.frozenAt !== "number" || !(s.frozenAt > 0)) problems.push('"frozenAt" must be a positive epoch-ms timestamp');
+  if (!Array.isArray(s?.cases) || s.cases.length === 0) {
+    // A suite of zero cases makes both sides score 0 and `2-non-inferior` reads Δ 0.0pp — a
+    // promotion granted for measuring nothing.
+    problems.push('"cases" must be a non-empty array');
+  }
+  if (problems.length > 0) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--suite ${file} is not a frozen EvalSuite: ${problems.join("; ")}`);
+  }
+  return s as EvalSuite;
+}
+
+/**
+ * The fractional change in PROMPT BYTES between two compiled graphs, over their agent nodes.
+ *
+ * Measured rather than declared, because `promptGrowth` is one of the two `PromotionInput`
+ * fields a caller could simply assert, and `5-prompt-size` is the check that stops a candidate
+ * paying for quality with context. The bytes are in the artifacts: `compile` freezes every
+ * resolved document into `RunGraph.documents`, keyed by ref, precisely so nothing has to ask a
+ * resolver at run time.
+ *
+ * A baseline with no prompt bytes at all returns 0 rather than `Infinity`: "grew from nothing"
+ * is not a ratio, and `canonicalize` refuses a non-finite number on the durable write path.
+ */
+function promptGrowthOf(baseline: RunGraph, candidate: RunGraph): number {
+  const bytes = (g: RunGraph): number => {
+    let total = 0;
+    for (const node of g.spec.nodes) {
+      const ref = node.agent?.prompt;
+      if (ref === undefined) continue;
+      total += (g.documents[ref] ?? "").length;
+    }
+    return total;
+  };
+  const before = bytes(baseline);
+  if (before === 0) return 0;
+  return (bytes(candidate) - before) / before;
+}
+
+/**
+ * Does the candidate lower oversight anywhere the baseline raised it?
+ *
+ * The compiler already answers this — `baselinePostures` + GRAPH014 — and this is the same call
+ * `graph/mutate.ts` makes for a runtime mutation, which is the point: a candidate and a mutation
+ * are the same hazard reached by two doors, and they must not be judged by two rules.
+ *
+ * Fails closed. Any compile failure at all is reported as "postures do not hold": a candidate
+ * this process cannot compile against the baseline's floor is not a candidate this process may
+ * certify, and `E_OVERSIGHT_LOOSENED` is only one of the reasons a compile can refuse.
+ */
+function posturesHoldOf(ws: Workspace, baseline: RunGraph, candidate: RunGraph): boolean {
+  const result = compile({
+    spec: candidate.spec,
+    resolver: ws.resolver,
+    tools: (ws.engine.tools as ToolRegistry).manifests(),
+    tenantCapabilities: ws.granted,
+    baselinePostures: Object.fromEntries(Object.entries(baseline.plans).map(([id, p]) => [id, p.posture])),
+  });
+  return result.ok;
+}
+
+/**
+ * Did two runs of the same suite against the same graph produce the same thing?
+ *
+ * This is `8-determinism`, and it is measured rather than asserted for the same reason as the
+ * posture check. Compared per case on the REPLAYED PROJECTION — status and channels — rather
+ * than on `pass`, because two runs can agree on a verdict and disagree about everything that
+ * produced it, and a nondeterministic candidate that happens to pass twice is still one nobody
+ * can promote.
+ */
+function sameOutcome(a: EvalReport, b: EvalReport): boolean {
+  if (a.cases.length !== b.cases.length) return false;
+  return a.cases.every((x, i) => {
+    const y = b.cases[i];
+    if (y === undefined || x.id !== y.id) return false;
+    // A case that failed to replay at all carries no report; two of those agree only if both
+    // failed for the same reasons.
+    if (x.replay === undefined || y.replay === undefined) {
+      return x.replay === y.replay && JSON.stringify(x.reasons) === JSON.stringify(y.reasons);
+    }
+    return (
+      x.replay.replayed.status === y.replay.replayed.status &&
+      JSON.stringify(x.replay.replayed.channels) === JSON.stringify(y.replay.replayed.channels)
+    );
+  });
+}
+
+/**
  * Every OTHER run in this workspace that belongs to the same cohort, folded.
  *
  * Trajectories rather than journaled scores, because `measureCohort` measures a POPULATION —
  * medians of cost, wall time and gates over the runs themselves. Reading peers' journaled
  * scores instead would measure the population as it was last judged, which is a different set
  * and a staler one.
+ *
+ * EVERY MEMBER IS FOLDED UNDER THE SAME RULE AS THE RUN BEING JUDGED, and that includes its
+ * graph. This used to fold peers with no `graph` at all, defended by a comment saying "a peer
+ * contributes usage, policy and status to the medians, and none of those needs the spec". That
+ * was false: `measureCohort` computes `p90Score` as a percentile OF THE SCORES, and a score's
+ * largest term is `outcome`, which `extractSignals` derives from `nodeTypes.get(step.nodeId)` —
+ * a map built from `opts.graph.spec.nodes`. A peer folded without its graph reports zero
+ * assertions, zero rubrics, no human decisions and `selfReported: false`, so its outcome is 0
+ * by construction whatever it actually did.
+ *
+ * MEASURED, through this CLI, on a 30-run workspace of one `function` node + one
+ * assertion-`evaluator` node where every run's assertion passes and every member's honest
+ * score is 1.000:
+ *
+ *     peers folded without their graph : "p90Score": 0.4
+ *     peers folded with their graph    : "p90Score": 1
+ *
+ * `isGolden` condition 2 is `score >= cohort.p90Score`, so the bar was understated by 0.6 —
+ * 60% of the metric. AND IT CHANGES VERDICTS, which is the part worth measuring rather than
+ * arguing. Same graph, 30 runs, `solve` deliberately wrong on even `n` so half the cohort's
+ * assertion fails; scoring one of the FAILING runs (its own score 0.400 either way):
+ *
+ *     without the peers' graphs : p90Score 0.400 — condition 2 PASSES, because the run ties
+ *                                 a bar its own failing peers set. One blocker, condition 1.
+ *     with the peers' graphs    : p90Score 1.000 — two blockers, the second being
+ *                                 "top decile of its cohort: score 0.400 vs p90 1.000".
+ *
+ * A failing run was in the top decile of a cohort of failures. That is what
+ * `measureCohort`'s own docstring refuses: "A promotion bar that any run can lower by standing
+ * next to it is exactly the measurement gamed by the thing being measured."
+ *
+ * THE RESIDUE, STATED. A peer whose authored graph is not published in `<workspace>/graphs/`
+ * still folds without one and still scores near 0. That is the same conservative reading the
+ * judged run gets from the same index, not a second rule — but it means a workspace that has
+ * deleted an old graph file measures its old runs as worthless rather than excluding them.
+ * Cohort `n` does not move either way: membership needs `runStatus === "succeeded"` and
+ * `didWork`, and `didWork` holds through `modelCalls`/`channelsWritten`, neither of which
+ * needs the spec.
  */
 async function cohortPeers(
   ws: Workspace,
   self: RunId,
   key: string,
   promotedGraphHashes: ReadonlySet<string>,
+  /**
+   * The SAME `graphsByHash` index the judged run's own fold used. Passed in rather than rebuilt
+   * so the two folds cannot disagree about what is published, and so scoring one run reads the
+   * `graphs/` directory once instead of once per peer.
+   */
+  graphs: ReadonlyMap<string, RunGraph>,
   /** The SAME rule the run being judged was folded under. See the call site. */
   bucketInput?: InputBucket,
 ): Promise<{ members: Trajectory[]; truncated: boolean }> {
@@ -3561,9 +3894,17 @@ async function cohortPeers(
     if (s.runId === self) continue;
     const events = await journalOf(ws, s.runId);
     if (events.length === 0) continue;
-    // No graph: a peer contributes usage, policy and status to the medians, and none of those
-    // needs the spec. A missing `promptRef` on a peer changes no median.
-    const t = foldTrajectory(events, { promotedGraphHashes, ...(bucketInput === undefined ? {} : { bucketInput }) });
+    // The peer's OWN authored graph, by the hash the peer's own `run.submitted` names — never
+    // the judged run's. A cohort can hold runs of more than one graph (the key's graphHash slot
+    // is the run's own), so reusing one spec for all of them would read another graph's node
+    // types onto this run's steps.
+    const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+    const graph = submitted === undefined ? undefined : graphs.get(submitted.payload.graphHash);
+    const t = foldTrajectory(events, {
+      promotedGraphHashes,
+      ...(graph === undefined ? {} : { graph }),
+      ...(bucketInput === undefined ? {} : { bucketInput }),
+    });
     if (cohortKeyOf(t) === key) members.push(t);
   }
   return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };

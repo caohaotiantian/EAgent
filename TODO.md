@@ -332,7 +332,85 @@ closed and the next member will look like one of these.
   grade — but it means one evaluator yields one bit. A benchmark wanting a GRADED ground-truth
   signal needs one assertion per case, so S1 reads `k/n`. The ladder offers binary ground truth
   (S1) or a graded model opinion (S4, a model judging a model at weight 0.3), and nothing in
-  between.
+  between. **THE WORKAROUND IS THE ANSWER, AND IT SHIPPED 2026-08-27.** The entry above reads as
+  a wall and it is a graph edit: `readSignals` computes S1 as (assertion NODES that passed) /
+  (assertion nodes), so six evaluator nodes hung off `collate` by `seq` edges give `k/6`. Driven
+  on the six shipped cases under the mock: `"0/1 assertions passed"`, outcome 0 became
+  `"3/6 assertions passed"`, outcome 0.5. The `score` discard is still real and still costs
+  something — the single evaluator's own body had already computed `score: 0.5` and the fold
+  threw it away — but it is not what made the benchmark a bit. The GRAPH was.
+
+### Found by driving the promotion half, 2026-08-27
+
+- ~~**A GRADED ground-truth signal is not expressible.**~~ Struck; see the amendment above. Six
+  evaluator nodes after the join compile, run, and fold to `k/6`. `maxNodes` had to go 24 -> 32.
+
+- **`NEW` FIXED — `loom score` FOLDED EVERY PEER WITHOUT ITS GRAPH, so the promotion bar was a
+  fiction.** `cohortPeers` folded peers with no `graph`, defended by a comment saying "a peer
+  contributes usage, policy and status to the medians, and none of those needs the spec".
+  `p90Score` is not a median of usage: it is a percentile OF THE SCORES, and a score's largest
+  term comes from `extractSignals`, which keys on `nodeTypes.get(step.nodeId)` — a map built from
+  the spec. Measured on 30 runs whose members all score 1.000: `p90Score 0.4`. And it changed
+  verdicts, which is the part worth keeping: on a cohort where half the runs fail, one of the
+  FAILING runs passed `isGolden` condition 2 by tying a bar its failing peers set. Fixed; the
+  `graphsByHash` index is now threaded into the peer fold. **The residue:** a peer whose authored
+  graph is not published in `graphs/` still folds without one and still scores near 0.
+
+- **`NEW` FIXED — THE PROMOTION GATE FAILED OPEN ON A PROMPT CANDIDATE, which is the only kind
+  D6's generator would produce.** `runEvalSuite` serves every model turn by
+  `effectKey(taskId, "model", turn)` — `nodeId@branch#iteration` plus a turn number, carrying no
+  prompt, no request and no graph hash. Driven on the walking skeleton, all eleven checks, every
+  input measured rather than asserted:
+
+      baseline                  passRate 1  cost 0.001125
+      metadata only (version 2) passRate 1  cost 0.001125  PROMOTE=true
+      agent maxTurns 3 -> 1     passRate 1  cost 0.000435  PROMOTE=true
+      agent prompt re-pointed   passRate 1  cost 0.001125  PROMOTE=true
+      live model calls made during the whole evaluation: 0
+
+  The crippled candidate was CHEAPER at an equal pass rate, so the gate preferred it.
+  `model.called` now carries a `requestDigest` — the `tool.called.argsDigest` precedent, and the
+  field `replay.ts`'s own `reboundEffects` docstring had already named as missing — and a case
+  whose recorded answer was served to a different call is refused.
+
+- **`NEW` STILL OPEN — TWO CANDIDATE SHAPES THE OFFLINE GATE STILL CANNOT SEE, and a request
+  digest cannot answer either.** Lowering `agent.maxTurns` asks the SAME question on the turns it
+  does take, so its turn-0 digest matches and the later recorded turns simply go unserved — it
+  still promotes, one turn cheaper. Lowering a node's `policy.budget` is invisible for a
+  different reason: replay has no adapter, so `estimateOf` returns 0 and the ceiling is never
+  tested. Both are policy that replay does not exercise. Naming them because "the gate now sees
+  prompt candidates" is easy to over-read.
+
+- **`NEW` STILL OPEN — `gateCandidate` PROMOTES A CANDIDATE THAT PASSES NOTHING.** `2-non-inferior`
+  is a non-inferiority test and returns `pass: true` at "0.0% vs 0.0%"; `validateSuite`'s
+  `minMustPass` defaults to 0. Driven through the shipped `loom promote` on the real review-bench
+  files under the mock, where both sides fail a ground-truth exam: `✓ 2-non-inferior pass rate
+  0.0% vs baseline 0.0% (Δ 0.0pp)` and only `✗ 1-must-pass` refused it. The must-pass floor is
+  doing the work a non-inferiority test cannot. Whether the gate should carry an absolute floor
+  belongs to whoever owns D10.d — it is a change to a criterion, not to this door.
+
+- **`NEW` STILL OPEN — THE SUITE IS HAND-AUTHORED, so "promoted over them" is a claim a human
+  makes by choosing runIds.** `loom promote` prints which cohort its cases came from, which lets
+  a reader CHECK the claim; it does not make it. The missing verb is `loom suite freeze --cohort
+  <runId>`, selecting cases from a cohort by the members' own journaled `evolution.scored`
+  verdicts — golden becomes a must-pass regression, non-golden becomes the room to win. Both
+  halves are required and the reason is measured: `close-the-loop.test.ts` shows a suite of
+  goldens only is one the baseline passes 100% by construction, so the best any candidate can do
+  against it is tie.
+
+- **`NEW` STILL OPEN — A PROMOTION'S SUBJECT IS A GRAPH AND THE STORE IS KEYED BY runId.** The
+  decision rides on `operator.command {kind: "evolution.promote"}` appended to the FIRST case's
+  run, with `caseRunIds` naming all of them. No kernel edit and no `Kernel-seam:` trailer — which
+  was the right trade for a first demonstration and is not an answer to the question. Whether the
+  kernel needs a graph-scoped durable fact, and whether that is one event type or a second
+  keyspace, is unowned.
+
+- **`NEW` STILL OPEN — `run.compiled` CARRIES NODE COUNTS, NOT THE SPEC.** `{graphHash, nodes,
+  edges, resolutionManifest}` — so a trajectory's S1/S4/S5 depend on a file on disk, and
+  `isGolden` reads a value the journal cannot reconstruct across a restart. That is the first
+  non-negotiable, and both the peer-fold fix and `loom score` itself work around it by threading
+  a filesystem index into the fold. Same family: `loom score` derives `promotedGraphHashes` from
+  `<workspace>/graphs/`, so condition 5 also reads a value the journal does not hold.
 
 ### Recorded, and deliberately not sequenced yet
 

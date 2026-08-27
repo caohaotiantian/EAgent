@@ -18,6 +18,12 @@
  * A fourth example added later is covered without touching this file, and one that no graph
  * names is caught rather than quietly rotting.
  *
+ * `examples/candidates/` IS A THIRD DIRECTORY AND IS NOT `graphs/`. `loom score` derives the set
+ * of promoted graphs from `<workspace>/graphs/`, so a candidate published there would be marked
+ * promoted before it was ever gated — its location IS its unpromoted status. The reachability
+ * scan therefore reads candidate specs too, or a body named only by a candidate would have to be
+ * published as a graph to keep this file green, which is the one place it must not be.
+ *
  * Three of the tests break an example ON PURPOSE — the `module.exports` mistake, the `seq`-for-
  * `join` edge, a `replace` reducer under a fan-out — because those are the sentences the README
  * spends the most words on, and a documented refusal that stopped refusing would otherwise be
@@ -54,7 +60,11 @@ const EXAMPLES = fileURLToPath(new URL("../../../examples/", import.meta.url));
  */
 function workspace(): { dir: string; dispose: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "loom-examples-"));
-  for (const sub of ["graphs", "resources"]) {
+  // `candidates/` is copied but is NOT `graphs/`, and the difference is load-bearing rather
+  // than tidy: `loom score` reads `<workspace>/graphs/` as the set of graphs a human approved,
+  // so a candidate parked there would be marked promoted before it was ever gated. It is
+  // published, named by no example graph, and reachable only through `loom promote`.
+  for (const sub of ["graphs", "resources", "candidates"]) {
     cpSync(join(EXAMPLES, sub), join(dir, sub), { recursive: true });
   }
   return { dir, dispose: () => rmSync(dir, { recursive: true, force: true }) };
@@ -345,9 +355,15 @@ test("ctx.effects in a SANDBOXED body refuses, exactly as summarise.js says it d
 test("every published resource is reachable from an example graph", () => {
   const ws = workspace();
   try {
-    const specs = graphNames(ws.dir)
-      .map((g) => readFileSync(graphFile(ws.dir, g), "utf8"))
-      .join("\n");
+    // BOTH DIRECTORIES. A resource named only by a candidate is still reachable — that is what
+    // a candidate IS — and scanning `graphs/` alone would have forced `bench-collate-v2.js` to
+    // be published as a graph to stay green, which is the one place it must not be.
+    const specs = [
+      ...graphNames(ws.dir).map((g) => readFileSync(graphFile(ws.dir, g), "utf8")),
+      ...readdirSync(join(ws.dir, "candidates"))
+        .filter((f) => [".json", ".yaml", ".yml"].includes(extname(f)))
+        .map((f) => readFileSync(join(ws.dir, "candidates", f), "utf8")),
+    ].join("\n");
     const kinds = readdirSync(join(ws.dir, "resources"), { withFileTypes: true }).filter((d) => d.isDirectory());
     let seen = 0;
     for (const kind of kinds) {
@@ -361,4 +377,152 @@ test("every published resource is reachable from an example graph", () => {
   } finally {
     ws.dispose();
   }
+});
+
+// ── the benchmark example: a GRADED ground-truth signal ──────────────────────
+
+test("review-bench scores k/6, not one bit — a review that got five of six right is not a zero", async () => {
+  // MEASURED before the graph was regraded, on the same six shipped cases under the same mock:
+  //
+  //     signals  [{"id":"S1","value":0,"weight":1,"evidence":"0/1 assertions passed"}]
+  //     outcome 0, score 0.2
+  //
+  // and the single evaluator's own body had already written `score: 0.5` into its verdict —
+  // the fold reads `pass` for an assertion evaluator and discards `score` (trajectory.ts's
+  // `extractSignals`), so a graded body behind one node collapses to a bit whatever it writes.
+  // `readSignals` computes S1 as (assertion NODES that passed) / (assertion nodes), so the
+  // granularity is a property of the GRAPH. Six nodes, one per case, is the whole fix.
+  //
+  // Under the mock the model flags nothing, so the three `defect: true` cases are MISSED and
+  // the three `defect: false` cases are correctly clean: 3/6 is the honest offline number, and
+  // pinning it is what would catch a regression to the one-bit shape.
+  const ws = workspace();
+  try {
+    const cases = readFileSync(join(EXAMPLES, "bench-cases.json"), "utf8");
+    const r = await loom(ws.dir, ["run", graphFile(ws.dir, "review-bench.json"), "--input", cases]);
+    assert.equal(r.code, 0, `${r.out}${r.err}`);
+    const s = summary(r);
+    assert.equal(s["status"], "succeeded");
+
+    const outputs = s["outputs"] as Record<string, { pass: boolean; detail: string }>;
+    assert.deepEqual(Object.keys(outputs).sort(), ["verdict0", "verdict1", "verdict2", "verdict3", "verdict4", "verdict5"]);
+    assert.deepEqual(
+      Object.keys(outputs).sort().map((k) => outputs[k]!.detail),
+      [
+        "fail-open-fold: MISSED",
+        "default-stop: MISSED",
+        "clear-all-actions: MISSED",
+        "rename-local: correctly clean",
+        "widen-comment: correctly clean",
+        "add-const: correctly clean",
+      ],
+      "each evaluator answers for ITS OWN case, and says which",
+    );
+
+    const scored = await loom(ws.dir, ["score", String(s["runId"])]);
+    assert.equal(scored.code, 0, `${scored.out}${scored.err}`);
+    const verdict = JSON.parse(scored.out) as { outcome: number; signals: { id: string; value: number; evidence: string }[] };
+    const s1 = verdict.signals.find((x) => x.id === "S1");
+    assert.equal(s1?.evidence, "3/6 assertions passed", "S1 is k/n over the six evaluator nodes");
+    assert.equal(s1?.value, 0.5);
+    assert.equal(verdict.outcome, 0.5, "…and the outcome moves with it, instead of sitting at 0");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("the review-bench CANDIDATE compiles, is NOT published as a graph, and really does parse better", async () => {
+  // A candidate has to be two things at once: runnable, and not promoted. `loom score` derives
+  // the promoted set from `<workspace>/graphs/`, so this file's LOCATION is its unpromoted
+  // status — there is no other flag for it, and `candidates/` is where it lives because of that.
+  const ws = workspace();
+  try {
+    const r = await loom(ws.dir, ["compile", join(ws.dir, "candidates", "review-bench-v2.json")]);
+    assert.equal(r.code, 0, `${r.out}${r.err}`);
+    assert.equal(
+      graphNames(ws.dir).includes("review-bench-v2.json"),
+      false,
+      "a candidate published in graphs/ would be marked promoted before it was ever gated",
+    );
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("…and its improvement is real: three shapes a reasoning model emits that the shipped parser drops", () => {
+  // THE CANDIDATE'S WHOLE CLAIM, measured rather than described. `bench-collate.js` matches
+  // first-brace-to-last-brace greedily and `JSON.parse`s the span, so ANY brace outside the
+  // answer takes the whole thing down and the verdict becomes `unparsed` — which
+  // `bench-check-<i>.js` reads as "not flagged", a MISS on every case that carries a defect.
+  //
+  // The three failing shapes are what a reasoning model actually emits: `examples/README.md`
+  // records GLM-5.2 spending roughly 17 reasoning tokens per content token, so a preamble is
+  // the ordinary case rather than the odd one.
+  //
+  // AND IT LIVES IN A DETERMINISTIC BODY, which is why it is a candidate an OFFLINE gate can
+  // judge at all: `loom promote` replays recorded runs and serves every model turn from the
+  // recording, so the same recorded text parsed correctly is a real delta, while a candidate
+  // that changed the PROMPT would be refused for having asked nothing.
+  const store = new ResourceStore({ now: () => 1 });
+  const actor = { kind: "human", id: "u:test" } as const;
+  const publish = (name: string, file: string): string => {
+    const ref = store.publish({ kind: "function", name, content: readFileSync(join(EXAMPLES, "resources", "function", file), "utf8"), actor });
+    store.promote(ref, "canary", actor);
+    store.promote(ref, "stable", actor);
+    return `function/${name}@stable`;
+  };
+  const shipped = publish("collate-shipped", "bench-collate.js");
+  const candidate = publish("collate-candidate", "bench-collate-v2.js");
+
+  const answer = '{"verdict":"concerns","findings":["fail-open"]}';
+  const shapes: Record<string, string> = {
+    clean: answer,
+    fenced: `\`\`\`json\n${answer}\n\`\`\``,
+    preamble: `Let me think. The guard \`if (x) { … }\` was removed.\nAnswer:\n${answer}`,
+    trailing: `${answer}\nNote: the \`{}\` case is unaffected.`,
+    scratch: `{"scratch":true}\n${answer}`,
+    "no json": "I could not review this diff.",
+  };
+
+  const specs: Record<string, ChannelSpec> = {
+    reviews: { type: "array", reduce: "replace" },
+    verdicts: { type: "array", reduce: "replace" },
+  };
+  const verdictOf = (ref: string, text: string): string => {
+    const body = createFunctionLoader({ store }).load(ref)!;
+    const out = body(makeStateView(specs, { reviews: [text] }, ["reviews"]), {
+      taskId: "collate@root#0" as never,
+      signal: new AbortController().signal,
+      now: () => 1,
+      seed: 1,
+    }) as { writes: { verdicts: { verdict?: string }[] } };
+    return String(out.writes.verdicts[0]?.verdict);
+  };
+
+  const before: Record<string, string> = {};
+  const after: Record<string, string> = {};
+  for (const [name, text] of Object.entries(shapes)) {
+    before[name] = verdictOf(shipped, text);
+    after[name] = verdictOf(candidate, text);
+  }
+
+  assert.deepEqual(before, {
+    clean: "concerns",
+    fenced: "concerns",
+    preamble: "unparsed",
+    trailing: "unparsed",
+    scratch: "unparsed",
+    "no json": "unparsed",
+  });
+  assert.deepEqual(after, {
+    clean: "concerns",
+    fenced: "concerns",
+    preamble: "concerns",
+    trailing: "concerns",
+    scratch: "concerns",
+    // THE ROW THAT MUST NOT MOVE. A text with no balanced object at all is still `unparsed`.
+    // A candidate that invented a verdict for it would score better and be worse, which is the
+    // shape of every optimiser that games its own metric.
+    "no json": "unparsed",
+  });
 });

@@ -380,6 +380,22 @@ export interface ReplayReport {
     readonly recorded: string;
     readonly replayed: string;
   }[];
+  /**
+   * Model effect keys where the RECORDING predates `model.called.requestDigest`, so whether
+   * the replay asked the same question is not decidable from these two journals.
+   *
+   * NOT A SUBSET OF `reboundEffects` AND NOT ITS COMPLEMENT — a third state, kept separate on
+   * purpose. "The calls differ" and "I cannot tell whether the calls differ" are different
+   * facts, and folding the second into the first would report a defect nobody measured, while
+   * folding it into "no rebound" is the loosening that made the promotion gate certify a
+   * candidate it never exercised.
+   *
+   * A reader deciding anything on this must fail closed: `evolution/gate.ts` refuses a case
+   * whose replay carries entries here AND whose graph is not the recorded one. Same graph and
+   * no digest is not a hazard — there is nothing a same-graph replay could have changed about
+   * the request — which is why the graph-hash test belongs at the reader and not here.
+   */
+  readonly unverifiedModelEffects: readonly string[];
 }
 
 /**
@@ -618,7 +634,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
 
   const replayedEvents: JournalEvent[] = [];
   for await (const e of shadow.read(replayRunId, 1)) replayedEvents.push(e);
-  const rebound = reboundEffects(events, replayedEvents);
+  const { rebound, unverified } = reboundEffects(events, replayedEvents);
 
   const frames = compare(original, replayed, effects);
   // Appended after `compare`, so the frame seq numbers of the three original kinds are
@@ -679,6 +695,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     hermetic: effects.unknownOutcomes.length === 0 && effects.derivedClocks.length === 0,
     graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound },
     reboundEffects: rebound,
+    unverifiedModelEffects: unverified,
   };
 }
 
@@ -695,13 +712,24 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
  *
  * Derived from the two journals rather than checked at serve time, because that is what is
  * possible from here: the journal records a call's TYPE SHAPE and never its argument
- * VALUES (`tool.called.argsShape`, and see the comment there for why), and there is no
- * per-effect input digest for `ReplayEffects.require` to compare against. So this catches
- * a different tool, a different tool version, a different argument SHAPE, and a different
- * model — and does NOT catch the same call with a different argument VALUE. That last one
- * is caught today by the graph hash, and only by it, which means it is not caught at all
- * under `onGraphChange: "allow"`. Closing it needs an `inputDigest` on `effect.started`,
- * written where the effect is journaled and compared in `require`.
+ * VALUES (`tool.called.argsShape`, and see the comment there for why). For a TOOL that is
+ * still all there is, so a tool entry catches a different tool, a different tool version and
+ * a different argument shape, and does NOT catch the same tool with a different argument
+ * VALUE — caught today by the graph hash, and only by it, which means not at all under
+ * `onGraphChange: "allow"`.
+ *
+ * FOR A MODEL IT IS NOW THE WHOLE REQUEST. This used to compare the model NAME alone, and
+ * named the missing piece in its own text: an input digest per effect. `model.called` carries
+ * one — `requestDigest`, a digest of the shaped `ModelRequest` — so a candidate that re-points
+ * `agent.prompt`, rewrites the system document, or changes which tools the model is offered
+ * shows up here instead of replaying byte-identically. That was measured before the field
+ * existed: a prompt-only candidate replayed with `reboundEffects: []` and `gateCandidate`
+ * answered `promote: true` having made zero model calls.
+ *
+ * A RECORDING WITH NO `requestDigest` IS NOT EVIDENCE OF SAMENESS. Journals written before
+ * that field carry none, and reading its absence as "the calls agree" would restore exactly
+ * the loosening it closes. Those keys go to `unverifiedModelEffects` instead, and the reader
+ * decides — see that field.
  *
  * Joined on the intersection of keys. Recorded-and-never-asked-for is already
  * `unservedEffects`; asked-for-and-never-recorded is `E_REPLAY_DIVERGENCE` at serve time.
@@ -709,31 +737,54 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
 function reboundEffects(
   recorded: readonly JournalEvent[],
   replayed: readonly JournalEvent[],
-): ReplayReport["reboundEffects"] {
+): { rebound: ReplayReport["reboundEffects"]; unverified: readonly string[] } {
   const index = (events: readonly JournalEvent[]): Map<string, { field: "tool" | "model"; call: string }> => {
     const out = new Map<string, { field: "tool" | "model"; call: string }>();
     for (const e of events) {
       if (isEvent(e, "tool.called")) {
         out.set(e.payload.key, { field: "tool", call: `${e.payload.name}@${e.payload.version}(${e.payload.argsShape})` });
       } else if (isEvent(e, "model.called")) {
-        // The MODEL, and deliberately not the provider. A replay reaches no adapter, so
-        // it journals `provider: "replay"` — a fact about the replay, not about the call,
-        // and comparing it would make every model effect in every replay look rebound.
-        out.set(e.payload.key, { field: "model", call: e.payload.model });
+        // The MODEL and the REQUEST, and deliberately not the provider. A replay reaches no
+        // adapter, so it journals `provider: "replay"` — a fact about the replay, not about
+        // the call, and comparing it would make every model effect in every replay look
+        // rebound. `requestDigest` is a fact about the call.
+        //
+        // `undefined` is kept as `undefined` rather than normalised to a string, so the
+        // caller can tell "no digest was written" from "a digest that happens to differ".
+        const d = (e.payload as { requestDigest?: string }).requestDigest;
+        out.set(e.payload.key, { field: "model", call: d === undefined ? e.payload.model : `${e.payload.model} ${d}` });
       }
     }
     return out;
+  };
+  const digestOf = (events: readonly JournalEvent[], key: string): string | undefined => {
+    for (const e of events) {
+      if (isEvent(e, "model.called") && e.payload.key === key) return (e.payload as { requestDigest?: string }).requestDigest;
+    }
+    return undefined;
   };
 
   const before = index(recorded);
   const after = index(replayed);
   const out: { key: string; field: "tool" | "model"; recorded: string; replayed: string }[] = [];
+  const unverified: string[] = [];
   for (const [key, a] of before) {
     const b = after.get(key);
-    if (b === undefined || b.call === a.call) continue;
+    if (b === undefined) continue;
+    if (a.field === "model" && digestOf(recorded, key) === undefined) {
+      // The recording cannot answer the question, so this key is neither rebound nor clean.
+      // Reporting it as clean is the loosening; reporting it as rebound would claim a
+      // difference nothing measured.
+      unverified.push(key);
+      continue;
+    }
+    if (b.call === a.call) continue;
     out.push({ key, field: a.field, recorded: a.call, replayed: b.call });
   }
-  return out.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
+  return {
+    rebound: out.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0)),
+    unverified: unverified.sort(),
+  };
 }
 
 /**

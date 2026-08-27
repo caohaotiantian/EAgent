@@ -295,6 +295,39 @@ export interface EventPayloads {
     readonly model: string;
     readonly finishReason: string;
     readonly usage: UsageRecord;
+    /**
+     * A digest of the REQUEST — the shaped `ModelRequest` that reached the adapter: model,
+     * system prompt, transcript and tool specs. Never the request itself.
+     *
+     * `tool.called.argsDigest` is the precedent and this is the same claim one effect kind
+     * over: the effect key `taskId:model:<turn>` is POSITIONAL, so it says which turn of
+     * which task this was and nothing about what was asked. Two runs of two different graphs
+     * agree on every model key as long as their node ids and turn counts agree.
+     *
+     * WHAT THAT COST, MEASURED. The offline promotion gate replays a recorded run against a
+     * candidate graph. A candidate whose only change is `agent.prompt` produces a different
+     * `graphHash` and an identical replay: every turn is served the recorded answer to a
+     * question the candidate did not ask. Driven on the walking skeleton, three cases,
+     * `gateCandidate` with all eleven checks:
+     *
+     *     baseline                  -> passRate 1  cost 0.001125
+     *     agent prompt re-pointed   -> passRate 1  cost 0.001125  PROMOTE=true
+     *     live model calls made by either evaluation: 0
+     *
+     * `reboundEffects` — the report field whose whole job is "was each recorded result handed
+     * back to the call that produced it" — returned `[]`, because the only thing it could
+     * compare for a model effect was the model NAME. Its own docstring named the missing
+     * piece: "Closing it needs an `inputDigest` on `effect.started`". This is that field,
+     * written on `model.called` instead, where a model call's identity already lives.
+     *
+     * A DIGEST AND NOT THE REQUEST, for the reason `argsShape` gives: prompts and transcripts
+     * are not in the journal anywhere else, and putting them here would make every journal a
+     * second copy of the conversation.
+     *
+     * OLDER JOURNALS DO NOT CARRY IT, and a reader must treat its absence as "cannot tell",
+     * never as "the same call". `run/replay.ts` does — see `unverifiedModelEffects`.
+     */
+    readonly requestDigest: string;
   };
   "tool.called": {
     readonly key: string;

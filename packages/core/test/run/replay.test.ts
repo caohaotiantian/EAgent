@@ -869,15 +869,28 @@ test("A REPLAY THAT NEVER SERVED A RECORDED EFFECT DOES NOT REPORT `match: true`
   const report = await replayRun({ store, runId, graph, engine: REPLAY_ENGINE(h) });
 
   // Everything the verdict used to be built from says "fine": same tasks, same channels,
-  // same status, same graph, nothing rebound.
+  // same status, same graph.
   assert.deepEqual(report.replayed.channels, report.original.channels);
   assert.equal(report.replayed.status, "succeeded");
   assert.equal(report.graph.match, true);
-  assert.deepEqual(report.reboundEffects, []);
+  // `reboundEffects` DOES see this one now, and only since `model.called.requestDigest`
+  // existed. Dropping a tool call from the recorded turn-0 result drops a tool RESULT from
+  // the transcript turn 1 is built on, so turn 1 asks a different question — which is what
+  // a request digest is for and what the model NAME could never show. It was `[]` here
+  // before the field, and this file's "everything says fine" list is one item shorter for it.
+  assert.deepEqual(
+    report.reboundEffects.map((r) => [r.key, r.field]),
+    [["summarize@root/e0[0]#0:model:1", "model"]],
+    "turn 1's transcript lost a tool result, so turn 1 is a different call",
+  );
+  // `effect.rebound` is excluded alongside `effect.unserved` because it is the OTHER
+  // divergence this doctored journal has — turn 1's transcript, above — and neither is a
+  // `compare` frame. `compare` weighs task states, gates, channels and status, and those are
+  // what this assertion is about: all four still say "fine".
   assert.equal(
-    report.frames.filter((f) => f.kind !== "effect.unserved").every((f) => f.match),
+    report.frames.filter((f) => f.kind !== "effect.unserved" && f.kind !== "effect.rebound").every((f) => f.match),
     true,
-    "the divergence is invisible to `compare`, which is what made it silent",
+    "the unserved tool result is invisible to `compare`, which is what made it silent",
   );
 
   // And the fact that says otherwise, which used to be reported beside the verdict.

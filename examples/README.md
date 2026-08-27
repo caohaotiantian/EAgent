@@ -270,3 +270,61 @@ loom replay <runId> --graph graphs/self-review.json     # match: true, zero mode
 writes anything: measured on GLM-5.2, roughly 17 reasoning tokens per content token. At 4,096 it
 never reached content at all and every review came back empty — which is how
 `TODO.md` §A0's truncation finding was discovered.
+
+## 5 · `review-bench` — the benchmark the self-improvement loop is measured on
+
+`self-review` reviews a diff nobody knows the answer to. `review-bench` reviews six diffs whose
+answers are **planted**: three carry a real defect, three are cosmetic. `bench-cases.json` holds
+the ground truth, so the run can be graded mechanically with no human and no rubric — which is
+what makes it an `S1` signal, the only one a model cannot argue with.
+
+```bash
+loom run graphs/review-bench.json --input "$(cat bench-cases.json)"
+# offline, against the mock: the model flags nothing, so
+#   verdict0 fail-open-fold: MISSED       verdict3 rename-local: correctly clean
+#   verdict1 default-stop: MISSED         verdict4 widen-comment: correctly clean
+#   verdict2 clear-all-actions: MISSED    verdict5 add-const: correctly clean
+loom score <runId>
+# → "signals": [{"id":"S1","value":0.5,"weight":1,"evidence":"3/6 assertions passed"}]
+#   "outcome": 0.5
+```
+
+**Six evaluator nodes, not one, and that is the whole design.** `readSignals` computes `S1` as
+*(assertion nodes that passed) / (assertion nodes)*, so the granularity of the signal is a
+property of the GRAPH rather than of the checker. This benchmark used to have a single evaluator
+whose body demanded a clean sweep of all six cases; a review that found five of six planted
+defects scored `"0/1 assertions passed"`, `outcome 0` — the same as one that found none. Its body
+already computed `score: 0.5` and the fold discarded it, because an assertion evaluator
+contributes its `pass` and nothing else. One node is one bit whatever the body writes.
+
+**The loop, end to end.** Thirty runs of one workflow assemble into one cohort — the input bucket
+is the input's SHAPE, so a benchmark run over a different case list is still the same kind of
+problem — and a candidate is then judged against a frozen exam drawn from them:
+
+```bash
+for i in $(seq 1 30); do loom run graphs/review-bench.json --input "$(cat bench-cases.json)"; done
+loom score <lastRunId>     # → "cohort": {"n": 30, …}, "golden": …, "goldenBlockers": []
+loom cohort <lastRunId>    # → every run judged under the same key and weights
+
+loom promote candidates/review-bench-v2.json \
+     --baseline graphs/review-bench.json --suite suite.json
+# → the eleven promotion checks, and exit 0 only if the candidate beat the baseline
+```
+
+`loom promote` replays the suite's recorded runs against both graphs. **It calls no model and
+runs no tool**, which is what makes it cheap enough to run on every candidate — and also what
+bounds it: a candidate whose only change is a PROMPT is refused, because replay would serve the
+recorded answer to a question the candidate never asked. An improvement the offline gate can
+measure has to live in something that re-executes, which means a `function` body, the graph's
+shape, or its policy.
+
+The suite is a hand-written JSON file today: `{name, version, frozen: true, frozenAt, generatedBy,
+cases: [{id, runId, mustPass, expect}]}`, where each `runId` names one of the thirty recordings.
+Freeze it BEFORE writing the candidate — `9-suite-predates-candidate` compares the two timestamps
+and refuses an exam written for a known student.
+
+`demo/close-the-loop.sh` runs all five steps against a real provider — it is the LIVE half, so it
+is a script and not a test: `npm run check` must never call a model. The offline half is
+`packages/core/test/evolution/close-the-loop.test.ts`, which proves the same loop on thirty real
+Engine runs in 284 ms for $0. Read the script's header before running it: it says what the golden
+yield is likely to be, and why widening the benchmark until it passes would be cheating.
