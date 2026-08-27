@@ -350,10 +350,39 @@ const SHAPE_RULE =
  * (`cli.ts` `registerFunctions`) — so the message reaches an operator's terminal instead of
  * hanging a run that has already spent money.
  */
-function isAsyncBody(value: unknown): boolean {
-  const ctor = (value as { constructor?: { name?: unknown } }).constructor;
-  const byName = typeof ctor?.name === "string" && ctor.name.startsWith("Async");
-  return byName || Object.prototype.toString.call(value).startsWith("[object Async");
+/**
+ * Is the body an async function — decided WITHOUT READING A PROPERTY OFF IT.
+ *
+ * The first version asked `value.constructor` and `Object.prototype.toString.call(value)` on
+ * the HOST side, after `runInContext` had returned. Both are interceptable: `constructor` is
+ * an ordinary property a body may define as a getter, and `toString` consults
+ * `Symbol.toStringTag`, which is another. Either one puts USER CODE on the host thread AFTER
+ * the vm's `timeout` has stopped applying — measured by this lane's reviewer with a body whose
+ * `constructor` getter spins 5e9 times, which the loader waited out. That is the exact hazard
+ * `ASYNC_RULE` exists to describe, reintroduced by the check that enforces it.
+ *
+ * `getPrototypeOf` reads an internal slot. It runs no user code, and an async function's
+ * prototype chain is not something a body can rewrite from inside without `Object`, which the
+ * realm's own intrinsics govern. The comparison is against the AsyncFunction prototype taken
+ * FROM THE SAME CONTEXT — a cross-realm `instanceof` is false, which is the trap the shape
+ * check next door already documents.
+ */
+function isAsyncBody(context: vm.Context, value: unknown): boolean {
+  // BOTH async shapes, and the second is not hypothetical: an `async function*` has
+  // AsyncGeneratorFunction.prototype, NOT AsyncFunction.prototype, so a check that names only
+  // the first lets it through. The predicate this replaced caught it by accident, through
+  // `ctor.name.startsWith("Async")` matching two different constructors with one prefix —
+  // which is why dropping to one prototype turned two of its tests red.
+  //
+  // A SYNCHRONOUS generator is deliberately absent. `function*` runs under the vm timeout like
+  // any other synchronous body; it is `await` that escapes the deadline, and refusing a shape
+  // the rule does not cover would be a refusal with no argument behind it.
+  const protos = vm.runInContext(
+    "[Object.getPrototypeOf(async function () {}), Object.getPrototypeOf(async function* () {})]",
+    context,
+  ) as readonly object[];
+  const proto: unknown = Object.getPrototypeOf(value);
+  return protos.includes(proto as object);
 }
 
 const ASYNC_RULE =
@@ -425,7 +454,7 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   // ONE RULE, BOTH LOADERS. See `ASYNC_RULE`. Checked here rather than in each bridge because
   // `functions.ts` had it and `hook-loader.ts` did not, which is the SHAPE_RULE argument three
   // paragraphs up playing out on a second rule.
-  if (isAsyncBody(value)) {
+  if (isAsyncBody(context, value)) {
     throw err.validation(CODES.E_RESOURCE_INVALID, `${opts.what} resource "${opts.label}": ${ASYNC_RULE}.`);
   }
   if (typeof (context as Record<string, unknown>)[opts.entry] !== "function") {

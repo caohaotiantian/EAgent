@@ -155,3 +155,37 @@ test("the embedder/CLI split the README states is the one scripts/surface.json a
   assert.doesNotMatch(barrel, /cli\.ts/, "index.ts does not re-export cli.ts, which is why the split exists");
   assert.doesNotMatch(barrel, /resources\/realm\.ts/);
 });
+
+// ── the async refusal must not itself run user code on the host thread ────────
+
+test("the async check reads no property off the body, so a hostile getter never runs", () => {
+  // The refusal exists because an async body outruns the vm's `timeout`. The first version of
+  // the check asked `value.constructor` and `Object.prototype.toString.call(value)` on the HOST
+  // side, after `runInContext` returned — and both are interceptable, so enforcing the rule
+  // reintroduced the hazard the rule describes.
+  //
+  // ASSERTED BY EFFECT, NOT BY ELAPSED TIME. The reviewer found this with a getter that spins,
+  // and a spin is the wrong thing for a test to measure: "no assertion whose truth depends on
+  // elapsed time" is the rule, and a duration bound is exactly that — it fails on a loaded
+  // machine and passes on a fast one. These getters THROW instead. If either is read the load
+  // dies with that message; if neither is, the body loads and the property was never touched.
+  const hostile = `(function () {
+     const f = (a, b) => ({ ok: 1 });
+     Object.defineProperty(f, "constructor", { get() { throw new Error("GETTER-RAN:constructor"); } });
+     Object.defineProperty(f, Symbol.toStringTag, { get() { throw new Error("GETTER-RAN:toStringTag"); } });
+     return f;
+   })()`;
+  const fn = createFunctionLoader({ store: storeWith("function", hostile) }).load("function/probe@stable");
+  assert.equal(typeof fn, "function", "a synchronous body still loads, and no getter was read");
+});
+
+test("…and every async shape is still refused, in both loaders", () => {
+  // `async function*` carries AsyncGeneratorFunction.prototype, not AsyncFunction.prototype —
+  // a prototype check naming only the first lets it through, which is how the narrower version
+  // of this fix turned two of the seam's own tests red.
+  for (const kind of ["function", "hook"] as const) {
+    for (const body of ["async (a, b) => ({ ok: 1 })", "async function* (a, b) { yield 1; }"]) {
+      assert.match(refusalFor(kind, body), /async function body cannot be bounded by any deadline/);
+    }
+  }
+});
