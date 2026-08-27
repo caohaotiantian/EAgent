@@ -3915,6 +3915,13 @@ export class Engine {
                   model: shaped.model,
                   finishReason: finish,
                   usage: turnUsage,
+                  // WHAT WAS ASKED, as a digest. `shaped` for the same reason `model` is: a
+                  // `preModel` filter's rewrite is part of the question this run put, and a
+                  // digest of `req` would certify a request that was never sent. The whole
+                  // object — model, system prompt, transcript and tool specs — because each of
+                  // those changes the answer, and a digest that covered only some of them
+                  // would report "the same call" for a candidate that moved the rest.
+                  requestDigest: digest(shaped),
                 },
                 actor: SYSTEM_ACTOR("agent"),
                 taskId: w.task.taskId,
