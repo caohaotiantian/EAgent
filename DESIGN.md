@@ -340,17 +340,63 @@ observable is orderable; splitting the engine is not, yet.**
 
 ### 8 · The extension surface and its version pin (D5)
 
-Unchanged in intent. One thing the audit sharpened: the closure is real and undocumented. A
-non-committer can add graphs, prompts, profiles, subgraphs, sandboxed functions, sandboxed
-hooks, MCP tools and OpenAI-wire providers without forking; an in-process tool, a new wire
-protocol, a delivery channel, a node type, a reducer or a ninth hook point all require a fork.
-That is a defensible trade — replay depends on closed vocabularies — but it is stated as a bound
-only in `TODO.md`, and "unlimited extensibility" appears unqualified above.
+**THE SURFACE HALF IS DONE. THE VERSION PIN IS NOT, AND IS NOT THIS ITEM.** That split was not in
+the original text and is the correction; what follows says which half discharged and why the other
+one is not orderable yet.
 
-*Fails today:* an example hook file and an example function body in the tree, with the required
-shape named in `--help` and in the loader's error text rather than in one source comment.
-**Ordering note:** the tree's only `examples/` directory is `packages/eagent/examples/`, which
-item 6 deletes. Either this item lands first, or item 6 carries the examples across.
+**Discharged.** The required shape of a code body is now stated in `--help` and in the loader's own
+refusal, not in one source comment: `compileRealm` appends the rule to both `E_RESOURCE_INVALID`
+messages, gated on `(e as Error).name === "SyntaxError"` — measured, `instanceof` is false across
+the vm realm boundary for both `module.exports` and `export default`, so the obvious form would
+never have fired. The asymmetry the audit did not name is closed too: a malformed FUNCTION body
+compiled `ok` with exit 0 and failed mid-run, while an identical malformed HOOK body exited 1;
+`requireFunctionBodies` now sits beside `requireHookBodies`. And the closure is written where a
+stranger reads it before forking — `README.md`, "Extending it, and where that stops" — with the
+qualifier added at "The three properties, mechanically" above and in `CLAUDE.md` §2.
+
+**The closure enumeration in the old text was wrong in one direction, and the correction is
+recorded rather than silently applied.** It said an in-process tool requires a fork. That is true
+of the CLI and false of a library embedder: `ToolRegistry` is on the pinned public surface
+(`scripts/surface.json`), while `openWorkspace` and `compileRealm` are not, and `src/index.ts`
+re-exports neither — so the bound differs by which door you came in. "A delivery channel requires
+a fork" was also too strong: any HTTP endpoint is a config row, and it is a non-webhook TRANSPORT
+that needs a fork. (Writing that down turned up a defect and it was fixed separately: `kind` on a
+channel row was read by nothing, so `"carrier-pigeon"` configured a webhook.)
+
+**Not discharged, and deliberately not built here: D5's version pin.** D5 specifies it as a
+journal EVENT recording a version-pinned default, plus a refusal for an extension using a proposed
+API. Neither is buildable today and the reason is measured, not aesthetic:
+
+- There is nothing to pin. `GRAPH_API_VERSION` accepts exactly one value; `loom.dev/v2` and a
+  missing field both fail `GRAPH000_API_VERSION`. No default has changed that an old graph would
+  want preserved, so the event would be written by every run and read by nothing — the
+  `run.cancelled.clean` shape already flagged for deletion in `journal/events.ts`.
+- "An extension using a proposed API cannot be published" has no publish boundary to attach to.
+  `@stable` here means a file landed in `resources/<kind>/` and `readResources` picked it up at
+  boot. There is no registry and no publish step to refuse at.
+- It costs two `Kernel-seam:` trailers (`graph/spec.ts` for the field, `journal/events.ts` for the
+  event) against a ledger standing at two, to ship a compatibility table with no entries.
+
+**A file-level `// loom:surface <version>` directive was proposed for this item and REJECTED on a
+control.** Its justification was that such a directive on a hook body compiles `ok`, disarms the
+`no-secrets` hook and writes a credential to disk. Three workspaces, one graph, one input: the
+directive over a NO-OP body wrote the credential; NO directive over the same no-op body wrote the
+credential; the directive over the REAL shipped body wrote nothing and the run failed. The
+directive is inert — the no-op body was the whole effect — so the proposal was a new refusal with
+no caller and no defect, which is the pattern this project has already paid for twice (the retry
+requeue, `LeasedScheduler`).
+
+*What would reopen the pin:* the first behavioural default this project wants to change without
+breaking graphs written against the old one. That is the entry the table would have. Until then a
+version pin binds nothing, and the rule it must carry when it arrives is written here now so it is
+not decided under pressure: **a pin may preserve a behavioural DEFAULT and never a REFUSAL.** A
+safety tightening applies to `loom.dev/v1` graphs too, or "oversight only tightens" stops holding
+across versions.
+
+*Fails today:* nothing in the surface half. The examples half was carried across by item 6 —
+`examples/` is tracked at the repo root with four graphs and is green under
+`packages/core/test/examples-run.test.ts`; the old ordering note pointing at
+`packages/eagent/examples/` was stale and is gone.
 
 ### Deliberately not sequenced
 
