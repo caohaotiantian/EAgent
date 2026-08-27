@@ -3105,7 +3105,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           ...(bucketInput === undefined ? {} : { bucketInput }),
         });
         const key = cohortKeyOf(t);
-        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, bucketInput);
+        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, index, bucketInput);
         if (peers.truncated) {
           process.stderr.write(
             `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
@@ -3360,12 +3360,56 @@ function bucketFlag(args: Args): InputBucket | undefined {
  * medians of cost, wall time and gates over the runs themselves. Reading peers' journaled
  * scores instead would measure the population as it was last judged, which is a different set
  * and a staler one.
+ *
+ * EVERY MEMBER IS FOLDED UNDER THE SAME RULE AS THE RUN BEING JUDGED, and that includes its
+ * graph. This used to fold peers with no `graph` at all, defended by a comment saying "a peer
+ * contributes usage, policy and status to the medians, and none of those needs the spec". That
+ * was false: `measureCohort` computes `p90Score` as a percentile OF THE SCORES, and a score's
+ * largest term is `outcome`, which `extractSignals` derives from `nodeTypes.get(step.nodeId)` —
+ * a map built from `opts.graph.spec.nodes`. A peer folded without its graph reports zero
+ * assertions, zero rubrics, no human decisions and `selfReported: false`, so its outcome is 0
+ * by construction whatever it actually did.
+ *
+ * MEASURED, through this CLI, on a 30-run workspace of one `function` node + one
+ * assertion-`evaluator` node where every run's assertion passes and every member's honest
+ * score is 1.000:
+ *
+ *     peers folded without their graph : "p90Score": 0.4
+ *     peers folded with their graph    : "p90Score": 1
+ *
+ * `isGolden` condition 2 is `score >= cohort.p90Score`, so the bar was understated by 0.6 —
+ * 60% of the metric. AND IT CHANGES VERDICTS, which is the part worth measuring rather than
+ * arguing. Same graph, 30 runs, `solve` deliberately wrong on even `n` so half the cohort's
+ * assertion fails; scoring one of the FAILING runs (its own score 0.400 either way):
+ *
+ *     without the peers' graphs : p90Score 0.400 — condition 2 PASSES, because the run ties
+ *                                 a bar its own failing peers set. One blocker, condition 1.
+ *     with the peers' graphs    : p90Score 1.000 — two blockers, the second being
+ *                                 "top decile of its cohort: score 0.400 vs p90 1.000".
+ *
+ * A failing run was in the top decile of a cohort of failures. That is what
+ * `measureCohort`'s own docstring refuses: "A promotion bar that any run can lower by standing
+ * next to it is exactly the measurement gamed by the thing being measured."
+ *
+ * THE RESIDUE, STATED. A peer whose authored graph is not published in `<workspace>/graphs/`
+ * still folds without one and still scores near 0. That is the same conservative reading the
+ * judged run gets from the same index, not a second rule — but it means a workspace that has
+ * deleted an old graph file measures its old runs as worthless rather than excluding them.
+ * Cohort `n` does not move either way: membership needs `runStatus === "succeeded"` and
+ * `didWork`, and `didWork` holds through `modelCalls`/`channelsWritten`, neither of which
+ * needs the spec.
  */
 async function cohortPeers(
   ws: Workspace,
   self: RunId,
   key: string,
   promotedGraphHashes: ReadonlySet<string>,
+  /**
+   * The SAME `graphsByHash` index the judged run's own fold used. Passed in rather than rebuilt
+   * so the two folds cannot disagree about what is published, and so scoring one run reads the
+   * `graphs/` directory once instead of once per peer.
+   */
+  graphs: ReadonlyMap<string, RunGraph>,
   /** The SAME rule the run being judged was folded under. See the call site. */
   bucketInput?: InputBucket,
 ): Promise<{ members: Trajectory[]; truncated: boolean }> {
@@ -3375,9 +3419,17 @@ async function cohortPeers(
     if (s.runId === self) continue;
     const events = await journalOf(ws, s.runId);
     if (events.length === 0) continue;
-    // No graph: a peer contributes usage, policy and status to the medians, and none of those
-    // needs the spec. A missing `promptRef` on a peer changes no median.
-    const t = foldTrajectory(events, { promotedGraphHashes, ...(bucketInput === undefined ? {} : { bucketInput }) });
+    // The peer's OWN authored graph, by the hash the peer's own `run.submitted` names — never
+    // the judged run's. A cohort can hold runs of more than one graph (the key's graphHash slot
+    // is the run's own), so reusing one spec for all of them would read another graph's node
+    // types onto this run's steps.
+    const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+    const graph = submitted === undefined ? undefined : graphs.get(submitted.payload.graphHash);
+    const t = foldTrajectory(events, {
+      promotedGraphHashes,
+      ...(graph === undefined ? {} : { graph }),
+      ...(bucketInput === undefined ? {} : { bucketInput }),
+    });
     if (cohortKeyOf(t) === key) members.push(t);
   }
   return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };

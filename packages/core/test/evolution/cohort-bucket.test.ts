@@ -20,6 +20,11 @@
  * 4. The seam is REACHABLE: `loom score --bucket` reaches the fold of the run being judged
  *    AND the fold of every peer. Wiring it to one of the two silently splits the cohort it
  *    was supposed to join, so `fields:` is checked by the count it produces.
+ * 5. The bucket rule is not the only thing the two folds have to agree on. Every member is
+ *    folded WITH ITS OWN GRAPH, because `extractSignals` reads node types out of the spec —
+ *    so a peer folded without one scores as though it did no evaluable work, and `p90Score`
+ *    is a percentile of exactly those scores. Measured before the fix: a failing run was in
+ *    the top decile of a cohort of failures.
  *
  * THE COST OF (1), STATED: a cohort of five runs over one to five documents mixes genuinely
  * different work, so `p50Cost` is a median over a spread. Measured by the first test itself —
@@ -254,6 +259,10 @@ async function cli(argv: string[]): Promise<{ code: number; out: string; err: st
 }
 
 async function drive(dir: string, graphFile: string, inputs: Record<string, string>): Promise<string> {
+  return driveJson(dir, graphFile, inputs);
+}
+
+async function driveJson(dir: string, graphFile: string, inputs: Record<string, unknown>): Promise<string> {
   const r = await cli(["run", graphFile, "--workspace", dir, "--input", JSON.stringify(inputs)]);
   assert.equal(r.code, 0, r.err);
   const { runId, status } = JSON.parse(r.out) as { runId: string; status: string };
@@ -357,6 +366,96 @@ test("loom score --bucket: a mode nobody defined is REFUSED, not absorbed", asyn
     } finally {
       ws.close();
     }
+  } finally {
+    w.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 3 · the same fold for every member, or the bar is measured on a crippled population
+// ---------------------------------------------------------------------------
+
+/**
+ * A graph whose evaluator's verdict depends on the input: `solve` is deliberately wrong when
+ * `n` is even, so half a cohort's assertion fails and the population has a real spread. The
+ * spread is the point — a cohort whose members all score alike cannot show a bar moving.
+ */
+const GRADED_GRAPH = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "bench-offline", project: "demo", version: 1 },
+  policy: { posture: "out" },
+  channels: {
+    problem: { type: "object", reduce: "replace" },
+    answer: { type: "object", reduce: "replace" },
+    verdict: { type: "object", reduce: "replace" },
+  },
+  inputs: ["problem"],
+  outputs: ["verdict"],
+  nodes: [
+    { id: "solve", type: "function", reads: ["problem"], writes: ["answer"], function: { ref: "function/solve@stable" } },
+    {
+      id: "check",
+      type: "evaluator",
+      reads: ["answer"],
+      writes: ["verdict"],
+      evaluator: { kind: "assertion", ref: "function/check@stable", threshold: 0.5 },
+    },
+  ],
+  edges: [{ id: "e", from: "solve", to: "check", kind: "seq" }],
+};
+
+const SOLVE_JS = `(view) => {
+  const n = view.get("problem").n;
+  return { writes: { answer: { n: n, value: n % 2 === 0 ? n : n * 2 } } };
+}`;
+const CHECK_JS = `(view) => {
+  const a = view.get("answer");
+  const ok = a.value === a.n * 2;
+  return { writes: { verdict: { pass: ok, score: ok ? 1 : 0, confidence: 1, detail: ok ? "ok" : "wrong" } } };
+}`;
+
+function gradedWorkspace(): { dir: string; graphFile: string; dispose: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "loom-peerfold-"));
+  mkdirSync(join(dir, "graphs"), { recursive: true });
+  mkdirSync(join(dir, "resources", "function"), { recursive: true });
+  const graphFile = join(dir, "graphs", "bench.json");
+  writeFileSync(graphFile, JSON.stringify(GRADED_GRAPH));
+  writeFileSync(join(dir, "resources", "function", "solve.js"), SOLVE_JS);
+  writeFileSync(join(dir, "resources", "function", "check.js"), CHECK_JS);
+  return { dir, graphFile, dispose: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("loom score folds EVERY cohort member with its own graph, or the promotion bar is a fiction", async () => {
+  // `extractSignals` keys on `nodeTypes.get(step.nodeId)`, and that map is built from
+  // `opts.graph.spec.nodes`. Folding a peer with no graph therefore reports zero assertions
+  // whatever the peer did, so its outcome is 0 by construction — and `p90Score`, the bar
+  // `isGolden` condition 2 must clear, is a percentile OF those scores.
+  const w = gradedWorkspace();
+  try {
+    const ids: string[] = [];
+    for (let n = 1; n <= 12; n++) ids.push(await driveJson(w.dir, w.graphFile, { problem: { n } }));
+
+    // Six runs pass their assertion and six fail; the failing ones score 0.400, the passing
+    // ones 1.000. p90 over twelve is the eleventh ascending, so the honest bar is 1.000.
+    const failing = await score(w.dir, ids[1]!); // n = 2, even, `solve` is wrong
+    assert.equal(failing.outcome, 0, "the premise: this run's assertion really did fail");
+    assert.equal(failing.score, 0.4);
+    assert.equal(failing.cohort.n, 12);
+    assert.equal(
+      failing.cohort.p90Score,
+      1,
+      "folded without their graphs every peer reports outcome 0 and scores 0.400, which is this " +
+        "run's own score — so it would tie the bar it is measured against",
+    );
+    assert.ok(
+      failing.goldenBlockers.some((b) => b.startsWith("top decile of its cohort:")),
+      `a failing run must not be in the top decile of its own cohort; blockers were ${JSON.stringify(failing.goldenBlockers)}`,
+    );
+
+    const passing = await score(w.dir, ids[0]!); // n = 1, odd
+    assert.equal(passing.outcome, 1);
+    assert.equal(passing.cohort.p90Score, 1, "the bar does not move with which member is being judged");
   } finally {
     w.dispose();
   }
