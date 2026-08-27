@@ -285,30 +285,60 @@ minutes what 2,215 tests could not.
 ### 5 · Close the self-improvement loop (D6)
 
 Not deferred any longer — closed, per the maintainer's decision. (This is a different sense of
-"frozen" from D6's: the eval set stays frozen before the candidate exists, unchanged.) **Metric before corpus, as a hard ordering
-inside this item:** the score currently prefers failure 0.400 to 0.100 because `readSignals`
-never reads `runStatus`, and `trajectory.usage` triple-counts spend. Every trajectory captured
-under an inverted metric is a poisoned label, so accumulating a corpus first is harmful rather
-than merely premature — which corrects `TODO.md` §E's stated deferral reason, whose whole
-premise was a correct scorer and a short sample.
+"frozen" from D6's: the eval set stays frozen before the candidate exists, unchanged.) The metric
+came before the corpus, as a hard ordering inside this item, because every trajectory captured
+under an inverted metric is a poisoned label. Then: a journal event that can carry a score, a verb
+that reads one, and one cohort where a later run is measurably better because of an earlier one.
 
-Then: a journal event that can carry a score, a verb that reads one, and one cohort where a
-later run is measurably better because of an earlier one.
-
-**MECHANISM DONE 2026-08-26; THE DEMONSTRATION IS BLOCKED, and by something worth knowing.**
-Built and driven on a real corpus: five live GLM-5.2 runs of one graph over five different diffs
+**MECHANISM DONE 2026-08-26.** Five live GLM-5.2 runs of one graph over five different diffs
 ($0.044, 510 s), each scored through `loom score`, each verdict journalled as `evolution.scored`
 (event row 53, with an audit rule that refuses a score claiming a completion the journal denies),
-each read back through `loom cohort`. Every run scored 0.6 with `delivered: true`.
+each read back through `loom cohort`.
 
-**What it cannot yet do, measured rather than assumed.** All five landed in DIFFERENT cohorts of
-one, because `cohortKeyOf` includes an input bucket that defaults to a digest of the whole input.
-`isGolden` needs thirty. So promotion is unreachable for any workflow whose inputs vary — which is
-every real workflow. The `bucketInput` seam exists for exactly this and has no caller. See
-`TODO.md` §A0. **This is the item's remaining work, and it is one seam, not a redesign.**
+**THE COHORT HALF IS DONE AND NEEDED NO CODE CHANGE, 2026-08-27.** The paragraph that used to
+sit here is struck: it said the input bucket "defaults to a digest of the whole input", that "the
+`bucketInput` seam exists for exactly this and has no caller", that "promotion is unreachable for
+any workflow whose inputs vary", and that the remaining work was "one seam, not a redesign". Four
+claims; the first three were fixed at f0c3c11, forty minutes after the paragraph was written, and
+the fourth was wrong about what was left. `trajectory.ts`'s `defaultBucket` is the input's SHAPE;
+`loom score --bucket` calls the seam and `test/evolution/cohort-bucket.test.ts` drives all three
+modes. Measured through the shipped CLI: thirty runs of one graph over thirty different inputs,
+one cohort key, `"cohort": {"n": 30}`, `"golden": true`, `"goldenBlockers": []`, ceiling `stable`.
+
+**What was actually left, and is now built.**
+
+- The promotion bar was a percentile of peers folded with NO GRAPH. `loom score` folded the
+  judged run with its authored spec and every peer without one, and `extractSignals` reads node
+  types out of the spec — so every peer reported zero assertions and its outcome was 0 by
+  construction. Measured: `p90Score 0.4` on a cohort whose members all score 1.0, and a FAILING
+  run passing condition 2 by tying a bar its failing peers set. Fixed at `fix(cli)`.
+- The gate FAILED OPEN on the candidate D6 aims at. `runEvalSuite` serves every model turn by
+  `effectKey(taskId, "model", turn)`, which carries no prompt and no request, so a candidate whose
+  only change was `agent.prompt` replayed byte-identically and `gateCandidate` answered
+  `promote: true` having made zero model calls — the crippled one came out cheaper at an equal
+  pass rate, so the gate preferred degradation. `model.called` now carries a `requestDigest` (the
+  `tool.called.argsDigest` precedent), `reboundEffects` compares it, and a case that measured the
+  recording instead of the candidate is refused. A recording that predates the field cannot
+  certify a DIFFERENT graph at all: a guard that cannot decide fails closed.
+- The gate had no door. `gateCandidate` and `runEvalSuite` had zero callers outside
+  `src/evolution/` and tests. `loom promote <candidate> --baseline <g> --suite <f>` is that door.
+  It MEASURES four of `PromotionInput`'s fields rather than accepting them, and journals the
+  decision on the existing `operator.command` row — no kernel edit, no `Kernel-seam:` trailer.
+- review-bench's S1 was one bit. One evaluator node demanding a clean sweep of six cases meant a
+  review that found five of six planted defects scored what one that found none scored. Six
+  evaluator nodes, one per case: S1 is k/6. A graph edit, no core change.
+
+**What is still open, and is not this item's to close.** The suite is hand-authored: `loom suite
+freeze --cohort <runId>`, which would select cases from a cohort by the runs' own journaled
+verdicts, is the missing half of "promoted over them". A promotion's subject is a GRAPH and
+`StateStore` is keyed by runId, so the decision borrows a run's coordinate. And an offline gate
+still cannot judge a prompt candidate at all — it can now only REFUSE one, which is the correct
+direction and not the same as a gate.
 
 *Fails today:* thirty runs of one workflow sharing a cohort key, and a candidate promoted over
-them because it measurably beat the baseline.
+them because it measurably beat the baseline — **against a live provider**. Offline, that is
+`node --test packages/core/test/evolution/close-the-loop.test.ts` and it passes in 284 ms; live,
+it is `examples/demo/close-the-loop.sh` and nobody has run it yet.
 
 ### 6 · Cut `packages/eagent` to its tag and delete it
 
