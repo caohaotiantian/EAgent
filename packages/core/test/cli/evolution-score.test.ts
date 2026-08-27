@@ -226,16 +226,116 @@ test("CONDITION 5 IS NON-VACUOUS — a published graph is promoted, a loose file
 
     // The other half, or the assertion above proves only that the condition never fires. A graph
     // run from a path OUTSIDE graphs/ was published by nobody, and the fold says so.
+    //
+    // It is scored through `--graph`, and that is the whole reason the flag exists: publishing
+    // into graphs/ is ALSO what marks a graph promoted here, so a candidate that had to be
+    // published in order to be scored would pass this very condition on the way in. The flag
+    // supplies the spec and nothing else, and condition 5 still fails.
     const loose = join(w.dir, "loose.json");
     writeFileSync(loose, JSON.stringify({ ...GRAPH, metadata: { ...GRAPH.metadata, version: 2 } }));
     const r = await cli(["run", loose, "--workspace", w.dir, "--input", JSON.stringify({ source: "input.txt" })]);
     assert.equal(r.code, 0, r.err);
     const looseRun = (JSON.parse(r.out) as { runId: string }).runId;
-    assert.equal((await cli(["score", looseRun, "--workspace", w.dir])).code, 0);
+    const scored = await cli(["score", looseRun, "--workspace", w.dir, "--graph", loose]);
+    assert.equal(scored.code, 0, scored.err);
+    const looseBlockers = scoreRows(await journal(w.dir, looseRun))[0]!.goldenBlockers;
     assert.ok(
-      scoreRows(await journal(w.dir, looseRun))[0]!.goldenBlockers.some((b) => b.startsWith("not self-training")),
+      looseBlockers.some((b) => b.startsWith("not self-training")),
       "a graph nobody published cannot be learned from",
     );
+    assert.equal(
+      looseBlockers.some((b) => b.startsWith("the signals were readable")),
+      false,
+      `--graph supplied the spec, so condition 6 must not fire; blockers were ${JSON.stringify(looseBlockers)}`,
+    );
+  } finally {
+    w.dispose();
+  }
+});
+
+test("NO SPEC, NO SCORE — an unresolvable graph is REFUSED and journals nothing", async () => {
+  const w = workspace();
+  try {
+    // The third folded-without-its-graph defect in one session, and the shape it shipped in: a
+    // run of a graph the workspace cannot resolve folded with no node types, found no evaluator
+    // nodes, and reported `signals: []` -> outcome 0 -> a score. Driven live on review-bench,
+    // same run and same command twice (docs/evolution-loop-2026-08-27.md §4): graph absent,
+    // score 0.111; graph present, `S1 6/6 assertions passed`, score 0.700. A candidate graph
+    // lives in candidates/, so every candidate cohort read as worthless and nothing said why.
+    const loose = join(w.dir, "candidate.json");
+    writeFileSync(loose, JSON.stringify({ ...GRAPH, metadata: { ...GRAPH.metadata, version: 3 } }));
+    const r = await cli(["run", loose, "--workspace", w.dir, "--input", JSON.stringify({ source: "input.txt" })]);
+    assert.equal(r.code, 0, r.err);
+    const runId = (JSON.parse(r.out) as { runId: string }).runId;
+
+    const refused = await cli(["score", runId, "--workspace", w.dir]);
+    assert.equal(refused.code, 1, `expected a refusal, got ${refused.out}`);
+    assert.equal(refused.out, "", "a refusal prints no verdict");
+    // NAMING THE MISSING THING AND THE FIX, because "outcome 0" named neither.
+    assert.ok(refused.err.includes(join(w.dir, "graphs")), `the message must name the directory: ${refused.err}`);
+    assert.ok(refused.err.includes("--graph"), `…and the flag that answers it: ${refused.err}`);
+
+    // AND NOTHING WAS JOURNALED. The journal is the only authoritative state, so a verdict
+    // nobody measured must not reach it — that is the difference between refusing and scoring 0.
+    assert.deepEqual(scoreRows(await journal(w.dir, runId)), []);
+
+    // The control, on the same run: given the spec, it scores.
+    const ok = await cli(["score", runId, "--workspace", w.dir, "--graph", loose]);
+    assert.equal(ok.code, 0, ok.err);
+    assert.equal(scoreRows(await journal(w.dir, runId)).length, 1);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("--graph IS A LOOKUP, NOT AN INPUT — another graph's node types are refused", async () => {
+  const w = workspace();
+  try {
+    // The flag hands the scorer a spec, and a spec decides which steps carry S1 and S4. Accepting
+    // one that is not the run's would let the caller choose the signals — the score's own inputs,
+    // supplied by the party the score judges. It is matched by hash against `run.submitted`.
+    const other = join(w.dir, "other.json");
+    writeFileSync(other, JSON.stringify({ ...GRAPH, metadata: { ...GRAPH.metadata, version: 4 } }));
+    const runId = await drive(w.dir, w.graphFile);
+
+    const wrong = await cli(["score", runId, "--workspace", w.dir, "--graph", other]);
+    assert.equal(wrong.code, 1, `expected a refusal, got ${wrong.out}`);
+    assert.deepEqual(scoreRows(await journal(w.dir, runId)), [], "and it journaled nothing");
+    assert.ok(/compiles to sha256:/.test(wrong.err), `the message must show both hashes: ${wrong.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("A CANDIDATE COHORT MEASURES ITS PEERS TOO — --graph reaches the whole population", async () => {
+  // The peer half, which is where the damage actually was: a cohort key pins one graphHash, so
+  // the peers of a candidate run are thirty runs of that same unpublished graph. Folding the
+  // judged run with `--graph` while its peers folded blind would measure it against a population
+  // of runs of ITSELF that nobody could measure — `p90Score` is a percentile OF THE SCORES, so
+  // that population sets the bar `isGolden` condition 2 has to clear.
+  const w = workspace();
+  try {
+    const candidate = join(w.dir, "candidate.json");
+    writeFileSync(candidate, JSON.stringify({ ...GRAPH, metadata: { ...GRAPH.metadata, version: 5 } }));
+    const runs: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const p = await cli(["run", candidate, "--workspace", w.dir, "--input", JSON.stringify({ source: "input.txt" })]);
+      assert.equal(p.code, 0, p.err);
+      runs.push((JSON.parse(p.out) as { runId: string }).runId);
+    }
+
+    const r = await cli(["score", runs[0]!, "--workspace", w.dir, "--graph", candidate]);
+    assert.equal(r.code, 0, r.err);
+    const printed = JSON.parse(r.out) as EventPayloads["evolution.scored"];
+    assert.equal(printed.cohort.n, 2, "both runs of the candidate are members, and both were measured");
+    assert.equal(
+      r.err.includes("folded without their graph"),
+      false,
+      `nothing was excluded, so nothing is reported: ${JSON.stringify(r.err)}`,
+    );
+    // AND THE SPEC DID NOT BUY PROMOTION. `--graph` supplies node types; `graphs/` is still the
+    // only thing that marks a graph promoted, so condition 5 keeps failing on both.
+    assert.ok(printed.goldenBlockers.some((b) => b.startsWith("not self-training")));
   } finally {
     w.dispose();
   }

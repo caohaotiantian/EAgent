@@ -549,19 +549,45 @@ Naming that here rather than letting them sit unowned:
   `npm --prefix tui install` (ENOENT), `packages/eagent/CHANGELOG.md:25-31` still calls `tui/`
   the installable product, and several `packages/eagent/src` docstrings still describe it as
   live. The guard misses all of it because it only forbids `src/tui/`.
-- **`NEW` `loom score` REPORTS OUTCOME 0 FOR A RUN WHOSE GRAPH IT CANNOT RESOLVE**, which is
-  indistinguishable from a run that failed every assertion. `extractSignals` reads the assertion
-  evaluator nodes out of the SPEC, and `score` resolves a run's spec from the workspace's
-  `graphs/`. A candidate graph lives in `candidates/`, so it does not resolve. Driven, same run
-  and same command, twice: with the graph absent, `"signals": []`, outcome 0, score 0.111; with
-  the file copied into `graphs/`, `{"id":"S1","value":1,"evidence":"6/6 assertions passed"}`,
-  outcome 1, score 0.700. Every candidate cohort therefore scores near zero until somebody
-  notices, and nothing says why. **The third folded-without-its-graph defect in one session** —
-  the other two were `cohortPeers` folding peers without a spec (fixed, 7227a74) and this one's
-  own cousin in `loom score`'s judged run (already fixed). It must REFUSE: a measurement that
-  cannot find what it is measuring has not measured anything, and "when a guard cannot decide it
-  fails closed" applies to the scorer exactly as it applies to the gate. Evidence:
+- **`NEW` FIXED 2026-08-27 — `loom score` REPORTED OUTCOME 0 FOR A RUN WHOSE GRAPH IT COULD NOT
+  RESOLVE**, which is indistinguishable from a run that failed every assertion. `extractSignals`
+  reads the assertion evaluator nodes out of the SPEC, and `score` resolved a run's spec from the
+  workspace's `graphs/`. A candidate graph lives in `candidates/`, so it did not resolve. Driven,
+  same run and same command, twice: with the graph absent, `"signals": []`, outcome 0, score
+  0.111; with the file copied into `graphs/`, `{"id":"S1","value":1,"evidence":"6/6 assertions
+  passed"}`, outcome 1, score 0.700. Every candidate cohort therefore scored near zero until
+  somebody noticed, and nothing said why. **The third folded-without-its-graph defect in one
+  session** — the other two were `cohortPeers` folding peers without a spec (fixed, 7227a74) and
+  this one's own cousin in `loom score`'s judged run. Evidence:
   `docs/evolution-loop-2026-08-27.md` §4.
+
+  **THE FIX IS A REFUSAL AT THE VERB AND A MARKER IN THE LIBRARY**, because the two layers can
+  say different things. `foldTrajectory` reports `specResolved`; `scoreTrajectory` zeroes outcome
+  AND score on a false and carries `components.specResolved` so a reader can tell which of the
+  now-three zeroes it is; `isGolden` gains condition 6, which names the graph hash rather than
+  leaving condition 1 to say `outcome 0.000` and be read as "this run was bad". `loom score`
+  refuses outright — exit 1, no verdict printed, **nothing appended**, since a verdict nobody
+  measured must not reach the only authoritative state.
+
+  `--graph <file>` is what makes that refusal actionable: publishing into `graphs/` is also what
+  marks a graph promoted, so "copy it into graphs/" is advice that passes golden condition 5 on
+  the way in. The flag supplies the spec alone, matched by HASH against `run.submitted`, and the
+  peers of the judged run are looked up through it too — a cohort key pins one graphHash, so a
+  candidate's peers are runs of those same unpublished bytes.
+
+  **This also closes the residue recorded on the `cohortPeers` entry above**, which said "cohort
+  `n` does not move either way". `n` not moving was the damage: `measureCohort` now drops a
+  member it could not measure, and on that entry's own 30-member fixture, keeping them gave
+  `n 30, p90Score 0.000` with `isGolden` condition 2 passing 30/30 — thirty runs nobody measured
+  certifying "cohort large enough" against a bar of zero that all thirty tied. Dropping them
+  gives `n 0` and condition 4 refuses. `promote --against-cohort` also excludes them from the
+  PAIRING, where an unmeasured baseline scoring 0 handed the candidate that whole score as
+  improvement it did not earn.
+
+  **What is NOT covered:** the `! N run(s) folded without their graph` line in `score` is a
+  backstop with no end-to-end test — with the judged run refusing and the peers sharing its
+  lookup, the only route left to it is a peer that reached the same cohort key through
+  `graph.mutated` while its spec is looked up by `run.submitted`'s hash. Stated at the branch.
 - **`NEW` `L4-gated-at-least-as-much` HAS NO END-TO-END COVERAGE.** It is the live promotion
   door's enforcement of "oversight only tightens", and this lane's reviewer deleted the whole
   regression-collection block in `promoteAgainstCohort` — both `gatingRegressions.push` loops,

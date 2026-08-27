@@ -98,6 +98,27 @@
  *
  * The human-effort term is not gated separately; it rides on the same `delivered`, because
  * "raised no gates" is precisely what a run that did nothing can claim most easily.
+ *
+ * ## …AND A SCORE THAT COULD NOT FIND WHAT IT WAS SCORING IS NOT A LOW SCORE
+ *
+ * Every rung above S2 is read out of the GRAPH: `extractSignals` keys assertions, rubrics and
+ * self-report on node types, and node types come from `spec.nodes`. A trajectory folded without
+ * its graph therefore arrives here with `assertions: []` and scores exactly what a run that
+ * failed every assertion scores. Driven live on one `review-bench` run, same run and same
+ * command twice (`docs/evolution-loop-2026-08-27.md` §4): graph absent from `<ws>/graphs/` →
+ * `signals []`, outcome 0, **score 0.111**; graph present → `S1 "6/6 assertions passed"`,
+ * outcome 1, **score 0.700**. A candidate graph is published in `candidates/`, so every
+ * candidate cohort read as worthless and nothing on the page said why.
+ *
+ * `Trajectory.specResolved` is the fold's answer to "did I have the spec", and this file treats
+ * a `false` as the guard-that-cannot-decide case CLAUDE.md names: the outcome is 0, the score is
+ * 0, `components.specResolved` says which zero it is, and `isGolden` condition 6 refuses on it
+ * by name. **The zero is not the point — the marker is.** A consumer that reads only the number
+ * has to be able to find out it is not a measurement, and `measureCohort` drops such a member
+ * from the POPULATION for the same reason it drops a non-run — see there for the measurement.
+ *
+ * `loom score` goes further and refuses to run at all, because the CLI can say the one thing
+ * this file cannot: WHICH graph is missing and where to put it.
  */
 
 import { digest, type Digest } from "../canonical.ts";
@@ -195,6 +216,13 @@ export interface ScoredTrajectory {
      * "the run finished without doing anything".
      */
     readonly delivered: boolean;
+    /**
+     * `Trajectory.specResolved`, carried through — the THIRD reason a score of 0 can happen,
+     * and the only one that is not a verdict on the run at all. `false` means the signal rungs
+     * were unreadable because the fold had no graph, so this row is a failed measurement and
+     * not a measured failure. `isGolden` condition 6 reads it.
+     */
+    readonly specResolved: boolean;
   };
   /**
    * Journaled with every score, because a score computed under different weights is a
@@ -372,7 +400,12 @@ export function scoreTrajectory(
   // a run can pass an assertion and then die, and the record should say so — but the run's
   // outcome is the outcome of the RUN, and a run that did not finish has none.
   const completed = t.outcome.runStatus === "succeeded";
-  const outcome = completed ? outcomeOf(signals) : 0;
+  // AND THE MEASUREMENT ITSELF CAN BE MISSING. Without the spec the ladder is unreadable, and
+  // what survives is whatever needs no node type — a gate decision (S2) comes off the journal
+  // and would otherwise be reported as if it were the whole outcome. A partial ladder presented
+  // as a complete one is the failure this closes; see the header for the two live readings.
+  const measured = t.specResolved;
+  const outcome = completed && measured ? outcomeOf(signals) : 0;
 
   const costNormalized = cohort.p50Cost > 0 ? clamp01(t.usage.costUsd / cohort.p50Cost) : 0;
   const latencyNormalized = cohort.p50Wall > 0 ? clamp01(t.usage.wallMs / cohort.p50Wall) : 0;
@@ -396,8 +429,8 @@ export function scoreTrajectory(
     cohortKey: cohortKeyOf(t),
     signals,
     outcome,
-    score: delivered ? earned : 0,
-    components: { outcome, costNormalized, latencyNormalized, humanEffortSaved, completed, delivered },
+    score: delivered && measured ? earned : 0,
+    components: { outcome, costNormalized, latencyNormalized, humanEffortSaved, completed, delivered, specResolved: measured },
     weightsDigest: wd,
   };
 }
@@ -416,12 +449,17 @@ export const MIN_COHORT_SIZE = 30;
 export const MIN_OUTCOME = 0.8;
 
 /**
- * All five conditions, and they are conjunctive.
+ * All six conditions, and they are conjunctive.
  *
  * Each one blocks a specific way the corpus rots: 1 blocks a model grading itself into
  * the training set, 2 blocks "good enough" becoming the standard, 3 blocks learning from
  * a run that broke a rule, 4 blocks fitting to noise, 5 blocks self-training on the
- * output of an unpromoted candidate.
+ * output of an unpromoted candidate, and 6 blocks learning from a run NOBODY MEASURED.
+ *
+ * 6 is not a rung and it is not redundant with 1. Without the spec the ladder is unreadable, so
+ * 1 fails too — but it fails saying `outcome 0.000`, which reads as "this run was bad" and is
+ * the exact confusion `goldenBlockers` exists to prevent. The condition names the cause instead,
+ * with the graph hash a reader has to go and find.
  */
 export function isGolden(
   t: Trajectory,
@@ -460,6 +498,15 @@ export function isGolden(
       pass: !t.fromUnpromotedCandidate,
       detail: t.fromUnpromotedCandidate ? "produced by an unpromoted candidate" : "produced by a promoted graph",
     },
+    {
+      id: 6,
+      name: "the signals were readable",
+      pass: scored.components.specResolved,
+      detail: scored.components.specResolved
+        ? "the graph was available, so an absent signal is an absent signal"
+        : `NO SPEC — graph ${t.graphHash} was not available to the fold, so no assertion, rubric or ` +
+          `self-report could be read and this score is a failed measurement rather than a measured failure`,
+    },
   ];
   return { golden: conditions.every((c) => c.pass), conditions };
 }
@@ -492,6 +539,31 @@ export function isGolden(
  * not spend, and the promotion bar cut by a third. With the filter as written both hold at
  * $0.015 and 0.340.
  *
+ * AND A MEMBER NOBODY COULD MEASURE IS NOT A MEMBER EITHER — the third clause, and the same
+ * argument a third time. `cohortPeers` (`cli.ts`) already fixed the case where every peer folded
+ * without a spec; the residue its docstring recorded — "a peer whose authored graph is not
+ * published in `graphs/` still folds without one … cohort `n` does not move either way" — got
+ * the damage backwards. `n` not moving IS the damage: an unmeasured peer stayed a member, so
+ * `MIN_COHORT_SIZE` counted it, and its score set a percentile nobody took.
+ *
+ * Measured on the header's own 30-member fixture — succeeded, one model call each, cost
+ * $0.001…$0.030 (p50 $0.015), wall 100…3000 ms, no signal of any kind — folded three ways, with
+ * `isGolden` conditions 2 and 4 read off the result (`test/evolution/score.test.ts`):
+ *
+ * ```
+ *                                    n    p50Cost   p90Score   cond 2 passes   cond 4
+ * all 30 with their spec            30    $0.0150      0.340         3 / 30      pass
+ * all 30 with NO spec, kept         30    $0.0150      0.000        30 / 30      pass   ← before
+ * all 30 with NO spec, dropped       0    $0.0000      0.000        30 / 30      FAIL   ← after
+ * 15 and 15, dropped                15    $0.0080      0.325         2 / 30      FAIL
+ * ```
+ *
+ * The "before" row is the one to read: thirty runs nobody could measure certified "cohort large
+ * enough" and set a promotion bar of ZERO, which every one of them then tied — condition 2
+ * passing 30/30 is the vacuous bar this file's `didWork` section already refused once, arriving
+ * through a different door. Dropping them makes `n` say what it means, and condition 4 then
+ * refuses the cohort instead of certifying it against nothing.
+ *
  * `n` therefore counts comparable runs rather than journal rows, and `MIN_COHORT_SIZE` means
  * 30 of those.
  */
@@ -502,7 +574,7 @@ export function measureCohort(
 ): CohortStats {
   const weights = opts.weights ?? DEFAULT_WEIGHTS;
   const weightsDigest = digest(weights);
-  const members = all.filter((m) => m.outcome.runStatus === "succeeded" && didWork(m));
+  const members = all.filter((m) => m.specResolved && m.outcome.runStatus === "succeeded" && didWork(m));
   const p50 = (xs: readonly number[]): number => {
     if (xs.length === 0) return 0;
     const sorted = [...xs].sort((a, b) => a - b);

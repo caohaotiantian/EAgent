@@ -124,6 +124,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              the same structure; exact gives one cohort per
                                              distinct input; fields:a,b groups on the digest
                                              of the named input channels only
+               [--graph <graph.json|yaml>]   the spec this run ran, when it is not published
+                                             in graphs/. Without it the signals cannot be
+                                             read and the command REFUSES rather than score 0.
+                                             Matched by hash against the journal, and unlike
+                                             publishing it does not mark the graph promoted
   loom cohort  <runId>                       read journaled scores back: this run's verdict and
                                              every run judged under the same key and weights
   loom promote <candidate.json|yaml>         judge a candidate graph against a baseline over a
@@ -3416,28 +3421,119 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // `<workspace>/graphs/` was put there by a person, and a successor graph reached through
         // `graph.mutated` at runtime was not. A graph run from a path outside `graphs/` is
         // therefore NOT promoted, which is the conservative reading and the correct one.
-        const { index } = graphsByHash(ws);
+        const { index, failed } = graphsByHash(ws);
         const promotedGraphHashes = new Set(index.keys());
         // The AUTHORED graph, for `promptRef` and node types only. A run that mutated its graph
         // folds its own successor hash from the journal; this lookup does not decide that.
         const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
-        const graph = submitted === undefined ? undefined : index.get(submitted.payload.graphHash);
+        // NO SPEC, NO SCORE — AND THAT IS A REFUSAL, NOT A ZERO. `extractSignals` reads the
+        // assertion, rubric and agent nodes out of `spec.nodes`, so a fold with no graph reports
+        // `signals: []`, and `signals: []` is precisely what a run that failed every assertion
+        // reports. Driven live on one review-bench run, same run and same command twice
+        // (`docs/evolution-loop-2026-08-27.md` §4): with the graph absent from graphs/,
+        // `"signals": []`, outcome 0, score 0.111; with it present, `S1 "6/6 assertions passed"`,
+        // outcome 1, score 0.700. A CANDIDATE graph is published in candidates/, so it never
+        // resolved and every candidate cohort read as worthless until somebody noticed.
+        //
+        // This is the third folded-without-its-graph defect in one session, and the first two
+        // were fixed by finding the graph. That is not available here — the graph may simply not
+        // be in this workspace — so the answer is the one CLAUDE.md gives for a guard that cannot
+        // decide: refuse, journal nothing, and name the file and the directory. Appending an
+        // `evolution.scored` row of 0 would put a fiction in the only authoritative state.
+        if (submitted === undefined) {
+          process.stderr.write(
+            `run ${runId} has no run.submitted event, so nothing in its journal names the graph it ran ` +
+              `and no signal can be read off its steps. That journal is not scoreable.\n`,
+          );
+          return 1;
+        }
+        const ranHash = submitted.payload.graphHash;
+        // `--graph` NAMES THE SPEC WITHOUT PUBLISHING IT, and the difference is load-bearing:
+        // publishing into graphs/ is ALSO what marks a graph promoted here, so a candidate that
+        // had to be published in order to be scored would pass golden condition 5 on the way in —
+        // the loop certifying its own unreviewed output. Judged by HASH against the journal, so
+        // this is a lookup the caller cannot answer wrongly, never an input to the score.
+        // CHECKED WHENEVER IT IS GIVEN, never only when the lookup missed: a flag that is
+        // silently ignored on the path where it happens to be redundant is a flag whose meaning
+        // depends on the workspace's contents.
+        const namedGraph = args.flags["graph"];
+        let graph = index.get(ranHash);
+        if (namedGraph !== undefined) {
+          const g = loadGraph(ws, requireFileFlag(args, "graph"), false);
+          if (g.graphHash !== ranHash) {
+            process.stderr.write(
+              `--graph ${String(namedGraph)} compiles to ${g.graphHash}, and run ${runId} ran ${ranHash}. ` +
+                `Scoring it under another graph's node types would read signals off nodes this run never ran.\n`,
+            );
+            return 1;
+          }
+          graph = g;
+        }
+        if (graph === undefined) {
+          process.stderr.write(
+            `run ${runId} ran graph ${ranHash}, and no graph in ${join(ws.root, "graphs")} has that hash ` +
+              `(${String(index.size)} searched${failed.length === 0 ? "" : `; ${String(failed.length)} would not compile — ${failed.join("; ")}`}). ` +
+              `Without the spec this run's assertion, rubric and agent nodes cannot be identified, so every ` +
+              `signal would read as absent and the verdict would be outcome 0 — the same number a run that ` +
+              `failed every assertion earns. Refusing instead: nothing was measured, so nothing is journaled. ` +
+              `fix: pass --graph <file> with the graph this run ran (a candidate lives in candidates/, and ` +
+              `--graph scores it without publishing it), or publish those bytes into ${join(ws.root, "graphs")}. ` +
+              `A graph EDITED since the run no longer matches, which is the point — this run executed the old bytes.\n`,
+          );
+          return 1;
+        }
         // ONE BUCKET RULE, USED BY BOTH FOLDS. A cohort key is only meaningful if every
         // member was bucketed by the same rule — folding this run under `--bucket` and its
         // peers under the default would produce a key nothing else in the workspace can
         // match, so the flag would report a cohort of one for the very runs it was asked to
         // join. `cohortPeers` therefore takes it too, and a test counts the members.
         const bucketInput = bucketFlag(args);
+        // `graph` is not optional here any more — the block above returned 1 rather than fold
+        // without it, which is what makes `t.specResolved` true for the judged run by
+        // construction. Peers are a different question; see below.
         const t = foldTrajectory(events, {
           promotedGraphHashes,
-          ...(graph === undefined ? {} : { graph }),
+          graph,
           ...(bucketInput === undefined ? {} : { bucketInput }),
         });
         const key = cohortKeyOf(t);
-        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, index, bucketInput);
+        // AND THE PEERS GET IT TOO. A cohort key pins one `graphHash`, so a peer of this run ran
+        // these same bytes — the whole point of a CANDIDATE cohort is thirty runs of one
+        // unpublished graph. Folding this run with `--graph` and its peers without it would
+        // measure the run against a population of runs of ITSELF that nobody could measure.
+        // It is a lookup keyed by hash, so it can only ever supply the peer's own spec; the
+        // promoted set is still `index` alone, which is what keeps golden condition 5 honest.
+        const lookup = new Map(index);
+        lookup.set(graph.graphHash, graph);
+        const peers = await cohortPeers(ws, runId, key, promotedGraphHashes, lookup, bucketInput);
         if (peers.truncated) {
           process.stderr.write(
             `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
+          );
+        }
+        // THE SAME DEFECT WEARING THE OTHER HAT, and this is the backstop rather than the fix.
+        // `measureCohort` drops a peer it could not measure, because `p90Score` is a percentile
+        // OF THE SCORES and a specless peer scores 0 — a promotion bar the population gets to
+        // lower by standing next to it. Dropping it QUIETLY is the same sin one directory over,
+        // so the count and the hashes are said here.
+        //
+        // WHAT IS LEFT TO REACH THIS. A cohort key pins one `graphHash`, so a peer of the judged
+        // run ran the same bytes and resolves out of the same two lookups the judged run just
+        // survived — the refusal above and `lookup` below close the ordinary cases. What remains
+        // is a peer that reached this key by a DIFFERENT route: `foldTrajectory` takes its
+        // `graphHash` from `graph.mutated` when there is one, while the spec is looked up by
+        // `run.submitted`'s hash, so two runs of two different authored graphs that mutate to the
+        // same successor share a key and need not share a lookup. Stated rather than asserted:
+        // this branch has no end-to-end coverage, and `test/evolution/score.test.ts` covers the
+        // arithmetic it guards.
+        const unmeasured = peers.members.filter((m) => !m.specResolved);
+        if (unmeasured.length > 0) {
+          const hashes = [...new Set(unmeasured.map((m) => m.graphHash))].sort();
+          process.stderr.write(
+            `! ${String(unmeasured.length)} peer run(s) in this cohort folded without their graph ` +
+              `(${hashes.join(", ")}) and are EXCLUDED from the population rather than scored 0 — a peer nobody ` +
+              `could measure would otherwise drag p90Score, and p90Score is the bar this run has to clear. ` +
+              `Publish those graphs in ${join(ws.root, "graphs")} to put them back in the cohort.\n`,
           );
         }
         const cohort = measureCohort(key, [t, ...peers.members]);
@@ -4041,13 +4137,14 @@ function sameOutcome(a: EvalReport, b: EvalReport): boolean {
  * `measureCohort`'s own docstring refuses: "A promotion bar that any run can lower by standing
  * next to it is exactly the measurement gamed by the thing being measured."
  *
- * THE RESIDUE, STATED. A peer whose authored graph is not published in `<workspace>/graphs/`
- * still folds without one and still scores near 0. That is the same conservative reading the
- * judged run gets from the same index, not a second rule — but it means a workspace that has
- * deleted an old graph file measures its old runs as worthless rather than excluding them.
- * Cohort `n` does not move either way: membership needs `runStatus === "succeeded"` and
- * `didWork`, and `didWork` holds through `modelCalls`/`channelsWritten`, neither of which
- * needs the spec.
+ * THE RESIDUE IS CLOSED, AND IT WAS REAL. This docstring used to end "a peer whose authored
+ * graph is not published in `<workspace>/graphs/` still folds without one and still scores near
+ * 0 … cohort `n` does not move either way", and the second half was the mistake: `n` not moving
+ * is exactly the damage. A specless peer stayed a MEMBER and scored 0, and `p90Score` is a
+ * percentile of the members' scores, so every such peer pulled the promotion bar toward zero —
+ * the same defect the paragraph above describes, one fold down. `foldTrajectory` now reports
+ * `specResolved` and `measureCohort` drops those members from the population; the call sites
+ * print the count, because a cohort that shrank has to say why.
  */
 async function cohortPeers(
   ws: Workspace,
@@ -4286,27 +4383,11 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     ...(bucketInput === undefined ? {} : { bucketInput }),
   });
   const key = cohortKeyOf(anchorT);
-  const peers = await cohortPeers(ws, anchorId, key, promotedGraphHashes, index, bucketInput);
-  if (peers.truncated) {
-    process.stderr.write(
-      `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
-    );
-  }
-  const cohort = measureCohort(key, [anchorT, ...peers.members]);
-  if (cohort.n < MIN_COHORT_SIZE) {
-    throw err.validation(
-      CODES.E_CONFIG_INVALID,
-      `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a promotion needs at least ` +
-        `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED and did work — a run that failed or ` +
-        `did nothing is excluded from the population as well as from the medians, so the number here is smaller ` +
-        `than the journal row count and that is the point. Record more runs of this workflow first.`,
-    );
-  }
-
-  // THE BASELINE IS THE COHORT'S OWN GRAPH. The key pins one `graphHash`, so there is exactly
-  // one answer and nobody gets to supply it. It must be PUBLISHED, because `promptGrowthOf` and
-  // `posturesHoldOf` both need the compiled artifact — and because a baseline this workspace
-  // cannot produce is one nobody can re-run to check this decision.
+  // RESOLVED BEFORE THE COHORT IS MEASURED, not after. This block used to sit below the
+  // `n < MIN_COHORT_SIZE` refusal, and now that `measureCohort` drops a member it could not
+  // measure, an unpublished baseline makes every member specless and the FIRST thing the
+  // operator hears is "record more runs of this workflow" — blaming their corpus for their
+  // graphs/ directory. The missing file is the earlier fact, so it is the earlier message.
   const baseline = index.get(anchorT.cohort.graphHash);
   if (baseline === undefined) {
     throw err.notFound(
@@ -4317,6 +4398,36 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
         `matches, which is the point — those runs were produced by the old bytes.`,
     );
   }
+  const peers = await cohortPeers(ws, anchorId, key, promotedGraphHashes, index, bucketInput);
+  if (peers.truncated) {
+    process.stderr.write(
+      `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
+    );
+  }
+  // Said here for the reason `loom score` says it: `measureCohort` drops a member it could not
+  // measure, and a cohort that shrank has to say why or the `n < MIN_COHORT_SIZE` refusal below
+  // blames the operator's corpus for the operator's graphs/ directory.
+  const specless = [anchorT, ...peers.members].filter((m) => !m.specResolved);
+  if (specless.length > 0) {
+    const hashes = [...new Set(specless.map((m) => m.graphHash))].sort();
+    process.stderr.write(
+      `! ${String(specless.length)} run(s) in this cohort folded without their graph (${hashes.join(", ")}) and ` +
+        `are excluded from the population AND from the pairing — an unmeasured baseline scores 0, and pairing ` +
+        `against a 0 hands this candidate that whole score as improvement it did not earn.\n`,
+    );
+  }
+  const cohort = measureCohort(key, [anchorT, ...peers.members]);
+  if (cohort.n < MIN_COHORT_SIZE) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a promotion needs at least ` +
+        `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED, did work, and could be MEASURED — a ` +
+        `run that failed, did nothing, or folded without its graph is excluded from the population as well as from ` +
+        `the medians, so the number here is smaller than the journal row count and that is the point. Any ! line ` +
+        `above says which exclusion applied. Record more runs of this workflow first.`,
+    );
+  }
+
   if (candidate.graphHash === baseline.graphHash) {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
@@ -4326,12 +4437,20 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   }
 
   // WHICH RECORDINGS SUPPLY INPUTS, and the filter is `measureCohort`'s own. A member that did
-  // not succeed, or succeeded having done nothing, is not in the population the ruler was built
-  // from — `components.delivered` is exactly that predicate, reported per run — so pairing
-  // against one would compare the candidate to a number the cohort itself excludes.
+  // not succeed, succeeded having done nothing, or could not be measured at all is not in the
+  // population the ruler was built from — `components.delivered` and `components.specResolved`
+  // are exactly those predicates, reported per run — so pairing against one would compare the
+  // candidate to a number the cohort itself excludes.
+  //
+  // `specResolved` IS THE ONE THAT LOOSENS. A baseline folded without its graph scores 0 for
+  // want of a spec, and `L1-paired-improvement` decides on the paired mean of
+  // `candidateScore − baselineScore`: every such pair hands the candidate the baseline's whole
+  // score as free improvement, and the candidate is measured with its graph in hand because
+  // this command compiled it. Refusing to pair against an unmeasured baseline is the same
+  // "a guard that cannot decide fails closed" the cost and posture checks above already apply.
   const eligible = [anchorT, ...peers.members]
     .map((t) => ({ t, scored: scoreTrajectory(t, cohort) }))
-    .filter((x) => x.scored.components.delivered)
+    .filter((x) => x.scored.components.delivered && x.scored.components.specResolved)
     // OLDEST FIRST. A RunId is a ULID, so ascending order is chronological, and taking the head
     // of it means `--runs 6` uses the six recordings least able to have been made for this
     // candidate. Deterministic, and not a choice the caller makes.

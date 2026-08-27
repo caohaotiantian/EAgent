@@ -23,6 +23,12 @@
  * `(node, promptRef)` — so without it the corpus cannot be grouped by the thing being
  * optimised. Both inputs are immutable and content-addressed, so the fold stays pure.
  *
+ * THE GRAPH ALSO DECIDES EVERY SIGNAL, which the paragraph above understates and a live run
+ * paid for. `extractSignals` reads assertion, rubric and agent nodes out of `spec.nodes`, so a
+ * fold with no graph reports no S1, no S4 and no S5 — and reported that as `outcome 0`, which
+ * is what a run that failed every assertion scores. `specResolved` is the fold saying which of
+ * the two it is; see that field for the two-line reproduction.
+ *
  */
 
 import { digest, shapeOf, type Digest } from "../canonical.ts";
@@ -158,6 +164,34 @@ export interface Trajectory {
    * an unpromoted candidate is how a loop teaches itself its own mistakes.
    */
   readonly fromUnpromotedCandidate: boolean;
+  /**
+   * THE FOLD HAD THE SPEC, so an empty `outcome` is a fact about the RUN and not about this
+   * process's filesystem.
+   *
+   * `extractSignals` keys assertions, rubrics and self-report on `nodeTypes`, a map built from
+   * `opts.graph.spec.nodes` and from nothing else. Without the graph that map is empty, every
+   * step folds as `nodeType: "unknown"`, and the run reads back `assertions: []` — which
+   * `outcomeOf` turns into `outcome 0`, the identical number a run that failed every assertion
+   * gets. Nothing in the record told the two apart.
+   *
+   * DRIVEN on one live run of `examples/graphs/review-bench.json`
+   * (`docs/evolution-loop-2026-08-27.md` §4), same run and same command twice:
+   *
+   * ```
+   * graph absent from <ws>/graphs/   signals []                          outcome 0  score 0.111
+   * graph copied into <ws>/graphs/   S1 "6/6 assertions passed" value 1  outcome 1  score 0.700
+   * ```
+   *
+   * A candidate graph lives in `candidates/`, so it never resolved and every candidate cohort
+   * scored near zero until somebody noticed. `score.ts` reads this field and refuses to call
+   * the result a measurement; `loom score` refuses outright.
+   *
+   * It is `opts.graph !== undefined` and nothing more. It does NOT claim the spec is the one
+   * the run ENDED on: a run that appended `graph.mutated` folds its successor's `graphHash`
+   * while this fold holds only the authored graph, and that gap is a different one this field
+   * does not close.
+   */
+  readonly specResolved: boolean;
 }
 
 export interface FoldTrajectoryOptions {
@@ -543,6 +577,8 @@ export function foldTrajectory(
     // FAILS CLOSED: an unanswered promotion set is not a certificate of promotion.
     fromUnpromotedCandidate:
       opts.promotedGraphHashes === undefined || !opts.promotedGraphHashes.has(graphHash),
+    // The one input `nodeTypes` above is built from. See the field.
+    specResolved: opts.graph !== undefined,
   };
 }
 
