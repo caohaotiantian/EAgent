@@ -2011,7 +2011,11 @@ export class Engine {
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as
     // something held it. `#logFor` is the writer for exactly this case.
-    const ctx = { log: this.#runs.get(runId)?.log ?? this.#logFor(runId) };
+    // The live context, when this engine still holds one. Kept separately from `ctx` because a
+    // rewind can DISPATCH now — see the compensation block below — and dispatching needs the
+    // graph, the policy engine and the abort signal, none of which are in the journal.
+    const live = this.#runs.get(runId);
+    const ctx = { log: live?.log ?? this.#logFor(runId) };
 
     // A BOUNDARY BELOW THE RUN'S FIRST EVENT ERASES THE RUN, AND NOTHING BRINGS IT BACK.
     //
@@ -2223,6 +2227,61 @@ export class Engine {
           `${offending.irreversibility}, and declares no compensation`,
         { details: { runId, atSeq, seq: offending.seq, tool: offending.name, ranIn: offending.runId } },
       );
+    }
+
+    // WHAT THE ROLLBACK WOULD DO, COMPUTED BEFORE ANYTHING IS DONE — and after the refusal
+    // above, deliberately. A rewind that is going to be refused must undo NOTHING: unwinding
+    // half a run and then declining to rewind it leaves the operator worse off than either
+    // answer alone, and they never asked for the half.
+    const preRewind: JournalEvent[] = [];
+    for await (const e of ctx.log.read(1 as Seq)) preRewind.push(e);
+    const plannedUndo = attemptable(planCompensation({ events: preRewind, tools: this.tools, sinceSeq: atSeq }));
+
+    // UNDO WHAT THE REWIND IS ABOUT TO HIDE.
+    //
+    // A rewind suppresses the RECORD of an effect; it has never touched the effect. That
+    // asymmetry is the whole reason the refusal above exists — but the refusal only covers
+    // `irreversible` and `externally_visible`, so a `reversible_write` was crossed silently and
+    // the file stayed written. `fs.write` declares `fs.restore` for exactly this and nothing had
+    // ever called it. Scoped to `atSeq` for the same reason the refusal is: only effects this
+    // rewind would actually suppress are its business.
+    //
+    // BEFORE THE MARKER, NOT AFTER, and the ordering is load-bearing twice over.
+    //
+    // MEASURED FIRST. Moving this call below the append undoes NOTHING AT ALL — not "less", not
+    // "in the wrong order": world `[1, 2]` afterwards, and every step recorded `not_attempted`.
+    // The marker is what creates the suppressed range `(atSeq, marker)`, and the undo arguments
+    // come from `#completedEffects`, which honours suppression. So the moment the marker exists,
+    // every `effect.completed` the rollback needs is hidden and there is no `details` to build an
+    // undo from. The rollback has to read the record before the record is taken away.
+    //
+    // AND THE CRASH CASES AGREE. Undo-then-mark that dies in between leaves a journal that is not
+    // rewound and a world partly unwound — the operator's second rewind re-plans, sees the
+    // `compensation.recorded` rows, skips them and finishes. Mark-then-undo that dies in between
+    // leaves a journal claiming the rewind happened over a world that still holds every effect,
+    // and nothing is coming back for it. One is recoverable; the other is a lie.
+    //
+    // The records therefore land INSIDE what becomes the suppressed range, which is why
+    // `planCompensation` reads `compensation.recorded` WITHOUT suppression — a record of an undo
+    // is not a thing to be undone, and suppressing it would make the next pass do it all again.
+    //
+    // A DETACHED RUN CANNOT DISPATCH, SO IT IS REFUSED RATHER THAN CROSSED. `rewind` deliberately
+    // works with no `RunContext` — "the runs most worth rewinding are the FINISHED ones" — but a
+    // tool call needs the graph, which is not in the journal, only its hash. Rewinding anyway
+    // would be the loosening: suppressing effects nothing is going to undo. `attach` is the fix
+    // and the message says so.
+    if (plannedUndo.length > 0) {
+      if (live === undefined) {
+        throw err.conflict(
+          CODES.E_RESTORE_ILLEGAL,
+          `cannot rewind to ${atSeq}: ${String(plannedUndo.length)} recorded effect(s) after it declare a ` +
+            `compensation (${[...new Set(plannedUndo.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}), and ` +
+            `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
+            `rewinding without them would hide the record and leave the effects standing`,
+          { details: { runId, atSeq, pending: plannedUndo.length } },
+        );
+      }
+      await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
     }
 
     await this.#serialize(() =>

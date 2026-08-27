@@ -53,6 +53,13 @@
  * done. A seq is unique per append and is what `checkpoint.restored.atSeq` is already denominated
  * in, so it survives a restart and a redo both.
  *
+ * `compensation.recorded` IS READ WITHOUT SUPPRESSION, unlike every effect record. A rewind runs
+ * its rollback BEFORE appending its marker — it has to, because the marker is what hides the
+ * `effect.completed` rows the undo arguments come from — so the records land inside the range
+ * `(atSeq, marker)` that the marker then suppresses. A suppression-aware read of them would
+ * report a rollback that already happened as never having happened, and the next pass would run
+ * every undo a second time. A record of an undo is not a thing to be undone.
+ *
  * ── THREE STATES, NOT TWO ────────────────────────────────────────────────────
  * A step whose `undo` is absent carries `blocked` instead, and the executor journals it as
  * `not_attempted` rather than dropping it. "This effect stands and nobody tried to undo it" is a
