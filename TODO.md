@@ -10,7 +10,7 @@ extensions); 3587 tests passing (core 2040, eagent 1,547); zero-dep and public-s
 green at 524 exports.
 
 **State today (2026-08-27):** 58 source files in `packages/core`, which is the whole runtime;
-2,288 tests passing; four guards green — zero-dep, public surface at 527 exports, and the
+2,302 tests passing; four guards green — zero-dep, public surface at 527 exports, and the
 kernel file list.
 
 Nothing here is a plan. **An item surviving is a choice; an item being dropped is also a
@@ -32,6 +32,65 @@ that changes an action. **`REPRO`** meant a case that EXECUTED the finding and f
 fixed; all five such cases have now fired and been retired — see `docs/audit-2026-08-25.md`.
 **`CITED`** means file:line at sha `86b84c9`, checked by reading. **`NEW`** means the backlog
 re-check, or the first real workload, found it — not the audit.
+
+### Two writers over one journal — what the deployment lane found `NEW`
+
+The four defects DESIGN.md item 2 names are all FIXED, and its `Fails today` scenario PASSES —
+driven end to end, 333 ms, and now pinned by `test/deployment/restart-and-answer.test.ts`.
+**Whoever reads item 2 next must not re-fix four fixed bugs.** What was missing was an
+instrument for two concurrent WRITERS, and building it found five things nothing in the
+in-process suite could see. All five are fixed; they are recorded here because the CLASS is not
+closed and the next member will look like one of these.
+
+- ~~**A gate decision went out the door that RETRIES.**~~ **FIXED 2026-08-27.**
+  `HumanGateBroker.resolve` checked the gate at `p.seq` and wrote through `RunLog.append`
+  ("retries on seq conflict because the events are unconditional") while its three neighbours
+  in the same file use `RunLog.commit` ("NEVER retries"). Two planes over one SQLite file
+  produced `gate.decided 2 | run.resumed 2 | task.leased 3 | task.committed 2 | run.failed 2`,
+  both calls fulfilled. `projection.ts` had carried the diagnosis in a comment for as long as
+  the fold's defence against it had existed — the FOLD was hardened and the WRITE was left.
+  **Residue:** the same check-then-unconditional-append shape may exist at other `log.append`
+  call sites; `HumanGateBroker.claim` is one, and it re-reads afterwards, which is why it was
+  left alone. `/usr/bin/grep -an 'log\.append' packages/core/src/run/*.ts` is the command that
+  would enumerate the rest. Widening the fix would have turned it into an audit of every writer.
+- ~~**Every plane on every machine called itself `worker-0`.**~~ **FIXED 2026-08-27.**
+  `Engine` defaults `workerId` to `"worker-0"` and `cli.ts` never passed one, so
+  `LeasedScheduler.select`'s `held.workerId === input.workerId` — "my own lease, take it back"
+  — read a live FOREIGN lease as its own. `openWorkspace` now passes
+  `${hostname()}:${pid}:${ordinal}`. **Residue, a real trade and not a bug:** a plane that
+  RESTARTS gets a new name, so it can no longer reclaim its own pre-restart leases through the
+  identity arm and waits for `reclaimable()` instead. That is arguably correct — after a
+  restart they ARE foreign — but nobody has measured what it costs a fast redeploy.
+- ~~**The auditor guarded a run's START and left its END to nobody.**~~ **FIXED 2026-08-27.**
+  Three at-most-once rules added — `gate.decided-once`, `run.terminal-is-last-and-once`,
+  `task.leased-once` — each the missing mirror of one that already existed. Measured against
+  the two-writer journal: 1 of 5 contradictions caught before, 5 of 5 after.
+- ~~**Two excuses in `audit-coverage.test.ts` were false claims.**~~ **FIXED 2026-08-27.**
+  `run.failed` and `run.cancelled` were `{kind: "no-relation"}`; a journal with two `run.failed`
+  rows falsifies that. The excuse list is the file's stated contract, and a false entry in it is
+  worse than the missing rule.
+- ~~**The run clock's rotation cursor was process memory.**~~ **FIXED 2026-08-27.**
+  `startRunClock` built `const rot = { offset: 0 }` and nothing reconstructed it, so the 200-run
+  starvation §E.2 records was fixed for a plane that stays up and unfixed for one that restarts.
+  Measured with its control on one 250-run journal: long-lived rot reached the oldest run on
+  tick 1; a rot rebuilt each boot never reached it in 20 boots. The window is now
+  `(floor(now / lapMs) * limit) mod N` and remembers nothing. **This means §E.2's run-clock
+  starvation was only HALF resolved, and the doc that recorded it never said so.**
+
+**What is still open on this axis, and neither is a defect:**
+
+- `RUN_CLOCK_SCAN_CEILING`'s residual: a run past 10,000 is reached by no lap, and
+  `RunClockTick.truncated` is the only reason anyone knows. The fix `runClockTick`'s own
+  docstring names is a CURSOR — `listRuns(after)` in `StateStore`, with a conformance test
+  behind it — and when it lands the rotation is the thing to delete.
+- Two planes now AGREE on a window rather than dividing it: correct, and wasteful, because they
+  duplicate every fold. §E.2 defers "which runs a worker considers" as needing a coordinator and
+  that is still true. Both of these want the same cursor.
+- **WHAT ELSE IS PROCESS-LOCAL AND UNRECONSTRUCTABLE?** `startGateClock`'s `armed` map is memory
+  too — a memo, so losing it costs a fold rather than correctness, which is why it was left. The
+  generalisable lesson `oversight-survives-restart.test.ts` states is that the unit needing a
+  restore arm is not the FIELD but the PRODUCER. A deliberate sweep of every long-lived
+  `new Map()` and `{ … }` in `cli.ts` is what would close the class; nobody has done it.
 
 ### The oversight floor can be lost silently, three ways
 

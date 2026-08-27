@@ -235,19 +235,55 @@ args, so a concurrent write changes what the approved node executes.
 *Fails today:* a test asserting `compile` REFUSES `policy: {posture: "strict"}` and
 `policy: {posturr: "out"}` — both of which `compile` now refuses.
 
+
 ### 2 · The instrument for everything outside one process
 
-The structural finding of the audit: **every surviving defect class is restart, scale, or a
-second machine**, and the project has no instrument that reaches any of them. 2,288 tests run
-offline, in-process, in ten seconds, with no restart and no second host — excellent inside that
-boundary and blind outside it. Four confirmed defects live there: the gate clock arming an
-unfiltered run set, the 200-run window starving the oldest run, the loopback bind, and the
-budget refunded across a restart because `foldRun` never folds `model.called`.
+The structural finding of the audit still stands: **every surviving defect class is restart,
+scale, or a second machine.** Two of the sentences that followed it did not, and both were
+falsified by driving them rather than reading them.
 
-One scenario reaches all four at once.
+**"The project has no instrument that reaches any of them" was false.** Four already existed
+and already ran in the gate: `test/cli/serve-host.test.ts` spawns real `loom serve` children
+onto real non-loopback sockets (7 tests, 5.8 s); `test/run/restart-crash.test.ts` forks a child
+and SIGKILLs it; `test/journal/store.test.ts` contends two workers on one SQLite file;
+`test/deployment/` is an in-process restart-and-scale harness. What was missing was
+COMPOSITION and a home — and, in the one place nothing composed, a live defect.
 
-*Fails today:* a script that starts `serve` over a journal holding more than 200 runs and one
-open gate, restarts the process, and answers that gate from a second host.
+**All four named defects are fixed, and the `Fails today` scenario PASSES.** 220 runs past the
+window, one open gate, `serve` booted and SIGINTed and booted again, `GET /gates` and
+`POST /runs/:id/gates/:gateId` answered from this machine's non-loopback address, the run
+`run.completed` and the tool behind the gate wrote its file — 333 ms end to end. It is
+`test/deployment/restart-and-answer.test.ts` now, so it passes on purpose rather than by
+nobody having looked.
+
+So the deliverable was never "make the scenario pass". It was to give the gate a lane on this
+axis and make the lane earn its place, which it did: **five defects nothing in the in-process suite
+could see** — 2,288 tests when this lane started, 2,302 now.
+
+- `HumanGateBroker.resolve` wrote its decision through `RunLog.append`, the door whose
+  docstring says it RETRIES, while its three neighbours use `commit`, the door that never does.
+  Two planes answering one gate in the same instant both landed.
+- Every plane on every machine called itself `worker-0`, so `LeasedScheduler`'s
+  "my own lease, take it back" check read a live foreign lease as its own.
+- `auditRun` guarded a run's START (`run.submitted-is-first-and-once`) and left its END to
+  nobody; it caught one of five contradictions in a two-writer journal and reported `ok`.
+- Two of the excuses in `audit-coverage.test.ts` were false claims, not judgement calls.
+- The run clock's rotation cursor was `const rot = { offset: 0 }` in a closure — a value a
+  decision reads that no journal can reconstruct, so the 200-run starvation was fixed for a
+  plane that stays up and unfixed for one that restarts.
+
+The lane is `test/deployment/`: `harness.ts` (which now owns the spawned-plane machinery
+`serve-host.test.ts` earned, plus `planes(d, n)` for concurrent writers), `two-planes.test.ts`,
+`run-clock-survives-restart.test.ts`, `restart-and-answer.test.ts`, and the three window and
+gate-clock files — 15 tests, of which two spawn a real `loom serve`.
+
+*Fails today:* nothing on this axis, and that is the claim to attack next. The two open holes
+are named where they live rather than here: `RUN_CLOCK_SCAN_CEILING`'s residual — a run past
+10,000 is reached by no lap, and `truncated` is the only reason anyone knows — and the fact
+that two planes now AGREE on a window rather than dividing it, which is correct and wasteful.
+Both want the cursor `runClockTick`'s docstring names: `listRuns(after)` in `StateStore`, with
+a conformance test behind it.
+
 
 ### 3 · Finish realm determinism (D3)
 
