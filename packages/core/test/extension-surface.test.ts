@@ -19,10 +19,14 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
+import { REQUIRED_BLOCK } from "../src/graph/spec.ts";
 import { createFunctionLoader } from "../src/resources/functions.ts";
 import { createHookLoader } from "../src/resources/hook-loader.ts";
 import { ResourceStore } from "../src/resources/store.ts";
+import { HOOK_POINTS } from "../src/run/hooks.ts";
+import { REDUCER_NAMES } from "../src/state/channels.ts";
 
 const ACTOR = { kind: "human", id: "u:test" } as const;
 
@@ -106,4 +110,48 @@ test("the gate reads the error's NAME, because instanceof is false across the re
     // could not have.
     assert.match((e as Error).message, /Unexpected token ';' — a code resource file is a BARE FUNCTION EXPRESSION/);
   }
+});
+
+// ── the closure, and where it is written down ───────────────────────────────
+
+/**
+ * README.md's "Extending it, and where that stops" quotes three compiler `fix:` lines verbatim.
+ * A doc that quotes a closed set is a doc that rots the moment the set moves, and this one has
+ * rotted before — `examples/README.md` said "Both graphs" against four graphs for long enough
+ * that two independent readers reported it.
+ *
+ * So the check is against the COMPILER'S OWN runtime tables, never a second list written here:
+ * `REQUIRED_BLOCK` is `validate.ts`'s only runtime enumeration of `NodeType` (its own comment
+ * says so), `REDUCER_NAMES` is what `GRAPH003_UNKNOWN_REDUCER`'s fix joins, and `HOOK_POINTS`
+ * is what `GRAPH003_UNKNOWN_HOOK_POINT`'s fix joins. Add a node type and this goes red naming
+ * the README, which is the only warning anyone gets that a published bound moved.
+ */
+const README = readFileSync(new URL("../../../README.md", import.meta.url), "utf8");
+
+test("README's fork-required list quotes the compiler's OWN closed sets, member for member", () => {
+  for (const [what, members] of [
+    ["node type", Object.keys(REQUIRED_BLOCK)],
+    ["reducer", [...REDUCER_NAMES]],
+    ["hook point", [...HOOK_POINTS]],
+  ] as const) {
+    // Joined exactly as the `fix:` line joins them, so this fails if the ORDER moves too — the
+    // README is quoting a line a user will compare character by character against their terminal.
+    assert.ok(
+      README.includes(members.join(", ")),
+      `README.md no longer quotes the ${what} set as the compiler prints it: expected "${members.join(", ")}"`,
+    );
+  }
+});
+
+test("the embedder/CLI split the README states is the one scripts/surface.json actually pins", () => {
+  // The correction this section exists to carry: an in-process tool needs a fork from the CLI
+  // and NOT from a library embedder. That is not an opinion, it is which names are on the pinned
+  // surface — so it is checked against the pin file and the barrel rather than restated.
+  const surface = readFileSync(new URL("../../../scripts/surface.json", import.meta.url), "utf8");
+  const barrel = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.match(surface, /"ToolRegistry"/, "an embedder registers a host-realm tool through this");
+  assert.doesNotMatch(surface, /"openWorkspace"/, "…and the CLI's own door is not on the surface");
+  assert.doesNotMatch(surface, /"compileRealm"/);
+  assert.doesNotMatch(barrel, /cli\.ts/, "index.ts does not re-export cli.ts, which is why the split exists");
+  assert.doesNotMatch(barrel, /resources\/realm\.ts/);
 });

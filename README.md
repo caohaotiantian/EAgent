@@ -169,10 +169,13 @@ Three things that command does not do, and each was a real defect:
 
 ## Examples that run
 
-[`examples/`](examples/) is a workspace, not a snippet dump: copy the directory, `cd` into it,
-and every command in [`examples/README.md`](examples/README.md) works offline with no key.
-`packages/core/test/examples-run.test.ts` executes all of it on every `npm run check`, so an
-example that stops working stops the build.
+[`examples/`](examples/) is a workspace, not a snippet dump: copy the directory, `cd` into it, and
+follow [`examples/README.md`](examples/README.md). Its §§1–4 work offline with no key; §§5–6 have
+an `agent` node and want a real model, and that README's table says which is which — this
+paragraph used to say "every command works offline with no key" and that was wrong for two of the
+four graphs. `packages/core/test/examples-run.test.ts` compiles every graph in the directory on
+every `npm run check` and runs the two that need no model, so an example that stops working stops
+the build.
 
 - **`graphs/fan-out-join.json`** — the fan-out → branch-ordered join above, end to end:
   `loom compile`, `loom run`, and a `loom replay` that comes back `{"match": true}`.
@@ -180,6 +183,10 @@ example that stops working stops the build.
   realm does and does not contain, and why `ctx.effects` refuses inside a sandboxed body.
 - **`resources/hook/no-secrets.js`** — a `preTool` hook that blocks a credential before it
   reaches the disk.
+- **`graphs/review-bench.json`** — a benchmark whose answer is known: six diffs, three with a
+  planted defect, and an `assertion` evaluator that scores the reviewer against the truth.
+- **`graphs/self-review.json`** — an agent fan-out, a human gate and an irreversible write; the
+  first workflow this project ported against a live provider.
 
 Two rules that fail a first attempt, stated here because both used to live only in a source
 comment:
@@ -191,6 +198,49 @@ comment:
 - **The edge from a join's arm into the join must be `"kind": "join"`.** A `seq` edge leaves the
   join inside the fan-out and is refused with `GRAPH008_HELD_JOIN_UNCOLLECTED`; no edge at all
   is `GRAPH008_BRANCH_NOT_CONNECTED`.
+
+## Extending it, and where that stops
+
+Read this before you fork, not after. Loom's stated property is *unlimited extensibility*, and the
+honest version of that sentence names its set. **Eight things need no fork. Six do**, and the two
+lists below were each driven through the shipped binary rather than read off a header.
+
+**No fork. You are a workspace author or an operator, and every one of these is a file you write:**
+
+| what | how | measured |
+|---|---|---|
+| a graph | `graphs/*.json`, `*.yaml`, `*.yml` | `loom compile graphs/…` |
+| a prompt, an agent profile, a skill | `resources/{prompt,agent_profile,skill}/*.md`, `*.txt` | `loom --help` names all seven publishable kinds |
+| a subgraph | `resources/subgraph/*.json` | ditto |
+| a `function` node body | `resources/function/*.js`, `*.mjs` — a bare function expression | `examples/README.md` §2 |
+| a `hook` body, at any of the eight points | `resources/hook/*.js` | §3 |
+| a tool | `--mcp-file` — any MCP server, stdio | §"Try it" above |
+| a provider | `--models-file` — any OpenAI-wire endpoint at any `baseUrl` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1"}` → `ok`, exit 0 |
+| a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | see the fork list's note on transports |
+
+**Fork required.** Each of these is a CLOSED SET, and the compiler names its members when you miss
+— that is the point of the list, and it is why the refusals below are quoted rather than described:
+
+- **a node type** — `GRAPH020_UNKNOWN_TYPE … fix: use one of function, agent, tool, router, join, evaluator, human_gate, subgraph`
+- **a reducer** — `GRAPH003_UNKNOWN_REDUCER … fix: use one of replace, append_ordered, merge_object, sum, max, min, union_set, last_write_wins_by_ts`
+- **a ninth hook point** — `GRAPH003_UNKNOWN_HOOK_POINT … fix: one of: preNode, preModel, postModel, preTool, postTool, onError, onGate, onComplete`
+- **a wire protocol that is not Anthropic's or OpenAI's** — `E_CONFIG_INVALID: … provider "bedrock", which must be one of: anthropic, openai`. An OpenAI-*compatible* endpoint is not a fork; a genuinely different wire is.
+- **a delivery TRANSPORT that is not an HTTP webhook** — email, SMS, a Slack app rather than a Slack webhook URL. `--channels-file` builds `WebhookChannel` or `SignedWebhookChannel` and nothing else.
+- **an in-process tool, from the CLI.** This one is split, and the split is the part nobody had
+  written down: `ToolRegistry` is on the pinned public surface, so a LIBRARY EMBEDDER registers a
+  host-realm tool with no fork at all. The CLI has no seam for one — `openWorkspace` and
+  `compileRealm` are not in `scripts/surface.json` and `src/index.ts` re-exports neither — so from
+  the binary, an in-process tool needs a fork and an MCP server does not.
+
+**The reason is replay, not taste.** Every one of those closed sets is journaled vocabulary. A run
+is replayed by folding its journal, and a fold can only reproduce a decision whose vocabulary the
+folding binary already knows; a node type or a reducer that arrived from a config file would make
+a recorded run unreadable by anything but the process that wrote it. So the sets are closed on
+purpose, and the tell that a closed set is honest is that its refusal NAMES ITS MEMBERS — every
+one above does.
+
+`TODO.md` carries the entries under active reconsideration; custom reducers are argued on the
+merits there. This list is a bound with a reason, not an apology.
 
 ## Why this exists
 

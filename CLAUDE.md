@@ -54,6 +54,17 @@ a stranger would use. If a built-in needs a back door, the surface is wrong.
 The test of this property is not "can you add a tool". It is **"can somebody who does not have
 commit access build the thing they need, and can they do it without forking?"**
 
+**Today the answer is a named set, not "yes", and the set lives in `README.md`'s "Extending it,
+and where that stops"** — the same escape-hatch-and-ledger shape as §1's kernel list: eight
+things need no fork (a graph, a prompt/profile/skill, a subgraph, a `function` body, a `hook`
+body, an MCP tool, an OpenAI-wire provider, an HTTP delivery endpoint) and six do (a node type, a
+reducer, a ninth hook point, a non-OpenAI/Anthropic wire protocol, a non-webhook delivery
+transport, and an in-process tool *from the CLI* — a library embedder has `ToolRegistry` on the
+pinned surface and needs no fork for that one). Every entry there is quoted from the refusal the
+binary actually prints. The reason the six are closed is replay: a fold can only reproduce a
+decision whose vocabulary the folding binary already knows. **Shrinking that second list is what
+this property means in practice; the list moving the other way is the alarm.**
+
 ### 3 · Endless self-improvement
 
 The system observes its own runs, and what it learns changes what it does next. Every run leaves
