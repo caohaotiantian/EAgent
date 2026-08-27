@@ -5,9 +5,13 @@ verdict and the command that produced it; the tables at the head of each section
 index. 107 items were checked, 106 of them by executing something — 19 DONE, 52 still open,
 30 partial, 2 wrong, 2 stale, 2 with no mechanical truth value.
 
-**State at re-check:** 58 source files in `packages/core`, 106 in `packages/eagent` (65
+**State at re-check (2026-08-25, before `packages/eagent` was deleted):** 58 source files in `packages/core`, 106 in `packages/eagent` (65
 extensions); 3587 tests passing (core 2040, eagent 1,547); zero-dep and public-surface guards
 green at 524 exports.
+
+**State today (2026-08-27):** 58 source files in `packages/core`, which is the whole runtime;
+2,288 tests passing; four guards green — zero-dep, public surface at 527 exports, and the
+kernel file list.
 
 Nothing here is a plan. **An item surviving is a choice; an item being dropped is also a
 choice.** The roadmap lives in `DESIGN.md`'s Sequence, not here.

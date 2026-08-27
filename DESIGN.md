@@ -238,7 +238,7 @@ args, so a concurrent write changes what the approved node executes.
 ### 2 · The instrument for everything outside one process
 
 The structural finding of the audit: **every surviving defect class is restart, scale, or a
-second machine**, and the project has no instrument that reaches any of them. 3587 tests run
+second machine**, and the project has no instrument that reaches any of them. 2,288 tests run
 offline, in-process, in ten seconds, with no restart and no second host — excellent inside that
 boundary and blind outside it. Four confirmed defects live there: the gate clock arming an
 unfiltered run set, the 200-run window starving the oldest run, the loopback bind, and the
@@ -312,8 +312,8 @@ them because it measurably beat the baseline.
 
 ### 6 · Cut `packages/eagent` to its tag and delete it
 
-The maintainer's decision, 2026-08-25. It is 43% of the test suite (1,547 of 3587), imports
-nothing into core, and carries a divergent toolchain (Node 22 against 24, TS 5.7 against 5.9).
+The maintainer's decision, 2026-08-25. It was 43% of the test suite (1,547 of 3587 at the time), imported
+nothing into core, and carried a divergent toolchain (Node 22 against 24, TS 5.7 against 5.9).
 Its CLI instructs `npm i -g eagent`, which is a real published package owned by an unrelated
 maintainer. Deleting it also frees the word **kernel** to mean `packages/core`, which is what
 makes item 7 possible at all.
