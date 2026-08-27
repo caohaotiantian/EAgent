@@ -97,20 +97,32 @@ test("loom steer reaches a run this process never submitted, and refuses an edge
 
     // A SEPARATE INVOCATION — a fresh workspace, nothing attached. This is the case the
     // `graphs/` bind exists for, and without it the next line is `E_RUN_NOT_FOUND`.
+    // `read`, NOT `approve`. This test used to steer the human_gate, which `#dispatchNode`
+    // never consults — a gate suspends and resumes through `resolveGate`, so the override was
+    // recorded and never read, and the door reported success for an intervention with no
+    // effect. Steering the tool node ahead of the gate is a steer that can actually be taken.
     const ok = await run([
-      "steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "approve", "--take", "e2", "--reason", "keep it on the write",
+      "steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "read", "--take", "e1", "--reason", "keep it on the gate",
     ]);
     assert.equal(ok.code, 0, ok.err);
-    assert.deepEqual(firstJson(ok.out)["take"], ["e2"]);
+    assert.deepEqual(firstJson(ok.out)["take"], ["e1"]);
 
-    // `e1` EXISTS AND LEAVES A DIFFERENT NODE. Taking it from `approve` would activate
-    // `approve` itself — the shape that jumps whatever sits between two nodes.
+    // A GATE IS NOT STEERABLE, and saying so is the point: its route is decided by the
+    // DECISION. Accepting this was the defect.
     await assert.rejects(
-      () => run(["steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "approve", "--take", "e1"]),
+      () => run(["steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "approve", "--take", "e2"]),
+      (thrown: unknown) =>
+        isLoomError(thrown) && thrown.code === CODES.E_ROUTE_INVALID && /human_gate/.test(thrown.message),
+    );
+
+    // `e2` EXISTS AND LEAVES A DIFFERENT NODE. Taking it from `read` would activate
+    // `approve`'s target — the shape that jumps whatever sits between two nodes, a gate included.
+    await assert.rejects(
+      () => run(["steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "read", "--take", "e2"]),
       (thrown: unknown) => isLoomError(thrown) && thrown.code === CODES.E_ROUTE_INVALID,
     );
     await assert.rejects(
-      () => run(["steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "approve", "--take", "e_nope"]),
+      () => run(["steer", runId, "--workspace", w.dir, "--as", "ops", "--node", "read", "--take", "e_nope"]),
       (thrown: unknown) => isLoomError(thrown) && thrown.code === CODES.E_ROUTE_INVALID,
     );
     // A steer with no node is a configuration error, not a route refusal — nothing was
@@ -127,7 +139,7 @@ test("loom steer reaches a run this process never submitted, and refuses an edge
       const steers = log.filter((ev) => ev.type === "operator.command" && (ev.payload as { kind: string }).kind === "steer");
       assert.equal(steers.length, 1, "only the accepted steer is on the record");
       assert.equal((steers[0]!.actor as { subject?: string }).subject, "ops");
-      assert.deepEqual((steers[0]!.payload as unknown as { args: { take: unknown } }).args.take, ["e2"]);
+      assert.deepEqual((steers[0]!.payload as unknown as { args: { take: unknown } }).args.take, ["e1"]);
     } finally {
       ws.close();
     }

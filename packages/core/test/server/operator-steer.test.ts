@@ -106,18 +106,23 @@ test("a human's steer is taken, and an edge that does not leave the node is not"
   try {
     const runId = await parked(r);
 
-    // `e4` IS `approve`'s ONLY DECLARED OUTGOING EDGE — the route the author wrote. Naming it
-    // is a legal steer; the point of the assertion is that the plane accepted one at all.
-    const ok = await steer(r, runId, { node: "approve", take: ["e4"], reason: "keep it on the write" });
+    // `merge`, NOT `approve`. This test used to steer the human_gate, and `#dispatchNode`
+    // never consults a gate's steer — a gate SUSPENDS and resumes through `resolveGate`, so
+    // the override was recorded and never read while the plane answered 200. Steering the
+    // function node ahead of it is a steer that can actually be taken.
+    const ok = await steer(r, runId, { node: "merge", take: ["e3"], reason: "keep it on the gate" });
     assert.equal(ok.status, 200);
+
+    // A GATE IS NOT STEERABLE and the plane says so rather than accepting a no-op.
+    assert.equal((await steer(r, runId, { node: "approve", take: ["e4"] })).status, 403);
 
     // An edge that exists but leaves a DIFFERENT node. This is the shape that jumps whatever
     // sits between here and there — a human gate included — and it is not a typo.
-    assert.equal((await steer(r, runId, { node: "approve", take: ["e1"] })).status, 403);
+    assert.equal((await steer(r, runId, { node: "merge", take: ["e1"] })).status, 403);
     // And one the graph does not contain at all.
-    assert.equal((await steer(r, runId, { node: "approve", take: ["e_nope"] })).status, 403);
+    assert.equal((await steer(r, runId, { node: "merge", take: ["e_nope"] })).status, 403);
     // A body that is not a steer is a 400, not a 403: nothing was refused on authority.
-    assert.equal((await steer(r, runId, { node: "approve" })).status, 400);
+    assert.equal((await steer(r, runId, { node: "merge" })).status, 400);
     assert.equal((await steer(r, runId, { take: ["e4"] })).status, 400);
 
     const log: JournalEvent[] = [];

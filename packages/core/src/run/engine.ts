@@ -2210,6 +2210,26 @@ export class Engine {
     // A NODE THAT IS NOT IN THE GRAPH LANDS HERE TOO, with an empty declared set and the same
     // code. It is the same fact — this run has no such route — and answering it with a second
     // error class would only tell a caller which of two ways they were wrong.
+    // A NODE WHOSE ROUTE THIS PATH NEVER DECIDES CANNOT BE STEERED, and accepting the steer
+    // anyway is the loosening. The override is applied in `#dispatchNode`, on a body that
+    // returned `succeeded`. A `human_gate` does not return through there — it SUSPENDS, and
+    // resumes via `resolveGate` — so a steer aimed at one was accepted, journaled, folded into
+    // `p.steers`, and then never read. Both doors reported success for an intervention with
+    // zero effect, which is worse than a refusal: an operator who is told "done" stops looking.
+    //
+    // Named by NODE TYPE and only the one that was demonstrated. The honest bound on this
+    // check is that it is a list of shapes somebody drove, not a proof about the other seven —
+    // if a second type turns out never to consult `p.steers` either, it belongs here and the
+    // way it will be found is somebody reporting a steer that did nothing.
+    const target = ctx.index.byId.get(route.nodeId);
+    if (target?.type === "human_gate") {
+      throw err.policy(
+        CODES.E_ROUTE_INVALID,
+        `node "${route.nodeId}" is a human_gate, and a gate's route is decided by the DECISION, not by a steer — ` +
+          `approve, reject or edit it with \`loom approve\`. A steer here would be recorded and never applied`,
+        { details: { runId, nodeId: route.nodeId, nodeType: target.type } },
+      );
+    }
     const invented = route.take.filter((id) => !outbound.includes(id));
     if (route.take.length === 0 || invented.length > 0) {
       throw err.policy(
