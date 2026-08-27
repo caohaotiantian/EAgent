@@ -2168,7 +2168,7 @@ function httpHost(args: Args): string {
  * keeps `serve` alive, and once that is closed the clock must not be the reason we linger.
  */
 /** How many runs one run-clock tick folds. The gate sweeper bounds itself for the same reason. */
-const DEFAULT_RUN_CLOCK_LIMIT = 200;
+export const DEFAULT_RUN_CLOCK_LIMIT = 200;
 
 /**
  * HOW DEEP THE ROTATION MAY REACH, and the honest name for what is left of the old bound.
