@@ -166,18 +166,38 @@ export interface EventPayloads {
     /** Effects that started but whose outcome was never recorded. Never claim these did not happen. */
     readonly unknownEffects: readonly string[];
     /**
-     * DECIDED FOR DELETION, AND BLOCKED ON THREE FILES THIS FIELD CANNOT REACH.
+     * WRITTEN ONCE AS `false`, READ BY NOTHING, AND NOW CLAIMED BY A VERB THAT DOES NOT EXIST.
      *
-     * It is written exactly once, as the literal `false` (`run/engine.ts:1846`), read by
-     * nothing, and named by no document. `clean` already carries the fact an operator asks
-     * for — whether the run stopped with its effects accounted for — and a second boolean
-     * that is always `false` reads like a forced cancel is a thing this engine can do.
+     * `clean` already carries the fact an operator asks for — whether the run stopped with its
+     * effects accounted for — and a second boolean that is always `false` reads like a forced
+     * cancel is a thing this engine can do.
      *
-     * Removing it is not a one-file edit: dropping a REQUIRED payload field turns each
-     * existing literal into an excess-property error, so the change is
-     * `run/engine.ts:1846`, `test/telemetry/spans.test.ts:64` and
-     * `test/run/gate-claim.test.ts:368`, together, in one commit. Left declared rather than
-     * made optional on purpose — optional-and-unread is the same zombie wearing a `?`.
+     * IT IS NOT. `TODO.md` §D.4 defines `kill` as "`cancel` that does not wait for an in-flight
+     * effect to settle" and assigns this field as its record. That definition presumes `cancel`
+     * waits, and it does not: measured in
+     * `test/run/cancel-does-not-wait.test.ts`, a cancel issued while a tool body is still
+     * running returns before the body does, declares the run cancelled at a lower seq than the
+     * effect's completion, and reports the effect in `unknownEffects` with `clean: false`.
+     * There is no drain for a second verb to skip. So the field is left standing for the
+     * maintainer to settle rather than deleted by whoever last read one of the two documents:
+     * that test goes red the day `cancel` grows a drain, which is the day `kill` becomes real.
+     *
+     * WHAT IT COSTS TO REMOVE, corrected — this said THREE FILES and there are SEVEN, nine
+     * sites. Dropping a REQUIRED payload field turns each existing literal into an
+     * excess-property error, so the change is one commit over `run/engine.ts`,
+     * `test/telemetry/spans.test.ts`, `test/run/gate-claim.test.ts`, `test/run/callback.test.ts`,
+     * `test/run/gate-lifecycle.test.ts` (three), `test/run/gate-authorization.test.ts` and
+     * `test/run/cancellation.test.ts`. Enumerated rather than counted, so the next reader can
+     * check it:
+     *
+     *     /usr/bin/grep -rn 'forced:' packages/core/src packages/core/test --include='*.ts' \
+     *       | /usr/bin/grep -av 'enforced' | /usr/bin/grep -av 'readonly forced'
+     *
+     * Line numbers are deliberately gone from this list. The three it used to carry were stale
+     * by the time anybody read them, which is how the file count went stale too.
+     *
+     * Left declared rather than made optional — optional-and-unread is the same zombie
+     * wearing a `?`.
      */
     readonly forced: boolean;
   };
