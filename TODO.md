@@ -436,14 +436,39 @@ closed and the next member will look like one of these.
   doing the work a non-inferiority test cannot. Whether the gate should carry an absolute floor
   belongs to whoever owns D10.d — it is a change to a criterion, not to this door.
 
-- **`NEW` STILL OPEN — THE SUITE IS HAND-AUTHORED, so "promoted over them" is a claim a human
-  makes by choosing runIds.** `loom promote` prints which cohort its cases came from, which lets
-  a reader CHECK the claim; it does not make it. The missing verb is `loom suite freeze --cohort
-  <runId>`, selecting cases from a cohort by the members' own journaled `evolution.scored`
-  verdicts — golden becomes a must-pass regression, non-golden becomes the room to win. Both
-  halves are required and the reason is measured: `close-the-loop.test.ts` shows a suite of
-  goldens only is one the baseline passes 100% by construction, so the best any candidate can do
-  against it is tie.
+- ~~**`NEW` THE SUITE IS HAND-AUTHORED, so "promoted over them" is a claim a human makes by
+  choosing runIds.**~~ **BUILT 2026-08-27** as `loom suite freeze --cohort <runId> --out
+  <suite.json> [--cases N] [--bucket MODE]`. Cases are the cohort members carrying an
+  `evolution.scored` row under this key and these weights; `mustPass` IS the journaled `golden`
+  verdict; **no flag on the verb names a runId**, so a case that is not a run this workspace
+  recorded AND judged cannot be put in the exam. `--cases` is a cap and never a selector — it
+  spreads across the score order with both ends included, so neither the goldens-only exam nor
+  the floorless one is reachable through it, and an all-golden selection is refused outright.
+  `frozenAt` is the write time and the write is `wx`, so a re-frozen exam is refused;
+  `generatedBy` is the constant `loom-suite-freeze`, which `--proposed-by` now REFUSES, closing
+  the `10-separate-lineage` collision a demo script shipped this session. Driven on 30 recorded
+  and scored runs of `close-the-loop.test.ts`'s workflow: 10 goldens, a 30-case suite, and the
+  regressing candidate refused by `1-must-pass` over an exam no human wrote —
+  `test/cli/suite-freeze.test.ts`.
+
+- **`NEW` THE ENTRY ABOVE'S OWN SECOND HALF WAS WRONG, and that is this lane's finding.**
+  "Non-golden becomes the room to win" is not reachable from a production journal.
+  `EvalCase.expect` can name a status, a whole channel VALUE, a cost and
+  `noIrreversibleWithoutGate` — every one of which describes what already happened — so an
+  expectation derived from a recording can only say *keep doing this*. Pinning a non-golden run's
+  output would bake the baseline's mistake into the exam and make a candidate that FIXES it score
+  WORSE, which `2-non-inferior` would then refuse; `close-the-loop.test.ts` gets its room to win
+  from PLANTED ground truth, and a real corpus has none. Measured through the shipped verb: the
+  good candidate promotes over the frozen suite at **Δ 0.0pp**, so `2-non-inferior` is what passes
+  it and not an improvement. **A suite frozen from a corpus is a REGRESSION FLOOR; the claim that
+  a candidate is BETTER is what `promote --against-cohort` measures, live.** What would change
+  that is a field in `EvalCase.expect` letting a case name the assertion node's `pass` rather
+  than its whole verdict object — `extractSignals`' `firstVerdict` already knows which channel
+  that is — and that is a change to the gate's vocabulary, not to this verb. **The residual cost,
+  stated:** a golden case pins the channels the recording produced, so a subtly-wrong output that
+  a deterministic verifier certified is now a must-pass regression, and a candidate that corrects
+  it fails `1-must-pass`. Bounded by `isGolden` condition 1 (`outcome >= 0.8` with an S1/S2/S3
+  signal), not eliminated.
 
 - **`NEW` STILL OPEN — A PROMOTION'S SUBJECT IS A GRAPH AND THE STORE IS KEYED BY runId.** The
   decision rides on `operator.command {kind: "evolution.promote"}` appended to the FIRST case's

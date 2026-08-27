@@ -12,7 +12,7 @@
  * JSON belongs in a CLI-only package that may take the dependency.
  */
 
-import { mkdirSync, readFileSync, readdirSync, existsSync, type Dirent } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, type Dirent } from "node:fs";
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 
@@ -80,7 +80,7 @@ import {
   promotionCeiling,
   scoreTrajectory,
 } from "./evolution/score.ts";
-import { gateCandidate, runEvalSuite, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
+import { gateCandidate, runEvalSuite, type EvalCase, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
 import { gateCandidateLive, MIN_PAIRED_RUNS, type LivePair, type Unmeasured } from "./evolution/live.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
@@ -131,6 +131,16 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              publishing it does not mark the graph promoted
   loom cohort  <runId>                       read journaled scores back: this run's verdict and
                                              every run judged under the same key and weights
+  loom suite freeze                          build a frozen EvalSuite out of a cohort's OWN
+               --cohort <runId>              journaled verdicts. A case is a run this workspace
+               --out <suite.json>            recorded and evolution.scored judged — golden runs
+               [--cases N]                   become must-pass regressions, the rest are the
+               [--bucket MODE]               population they were promoted over. No flag names a
+                                             runId, so no caller can put a case in the exam that
+                                             is not one of them. Refuses a cohort under 30, a
+                                             selection that is all golden (the baseline passes
+                                             such an exam by construction) and an --out that
+                                             already exists — a re-frozen exam is not frozen
   loom promote <candidate.json|yaml>         judge a candidate graph against a baseline over a
                --baseline <graph.json|yaml>  frozen suite of RECORDED runs, replayed offline.
                --suite <suite.json>          No model is called and no tool runs. Prints the
@@ -303,7 +313,9 @@ const KNOWN_FLAGS: readonly string[] = [
   "baseline",
   "bucket",
   "budget",
+  "cases",
   "channels-file",
+  "cohort",
   "data-dir",
   "egress",
   "exec-env",
@@ -315,6 +327,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "input",
   "mcp-file",
   "models-file",
+  "out",
   "port",
   "proposed-by",
   "reason",
@@ -3657,6 +3670,16 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         return 0;
       }
 
+      // THE EXAM COMES OUT OF THE RUNS. See `freezeSuite` for what is selected and why.
+      case "suite": {
+        const sub = requirePositional(args, 0, `a subcommand — "freeze" is the only one`);
+        if (sub !== "freeze") {
+          process.stderr.write(`unknown subcommand "suite ${sub}" — the only one is "freeze"\n\n${USAGE}`);
+          return 2;
+        }
+        return await freezeSuite(ws, args);
+      }
+
       // THE DOOR ON THE PROMOTION GATE, and it is the whole reason the gate exists.
       //
       // `gateCandidate`, `runEvalSuite` and `requirePromotable` had ZERO callers outside
@@ -3984,6 +4007,22 @@ function proposedByFlag(args: Args): string | undefined {
         `Omit it when a human is driving this by hand.`,
     );
   }
+  // THE ONE IDENTITY THAT MAY NEVER PROPOSE A CANDIDATE. `10-separate-lineage` refuses a
+  // promotion whose suite and candidate share a proposer, and it is what makes an AI-authored
+  // suite trustworthy at all — so `loom suite freeze` signs every suite it writes with
+  // `SUITE_GENERATOR`, and a candidate proposed under that same name would either collide with
+  // the exam's lineage or, worse, be waved through by a caller who never noticed. This session
+  // shipped a demo script whose generator and proposer WERE the same string. Refused at the
+  // flag, where the message can say so, rather than as a silent `10-separate-lineage` failure
+  // twenty lines of output later.
+  if (v === SUITE_GENERATOR) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--proposed-by "${SUITE_GENERATOR}" is reserved: it is the identity "loom suite freeze" signs every suite it ` +
+        `writes with, and gateCandidate's 10-separate-lineage refuses a candidate whose proposer matches the suite's ` +
+        `generator — a shared lineage converges the exam on what the candidate already does. Name the optimiser.`,
+    );
+  }
   return v;
 }
 
@@ -4180,6 +4219,419 @@ async function cohortPeers(
     if (cohortKeyOf(t) === key) members.push(t);
   }
   return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };
+}
+
+// ── evolution: freezing an exam OUT OF a cohort ─────────────────────────────
+
+/**
+ * The identity `loom suite freeze` signs its suites with.
+ *
+ * `gateCandidate`'s `10-separate-lineage` refuses a promotion whose `suiteGeneratedBy` equals
+ * its `proposedBy`, and that check is the reason an AI-authored suite is allowed at all. A
+ * freezer that let the two collide would hand every caller a suite that refuses by
+ * construction — this session shipped a demo script that did exactly that. So the value is a
+ * constant here rather than a flag, and `proposedByFlag` REFUSES it: the one identity that can
+ * never propose a candidate is the one that writes the exams.
+ */
+const SUITE_GENERATOR = "loom-suite-freeze";
+
+/**
+ * The fewest cases a frozen suite may hold.
+ *
+ * Not a round number: `gateCandidate`'s `2-non-inferior` allows a Δ of −1pp by default, and one
+ * case out of five moves the pass rate by 20pp. An exam whose resolution is coarser than its own
+ * decision margin cannot answer the question it is asked, so the floor is where a single case is
+ * worth less than a sixth — and `close-the-loop.test.ts` freezes at `minCases: 6` for the same
+ * arithmetic.
+ */
+const MIN_SUITE_CASES = 6;
+
+/**
+ * `loom suite freeze --cohort <runId> --out <suite.json>` — THE MISSING HALF OF "PROMOTED OVER
+ * THEM".
+ *
+ * `loom promote --suite` judged a candidate against an exam a HUMAN typed: somebody picked which
+ * recordings became cases and wrote the expectations. That makes "promoted over the cohort" a
+ * claim a person assembled, and D6's freeze argument is precisely about not letting the exam be
+ * shaped around a known student. `test/evolution/close-the-loop.test.ts` had the selection rule
+ * — as a function inside a test, reachable from nothing a person can run, which is the standing
+ * `scoreTrajectory` had before `loom score` and `gateCandidate` had before `loom promote`. This
+ * is the door.
+ *
+ * ## WHICH RUNS BECOME CASES
+ *
+ * The cohort, by the same three inputs `loom score` and `promote --against-cohort` fold with —
+ * the anchor's own graph, the published set, and one `--bucket` rule — so the key this derives
+ * is one every other verb in the binary reproduces. Then, of that population:
+ *
+ * - the run must carry a journaled `evolution.scored` row under THIS cohort key and THIS
+ *   weights digest. That row is the selection: nothing here recomputes a verdict, and a run
+ *   nobody judged is not a case. It is also what makes injection impossible — **no flag names a
+ *   runId**, so the only way into the exam is to have been run and scored in this workspace.
+ * - `components.delivered` must hold, which is `measureCohort`'s own membership filter. A run
+ *   the ruler was not built from is not a run to be examined against it.
+ *
+ * `--cases N` is a CAP and never a selector, the same distinction `--runs` draws one verb over.
+ * Omitted, every eligible member becomes a case — the strongest freeze available, because a
+ * selection rule that never runs cannot shape anything. Given, the members are ordered by their
+ * journaled score and N are taken SPREAD ACROSS THAT ORDER, ends included: not the top, which is
+ * the exam the baseline passes by construction, and not the bottom, which has no regression
+ * floor at all.
+ *
+ * That refusal is not a matter of taste. `test/evolution/close-the-loop.test.ts` measures it:
+ * over a suite of the baseline's own goldens the baseline scores `passRate 1` and "the best any
+ * candidate can do is tie". So a selection that comes out all-golden — or all-non-golden — is
+ * REFUSED here rather than written to disk.
+ *
+ * ## WHAT THE EXPECTATIONS ARE, AND WHAT THAT COSTS
+ *
+ * The honest answer is that `EvalCase.expect`'s vocabulary can only describe what already
+ * happened, so **a suite frozen from a corpus is a REGRESSION floor and not an improvement
+ * exam.** Three expectations, and the third is the one with a price:
+ *
+ * 1. `status` — the recorded terminal status. Every eligible case succeeded (that is what
+ *    `delivered` means), so this is "the candidate still finishes", which is real: a candidate
+ *    that can no longer consume the recorded effects fails `runCase` outright.
+ * 2. `noIrreversibleWithoutGate` — an INVARIANT, not an output, and the only expectation here
+ *    that is not a statement about what the baseline produced. `ungatedActions` reads it two
+ *    ways: no gate the candidate raised may be left open, and every Task the RECORDING gated
+ *    must be gated in the replay too. Set only when the recording itself was clean by that
+ *    predicate — `gateShapeOf` answers it from `foldRun`, the kernel projection. A recording
+ *    that ended on an unresolved gate would fail its own expectation and cost both sides a case
+ *    for nothing.
+ * 3. `channels` — **only on the golden cases, and only the channels the grader did not write.**
+ *
+ * The cost of (3) is the one the lane has to state rather than hide: an expectation taken from
+ * what the baseline PRODUCED bakes the baseline's mistakes into the exam, and a candidate that
+ * fixes one fails a must-pass case. What bounds the damage is which runs get it. `isGolden`
+ * condition 1 needs `outcome >= 0.8` AND a ground-truth signal (S1 a deterministic verifier, S2
+ * a human decision, S3 downstream acceptance — never S4 alone), so what is pinned is an output
+ * something outside the graph already certified, not merely one the graph emitted. The
+ * non-golden half gets NO channel expectations at all, because pinning what a low-scoring run
+ * produced would make a candidate that improves on it score WORSE, and `2-non-inferior` would
+ * then refuse the improvement.
+ *
+ * Two channel sets are excluded from (3) and both matter:
+ *
+ * - anything an `evaluator` node wrote. A candidate that rewrites the grader passes any suite
+ *   that reads the grader, and `close-the-loop.test.ts` names the rule; here it is derived,
+ *   from the recording's own steps against the cohort graph's node types.
+ * - the graph's declared `inputs`. Replay serves those from the recording, so pinning one
+ *   asserts nothing about the candidate and only inflates the case.
+ *
+ * WHAT THIS SUITE THEREFORE CANNOT DO, said out loud: it cannot show a candidate a POSITIVE
+ * delta. Every expectation it can write is "keep doing this", so the best a candidate can score
+ * is the baseline's own pass rate, and `gateCandidate` promotes on a tie because it is a
+ * non-inferiority test. That is the correct division of labour and not a gap being papered over:
+ * this exam is the safety floor a candidate must not fall through, and the claim that a
+ * candidate is BETTER is what `loom promote --against-cohort` measures, live, on paired scores.
+ * A reader who wants "measurably beat the baseline" over a frozen suite needs a corpus with
+ * planted ground truth, which is what that test file has and a production journal does not.
+ *
+ * ## FREEZE, AND STAYING FROZEN
+ *
+ * `frozenAt` is the wall clock at write time, and the write is the freeze: `wx` refuses an
+ * `--out` that already exists, because a re-frozen exam is not frozen. The decision is also
+ * journaled as `operator.command` on the anchor's run — the same borrow `loom promote` makes,
+ * for the same reason: `StateStore` is keyed by runId and a fact whose subject is a SUITE has to
+ * anchor somewhere. Written BEFORE the file, so a suite that exists is one the journal can
+ * account for.
+ */
+async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
+  const anchorId = suiteCohortFlag(args);
+  const out = suiteOutFlag(args);
+  const cap = suiteCasesFlag(args);
+  const bucketInput = bucketFlag(args);
+
+  // BEFORE ANY WORK, and again at the write with `wx`. Two checks rather than one because this
+  // one can say what happened, and the second one cannot be raced.
+  if (existsSync(out)) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${out} already exists, and a re-frozen exam is not frozen: overwriting it would let a suite be re-cut ` +
+        `after a candidate is known, which is the one thing EvalSuite.frozenAt exists to stop. ` +
+        `Freeze to a new path, or delete that one deliberately.`,
+    );
+  }
+
+  const anchorEvents = await journalOf(ws, anchorId);
+  if (anchorEvents.length === 0) {
+    process.stderr.write(`no journal for run ${anchorId} in this workspace (${ws.root}), so it names no cohort\n`);
+    return 1;
+  }
+  // THE RULER, AND THE ANCHOR CARRIES IT. A score computed under different weights is a
+  // different metric, so a suite has to be frozen under ONE of them; the anchor's own journaled
+  // verdict is the only answer that is a fact rather than a default. A caller that has not
+  // scored the anchor is told to, not silently given `DEFAULT_WEIGHTS`.
+  const anchorScore = lastScore(anchorEvents);
+  if (anchorScore === undefined) {
+    process.stderr.write(
+      `run ${anchorId} carries no journaled score, so it names neither a cohort nor the weights this suite would be ` +
+        `frozen under — cases are selected BY those verdicts, not recomputed here. Judge it first: loom score ${anchorId}\n`,
+    );
+    return 1;
+  }
+
+  // THE SAME THREE INPUTS `loom score` FOLDS WITH — see `promoteAgainstCohort`, which says why.
+  const { index } = graphsByHash(ws);
+  const promotedGraphHashes = new Set(index.keys());
+  const anchorSubmitted = anchorEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+  const anchorGraph = anchorSubmitted === undefined ? undefined : index.get(anchorSubmitted.payload.graphHash);
+  const anchorT = foldTrajectory(anchorEvents, {
+    promotedGraphHashes,
+    ...(anchorGraph === undefined ? {} : { graph: anchorGraph }),
+    ...(bucketInput === undefined ? {} : { bucketInput }),
+  });
+  const key = cohortKeyOf(anchorT);
+  const peers = await cohortPeers(ws, anchorId, key, promotedGraphHashes, index, bucketInput);
+  if (peers.truncated) {
+    process.stderr.write(
+      `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
+    );
+  }
+  const cohort = measureCohort(key, [anchorT, ...peers.members]);
+  if (cohort.n < MIN_COHORT_SIZE) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a frozen suite needs at least ` +
+        `${String(MIN_COHORT_SIZE)} — the same floor isGolden condition 4 clears, because a suite cut from a cohort ` +
+        `too small to have goldens has no regression floor to freeze. "Comparable" counts runs that SUCCEEDED and ` +
+        `did work. Record more runs of this workflow first.`,
+    );
+  }
+
+  // THE COHORT'S OWN GRAPH, WHICH HAS TO BE PUBLISHED — and not for the reason
+  // `promoteAgainstCohort` needs it. The grader-channel exclusion below reads NODE TYPES, and
+  // without the spec every channel an `evaluator` wrote would be pinned as though it were the
+  // work. A suite that grades on the grader is the failure this whole verb is aimed at, so a
+  // missing spec is a refusal rather than a degraded freeze.
+  const graph = index.get(anchorT.cohort.graphHash);
+  if (graph === undefined) {
+    throw err.notFound(
+      CODES.E_RUN_NOT_FOUND,
+      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} ` +
+        `has that hash (${String(index.size)} searched). The expectations exclude every channel an evaluator node ` +
+        `wrote, and node types live in the spec — without it this would freeze an exam that grades the grader. ` +
+        `Restore those bytes to graphs/.`,
+    );
+  }
+  const evaluatorNodes = new Set(graph.spec.nodes.filter((n) => n.type === "evaluator").map((n) => n.id));
+  const inputChannels = new Set<string>(graph.spec.inputs);
+
+  interface Selectable {
+    readonly runId: RunId;
+    readonly score: number;
+    readonly golden: boolean;
+    readonly expect: EvalCase["expect"];
+  }
+  const eligible: Selectable[] = [];
+  let unjudged = 0;
+  let excludedForWeights = 0;
+  let undelivered = 0;
+  for (const t of [anchorT, ...peers.members]) {
+    const runId = t.runId as RunId;
+    const events = runId === anchorId ? anchorEvents : await journalOf(ws, runId);
+    const sc = runId === anchorId ? anchorScore : lastScore(events);
+    // A RUN NOBODY JUDGED IS NOT A CASE. Counted rather than dropped: "the cohort is small" and
+    // "most of the cohort has never been scored" are different facts about a workspace, and the
+    // second is fixed by running `loom score`, which the summary says.
+    if (sc === undefined) {
+      unjudged++;
+      continue;
+    }
+    if (sc.cohortKey !== key) continue;
+    if (sc.weightsDigest !== anchorScore.weightsDigest) {
+      excludedForWeights++;
+      continue;
+    }
+    if (!sc.components.delivered) {
+      undelivered++;
+      continue;
+    }
+    const gates = gateShapeOf(events);
+    const recorded = foldRun(events)?.channels ?? {};
+    const graderWrote = new Set(t.steps.filter((s) => evaluatorNodes.has(s.nodeId)).flatMap((s) => s.channelsWritten));
+    const pinned = Object.fromEntries(
+      Object.entries(recorded).filter(([c]) => !graderWrote.has(c) && !inputChannels.has(c)),
+    );
+    eligible.push({
+      runId,
+      score: sc.score,
+      golden: sc.golden,
+      expect: {
+        status: "succeeded",
+        ...(gates.unresolved.length === 0 ? { noIrreversibleWithoutGate: true } : {}),
+        ...(sc.golden && Object.keys(pinned).length > 0 ? { channels: pinned } : {}),
+      },
+    });
+  }
+
+  // ASCENDING SCORE, TIES BY RunId — which is a ULID, so a tie breaks chronologically and the
+  // whole order is reproducible from the journals alone.
+  eligible.sort((a, b) => a.score - b.score || (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  if (eligible.length < MIN_SUITE_CASES) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `cohort "${key}" yields ${String(eligible.length)} case(s) and a frozen suite needs at least ` +
+        `${String(MIN_SUITE_CASES)}: ${String(unjudged)} run(s) carry no journaled verdict, ${String(excludedForWeights)} ` +
+        `were scored under different weights, ${String(undelivered)} finished without delivering work. Cases come from ` +
+        `evolution.scored rows and nothing else, so the fix is to judge the cohort: loom score <runId>.`,
+    );
+  }
+
+  // A CAP, NEVER A SELECTOR. Spread across the score order with both ends included, so the
+  // sample carries the cohort's best AND its worst — the two halves the exam needs, and neither
+  // of them a choice the caller makes.
+  const n = cap === undefined ? eligible.length : Math.min(cap, eligible.length);
+  const selected =
+    n === eligible.length
+      ? eligible
+      : Array.from({ length: n }, (_, i) => eligible[Math.round((i * (eligible.length - 1)) / (n - 1))]!);
+
+  const goldens = selected.filter((x) => x.golden).length;
+  if (goldens === 0 || goldens === selected.length) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      goldens === 0
+        ? `every one of the ${String(selected.length)} selected runs is NON-golden, so this suite would have no ` +
+          `must-pass case and no regression floor at all — nothing in it a candidate could be refused for breaking. ` +
+          `The cohort has no golden trajectory to freeze; loom score <runId> prints goldenBlockers saying why.`
+        : `every one of the ${String(selected.length)} selected runs is GOLDEN, and an exam drawn only from a ` +
+          `workflow's best runs is one the baseline passes by construction — measured in ` +
+          `test/evolution/close-the-loop.test.ts, where the baseline scores passRate 1 on its own goldens and "the ` +
+          `best any candidate can do is tie". A loop freezing suites this way would report improvement forever and ` +
+          `measure none of it.`,
+    );
+  }
+
+  const frozenAt = Date.now();
+  const suite: EvalSuite = {
+    name: `${anchorT.cohort.workflow}-cohort`,
+    version: 1,
+    frozen: true,
+    frozenAt,
+    generatedBy: SUITE_GENERATOR,
+    cases: selected.map((x, i) => ({
+      // The runId is IN the case id, so a reader of the file can go back to the recording the
+      // expectation was taken from without trusting anything this verb printed.
+      id: `${String(i).padStart(3, "0")}-${x.runId}`,
+      runId: x.runId,
+      mustPass: x.golden,
+      expect: x.expect,
+    })),
+    // `minFailureCases` is deliberately NOT claimed. It counts cases expecting `status:
+    // "failed"`, and every case here expects `succeeded` by construction — `delivered` requires
+    // it — so asserting it would make `validateSuite` refuse this exam for a property the
+    // selection rule forbids it from having. close-the-loop.test.ts's freeze says the same.
+    composition: { minCases: MIN_SUITE_CASES, minMustPass: 1 },
+  };
+
+  const summary = {
+    out,
+    cohortKey: key,
+    cohortN: cohort.n,
+    weightsDigest: anchorScore.weightsDigest,
+    suite: suite.name,
+    suiteVersion: suite.version,
+    frozenAt,
+    generatedBy: SUITE_GENERATOR,
+    cases: suite.cases.length,
+    mustPass: goldens,
+    caseRunIds: suite.cases.map((c) => c.runId),
+    withChannelExpectations: suite.cases.filter((c) => c.expect.channels !== undefined).length,
+    considered: eligible.length,
+    unjudged,
+    excludedForWeights,
+    undelivered,
+    truncated: peers.truncated,
+  };
+
+  // JOURNALED BEFORE THE FILE EXISTS, so a suite on disk is never one the journal cannot account
+  // for. The anchor's run is the coordinate for the same reason `loom promote` borrows a case's:
+  // the store is keyed by runId and the subject of this fact is a suite.
+  await ws.store.append({
+    runId: anchorId,
+    expectedSeq: await ws.store.head(anchorId),
+    events: [
+      {
+        type: "operator.command",
+        payload: { kind: "evolution.suite-freeze", args: summary },
+        actor: { kind: "human", subject: subjectFlag(args), via: "console" },
+      },
+    ],
+  });
+
+  try {
+    // `wx` IS THE FREEZE. The `existsSync` above says what happened; this is the check that
+    // cannot be raced, and it is the one that holds.
+    writeFileSync(out, `${JSON.stringify(suite, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      code === "EEXIST"
+        ? `${out} was created while this suite was being frozen, and a re-frozen exam is not frozen. Freeze to a new path.`
+        : `could not write ${out}: ${(e as Error).message}`,
+    );
+  }
+
+  process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+  process.stderr.write(
+    `froze ${String(suite.cases.length)} case(s) from cohort "${key}" (n ${String(cohort.n)}), ` +
+      `${String(goldens)} of them must-pass. This exam is a REGRESSION FLOOR: every expectation in it comes from a run ` +
+      `that already happened, so the best a candidate can score on it is the baseline's own pass rate. ` +
+      `Use promote --against-cohort to measure an IMPROVEMENT.\n`,
+  );
+  return 0;
+}
+
+/** `--cohort <runId>` — any run in the cohort names it, exactly as `--against-cohort` does. */
+function suiteCohortFlag(args: Args): RunId {
+  const v = args.flags["cohort"];
+  if (v === undefined || v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `suite freeze --cohort needs a runId: ${v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `It names any run in the cohort the exam is cut from — the key and the score weights are derived from it.`,
+    );
+  }
+  return v as RunId;
+}
+
+/** `--out <suite.json>` — where the frozen exam lands, and it must not be there already. */
+function suiteOutFlag(args: Args): string {
+  const v = args.flags["out"];
+  if (v === undefined || v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `suite freeze --out needs a path: ${v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `The file IS the freeze, so there is nowhere else for the suite to go.`,
+    );
+  }
+  return resolve(v);
+}
+
+/**
+ * `--cases N`, the cap on how many of the cohort's judged runs become cases.
+ *
+ * Refused below `MIN_SUITE_CASES` at the flag rather than absorbed downstream, for `runsFlag`'s
+ * reason one verb over: an operator who typed 3 should learn that an exam that coarse cannot
+ * resolve a 1pp decision margin BEFORE the file exists, because the file is not rewritable.
+ */
+function suiteCasesFlag(args: Args): number | undefined {
+  const raw = args.flags["cases"];
+  if (raw === undefined) return undefined;
+  const n = typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n < MIN_SUITE_CASES) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--cases must be a whole number of cases, at least ${String(MIN_SUITE_CASES)}, not ` +
+        `${typeof raw === "string" ? `"${raw}"` : String(raw)}. One case out of five moves a suite's pass rate by ` +
+        `20pp while 2-non-inferior decides on 1pp, so a smaller exam cannot resolve the question it is asked. ` +
+        `Omit the flag to use every judged run in the cohort.`,
+    );
+  }
+  return n;
 }
 
 // ── evolution: judging a candidate by RUNNING it ────────────────────────────
