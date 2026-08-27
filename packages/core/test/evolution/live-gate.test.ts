@@ -219,3 +219,20 @@ test("oversight and cost still refuse, and each is the only thing wrong with its
   // …and the SAME growth is bought by a bigger win, which is the bargain the check encodes.
   assert.equal(gateCandidateLive(input(winning, { promptGrowth: 0.4 })).promote, true);
 });
+
+test("a cost ratio over a ZERO baseline is reported as not run, never as 1.00×", () => {
+  // The first version answered the undecidable case with the PASSING value:
+  // `baseCost === 0 ? 1 : …`. Driven by this lane's reviewer — six pairs at a $0 baseline and
+  // a $100 candidate promoted, reporting "cost ratio 1.00×" over a division nobody performed.
+  const zeroBase = Array.from({ length: 6 }, (_, i) => pair(i, 0.4, 0.5, 0, 100));
+  const v = gateCandidateLive(input(zeroBase));
+  const cost = v.checks.find((c) => c.id === "3-cost");
+  assert.equal(cost?.ran, false, "an undecidable ratio did not run");
+  assert.equal(cost?.pass, false, "and it is never reported as passed");
+  assert.match(cost.detail, /DID NOT RUN/);
+
+  // It must not, by itself, refuse a promotion the rest of the gate approves — the decision is
+  // taken over the checks that RAN, exactly as it is for `8-determinism`.
+  const priced = Array.from({ length: 6 }, (_, i) => pair(i, 0.4, 0.5, 0.01, 0.01));
+  assert.equal(gateCandidateLive(input(priced)).promote, true, "control: a decidable ratio still promotes");
+});

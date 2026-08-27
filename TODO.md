@@ -523,6 +523,21 @@ Naming that here rather than letting them sit unowned:
   cannot find what it is measuring has not measured anything, and "when a guard cannot decide it
   fails closed" applies to the scorer exactly as it applies to the gate. Evidence:
   `docs/evolution-loop-2026-08-27.md` §4.
+- **`NEW` `L4-gated-at-least-as-much` HAS NO END-TO-END COVERAGE.** It is the live promotion
+  door's enforcement of "oversight only tightens", and this lane's reviewer deleted the whole
+  regression-collection block in `promoteAgainstCohort` — both `gatingRegressions.push` loops,
+  replaced with `void candGates; void baseGates;` — and `promote-live.test.ts` stayed 8/8 green.
+  The unit test exercises the failing branch by injecting a regression string rather than by
+  folding two real journals, and the CLI fixture raises no gates, so both clauses pass
+  vacuously. A guard nothing would notice the deletion of is not yet a guard.
+- **`NEW` NO GRAPH THAT RAISES A BLOCKING GATE CAN BE PROMOTED LIVE, and the refusal blames the
+  wrong thing.** `driveToRest` returns as soon as the projection is `running` with no
+  `retryAfter`, so a candidate run parked on a human gate comes back NON-TERMINAL, becomes an
+  `unmeasured` entry, and `L2-every-input-measured` refuses the promotion — reporting a missing
+  measurement where the truth is "this run is waiting for a person". Fail-closed and therefore
+  safe, but the operator is told the wrong cause and `review-bench` only avoids it by having no
+  gates. Reported by this lane's reviewer FROM CODE, not driven: nobody has yet built the gated
+  fixture that would confirm it.
 
 ---
 ## A · Defects and unguarded behaviour

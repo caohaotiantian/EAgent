@@ -376,15 +376,30 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
   // rule.
   const baseCost = input.pairs.reduce((a, p) => a + p.baselineCostUsd, 0);
   const candCost = input.pairs.reduce((a, p) => a + p.candidateCostUsd, 0);
-  const costRatio = baseCost === 0 ? 1 : candCost / baseCost;
+  // A RATIO OVER A ZERO BASELINE IS NOT 1, IT IS UNDECIDABLE — and the first version answered
+  // it `1`, which is the passing value. Driven by this lane's reviewer: six pairs at
+  // `baselineCostUsd: 0` and `candidateCostUsd: 100` promoted, reporting "cost ratio 1.00× —
+  // $600.000000 vs $0.000000". A check that invents its own passing answer for the case it
+  // cannot compute is the permissive-branch shape this tree has been caught by repeatedly, and
+  // it sits one function away from the unpriced-route refusal that exists to stop exactly this.
+  //
+  // Reported the way `8-determinism` is, and for the same reason: `ran: false` with
+  // `pass: false`, never a bare pass. A consumer folding `checks.every(c => c.pass)` must not
+  // read "I could not measure this" as "this is fine", and the decision is taken over the
+  // checks that RAN, so an undecidable cost does not by itself refuse a promotion the rest of
+  // the gate approves — it refuses to certify a comparison nobody made.
+  const costDecidable = input.pairs.length > 0 && baseCost > 0;
+  const costRatio = baseCost === 0 ? Number.NaN : candCost / baseCost;
   checks.push({
     id: "3-cost",
-    ran: input.pairs.length > 0,
-    pass: input.pairs.length > 0 && costRatio <= maxCost,
+    ran: costDecidable,
+    pass: costDecidable && costRatio <= maxCost,
     detail:
       input.pairs.length === 0
         ? "no pair was measured, so nothing was spent to compare"
-        : `cost ratio ${costRatio.toFixed(2)}× (max ${String(maxCost)}×) — $${candCost.toFixed(6)} vs $${baseCost.toFixed(6)}`,
+        : baseCost === 0
+          ? `DID NOT RUN — the baseline pairs cost $0.000000, so there is no ratio to take. The candidate spent ${candCost.toFixed(6)}. A live cohort that spent nothing is a cohort that called no priced provider; check the models file rather than reading this as a pass`
+          : `cost ratio ${costRatio.toFixed(2)}× (max ${String(maxCost)}×) — ${candCost.toFixed(6)} vs ${baseCost.toFixed(6)}`,
   });
 
   // The paired MEAN is what buys prompt growth here, where the replayed gate uses its pass-rate
