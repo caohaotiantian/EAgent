@@ -445,3 +445,30 @@ export async function until<T>(what: string, deadlineMs: number, probe: () => Pr
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+/**
+ * `n` planes over ONE directory, live AT THE SAME TIME.
+ *
+ * `Deployment.open` called twice in sequence is a RESTART — the first handle is closed before
+ * the second exists. This is the other axis: `n` `openWorkspace` handles, `n` SqliteStateStore
+ * connections, `n` Engines each with its own `workerId`, `n` HumanGateBrokers, one journal.db.
+ * It is what a second machine looks like from the journal's point of view, which is the level
+ * at which two machines actually meet: the durable log, not the socket.
+ *
+ * WHAT IT REACHES THAT A SPAWNED PLANE DOES NOT: a forced interleaving. `Promise.allSettled`
+ * over two calls is deterministic, and a race between two OS processes is not — the same
+ * defect took two attempts to reproduce over :18801/:18802 and reproduces every time here.
+ *
+ * WHAT IT DOES NOT REACH, stated rather than implied: module state shared between the two
+ * planes (they share a process, so they share it whether or not that is correct), an exit path,
+ * and an unflushed WAL. `serving` is what reaches those.
+ */
+export function planes(d: Deployment, n: number): { readonly all: readonly Plane[]; dispose(): void } {
+  const all = Array.from({ length: n }, () => d.open());
+  return {
+    all,
+    dispose: () => {
+      for (const p of all) p.close();
+    },
+  };
+}
