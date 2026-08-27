@@ -373,10 +373,32 @@ verdicts, is the missing half of "promoted over them". A promotion's subject is 
 still cannot judge a prompt candidate at all — it can now only REFUSE one, which is the correct
 direction and not the same as a gate.
 
-*Fails today:* thirty runs of one workflow sharing a cohort key, and a candidate promoted over
-them because it measurably beat the baseline — **against a live provider**. Offline, that is
-`node --test packages/core/test/evolution/close-the-loop.test.ts` and it passes in 284 ms; live,
-it is `examples/demo/close-the-loop.sh` and nobody has run it yet.
+**THE LIVE HALF HAS NOW BEEN RUN, 2026-08-27, and it is half met.** 33 live GLM-5.2 runs of
+`review-bench`, $0.78, one cohort key, `members 33 golden 4` read back through `loom cohort`.
+The graded S1 works on a live model: `{"id":"S1","value":0.833,"evidence":"5/6 assertions
+passed"}`, outcome 0.833, which is the first thing on this corpus ever to clear `MIN_OUTCOME`.
+Two defects the script had never revealed because the script had never run: it died on its own
+first step (`xargs` assembling a command longer than the platform allows, twice, for two
+different reasons), and an absent channel crashed `loom promote` outright once the comparison
+became canonical — `canonicalize` refuses `undefined` where `JSON.stringify` returned it.
+
+**What is NOT met, and the reason is worth more than a green would have been.** The promotion
+was REFUSED: `✗ 1-must-pass`, with baseline and candidate both at `16.7%` and `Δ 0.0pp`. That
+is correct. `review-bench-v2`'s improvement is a parser — `bench-collate`'s greedy
+`/\{[\s\S]*\}/` mis-reads a model answer wrapped in a reasoning preamble — and across the
+corpus's **192 verdicts, zero were `unparsed`**: GLM-5.2 wrote clean JSON every time, so the
+candidate repairs a failure this corpus does not contain. A gate that answered anything but
+"no improvement" here would be lying.
+
+Getting to a live promotion means a candidate that beats the baseline on runs that actually
+happened — not a smaller exam chosen after seeing the scores, and not a candidate picked to
+match the corpus. Both are the exam-written-for-the-student that D6's freeze rule exists to
+stop, and this item is the last place that should be quietly conceded.
+
+*Fails today:* a candidate promoted over that cohort **against a live provider** because it
+measurably beat the baseline. Offline the whole loop closes —
+`node --test packages/core/test/evolution/close-the-loop.test.ts`, 284 ms — and live,
+`examples/demo/close-the-loop.sh` now runs end to end and refuses.
 
 ### 6 · Cut `packages/eagent` to its tag and delete it
 

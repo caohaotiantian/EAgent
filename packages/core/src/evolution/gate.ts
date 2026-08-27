@@ -197,6 +197,17 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
     // Measured: two suites naming the same expected verdict with `{pass, score}` and
     // `{score, pass}` disagreed, so a case failed for the order its author typed the keys in
     // and the suite author was told the CANDIDATE differed.
+    // AN ABSENT CHANNEL IS A FAILED CASE, NOT A CRASH. `canonicalize` refuses `undefined`
+    // — it is not representable — where `JSON.stringify` quietly returned the JS value
+    // `undefined` and compared unequal. So moving to canonical comparison turned "the run
+    // never wrote this channel" from a case failure into `E_INTERNAL:
+    // CanonicalizationError` out of the whole verb, killing the promotion instead of
+    // refusing it. Found by running the live demo, which names six verdict channels and
+    // meets runs that produced none of them.
+    if (!(channel in p.channels)) {
+      reasons.push(`channel "${channel}" was never written by this run`);
+      continue;
+    }
     if (!sameContent(p.channels[channel], want)) {
       reasons.push(`channel "${channel}" differs`);
     }

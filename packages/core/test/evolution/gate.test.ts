@@ -525,3 +525,25 @@ test("a channel expectation is compared by CANONICAL form, not by the order its 
   assert.deepEqual(r.cases[0]!.reasons, [], "same content in another key order is the same content");
   assert.equal(r.passRate, 1);
 });
+
+test("a channel the run never wrote fails the case and does not kill the command", async () => {
+  // `canonicalize` refuses `undefined` — it is not representable — so comparing an absent
+  // channel by canonical form threw `CanonicalizationError` out of `runEvalSuite` and took
+  // the whole promotion with it. `JSON.stringify` had returned the JS value `undefined` and
+  // compared unequal, so the move to canonical form turned a case failure into a crash.
+  // Reproduced by running the live demo, whose suite names six verdict channels against runs
+  // that produced none of them.
+  const h = harness();
+  const runId = await recordRun(h);
+  const report = await runEvalSuite({
+    store: h.store,
+    suite: {
+      name: "s", version: 1, frozen: true, frozenAt: 1_000,
+      cases: [{ id: "a", mustPass: false, runId, expect: { channels: { "no-such-channel": { any: "value" } } } }],
+    },
+    graph: compileSkeleton(),
+    engine: engineOf(h),
+  });
+  assert.equal(report.passed, 0);
+  assert.match(report.cases[0]!.reasons.join(" "), /channel "no-such-channel" was never written/);
+});

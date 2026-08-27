@@ -63,11 +63,31 @@ if [ ! -f "$MODELS" ]; then
 fi
 
 mkdir -p "$OUT"
-INPUT="$(cat "$WS/bench-cases.json")"
+# THROUGH THE ENVIRONMENT, NOT ARGV. `--input` takes JSON on the command line and there are
+# six diffs in it, so inlining it into an `xargs -I{}` template made the assembled command
+# longer than the platform allows: this script died on its own first step with "xargs: command
+# line cannot be assembled, too long" and had never been run. A child inherits the environment,
+# so the template stays short however big the corpus gets.
+export LOOM_DEMO_INPUT="$(cat "$WS/bench-cases.json")"
 
 echo "== 1 · $RUNS live runs of review-bench, $PAR at a time"
-seq 1 "$RUNS" | xargs -P "$PAR" -I{} sh -c \
-  "$LOOM run '$WS/graphs/review-bench.json' --workspace '$WS' --models-file '$MODELS' --input '$INPUT' > '$OUT/run-{}.json'"
+# A PLAIN LOOP, NOT `xargs -I`. BSD xargs caps the command it BUILDS with -I at 255 bytes
+# (its -S option), and the four absolute paths below exceed that on their own — which is the
+# second reason this script had never run past its first step, and it survives the first fix.
+# A loop with background jobs has no such limit and needs no flag that differs across platforms.
+run_one() {
+  $LOOM run "$WS/graphs/review-bench.json" --workspace "$WS" --models-file "$MODELS" \
+    --input "$LOOM_DEMO_INPUT" > "$OUT/run-$1.json"
+}
+i=1
+while [ "$i" -le "$RUNS" ]; do
+  run_one "$i" &
+  # Block while PAR are in flight. `wait -n` returns on the FIRST child to finish, so a slow
+  # run does not stall the others behind it the way a fixed batch barrier would.
+  while [ "$(jobs -pr | wc -l)" -ge "$PAR" ]; do wait -n 2>/dev/null || break; done
+  i=$((i + 1))
+done
+wait
 node -e '
   const {readdirSync,readFileSync}=require("fs");
   const dir=process.argv[1];
