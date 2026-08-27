@@ -59,7 +59,7 @@ import {
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
 import { isSyntheticSubject } from "./vocab.ts";
-import type { RunProjection, TaskRecord } from "./run/projection.ts";
+import { foldRun, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
 import { HookRegistry } from "./run/hooks.ts";
@@ -71,8 +71,17 @@ import type { GateId, RunId, Seq } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
-import { cohortKeyOf, DEFAULT_WEIGHTS, isGolden, measureCohort, promotionCeiling, scoreTrajectory } from "./evolution/score.ts";
+import {
+  cohortKeyOf,
+  DEFAULT_WEIGHTS,
+  isGolden,
+  measureCohort,
+  MIN_COHORT_SIZE,
+  promotionCeiling,
+  scoreTrajectory,
+} from "./evolution/score.ts";
 import { gateCandidate, runEvalSuite, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
+import { gateCandidateLive, MIN_PAIRED_RUNS, type LivePair, type Unmeasured } from "./evolution/live.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -125,6 +134,21 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              Exit 0 promotes, 1 refuses. The suite must have
                                              been frozen BEFORE the candidate was proposed —
                                              an exam written for a known student is not one
+  loom promote <candidate.json|yaml>         …OR judge it by RUNNING it. Replay serves every
+               --against-cohort <runId>      model turn from the recording, so a candidate whose
+               [--runs N] [--as ID]          only change is a PROMPT replays byte-identically
+               [--bucket MODE]               and the mode above cannot see it. This one names a
+                                             cohort — any run in it — takes the INPUTS out of
+                                             those recordings, runs the candidate on them for
+                                             real, and compares the PAIRED score differences.
+                                             It calls a provider and spends money: --models-file
+                                             is required and the mock is refused. The inputs
+                                             cannot be supplied by a flag, which is what keeps
+                                             the exam older than the student. --runs caps how
+                                             many of the cohort's recordings are used (default:
+                                             all of them; floor ${String(MIN_PAIRED_RUNS)}), oldest first.
+                                             8-determinism CANNOT run here and is reported as
+                                             DID NOT RUN, never as passed
 
   --help            print this and exit — also "loom help", and valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
@@ -268,6 +292,7 @@ export function resourceRefsIn(text: string): readonly string[] {
  * rejecting a real flag.
  */
 const KNOWN_FLAGS: readonly string[] = [
+  "against-cohort",
   "allow-exec",
   "as",
   "baseline",
@@ -289,6 +314,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "proposed-by",
   "reason",
   "reject",
+  "runs",
   "suite",
   "sweep-ms",
   "token",
@@ -1951,6 +1977,28 @@ async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): P
 }
 
 /**
+ * THE CLI'S ONE `Engine.submit` CALL SITE, and it stays one on purpose.
+ *
+ * `test/run/submit-callers.test.ts` counts the call sites per file — by scanning for the text,
+ * so this sentence deliberately does not spell the pattern out; writing it here once cost a red
+ * run. `SubmitInput.submittedBy` is optional and an absent principal is the PERMISSIVE case — a
+ * run nobody owns
+ * is readable by every authenticated caller. A second, forgetful submit inside a file already
+ * on that list is exactly what the count exists to catch. `loom promote --against-cohort` starts
+ * runs too, and routing it through here means the CLI's answer to "who owns the runs this binary
+ * starts" is given in one place rather than twice.
+ *
+ * Both callers pass `submitterFlag(args)`, so the answer is unchanged: `--as` or nobody.
+ */
+async function startAndDrive(
+  ws: Workspace,
+  input: { graph: RunGraph; inputs: Record<string, unknown>; submittedBy?: SubmittedBy; budgetUsd?: number },
+): Promise<{ runId: RunId; projection: RunProjection }> {
+  const runId = await ws.engine.submit(input);
+  return { runId, projection: await driveToRest(ws, runId, await ws.engine.advance(runId)) };
+}
+
+/**
  * What this process will actually do to a model call, said where the operator will read it.
  *
  * IT LIVED ONLY IN `serve`'s BANNER. `loom run` — the door a first-time user goes through, and the
@@ -2879,7 +2927,23 @@ export async function serveUntilInterrupt(plane: { close(): Promise<void> }, clo
 
 // ---------------------------------------------------------------------------
 
-export async function main(argv: readonly string[]): Promise<number> {
+/**
+ * `fetchImpl` is `openWorkspace`'s injection seam, one step further out — and it exists for the
+ * reason that one's docstring already names.
+ *
+ * `openWorkspace` takes `env` so a test can supply a credential without writing one into the
+ * process, and `fetchImpl` so a `--models-file` adapter can be exercised without reaching the
+ * network. `main` threaded neither, so the only door a test could drive END TO END was one with
+ * no adapter at all — "every `--models-file` test called `adapter.stream` directly and none ran
+ * a graph". That was tolerable while every verb was offline. `promote --against-cohort` is not:
+ * its whole subject is what a provider answers, and a mode whose only test bypasses `main` is a
+ * mode nobody has driven through the door people use.
+ *
+ * It changes nothing for `bin/loom`, which passes one argument and gets `undefined` — the real
+ * `fetch`. It is not a way to make the live mode offline in production: the adapter still has to
+ * be declared in a `--models-file`, and `promoteAgainstCohort` refuses when there is none.
+ */
+export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fetch"]): Promise<number> {
   const args = parseArgs(argv);
   if (args.command === "help" || args.flags["help"] === true) {
     process.stdout.write(USAGE);
@@ -2893,7 +2957,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
   // parameter.
   const mcp = args.flags["mcp-file"] === undefined ? [] : await startMcp(readMcpServers(requireFileFlag(args, "mcp-file")));
-  const ws = openWorkspace(args, process.env, undefined, mcp);
+  const ws = openWorkspace(args, process.env, fetchImpl, mcp);
   try {
     switch (args.command) {
       case "compile": {
@@ -2945,13 +3009,12 @@ export async function main(argv: readonly string[]): Promise<number> {
           warnAboutModels(ws.models, "run");
         }
         const budgetUsd = budgetFlag(args);
-        const runId = await ws.engine.submit({
+        const { runId, projection: p } = await startAndDrive(ws, {
           graph,
           inputs,
           ...submitterFlag(args),
           ...(budgetUsd === undefined ? {} : { budgetUsd }),
         });
-        const p = await driveToRest(ws, runId, await ws.engine.advance(runId));
         // THE ERROR, WHEN THERE IS ONE. A failed run printed `"status": "failed"` and nothing
         // else, so every carefully-worded refusal in this file — `RoutingAdapter.#resolve`'s
         // "no route for model X; routed: …" most of all — reached nobody through the door
@@ -3477,6 +3540,25 @@ export async function main(argv: readonly string[]): Promise<number> {
       // greps case reasons for the substring `irreversible`.
       case "promote": {
         const candidateFile = requirePositional(args, 0, "a candidate graph file");
+        // TWO MODES, AND THE FLAG THAT PICKS ONE IS READ FIRST. `--against-cohort` judges the
+        // candidate by RUNNING it; the branch below judges it by replaying recordings against
+        // it. They answer different questions and produce differently-shaped verdicts, which is
+        // why the mode is a flag rather than a variation inside one report — see
+        // `promoteAgainstCohort` for what the live one can and cannot certify.
+        if (args.flags["against-cohort"] !== undefined) {
+          return await promoteAgainstCohort(ws, args, loadGraph(ws, candidateFile, false));
+        }
+        // `--runs` belongs to the mode above and means nothing here. Accepting it silently
+        // would let an operator believe they had capped a live run count on a command that
+        // makes no live runs — the `--bucket`-with-no-mode argument, one flag over.
+        if (args.flags["runs"] !== undefined) {
+          throw err.validation(
+            CODES.E_CONFIG_INVALID,
+            `--runs caps how many of a cohort's recordings a LIVE promotion re-runs, and this promotion replays a ` +
+              `frozen suite instead — it makes no runs at all, so the flag would cap nothing. ` +
+              `Add --against-cohort <runId> to judge this candidate live, or drop --runs.`,
+          );
+        }
         const baseline = loadGraph(ws, requireFileFlag(args, "baseline"), false);
         const candidate = loadGraph(ws, candidateFile, false);
         const suite = readSuite(requireFileFlag(args, "suite"));
@@ -3944,6 +4026,392 @@ async function cohortPeers(
     if (cohortKeyOf(t) === key) members.push(t);
   }
   return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };
+}
+
+// ── evolution: judging a candidate by RUNNING it ────────────────────────────
+
+/**
+ * `--against-cohort <runId>` — the run that NAMES the baseline population.
+ *
+ * A runId and not a cohort key, for the reason `loom score` takes a runId: a cohort key is
+ * `workflow|graphHash|tier|bucket`, four fields an operator would have to assemble by hand and
+ * could assemble WRONG in a way that silently selects nothing. Any run in the cohort names it,
+ * and `cohortKeyOf` derives the rest.
+ */
+function cohortAnchorFlag(args: Args): RunId {
+  const v = args.flags["against-cohort"];
+  if (v === undefined || v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--against-cohort needs a runId: ${v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `It names any run in the baseline cohort this candidate is judged against — the key is derived from it.`,
+    );
+  }
+  return v as RunId;
+}
+
+/**
+ * `--runs N`, the cap on how many of the cohort's recordings are re-run LIVE.
+ *
+ * A cap and never a selector: it says HOW MANY, never WHICH. That distinction is the freeze
+ * property. `promoteAgainstCohort` takes the oldest N, and an operator who could name the
+ * inputs would be writing the exam for the student — the failure `EvalSuite.frozenAt` exists to
+ * stop, reached through a different door.
+ *
+ * Refused below `MIN_PAIRED_RUNS` at the flag rather than absorbed by the gate, because this is
+ * the number that decides how much real money the command spends and an operator who typed 2
+ * should learn it is too few BEFORE the provider is called, not after.
+ */
+function runsFlag(args: Args): number | undefined {
+  const raw = args.flags["runs"];
+  if (raw === undefined) return undefined;
+  const n = typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n < MIN_PAIRED_RUNS) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--runs must be a whole number of runs, at least ${String(MIN_PAIRED_RUNS)}, not ` +
+        `${typeof raw === "string" ? `"${raw}"` : String(raw)}. Fewer pairs than that cannot reach a 95% bound on ` +
+        `anything — the exact sign test tops out at p = 0.0625 at n = 4 — so a smaller number buys a live model ` +
+        `bill for a decision nothing could support. Omit the flag to use every recording in the cohort.`,
+    );
+  }
+  return n;
+}
+
+/**
+ * The gates a run raised, folded to the two questions `gate.ts`'s `ungatedActions` asks.
+ *
+ * ONE DEFINITION OF GATE STATE, and it is `foldRun`'s — the kernel projection — rather than a
+ * second scan over `gate.raised` / `gate.decided` / `gate.cancelled` / `gate.batch_decided`
+ * written here. A private re-derivation of "is this gate resolved" is precisely how two readers
+ * of one journal come to disagree about whether oversight happened.
+ *
+ * `decided` and `cancelled` are the resolved states, exactly as `ungatedActions` treats them: a
+ * cancelled gate is one whose work never ran.
+ */
+function gateShapeOf(events: readonly JournalEvent[]): { decidedNodes: Set<string>; unresolved: string[] } {
+  const decidedNodes = new Set<string>();
+  const unresolved: string[] = [];
+  const p = foldRun(events);
+  if (p === undefined) return { decidedNodes, unresolved };
+  for (const g of Object.values(p.gates)) {
+    if (g.state === "decided") decidedNodes.add(g.nodeId);
+    else if (g.state !== "cancelled") unresolved.push(`gate "${g.gateId}" on node "${g.nodeId}" is ${g.state}`);
+  }
+  return { decidedNodes, unresolved };
+}
+
+/** The middle value, or `null` when there is nothing to take a median of. */
+function medianOf(xs: readonly number[]): number | null {
+  if (xs.length === 0) return null;
+  const sorted = [...xs].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) / 2)]!;
+}
+
+/**
+ * JUDGE A CANDIDATE BY RUNNING IT, on inputs that predate it.
+ *
+ * THE DEFECT THIS EXISTS FOR. The replayed mode above serves every model turn from the
+ * recording under `effectKey(taskId, "model", turn)`, and `taskId` is `nodeId@branchPath#
+ * iteration` — no prompt, no request, no graph hash. A candidate that changes a FUNCTION BODY
+ * is measurable there because functions re-execute; a candidate that changes a PROMPT replays
+ * byte-identically and was certified having asked nothing. `gate.ts`'s `unexercised` now REFUSES
+ * that case rather than certifying it, and refusing is not judging — its own text names this
+ * verb: "re-record the corpus, or judge this candidate live".
+ *
+ * ── The five decisions that make it a gate rather than a demonstration ──────────
+ *
+ * **1 · THE INPUTS COME OUT OF THE RECORDINGS.** Each selected baseline run's
+ * `run.submitted.inputs` is what the candidate is given. There is no flag that supplies an
+ * input and there deliberately is not: `EvalSuite.frozenAt` exists because a suite assembled at
+ * promotion time is a suite built to be passed, and an operator typing inputs here would be
+ * doing the same thing one door over. `--runs` caps HOW MANY and never WHICH; the order is
+ * oldest-first by runId, which is a real ordering because a RunId is a ULID — so the recordings
+ * used are the ones least able to have been made for this candidate.
+ *
+ * **2 · ONE RULER FOR BOTH SIDES.** `scoreTrajectory` normalises cost and latency against a
+ * `CohortStats`, so a baseline score journaled weeks ago and a candidate score computed now are
+ * numbers from two different rulers. The cohort is measured ONCE, here, from the baseline
+ * population, and both sides are scored against it. That ruler is a pure function of runs the
+ * candidate did not produce — `cohortKeyOf` keys on `graphHash`, so the candidate's own runs
+ * land in a different cohort and cannot move the bar they are judged by. The baseline scores
+ * are therefore RE-DERIVED rather than read from `evolution.scored`, which is the opposite of
+ * what `loom cohort` does and for the opposite reason: that verb reads a journaled verdict back
+ * and must not recompute it, this one is making a new judgement and both halves must be made
+ * with the same instrument.
+ *
+ * **3 · THE COMPARISON IS PAIRED.** See `evolution/live.ts`. Input variance dominates; an
+ * unpaired comparison of two thirty-run samples would mostly measure which inputs fell where.
+ *
+ * **4 · IT DOES NOT PUBLISH THE WINNER.** Same as the replayed mode: promotion stays a human
+ * putting the file in `<workspace>/graphs/`. The candidate's runs ARE journaled — they happened
+ * — and they fold as `fromUnpromotedCandidate: true` because the candidate is not in `graphs/`,
+ * which is `isGolden` condition 5 doing exactly its job: nothing learns from them.
+ *
+ * **5 · THE DECISION IS RECORDED OR IT DOES NOT STAND.** On `operator.command`, as the replayed
+ * mode does — `journal/events.ts` is a kernel file and a first demonstration does not get to
+ * raise the `Kernel-seam:` ledger. The row carries `mode: "live-cohort"`, the cohort key, the
+ * cohort's own statistics, every pair, and `checksNotRun`. A reader must not be able to mistake
+ * a live verdict for a replayed one, and those fields are what stop them.
+ *
+ * ── What it refuses ─────────────────────────────────────────────────────────────
+ *
+ * No adapter, an unpriced route, a cohort under `MIN_COHORT_SIZE`, a baseline graph that is not
+ * published, and a candidate identical to the baseline. Each is a way the command could produce
+ * a number that looks like a judgement and is not one; each names what to do instead.
+ */
+async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGraph): Promise<number> {
+  const anchorId = cohortAnchorFlag(args);
+  const cap = runsFlag(args);
+
+  // THE REPLAYED MODE'S FLAGS ARE REFUSED RATHER THAN IGNORED. `--baseline` is derivable here
+  // and must be derived: a cohort key pins ONE `graphHash`, so the baseline is the graph those
+  // recordings actually ran, and letting a caller name a different one would judge the candidate
+  // against a graph that produced none of the evidence. `--suite` has no meaning at all — this
+  // mode replays nothing.
+  for (const [flag, why] of [
+    ["baseline", "the baseline is the graph the cohort's own runs used, derived from the cohort key — naming another one would judge this candidate against a graph that produced none of the recordings"],
+    ["suite", "this mode replays no recordings, so there is no suite to run; the exam is the cohort's INPUT distribution"],
+  ] as const) {
+    if (args.flags[flag] !== undefined) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `--${flag} does not apply with --against-cohort: ${why}.`);
+    }
+  }
+
+  // A "LIVE" JUDGEMENT WITH THE MOCK ADAPTER IS A LIE, and it is the easiest lie to tell here:
+  // `MockModelAdapter` answers every agent node with "[mock] …", fabricates a cost, and the run
+  // succeeds. The whole point of this mode is that a prompt change is only visible when a
+  // provider answers it, so no adapter is a refusal and not a warning.
+  if (ws.models === undefined) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `promote --against-cohort calls a real provider, and this process has none: without --models-file the only ` +
+        `registered adapter is the offline mock, which answers every agent node with canned text and fabricates a ` +
+        `cost. A promotion decided on that measures the mock. ` +
+        `fix: --models-file <file> with {"adapters":[{"provider":"anthropic"}],"routes":{…}}`,
+    );
+  }
+  // AN UNPRICED ROUTE MAKES `3-cost` CERTIFY A RATIO IT DID NOT MEASURE. Every call on such a
+  // route is journaled as costing 0, so the candidate's total is 0, the ratio is 0.00×, and the
+  // check reports a pass it did not earn — against a baseline whose recorded cost was real
+  // money. A guard that cannot decide fails closed, and the fix is one line of configuration.
+  if (ws.models.unpriced.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${String(ws.models.unpriced.length)} route(s) in ${ws.models.file} have no price (${ws.models.unpriced.join(", ")}), ` +
+        `so every candidate call on them is journaled as costing $0 and 3-cost would report a 0.00× ratio it never ` +
+        `measured — against recordings that cost real money. ` +
+        `fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter.`,
+    );
+  }
+
+  const anchorEvents = await journalOf(ws, anchorId);
+  if (anchorEvents.length === 0) {
+    process.stderr.write(`no journal for run ${anchorId} in this workspace (${ws.root}), so it names no cohort\n`);
+    return 1;
+  }
+
+  // THE SAME THREE INPUTS `loom score` FOLDS WITH, and they have to be the same or the key this
+  // command derives is one no other verb in the binary can reproduce.
+  const { index } = graphsByHash(ws);
+  const promotedGraphHashes = new Set(index.keys());
+  const bucketInput = bucketFlag(args);
+  const anchorSubmitted = anchorEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+  const anchorGraph = anchorSubmitted === undefined ? undefined : index.get(anchorSubmitted.payload.graphHash);
+  const anchorT = foldTrajectory(anchorEvents, {
+    promotedGraphHashes,
+    ...(anchorGraph === undefined ? {} : { graph: anchorGraph }),
+    ...(bucketInput === undefined ? {} : { bucketInput }),
+  });
+  const key = cohortKeyOf(anchorT);
+  const peers = await cohortPeers(ws, anchorId, key, promotedGraphHashes, index, bucketInput);
+  if (peers.truncated) {
+    process.stderr.write(
+      `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
+    );
+  }
+  const cohort = measureCohort(key, [anchorT, ...peers.members]);
+  if (cohort.n < MIN_COHORT_SIZE) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a promotion needs at least ` +
+        `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED and did work — a run that failed or ` +
+        `did nothing is excluded from the population as well as from the medians, so the number here is smaller ` +
+        `than the journal row count and that is the point. Record more runs of this workflow first.`,
+    );
+  }
+
+  // THE BASELINE IS THE COHORT'S OWN GRAPH. The key pins one `graphHash`, so there is exactly
+  // one answer and nobody gets to supply it. It must be PUBLISHED, because `promptGrowthOf` and
+  // `posturesHoldOf` both need the compiled artifact — and because a baseline this workspace
+  // cannot produce is one nobody can re-run to check this decision.
+  const baseline = index.get(anchorT.cohort.graphHash);
+  if (baseline === undefined) {
+    throw err.notFound(
+      CODES.E_RUN_NOT_FOUND,
+      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} ` +
+        `has that hash (${String(index.size)} searched). The baseline is derived from the cohort rather than passed in, ` +
+        `so it has to be publishable: restore those bytes to graphs/. A graph EDITED since the cohort ran no longer ` +
+        `matches, which is the point — those runs were produced by the old bytes.`,
+    );
+  }
+  if (candidate.graphHash === baseline.graphHash) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the candidate and the cohort's own graph are the same graph (${candidate.graphHash}). Running it against its ` +
+        `own recordings' inputs would measure model nondeterminism and report it as an improvement or a regression.`,
+    );
+  }
+
+  // WHICH RECORDINGS SUPPLY INPUTS, and the filter is `measureCohort`'s own. A member that did
+  // not succeed, or succeeded having done nothing, is not in the population the ruler was built
+  // from — `components.delivered` is exactly that predicate, reported per run — so pairing
+  // against one would compare the candidate to a number the cohort itself excludes.
+  const eligible = [anchorT, ...peers.members]
+    .map((t) => ({ t, scored: scoreTrajectory(t, cohort) }))
+    .filter((x) => x.scored.components.delivered)
+    // OLDEST FIRST. A RunId is a ULID, so ascending order is chronological, and taking the head
+    // of it means `--runs 6` uses the six recordings least able to have been made for this
+    // candidate. Deterministic, and not a choice the caller makes.
+    .sort((a, b) => (a.t.runId < b.t.runId ? -1 : a.t.runId > b.t.runId ? 1 : 0));
+  const selected = cap === undefined ? eligible : eligible.slice(0, cap);
+
+  process.stderr.write(
+    `judging ${candidate.graphHash} live against cohort "${key}" (n ${String(cohort.n)}): ` +
+      `${String(selected.length)} run(s) of the candidate, on inputs taken from recordings. This calls ${ws.models.file}'s ` +
+      `provider(s) and spends money.\n`,
+  );
+
+  const pairs: LivePair[] = [];
+  const unmeasured: Unmeasured[] = [];
+  const gatingRegressions: string[] = [];
+  const budgetUsd = budgetFlag(args);
+
+  for (const { t, scored } of selected) {
+    const baseEvents = await journalOf(ws, t.runId);
+    const submitted = baseEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+    if (submitted === undefined) continue;
+    // The RECORDED input, verbatim. This is the line that makes the exam older than the student.
+    const inputs = { ...submitted.payload.inputs };
+
+    const { runId } = await startAndDrive(ws, {
+      graph: candidate,
+      inputs,
+      ...submitterFlag(args),
+      ...(budgetUsd === undefined ? {} : { budgetUsd }),
+    });
+    const candEvents = await journalOf(ws, runId);
+    const candT = foldTrajectory(candEvents, {
+      promotedGraphHashes,
+      graph: candidate,
+      ...(bucketInput === undefined ? {} : { bucketInput }),
+    });
+
+    // TERMINALITY IS READ OFF THE JOURNAL, not off a projection this process happens to hold.
+    // `incomplete` is the fold's word for "no terminal event at all", which is exactly the
+    // missing measurement — see `L2-every-input-measured` for why it is neither a zero nor a
+    // silent drop, and why a FAILED run is paired rather than excused.
+    if (candT.outcome.runStatus === "incomplete") {
+      unmeasured.push({ baselineRunId: t.runId, candidateRunId: runId, status: "incomplete" });
+      continue;
+    }
+
+    const candScored = scoreTrajectory(candT, cohort);
+    pairs.push({
+      baselineRunId: t.runId,
+      candidateRunId: runId,
+      baselineScore: scored.score,
+      candidateScore: candScored.score,
+      baselineCostUsd: t.usage.costUsd,
+      candidateCostUsd: candT.usage.costUsd,
+    });
+
+    // OVERSIGHT ONLY TIGHTENS, per input. Both halves of `ungatedActions`, asked of two real
+    // journals instead of a replay: a gate the candidate left unresolved, and a node the
+    // recording gated that the candidate did not. The second is the one that matters — a
+    // candidate reaching the same work along a path with fewer gates has loosened oversight,
+    // whatever its score.
+    const baseGates = gateShapeOf(baseEvents);
+    const candGates = gateShapeOf(candEvents);
+    for (const u of candGates.unresolved) gatingRegressions.push(`on the input from ${t.runId}: ${u}`);
+    for (const node of baseGates.decidedNodes) {
+      if (!candGates.decidedNodes.has(node)) {
+        gatingRegressions.push(`on the input from ${t.runId}: the recording gated node "${node}" and this candidate did not`);
+      }
+    }
+  }
+
+  const verdict = gateCandidateLive({
+    pairs,
+    unmeasured,
+    postureDiffNonNegative: posturesHoldOf(ws, baseline, candidate),
+    promptGrowth: promptGrowthOf(baseline, candidate),
+    gatingRegressions,
+  });
+
+  for (const c of [...verdict.checks].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    process.stdout.write(`${c.ran ? (c.pass ? "✓" : "✗") : "⊘"} ${c.id.padEnd(26)} ${c.detail}\n`);
+  }
+
+  // REPORTED, NOT GATED — see `3-cost` in `evolution/live.ts`. D10.d asks for a ratio of
+  // MEDIANS and the replayed gate cannot express one; pairing makes it expressible, and it is
+  // put on the page for a reader to check the gated ratio of totals against.
+  const medianCostRatio = medianOf(pairs.filter((p) => p.baselineCostUsd > 0).map((p) => p.candidateCostUsd / p.baselineCostUsd));
+
+  const decision = {
+    // THE FIRST FIELD, AND THE ONE THAT STOPS A LIVE VERDICT IMPERSONATING A REPLAYED ONE.
+    // The replayed decision carries `suite`/`suiteVersion`/`suiteFrozenAt` and no `mode`; this
+    // carries `mode` and no suite at all, so the two rows are not confusable even by a reader
+    // who only looks at the keys.
+    mode: "live-cohort",
+    promote: verdict.promote,
+    cohortKey: key,
+    cohort: {
+      n: cohort.n,
+      p50CostUsd: cohort.p50Cost,
+      p50WallMs: cohort.p50Wall,
+      p50Gates: cohort.p50Gates,
+      p90Score: cohort.p90Score,
+      weightsDigest: cohort.weightsDigest,
+    },
+    baselineGraphHash: baseline.graphHash,
+    candidateGraphHash: candidate.graphHash,
+    eligible: eligible.length,
+    selected: selected.length,
+    paired: verdict.paired,
+    pairs: pairs.map((p) => ({ ...p, diff: Math.round((p.candidateScore - p.baselineScore) * 1e6) / 1e6 })),
+    unmeasured,
+    medianCostRatio,
+    // WHICH CHECKS COULD NOT RUN. Without this the row says "promote: true" over a set of
+    // criteria a reader would assume was the replayed gate's eleven.
+    checksNotRun: verdict.notRun,
+    checks: verdict.checks.map((c) => ({ id: c.id, ran: c.ran, pass: c.pass, detail: c.detail })),
+  };
+  process.stdout.write(`\n${JSON.stringify(decision, null, 2)}\n`);
+  process.stderr.write(
+    `! decided WITHOUT ${verdict.notRun.join(", ")} — this is a live verdict, not the replayed gate's. ` +
+      `The journaled row says so: mode "live-cohort", checksNotRun ${JSON.stringify(verdict.notRun)}.\n`,
+  );
+
+  // ANCHORED ON A RECORDING THIS PROMOTION WAS JUDGED OVER, the same choice the replayed mode
+  // makes and for the same reason: `StateStore` is keyed by runId, so a fact whose subject is a
+  // GRAPH has to borrow some run's coordinate. It borrows the FIRST SELECTED baseline run's, and
+  // `pairs[].baselineRunId` names every one of them. Never a candidate run's: those were
+  // produced by a graph no human has approved, and hanging the decision off one would put the
+  // record of a judgement inside the thing being judged.
+  const anchor = selected[0]?.t.runId ?? anchorId;
+  await ws.store.append({
+    runId: anchor,
+    expectedSeq: await ws.store.head(anchor),
+    events: [
+      {
+        type: "operator.command",
+        payload: { kind: "evolution.promote", args: decision },
+        actor: { kind: "human", subject: subjectFlag(args), via: "console" },
+      },
+    ],
+  });
+  return verdict.promote ? 0 : 1;
 }
 
 function requirePositional(args: Args, i: number, what: string): string {

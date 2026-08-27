@@ -369,9 +369,36 @@ one cohort key, `"cohort": {"n": 30}`, `"golden": true`, `"goldenBlockers": []`,
 **What is still open, and is not this item's to close.** The suite is hand-authored: `loom suite
 freeze --cohort <runId>`, which would select cases from a cohort by the runs' own journaled
 verdicts, is the missing half of "promoted over them". A promotion's subject is a GRAPH and
-`StateStore` is keyed by runId, so the decision borrows a run's coordinate. And an offline gate
-still cannot judge a prompt candidate at all — it can now only REFUSE one, which is the correct
-direction and not the same as a gate.
+`StateStore` is keyed by runId, so the decision borrows a run's coordinate.
+
+**AND THE SENTENCE THAT USED TO END THIS PARAGRAPH IS NOW FALSE, so it is struck rather than
+edited.** It said "an offline gate still cannot judge a prompt candidate at all — it can now only
+REFUSE one, which is the correct direction and not the same as a gate". The refusal is still
+what the OFFLINE gate does and still correct; what changed is that refusing is no longer the only
+thing the product can do with such a candidate. `loom promote <candidate> --against-cohort
+<runId>` judges it by RUNNING it, on inputs read out of the cohort's own `run.submitted.inputs`,
+and compares the PAIRED score differences — one difference per input, both sides scored against
+one `CohortStats` measured from the baseline population alone. The decision rule is a one-sided
+95 % lower confidence bound on the paired mean, which must be strictly above 0: "we detected an
+improvement", not "we could not detect harm".
+
+Three things about it belong here rather than in a commit message, because they are the shape of
+the claim and not the implementation:
+
+- **`8-determinism` cannot run in this mode and is not reported as passed.** Two live runs of a
+  model do not match. The check carries `ran: false, pass: false`, the verdict carries
+  `notRun`, and the journaled row carries `mode: "live-cohort"` and `checksNotRun` — so a live
+  certificate cannot be read as the replayed gate's, and a consumer folding `checks.every(c =>
+  c.pass)` reads it conservatively. This is the sharpest judgement in the lane and the argument
+  is written out in `evolution/live.ts`.
+- **The decision rule is weak at the n this corpus has.** Six pairs is the floor (`MIN_PAIRED_RUNS`,
+  the smallest n at which the exact sign test can reach p < 0.05 at all), and at six the t bound
+  assumes roughly symmetric differences with no way to check that from the data. It is a real
+  bar — far stronger than the replayed gate's `2-non-inferior` point estimate — and it is not a
+  substitute for a corpus large enough for McNemar's.
+- **It has not been run against a real provider.** The mechanism is driven end to end in
+  `test/cli/promote-live.test.ts` through `main()` with a stub adapter, offline; the live
+  proof is the maintainer's and is the last unmet clause below.
 
 **THE LIVE HALF HAS NOW BEEN RUN, 2026-08-27, and it is half met.** 33 live GLM-5.2 runs of
 `review-bench`, $0.78, one cohort key, `members 33 golden 4` read back through `loom cohort`.
@@ -393,12 +420,26 @@ candidate repairs a failure this corpus does not contain. A gate that answered a
 Getting to a live promotion means a candidate that beats the baseline on runs that actually
 happened — not a smaller exam chosen after seeing the scores, and not a candidate picked to
 match the corpus. Both are the exam-written-for-the-student that D6's freeze rule exists to
-stop, and this item is the last place that should be quietly conceded.
+stop, and this item is the last place that should be quietly conceded. **The live mode is built
+so that the first of those two is not available to an operator at all**: `--against-cohort`
+takes a cohort and never a set of inputs, `--runs` says how many and never which, and the
+recordings used are the oldest by runId. Picking a candidate to match the corpus remains a thing
+a human can do, and nothing mechanical stops it.
 
 *Fails today:* a candidate promoted over that cohort **against a live provider** because it
-measurably beat the baseline. Offline the whole loop closes —
-`node --test packages/core/test/evolution/close-the-loop.test.ts`, 284 ms — and live,
-`examples/demo/close-the-loop.sh` now runs end to end and refuses.
+measurably beat the baseline. The mechanism is now there and the exam is frozen by construction;
+what is missing is a run of it with a key. The command is
+
+```
+loom promote <candidate.json> --against-cohort <runId> --runs N \
+  --workspace <ws> --models-file <models.json> --as <you>
+```
+
+exit 0 promotes, 1 refuses, and the verdict lands on `operator.command` with `mode:
+"live-cohort"`. Offline the whole loop closes —
+`node --test packages/core/test/evolution/close-the-loop.test.ts`, 284 ms — the live mode's own
+mechanism is driven in `test/cli/promote-live.test.ts` (8 tests, ~600 ms, stub provider), and
+live, `examples/demo/close-the-loop.sh` now runs end to end and refuses.
 
 ### 6 · Cut `packages/eagent` to its tag and delete it
 
