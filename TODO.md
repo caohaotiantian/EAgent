@@ -313,8 +313,13 @@ closed and the next member will look like one of these.
   dominated**, `outcome: 0`, `score: 0.1` — driven by correctness rather than by cheapness. That
   is the saturation broken. `examples/graphs/review-bench.json` ships it.
 
-- **`NEW` A fan-out branch is exactly ONE node deep, so a GRADED ground-truth signal is not
-  expressible.** Trying to put a per-case evaluator between the fanned node and its join is
+- ~~**`NEW` A fan-out branch is exactly ONE node deep, so a GRADED ground-truth signal is not
+  expressible.**~~ **FALSIFIED 2026-08-27** — it is expressible, and `examples/graphs/review-bench.json`
+  now ships the shape: SIX `evaluator` nodes hung off `collate` with `seq` edges, one per case,
+  each writing its own channel, folding to `{"id":"S1","value":0.833,"evidence":"5/6 assertions
+  passed"}` on a live model. The wall below is real and was correctly described — it is a wall
+  around putting an evaluator INSIDE a fan-out branch, and the way past it is to grade AFTER the
+  join instead of within it. Original finding: Trying to put a per-case evaluator between the fanned node and its join is
   refused four ways, and the refusals are individually right and jointly a wall:
   `GRAPH021_FANOUT_WITHOUT_JOIN` requires the join to name the FANNED node; `GRAPH008_BRANCH_NOT_CONNECTED`
   requires a direct edge from that node to the join. The only shape that compiles hangs the
@@ -407,7 +412,12 @@ closed and the next member will look like one of these.
   a check that sometimes has no answer is worse than one clear rule. Deciding whether the median
   should gate, and what an undefined pair does to it, belongs to whoever owns D10.d.
 
-- **`NEW` STILL OPEN — `gateCandidate` PROMOTES A CANDIDATE THAT PASSES NOTHING.** `2-non-inferior`
+- ~~**`NEW` `gateCandidate` PROMOTES A CANDIDATE THAT PASSES NOTHING.**~~ **FIXED 2026-08-27**
+  by `2a-candidate-earned-it`, an ABSOLUTE floor: a candidate that passed zero cases is refused
+  whatever the baseline managed, and `validateSuite` now refuses a suite with no cases at all.
+  The question the entry deferred to "whoever owns D10.d" was answered on the merits — every
+  other criterion is a ratio, and a tie satisfies all of them, so the relative test could never
+  be the thing that catches this. Original finding: `2-non-inferior`
   is a non-inferiority test and returns `pass: true` at "0.0% vs 0.0%"; `validateSuite`'s
   `minMustPass` defaults to 0. Driven through the shipped `loom promote` on the real review-bench
   files under the mock, where both sides fail a ground-truth exam: `✓ 2-non-inferior pass rate
