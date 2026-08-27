@@ -856,7 +856,7 @@ Each was verified against the code, not remembered.
 |---|---|---|
 | `B.1` **Compensation edges** — a compile-time rollback proof and | open | Accurate in all three halves. The only edge kinds skipped in #edgesToTake are `error` and `compensation`; `loop`, `conditional` and the default arm all push edges, so the fall… |
 | `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | open | Claim holds. Two omissions: (a) it is now a compile WARNING, so an author is told; (b) a stale comment contradicts this — packages/core/test/run/skeleton.ts:81-82 says a join … |
-| `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | open | Confirmed. `.wallMs` occurs 10 times in core/src but every one is UsageRecord.wallMs (vocab.ts:335, evolution/score.ts:212, run/escalation.ts:212, …), never Budget.wallMs. |
+| `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (f2f24f8). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
 | `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
 | `B.5` **Retention tiering** — proven by test, zero callers, so a | open | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. |
 | `B.6` **The evolution subsystem is now REACHABLE but not wired.* | open | Every clause checks out. Members of "still uncalled" — cohort measurement: measureCohort, cohortKeyOf, isGolden, scoreTrajectory, readSignals, outcomeOf; promotion ceilings an… |
@@ -875,7 +875,15 @@ believes a feature is present.
 - **Compensation edges** — a compile-time rollback proof and a rewind refusal exist; execution
   falls through and does nothing.
 - **`JoinNode.timeoutMs`** — a barrier waits forever however small a number is written.
-- **`Budget.tokens` and `Budget.wallMs`** — declared, never read; only cost binds.
+- ~~**`Budget.tokens` and `Budget.wallMs`** — declared, never read; only cost binds.~~ **Both
+  bind** as of f2f24f8: run and node ceilings, `budget.exhausted` now says which dimension, and
+  both fold out of `p.usage` so a restart cannot refund them
+  (`test/run/budget-triple.test.ts`). **Two limits are deliberate and stated in the source, not
+  oversights:** `wallMs` counts PROVIDER time — a run suspended on a human gate accrues none,
+  and neither does an hour spent inside a tool — and it cannot refuse the turn that crosses it,
+  only the next one. **One thing is genuinely not built:** a subgraph child inherits its
+  parent's DOLLAR slice and neither of the other two ceilings; the child's tokens and provider
+  time reach the parent only through `subgraph.completed`, after the child has finished.
 - **`preAuthorization`** — a whole risk envelope (cost ceiling, blast radius, tool scope, data
   classification, allowed side effects, audit completeness, demotion triggers) that is not a field
   of the graph schema at all. ~~so declaring one is silence.~~ **The operative complaint is stale
