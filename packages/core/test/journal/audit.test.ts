@@ -498,6 +498,48 @@ test("...and the KIND must match the call, not merely exist", () => {
   );
 });
 
+test("compensation.names-a-recorded-call — a rollback claim about a call the journal does not carry", () => {
+  // `compensation.recorded` is where a run says "this effect is undone", and its identity is the
+  // SEQ of the `tool.called` it undoes rather than that call's effect key — the key is positional
+  // and a rewind-then-redo reuses it. That makes the seq load-bearing: `run/compensation.ts`
+  // folds these into `settled` and skips those calls on the next pass, so a record naming the
+  // wrong seq silently exempts a call nobody undid. A rollback that looks done.
+  const invented = fixture(() => [
+    ev("compensation.recorded", {
+      compensates: "n@root#0:tool:0",
+      compensatesSeq: 99,
+      tool: "db.insert",
+      undo: "db.delete",
+      outcome: "compensated",
+      trigger: "run_failed",
+    }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(invented), ["compensation.names-a-recorded-call"]);
+
+  // The control: the same claim, about a `tool.called` that is actually there. `fixture` assigns
+  // seq in order — `run.submitted` is seq 1 — so the `tool.called` below is seq 3 and the record names it.
+  const real = fixture(() => [
+    ev("effect.started", { key: "n@root#0:tool:0", kind: "tool", attempt: 1 }),
+    ev("tool.called", { key: "n@root#0:tool:0", name: "db.insert" }),
+    ev("effect.started", { key: "n@root#0:compensate:3", kind: "compensate", attempt: 1 }),
+    // The undo is an ordinary tool dispatch and journals an ordinary `tool.called`. It keys into
+    // the `compensate` namespace because its ordinal is the seq it undoes; `call-pairs-with-its-effect`
+    // accepts that kind for a `tool.called` and would fire here if it did not.
+    ev("tool.called", { key: "n@root#0:compensate:3", name: "db.delete" }),
+    ev("compensation.recorded", {
+      compensates: "n@root#0:tool:0",
+      compensatesSeq: 3,
+      tool: "db.insert",
+      undo: "db.delete",
+      outcome: "compensated",
+      trigger: "run_failed",
+    }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(real), [], "a real rollback of a real call trips nothing");
+});
+
 test("gate.raise-has-a-decision — a gate manufactured outside the guard chain", () => {
   // A gate is the OUTPUT of the guard chain; `policy.decided` is the input that produced it —
   // the reasons, the posture, the class. A gate raised for a task that never had a decision came

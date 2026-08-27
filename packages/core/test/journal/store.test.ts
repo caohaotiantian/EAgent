@@ -460,7 +460,7 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   // appender, no reader, and no planned reload path anywhere in the tree, so the row
   // promised a durable fact the log never recorded. A count moving down is the same
   // deliberate act as a count moving up, and this line is where it is seen.
-  assert.equal(EVENT_TYPES.length, 52, "update this count when the vocabulary changes, deliberately");
+  assert.equal(EVENT_TYPES.length, 53, "update this count when the vocabulary changes, deliberately");
 
   // THE MISSING DIRECTION, ENFORCED BY THE COMPILER RATHER THAN COUNTED. `Exclude` is empty
   // exactly when every `EventPayloads` key appears in the array; when it is not, this fails to
