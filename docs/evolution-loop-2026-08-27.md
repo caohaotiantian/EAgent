@@ -86,7 +86,16 @@ over them, and S5 — the model's own report that it is done — carries weight 
   with the graph copied into `graphs/`: `S1 6/6 assertions passed`, outcome 1, score 0.700.
   Silently scoring 0 for "I could not find the spec" is indistinguishable from "this run failed
   every assertion", and it makes every candidate look worthless. **This is the third
-  folded-without-its-graph defect this session** and it is recorded in `TODO.md` as open.
+  folded-without-its-graph defect this session.**
+
+  *Amended 2026-08-27, same day:* fixed. `loom score` refuses — exit 1, no verdict printed and
+  **nothing appended** — and `--graph <file>` supplies the spec without publishing it, which
+  matters because publishing into `graphs/` is also what marks a graph promoted. The library
+  half is `Trajectory.specResolved`, read by `scoreTrajectory` (outcome and score both 0,
+  `components.specResolved` saying which zero it is), by `isGolden` condition 6, and by
+  `measureCohort`, which drops such a member from the population. Reproducing §5's second line
+  no longer needs the graph in `graphs/`: `loom score <runId> --workspace <ws> --graph
+  candidates/review-bench-v3.json`. See `TODO.md` §A0 for what is still uncovered.
 
 ## 5 · To reproduce
 
@@ -96,7 +105,8 @@ over them, and S5 — the model's own report that it is done — carries weight 
     # the candidate, against the same inputs
     loom run  candidates/review-bench-v3.json --workspace <ws> --models-file <models.json> \
               --input "$(cat bench-cases.json)"
-    loom score <runId> --workspace <ws>      # needs the graph in graphs/, see §4
+    loom score <runId> --workspace <ws> \
+      --graph candidates/review-bench-v3.json  # the spec, without publishing it; see §4
     loom cohort <runId> --workspace <ws>
 
 ---
