@@ -5,7 +5,7 @@
     "name": "review-bench",
     "project": "loom",
     "version": 1,
-    "description": "Review diffs whose answer is known, and assert mechanically whether the review found them."
+    "description": "THE CANDIDATE. review-bench with function/bench-collate swapped for bench-collate-v2, whose parser survives a reasoning preamble. Deliberately outside graphs/: `loom score` reads graphs/ as the promoted set, so a candidate parked there would be marked promoted before it was gated."
   },
   "policy": {
     "posture": "out",
@@ -137,7 +137,7 @@
         "verdicts"
       ],
       "function": {
-        "ref": "function/bench-collate@stable"
+        "ref": "function/bench-collate-v2@stable"
       }
     },
     {
