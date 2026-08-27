@@ -35,6 +35,7 @@ import {
   type TaskId,
 } from "../ids.ts";
 import { isEvent, type Actor, type ErrorRecord, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
+import { payloadHandle, type PayloadRef } from "../journal/payloads.ts";
 import {
   channelValue,
   makeStateView,
@@ -285,6 +286,25 @@ export interface RunProjection {
   readonly channels: ChannelState;
   /** branch path → the channels bound at exactly that branch. */
   readonly bindings: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  /**
+   * Channels whose value in `channels` is a `PayloadHandle` rather than the value itself.
+   *
+   * THE AUTHORITATIVE ANSWER TO "IS THIS A HANDLE", and the reason it is a field rather than a
+   * predicate over `channels`. A handle is an ordinary JSON object, so a node body can write
+   * one; a reader that recognised handles by shape would let any node that can write a channel
+   * name a payload it never produced, and would then hand that node the bytes. This map is
+   * built only from the `external` declarations on `task.committed` and `state.reduced` — by
+   * the executor that did the externalising — so it says what the RUN did, not what a value
+   * looks like.
+   *
+   * Folded, therefore reconstructible across a restart, which is what invariant 1 requires of
+   * any value a decision reads: the engine reads it to decide what to resolve before a body
+   * runs, and a fresh process must reach the same answer.
+   *
+   * Empty for every run that externalised nothing, which is every run written before this
+   * existed and every run under an engine with no payload store.
+   */
+  readonly external: Readonly<Record<string, PayloadRef>>;
 
   readonly tasks: Readonly<Record<TaskId, TaskRecord>>;
   readonly gates: Readonly<Record<GateId, GateRecord>>;
@@ -397,6 +417,7 @@ interface MutableProjection {
   posture: Posture;
   channels: Record<string, unknown>;
   bindings: Record<string, Record<string, unknown>>;
+  external: Record<string, PayloadRef>;
   tasks: Record<TaskId, TaskRecord>;
   gates: Record<GateId, GateRecord>;
   usage: UsageRecord;
@@ -534,6 +555,7 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     posture: "out",
     channels: {},
     bindings: {},
+    external: {},
     tasks: {},
     gates: {},
     usage: { ...ZERO_USAGE },
@@ -562,6 +584,7 @@ function freeze(p: MutableProjection): RunProjection {
     posture: p.posture,
     channels: { ...p.channels },
     bindings: { ...p.bindings },
+    external: { ...p.external },
     tasks: { ...p.tasks },
     gates: { ...p.gates },
     usage: { ...p.usage },
@@ -916,7 +939,11 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     upsertTask(p, e.taskId, {
       state: e.payload.status === "succeeded" ? "succeeded" : (e.payload.status as TaskState),
       take: e.payload.take as readonly EdgeId[],
-      writes: e.payload.writes,
+      // A HANDLE IS PUT BACK WHERE THE VALUE WAS, so `TaskRecord.writes` still has one entry
+      // per channel the Task wrote and every reader of it keeps counting the same things. The
+      // engine only externalises a write it is reducing in the same commit, so a write a join
+      // will later fold is never a handle — see `#externalise`.
+      writes: withHandles(e.payload.writes, e.payload.external),
       attempt: e.payload.attempt,
     });
     // `usage` IS A PER-ATTEMPT RESTATEMENT — see `chargeUsage`. Assigning it to the Task and
@@ -949,7 +976,13 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     return;
   }
   if (isEvent(e, "state.reduced")) {
-    p.channels = { ...p.channels, ...e.payload.values };
+    p.channels = { ...p.channels, ...withHandles(e.payload.values, e.payload.external) };
+    // The map tracks the CURRENT value of each channel, so a later inline write to a channel
+    // that was once externalised has to clear it. Without the delete, `external` would still
+    // name the channel, the engine would resolve a stale digest, and the node would be handed
+    // a value the run had already replaced — a silent read of history.
+    for (const c of e.payload.channels) delete p.external[c];
+    for (const [c, ref] of Object.entries(e.payload.external ?? {})) p.external[c] = ref;
     return;
   }
 
@@ -1230,6 +1263,51 @@ export function stateAtBranch(p: RunProjection, branch: BranchCoordinate): Chann
     if (bound !== undefined) out = { ...out, ...bound };
   }
   return out;
+}
+
+/**
+ * Put a handle back where the executor took a value out.
+ *
+ * Pure and synchronous, like everything else in this file: it constructs the marker, it never
+ * fetches what the marker points at. The two maps are disjoint by construction — a key in
+ * `external` is absent from `values` — so this is a merge and not an override, and it is written
+ * as one so a payload that broke that rule would be visible rather than silently winning.
+ */
+function withHandles(
+  values: Readonly<Record<string, unknown>>,
+  external: Readonly<Record<string, PayloadRef>> | undefined,
+): Record<string, unknown> {
+  if (external === undefined) return { ...values };
+  const out: Record<string, unknown> = { ...values };
+  for (const [channel, ref] of Object.entries(external)) out[channel] = payloadHandle(ref);
+  return out;
+}
+
+/**
+ * The projection a Task sees once its externalised reads have been fetched.
+ *
+ * THE OVERLAY GOES IN AT THE TASK'S OWN BRANCH, which is the last layer `stateAtBranch` applies,
+ * so a resolved value wins over the shared channel AND over every binding on the path — the same
+ * precedence a fan-out's item binding already has. Putting it in `channels` instead would leave
+ * a binding shadowing the resolved value, and the node would be handed the handle after all.
+ *
+ * The resolved names leave `external` in the copy, because the copy is handed to code that asks
+ * "is this channel a handle" and the honest answer for it is now no. The stored projection is
+ * untouched: this returns a new object and folds nothing.
+ */
+export function withResolved(
+  p: RunProjection,
+  branch: BranchCoordinate,
+  resolved: Readonly<Record<string, unknown>>,
+): RunProjection {
+  const key = encodeBranch(branch);
+  const external = { ...p.external };
+  for (const name of Object.keys(resolved)) delete external[name];
+  return {
+    ...p,
+    external,
+    bindings: { ...p.bindings, [key]: { ...(p.bindings[key] ?? {}), ...resolved } },
+  };
 }
 
 /** The `StateView` handed to a node body: branch-resolved, then read-restricted. */

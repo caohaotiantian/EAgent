@@ -25,7 +25,7 @@
 
 import { randomInt } from "node:crypto";
 
-import { digest, shapeOf } from "../canonical.ts";
+import { canonicalize, digest, shapeOf } from "../canonical.ts";
 import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
 import {
   ROOT_BRANCH,
@@ -55,6 +55,7 @@ import {
   type SubmittedBy,
   type SystemActor,
 } from "../journal/events.ts";
+import { EXTERNALISE_ABOVE_BYTES, payloadHandle, refFor, type PayloadRef, type PayloadStore } from "../journal/payloads.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
@@ -111,6 +112,7 @@ import {
   type SweepReport,
   type TimeoutAction,
 } from "./gates.ts";
+import { externalisableChannels } from "./externalise.ts";
 import { RunLog } from "./log.ts";
 import { BLOCK_REASON, attemptable, planCompensation, type CompensationStep } from "./compensation.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type BudgetLimits, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
@@ -129,6 +131,7 @@ import {
   scopeFor,
   tasksInState,
   viewFor,
+  withResolved,
   type GateRecord,
   type RunProjection,
   type TaskRecord,
@@ -189,6 +192,23 @@ export interface EngineOptions {
    * a loud failure, never a silent live call.
    */
   readonly replay?: ReplayEffects;
+  /**
+   * Where a channel value larger than `EXTERNALISE_ABOVE_BYTES` goes instead of into the
+   * journal. See `run/externalise.ts` for which channels are eligible.
+   *
+   * ABSENT MEANS OFF, and off is byte-for-byte the behaviour this engine had before the
+   * option existed: every value is journaled inline, `state.reduced.external` is never
+   * written, and `RunProjection.external` stays empty. That is the right default for an
+   * embedder who has not decided where a second durable store lives, because the failure
+   * mode of getting it wrong is a journal that cannot be replayed.
+   *
+   * IT MUST BE THE SAME STORE ACROSS A RESTART. A journal whose events name payloads is not
+   * replayable on its own — that is the price of the indirection, and it is why an engine
+   * asked to resolve a handle it cannot find raises `E_PAYLOAD_UNRESOLVED` rather than
+   * carrying on. A memory store is therefore for tests and for a run that lives in one
+   * process; `filePayloads(dir)` is the durable one.
+   */
+  readonly payloads?: PayloadStore;
 }
 
 export interface SubmitInput {
@@ -278,11 +298,29 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   // the run cannot be supervised, and continuing past that is the thing the gate exists to
   // prevent.
   CODES.E_GATE_REQUIRED,
+  // A CHANNEL WHOSE BYTES CANNOT BE PRODUCED IS THE SAME CLASS, for the reason the paragraph
+  // above gives about routing: an ordinary failed Task takes an `error` edge, and a join with
+  // `onBranchError: "skip"` absorbs it into a run that reports **succeeded**. The state this
+  // run is meant to be reading is not there, so no other node's answer is worth more than the
+  // one that could not be computed, and "continue without it" is precisely the silent-wrong
+  // answer externalisation must never introduce.
+  CODES.E_PAYLOAD_UNRESOLVED,
 ]);
 
 interface Wave {
   readonly task: TaskRecord;
   readonly node: NodeSpec;
+}
+
+/**
+ * One map split three ways: what the journal carries, what it points at, and what the fold
+ * will end up holding. `values` and `external` are disjoint — a channel is in exactly one —
+ * and `projected` is their union with each ref turned back into a handle.
+ */
+interface Externalised {
+  readonly values: Record<string, unknown>;
+  readonly external?: Record<string, PayloadRef>;
+  readonly projected: Record<string, unknown>;
 }
 
 /**
@@ -788,6 +826,7 @@ export class Engine {
   readonly #maxParallelism: number;
   readonly #policyOpts: Omit<PolicyEngineOptions, "onEscalate">;
   readonly #replay: ReplayEffects | undefined;
+  readonly #payloads: PayloadStore | undefined;
   readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly #contextTokens: number;
   readonly #resolver: ResourceResolver;
@@ -825,6 +864,7 @@ export class Engine {
     // the constructor is the check.
     new PolicyEngine(this.#policyOpts);
     this.#replay = opts.replay;
+    this.#payloads = opts.payloads;
     this.#sleep = opts.sleep ?? defaultSleep;
     this.#contextTokens = opts.contextTokens ?? 100_000;
     // Mutations must resolve the same refs the original compile did. Without a real
@@ -2929,8 +2969,102 @@ export class Engine {
 
   // ── node execution ────────────────────────────────────────────────────────
 
+  /**
+   * Fetch every externalised channel this node can observe, before anything looks at one.
+   *
+   * THIS IS THE HALF THAT LETS `foldRun` STAY PURE. The fold puts a handle in the projection
+   * and does no I/O; the value only ever appears here, in an async method, and only for the
+   * channels the graph says this node reaches. A body still calls `view.get(...)` and still
+   * gets a plain value synchronously.
+   *
+   * `observedChannels`, NOT `node.reads`, and it is the same one-word correction `#gatePayload`
+   * and `dataClassification` already carry: a `tool` node's arguments are resolved against the
+   * whole scope, so a channel named only in `tool.args` reaches the tool while being absent
+   * from `reads`. Resolving `reads` alone would have handed such a tool `{$payload: ...}` as its
+   * argument. The two remaining ways a channel is read without appearing here — an expression's
+   * free variables and a `subgraph` node's delegated inputs — are not resolved but CANNOT BE
+   * HANDLES: `externalisableChannels` removes both from the eligible set at the other end.
+   *
+   * NO STORE PLUS A HANDLE IS A REFUSAL, never a fallback. It means this process is attached to
+   * a journal written by one that had a payload store, so the values this run needs exist and
+   * are simply not reachable from here. Handing the node the handle would let it succeed on the
+   * wrong value; `E_PAYLOAD_UNRESOLVED` is run-fatal, so no error edge routes around it.
+   */
+  async #resolveReads(ctx: RunContext, p: RunProjection, w: Wave): Promise<RunProjection> {
+    const need = observedChannels(w.node).filter((c) => p.external[c] !== undefined);
+    if (need.length === 0) return p;
+    const store = this.#payloads;
+    if (store === undefined) {
+      throw err.internal(
+        CODES.E_PAYLOAD_UNRESOLVED,
+        `node "${w.node.id}" reads ${need.map((c) => `"${c}"`).join(", ")}, whose ${
+          need.length === 1 ? "value was" : "values were"
+        } externalised by the process that wrote this journal — this engine was constructed with no \`payloads\` store`,
+        { details: { nodeId: w.node.id, taskId: w.task.taskId, channels: need } },
+      );
+    }
+    const resolved: Record<string, unknown> = {};
+    for (const c of need) resolved[c] = await store.get(ctx.runId, p.external[c]!);
+    return withResolved(p, w.task.branch, resolved);
+  }
+
+  /**
+   * Move the values in `writes` that are too big and eligible out of the journal.
+   *
+   * THE THRESHOLD IS MEASURED ON THE CANONICAL TEXT, which is the same text `journal/store.ts`
+   * weighs against its 8 MiB refusal and the same text the digest is taken over — so "the size
+   * that decided" and "the size recorded in the ref" are one number, and a value cannot be
+   * externalised under one measurement and refused under another.
+   *
+   * STRICTLY ABOVE the threshold: at exactly `EXTERNALISE_ABOVE_BYTES` the value stays inline,
+   * because the handle that would replace it costs ~110 bytes plus a round trip on every read,
+   * and swapping a 64 KiB value for that is a saving; swapping a 200-byte one for it is a loss
+   * in both bytes and reads. `boundedPayload` draws its own boundary the same way (`<=` passes).
+   *
+   * A FAILED `put` IS NOT SWALLOWED. It propagates, the Task fails, and the journal records the
+   * failure — which is the only honest outcome, because the alternative is to journal a handle
+   * whose bytes were never stored and discover it at the next read.
+   */
+  async #externalise(ctx: RunContext, values: Readonly<Record<string, unknown>>): Promise<Externalised> {
+    const store = this.#payloads;
+    if (store === undefined) return { values: { ...values }, projected: { ...values } };
+    const eligible = externalisableChannels(ctx.graph);
+    const kept: Record<string, unknown> = {};
+    const external: Record<string, PayloadRef> = {};
+    for (const [channel, value] of Object.entries(values)) {
+      if (!eligible.has(channel)) {
+        kept[channel] = value;
+        continue;
+      }
+      const canonical = canonicalize(value);
+      if (refFor(canonical).bytes <= EXTERNALISE_ABOVE_BYTES) {
+        kept[channel] = value;
+        continue;
+      }
+      external[channel] = await store.put(ctx.runId, canonical);
+    }
+    // `projected` is what the FOLD will build from these two maps, computed here so the state
+    // hashes this commit journals are hashes of the projection a reader will actually
+    // reconstruct — see `state.reduced.external`. Built by the same `payloadHandle` the fold
+    // uses, rather than by a second copy of the shape.
+    const projected = { ...kept };
+    for (const [channel, ref] of Object.entries(external)) projected[channel] = payloadHandle(ref);
+    return Object.keys(external).length === 0
+      ? { values: kept, projected }
+      : { values: kept, external, projected };
+  }
+
   async #executeTask(ctx: RunContext, w: Wave): Promise<NodeOutcome> {
-    const p = (await this.#project(ctx))!;
+    // HERE, AND ONLY HERE, is where a handle becomes a value. Everything downstream of this
+    // line — the policy decision, the gate payload a human reads, the gate BINDING that
+    // decision is compared against, `#dispatch` and every node body it reaches — takes `p`
+    // from this variable, so all of them see one projection and cannot disagree about whether
+    // a channel is a byte string or a reference to one. Resolving inside `#dispatch` instead
+    // was the version that did not work: the gate raised at line ~2650 would have bound a
+    // digest computed over handles and `#approvalStillCovers` would have re-derived it over
+    // values, so every approved task would have failed as "no longer the one this task would
+    // execute".
+    const p = await this.#resolveReads(ctx, (await this.#project(ctx))!, w);
     const { node, task } = w;
     const spec = ctx.graph.spec;
 
@@ -5520,35 +5654,58 @@ export class Engine {
       });
     }
 
+    // A join emits its fold; a root-branch Task reduces its own writes immediately;
+    // a Task inside a fan-out holds them until its join.
+    //
+    // COMPUTED BEFORE `task.committed` IS BUILT, which it was not, because the answer decides
+    // whether that event's `writes` may be externalised at all. Nothing else moved: it is the
+    // same expression over the same `p`, `w` and `outcome`.
+    const reduce = outcome.reduced ?? this.#immediateReduce(ctx, p, w, outcome);
+
+    // A WRITE THIS COMMIT DOES NOT REDUCE STAYS INLINE, and the condition is the whole reason
+    // `#foldJoin` needs no resolution step. `#immediateReduce` returns `undefined` for a Task
+    // inside a fan-out — its writes are a PROPOSAL a later join re-folds — and a join at depth
+    // returns its partial fold as its own held write. In both of those cases the value has to
+    // be foldable by a synchronous reducer later, so it is journaled whole. What is left is
+    // exactly the case where this commit's own `state.reduced` carries the value forward, and
+    // the handle it leaves in `TaskRecord.writes` is never read as a number or an array.
+    const committed =
+      outcome.reduced === undefined && reduce !== undefined
+        ? await this.#externalise(ctx, outcome.writes)
+        : { values: { ...outcome.writes }, projected: { ...outcome.writes } };
+
     events.push({
       type: "task.committed",
       payload: {
         status: outcome.status === "failed" ? "failed" : "succeeded",
-        writes: outcome.writes,
+        writes: committed.values,
         take,
         usage: outcome.usage,
         attempt: w.task.attempt + 1,
+        ...(committed.external === undefined ? {} : { external: committed.external }),
       },
       actor: SYSTEM_ACTOR("executor"),
       taskId: w.task.taskId,
     });
 
-    // A join emits its fold; a root-branch Task reduces its own writes immediately;
-    // a Task inside a fan-out holds them until its join.
-    const reduce = outcome.reduced ?? this.#immediateReduce(ctx, p, w, outcome);
     if (reduce !== undefined) {
+      const applied = await this.#externalise(ctx, reduce.values);
       const before = stateHash(p.channels);
-      const after = stateHash({ ...p.channels, ...reduce.values });
+      // `applied.projected`, not `reduce.values`: the fold builds `p.channels` from the event's
+      // `values` PLUS a handle per `external` entry, so hashing the raw values here would
+      // record a state hash of a projection nobody reconstructs.
+      const after = stateHash({ ...p.channels, ...applied.projected });
       events.push({
         type: "state.reduced",
         payload: {
           channels: reduce.channels,
-          values: reduce.values,
+          values: applied.values,
           branchCount: reduce.branchCount,
           skipped: reduce.skipped,
           degraded: reduce.skipped > 0,
           stateHashBefore: before,
           stateHashAfter: after,
+          ...(applied.external === undefined ? {} : { external: applied.external }),
         },
         actor: SYSTEM_ACTOR("executor"),
         taskId: w.task.taskId,

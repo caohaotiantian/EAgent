@@ -31,6 +31,7 @@ import type { LoomError } from "../errors.ts";
 import type { EdgeSpec, NodeSpec } from "../graph/spec.ts";
 import type { NodeId, RunId, Seq, TaskId, GateId, CheckpointId } from "../ids.ts";
 import type { Classification, Posture, UsageRecord } from "../vocab.ts";
+import type { PayloadRef } from "./payloads.ts";
 
 export type { Classification, Posture, UsageRecord };
 
@@ -198,6 +199,20 @@ export interface EventPayloads {
     readonly take: readonly string[];
     readonly usage: UsageRecord;
     readonly attempt: number;
+    /**
+     * Channels whose value is NOT in `writes` — it is in the payload store under this digest.
+     *
+     * THE FOLD MAY NOT DECIDE THIS BY LOOKING AT A VALUE. A node body is free to write
+     * `{$payload: {digest, bytes}}`, and a fold that recognised handles by their shape would
+     * let any node that can write a channel name a payload it never produced. So the fact is
+     * DECLARED here, by the executor that did the externalising, and the fold reads the
+     * declaration instead of guessing. A key present here is absent from `writes`; the two
+     * maps are disjoint by construction.
+     *
+     * The digest is the same one `effect.completed.resultDigest` has always carried, for the
+     * same reason: it is what keeps the value's identity in the journal after the bytes leave.
+     */
+    readonly external?: Readonly<Record<string, PayloadRef>>;
   };
   "task.failed": { readonly error: ErrorRecord; readonly attempt: number };
   "task.skipped": { readonly reason: string };
@@ -248,6 +263,17 @@ export interface EventPayloads {
     readonly degraded: boolean;
     readonly stateHashBefore: string;
     readonly stateHashAfter: string;
+    /**
+     * Channels whose reduced value is in the payload store rather than in `values`.
+     *
+     * `stateHashBefore` and `stateHashAfter` are hashes of the projection AS THE FOLD BUILDS
+     * IT — over handles, not over the bytes behind them. That is not a weakening: a handle is
+     * the digest of its own content, so two runs that reduce the same value still reach the
+     * same state hash, and a run that reduced a different value still reaches a different one.
+     * Hashing the resolved values instead would mean the executor and a replay comparing
+     * projections had to agree on which side of the indirection they were standing.
+     */
+    readonly external?: Readonly<Record<string, PayloadRef>>;
   };
   "channel.written": { readonly channel: string; readonly reducer: string; readonly valueDigest: string };
 

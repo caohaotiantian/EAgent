@@ -24,6 +24,7 @@ import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
+import { filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
 import { builtinTools, fsRestore } from "./builtin/tools.ts";
 import { Engine } from "./run/engine.ts";
@@ -451,6 +452,23 @@ interface Workspace {
   readonly store: SqliteStateStore;
   readonly engine: Engine;
   readonly bus: InProcessEventBus;
+  /**
+   * Where this workspace's externalised channel values live.
+   *
+   * EXPOSED SO THAT `loom replay` CAN BE HANDED THE SAME ONE, which is the third member of a
+   * family this file already documents twice: a replay engine built without the recording
+   * engine's hooks ran a different program, one built without its policy held different
+   * capabilities, and one built without this externalises nothing and recomputes an inline
+   * value where the journal recorded a handle. Measured before this field existed, on a real
+   * `loom run` of a three-node chain:
+   *
+   *     loom replay <runId> --graph chain.json
+   *     ✗ state.reduced : expected {"doc":{"$payload":{"digest":"sha256:6ceb75ce…"}},…},
+   *                       got {"doc":"xxxxxxxx…300,000 more…"}
+   *
+   * `match: false` blamed on the run, when the replayer was what differed.
+   */
+  readonly payloads: PayloadStore;
   readonly resolver: ResourceResolver;
   /** Every hook body this workspace published. Authoritative here: a ref it lacks is a MISSING FILE. */
   readonly hooks: HookRegistry;
@@ -547,6 +565,20 @@ export function openWorkspace(
 
   const store = new SqliteStateStore({ path: join(dataDir, "journal.db") });
   const bus = new InProcessEventBus({ store });
+  // BESIDE `journal.db`, INSIDE THE DATA DIR, and both halves of that are the argument.
+  //
+  // Externalisation makes the journal file no longer self-contained: an event names a payload
+  // instead of carrying it. That is only a fair trade if the two travel together, and the
+  // paragraph below has already settled what travels together — the data dir is "one directory
+  // to copy, archive or delete". So the payloads go in it, and `loom status` already prints its
+  // path. A journal.db carried off on its own now refuses (`E_PAYLOAD_UNRESOLVED`, run-fatal)
+  // rather than answering from a value it does not have.
+  //
+  // AND IT INHERITS THE DENY-LIST FOR FREE. `deny: [dataDir, ...]` below exists because the
+  // journal sits in a directory a `fs.write` tool could otherwise reach; a payload store outside
+  // it would have needed its own entry, and the entry somebody forgets is the one this codebase
+  // has paid for twice.
+  const payloads = filePayloads(join(dataDir, "payloads"));
 
   const tools = new ToolRegistry();
   // THE JAIL ROOT CONTAINS THE JOURNAL, so containment alone is not the boundary.
@@ -687,6 +719,7 @@ export function openWorkspace(
   const engine = new Engine({
     store,
     bus,
+    payloads,
     // A NAME OF ITS OWN, so a live lease held by another plane is another plane's. See
     // `planeWorkerId` for the measurement that says why the default could not stay.
     workerId: planeWorkerId(),
@@ -713,7 +746,7 @@ export function openWorkspace(
     sweep: { limit: GATE_CLOCK_LIMIT },
   });
 
-  return { root, dataDir, store, engine, bus, resolver, hooks, granted, execAllowlist: execPrograms, delivery, models, close: () => store.close() };
+  return { root, dataDir, store, engine, bus, payloads, resolver, hooks, granted, execAllowlist: execPrograms, delivery, models, close: () => store.close() };
 }
 
 /**
@@ -3345,6 +3378,11 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             // differed. A harness that answers a different question than the one asked is worse
             // than one that fails.
             policy: { granted: ws.granted },
+            // AND THE SAME PAYLOAD STORE, for the reason the two comments above give. A replay
+            // re-executes into a shadow journal and compares events; an engine with no payload
+            // store journals the value where the recording journaled a handle, so every run
+            // that externalised anything reported `match: false` about itself.
+            payloads: ws.payloads,
           },
         });
         for (const f of report.frames.filter((x) => !x.match)) {

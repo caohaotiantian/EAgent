@@ -737,16 +737,26 @@ Each was verified against the code, not remembered.
   reach inside `policy` or `budget`: `policy: {posturr: "out"}` and `budget: {nonsense: 5}` both
   compile `ok`. See §A0 — that hole is the same family this entry closed one level up. The node's own fields turned out to hold
   the worst instance in the family, `policyy` losing a declared `posture: "in"` in silence.
-- **The journal amplifies a payload by `2N+2`.** **BOUNDED, NOT FIXED.** `prepare` now refuses a
-  single canonical payload above 8 MiB (`E_PAYLOAD_TOO_LARGE`), which stops the runaway — a 256 MiB
-  event used to be accepted at ~2.5 GiB of RSS — and says what to do instead. It does nothing about
-  the amplification itself. **The real fix is payload externalisation**: a reference above a
-  threshold, resolved on read. The write half is a threshold check in the same funnel; the read half
-  is the hard part, because `foldRun` is SYNCHRONOUS and hands channel values straight to node
-  bodies, so either the fold becomes async (touching the engine, gates, replay and audit) or the
-  projection carries unresolved handles and replay's comparison learns to compare what they point
-  at. `effect.completed` already carries `resultDigest`, so an externalised effect result keeps its
-  identity for free; `task.committed` and `state.reduced` would need one. Original finding: Measured: `journal_bytes = payload × (2N + 2)`
+- ~~**The journal amplifies a payload by `2N+2`.**~~ **FIXED for an eligible channel, and the
+  eligible set is named.** `EngineOptions.payloads` takes a content-addressed store; a `replace`
+  channel whose canonical value is STRICTLY above 64 KiB (`EXTERNALISE_ABOVE_BYTES`) is written to
+  it and the journal carries `{digest, bytes}` on `task.committed.external` / `state.reduced.external`
+  instead. `foldRun` STAYED PURE AND SYNCHRONOUS — it puts a `PayloadHandle` in the projection and
+  records the fact in `RunProjection.external` — and `Engine.#resolveReads` fetches a node's
+  `observedChannels` before the body runs, so `view.get()` is still synchronous and still returns a
+  plain value. Measured through the binary on a three-node chain moving one 300 KB document:
+  `.loom/journal.db` **1.5M → 340K**, plus a 296K `payloads/` holding ONE copy, and
+  `loom replay` reports `match: true`. In-process, over the same chain at N = 2…5 nodes:
+  3.01x / 5.01x / 7.01x / 9.02x of the payload inline, **flat 1.01–1.02x externalised** — what is
+  left is `run.submitted`'s copy of the inputs.
+  **What is NOT eligible, and why** (`run/externalise.ts`): any reducer but `replace`, because
+  every other one seeds its fold from the channel's current value and would have to materialise the
+  handle inside a synchronous reducer; a declared OUTPUT, because nothing resolves
+  `run.completed.outputs`; a channel any `when`/`until`/router case names, because `#edgesToTake`
+  evaluates against the raw scope and a handle would route the graph silently wrong; a fan-out's
+  `over`/`as`; and a `subgraph` node's delegated inputs, which go to a child run with its own
+  payload scope. A write HELD FOR A JOIN also stays inline — a join re-folds it synchronously.
+  Original finding: Measured: `journal_bytes = payload × (2N + 2)`
   where N is the nodes a value flows through — `task.committed` and `state.reduced` each carry a
   full copy per hop, plus `run.submitted` and `run.completed`. One run, one 16 MiB value, four
   nodes = **160 MiB of SQLite**, fsynced. Nothing caps bytes anywhere: a 256 MiB single event is
@@ -754,6 +764,10 @@ Each was verified against the code, not remembered.
   5 KB is refused, 2-deep 64 MiB is accepted. `foldRun` is NOT the problem (0.0 ms over 160 MiB;
   it copies references); the cost is in append and in replay, which re-materialises the whole
   journal at four sites and is strictly linear in bytes.
+- **`run.submitted.inputs` is the last inline copy, and it is the largest one left.** Inputs arrive
+  before any node has run, so there is nothing yet to point at — but a 300 KB input is still 300 KB
+  of journal, and it is now the whole of the 1.01x above. Externalising it needs a store the
+  SUBMIT path can reach, which `submit` does not have today.
 - ~~**`validate.ts` and `compile.ts` compute `dataFloor` from different sets.**~~ **DONE.** One
   exported `dataFloorOf` now, read by both. The drift was visible in the direction that matters: an
   author declaring `posture: "on"` beside a templated `secret_ref` read ran at `in` and was told
@@ -836,6 +850,15 @@ Each was verified against the code, not remembered.
   described settlement, which happens after, and concluded nothing bound before.
 - **`reads` is not enforced as the read set.** The compile rule covers edge conditions and router
   cases but never tool arguments, so a template can name a channel the node did not declare.
+  **Half of this was already false, checked by running:** the STATE VIEW is enforced —
+  `viewFor` → `makeStateView` builds a slice from `reads` alone and `get`/`require` refuse anything
+  outside it (`E_CHANNEL_UNDECLARED`). What is unenforced is the COMPILE rule, and the runtime
+  effect of that is already contained: `observedChannels(node)` — `reads` ∪ every `${channel}` root
+  in `tool.args` — is what the taint rule, `dataClassification`, `dataFloorOf`, the gate payload and
+  now `#resolveReads` all read, so the templated channel is covered everywhere a decision is made.
+  The one read that `observedChannels` still does NOT cover is a `subgraph` node's `inputs`, which
+  `#gateBinding`'s `delegated` comment already names; `externalisableChannels` excludes those
+  channels rather than relying on it.
 - **`reachableToolNames` does not descend into a subgraph**, so a subgraph node is classified
   `read_only` however irreversible its child is.
 - **A branch choice made from untrusted content raises nothing.** Bounded twice (a router is
@@ -1027,7 +1050,18 @@ is a better view of nothing.
    these fields simply never reached it. A token ceiling is the one an operator can reason about
    when prices are unknown — the case hit for real against a GLM endpoint, where placeholder
    prices had to be invented before the cost budget meant anything.
-7. **Payload externalisation gets built, as HANDLES IN THE PROJECTION** — decided 2026-08-26,
+7. ~~**Payload externalisation gets built, as HANDLES IN THE PROJECTION**~~ — **BUILT 2026-08-28,
+   in the decided shape.** `journal/payloads.ts` (the store and the threshold),
+   `run/externalise.ts` (which channels are eligible, and why each exclusion exists),
+   `RunProjection.external` (the fold's record of which channels are handles — a FIELD, never a
+   shape sniff, or a node that writes `{$payload:…}` could name a payload it never produced), and
+   `Engine.#resolveReads` / `#externalise`. `foldRun` is unchanged in kind: still pure, still
+   synchronous. Evidence in `test/run/payload-externalisation.test.ts` and in the §A entry above.
+   The prerequisite turned out to be half-true already — see the corrected §A bullet. Two things
+   the decision assumed and the build did not do: `task.committed` and `state.reduced` did NOT each
+   need a digest FIELD of their own, they needed a per-channel `external` MAP (a digest alone
+   cannot say WHICH channel left); and `run.submitted.inputs` is still inline. Retention tiering is
+   now unblocked. Original text: decided 2026-08-26,
    and the fork was not about effort. Above a threshold a payload leaves the journal and leaves a
    `{ref, digest}`; **`foldRun` stays pure and synchronous**, and the engine resolves exactly the
    channels a node DECLARED it reads before invoking the body, so `view.get()` stays synchronous
@@ -1294,7 +1328,7 @@ again. **They are stated as properties to preserve, not as history to honour.**
 | `G.4` **Divergence must be terminal and loud.** The known failur | partial | TERMINAL AND LOUD: already true for the recorded-effect path, so that half of the bullet is stale as a work item. `E_REPLAY_DIVERGENCE` is in `RUN_FATAL_CODES` (engine.ts:265-… |
 | `G.5` **Two-axis labels (D4).** Integrity × confidentiality, mos | partial | Four sub-claims, three verdicts. (a) "Integrity × confidentiality" — BOTH AXES NOW EXIST: `tainted`/`applyTaint` for integrity and `carriesSecret`/`applySecretFlow` for confid… |
 | `G.6` **Prompt text into the artifact hash (D7).** A prompt edit | partial | FIRST HALF TRUE, SECOND HALF FALSE. Prompt text is genuinely not in the artifact hash — `graphHash: digest(spec)` (compile.ts:158) digests the spec, and a ref'd prompt's text … |
-| `G.7` **Payload externalisation.** Above a byte threshold a payl | open | Reproduced exactly as written. `MAX_PAYLOAD_BYTES = 8 * 1024 * 1024` (journal/store.ts:179) and `boundedPayload` THROWS above it (store.ts:214-221); the code's own comment at … |
+| `G.7` **Payload externalisation.** Above a byte threshold a payl | DONE 2026-08-28 | Reproduced exactly as written. `MAX_PAYLOAD_BYTES = 8 * 1024 * 1024` (journal/store.ts:179) and `boundedPayload` THROWS above it (store.ts:214-221); the code's own comment at … |
 | `G.8` **Proposed-API mechanism and a version pin (D5).** | open | Both halves of D5 are unbuilt. There is no proposed-API declaration file, no opt-in, and no publish-time refusal for an extension that uses one; and there is no runtime versio… |
 | `G.9` **One retry budget per run**, decremented across every lay | open | The work item stands: no run-scoped retry budget exists, so nothing decrements across layers. On the RATIONALE, which is a three-member aggregate — I confirmed two of the thre… |
 | `G.ids` Each traces to a decision in `DESIGN.md`. | partial | Every id cited in G resolves, and every subject matches: D1 "The default surface is one line" ↔ the one-line agent surface; D2 "Effects are DECLARED, not called" ↔ declared ef… |
@@ -1339,9 +1373,7 @@ Each traces to a decision in `DESIGN.md`.
   `DESIGN.md` D4 for what would reopen it.
 - **Prompt text into the artifact hash (D7).** A prompt edit currently changes what a resumed run
   does, silently.
-- **Payload externalisation.** Above a byte threshold a payload moves out of the journal and
-  leaves a reference. This is what actually bounds the store; retention tiering is downstream of
-  it.
+- ~~**Payload externalisation.**~~ **DONE** — see §A. Retention tiering is no longer blocked on it.
 - **Proposed-API mechanism and a version pin (D5).**
 - **One retry budget per run**, decremented across every layer. Engine retry × provider retry ×
   agent-loop retry currently multiply.

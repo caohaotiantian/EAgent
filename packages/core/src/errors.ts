@@ -389,6 +389,18 @@ export const CODES = {
   E_TRACE_INCONSISTENT: "E_TRACE_INCONSISTENT",
   /** A run finished without writing any declared output — a path was stranded. */
   E_OUTPUT_MISSING: "E_OUTPUT_MISSING",
+  /**
+   * A channel holds an externalised payload and the bytes could not be produced — no payload
+   * store is configured, the cell is gone, or what came back does not digest to what the
+   * journal recorded.
+   *
+   * `internal` rather than `validation`, so it is not retried: the same missing file will be
+   * missing again. And RAISED rather than fallen back from, which is the whole point. The
+   * alternative is to hand the node its handle, and a body that receives `{$payload: ...}`
+   * where a document belonged does not fail — it succeeds on the wrong value, and the journal
+   * records that success as the run's answer. A guard that cannot decide fails closed.
+   */
+  E_PAYLOAD_UNRESOLVED: "E_PAYLOAD_UNRESOLVED",
 } as const;
 
 export type Code = (typeof CODES)[keyof typeof CODES];
