@@ -714,6 +714,16 @@ test("a malformed channels file REFUSES TO START rather than delivering gates no
       ["a string toleranceMs", { channels: [{ name: "slack", url: "https://x.example.com", callbackSecret: "s", toleranceMs: "60000" }] }],
       // Refused by `SignedWebhookChannel`, re-raised naming the file and the row.
       ["a callbackBaseUrl with credentials in it", { callbackBaseUrl: "https://u:p@loom.example.com", channels: [{ name: "slack", url: "https://x.example.com", callbackSecret: "s" }] }],
+      // A FIELD THAT WAS READ BY NOTHING. Driven before this refusal existed, four values —
+      // "slack", "carrier-pigeon", "webhook", "email" — and all four were ACCEPTED and all four
+      // produced the identical plain notify-only webhook, indistinguishable from a row with no
+      // `kind` at all. Every one of the four is a config file that reads as configured and is
+      // not, and "carrier-pigeon" proves the field constrained nothing whatsoever.
+      ["a channel declaring a kind", { channels: [{ name: "slack", kind: "slack", url: "https://x.example.com" }] }],
+      // Refused too, and deliberately. There is no `kind` VOCABULARY to be right about — this
+      // reader has one transport — so accepting the "correct" spelling would advertise a set
+      // that does not exist and put the next unread field back on the table.
+      ["a channel declaring kind: webhook", { channels: [{ name: "slack", kind: "webhook", url: "https://x.example.com" }] }],
     ];
     for (const [what, body] of cases) {
       const file = writeChannels(d.dir, body);

@@ -269,6 +269,48 @@ test("`module.exports` in a hook file is a SYNTAX ERROR, and the graph is refuse
   }
 });
 
+test("`module.exports` in a FUNCTION file is refused at compile too, not left to the run", async () => {
+  // THE ASYMMETRY THIS TEST EXISTS FOR. The identical mistake, one directory over, used to
+  // print `! skipping …` and then `ok` with exit 0 — measured — and only failed later, inside
+  // a run, as `E_RESOURCE_NOT_FOUND: no function registered as "function/count@stable"`. A
+  // deleted body was already a compile error on BOTH paths; only a malformed one differed.
+  const ws = workspace();
+  try {
+    writeFileSync(
+      join(ws.dir, "resources", "function", "count.js"),
+      "module.exports = function (view, ctx) { return {}; };\n",
+    );
+    const r = await loom(ws.dir, ["compile", graphFile(ws.dir, "fan-out-join.json")]);
+    assert.notEqual(r.code, 0, `compile must refuse, got code ${r.code}:\n${r.out}${r.err}`);
+    const said = `${r.out}${r.err}`;
+    assert.match(said, /BARE FUNCTION EXPRESSION/, "the loader's warning names the rule that was broken");
+    assert.match(said, /this graph declares 1 function body\(s\) this workspace does not publish/);
+    assert.match(said, /function\/count@stable/);
+    assert.doesNotMatch(r.out, /^ok/m, "a graph that cannot run must not print ok");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("an assertion evaluator's ref is a function body, and a malformed one is refused as well", async () => {
+  // `#functionBody` has two callers — `#runFunction` and `#runEvaluator`'s assertion arm — and
+  // every previous change to this contract landed at one of them a commit before the other.
+  // review-bench names `function/bench-check@stable` from an `evaluator`, so the second caller
+  // has a shipped example to check it against.
+  const ws = workspace();
+  try {
+    writeFileSync(
+      join(ws.dir, "resources", "function", "bench-check.js"),
+      "module.exports = function (view, ctx) { return {}; };\n",
+    );
+    const r = await loom(ws.dir, ["compile", graphFile(ws.dir, "review-bench.json")]);
+    assert.notEqual(r.code, 0, `compile must refuse, got code ${r.code}:\n${r.out}${r.err}`);
+    assert.match(`${r.out}${r.err}`, /function\/bench-check@stable/);
+  } finally {
+    ws.dispose();
+  }
+});
+
 // ── the claims the example files make in their own comments ──────────────────
 
 test("ctx.effects in a SANDBOXED body refuses, exactly as summarise.js says it does", () => {

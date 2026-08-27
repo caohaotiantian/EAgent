@@ -94,15 +94,22 @@ test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"fail
   // the graph compiled, the run started, and the executor found no child. With the fabrication
   // gone that is a COMPILE error (GRAPH015) and nothing is printed, because nothing ran.
   //
-  // A PUBLISHED function body that does not evaluate keeps the same failure and survives the
-  // fix: the file exists, so the ref resolves and the graph compiles; `registerFunctions`
-  // cannot compile it, warns on stderr and registers nothing; and `FunctionRegistry.require`
-  // raises the same E_RESOURCE_NOT_FOUND at run time. Compile-clean, run-failed, which is the
-  // shape this test needs.
+  // THE FIXTURE MOVED A SECOND TIME, for the second time because a compile-time check got
+  // stricter. It was a published function body that did not PARSE: the file existed so the ref
+  // resolved, `registerFunctions` warned on stderr and registered nothing, and
+  // `FunctionRegistry.require` raised E_RESOURCE_NOT_FOUND from inside the run. That is exactly
+  // the late failure `requireFunctionBodies` now refuses at compile — so that fixture, like the
+  // unpublished-subgraph one before it, no longer reaches the engine at all.
+  //
+  // A body that COMPILES AND THROWS is the shape this test needs and the one no compile-time
+  // check can take away, because what it does is only knowable by running it. Measured through
+  // the shipped CLI: exit 1, `"status": "failed"`, and
+  // `"error": {"class":"internal","code":"E_INTERNAL","message":"Error: boom"}` — the body's own
+  // words on stdout, which is the whole point.
   const d = emptyDir();
   try {
     mkdirSync(join(d.dir, "resources", "function"), { recursive: true });
-    writeFileSync(join(d.dir, "resources", "function", "broken.js"), "function (view) { return {");
+    writeFileSync(join(d.dir, "resources", "function", "broken.js"), 'function (view) { throw new Error("boom"); }');
     const g = join(d.dir, "g.json");
     writeFileSync(
       g,
@@ -125,10 +132,14 @@ test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"fail
     );
     const r = await run(["run", g, "--workspace", d.dir, "--input", '{"a":{}}']);
     assert.equal(r.code, 1);
-    const body = JSON.parse(r.out.slice(r.out.indexOf("{"))) as { status: string; error?: { code?: string } };
+    const body = JSON.parse(r.out.slice(r.out.indexOf("{"))) as {
+      status: string;
+      error?: { code?: string; message?: string };
+    };
     assert.equal(body.status, "failed");
     assert.ok(body.error !== undefined, "the error reaches stdout, not only the journal");
-    assert.equal(body.error?.code, "E_RESOURCE_NOT_FOUND");
+    assert.equal(body.error?.code, "E_INTERNAL");
+    assert.match(String(body.error?.message), /boom/, "the BODY's own words, not a generic label");
   } finally {
     d.dispose();
   }

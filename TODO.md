@@ -373,6 +373,26 @@ Naming that here rather than letting them sit unowned:
   `validate.ts`, `subprocess.ts`, `gate.ts`, `redact.ts`, `http.ts`, `hooks.ts`,
   `policy.ts`, `delivery.ts`, `resources/hook-loader.ts` and `scripts/check-surface.mjs` — ten
   files, seventeen occurrences.
+- **`NEW` F36'S ASYNC REFUSAL IS IN ONE LOADER OF TWO, and the hole it closed is open one
+  directory over.** `resources/functions.ts:302-308` refuses an async body at LOAD with
+  "an async function body cannot be bounded by any deadline". `resources/hook-loader.ts` has
+  **zero** occurrences of the string `async` (`/usr/bin/grep -acn async` → 0). Driven, one
+  source, both loaders:
+
+      function: REFUSED -> function resource "function/p@stable" did not evaluate: an async
+                function body cannot be bounded by any deadline. The vm …
+      hook:     async body LOADED (no refusal)
+
+  and the consequence reproduces exactly as F36 describes it. `async (a, b) => { await 0;
+  while (true) {} }` at a hook point, `callTimeoutMs: 200`: the call RETURNS `Promise
+  { <pending> }` — the vm timeout never engages, because the vm call itself finished — and the
+  process spins until killed. `EXIT=137`.
+
+  This is a drift receipt, not a new class: the rule is stated once per loader instead of once at
+  the seam they share, which is the same argument that put the body-shape sentence in
+  `resources/realm.ts`. **Its fix is a REFUSAL on config that loads today** — an async hook body
+  someone wrote yesterday stops loading — so it wants its own `fix:` commit with this
+  reproduction in the body, and it is not something a version pin may grandfather.
 - **`CITED` No `LICENSE` at the repository root.** The `loom` branch dropped the one `init`
   carries; neither the root manifest nor `packages/core` declares a license.
 - ~~**The `tui` removal is an unfinished transaction**~~ **MOOT 2026-08-25** — `packages/eagent`,
@@ -851,6 +871,14 @@ clock bound to a journaled task boundary, `Date` and `Intl` absent, an embedder 
 that refuses a governed name. A user-authored reducer would run under exactly the machinery that
 was not there when the deferral was written. Property 2 says extensibility should be unlimited;
 a closed reducer set is one of the six things the audit found still require a fork.
+
+**Those six now live in `README.md`, "Extending it, and where that stops"**, beside the eight that
+need no fork, each quoted from the refusal the binary prints. Two of the six moved while being
+written down: an in-process tool needs a fork from the CLI and NOT from a library embedder
+(`ToolRegistry` is pinned in `scripts/surface.json`; `openWorkspace` and `compileRealm` are not),
+and it is a non-webhook delivery TRANSPORT that needs a fork rather than "a delivery channel" —
+any HTTP endpoint is a config row. Do not re-enumerate the set here: one list, in the file a
+stranger opens first.
 
 
 **Re-checked 2026-08-25 — 8 items: 4 partial · 3 open · 1 n/a.**

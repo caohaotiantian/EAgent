@@ -292,6 +292,28 @@ export interface RealmOptions {
   readonly callTimeoutMs: number;
 }
 
+/**
+ * The one sentence that says what a code resource FILE has to be, at the one place that finds out
+ * it isn't.
+ *
+ * It lives here, and not in each loader, because both refusals below are reached by
+ * `createFunctionLoader` and `createHookLoader` alike — measured: a `module.exports` body in
+ * `resources/function/` and the same body in `resources/hook/` produce character-identical text
+ * apart from the leading kind. Two copies of this rule in two loaders is exactly how those two
+ * files came to disagree about async bodies, and a rule the tool states twice is a rule that
+ * eventually states two different things.
+ *
+ * Before this, the tool relayed V8 and nothing else: `did not evaluate: Unexpected token ';'`.
+ * That names the character V8 choked on and never the rule the author broke, and the rule is not
+ * guessable from the token — `module.exports`, `export default` and a top-level `const` fail at
+ * three different tokens for one reason.
+ */
+const SHAPE_RULE =
+  "a code resource file is a BARE FUNCTION EXPRESSION and nothing else. The loader evaluates " +
+  "(<the whole file>), so its value IS the function: (view, ctx) => {…} for a function body, " +
+  "(input, ctx) => {…} for a hook body. module.exports, export default and any top-level " +
+  "statement are errors before the body ever runs — the file is EVALUATED, not imported";
+
 export function compileRealm(opts: RealmOptions): RealmCall {
   // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
   // Seeding it with host objects is what opened the bridge the first time.
@@ -323,13 +345,29 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   } catch (e) {
     throw err.validation(
       CODES.E_RESOURCE_INVALID,
-      `${opts.what} resource "${opts.label}" did not evaluate: ${(e as Error).message}`,
+      `${opts.what} resource "${opts.label}" did not evaluate: ${(e as Error).message}` +
+        // GATED ON `.name`, NEVER `instanceof`. The error is constructed by the VM CONTEXT'S
+        // SyntaxError, whose prototype is not the host's, so `e instanceof SyntaxError` is FALSE
+        // for both `module.exports = …;` and `export default …` — measured, both spellings, both
+        // false, both `name === "SyntaxError"`. The obvious form would compile, pass review, and
+        // silently never fire, which is worse than not adding the sentence.
+        //
+        // Gated at all, because this arm also catches errors the body itself raised while
+        // evaluating. A body that throws on line 1 is not a shape mistake and must not be told it
+        // is one. The residual: `module.exports = f` with no trailing semicolon parses and fails
+        // as a ReferenceError, `module is not defined` — the same mistake, and it does NOT get
+        // this sentence. Widening the gate to name that case is a separate judgement; it is
+        // recorded here rather than guessed at.
+        ((e as Error).name === "SyntaxError" ? ` — ${SHAPE_RULE}` : ""),
     );
   }
   if (typeof value !== "function") {
     throw err.validation(
       CODES.E_RESOURCE_INVALID,
-      `${opts.what} resource "${opts.label}" evaluated to ${typeof value}, not a function`,
+      // UNCONDITIONAL here: nothing else evaluates to a non-function at this seam. A JSON object
+      // in a `.js` body, or a body whose last expression is a config table, arrives here having
+      // parsed cleanly, and the only useful thing to say is what the file was supposed to be.
+      `${opts.what} resource "${opts.label}" evaluated to ${typeof value}, not a function — ${SHAPE_RULE}`,
     );
   }
   if (typeof (context as Record<string, unknown>)[opts.entry] !== "function") {
