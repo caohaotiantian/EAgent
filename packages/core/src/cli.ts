@@ -89,8 +89,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                [--sweep-ms 1000]                           how often gate SLAs are checked
   loom compile <graph.json|yaml>                           validate and print diagnostics
 
-  A workspace publishes resources/ by directory: prompt/*.md, function/*.js,
-  subgraph/*.json, and graphs/*.json for the graphs a run can be re-attached from.
+  A workspace publishes resources/ by directory, one directory per kind:
+    prose  prompt, agent_profile, skill   *.md *.txt
+    specs  subgraph, graph                *.json *.yaml *.yml
+    code   function, hook                 *.js *.mjs
+  A CODE BODY IS A BARE FUNCTION EXPRESSION and nothing else: (view, ctx) => {…}
+  for a function, (input, ctx) => {…} for a hook. Not module.exports, not export
+  default — the file is EVALUATED, not imported, and its value IS the function.
+  graphs/ sits beside resources/ and holds the graphs a run can be re-attached from.
   loom run     <graph.json|yaml> [--input JSON] [--as ID]  run to completion or to a gate
                [--budget USD]                              a ceiling for THIS run
   loom gates   <runId>                                     list open gates
