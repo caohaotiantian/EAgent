@@ -553,16 +553,24 @@ export function isGolden(
  * ```
  *                                    n    p50Cost   p90Score   cond 2 passes   cond 4
  * all 30 with their spec            30    $0.0150      0.340         3 / 30      pass
- * all 30 with NO spec, kept         30    $0.0150      0.000        30 / 30      pass   ← before
- * all 30 with NO spec, dropped       0    $0.0000      0.000        30 / 30      FAIL   ← after
+ * all 30 with NO spec, dropped       0    $0.0000      0.000        30 / 30      FAIL
  * 15 and 15, dropped                15    $0.0080      0.325         2 / 30      FAIL
  * ```
  *
- * The "before" row is the one to read: thirty runs nobody could measure certified "cohort large
- * enough" and set a promotion bar of ZERO, which every one of them then tied — condition 2
- * passing 30/30 is the vacuous bar this file's `didWork` section already refused once, arriving
- * through a different door. Dropping them makes `n` say what it means, and condition 4 then
- * refuses the cohort instead of certifying it against nothing.
+ * A THIRD ROW STOOD HERE AND HAS BEEN REMOVED RATHER THAN RENUMBERED. It claimed to be the
+ * pre-fix behaviour — specless members KEPT, at `p90Score 0.000` and condition 2 passing 30/30 —
+ * and two independent reconstructions of the code as it stood, one by this lane's reviewer and
+ * one after it, both got `p90Score 0.340` and condition 2 passing 3/30 on this same fixture. A
+ * number nobody can reproduce does not become true by being specific, and swapping in a second
+ * guess would be the failure the working rules name: a correction that replaces a false claim
+ * with a differently-false one is worse than the original.
+ *
+ * The argument the row was offered as evidence for does not rest on it. Keeping a member nobody
+ * could measure inflates `n`, so `MIN_COHORT_SIZE` counts a run that carries no signal toward
+ * "cohort large enough" — that is visible in the two rows above, where dropping thirty
+ * unmeasurable members takes `n` from 30 to 0 and condition 4 from pass to FAIL. Whether their
+ * scores also flattened the p90 is the part that did not reproduce, and it is not load-bearing:
+ * a bar set by runs nobody measured is wrong at any height.
  *
  * `n` therefore counts comparable runs rather than journal rows, and `MIN_COHORT_SIZE` means
  * 30 of those.
