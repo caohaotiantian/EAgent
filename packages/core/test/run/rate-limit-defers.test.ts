@@ -469,7 +469,12 @@ test("THE DEFERRAL BUDGET IS RECONSTRUCTED FROM THE JOURNAL, so a restart cannot
   let t = 1_700_000_000_000;
   const now = (): number => t;
   const store = new MemoryStateStore({ now });
-  const script: MockScript = () => RATE_LIMIT(60_000);
+  // 70 s ON PURPOSE, and it is the whole difference between this test and a vacuous one.
+  // 900 s / 60 s divides evenly, so the last deferral landed exactly ON the budget and the
+  // overshoot the code used to allow — it checked the time ALREADY spent, then added another —
+  // could never show up. 900 / 70 does not divide: twelve fit at 840 s and a thirteenth would
+  // reach 910 s.
+  const script: MockScript = () => RATE_LIMIT(70_000);
 
   const build = (): Engine => {
     const models = new ModelRegistry();
@@ -504,8 +509,11 @@ test("THE DEFERRAL BUDGET IS RECONSTRUCTED FROM THE JOURNAL, so a restart cannot
 
   const log = await events(store, runId);
   assert.equal(p.status, "failed", "a restart must not refill the deferral budget");
-  const deferredMs = deferrals(log)
-    .filter((s) => s.deferred === true)
-    .reduce((a, s) => a + s.afterMs, 0);
+  const deferred = deferrals(log).filter((s) => s.deferred === true);
+  // NON-VACUOUS FIRST. Without this the assertion below passes on a build that never defers at
+  // all — measured: at the base commit this whole test was green, because 0 <= 900_000, and it
+  // was the one test of the eight that was NOT red first.
+  assert.ok(deferred.length > 0, "precondition: the run must actually have deferred");
+  const deferredMs = deferred.reduce((a, x) => a + x.afterMs, 0);
   assert.ok(deferredMs <= 900_000, `total deferred time across restarts: ${String(deferredMs)}`);
 });

@@ -299,6 +299,18 @@ const RETRY_AFTER_CEILING_MS = 300_000;
  * The sum is FOLDED from the journal (`TaskRecord.deferredMs`), so a restart does not refill it.
  * It is the scheduled time, not measured elapsed time: a decision that read a clock would not be
  * reproducible from the log.
+ *
+ * IT BOUNDS TWO THINGS AND THE ARGUMENT ABOVE COVERS ONE. `DEFERRABLE_CODES` has two members,
+ * so this same 900 s also caps how long a parent will poll an unfinished CHILD. The reading
+ * transfers — past it, "the child is still working" stops being a wait and starts being a run
+ * that will not finish — but it is a second claim and it was not made. A deployment that wants
+ * long-running children and short rate-limit patience cannot have both, and the shape of that
+ * fix is a second constant rather than a knob on this one.
+ *
+ * A TRUE BOUND ON THE TOTAL. The check is `spent + afterMs <= BUDGET`, not `spent < BUDGET`.
+ * The first version asked only whether the time already spent was under, then added up to
+ * another `DEFERRAL_MAX_MS` on top — so the real ceiling was 960 s against a documented 900 s.
+ * Three places call this a bound; the code now is one.
  */
 const DEFERRAL_BUDGET_MS = 900_000;
 
@@ -5972,12 +5984,24 @@ export class Engine {
 
     // A DEFERRAL, decided before the policy is consulted at all — that ordering IS the fix.
     const task = p.tasks[w.task.taskId];
-    const deferrable = DEFERRABLE_CODES.has(error.code) && (task?.deferredMs ?? 0) < DEFERRAL_BUDGET_MS;
-    if (deferrable) {
-      const curve = Math.min(DEFERRAL_INITIAL_MS * 2 ** (task?.deferrals ?? 0), DEFERRAL_MAX_MS);
+    // THE BUDGET IS A BOUND ON THE TOTAL, not on the total before the last one. The first
+    // version asked whether the time ALREADY SPENT was under budget and then added up to
+    // another `DEFERRAL_MAX_MS` on top, so the real ceiling was "budget plus one deferral" —
+    // 960 s against a documented 900 s, a 33% overshoot at the worst `honoured` value. Three
+    // places call it a bound. This lane's reviewer found it, and found that the test could not:
+    // the fixture asks for 60 s against a 900 s budget, which divides evenly, so the last
+    // deferral landed exactly ON the line and the overshoot never appeared.
+    //
+    // Deciding the wait FIRST and then asking whether it fits is the fail-closed order. A
+    // provider asking for more time than the budget has left ends the run now rather than
+    // overshooting once and ending it anyway.
+    const spent = task?.deferredMs ?? 0;
+    const deferralCurve = Math.min(DEFERRAL_INITIAL_MS * 2 ** (task?.deferrals ?? 0), DEFERRAL_MAX_MS);
+    const afterMs = Math.max(deferralCurve, honoured);
+    if (DEFERRABLE_CODES.has(error.code) && spent + afterMs <= DEFERRAL_BUDGET_MS) {
       // The attempt is REPEATED, not advanced: `task.retry_scheduled` is the event that moves
       // the budget, so writing the same number is what "not charged" means durably.
-      return { afterMs: Math.max(curve, honoured), code: error.code, deferred: true };
+      return { afterMs, code: error.code, deferred: true };
     }
 
     if (policy === undefined) return undefined;
