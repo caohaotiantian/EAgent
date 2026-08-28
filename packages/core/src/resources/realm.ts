@@ -521,9 +521,45 @@ function refuseThenable(where: string): never {
  * its own prototype and is not read here, because reading it is the hazard `THENABLE_RULE`
  * describes.
  *
- * WHAT IT STILL DOES NOT CATCH, named because the pair is not a total answer: a body's thenable
- * hidden inside a value the rebuild passes through, such as a cross-realm `Map`. Those are
- * refused by the canonicalizer for being a `Map` at all, which is the message worth getting.
+ * THE PROTOTYPE TEST IS AN INVARIANT OF THE REBUILD, AND THE REBUILD HAD TO EARN IT. It reads as
+ * a free fact — `intoHostRealm` builds `out` from a host `{}`, so of course it has the host's
+ * `Object.prototype` — and it was not one: `rebuild` copied with `out[k] = …`, and an own
+ * enumerable `__proto__` key goes through `Object.prototype.__proto__`'s SETTER and RE-PARENTS
+ * `out`. A body that returned one turned this test off and walked past. See `rebuild`, which
+ * copies with `Object.defineProperty` for exactly this reason; without that line every sentence
+ * above is conditional on the value's good behaviour.
+ *
+ * ## WHAT IT STILL DOES NOT CATCH — TWO MEMBERS, BOTH MEASURED ON THIS TREE
+ *
+ * Named because the pair is not a total answer, and enumerated because the previous version of
+ * this paragraph named one member and gave it a reassurance that does not survive the second.
+ *
+ *   1. A body's thenable hidden inside a cross-realm `Map`. The rebuild passes it through, and
+ *      the canonicalizer refuses it for being a `Map` at all — measured, `Map is not
+ *      representable; use a plain object/array at <root>`. That IS the message worth getting.
+ *   2. ANY OTHER PASS-THROUGH VALUE WITH A TWO-FACED `then` GETTER, and this one is not covered
+ *      by 1's reassurance. `rebuild` returns a value as-is whenever its prototype's constructor
+ *      is not named `Object`, which is every class instance, not just the built-ins. Measured
+ *      through the hook loader at `callTimeoutMs: 100`, a body returning `new Thing()` where
+ *      `Thing.prototype.then` is a getter answering `undefined` on its first read and a spinning
+ *      function on its second:
+ *
+ *          PASS-THROUGH CROSSED at 1 ms; host proto? false
+ *            AWAIT resolved at 1945 ms to {"late":1}
+ *
+ *      The in-context guard took the first face, this check declined to read at all, and
+ *      `runFilters`' own `await h.body(...)` took the second. The canonicalizer does not save it
+ *      either — measured, `canonicalize(new Thing())` is `{"a":1}`, not a refusal — and it would
+ *      be too late if it did, because the continuation has already outrun the deadline by the
+ *      time any value reaches it.
+ *
+ * MEMBER 2 IS LEFT OPEN DELIBERATELY, and the reason is that no read closes it. Reading `.then`
+ * here would run the getter on the host thread — the hazard this check's gate exists to avoid —
+ * and would still lose, because a getter that counts simply moves its second face to the `await`.
+ * The answers that WOULD close it are refusing every non-plain return outright (which deletes the
+ * clear canonicalizer message member 1 depends on) or a process boundary. It is the same
+ * unbounded-continuation limit `THENABLE_RULE` and `UNREBUILDABLE_RULE` both end on, and it is
+ * A13's to carry: a code resource is trusted, and this catches the value that arrives by mistake.
  */
 function crossedAsThenable(v: unknown, where: string): boolean {
   if (v === null || typeof v !== "object") return false;
@@ -624,7 +660,7 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   }
 
   const where = `${opts.what} resource "${opts.label}"`;
-  return (payload) => {
+  const call: RealmCall = (payload) => {
     // ONLY JSON CROSSES *HERE*. Every value this call hands the body is rebuilt from this string
     // INSIDE the context, so no host object reaches it BY THIS ROUTE. `opts.globals` is the route
     // that is not this one, and it is not rebuilt — see `RealmOptions.globals`.
@@ -651,6 +687,92 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     if (crossedAsThenable(host, where)) refuseThenable(where);
     return host;
   };
+  // THE ONLY PLACE THE BRAND IS APPLIED. See `REALM_BOUND` for what it means and what it does
+  // not, and `isRealmBounded` for how it is read.
+  //
+  // SKIPPED WHOLESALE WHEN THE EMBEDDER SENT GLOBALS, rather than inspected. `RealmOptions.globals`
+  // is a value seam and `refuseGovernedGlobals` reads NAMES: whatever survives the name check
+  // arrives in the body as the very host object that was passed. This module already measures two
+  // of the escapes — `{MY_DATE: Date}` gives a body a live wall clock, `{LOOKUP: {a: 1}}` gives it
+  // `LOOKUP.constructor.constructor("return typeof process")()` → `"object"`. Deciding whether some
+  // particular passed-in object is inert is the verifier-pronouncing-code-safe problem; refusing
+  // the brand is the answer a guard that cannot decide is supposed to give.
+  if (opts.globals === undefined || Object.keys(opts.globals).length === 0) REALM_BOUND.add(call);
+  return call;
+}
+
+/**
+ * THE BRAND, AND WHY IT IS A `WeakSet` RATHER THAN A SYMBOL PROPERTY.
+ *
+ * `ReplayReport.hermetic` used to be a claim nothing could falsify on a graph of `function`
+ * nodes: its two terms are indexed by effect key, and a `function` or `evaluator{assertion}`
+ * body computes none, so no input made the field false while the bodies RE-EXECUTED LIVE. The
+ * fix is not to journal a body's output — that would put a `function` member in the kernel's
+ * forever-vocabulary in order to re-open a fail-open this project already paid to close, and
+ * re-execution is the only thing that catches a body regression at all. The fix is to stop
+ * claiming more than the runtime can vouch for, and this symbol is what it can vouch for: that
+ * a body came out of `compileRealm` with no embedder globals, so its inputs are a JSON payload
+ * and its globals are this context's own.
+ *
+ * A REGISTRY SYMBOL WOULD BE FORGEABLE, WHICH IS THE WHOLE POINT. `Symbol.for(k)` is reachable
+ * by any code in the process holding the same string — `engine.ts`'s `REBIND_DEADLINE` is
+ * `Symbol.for("@loom/core:function.rebindDeadline")` and is spelled out in two files — so an
+ * embedder could stamp it on a host closure and the spoof would land on the PASSING side of the
+ * flag.
+ *
+ * AND A MODULE-PRIVATE `Symbol()` IS FORGEABLE TOO, WHICH IS THE PART THAT HAD TO BE MEASURED
+ * RATHER THAN REASONED. The obvious fix is `const REALM_BOUND = Symbol()` closed inside this
+ * module, stamped with `Object.defineProperty(call, REALM_BOUND, …)`, on the argument that
+ * "nothing outside this file can name it, so nothing outside this file can claim it". That
+ * argument is FALSE, and the thing that makes it false is that a symbol used as a property key
+ * is no longer private — the object carries it, and any holder of the object can read it back.
+ * Measured against that spelling, three ways, all `true` where `false` was the whole point:
+ *
+ *     branded call            -> true
+ *     own symbols on the call -> 1 [Symbol()]
+ *     FORGED host closure     -> true      Object.getOwnPropertySymbols(branded), copied over
+ *     FORGED via Reflect      -> true      Reflect.ownKeys(branded), same route
+ *     FORGED via prototype    -> true      setPrototypeOf(closure, branded) — `in` walks the chain
+ *
+ * A `WeakSet` writes NOTHING onto the object, so there is nothing to enumerate and nothing to
+ * copy, and `has` consults no prototype chain. Membership is a fact held in this module's own
+ * closure about an identity, not a mark travelling on the value. It is also the reason there is
+ * no exported adder: the only way into the set is to have been RETURNED BY `compileRealm`, so
+ * possession of one branded call buys nothing that could be transferred to another object.
+ * That difference is the difference between a brand and a hint, and a hint is not something a
+ * replay report may rest a hermeticity claim on.
+ *
+ * The cost, stated: a `WeakSet` keyed on the call means a body's brand dies with the body, which
+ * is correct — and it means `isRealmBounded` cannot answer for a body serialized and revived,
+ * which nothing does and which would be a different claim anyway.
+ *
+ * WHAT THE BRAND DOES NOT MEAN, named because the field it feeds is exactly the kind that gets
+ * read as total. A branded body is realm-bounded; it is not proven deterministic. Two ambient
+ * routes to a value replay cannot reproduce are still open inside the realm and are pinned as
+ * PASSING tests in `test/resources/realm-has-no-clock.test.ts` — `THE HOST'S DEFAULT LOCALE IS
+ * AMBIENT` and `GARBAGE COLLECTION IS OBSERVABLE`. So `hermetic: true` with this conjunct means
+ * "no body ran that the runtime could not vouch for", not "nothing nondeterministic happened".
+ * The direction is what makes it progress rather than motion: the old inaccuracy over-claimed,
+ * this one under-claims, and an under-claiming guard is the only kind that is safe to be wrong.
+ */
+const REALM_BOUND = new WeakSet<object>();
+
+/**
+ * Was this body compiled by `compileRealm` with no embedder globals?
+ *
+ * FALSE IS THE ANSWER FOR EVERYTHING THIS MODULE DID NOT MAKE, and that is the fail-closed
+ * direction: a hand-registered host closure, a body from a realm carrying `opts.globals`, a
+ * plain object, `undefined`. Absence of evidence is reported as unvouched-for, never as
+ * bounded, so nothing a caller can pass makes this answer `true` by accident.
+ *
+ * NO `try` HERE, and its absence is the point rather than an omission: `WeakSet.prototype.has`
+ * runs no user code. It does not read a property, does not invoke a getter, does not consult a
+ * `has` trap, and does not walk a prototype chain — so unlike every other guard in this file it
+ * has no undecidable case to fail closed on. A hostile `Proxy` gets `false` because it is not in
+ * the set, which is the same answer for the same reason as every other stranger.
+ */
+export function isRealmBounded(fn: unknown): boolean {
+  return typeof fn === "function" && REALM_BOUND.has(fn);
 }
 
 /**
@@ -755,7 +877,32 @@ function rebuild(value: unknown): unknown {
   const isPlain = proto === null || (proto as { constructor?: { name?: string } })?.constructor?.name === "Object";
   if (!isPlain) return value;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = rebuild(v);
+  // `Object.defineProperty`, NOT `out[k] = …`, and the key that forces it is `__proto__`.
+  //
+  // Assignment goes through the ordinary [[Set]], which walks the prototype chain and finds
+  // `Object.prototype.__proto__`'s ACCESSOR. So `out["__proto__"] = v` does not create a
+  // property at all — it RE-PARENTS `out` to whatever the body chose. Measured, a hook body
+  // returning `Object.defineProperty(o, "__proto__", {value: proto, enumerable: true, …})`
+  // with `proto = {then: <spins 4e9 then resolves>}`, at `callTimeoutMs: 100`:
+  //
+  //     P6 CROSSED at 2 ms; host proto? false | typeof then: function
+  //     P6 AWAIT resolved at 1950 ms to {"late":1} | host proto? false
+  //
+  // Both harms `THENABLE_RULE` names: the continuation outran the deadline by 19x, and a
+  // vm-realm object reached the host. It defeated BOTH reads that are supposed to stop it —
+  // the in-context guard saw an `o` whose own `then` is absent, and `crossedAsThenable` skipped
+  // the result because the invariant it gates on, `getPrototypeOf(out) === Object.prototype`,
+  // is exactly what the assignment had just broken. `defineProperty` never consults the
+  // prototype chain, so the key lands as an own data property and the invariant holds.
+  //
+  // A REGRESSION, not an unclosed residue, and worth saying so: the host-side thenable check
+  // 347cb98 replaced was UNGATED — it read `out.then` on whatever `intoHostRealm` returned, so
+  // it caught this. Same body through the function loader, both trees: `OLD (347cb98^) REFUSED
+  // at 1 ms`, `NEW CROSSED at 0 ms`. Narrowing a total check to a gated one is only safe when
+  // the gate cannot be turned off by the value being gated, and this one could.
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    Object.defineProperty(out, k, { value: rebuild(v), writable: true, enumerable: true, configurable: true });
+  }
   return out;
 }
 
