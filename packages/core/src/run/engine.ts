@@ -59,7 +59,7 @@ import { EXTERNALISE_ABOVE_BYTES, payloadHandle, refFor, type PayloadRef, type P
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, type Expr } from "../graph/expr.ts";
-import { observedChannels, reachableToolNames } from "../graph/spec.ts";
+import { observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
 import type { BatchingSpec, DedupeSpec, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
@@ -7398,13 +7398,17 @@ function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Recor
  * `| json` says it explicitly. The embedded form (`"see ${x} here"`) already stringifies a
  * non-string, so this makes the whole form able to express the same intent without the trailing
  * space that was the only workaround.
+ *
+ * THE SUFFIX IS PARSED IN `graph/spec.ts`, not here. This file used to own the only regex that
+ * knew `| json` existed, and `observedChannels` — which every classification, laundering and
+ * taint decision reads — did not, so it named the channel `"secret | json"` while this function
+ * looked up `secret`. Four documented characters and the guard stopped firing. One parse now, so
+ * the two cannot disagree again.
  */
-const TEMPLATE_JSON = /\s*\|\s*json$/;
-
 function resolveArgs(args: Readonly<Record<string, unknown>>, scope: Readonly<Record<string, unknown>>): Record<string, unknown> {
   const resolveOne = (expr: string): { value: unknown; asText: boolean } => {
-    const asText = TEMPLATE_JSON.test(expr);
-    return { value: lookup(scope, expr.replace(TEMPLATE_JSON, "").trim()), asText };
+    const { path, asText } = parseTemplateExpr(expr);
+    return { value: lookup(scope, path), asText };
   };
   const sub = (v: unknown): unknown => {
     if (typeof v === "string") {

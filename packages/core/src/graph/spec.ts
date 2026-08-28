@@ -1007,6 +1007,50 @@ export function launderedChannels(
 }
 
 /**
+ * The ONE parse of what is written between `${` and `}`, because there were two and they
+ * disagreed about the syntax this product documents.
+ *
+ * A template expression is a dotted path with an optional `| json` suffix asking for text.
+ * `run/engine.ts`'s `resolveArgs` strips that suffix BEFORE `lookup`, so `${secret | json}`
+ * hands the tool the same plaintext `${secret}` does. `observedChannels` used to take
+ * `expr.trim().split(".")[0]` with no knowledge of the suffix, so for the same channel it named
+ * `"secret | json"` — a channel that does not exist — and MISSED `secret`. Measured on one graph
+ * differing only in the template form:
+ *
+ *   observedChannels `${secret}`        ["plain","secret"]    plan.posture `in`, GRAPH014_SECRET_LAUNDERED
+ *   observedChannels `${secret | json}` ["plain","secret | json"]  plan.posture `out`, no warning
+ *
+ * So every decision derived from the observed set — `dataFloorOf`'s classification floor,
+ * `launderedChannels`, and `applyTaint`'s integrity check, all of which call `observedChannels`
+ * — was defeated by adding four documented characters. The confidentiality axis dropped `in` to
+ * `out`; the integrity axis lost the taint edge the same way. It also produced WRONG ADVICE on a
+ * graph this repo ships: `examples/graphs/self-review.json` was told to declare a channel named
+ * `"report | json"`, which `isSafeId` would reject.
+ *
+ * EXPORTED SO `resolveArgs` CAN IMPORT IT rather than keeping a second copy of the regex. Two
+ * representations of one vocabulary is the drift this tree pays for repeatedly — `dataFloorOf`
+ * exists for the same reason one function down — and the failure mode here is not a wrong
+ * message but a guard that stops firing.
+ *
+ * ONE SUFFIX, NOT A PIPELINE. `${x | json | json}` strips the trailing `| json` and leaves the
+ * path `x | json`, which `lookup` resolves to `undefined` and which this function reports as the
+ * root `x | json`. Both ends agree and the tool receives nothing, so it is a bad graph the
+ * compiler warns about, not a bypass. Stripping repeatedly would make that expression RESOLVE,
+ * which is new syntax and not this function's business.
+ */
+export function parseTemplateExpr(expr: string): { readonly path: string; readonly asText: boolean } {
+  // TRIMMED HERE, not by the caller. The suffix regex is anchored at `$`, so `${x | json  }`
+  // matched for `resolveArgs` — which trimmed first — and not for `observedChannels`, which did
+  // not. That is the same divergence one whitespace character down, and a function that depends
+  // on its callers agreeing about normalisation is a function that will diverge again.
+  const trimmed = expr.trim();
+  const asText = TEMPLATE_JSON.test(trimmed);
+  return { path: trimmed.replace(TEMPLATE_JSON, "").trim(), asText };
+}
+
+const TEMPLATE_JSON = /\s*\|\s*json$/;
+
+/**
  * Every channel this node can OBSERVE — not the ones it declares in `reads`.
  *
  * `#runToolNode` resolves `tool.args` against `scopeFor(...)`, the WHOLE channel scope, so a
@@ -1052,7 +1096,7 @@ export function observedChannels(node: NodeSpec): readonly string[] {
   const scan = (v: unknown): void => {
     if (typeof v === "string") {
       for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
-        const root = m[1]!.trim().split(".")[0];
+        const root = parseTemplateExpr(m[1]!).path.split(".")[0];
         if (root !== undefined && root !== "") out.add(root);
       }
       return;
