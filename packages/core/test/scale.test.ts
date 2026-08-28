@@ -309,7 +309,7 @@ function fanoutSpec(width: number): GraphSpec {
         type: "join",
         reads: ["results"],
         writes: ["results"],
-        join: { branches: [n("work")], mode: "all", onBranchError: "fail", timeoutMs: 60_000 },
+        join: { branches: [n("work")], mode: "all", onBranchError: "fail" },
       },
       { id: n("done"), type: "function", reads: ["results"], writes: ["summary"], function: { ref: "function/done@stable" } },
     ],

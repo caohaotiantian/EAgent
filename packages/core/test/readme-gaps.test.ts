@@ -111,11 +111,14 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     },
   },
   {
-    row: "`JoinNode.timeoutMs`",
-    claims: "nothing reads it, so a barrier whose branch never arrives waits forever",
+    row: "A barrier deadline",
+    claims: "declaring one is now a compile ERROR",
     probe: () => {
-      // STILL A GAP. If a reader ever wires it, this fails and the row has to change.
+      // STILL A GAP, and now a refused one. If a reader ever wires it, this fails and the row
+      // has to change; and the field must stay out of the schema, or the refusal below stops
+      // being a refusal and goes back to being silence.
       assert.doesNotMatch(SRC("run/engine.ts"), /join[?.]*\.timeoutMs/, "a join timeout is read now — update the row");
+      assert.doesNotMatch(SRC("graph/spec.ts"), /join: \[[^\]]*"timeoutMs"/, "the field is back in ALLOWED_FIELDS.join");
       const spec = {
         ...BASE,
         channels: { n: { type: "object", reduce: "replace" }, items: { type: "array", reduce: "replace" }, item: { type: "string", reduce: "replace" } },
@@ -132,7 +135,7 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
           { id: "e2" as never, from: "j" as never, to: "d" as never, kind: "seq" },
         ],
       } as unknown as GraphSpec;
-      assert.ok(diagnostics(spec).includes("GRAPH008_JOIN_TIMEOUT_INERT"), "and declaring one must warn");
+      assert.ok(diagnostics(spec).includes("GRAPH020_UNKNOWN_FIELD"), "and declaring one must be refused");
     },
   },
   {

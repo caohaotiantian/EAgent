@@ -92,7 +92,7 @@ function fanoutGatedSpec(over: Partial<HumanGateNode> = {}): GraphSpec {
       {
         id: n("collect"),
         type: "join",
-        join: { branches: [n("approve")], mode: "all", onBranchError: "fail", timeoutMs: 60_000 },
+        join: { branches: [n("approve")], mode: "all", onBranchError: "fail" },
       },
       {
         id: n("restart"),

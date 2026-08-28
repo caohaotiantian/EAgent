@@ -771,8 +771,9 @@ Two defects came out of the last two steps, which is where they always are. They
 directly and never written down — `9b1efd5` (`trace` printed neither `node.id` nor
 `branch.path`) and `1d59621` (a millisecond cannot order Tasks). **The sentence that used to
 point at "the `trace` entries below" was born dangling**: the commit that added this preamble
-added no such entries. The remaining known gap on this path is the inert join `timeoutMs`, which
-`loom compile` correctly warns about.
+added no such entries. The join `timeoutMs` that used to be named here as the remaining gap is
+gone: the field was DELETED (§D.8), so declaring one is `GRAPH020_UNKNOWN_FIELD` rather than a
+warning about a field nothing reads.
 
 
 Each was verified against the code, not remembered.
@@ -1036,7 +1037,7 @@ Each was verified against the code, not remembered.
 | item | verdict | what running it showed |
 |---|---|---|
 | `B.1` **Compensation edges** — a compile-time rollback proof and | **done, partly** | Was accurate in all three halves; two of them are now closed. Rollback RUNS on run failure and on rewind (`run/compensation.ts` + `Engine.#compensate`), in three journaled states. `#edgesToTake` still skips `compensation` — deliberately, see the body entry — and four narrower gaps are named there. |
-| `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | open | Claim holds. Two omissions: (a) it is now a compile WARNING, so an author is told; (b) a stale comment contradicts this — packages/core/test/run/skeleton.ts:81-82 says a join … |
+| `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | **CLOSED 2026-08-28 by deletion** | The field is gone from `JoinNode` and from `ALLOWED_FIELDS.join`; declaring one is `GRAPH020_UNKNOWN_FIELD` and the graph is refused, so no author can write a deadline that binds nothing. `E_JOIN_TIMEOUT` and `GRAPH008_JOIN_TIMEOUT_INERT` went with it, and the unraised-code census reached ZERO — `registries.test.ts` now asserts the empty set instead of pinning a list. The stale comment naming `GRAPH008_JOIN_TIMEOUT_UNSUPPORTED` (a code that never existed) is corrected in both places it appeared. **What this does NOT close, and it is the honest residue:** a node declaring no `timeoutMs` still hangs its task forever, so a join over such a branch still waits forever. That is a default node deadline's job. See §D.8. |
 | `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (e93f874). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
 | `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
 | `B.5` **Retention tiering** — proven by test, zero callers, so a | **CLOSED 2026-08-28** | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. **Answered by DELETING the file, its test and its 15 pinned exports** (surface 540 → 525). The mechanism could not do the job its name promised — `archive` pruned nothing from hot, `DEFAULT_RETENTION.cold` was `Infinity`, and the only `TierStore` was an in-process `Map`. See §D.14. |
@@ -1076,7 +1077,13 @@ believes a feature is present.
     (`GRAPH008_COMPENSATE_UNIMPLEMENTED`); a branch failing is neither trigger.
   - A DETACHED run whose steps are all blocked journals nothing, because appending the
     `not_attempted` rows goes through a `RunContext` that cannot be rebuilt without the graph.
-- **`JoinNode.timeoutMs`** — a barrier waits forever however small a number is written.
+- ~~**`JoinNode.timeoutMs`** — a barrier waits forever however small a number is written.~~
+  **CLOSED 2026-08-28 by DELETING the field**, not by building the deadline. A barrier deadline's
+  undecidable case — "is this branch stranded, or legitimately slow?" — has no journaled answer,
+  and firing over whatever arrived commits a partial fold under `mode: "all"` that no reader can
+  tell from a complete one. Every branch already has an enforced bound at its own locus. The
+  "waits forever" hole itself is NOT closed and moved to its own item: a node with no declared
+  `timeoutMs` hangs its task, because `#withNodeDeadline` returns straight through.
 - ~~**`Budget.tokens` and `Budget.wallMs`** — declared, never read; only cost binds.~~ **Both
   bind** as of e93f874: run and node ceilings, `budget.exhausted` now says which dimension, and
   both fold out of `p.usage` so a restart cannot refund them
@@ -1279,7 +1286,7 @@ is a better view of nothing.
 | `D.5` **The identity and permission source of truth** for approv | open | (i) DECISION: OPEN. (ii) OBSERVABLE: an approvers list naming a group or a role compiles clean and can never be satisfied, because the runtime check is exact string equality —… |
 | `D.6` which approval callback is mandatory | open | (i) DECISION: OPEN. (ii) OBSERVABLE: of the three DeliveryChannels that ship, exactly one can be answered. `channel.parseCallback !== undefined` IS the answerability test (del… |
 | `D.7` providers required at launch | partial | (i) DECISION: half ANSWERED IN CODE, half OPEN. The launch set is closed and ENFORCED at boot — `PROVIDERS` (cli.ts:815) is exactly {anthropic, openai}, and OpenAIAdapter with… |
-| `D.8` what a join timeout does | partial | (i) DECISION: the SILENT half is closed, the RUNTIME half is OPEN. GRAPH008_JOIN_TIMEOUT_INERT (validate.ts:1429-1435) now warns 'which no executor reads — this barrier has no… |
+| `D.8` what a join timeout does | **ANSWERED 2026-08-28 — NOTHING, and the field is gone** | The runtime half is answered by refusing the question: `JoinNode.timeoutMs` deleted from `graph/spec.ts` (kernel #3) and from `ALLOWED_FIELDS.join`, `GRAPH008_JOIN_TIMEOUT_INERT` deleted from `validate.ts`, `E_JOIN_TIMEOUT` deleted from `errors.ts`, and `registries.test.ts`'s `NEVER_RAISED` list deleted with its one member — the declared-and-unraised census is zero and is now asserted as the empty set. Declaring a barrier deadline is `GRAPH020_UNKNOWN_FIELD`: strictly tighter than the warning it replaces. The false claim in README.md that `DESIGN.md` records a decision here went too — measured, `grep -aic timeout DESIGN.md` and `grep -aic deadline DESIGN.md` are both 0 across 575 lines. Residue, stated rather than implied: deleting the field does not stop a run waiting forever, because a node with no `timeoutMs` hangs its task. |
 | `D.9` whether a function body's output becomes a journaled effec | open | (i) DECISION: OPEN — today it does NOT. (ii) OBSERVABLE, and it is the sharpest one in this section: a replay that reports `hermetic: true` re-executed the function body LIVE.… |
 | `D.10` the `preAuthorization` envelope | partial | (i) DECISION: OPEN — no envelope exists. (ii) OBSERVABLE: declaring one is no longer uniformly silent. GRAPH020 now REFUSES `preAuthorization` at the graph root and on a node,… |
 | `D.11` token and wall-clock budgets | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it. (ii) OBSERVABLE: the flagship shipped workflow declares a 400k-token and 5-minute ceiling and compiles with ZERO diagnostics — neither binds anything, and … **ANSWERED + BUILT 2026-08-28.** Both bind, at the run ceiling and the node ceiling, through the machinery `costUsd` already used. Two judgements are recorded at the code rather than here: `tokens` is `inputTokens + outputTokens` (a wider sum double-counts cache fields and reasoning tokens), and `wallMs` is PROVIDER time, not elapsed time — so a night suspended on a human gate accrues nothing, proven by a test that moves the clock a full day under a 10,000 ms ceiling. Known limit: `wallMs` is settled-only, so it cannot refuse the call that crosses the ceiling, only the next one. |

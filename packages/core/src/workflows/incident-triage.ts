@@ -138,9 +138,10 @@ export function incidentTriageSpec(over: Partial<GraphSpec> = {}): GraphSpec {
         // `skip` because one unreachable pod must not lose the other four
         // investigations. The trajectory still records that a branch was skipped.
         // NO `timeoutMs`. It was declared here as 120_000 and read by nothing — this workflow
-        // said both branches must finish inside two minutes and had no such bound.
-        // `GRAPH008_JOIN_TIMEOUT_UNSUPPORTED` refuses it now; the branches' own node
-        // `timeoutMs` is the bound that is actually enforced.
+        // said both branches must finish inside two minutes and had no such bound. The field is
+        // gone from `JoinNode`, so `GRAPH020_UNKNOWN_FIELD` refuses it now; the branches' own
+        // node `timeoutMs` is the bound that is actually enforced. This comment used to name
+        // `GRAPH008_JOIN_TIMEOUT_UNSUPPORTED`, a code that has never existed in this tree.
         join: { branches: [n("investigate"), n("quarantine")], mode: "all", onBranchError: "skip" },
       },
       {

@@ -162,7 +162,7 @@ test("A JOIN INSIDE A FAN-OUT THAT NO OUTER JOIN COLLECTS IS REFUSED", () => {
         type: "join",
         reads: ["findings"],
         writes: ["findings"],
-        join: { branches: [n("inner")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: [n("inner")], mode: "all", onBranchError: "skip" },
       },
       {
         id: n("outerJoin"),
@@ -170,7 +170,7 @@ test("A JOIN INSIDE A FAN-OUT THAT NO OUTER JOIN COLLECTS IS REFUSED", () => {
         reads: ["findings"],
         writes: ["findings"],
         // `innerJoin` is NOT here. That is the defect under test.
-        join: { branches: [n("outer")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: [n("outer")], mode: "all", onBranchError: "skip" },
       },
       { id: n("finish"), type: "function", reads: ["findings"], writes: ["report"], function: { ref: "function/report@stable" } },
     ],

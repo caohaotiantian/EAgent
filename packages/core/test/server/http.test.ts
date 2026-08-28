@@ -4244,7 +4244,7 @@ function twoGateSpec(): GraphSpec {
       // first — and the queue must put `urgent` there instead.
       gate("slow", 900_000),
       gate("urgent", 60_000),
-      { id: "collect", type: "join", join: { branches: ["slow", "urgent"], mode: "all", onBranchError: "fail", timeoutMs: 60_000 } },
+      { id: "collect", type: "join", join: { branches: ["slow", "urgent"], mode: "all", onBranchError: "fail" } },
       { id: "finish", type: "function", reads: ["seed"], writes: ["done"], function: { ref: "function/two-gates-done@stable" } },
     ],
     edges: [

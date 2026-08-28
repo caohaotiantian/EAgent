@@ -656,7 +656,7 @@ test("E4 — three failures on one node escalate it", async () => {
         type: "join",
         reads: ["results"],
         writes: ["done"],
-        join: { branches: [n("flaky")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: [n("flaky")], mode: "all", onBranchError: "skip" },
       },
     ],
     edges: [

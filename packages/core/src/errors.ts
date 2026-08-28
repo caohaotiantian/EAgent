@@ -256,7 +256,9 @@ const CLASSES: ReadonlySet<ErrorClass> = new Set<ErrorClass>([
  * Adding a code costs one line at the moment of first use, and this file is deliberately NOT
  * kernel (`scripts/kernel.json`: "Adding an error code IS adding capability") — so declaring
  * one early saves nothing and promises something. `registries.test.ts` pins the unraised set,
- * which is `E_JOIN_TIMEOUT` alone, and says there why that one is allowed to stand.
+ * WHICH IS NOW EMPTY: `E_JOIN_TIMEOUT` was the last member and it went with `JoinNode.timeoutMs`,
+ * the field it was reserved for. The exemption list and the paragraph arguing for its one member
+ * went too — an allow-list with no members is a rule, not a list.
  */
 export const CODES = {
   // validation
@@ -377,7 +379,6 @@ export const CODES = {
 
   // timeout
   E_TOOL_TIMEOUT: "E_TOOL_TIMEOUT",
-  E_JOIN_TIMEOUT: "E_JOIN_TIMEOUT",
   E_GATE_EXPIRED: "E_GATE_EXPIRED",
   /**
    * The graph offered for a run is not the graph that run compiled.

@@ -166,7 +166,30 @@ export interface RouterNode {
 /**
  * The barrier: which branches, how many of them, and what a failed one means.
  *
- * THERE IS NO `drain` FIELD, and its absence is the honest form of what the runtime does.
+ * THERE IS NO `timeoutMs` FIELD, and there is no barrier deadline. It was declared here,
+ * shape-validated as a duration, warned about at compile, and read by no executor; declaring
+ * one is now `GRAPH020_UNKNOWN_FIELD` and the graph is refused. Every branch of a join already
+ * has an author-declarable, ENFORCED deadline at its own locus — a node branch through
+ * `NodeSpec.timeoutMs` and `#withNodeDeadline`, a gate branch through `slaMs` + `onTimeout` and
+ * `GateSweeper` — so the field bought a second spelling and no bound.
+ *
+ * The reason it is not coming back as a warning is that a barrier deadline's undecidable case
+ * has no journaled answer: "is this branch stranded, or legitimately slow?" A join sees only
+ * that a sibling has not committed, and `#deadlineOf` deliberately gives a gate with no `slaMs`
+ * NO deadline at all — so a branch parked on a human gate is indistinguishable from a hung
+ * socket, and a firing barrier would fail runs that are correctly waiting for a person. Firing
+ * over whatever arrived is worse: `#foldJoin` has no transform, so a partial fold under
+ * `mode: "all"` commits a value no reader can tell from a complete one. An author who wants
+ * partial evidence has `mode: "any"` and `mode: "quorum"`, which are journaled as partial by
+ * construction.
+ *
+ * DELETING IT DOES NOT CLOSE THE "WAITS FOREVER" HOLE, and nothing here should be read as
+ * claiming otherwise: `engine.ts`'s `#withNodeDeadline` returns straight through when a node
+ * declares no `timeoutMs`, so an `agent` or `tool` node with none hangs its task forever. That
+ * is a default node deadline's job, at the one enforcement point that already covers every
+ * node type.
+ *
+ * THERE IS NO `drain` FIELD EITHER, and its absence is the honest form of what the runtime does.
  * It meant "keep non-arriving branches running after the join fires", and the runtime
  * keeps them running unconditionally — a short-circuiting `any` or `quorum` join fires and
  * the remaining branches run to completion, with no `task.cancelled` appended anywhere.
@@ -180,27 +203,6 @@ export interface JoinNode {
   /** `quorum` only: an integer count, or a fraction of the branch width. */
   readonly k?: number;
   readonly onBranchError: "fail" | "skip" | "compensate";
-  /**
-   * DECLARED AND UNENFORCED: THERE IS NO JOIN DEADLINE.
-   *
-   * `#maybeFireJoin` decides on `branches`, `mode` and `k`, and `#foldJoin` on
-   * `onBranchError`. Neither reads a clock, nothing in `src/` reads this field at all, and
-   * `E_JOIN_TIMEOUT` is declared in `errors.ts` with no call site — so a run whose branch
-   * never arrives waits forever, however small a number is written here. It was REQUIRED
-   * by this type, so every author had to write one that decides nothing, which is the
-   * "looks supervised" shape one field over from the gates that refuse it.
-   *
-   * Optional rather than refused, and the difference is only who can act: refusing it is
-   * the right answer and it belongs in the change that implements the deadline, because a
-   * deadline needs lease reclaim to be worth anything — a branch held by a dead worker is
-   * what actually strands a join under multi-process workers, and a timer would fire
-   * against a task nobody is running. Until then the type says what is true and an author
-   * who omits it loses nothing.
-   *
-   * Reversal: when the deadline lands, this becomes required again, `E_JOIN_TIMEOUT`
-   * leaves `NEVER_RAISED`, and the note in `design/HANDOFF.md` goes with it.
-   */
-  readonly timeoutMs?: number;
 }
 
 export interface EvaluatorNode {
@@ -711,7 +713,7 @@ export const ALLOWED_FIELDS: Readonly<Record<NodeType, readonly string[]>> = {
   agent: ["profile", "prompt", "outputSchema", "maxTurns", "tools", "canMutate"],
   tool: ["name", "version", "args"],
   router: ["mode", "cases", "fallbackEdge", "profile"],
-  join: ["branches", "mode", "k", "onBranchError", "timeoutMs"],
+  join: ["branches", "mode", "k", "onBranchError"],
   evaluator: ["kind", "ref", "threshold"],
   human_gate: ["ref", "approval", "sla", "batching", "dedupe", "delivery"],
   subgraph: ["ref", "inputs", "outputs", "budgetShare"],

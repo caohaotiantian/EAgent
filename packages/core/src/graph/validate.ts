@@ -1687,25 +1687,6 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       }
     }
 
-    // A BARRIER TIMEOUT IS INERT, AND THE COMPILER SAYS SO — a warning, deliberately not an error.
-    //
-    // `JoinNode.timeoutMs` is shape-validated as a duration and read by NOTHING. That looks like
-    // the shape `router.mode: "model"`, `onBudgetExhausted: "gate"`, `approval.mode: "quorum"`
-    // and `sla.onTimeout: "default_action"` are each a compile ERROR for — and it is not quite,
-    // which is why the treatment differs.
-    //
-    // Those four SUBSTITUTE: they run something semantically different from what the graph says,
-    // so accepting them ships a graph that reads as supervised and behaves otherwise. This one
-    // does nothing at all, and `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` says so in three places — the node table,
-    // the field table and the `mode: all` row all state there is no join deadline. The design is
-    // not drifting; it made a choice.
-    //
-    // So refusing would be taking a product decision HANDOFF §3 explicitly reserves — whether a
-    // barrier timeout should FAIL the join or FOLD what arrived, the latter being a semantics
-    // change under `mode: all` rather than a timeout. A warning closes the real gap without
-    // taking it: an author who never read D5 finds out from the compiler instead of from a
-    // barrier that waits forever. This is the treatment `GRAPH019_POSTURE_NO_EFFECT` gets, and
-    // for the same reason — you declared something that changes nothing.
     // A JOIN CAN ONLY PROPAGATE WHAT ITS BRANCHES WROTE, and declaring otherwise compiled clean.
     //
     // `#foldJoin` folds each branch task's committed `writes` per channel and commits the result
@@ -1748,16 +1729,6 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
             : `its branches write nothing, so this join can only signal that they finished`,
       });
     }
-
-    if (join.timeoutMs !== undefined) {
-      d.push({
-        severity: "warning",
-        code: "GRAPH008_JOIN_TIMEOUT_INERT",
-        message: `join "${n.id}" declares timeoutMs ${String(join.timeoutMs)}, which no executor reads — this barrier has no deadline`,
-        at: { nodeId: n.id },
-        fix: `remove timeoutMs, or bound the BRANCHES with node timeoutMs, which is enforced`,
-      });
-    }
   }
 }
 
@@ -1766,10 +1737,10 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
 /**
  * A field the runtime does not read is reported rather than silently accepted.
  *
- * `FunctionNode.cpuBound` is the case this was written for, and it differs from
- * `GRAPH008_JOIN_TIMEOUT_INERT` in the way that decides the severity. The join deadline is a
- * choice the design MADE — `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` states in three places that there is no
- * barrier deadline. This one is DRIFT: two documents said the opposite of the code, the node
+ * `FunctionNode.cpuBound` is the case this was written for. Its sibling rule for the join
+ * deadline is gone: `JoinNode.timeoutMs` was DELETED rather than warned about, so declaring one
+ * is `GRAPH020_UNKNOWN_FIELD` and there is no inert field left to describe. This one is DRIFT:
+ * two documents said the opposite of the code, the node
  * table's `function` row ("Runs in a worker thread if `cpuBound: true`") and D3's pool diagram
  * ("worker_threads if cpuBound"), while `packages/core/src` contains no `worker_threads` import
  * at all. Both have been corrected; this is what stops an author believing the old sentence.
