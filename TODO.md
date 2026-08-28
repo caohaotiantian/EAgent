@@ -9,9 +9,10 @@ index. 107 items were checked, 106 of them by executing something — 19 DONE, 5
 extensions); 3587 tests passing (core 2040, eagent 1,547); zero-dep and public-surface guards
 green at 524 exports.
 
-**State today (2026-08-27):** 58 source files in `packages/core`, which is the whole runtime;
-2,302 tests passing; four guards green — zero-dep, public surface at 527 exports, and the
-kernel file list.
+**State today (2026-08-28):** 62 source files in `packages/core`, which is the whole runtime;
+2,468 tests passing; four guards green — zero-dep, public surface at 540 exports, and the
+kernel file list at 10 files carrying 8 declared seams. The account of the 2026-08-27/28
+session is the block below.
 
 ## State at 2026-08-28 — what the long session closed, and what it left
 
