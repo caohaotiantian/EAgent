@@ -29,7 +29,69 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { BANNER_KEYS, awaitLine, bannerKeysIn, completeLines, deployment, serving } from "./harness.ts";
+import { BANNER_KEYS, awaitBanner, awaitLine, bannerKeysIn, bannerMissing, completeLines, deployment, serving } from "./harness.ts";
+
+/** The banner `announce` writes, as bytes, so a test can deliver it in pieces of its choosing. */
+const FULL_BANNER = `loom listening on http://127.0.0.1:58955\n${BANNER_KEYS.map((k) => `  ${k}: value\n`).join("")}`;
+
+test("THE WAIT ITSELF DOES NOT RETURN ON A PREFIX — the one property no other test here pins", async () => {
+  // THIS IS THE TEST THAT WAS MISSING, and its absence is the finding. Measured on 2026-08-28:
+  // with `serving`'s wait reverted to the pre-fix `out.includes("  clock:")` and every other
+  // test in this file kept, all five stayed GREEN. The reason is in `bannerMissing`'s note —
+  // against a real child the whole banner arrives in one chunk on an idle machine, 10 boots out
+  // of 10, so an integration probe cannot tell a correct wait from a wrong one. The buffer has
+  // to be driven by hand.
+  //
+  // Sleeps here are SEQUENCING, not measurement: `awaitBanner` polls every 5 ms, so 40 ms is
+  // eight opportunities to return early. Nothing below asserts how long anything took. This is
+  // the same shape as "`awaitLine` WAITS" further down, for the same reason.
+  const settle = async () => {
+    await new Promise((r) => setTimeout(r, 40));
+  };
+
+  let buf = "";
+  let returned = false;
+  const done = awaitBanner(
+    () => buf,
+    () => null,
+    (missing) => `never booted: ${missing.join(", ")}`,
+    5_000,
+  ).then(() => {
+    returned = true;
+  });
+
+  // Everything up to and including `clock:` — precisely the prefix the old wait accepted.
+  const clockEnd = FULL_BANNER.indexOf("  clock:") + FULL_BANNER.slice(FULL_BANNER.indexOf("  clock:")).indexOf("\n") + 1;
+  buf += FULL_BANNER.slice(0, clockEnd);
+  await settle();
+  assert.equal(
+    returned,
+    false,
+    `boot returned on a prefix. \`${JSON.stringify(FULL_BANNER.slice(clockEnd))}\` was still in flight, and a caller ` +
+      `reading \`out\` here sees a banner that is missing ${bannerMissing(buf).join(", ")}.`,
+  );
+
+  buf += FULL_BANNER.slice(clockEnd);
+  await done;
+  assert.equal(returned, true, "…and it does return once the whole banner has landed");
+});
+
+test("AN UNTERMINATED LAST LINE IS NOT A LANDED BANNER — `bannerMissing`, on synthetic buffers", () => {
+  // The predicate on its own, at every boundary that matters. Deterministic, no child, no clock.
+  assert.deepEqual([...bannerMissing(FULL_BANNER)], [], "the whole banner is complete");
+  assert.deepEqual([...bannerMissing("")], ["the address line", ...BANNER_KEYS]);
+  assert.deepEqual(
+    [...bannerMissing(FULL_BANNER.slice(0, -1))],
+    [BANNER_KEYS[BANNER_KEYS.length - 1]],
+    "the last line arrived without its newline — a pipe splits where it likes, so this is a prefix",
+  );
+  assert.deepEqual(
+    [...bannerMissing(FULL_BANNER.replace(/^loom listening on .*\n/, ""))],
+    ["the address line"],
+    "every key but no address is not a booted plane — `serving` parses the port off that line",
+  );
+});
+
 
 test("THE BANNER-KEY SET `serving` WAITS FOR IS THE WHOLE BANNER — measured against a real child", async () => {
   // The regression this catches is the one that was live: a line added to `announce` after

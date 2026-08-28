@@ -108,14 +108,17 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 - Every module says *why it exists* at the top, not what it does.
 - Tests are offline and deterministic — no network, no API key, no wall-clock dependence, with
   ONE declared exception: `packages/core/test/scale.test.ts` measures compile cost against node
-  count and says in its own header that it must read a clock. **"Re-run it alone before believing
-  it" used to stand here and it was not true**: measured, `compile scales sub-quadratically` failed
-  1 run in 10 alone and 1 in 15 under fourteen CPU burners, because it is a RATIO between two
-  sizes and load slows a 500-node compile far more than a 100-node one, which a ratio amplifies
-  rather than cancels. It now asserts twice — once on a deterministic count of the compiler's spec
-  reads, which cannot flake, and once on the clock, whose noise is down to 15/15 under the same
-  load. **Believe a red one.** If only the timed half is red, the count in the same output says
-  whether the algorithm moved.
+  count and says in its own header that it must read a clock. It asserts twice — once on a count
+  of the compiler's spec reads, which is byte-identical run to run, and once on the clock.
+  **Read the count before believing the clock.** Re-measured 2026-08-28 on 16 cores: alone,
+  10/10 pass; under fourteen CPU burners, 6/6; under forty, **0/4**, at 31.3×–51.6× against a
+  bound of 25×. In every one of those red runs the count read `314356 → 5616756 (17.87×)`, digit
+  for digit, so the algorithm had provably not moved. A red clock with the count unchanged is
+  load and nothing else — re-run it on a machine that is not busy. **A count that has moved is
+  the real thing, and no amount of re-running will clear it.**
+  Two claims that used to stand here are gone because they did not reproduce: that the test fails
+  1 run in 10 *alone* (both this form and the pre-2026-08-28 one passed 10/10 alone), and
+  "**Believe a red one**" (measured red 4 times out of 4 from load, with the algorithm still).
 - `/usr/bin/grep -a` always, and the path matters: this shell's `grep` is a ugrep wrapper that
   passes `-I`. Empty output is not evidence of absence. **The trigger set is NUL ∪ invalid
   UTF-8**, not non-ASCII — valid non-ASCII matches fine. **Five** tracked files carry a NUL byte
