@@ -38,7 +38,10 @@ import {
   POLICY_FIELDS,
   SPEC_FIELDS,
   EDGE_FIELDS,
+  NESTED_FIELDS,
   dataFloorOf,
+  launderedChannels,
+  observedChannels,
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
@@ -716,6 +719,11 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     });
     return true;
   }
+  // AND ITS CONTENTS. `SPEC_FIELDS` proves the graph has a `metadata:`; nothing looked inside it,
+  // so `nmae` compiled clean. This one is TIDY rather than load-bearing — no rule reasons from
+  // `metadata` beyond `name` — and it is here because the two below it are not, and a family with
+  // a member left out is a family nobody can check by naming it.
+  unknownKeys(spec.metadata as unknown as Record<string, unknown>, NESTED_FIELDS.metadata, "`metadata`", undefined, d);
   // AND THE ELEMENTS, not just the arrays. `edges: [null]` reached `e.id` and crashed; a node
   // that is not an object does the same one loop over.
   for (const [field, list] of [
@@ -867,6 +875,21 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       fatal = true;
       continue;
     }
+    // AND ITS KEYS. This is `policyy: {posture: "in"}` exactly one scope over, and it costs the
+    // same control: `classificaton: "secret_ref"` compiled clean, left the channel unclassified,
+    // and dropped every reader's floor from `in` to `out` with nothing said. `initial`, `reduce`
+    // and `onConflict` fail the same way one consequence down.
+    unknownKeys(decl, NESTED_FIELDS.channel, `channel "${name}"`, { channel: name }, d);
+    const projection = objectBlock(
+      decl["contextProjection"],
+      `channel "${name}"'s \`contextProjection\``,
+      { channel: name },
+      `a context projection is \`{maxTokens, overflow, fields?, take?}\``,
+      d,
+    );
+    if (projection !== undefined) {
+      unknownKeys(projection, NESTED_FIELDS.contextProjection, `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
+    }
     const reduce = decl["reduce"];
     if (!REDUCER_NAMES.includes(reduce as never)) {
       d.push({
@@ -983,6 +1006,45 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
           fix: `a value above ${MAX_TIMER_MS} is truncated to 1ms by every Node timer, so it would become its own opposite`,
         });
         fatal = true;
+      }
+    }
+
+    // `retry` IS THE WORST BLOCK IN THIS FAMILY, and nothing checked inside it. Measured against
+    // `compile`: `retry: {maxAttemptss: 3}` → ok, zero diagnostics, `plan.retry` a block with no
+    // `maxAttempts` at all. `#retryDecision` stops at `attempt >= policy.maxAttempts`, and
+    // `n >= undefined` is false for every `n`, so the bound the author wrote is not lost — it is
+    // ABSENT, and a node that should stop after three tries retries until the run's budget runs
+    // out. `effectiveRetry` compounds it: a `retry` block that EXISTS suppresses
+    // `DEFAULT_PROVIDER_RETRY`, so the typo also removes the sane default it was overriding.
+    //
+    // NOT `fatal`, on this file's own stated rule: a lost bound costs a limit, not a posture, and
+    // no later rule reasons from `retry` — so the author gets this diagnostic alongside the rest
+    // of the graph's faults rather than instead of them. It is still an ERROR: unlike the inert
+    // declarations GRAPH019 warns about, this graph does not mean what it says.
+    const retryBlock = objectBlock(
+      n.retry,
+      `node "${n.id}"'s \`retry\``,
+      { nodeId: n.id },
+      `a retry policy is \`{maxAttempts, backoff?, initialMs?, maxMs?, jitter?, onlyIf?}\``,
+      d,
+    );
+    if (n.retry !== undefined && retryBlock === undefined) fatal = true;
+    if (retryBlock !== undefined) {
+      unknownKeys(retryBlock, NESTED_FIELDS.retry, `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
+      // REQUIRED, and required as a NUMBER. `RetryPolicy.maxAttempts` is the only non-optional
+      // field on the interface and nothing enforced it; a string survives the comparison by
+      // coercion, but `undefined`, `null` and a non-integer all make it always-false.
+      const max = retryBlock["maxAttempts"];
+      if (!Number.isInteger(max) || (max as number) < 1) {
+        d.push({
+          severity: "error",
+          code: "GRAPH020_MISSING_FIELD",
+          message: `node "${n.id}" has a \`retry\` block whose \`maxAttempts\` is ${
+            max === undefined ? "missing" : `${JSON.stringify(max)}, which is not a whole number of attempts`
+          }`,
+          at: { nodeId: n.id },
+          fix: `add \`maxAttempts:\` — without it the engine compares \`attempt >= undefined\`, which is never true, so the retry never stops`,
+        });
       }
     }
 
@@ -1199,6 +1261,44 @@ function rule004Expressions(
     // compiled clean and then really decided the branch — the exact thing
     // `GRAPH004_UNDECLARED_READ` exists to make impossible.
     for (const c of n.router?.cases ?? []) check(c.when, { nodeId: n.id }, n.id);
+  }
+
+  // AND `tool.args`, WHICH IS A READ SET THIS RULE HAD NEVER LOOKED AT.
+  //
+  // The rule above says an expression may only reference what its owning node declared. A tool
+  // node's arguments are the other way a node names a channel, and `#runToolNode` resolves them
+  // against `scopeFor(...)` — the WHOLE channel scope, not a slice of `reads` — so
+  // `args: {body: "${secret}"}` on a node declaring `reads: ["plain"]` compiled clean and handed
+  // the tool the secret. That exact graph is `test/graph/data-floor.test.ts`.
+  //
+  // A WARNING, AND THE ARGUMENT IS THAT THE RUNTIME IS ALREADY CORRECT. Every decision computed
+  // from the read set — the oversight floor, `dataClassification`, taint, the gate payload and
+  // its binding — reads `observedChannels`, which folds `tool.args` in, so the channel is not
+  // escaping any guard: the graph runs at the posture the secret demands. What is wrong is the
+  // DECLARATION: `reads` under-reports what the node reads, to every human reading the graph and
+  // to `#resolveReads`. Making that an error would refuse graphs that run correctly today —
+  // including the regression test that pins the fix — and this file's own rule for an allow-list
+  // is that refusing correct graphs is worse than the hole it closed. So it is reported, loudly,
+  // and it does not fail the compile.
+  //
+  // NOT COVERED, and said rather than implied: a `subgraph` node's `inputs` name parent channels
+  // and are checked against `spec.channels`, never against `reads`. `observedChannels` does not
+  // scan them either, so that hop has neither half of this pair.
+  for (const n of spec.nodes) {
+    if (n.tool?.args === undefined) continue;
+    const declared = new Set([...(n.reads ?? []), ...(n.writes ?? [])]);
+    for (const ref of observedChannels(n)) {
+      if (declared.has(ref)) continue;
+      d.push({
+        severity: "warning",
+        code: "GRAPH004_UNDECLARED_ARG_READ",
+        message: `node "${n.id}"'s tool arguments read channel "${ref}", which it does not declare in \`reads\``,
+        at: { nodeId: n.id, channel: ref },
+        fix: Object.hasOwn(spec.channels, ref)
+          ? `add "${ref}" to node "${n.id}".reads — the argument is resolved against the whole channel scope either way, so the declaration is the only thing that is wrong`
+          : `"${ref}" is not a declared channel either, so the argument resolves to nothing — declare it under channels: and add it to node "${n.id}".reads`,
+      });
+    }
   }
 }
 
@@ -2174,6 +2274,34 @@ function rule014And019Oversight(
         code: "GRAPH019_POSTURE_NO_EFFECT",
         message: `node "${n.id}" declares posture "${declared}" but "${floor}" applies from a higher level`,
         at: { nodeId: n.id },
+      });
+    }
+
+    // A LAUNDERING HOP, which the compiler had nothing to say about at all.
+    //
+    // `applySecretFlow` is a RUN-time rule: a node that observes a `pii` or `secret_ref` channel
+    // marks every channel it writes as carrying a secret, and a human's de-escalation then stops
+    // being able to lower a hard-to-undo sink below `in`. So a graph's real oversight depends on
+    // a fact — "this ordinary-looking channel holds a secret now" — that appears nowhere in the
+    // graph, and an author met it by running. `plans[].posture` does not show it either: it is
+    // computed from DECLARED classifications, so the downstream node reads `out` here and gates
+    // at `in` there.
+    //
+    // A WARNING, NOT A REFUSAL, and the direction is the argument. Laundering is a legitimate
+    // shape — a summariser that reduces a secret to a digest is the ordinary reason to write one
+    // — and its run-time consequence TIGHTENS oversight rather than loosening it. Refusing would
+    // reject correct graphs to prevent something safe; that is the trade this file already
+    // refuses to make for `GRAPH019_POSTURE_NO_EFFECT`. What the author is owed is the fact.
+    //
+    // The rule itself is `launderedChannels` in `spec.ts`, beside `dataFloorOf` and reading the
+    // same `observedChannels`, because those six lines lived in two files once and drifted.
+    for (const c of launderedChannels(spec.channels, n)) {
+      d.push({
+        severity: "warning",
+        code: "GRAPH014_SECRET_LAUNDERED",
+        message: `node "${n.id}" reads a classified channel and writes "${c}", which is not classified — at run time "${c}" carries the secret and holds every hard-to-undo reader at "in"`,
+        at: { nodeId: n.id, channel: c },
+        fix: `classify "${c}" to say so in the graph, or keep it if the node really does strip the secret — the run tightens either way, and this only says the compiled posture is not the whole story`,
       });
     }
 

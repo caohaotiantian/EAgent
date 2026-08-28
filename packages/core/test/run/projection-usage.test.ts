@@ -261,7 +261,7 @@ function retryingAgentSpec(): GraphSpec {
           tools: ["note.read"],
           outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
         },
-        retry: { maxAttempts: 3, backoffMs: 60_000 },
+        retry: { maxAttempts: 3, initialMs: 60_000 },
       },
     ],
     edges: [],

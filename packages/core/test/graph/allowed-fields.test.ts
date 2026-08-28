@@ -23,10 +23,21 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { compile } from "../../src/graph/compile.ts";
-import { ALLOWED_FIELDS, EDGE_FIELDS, NODE_FIELDS, POLICY_FIELDS, REQUIRED_BLOCK, SPEC_FIELDS, type NodeType } from "../../src/graph/spec.ts";
+import {
+  ALLOWED_FIELDS,
+  EDGE_FIELDS,
+  NESTED_FIELDS,
+  NODE_FIELDS,
+  POLICY_FIELDS,
+  REQUIRED_BLOCK,
+  SPEC_FIELDS,
+  type NodeType,
+} from "../../src/graph/spec.ts";
 import { resolver } from "../run/skeleton.ts";
 
 const SPEC_SRC = readFileSync(fileURLToPath(new URL("../../src/graph/spec.ts", import.meta.url)), "utf8");
+/** `ChannelSpec` and `ContextProjection` live in the state layer, so the cross-check reads two files. */
+const CHANNELS_SRC = readFileSync(fileURLToPath(new URL("../../src/state/channels.ts", import.meta.url)), "utf8");
 
 /** The interface each node type's block is typed as, e.g. `evaluator` → `EvaluatorNode`. */
 const BLOCK_INTERFACE: Readonly<Record<NodeType, string>> = {
@@ -40,9 +51,9 @@ const BLOCK_INTERFACE: Readonly<Record<NodeType, string>> = {
   subgraph: "SubgraphNode",
 };
 
-/** Field names declared by an interface in `spec.ts`, read from the source. */
-function membersOf(name: string): readonly string[] {
-  const m = new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`).exec(SPEC_SRC);
+/** Field names declared by an interface, read from the source rather than restated here. */
+function membersOf(name: string, src: string = SPEC_SRC): readonly string[] {
+  const m = new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`).exec(src);
   assert.ok(m, `interface ${name} moved or changed shape — this test reads it from the source`);
   return [...m[1]!.matchAll(/^\s*readonly\s+([A-Za-z_$][\w$]*)\??\s*:/gm)].map((x) => x[1]!).sort();
 }
@@ -205,6 +216,142 @@ test("A GRAPH USING THESE FIELDS CORRECTLY STILL COMPILES — the control", () =
   });
   assert.deepEqual(
     r.diagnostics.filter((x) => x.code === "GRAPH020_UNKNOWN_FIELD"),
+    [],
+    "valid fields were refused",
+  );
+});
+
+// ── and one level in again: retry, a channel, and metadata ───────────────────
+
+/**
+ * A census of the allow-lists found five, covering the node block, the node, the graph, the edge
+ * and `policy`. FOUR SCOPES HAD NO LIST AT ALL: `retry`, a `channels.<name>` declaration, that
+ * declaration's `contextProjection`, and `metadata`.
+ *
+ * Measured against `compile` before `NESTED_FIELDS` existed, each on a graph that is otherwise
+ * byte-identical to one that compiles clean, each `ok: true` with ZERO diagnostics:
+ *
+ *     retry: { maxAttemptss: 3 }                     →  plan.retry = {"maxAttemptss":3}
+ *     retry: { backoff: "fixed" }                    →  plan.retry = {"backoff":"fixed"}
+ *     channels.a: { …, classificaton: "secret_ref" } →  channel `a` unclassified
+ *     metadata: { …, nmae: "x" }                     →  nothing
+ *
+ * THE FIRST TWO ROWS ARE THE WORST MEMBER OF THIS FAMILY YET, and worse than the `policyy` case
+ * this file was written for, because it is not a lost declaration but an INVERTED one.
+ * `#retryDecision` stops at `attempt >= policy.maxAttempts`; `n >= undefined` is `false` for every
+ * `n`, so a bounded retry becomes an unbounded one — and `effectiveRetry` stops substituting
+ * `DEFAULT_PROVIDER_RETRY` as soon as any `retry` block exists, so the typo also deletes the sane
+ * default it was overriding. That is why `maxAttempts` is REQUIRED here and not merely allowed.
+ *
+ * The third row is `policyy` exactly one scope over, with the same cost: a channel the author
+ * meant to mark `secret_ref` is unclassified, so `dataFloorOf` floors its readers at `out` instead
+ * of `in` and no human is asked. The fourth is tidy rather than load-bearing, and is here because
+ * the others are not — a family with a member left out is a family nobody can check by naming it.
+ *
+ * TWO OF THE FOUR INTERFACES ARE IN ANOTHER FILE, so the anti-cry-wolf check reads two sources.
+ */
+const nested = (r: ReturnType<typeof compile>, code = "GRAPH020_UNKNOWN_FIELD") =>
+  r.diagnostics.find((x) => x.code === code);
+
+test("A MISSPELLED `retry` FIELD IS REFUSED — the bound that became its own opposite", () => {
+  const r = full({ node: { retry: { maxAttemptss: 3 } } });
+  assert.equal(r.ok, false, "a retry block with no bound the engine can read compiled clean");
+  assert.match(nested(r)!.message, /maxAttemptss/, "the message must name what the author wrote");
+  assert.match(nested(r)!.fix ?? "", /`maxAttempts`/, `expected the near miss, got: ${nested(r)!.fix ?? "(none)"}`);
+});
+
+test("AND `maxAttempts` IS REQUIRED, because absent and misspelled fail identically", () => {
+  // The unknown-key check alone would pass `retry: {backoff: "fixed"}` — a policy that reads as a
+  // retry policy and never stops retrying. `RetryPolicy.maxAttempts` is the one non-optional field
+  // on the interface and nothing enforced it.
+  const r = full({ node: { retry: { backoff: "fixed" } } });
+  assert.equal(r.ok, false);
+  const diag = nested(r, "GRAPH020_MISSING_FIELD")!;
+  assert.ok(diag !== undefined, r.diagnostics.map((x) => x.code).join(", ") || "(no diagnostics)");
+  assert.match(diag.message, /maxAttempts/);
+  assert.match(diag.fix ?? "", /never/, "the fix must say what the engine actually does without it");
+});
+
+test("...and a non-integer bound is refused too — a string coerces, `null` and `1.5` do not", () => {
+  for (const bad of [null, 1.5, "3", 0, -1]) {
+    const r = full({ node: { retry: { maxAttempts: bad } } });
+    assert.equal(r.ok, false, `maxAttempts: ${JSON.stringify(bad)} compiled`);
+    assert.ok(nested(r, "GRAPH020_MISSING_FIELD") !== undefined, `maxAttempts: ${JSON.stringify(bad)}`);
+  }
+});
+
+test("A MISSPELLED CHANNEL FIELD IS REFUSED — `policyy` one scope over, and the same cost", () => {
+  const r = full({
+    spec: { channels: { a: { type: "string", reduce: "replace", classificaton: "secret_ref" }, b: { type: "object", reduce: "replace" } } },
+  });
+  assert.equal(r.ok, false, "a channel that meant to be secret and is not compiled clean");
+  assert.match(nested(r)!.message, /classificaton/);
+  assert.match(nested(r)!.fix ?? "", /`classification`/);
+  assert.equal(nested(r)!.at?.channel, "a", "the diagnostic must point at the channel");
+});
+
+test("AND INSIDE ITS `contextProjection`", () => {
+  const r = full({
+    spec: {
+      channels: {
+        a: { type: "string", reduce: "replace", contextProjection: { maxTokens: 10, overflow: "truncate_tail", takee: 3 } },
+        b: { type: "object", reduce: "replace" },
+      },
+    },
+  });
+  assert.equal(r.ok, false);
+  assert.match(nested(r)!.message, /takee/);
+  assert.match(nested(r)!.fix ?? "", /`take`/);
+});
+
+test("AN UNKNOWN `metadata` FIELD IS REFUSED", () => {
+  const r = full({ spec: { metadata: { name: "sc", project: "test", version: 1, nmae: "x" } } });
+  assert.equal(r.ok, false);
+  assert.match(nested(r)!.message, /nmae/);
+  assert.match(nested(r)!.fix ?? "", /`name`/);
+});
+
+test("EVERY FIELD THESE FOUR INTERFACES DECLARE IS ALLOWED — the guard must not refuse valid graphs", () => {
+  // The same anti-cry-wolf check as the three above, and the one that matters most here: a field
+  // added to `ChannelSpec` and not to this table refuses a channel declaration that is correct,
+  // and an author has no way to tell that from a real typo.
+  const IFACE: Readonly<Record<keyof typeof NESTED_FIELDS, readonly [string, string]>> = {
+    retry: ["RetryPolicy", SPEC_SRC],
+    channel: ["ChannelSpec", CHANNELS_SRC],
+    contextProjection: ["ContextProjection", CHANNELS_SRC],
+    metadata: ["GraphMetadata", SPEC_SRC],
+  };
+  for (const [key, [iface, src]] of Object.entries(IFACE) as [keyof typeof NESTED_FIELDS, readonly [string, string]][]) {
+    assert.deepEqual(
+      [...NESTED_FIELDS[key]].sort(),
+      membersOf(iface, src),
+      `NESTED_FIELDS.${key} and ${iface} disagree — a field was added to one and not the other`,
+    );
+  }
+  assert.deepEqual(Object.keys(NESTED_FIELDS).sort(), Object.keys(IFACE).sort(), "the table lost or gained a scope");
+});
+
+test("A GRAPH USING ALL FOUR CORRECTLY STILL COMPILES — the control", () => {
+  // Reading a table proves nothing about what the check accepts. Every field of all four scopes,
+  // valid, in one graph.
+  const r = full({
+    node: { retry: { maxAttempts: 2, backoff: "fixed", initialMs: 10, maxMs: 20, jitter: false, onlyIf: ["E_TOOL_TIMEOUT"] } },
+    spec: {
+      metadata: { name: "sc", project: "test", version: 1, description: "d", labels: { k: "v" } },
+      channels: {
+        a: {
+          type: "string",
+          reduce: "replace",
+          initial: "",
+          classification: "internal",
+          contextProjection: { fields: ["x"], take: -2, maxTokens: 100, overflow: "truncate_tail" },
+        },
+        b: { type: "object", reduce: "merge_object", onConflict: "last_by_branch" },
+      },
+    },
+  });
+  assert.deepEqual(
+    r.diagnostics.filter((x) => x.severity === "error"),
     [],
     "valid fields were refused",
   );

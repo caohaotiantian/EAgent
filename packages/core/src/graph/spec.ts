@@ -816,6 +816,44 @@ export const EDGE_FIELDS: readonly string[] = [
   "compensates",
 ];
 
+/**
+ * And one level in AGAIN — the four blocks the five lists above walk straight past.
+ *
+ * A census of the allow-lists found `ALLOWED_FIELDS`, `NODE_FIELDS`, `SPEC_FIELDS`, `EDGE_FIELDS`
+ * and `POLICY_FIELDS`, read at eight `unknownKeys` call sites. Nothing checked inside `retry`,
+ * inside a `channels.<name>` declaration, inside that declaration's `contextProjection`, or
+ * inside `metadata`. Measured against `compile`, one graph each, every one `ok: true` with ZERO
+ * diagnostics:
+ *
+ *     retry: { maxAttemptss: 3 }                     →  plan.retry = {"maxAttemptss":3}
+ *     channels.a: { …, classificaton: "secret_ref" } →  channel `a` unclassified, floor `out`
+ *     metadata: { …, nmae: "x" }                     →  nothing
+ *
+ * TWO OF THEM ARE LOAD-BEARING, AND THE FIRST IS THE WORST MEMBER OF THIS FAMILY FOUND SO FAR.
+ * `#retryDecision` stops at `attempt >= policy.maxAttempts`, and `n >= undefined` is `false` for
+ * every `n` — so a retry block whose `maxAttempts` was misspelled is not a lost bound, it is an
+ * UNBOUNDED retry, and `effectiveRetry` also stops substituting `DEFAULT_PROVIDER_RETRY` the
+ * moment a `retry` block exists. The second is `policyy: {posture: "in"}` exactly one scope over:
+ * a channel meant to be `secret_ref` with the key misspelled is an unclassified channel, so every
+ * reader's floor drops from `in` to `out` and no diagnostic says so.
+ *
+ * ONE TABLE for the reason `POLICY_FIELDS` gives — each would otherwise be a name on a pinned
+ * public surface — with one difference worth stating, since that table's argument does not carry:
+ * these are read at FOUR call sites, not one. What replaces it is the same reason `REQUIRED_FIELDS`
+ * is total: `test/graph/allowed-fields.test.ts` iterates this table against the interfaces, so a
+ * scope somebody adds here is a scope that gets cross-checked, and a scope left out of the table
+ * is visibly absent rather than silently unchecked.
+ *
+ * `channel` and `contextProjection` are `ChannelSpec` and `ContextProjection` from
+ * `state/channels.ts`, not from this file; the test reads that file too rather than restating them.
+ */
+export const NESTED_FIELDS: Readonly<Record<"retry" | "channel" | "contextProjection" | "metadata", readonly string[]>> = {
+  retry: ["maxAttempts", "backoff", "initialMs", "maxMs", "jitter", "onlyIf"],
+  channel: ["type", "reduce", "initial", "classification", "contextProjection", "identityKey", "onConflict"],
+  contextProjection: ["fields", "take", "maxTokens", "overflow"],
+  metadata: ["name", "project", "version", "description", "labels"],
+};
+
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
   function: "function",
   agent: "agent",
@@ -920,6 +958,52 @@ export function dataFloorOf(
       return cls === undefined ? ("out" as Posture) : CLASSIFICATION_POSTURE_FLOOR[cls];
     }),
   );
+}
+
+/**
+ * The channels this node would WRITE a secret into that do not say they hold one.
+ *
+ * THE LAUNDERING HOP, stated statically, and it is the same rule `applySecretFlow` applies at
+ * run time: a node that observes a `pii` or `secret_ref` channel marks everything it writes as
+ * carrying a secret, and `PolicyEngine.#floorFor` then holds a hard-to-undo action at `in` under
+ * a human's de-escalation ceiling instead of letting it fall to `on`. Measured in
+ * `test/run/secret-flow.test.ts` before that existed: one `function` node copying a `secret_ref`
+ * channel into an `internal` one dropped the sink from `in` to `on`, no gate was raised, and the
+ * tool received the plaintext.
+ *
+ * The RUN was fixed; the COMPILE said nothing, so an author discovered the posture change by
+ * running. This is the half a compiler can answer — `reads`, `tool.args` and `writes` are all in
+ * the spec — and `validate.ts` turns it into `GRAPH014_SECRET_LAUNDERED`.
+ *
+ * BESIDE `dataFloorOf` AND SHARING `observedChannels` ON PURPOSE. That function is here because
+ * the same six lines lived in two files a single word apart and drifted; this one asks the same
+ * question one hop later and would drift the same way. `test/graph/laundering.test.ts` pins the
+ * remaining half of the coupling: engine.ts spells the `sensitive` predicate locally, and the
+ * test reads that source and fails if the two ever name different classifications.
+ *
+ * SENSITIVE IS DERIVED, not listed: every classification whose posture floor is above `out`.
+ * Writing `["pii", "secret_ref"]` here would be a fourth copy of a vocabulary that already has a
+ * total table, and a fifth classification added to `vocab.ts` would silently miss this rule.
+ * A classification in NO vocabulary looks up `undefined`, which is not `"out"`, so it counts as
+ * sensitive at both ends — over-reporting on the source side, under-reporting on the written side.
+ * Neither survives: `GRAPH003_UNKNOWN_CLASSIFICATION` is an error on that graph already.
+ *
+ * ONE HOP, NOT THE CLOSURE. A node writing into a laundered channel launders again at run time —
+ * `carriesSecret` is monotone and never cleared — and this function does not chase that, because
+ * the second hop's node is reported by its own first-hop check only if it observes a DECLARED
+ * secret. Named as a residue rather than hidden: the diagnostic finds the source of a leak, not
+ * every node downstream of it.
+ */
+export function launderedChannels(
+  channels: Readonly<Record<string, { readonly classification?: Classification }>>,
+  node: NodeSpec,
+): readonly string[] {
+  const sensitive = (c: string): boolean => {
+    const cls = channels[c]?.classification;
+    return cls !== undefined && CLASSIFICATION_POSTURE_FLOOR[cls] !== "out";
+  };
+  if (!observedChannels(node).some(sensitive)) return [];
+  return (node.writes ?? []).filter((c) => !sensitive(c));
 }
 
 /**
