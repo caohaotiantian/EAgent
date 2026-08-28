@@ -164,6 +164,44 @@ test("intoHostRealm still rebuilds what it always rebuilt", () => {
   assert.equal(intoHostRealm(null), null);
 });
 
+test("REBUILDING NEVER RE-PARENTS THE OBJECT IT IS BUILDING", () => {
+  // `rebuild` copied with `out[k] = …`, and [[Set]] walks the prototype chain: `__proto__` finds
+  // `Object.prototype`'s ACCESSOR, so the assignment set a prototype instead of a property. Every
+  // guard downstream that tests `getPrototypeOf(v) === Object.prototype` — `crossedAsThenable` is
+  // the one that matters — was therefore switchable off by the value it was inspecting.
+  //
+  // Asserted on `intoHostRealm` directly as well as through a loader, because this is a property
+  // of the REBUILD and an embedder calls it with values that never saw a realm.
+  const hostile: Record<string, unknown> = {};
+  Object.defineProperty(hostile, "__proto__", {
+    value: { then: () => 1, marker: "injected" },
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+  hostile["ok"] = 2;
+
+  const out = intoHostRealm(hostile) as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(out), Object.prototype, "the rebuilt object was re-parented by its own key");
+  assert.ok(Object.hasOwn(out, "__proto__"), "`__proto__` did not survive as an own property");
+  assert.equal(typeof out["then"], "undefined", "the injected prototype's `then` is reachable from the rebuild");
+  assert.equal(out["ok"], 2);
+  // The value under the key is itself rebuilt, like any other — this is a copy, not a passthrough.
+  assert.notEqual(out["__proto__"], hostile["__proto__"]);
+  assert.equal((out["__proto__"] as Record<string, unknown>)["marker"], "injected");
+});
+
+test("`__proto__` survives the rebuild as data, exactly as JSON.parse treats it", () => {
+  // The rule the fix has to match, so nobody later "hardens" this into a refusal: `__proto__` is
+  // an ordinary JSON key. `JSON.parse` creates it as an own data property and does not re-parent,
+  // and a rebuild that refused it would reject a value the journal round-trips fine.
+  const parsed = JSON.parse(`{"__proto__": {"a": 1}, "b": 2}`) as Record<string, unknown>;
+  const out = intoHostRealm(parsed) as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(out), Object.prototype);
+  assert.deepEqual(Object.keys(out), Object.keys(parsed));
+  assert.equal(JSON.stringify(out), JSON.stringify(parsed));
+});
+
 test("a non-plain value STILL PASSES THROUGH — the canonicalizer's message is the better one", () => {
   // Documented behaviour, and refusing here would have stolen a clearer error from downstream.
   const m = new Map([["a", 1]]);

@@ -270,6 +270,72 @@ test("A `then` GETTER THAT ANSWERS DIFFERENTLY EACH READ IS STILL CAUGHT", () =>
   assert.match(r.message, /returned a promise, and no deadline can bound one/, r.message);
 });
 
+test("AN OWN ENUMERABLE `__proto__` KEY CANNOT TURN THE SECOND CHECK OFF", async () => {
+  // A REGRESSION, and the narrowest one this seam has had. The host-side thenable check that
+  // 347cb98 replaced was UNGATED — it read `out.then` on whatever `intoHostRealm` returned. Its
+  // replacement, `crossedAsThenable`, is gated on `getPrototypeOf(v) === Object.prototype`, and
+  // `rebuild` copied with `out[k] = …`, so an own enumerable `__proto__` key went through
+  // `Object.prototype.__proto__`'s SETTER and re-parented the rebuilt object. The value being
+  // gated could turn its own gate off.
+  //
+  // Measured with this exact body, at `callTimeoutMs: 100`, before `rebuild` used
+  // `Object.defineProperty`:
+  //
+  //     P6 CROSSED at 2 ms; host proto? false | typeof then: function
+  //     P6 AWAIT resolved at 1950 ms to {"late":1} | host proto? false
+  //
+  // and through the FUNCTION loader on both trees, which is what makes it a regression rather
+  // than a residue: `OLD (347cb98^) REFUSED at 1 ms`, `NEW CROSSED at 0 ms`.
+  const body = loadHook(
+    `(function () {` +
+      `  var proto = { then: function (res) { for (var k = 0; k < 4e9; k++) {} res({ late: 1 }); } };` +
+      `  return function (i, c) {` +
+      `    var o = {};` +
+      `    Object.defineProperty(o, "__proto__", { value: proto, enumerable: true, writable: true, configurable: true });` +
+      `    o.ok = 2;` +
+      `    return o;` +
+      `  };` +
+      `})()`,
+    100,
+  );
+  const v = body!({}, CTX) as Record<string, unknown>;
+
+  // The invariant the second check gates on, which is the whole point: it must be a fact about
+  // the rebuild, not a courtesy the returned value can withdraw.
+  assert.equal(Object.getPrototypeOf(v), Object.prototype, "the rebuilt object was re-parented by its own key");
+  // The key landed as an own DATA property, so `then` is not reachable from the crossed value.
+  assert.ok(Object.hasOwn(v, "__proto__"), "`__proto__` did not survive as an own property");
+  assert.equal(typeof v["then"], "undefined", "a callable `then` reached the host");
+  assert.equal(v["ok"], 2);
+
+  // And the harm itself, asserted by outcome: `await` must settle on THIS value, not run the
+  // injected continuation past the 100 ms deadline and resolve to `{late: 1}` 1,950 ms later.
+  const t0 = Date.now();
+  const settled = await (v as unknown as Promise<unknown>);
+  assert.equal(settled, v, "the injected `then` ran — a continuation crossed the deadline");
+  assert.ok(Date.now() - t0 < 1000, `await took ${Date.now() - t0} ms — the spinning continuation ran`);
+});
+
+test("the same key nested one level down cannot re-parent an inner object either", () => {
+  // `rebuild` recurses, so the fix has to hold at every depth — the top-level test alone would
+  // pass against a fix applied only to the outermost object.
+  const body = loadHook(
+    `(function () {` +
+      `  var proto = { then: function (res) { res({ late: 1 }); } };` +
+      `  return function (i, c) {` +
+      `    var inner = {};` +
+      `    Object.defineProperty(inner, "__proto__", { value: proto, enumerable: true, writable: true, configurable: true });` +
+      `    return { writes: { out: inner } };` +
+      `  };` +
+      `})()`,
+  );
+  const v = body!({}, CTX) as { writes: { out: Record<string, unknown> } };
+  const inner = v.writes.out;
+  assert.equal(Object.getPrototypeOf(inner), Object.prototype, "a nested object was re-parented");
+  assert.ok(Object.hasOwn(inner, "__proto__"));
+  assert.equal(typeof inner["then"], "undefined");
+});
+
 test("a body that shadows `Error` cannot reduce the refusal to a bare marker", () => {
   // The refusal crosses the vm boundary as a thrown value, and the first version built it with
   // `new Error(…)` — a binding a body can replace. Measured: a body installing an `Error` whose

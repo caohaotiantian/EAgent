@@ -521,9 +521,45 @@ function refuseThenable(where: string): never {
  * its own prototype and is not read here, because reading it is the hazard `THENABLE_RULE`
  * describes.
  *
- * WHAT IT STILL DOES NOT CATCH, named because the pair is not a total answer: a body's thenable
- * hidden inside a value the rebuild passes through, such as a cross-realm `Map`. Those are
- * refused by the canonicalizer for being a `Map` at all, which is the message worth getting.
+ * THE PROTOTYPE TEST IS AN INVARIANT OF THE REBUILD, AND THE REBUILD HAD TO EARN IT. It reads as
+ * a free fact — `intoHostRealm` builds `out` from a host `{}`, so of course it has the host's
+ * `Object.prototype` — and it was not one: `rebuild` copied with `out[k] = …`, and an own
+ * enumerable `__proto__` key goes through `Object.prototype.__proto__`'s SETTER and RE-PARENTS
+ * `out`. A body that returned one turned this test off and walked past. See `rebuild`, which
+ * copies with `Object.defineProperty` for exactly this reason; without that line every sentence
+ * above is conditional on the value's good behaviour.
+ *
+ * ## WHAT IT STILL DOES NOT CATCH — TWO MEMBERS, BOTH MEASURED ON THIS TREE
+ *
+ * Named because the pair is not a total answer, and enumerated because the previous version of
+ * this paragraph named one member and gave it a reassurance that does not survive the second.
+ *
+ *   1. A body's thenable hidden inside a cross-realm `Map`. The rebuild passes it through, and
+ *      the canonicalizer refuses it for being a `Map` at all — measured, `Map is not
+ *      representable; use a plain object/array at <root>`. That IS the message worth getting.
+ *   2. ANY OTHER PASS-THROUGH VALUE WITH A TWO-FACED `then` GETTER, and this one is not covered
+ *      by 1's reassurance. `rebuild` returns a value as-is whenever its prototype's constructor
+ *      is not named `Object`, which is every class instance, not just the built-ins. Measured
+ *      through the hook loader at `callTimeoutMs: 100`, a body returning `new Thing()` where
+ *      `Thing.prototype.then` is a getter answering `undefined` on its first read and a spinning
+ *      function on its second:
+ *
+ *          PASS-THROUGH CROSSED at 1 ms; host proto? false
+ *            AWAIT resolved at 1945 ms to {"late":1}
+ *
+ *      The in-context guard took the first face, this check declined to read at all, and
+ *      `runFilters`' own `await h.body(...)` took the second. The canonicalizer does not save it
+ *      either — measured, `canonicalize(new Thing())` is `{"a":1}`, not a refusal — and it would
+ *      be too late if it did, because the continuation has already outrun the deadline by the
+ *      time any value reaches it.
+ *
+ * MEMBER 2 IS LEFT OPEN DELIBERATELY, and the reason is that no read closes it. Reading `.then`
+ * here would run the getter on the host thread — the hazard this check's gate exists to avoid —
+ * and would still lose, because a getter that counts simply moves its second face to the `await`.
+ * The answers that WOULD close it are refusing every non-plain return outright (which deletes the
+ * clear canonicalizer message member 1 depends on) or a process boundary. It is the same
+ * unbounded-continuation limit `THENABLE_RULE` and `UNREBUILDABLE_RULE` both end on, and it is
+ * A13's to carry: a code resource is trusted, and this catches the value that arrives by mistake.
  */
 function crossedAsThenable(v: unknown, where: string): boolean {
   if (v === null || typeof v !== "object") return false;
@@ -755,7 +791,32 @@ function rebuild(value: unknown): unknown {
   const isPlain = proto === null || (proto as { constructor?: { name?: string } })?.constructor?.name === "Object";
   if (!isPlain) return value;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = rebuild(v);
+  // `Object.defineProperty`, NOT `out[k] = …`, and the key that forces it is `__proto__`.
+  //
+  // Assignment goes through the ordinary [[Set]], which walks the prototype chain and finds
+  // `Object.prototype.__proto__`'s ACCESSOR. So `out["__proto__"] = v` does not create a
+  // property at all — it RE-PARENTS `out` to whatever the body chose. Measured, a hook body
+  // returning `Object.defineProperty(o, "__proto__", {value: proto, enumerable: true, …})`
+  // with `proto = {then: <spins 4e9 then resolves>}`, at `callTimeoutMs: 100`:
+  //
+  //     P6 CROSSED at 2 ms; host proto? false | typeof then: function
+  //     P6 AWAIT resolved at 1950 ms to {"late":1} | host proto? false
+  //
+  // Both harms `THENABLE_RULE` names: the continuation outran the deadline by 19x, and a
+  // vm-realm object reached the host. It defeated BOTH reads that are supposed to stop it —
+  // the in-context guard saw an `o` whose own `then` is absent, and `crossedAsThenable` skipped
+  // the result because the invariant it gates on, `getPrototypeOf(out) === Object.prototype`,
+  // is exactly what the assignment had just broken. `defineProperty` never consults the
+  // prototype chain, so the key lands as an own data property and the invariant holds.
+  //
+  // A REGRESSION, not an unclosed residue, and worth saying so: the host-side thenable check
+  // 347cb98 replaced was UNGATED — it read `out.then` on whatever `intoHostRealm` returned, so
+  // it caught this. Same body through the function loader, both trees: `OLD (347cb98^) REFUSED
+  // at 1 ms`, `NEW CROSSED at 0 ms`. Narrowing a total check to a gated one is only safe when
+  // the gate cannot be turned off by the value being gated, and this one could.
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    Object.defineProperty(out, k, { value: rebuild(v), writable: true, enumerable: true, configurable: true });
+  }
   return out;
 }
 
