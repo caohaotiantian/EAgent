@@ -7,12 +7,18 @@
  * interfaces. The prose is gone; the checks below never depended on it. **Each one compares two
  * representations that both live in `src/`**, which is why they outlived the documents.
  *
- * Four vocabularies, each declared in one place and used in another:
+ * Five vocabularies, each declared in one place and used in another:
  *
  *   - error codes (`errors.ts` ↔ every `throw` site)
  *   - event types (`journal/events.ts` ↔ every append site)
+ *   - effect kinds (`journal/events.ts` ↔ every `effect.started` append site)
  *   - escalation rules (`run/escalation.ts` ↔ every escalate site)
  *   - telemetry names (`telemetry/spans.ts` ↔ nowhere else, by rule)
+ *
+ * Effect kinds are the newest and were the last to be checked, because they hid inside event
+ * types: a union nested in a payload passes every gate that walks the type list. Two of the eight
+ * members had never been appended by anything, and one of them named a mechanism DESIGN.md
+ * refuses outright.
  *
  * Both directions are checked for the first three, because the field has been burned by each:
  * a code the wire carried that nothing declared, and a code declared that nothing raises heading a
@@ -34,6 +40,9 @@
  *
  *   - `E_JOIN_TIMEOUT` stands while no executor reads a join deadline.
  *   - each unappended event type stands while the files blocking its decision still name it.
+ *   - no effect kind stands at all: `EFFECT_KINDS` is empty, which is the steady state a closed
+ *     vocabulary should be in, and it is a pinned set rather than a floor so a new member with no
+ *     writer has to be argued into it.
  *
  * A blocked decision is not the same thing as an excuse. It says what should happen, who has to
  * do it, and what will make this test demand it.
@@ -341,6 +350,131 @@ test("EVERY EXCUSE IS STILL BLOCKED — the moment it is not, the decision must 
   assert.deepEqual(stale, [], "an excuse outlived its reason");
 });
 
+// ── effect kinds ─────────────────────────────────────────────────────────────
+
+/**
+ * THE FIFTH VOCABULARY, AND THE ONE THAT HID INSIDE THE SECOND.
+ *
+ * `effect.started.kind` is a closed union nested in an event payload, so every check above walks
+ * straight past it: `EVENT_TYPES` says `effect.started` has an appender, and it does — which is
+ * exactly why `"mailbox"` survived every "is this built?" search for the life of the project. The
+ * event was written; the KIND never was.
+ *
+ * The two representations are `journal/events.ts`'s union and the `effect.started` append sites in
+ * `run/engine.ts`. A member of the first with nothing in the second is a durable fact the journal
+ * promises and no run can produce.
+ *
+ * WHAT THIS DOES WHEN IT CANNOT DECIDE: it refuses. An append site whose `kind` is neither a
+ * literal nor an identifier this file can resolve to a declared union fails the test rather than
+ * being skipped, and an EMPTY writer set is a failure, not a vacuous pass — the shape
+ * `check-kernel.mjs` refuses for its own pin, "it would pass everything while watching nothing".
+ *
+ * THE FAILURE MODE THIS INHERITS, stated rather than discovered: the writer scan is a source-text
+ * search, so an append site that assembled its `kind` by string concatenation would read as absent
+ * and this test would refuse a kind that IS written. That is the correct direction — a false
+ * refusal costs a comment here, a false pass costs the registry.
+ */
+/** Comment-stripped, so the docstring above the union — which names deleted members — cannot be read as a declaration. */
+const EVENTS_TEXT = CODE_TEXT.get(join(SRC_DIR, "journal/events.ts"))!;
+
+const EFFECT_KINDS: readonly {
+  readonly kind: string;
+  readonly decision: "wire" | "delete";
+  readonly why: string;
+  /** Paths, relative to `packages/core/`, that must change before the decision can be executed. */
+  readonly blockedOn: readonly string[];
+}[] = [];
+
+/** The union as declared. Passed the text so the self-test below can prove it can answer wrongly. */
+function declaredEffectKinds(eventsText: string): readonly string[] {
+  const decl = /"effect\.started":\s*\{[\s\S]*?\breadonly kind:\s*([^;]+);/.exec(eventsText);
+  assert.ok(decl !== undefined && decl !== null, "journal/events.ts no longer declares effect.started.kind in a shape this test can read");
+  return [...decl[1]!.matchAll(/"([a-z]+)"/g)].map((m) => m[1]!).sort();
+}
+
+/**
+ * The kinds actually appended, read from the `effect.started` sites in the engine.
+ *
+ * One site passes a variable rather than a literal (`kind: effectKind`, whose parameter is
+ * declared `"tool" | "compensate"`), so an identifier is resolved against its own declaration in
+ * the same file. An identifier that resolves to nothing is returned as `?name`, and the caller
+ * treats that as a refusal — never as "no kinds here".
+ */
+function appendedEffectKinds(engineText: string): readonly string[] {
+  const found = new Set<string>();
+  // `type: "effect.started"`, not the bare literal: a READ of the type (`e.type === "effect.started"`)
+  // with an unrelated `kind:` within the window would otherwise count as a writer, which is the one
+  // direction this check must never guess in.
+  for (const m of engineText.matchAll(/\btype:\s*"effect\.started"/g)) {
+    const window = engineText.slice(m.index, m.index + 400);
+    const k = /\bkind:\s*(?:"([a-z]+)"|([A-Za-z_$][\w$]*))/.exec(window);
+    if (k === null) { found.add("?unreadable-site"); continue; }
+    if (k[1] !== undefined) { found.add(k[1]); continue; }
+    const ident = k[2]!;
+    const union = new RegExp(`\\b${ident}\\s*:\\s*((?:"[a-z]+"\\s*\\|\\s*)*"[a-z]+")`).exec(engineText);
+    if (union === null) { found.add(`?${ident}`); continue; }
+    for (const q of union[1]!.matchAll(/"([a-z]+)"/g)) found.add(q[1]!);
+  }
+  return [...found].sort();
+}
+
+test("EVERY DECLARED EFFECT KIND HAS A WRITER, except the ones pinned here", () => {
+  const declared = declaredEffectKinds(EVENTS_TEXT);
+  const written = appendedEffectKinds(CODE_TEXT.get(join(SRC_DIR, "run/engine.ts"))!);
+  assert.deepEqual(declared, ["compensate", "model", "random", "subgraph", "summarize", "tool"], "the union moved — say so in a commit, not here by accident");
+
+  assert.ok(written.length > 0, "no effect.started append site was found at all — this check would pass everything while watching nothing");
+  assert.deepEqual(written.filter((k) => k.startsWith("?")), [], "an effect.started site declares a kind this test cannot resolve — it refuses rather than guessing");
+
+  const unwritten = declared.filter((k) => !written.includes(k)).sort();
+  assert.deepEqual(
+    unwritten,
+    EFFECT_KINDS.map((e) => e.kind).sort(),
+    "a member of effect.started.kind gained (or lost) its only writer — wire it, or pin it here with a reason",
+  );
+
+  const undeclared = written.filter((k) => !declared.includes(k)).sort();
+  assert.deepEqual(undeclared, [], "the engine appends an effect kind journal/events.ts does not declare");
+});
+
+test("every writerless effect kind is one this file can name a reason for", () => {
+  reasonsAreReal(EFFECT_KINDS, "EFFECT_KINDS");
+  const declared = new Set(declaredEffectKinds(EVENTS_TEXT));
+  const unknown = EFFECT_KINDS.map((e) => e.kind).filter((k) => !declared.has(k));
+  assert.deepEqual(unknown, [], "pinned as writerless but not a declared effect kind at all");
+  for (const row of EFFECT_KINDS) {
+    assert.ok(row.blockedOn.length > 0, `${row.kind}: a decision with nothing blocking it is a decision to execute now`);
+    for (const rel of row.blockedOn) assert.ok(existsSync(join(PKG_DIR, rel)), `${row.kind} is blocked on ${rel}, which is not in the tree`);
+  }
+});
+
+test("and both halves of that comparison can fail", () => {
+  // The real functions on a synthetic tree. A pin that cannot report a difference is a pin
+  // reporting success about nothing, which is the shape the rest of this file exists to refuse.
+  const events = `"effect.started": { readonly key: string; readonly kind: "model" | "ghost"; readonly attempt: number };`;
+  assert.deepEqual(declaredEffectKinds(events), ["ghost", "model"]);
+  assert.deepEqual(appendedEffectKinds(`x({ type: "effect.started", payload: { key, kind: "model", attempt: 1 } })`), ["model"]);
+  assert.deepEqual(
+    appendedEffectKinds(`f(k: "tool" | "compensate") { a({ type: "effect.started", payload: { key, kind: k, attempt: 1 } }) }`),
+    ["compensate", "tool"],
+  );
+  assert.deepEqual(
+    appendedEffectKinds(`a({ type: "effect.started", payload: { key, kind: mystery, attempt: 1 } })`),
+    ["?mystery"],
+    "an unresolvable kind must surface as a refusal, not vanish",
+  );
+  assert.deepEqual(
+    appendedEffectKinds(`if (e.type === "effect.started") { const kind: "ghost" = read(e); }`),
+    [],
+    "reading the type is not writing it — a read site must not launder a kind into the writer set",
+  );
+  // And the text the real call is handed is comment-stripped, so the docstring's account of the
+  // members that were DELETED cannot read back as a declaration of them.
+  const raw = readFileSync(join(SRC_DIR, "journal/events.ts"), "utf8");
+  assert.ok(raw.includes("mailbox"), "the docstring stopped recording why the mailbox kind was refused");
+  assert.ok(!EVENTS_TEXT.includes("mailbox"), "`mailbox` is back in the CODE of events.ts, not just its history");
+});
+
 // ── escalation rules ─────────────────────────────────────────────────────────
 
 const RULES_NEVER_RAISED: readonly { readonly id: string; readonly why: string }[] = [
@@ -393,7 +527,7 @@ test("ONE FILE OWNS THE TELEMETRY VOCABULARY", () => {
 
 // ── the ratchet ──────────────────────────────────────────────────────────────
 
-test("NEITHER EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () => {
+test("NO EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () => {
   // THE HOLE THE REST OF THIS FILE DOES NOT CLOSE, and the one that produced sixteen members.
   // Every check above compares the set of unwritten members to a pinned list, so the way to
   // pass is to add the member to the list — with a fat reason, which `reasonsAreReal` will
@@ -415,6 +549,13 @@ test("NEITHER EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", 
     `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX and is FIVE — ` +
       `journal/events.ts is kernel, and a closed vocabulary that only ever grows is not one`,
   );
+  assert.equal(
+    EFFECT_KINDS.length,
+    0,
+    `${EFFECT_KINDS.length} effect kinds are declared with no writer; it was TWO before \`clock\` and \`mailbox\` were ` +
+      `deleted and is ZERO now — a kind is cheap to declare and impossible to produce, which is how one of them ` +
+      `advertised a mechanism DESIGN.md refuses`,
+  );
 });
 
 test("the registries are non-empty, so none of the above can pass vacuously", () => {
@@ -424,4 +565,8 @@ test("the registries are non-empty, so none of the above can pass vacuously", ()
   assert.ok(EVENT_TYPES.length >= 30, `EVENT_TYPES has ${String(EVENT_TYPES.length)} members`);
   assert.ok(Object.keys(ESCALATION_RULES).length >= 8, "ESCALATION_RULES is populated");
   assert.ok(FILES.length >= 40, `scanned ${String(FILES.length)} source files`);
+  assert.ok(
+    declaredEffectKinds(EVENTS_TEXT).length >= 6,
+    "effect.started.kind lost members — an empty union would make the writer check pass while watching nothing",
+  );
 });

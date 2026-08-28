@@ -303,5 +303,9 @@ test("H20: `FunctionContext.now` says what it is — reproducible without being 
     /now: this\.#now,\s*\n\s*seed: await this\.#randomSeedEffect/,
     "a body is being handed the wall clock again",
   );
-  assert.doesNotMatch(engine, /kind:\s*"clock"/, "a clock effect is being appended — then say `recorded` on the seam");
+
+  // The other half — that no clock effect is appended — used to be a `doesNotMatch` for
+  // `kind: "clock"` here. `clock` is no longer a member of `effect.started.kind`, so appending one
+  // is a typecheck error rather than a string this file has to go looking for; a compiler refusing
+  // the value is strictly stronger than a regex refusing one spelling of it.
 });
