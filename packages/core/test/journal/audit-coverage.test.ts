@@ -72,7 +72,19 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
 
   // ── genuinely nothing to relate ─────────────────────────────────────────────
   "run.compiled": { kind: "no-relation", why: "carries the graph hash; that binding is checked by replay and by #assertBound, not by a sequence relation" },
-  "run.suspended": { kind: "no-relation", why: "a suspend/resume pair is a lifecycle nicety, not an obligation — a run may end suspended" },
+  // `run.suspended` AND `run.resumed` BOTH LEFT THIS LIST, and both excuses were true about
+  // the wrong half. "A suspend/resume pair is a lifecycle nicety, not an obligation — a run
+  // may end suspended" is still true, and so is "a resume with no prior suspend is legal: a
+  // fresh process attaching a live run appends one". Neither is the relation that was there
+  // to check. The gate broker's rows (`reason: "gate"`, `by: "gate"`) really are
+  // unconstrained — several may ride one wave, and none of them touches `p.paused`. THE
+  // OPERATOR's rows are not: `projection.ts` sets `p.paused` on `run.suspended{reason:
+  // "operator"}` and clears it only on `run.resumed{by:"operator"}`, and `Engine.pause` and
+  // `Engine.resume` are both guarded on that flag, so the two ALTERNATE by construction.
+  // Falsified by producing a journal with two operator suspensions and no resume between —
+  // two Engines over one store, `Promise.allSettled` over two pauses, both fulfilled — which
+  // every rule in this file called fine. `run.operator-pause-alternates` constrains the
+  // operator half now, and the gate half is still excused by being outside it.
   // `run.failed` and `run.cancelled` LEFT THIS LIST, and what they said while they were on it
   // was false. The entry read "a terminal marker; the auditor reads its ABSENCE (via
   // run.completed) to decide whether `eventually` rules apply" — i.e. there is no relation to
@@ -80,12 +92,6 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   // Falsified by producing a journal with two `run.failed` rows in it — two planes over one
   // SQLite file, `Promise.allSettled` over two decisions on one gate — which `loom audit`
   // called `ok`, exit 0. `run.terminal-is-last-and-once` constrains all three terminals now.
-  //
-  // `run.resumed` stays, and its reason is not "a terminal marker": it is that a resume with
-  // no prior suspend is genuinely legal. It is no longer the shape it was excused NEXT to,
-  // though — a second `run.resumed` beside a second `gate.decided` is now caught, one rule
-  // over, by `run.terminal-is-last-and-once` and `gate.decided-once` respectively.
-  "run.resumed": { kind: "no-relation", why: "a resume with no prior suspend is legal: a fresh process attaching a live run appends one" },
   "task.retry_scheduled": { kind: "no-relation", why: "advisory: the lease that follows is what actually re-runs the task" },
   "task.progress": { kind: "no-relation", why: "free-form progress text from a tool; constrains nothing" },
   "action.pending": { kind: "no-relation", why: "an intervention-window marker; the hold either elapses or is interrupted, and both are legal" },

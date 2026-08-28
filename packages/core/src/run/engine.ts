@@ -327,6 +327,15 @@ const DEFERRAL_INITIAL_MS = 1_000;
 const DEFERRAL_MAX_MS = 60_000;
 
 /**
+ * How many times `#intervene` re-decides against a moved head before it gives up.
+ *
+ * Eight, matching `gates.ts`' `MAX_DECISION_LAPS`, and for its reason: a bound rather than a
+ * spin, because the loop's exit depends on other writers stopping. Exhausting it is a refusal
+ * (`E_SEQ_CONFLICT`), never a write — the fail-closed answer for a guard that cannot decide.
+ */
+const MAX_INTERVENTION_LAPS = 8;
+
+/**
  * The failures that are NOT this node's failure — the whole membership test for a deferral.
  *
  * Named as a set rather than checked inline because the claim "these and no others" is the
@@ -2226,16 +2235,14 @@ export class Engine {
    * would read, to anyone folding the log, like two separate interventions.
    */
   async pause(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
-    const p = await this.#requireLive(runId, "pause");
-    if (p.paused) return p;
-    const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
-    await this.#serialize(() =>
-      log.append([
-        { type: "operator.command", payload: { kind: "pause", args: { reason } }, actor: by },
-        { type: "run.suspended", payload: { reason: "operator" }, actor: by },
-      ]),
+    return this.#intervene(runId, "pause", (p) =>
+      p.paused
+        ? undefined
+        : [
+            { type: "operator.command", payload: { kind: "pause", args: { reason } }, actor: by },
+            { type: "run.suspended", payload: { reason: "operator" }, actor: by },
+          ],
     );
-    return (await this.projection(runId))!;
   }
 
   /**
@@ -2250,22 +2257,82 @@ export class Engine {
    * names what it is stuck on rather than an unblock nobody asked for.
    */
   async resume(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
-    const p = await this.#requireLive(runId, "resume");
-    if (!p.paused) {
-      throw err.conflict(
-        CODES.E_ILLEGAL_TRANSITION,
-        `run ${runId} is not paused (it is ${p.status}${p.suspendedReason === undefined ? "" : `, suspended on ${p.suspendedReason}`}); resume undoes a pause and nothing else`,
-        { details: { runId, status: p.status } },
-      );
-    }
-    const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
-    await this.#serialize(() =>
-      log.append([
+    return this.#intervene(runId, "resume", (p) => {
+      if (!p.paused) {
+        throw err.conflict(
+          CODES.E_ILLEGAL_TRANSITION,
+          `run ${runId} is not paused (it is ${p.status}${p.suspendedReason === undefined ? "" : `, suspended on ${p.suspendedReason}`}); resume undoes a pause and nothing else`,
+          { details: { runId, status: p.status } },
+        );
+      }
+      return [
         { type: "operator.command", payload: { kind: "resume", args: { reason } }, actor: by },
         { type: "run.resumed", payload: { by: "operator" }, actor: by },
-      ]),
-    );
-    return (await this.projection(runId))!;
+      ];
+    });
+  }
+
+  /**
+   * ONE OPERATOR INTERVENTION, DECIDED AGAINST A HEAD AND WRITTEN CONDITIONAL ON IT.
+   *
+   * `pause` and `resume` used to write through `RunLog.append`, and `RunLog`'s own docstrings
+   * say why that is the wrong door: `append` "retries on seq conflict because the events are
+   * unconditional", `commit` "NEVER retries — the caller decided something was true at
+   * `expectedSeq`… the primitive that turns at-least-once execution into exactly-once state".
+   * Everything either verb does before its write is a decision conditional on the head — the
+   * run is not terminal AT `p.seq`, and it is (or is not) paused AT `p.seq`. Writing through
+   * the retrying door meant two writers who both read "not paused" both landed.
+   *
+   * MEASURED, two Engines over one store — a `loom serve` and a CLI, which is the ordinary
+   * deployment — with `Promise.allSettled` over two pauses. Both calls returned FULFILLED and
+   * the journal read `5 operator.command | 6 run.suspended | 7 operator.command | 8
+   * run.suspended`. `pause`'s own docstring already claimed the opposite: "IDEMPOTENT: a
+   * second pause on a paused run appends nothing. Two `run.suspended` rows would read, to
+   * anyone folding the log, like two separate interventions."
+   *
+   * THIS IS `HumanGateBroker.resolve`'S DEFECT, ONE DOOR OVER, and it is fixed the same way —
+   * so the shape is copied rather than reinvented. THE RETRY IS HERE AND IT IS NOT A
+   * RE-COMMIT: `commit` never retries, so a conflict comes back to the top and re-decides
+   * against the NEW head. A conflict raised by an unrelated append (a wave committing, a
+   * sweeper) is served by the next lap; a conflict raised by the OTHER operator's pause meets
+   * `p.paused` on the next lap and becomes the documented no-op, which is the right answer
+   * and the one the concurrent case never used to give. A bare re-`commit` at a refreshed seq
+   * would be the original defect with an extra step.
+   *
+   * `decide` returning `undefined` means "already true, append nothing"; throwing is a
+   * refusal, and it is re-evaluated on every lap so a loser reaches the same refusal a
+   * latecomer would.
+   *
+   * WHY THESE TWO AND NOT EVERY GUARDED APPEND IN THIS FILE. `#cancelTree` and `#finish` have
+   * the same read-then-append shape and are NOT converted here: a duplicate from either is
+   * caught by `journal/audit.ts`'s `run.terminal-is-last-and-once`, so it is a defect somebody
+   * eventually finds. A duplicated operator intervention was invisible to every rule that file
+   * had — which is why the fix for these two ships with the rule that makes them visible.
+   */
+  async #intervene(
+    runId: RunId,
+    verb: string,
+    decide: (p: RunProjection) => readonly NewEvent[] | undefined,
+  ): Promise<RunProjection> {
+    for (let attempt = 0; ; attempt++) {
+      const p = await this.#requireLive(runId, verb);
+      const events = decide(p);
+      if (events === undefined) return p;
+      const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
+      try {
+        await this.#serialize(() => log.commit(p.seq, events));
+        return (await this.projection(runId))!;
+      } catch (e) {
+        if (!isLoomError(e) || e.code !== CODES.E_SEQ_CONFLICT) throw e;
+        if (attempt + 1 >= MAX_INTERVENTION_LAPS) {
+          throw err.conflict(
+            CODES.E_SEQ_CONFLICT,
+            `run ${runId} could not be ${verb}d in ${MAX_INTERVENTION_LAPS} attempts — the journal head moved under every one`,
+            { details: { runId, verb } },
+          );
+        }
+      }
+    }
   }
 
   /**

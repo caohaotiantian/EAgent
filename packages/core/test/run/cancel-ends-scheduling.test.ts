@@ -33,6 +33,7 @@ import { InProcessEventBus } from "../../src/bus.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
+import { auditRun } from "../../src/journal/audit.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
@@ -188,6 +189,16 @@ test("A CANCELLED RUN DOES NOT SCHEDULE A RETRY for an effect that settles after
   const final = await engine.projection(runId);
   assert.equal(final?.status, "cancelled");
   assert.deepEqual(runnable(final!.tasks), [], "a terminal run holds no runnable Task");
+
+  // AND THE AUDITOR AGREES. `run.terminal-is-last-and-once` names every event that moves a run
+  // it has already ended; on this journal before the fix it named five, and the argument for
+  // keeping the settling effect's own rows is only honest if the auditor can tell those apart
+  // from the scheduling. It can — see `settlesAnEffectStartedBefore` in `journal/audit.ts`.
+  assert.deepEqual(
+    auditRun(after).violations.map((v) => `${v.rule}@${String(v.seq)}: ${v.detail}`),
+    [],
+    "the journal a cancel-mid-effect leaves behind must audit clean",
+  );
 });
 
 // -- the success arm --------------------------------------------------------
@@ -309,4 +320,14 @@ test("A CANCELLED RUN DOES NOT ACTIVATE THE NEXT NODE when the in-flight effect 
   const final = await engine.projection(runId);
   assert.equal(final?.status, "cancelled");
   assert.deepEqual(runnable(final!.tasks), [], "a terminal run holds no runnable Task");
+
+  // AND THE AUDITOR AGREES. `run.terminal-is-last-and-once` names every event that moves a run
+  // it has already ended; on this journal before the fix it named five, and the argument for
+  // keeping the settling effect's own rows is only honest if the auditor can tell those apart
+  // from the scheduling. It can — see `settlesAnEffectStartedBefore` in `journal/audit.ts`.
+  assert.deepEqual(
+    auditRun(after).violations.map((v) => `${v.rule}@${String(v.seq)}: ${v.detail}`),
+    [],
+    "the journal a cancel-mid-effect leaves behind must audit clean",
+  );
 });
