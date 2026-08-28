@@ -1738,6 +1738,17 @@ export class Engine {
     to: Posture,
     justification: string,
     actor: PolicyActor,
+    /**
+     * WHICH DOOR THE HUMAN CAME THROUGH, and it used to be the constant `"api"`.
+     *
+     * `via` is a durable field on the actor envelope and `HumanActor["via"]` is a closed
+     * vocabulary; writing `"api"` for every caller was true while the only caller was an
+     * embedder and became a FALSE durable fact the moment `loom deescalate` existed — an
+     * audit reading the journal back would say a de-escalation arrived over the network when
+     * it was typed at the host's shell, which is the more serious of the two. Defaulted
+     * rather than required so an embedder already calling this is unchanged.
+     */
+    via: HumanActor["via"] = "api",
   ): Promise<RunProjection> {
     const ctx = this.#require(runId);
     const before = ctx.policy.ceilingFor(scope) ?? "in";
@@ -1747,7 +1758,7 @@ export class Engine {
         {
           type: "policy.deescalated",
           payload: { from: before, to, scope, justification },
-          actor: { kind: "human", subject: actor.id, via: "api" },
+          actor: { kind: "human", subject: actor.id, via },
         },
       ]),
     );
