@@ -232,6 +232,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     ToolRegistry — so a provider on a wire that is neither Anthropic's nor
                     OpenAI's, and an in-process tool, need no fork. A models-file "routes"
                     row may name an adapter registered here.
+                    A ModelAdapter must implement provider, stream, priceOf, estimateOf and
+                    outputCeilingOf, and its "done" frame must carry provider. That list is
+                    the extension CONTRACT: adding a member to it breaks every adapter this
+                    repo did not write, which is the surface this flag exists to open.
                     IT IS ARGV, SO IT IS YOUR OWN CHOICE LOADED INTO YOUR OWN PROCESS: the
                     module runs unsandboxed with everything this binary has — the same trust
                     a resources/function body and a hand-registered tool already carry. It

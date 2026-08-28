@@ -60,16 +60,22 @@ test("EVERY EXPORTED CLASS IS CONSTRUCTED SOMEWHERE, so typecheck really does co
   );
 });
 
-test("the three constructed only inside `src/` are named, so the exception cannot grow quietly", () => {
-  // `check-surface.mjs` says "the other three inside `src/`". Which three matters: a class only
+test("the two constructed only inside `src/` are named, so the exception cannot grow quietly", () => {
+  // `check-surface.mjs` says "the other three inside `src/`". Which ones matters: a class only
   // `src/` constructs is covered by typecheck, but no TEST exercises its shape, so a change is
   // caught only if some internal caller happens to break. That is weaker, and the list is short
   // enough to be worth stating.
+  //
+  // IT WENT THREE -> TWO, and the direction is the point: `ReplayEffects` left the list because
+  // the change that made `hermetic` falsifiable had to construct one to test it. A name leaving
+  // this set is a public shape gaining its first real check. The assertion is an equality rather
+  // than a subset so that BOTH directions are a decision — a name arriving is a shape losing its
+  // cover, and a name leaving should be noticed and celebrated rather than silently absorbed.
   const classes = exportedClasses();
   const srcOnly = classes.filter((c) => !new RegExp(`new ${c}\\s*\\(`).test(TESTS)).sort();
   assert.deepEqual(
     srcOnly,
-    ["CanonicalizationError", "ReplayEffects", "SubscriberOverflowError"],
+    ["CanonicalizationError", "SubscriberOverflowError"],
     "the set of exported classes no test constructs has changed — each addition is one more " +
       "public shape checked only by an internal caller",
   );

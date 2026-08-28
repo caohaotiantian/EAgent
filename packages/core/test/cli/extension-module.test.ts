@@ -39,6 +39,20 @@ import type { RunId } from "../../src/ids.ts";
 /**
  * A wire that is neither Anthropic's nor OpenAI's, written the way a stranger would have to
  * write it: a plain module, importing nothing from this repo, handed only `{models, tools}`.
+ *
+ * IT IMPLEMENTS THE WHOLE `ModelAdapter` CONTRACT, and the two newest members are here because
+ * they were MISSED. This fixture was written against a tree where `outputCeilingOf` did not
+ * exist and the `done` frame carried no `provider`; both landed in the same wave, from two other
+ * decisions, and this test was the only thing in the tree that noticed — every shipped adapter
+ * was updated with them, and a THIRD-PARTY one is by definition not.
+ *
+ * That is the finding worth keeping: **making a member required on `ModelAdapter` is a breaking
+ * change to the extension surface**, and the extension surface is the thing D.7.5 exists to open.
+ * The members stay required — `outputCeilingOf` was added precisely because reserving against a
+ * made-up constant is a guard answering its undecidable case with the passing value, and an
+ * optional version with a fallback reinstates that defect for exactly the adapters nobody here
+ * wrote. So the contract is the thing that has to be legible instead: `--help` names the required
+ * members at the flag, and README quotes them.
  */
 const BEDROCK_MODULE = `
 class BedrockConverseAdapter {
@@ -50,12 +64,14 @@ class BedrockConverseAdapter {
     yield {
       type: "done",
       message: { role: "assistant", content: text },
+      provider: this.provider,
       finishReason: "stop",
       usage: { ...usage, costUsd: this.priceOf(req.model, usage), wallMs: 0 },
     };
   }
   priceOf(_m, u) { return (u.inputTokens + u.outputTokens) / 1e6; }
   estimateOf() { return 0.001; }
+  outputCeilingOf(req) { return req.maxTokens ?? 4096; }
 }
 export default ({ models, tools }) => {
   models.register(new BedrockConverseAdapter());
