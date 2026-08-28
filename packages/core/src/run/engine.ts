@@ -4659,6 +4659,40 @@ export class Engine {
         // no output to bill and no ceiling to describe. Inventing a number here would price work
         // that never happens.
         ceiling = adapter === undefined ? undefined : outputCeilingOf(adapter, shaped, `node "${w.node.id}"`);
+        // A FLOOR ON REPLAY, AND THE JOURNAL CANNOT YET DO BETTER. Stated here rather than left
+        // to be discovered, because D.7.3 moved this number without saying it had: the padding
+        // used to be a made-up constant of 1,024, which both paths computed, so a `budget.tokens`
+        // refusal replayed event for event and message for message. Now the live path asks the
+        // adapter and the replay path has no adapter to ask.
+        //
+        // WHAT THE `?? 0` IS AND IS NOT. It is a LOWER BOUND on the live estimate — same
+        // `shaped`, no padding — so it is SOUND in one direction and holed in the other:
+        //   - a replay can never refuse a turn the live run allowed. That direction is safe, and
+        //     it is why this check is not simply switched off in replay. Measured, node cap 10:
+        //     LIVE refuses at 1043, REPLAY refuses at 19 — skipping the check would have lost
+        //     that refusal entirely and died on the missing effect instead.
+        //   - a replay CAN fail to refuse a turn the live run refused, whenever the refusal
+        //     needed the padding. Measured, node cap 500: LIVE fails E_BUDGET_EXHAUSTED at 1043,
+        //     REPLAY does not refuse at 19, reaches the model effect the live run never made, and
+        //     dies E_REPLAY_DIVERGENCE with zero `budget.exhausted` rows in the shadow journal.
+        //     `replayRun`'s `compare()` grades both as `failed` and reports `match: true`, so
+        //     nothing announces it — that last part is in `run/replay.ts`, not here.
+        //
+        // THE CLASS, NAMED. Three token/cost refusals cannot be re-derived by a replay today and
+        // all three for the same reason — the quantity is an ADAPTER's answer and the journal
+        // does not carry it: this node ceiling; the node `costUsd` ceiling above, whose
+        // `estimateOf(shaped) ?? 0` makes it refuse nothing at all in replay (older than this
+        // change, and undocumented until now); and `ctx.policy.reserve` below, which charges the
+        // RUN's token budget the same padded number live and an unpadded one in replay. Only
+        // `wallMs` is exempt, and only because it is settled-only.
+        //
+        // WHAT WOULD CLOSE IT, and why it is not here. `outputCeilingOf` is a call into the
+        // adapter, so the rule that applies is this repo's own — every nondeterministic call is
+        // recorded under a derived key and replay serves the record. That means a seventh member
+        // of `effect.started.kind` in `journal/events.ts` plus an index for it in
+        // `ReplayEffects`, and that union's docstring is explicit that its membership is a
+        // measured, guarded set rather than a place to add a field. It is a vocabulary change,
+        // not a repair, and it is the seam this hole is asking for.
         const estimateTokensForTurn = estimateTurnTokens(shaped, ceiling ?? 0);
         const nodeCapTokens = w.node.policy?.budget?.tokens;
         const taskTokens = usage.inputTokens + usage.outputTokens;
@@ -4666,7 +4700,17 @@ export class Engine {
           throw err.exhausted(
             CODES.E_BUDGET_EXHAUSTED,
             `node "${w.node.id}" would exceed its ${String(nodeCapTokens)}-token budget ` +
-              `(${String(taskTokens)} spent by this task, ${String(estimateTokensForTurn)} estimated for this turn)`,
+              `(${String(taskTokens)} spent by this task, ${String(estimateTokensForTurn)} estimated for this turn` +
+              // THE NUMBER SAYS WHICH NUMBER IT IS. Without this the recorded refusal reads
+              // "1043 estimated" and its replay reads "19 estimated", two different numbers for
+              // one turn with no hint that the second is a floor — the exact failure the header
+              // of `test/run/replay-fidelity.test.ts` was written about, a wrong answer
+              // announcing itself as a different wrong answer.
+              (ceiling === undefined
+                ? `, a FLOOR: a replay has no adapter to state the output ceiling, so the padding ` +
+                  `the recorded run reserved against is missing from this number`
+                : "") +
+              `)`,
             {
               details: {
                 dimension: "tokens",
@@ -4675,6 +4719,10 @@ export class Engine {
                 spent: taskTokens,
                 reserved: 0,
                 requested: estimateTokensForTurn,
+                // `null` is "nobody stated one", which on this path means a replay. Written
+                // rather than omitted so an auditor reading `budget.exhausted`'s error record can
+                // tell a padded estimate from an unpadded one without knowing how it got there.
+                ceiling: ceiling ?? null,
               },
             },
           );

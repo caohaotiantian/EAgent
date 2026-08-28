@@ -52,7 +52,7 @@ function shifting(): { resolver: ResourceResolver; bump: () => void } {
   };
 }
 
-function spec(): GraphSpec {
+function spec(nodeTokens?: number): GraphSpec {
   return {
     apiVersion: "loom.dev/v1",
     kind: "GraphSpec",
@@ -62,7 +62,14 @@ function spec(): GraphSpec {
     inputs: ["q"],
     outputs: ["a"],
     nodes: [
-      { id: "ask", type: "agent", reads: ["q"], writes: ["a"], agent: { profile: "agent_profile/x@stable", prompt: "prompt/p@stable" } },
+      {
+        id: "ask",
+        type: "agent",
+        reads: ["q"],
+        writes: ["a"],
+        ...(nodeTokens === undefined ? {} : { policy: { budget: { tokens: nodeTokens } } }),
+        agent: { profile: "agent_profile/x@stable", prompt: "prompt/p@stable" },
+      },
     ],
     edges: [],
   } as unknown as GraphSpec;
@@ -211,7 +218,10 @@ class FramelessAdapter implements ModelAdapter {
 }
 
 /** Run one agent node live under `adapter`, then replay the journal it wrote. */
-async function liveThenReplay(adapter: ModelAdapter): Promise<{
+async function liveThenReplay(
+  adapter: ModelAdapter,
+  nodeTokens?: number,
+): Promise<{
   live: RunProjection;
   report: Awaited<ReturnType<typeof replayRun>>;
 }> {
@@ -231,7 +241,7 @@ async function liveThenReplay(adapter: ModelAdapter): Promise<{
     resolver: res.resolver,
     policy: { granted: [], systemFloor: "out", budget: { runUsd: 10 } },
   });
-  const graph = compileOrThrow({ spec: spec(), resolver: res.resolver, tools: {}, tenantCapabilities: [] });
+  const graph = compileOrThrow({ spec: spec(nodeTokens), resolver: res.resolver, tools: {}, tenantCapabilities: [] });
   const runId = await engine.submit({ graph, inputs: { q: "hi" } });
   const live = await engine.advance(runId);
   const report = await replayRun({
@@ -279,4 +289,88 @@ test("A TURN WITH NO TERMINAL FRAME IS NOT A REFUSAL — absent must not be read
   assert.equal(live.status, "succeeded", JSON.stringify(live.error ?? {}));
   assert.equal(report.match, true, diverged(report));
   assert.equal(report.replayed.status, "succeeded", "an absent `provider` must replay as the run it was, not as a refusal");
+});
+
+/**
+ * THE NODE TOKEN CEILING IS AN ADAPTER'S ANSWER, AND A REPLAY HAS NO ADAPTER TO ASK.
+ *
+ * D.7.3 replaced a made-up padding constant of 1,024 with `outputCeilingOf(adapter, req)`. Both
+ * paths used to compute the constant, so a `budget.tokens` refusal replayed event for event and
+ * message for message; only the live path can compute the adapter's answer. MEASURED through
+ * `replayRun` on a one-agent graph with node `budget.tokens: 500`, on `0eea7aa` (before D.7.3)
+ * and on this tree (after) — the estimate is 1,043 in that probe's rig and 1,041 in this file's,
+ * which differ only by the resolved prompt:
+ *
+ *   BEFORE  LIVE   failed E_BUDGET_EXHAUSTED  … 1043 estimated for this turn
+ *           REPLAY failed E_BUDGET_EXHAUSTED  … 1043 estimated for this turn
+ *   AFTER   LIVE   failed E_BUDGET_EXHAUSTED  … 1043 estimated for this turn
+ *           REPLAY failed E_REPLAY_DIVERGENCE effect "ask@root#0:model:0" is not in the journal
+ *
+ * The BEFORE column agreed by accident, not by construction: it matched because the adapter under
+ * test also reported 1,024. Against the 4,096 the shipped `providers/http.ts` adapter reports it
+ * would have printed two different numbers even then.
+ *
+ * `ceiling ?? 0` is a LOWER BOUND, so the damage is one-directional and these three tests are the
+ * two directions plus the hole:
+ *
+ *   - a replay never refuses a turn the live run allowed (sound, and the reason the check is not
+ *     simply switched off in replay — switching it off would lose the first test below);
+ *   - a refusal the transcript alone earns still re-derives, and now SAYS its number is a floor
+ *     instead of quietly printing a different one;
+ *   - a refusal that needed the padding does not re-derive at all, and `compare()` grades both
+ *     runs `failed` so `match` stays `true`. That one is pinned below as the debt it is.
+ */
+
+test("A REFUSAL THE TRANSCRIPT ALONE EARNS STILL RE-DERIVES — and the replayed number says it is a floor", async () => {
+  // Cap 10: the transcript estimate exceeds it with no padding at all, so both paths refuse.
+  const named = new MockModelAdapter({ provider: "leaf", script: () => ({ text: "ok", finishReason: "stop" }) });
+  const { live, report } = await liveThenReplay(named, 10);
+
+  assert.equal(live.error?.code, "E_BUDGET_EXHAUSTED");
+  assert.equal(report.replayed.error?.code, "E_BUDGET_EXHAUSTED", "the replay must reach the same refusal");
+
+  // The two messages carry DIFFERENT numbers — 1041 live, 17 replayed — because the live one is
+  // padded by the adapter's ceiling and the replayed one cannot be. Two numbers for one turn with
+  // no hint which is which is this file's own opening lesson: a wrong answer announcing itself as
+  // a different wrong answer is not a loud failure. So the replayed one names itself.
+  assert.match(live.error?.message ?? "", /1041 estimated for this turn\)$/, "the live estimate is padded by the adapter's 1,024");
+  assert.match(report.replayed.error?.message ?? "", /17 estimated for this turn,/, "the replayed one is the transcript alone");
+  assert.doesNotMatch(live.error?.message ?? "", /FLOOR/, "the LIVE estimate is the real one and claims nothing");
+  assert.match(
+    report.replayed.error?.message ?? "",
+    /a FLOOR: a replay has no adapter to state the output ceiling/,
+    `the replayed refusal must say its estimate is unpadded: ${report.replayed.error?.message}`,
+  );
+});
+
+test("A REPLAY NEVER REFUSES A TURN THE LIVE RUN ALLOWED — the direction `ceiling ?? 0` makes safe", async () => {
+  // The lower bound can only ever under-count, so this direction cannot break. It is the reason
+  // the check keeps running in replay rather than being skipped, and it goes red if anyone
+  // re-introduces a fabricated ceiling larger than the adapter's.
+  const small = new MockModelAdapter({ provider: "leaf", defaultMaxTokens: 8, script: () => ({ text: "ok", finishReason: "stop" }) });
+  const { live, report } = await liveThenReplay(small, 100);
+
+  assert.equal(live.status, "succeeded", JSON.stringify(live.error ?? {}));
+  assert.equal(report.match, true, diverged(report));
+  assert.equal(report.replayed.status, "succeeded");
+});
+
+test("THE HOLE THIS DOES NOT CLOSE: a refusal that needed the padding does not re-derive", async () => {
+  // Pinned, not fixed. Closing it means recording the adapter's ceiling under a derived key — a
+  // seventh member of `effect.started.kind` in `journal/events.ts` and an index for it in
+  // `ReplayEffects` — which is a vocabulary change to two files this change does not touch.
+  // WHEN THAT LANDS, THIS TEST GOES RED AND SHOULD BE DELETED: the replay will refuse with
+  // E_BUDGET_EXHAUSTED and 1041, exactly as the recording did.
+  const named = new MockModelAdapter({ provider: "leaf", script: () => ({ text: "ok", finishReason: "stop" }) });
+  const { live, report } = await liveThenReplay(named, 500);
+
+  assert.equal(live.error?.code, "E_BUDGET_EXHAUSTED", "live refuses: transcript + the adapter ceiling exceeds 500");
+  assert.match(live.error?.message ?? "", /1041 estimated for this turn/, "17 transcript + 1024 ceiling");
+
+  assert.equal(
+    report.replayed.error?.code,
+    "E_REPLAY_DIVERGENCE",
+    "the replay does not refuse; it reaches the model effect the live run never made",
+  );
+  assert.equal(report.match, true, "and `compare()` grades both `failed`, which is what keeps this quiet");
 });
