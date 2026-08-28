@@ -493,7 +493,34 @@ export type FinishReason = "stop" | "tool_use" | "max_tokens" | "content_filter"
 
 export type ModelEvent =
   | { readonly type: "text_delta"; readonly text: string }
-  | { readonly type: "done"; readonly message: Message; readonly finishReason: FinishReason; readonly usage: UsageRecord };
+  | {
+      readonly type: "done";
+      readonly message: Message;
+      readonly finishReason: FinishReason;
+      readonly usage: UsageRecord;
+      /**
+       * WHO ACTUALLY SERVED THIS TURN — the leaf's own identity, not the wrapper's.
+       *
+       * D.7.6. `model.called.provider` is the journal's only record of which provider answered,
+       * and in every real deployment it read the constant `"routed"`: `openWorkspace` registers
+       * a `RoutingAdapter` as the sole default, the engine journalled `adapter.provider`, and
+       * the leaf that served was never asked. A `FallbackAdapter` call that failed over to
+       * tier 2 was journalled identically to one that did not, so the journal could not say a
+       * fallback had ever fired — the exact evidence a journal-derived circuit breaker would
+       * need. It was already leaking into a shipped surface: `telemetry/spans.ts` emits
+       * `gen_ai.system` from this field, so every OTLP export named the router.
+       *
+       * REQUIRED, and it lives on the `done` frame because the adapter that made the call is
+       * the only thing that knows, and it knows at exactly the moment it reports the outcome.
+       * The composites — `RoutingAdapter`, `FallbackAdapter`, `RecordingAdapter`,
+       * `OneModelAdapter` — forward the leaf's frame unchanged, which they already do
+       * structurally, so the answer arrives without anybody interrogating anybody.
+       *
+       * NO SCHEMA CHANGE PAID FOR IT: `model.called.provider` already existed and was already
+       * `string`. The vocabulary was right; the writer was wrong.
+       */
+      readonly provider: string;
+    };
 
 export interface ModelAdapter {
   readonly provider: string;
@@ -501,6 +528,27 @@ export interface ModelAdapter {
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number;
   /** Worst-case cost of a request, for the budget reservation (D6.5). */
   estimateOf(req: ModelRequest): number;
+  /**
+   * The worst-case OUTPUT tokens this request may bill — the number this adapter is about to
+   * put in the request body, and nothing else.
+   *
+   * FOR THE RESERVATION ONLY. It caps nothing: the provider is not asked to respect it and
+   * this method does not change what is sent.
+   *
+   * IT IS A METHOD TAKING THE REQUEST, not a field, and `RoutingAdapter` is why — the only
+   * adapter the CLI ever registers resolves a different leaf per `req.model`, so a field
+   * cannot answer for it at all. `estimateOf` is a method for the same reason and this
+   * mirrors it deliberately.
+   *
+   * REQUIRED, not optional. An optional member returns the engine to a constant of its own,
+   * and that constant WAS the defect (D.7.3): the engine reserved against a hard-coded 1,024
+   * while both HTTP adapters sent `defaultMaxTokens ?? 4096`, so a `budget.tokens` the
+   * operator set did not bind what it said it bound. An adapter that cannot know its ceiling
+   * must return the LARGEST number it might permit — over-reserving refuses work that would
+   * have fit, which is visible and arguable; under-reserving lets work through, and only the
+   * second is a broken guard.
+   */
+  outputCeilingOf(req: ModelRequest): number;
 }
 
 /**
@@ -635,10 +683,15 @@ export class MockModelAdapter implements ModelAdapter {
    */
   readonly seen: ModelRequest[] = [];
 
-  constructor(opts: { provider?: string; script: MockScript; pricePerMTok?: number }) {
+  readonly #defaultMaxTokens: number;
+
+  constructor(opts: { provider?: string; script: MockScript; pricePerMTok?: number; defaultMaxTokens?: number }) {
     this.provider = opts.provider ?? "mock";
     this.#script = opts.script;
     this.#pricePerMTok = opts.pricePerMTok ?? 1;
+    // 1,024 keeps every existing test's arithmetic; the option exists so a test can stand an
+    // adapter up with a ceiling the engine cannot guess, which is the real deployment's shape.
+    this.#defaultMaxTokens = opts.defaultMaxTokens ?? 1024;
   }
 
   async *stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
@@ -665,6 +718,7 @@ export class MockModelAdapter implements ModelAdapter {
     yield {
       type: "done",
       message,
+      provider: this.provider,
       finishReason: turn.finishReason ?? (turn.toolCalls !== undefined && turn.toolCalls.length > 0 ? "tool_use" : "stop"),
       usage: {
         inputTokens,
@@ -679,9 +733,12 @@ export class MockModelAdapter implements ModelAdapter {
     return round6(((usage.inputTokens + usage.outputTokens) / 1_000_000) * this.#pricePerMTok);
   }
 
+  outputCeilingOf(req: ModelRequest): number {
+    return req.maxTokens ?? this.#defaultMaxTokens;
+  }
+
   estimateOf(req: ModelRequest): number {
-    const maxOut = req.maxTokens ?? 1024;
-    return this.priceOf(req.model, { inputTokens: estimateTokens(req), outputTokens: maxOut });
+    return this.priceOf(req.model, { inputTokens: estimateTokens(req), outputTokens: this.outputCeilingOf(req) });
   }
 
   reset(): void {

@@ -211,6 +211,9 @@ class OneModelAdapter implements ModelAdapter {
   estimateOf(req: ModelRequest): number {
     return this.#inner.estimateOf({ ...req, model: this.#model });
   }
+  outputCeilingOf(req: ModelRequest): number {
+    return this.#inner.outputCeilingOf({ ...req, model: this.#model });
+  }
 }
 
 function specFor(opts: AgentOptions, profileRef: ResourceRef): GraphSpec {

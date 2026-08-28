@@ -243,6 +243,7 @@ test("THE CALLER'S MODEL ID REACHES THE PROVIDER, not the profile ref", async ()
     },
     priceOf: () => 0,
     estimateOf: () => 0,
+    outputCeilingOf: () => 1024,
   };
 
   const a = agent({ prompt: "hi", model: "claude-opus-5", adapter: spy as never, now: NOW });

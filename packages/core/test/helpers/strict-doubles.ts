@@ -134,6 +134,9 @@ export class StrictMockModelAdapter implements ModelAdapter {
   estimateOf(req: ModelRequest): number {
     return this.#inner.estimateOf(req);
   }
+  outputCeilingOf(req: ModelRequest): number {
+    return this.#inner.outputCeilingOf(req);
+  }
 
   reset(): void {
     this.seen.length = 0;

@@ -144,6 +144,7 @@ import {
   type FunctionBody,
   type FunctionOutcome,
   type Message,
+  type ModelAdapter,
   type ModelRequest,
   type ModelToolCall,
   type ToolDefinition,
@@ -2319,6 +2320,24 @@ export class Engine {
    * caught by `journal/audit.ts`'s `run.terminal-is-last-and-once`, so it is a defect somebody
    * eventually finds. A duplicated operator intervention was invisible to every rule that file
    * had — which is why the fix for these two ships with the rule that makes them visible.
+   *
+   * THE READ, THE DECISION AND THE COMMIT ARE ONE `#serialize` SLOT, and that is load-bearing
+   * rather than tidy. The first version of this loop read the projection and decided OUTSIDE
+   * the chain and entered it only for the commit, so every append the engine's OWN running
+   * graph made landed between the two — a busy run moved the head under all eight laps and
+   * the operator's brake came back `E_SEQ_CONFLICT` with the run still going. Measured on one
+   * Engine over a `MemoryStateStore`, a 20-node `seq` chain with `advance` in flight: pause
+   * refused at 38, 40, 42, 52 and 56 microtask ticks, `run.suspended` rows 0, journal 144
+   * events, run succeeded. That is `loom serve` exactly — the engine answering the HTTP pause
+   * is the engine driving the run — so the in-process window was the common case, not the
+   * exotic one. `RunLog.append`, the door this replaced, never lost it because its retry loop
+   * ran entirely inside ONE slot. `pause-beats-a-busy-run.test.ts` holds the range.
+   *
+   * NO DEADLOCK, and the reason is a fact about one method: `#requireLive` reads through
+   * `Engine.projection`, which folds the journal and does NOT go through `#serialize`. A lap
+   * therefore never waits on the chain it is already holding. The lap loop stays, because the
+   * conflict it was built for — another PROCESS over the same journal — is still real and
+   * `#serialize` cannot order writers it cannot see.
    */
   async #intervene(
     runId: RunId,
@@ -2326,12 +2345,18 @@ export class Engine {
     decide: (p: RunProjection) => readonly NewEvent[] | undefined,
   ): Promise<RunProjection> {
     for (let attempt = 0; ; attempt++) {
-      const p = await this.#requireLive(runId, verb);
-      const events = decide(p);
-      if (events === undefined) return p;
-      const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
       try {
-        await this.#serialize(() => log.commit(p.seq, events));
+        // `undefined` means "the decision was to append nothing"; a projection is that
+        // already-true answer, returned as `pause`'s documented no-op.
+        const settled = await this.#serialize(async (): Promise<RunProjection | undefined> => {
+          const p = await this.#requireLive(runId, verb);
+          const events = decide(p);
+          if (events === undefined) return p;
+          const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
+          await log.commit(p.seq, events);
+          return undefined;
+        });
+        if (settled !== undefined) return settled;
         return (await this.projection(runId))!;
       } catch (e) {
         if (!isLoomError(e) || e.code !== CODES.E_SEQ_CONFLICT) throw e;
@@ -4546,7 +4571,19 @@ export class Engine {
       const shaped = await this.#filterHook(ctx, w.task, "preModel", req);
 
       let recordedProvider = "replay";
+      let servingProvider: string | undefined;
+      // Whether a live stream produced a terminal `done` frame at all. Distinct from
+      // `servingProvider === undefined`, which cannot tell "the adapter named nobody" from
+      // "the adapter never finished" -- and only the first is D.7.6's refusal. An adapter that
+      // yields no `done` frame is a separate question this change does not answer.
+      let sawDoneFrame = false;
       let reservation;
+      // THE CEILING THIS TURN WAS SENT UNDER, hoisted out of the reservation because two things
+      // need it: the token budget charges against it, and a turn that comes back truncated has
+      // to NAME it — an operator told "raise the ceiling" without being told what it is now
+      // cannot tell a margin from an order of magnitude. `undefined` in a replay, which reaches
+      // no adapter and therefore has nothing to ask.
+      let ceiling: number | undefined;
       try {
         // A replay makes no call, so it reserves nothing. Estimating against a provider
         // that is not there would be inventing a cost for work that never happens.
@@ -4600,7 +4637,13 @@ export class Engine {
         // `reasoningTokens` a subset of `outputTokens`, so a wider sum would double-count one
         // and add two the provider bills separately, and a ceiling that over-counts refuses work
         // that fit.
-        const estimateTokensForTurn = estimateTurnTokens(shaped);
+        //
+        // THE CEILING IS ASKED FOR, NOT ASSUMED — D.7.3. A REPLAY reserves nothing, exactly as
+        // `estimateOf` above already does and for the same reason: no call is made, so there is
+        // no output to bill and no ceiling to describe. Inventing a number here would price work
+        // that never happens.
+        ceiling = adapter === undefined ? undefined : outputCeilingOf(adapter, shaped, `node "${w.node.id}"`);
+        const estimateTokensForTurn = estimateTurnTokens(shaped, ceiling ?? 0);
         const nodeCapTokens = w.node.policy?.budget?.tokens;
         const taskTokens = usage.inputTokens + usage.outputTokens;
         if (nodeCapTokens !== undefined && taskTokens + estimateTokensForTurn > nodeCapTokens) {
@@ -4739,6 +4782,14 @@ export class Engine {
               assistant = ev.message;
               finish = ev.finishReason;
               turnUsage = ev.usage;
+              // WHO ACTUALLY SERVED IT — D.7.6. Read off the frame rather than off the adapter
+              // this loop is holding, because that adapter is a `RoutingAdapter` in every CLI
+              // deployment and a `FallbackAdapter` may have answered from a tier nobody named.
+              // Left `undefined` when the frame omits it, which only an untyped adapter can do;
+              // the refusal below is what happens then, and it is deliberately NOT a fallback
+              // to `adapter.provider` — that fallback IS the bug this removes.
+              sawDoneFrame = true;
+              servingProvider = typeof ev.provider === "string" && ev.provider !== "" ? ev.provider : undefined;
             }
           }
         }
@@ -4779,7 +4830,13 @@ export class Engine {
                 type: "model.called",
                 payload: {
                   key,
-                  provider: adapter?.provider ?? recordedProvider,
+                  // THE LEAF, THEN THE RECORD, THEN THE WRAPPER — in that order, and the last
+                  // arm is reached only on a live call whose adapter gave no answer, which the
+                  // refusal below then fails. `adapter.provider` is the most this engine
+                  // honestly knows about such a turn, and it is written because the call
+                  // happened and cost money (the FX13 ordering); it is not allowed to stand as
+                  // an answer.
+                  provider: servingProvider ?? (this.#replay === undefined ? adapter?.provider : recordedProvider) ?? recordedProvider,
                   // `shaped`, not `req`: a `preModel` filter may have rewritten the model, and
                   // journaling the pre-filter value records a call nobody made.
                   model: shaped.model,
@@ -4818,12 +4875,45 @@ export class Engine {
         );
       }
 
+      // AN ADAPTER THAT WILL NOT SAY WHO SERVED THE TURN — D.7.6, and the same ordering as
+      // the truncation refusal below and for the same reason: the call happened and cost money,
+      // so `model.called` and `effect.completed` record it first, with `adapter.provider` as
+      // the only thing this engine honestly knows. THEN the turn is refused. What it must not
+      // do is accept `adapter.provider` and continue — that is the defect being removed, and
+      // reinstating it here would restore it for exactly the adapters nobody in this repo
+      // wrote. `outputCeilingOf` above is required on `ModelAdapter` and so is this field, so a
+      // well-typed adapter cannot reach this arm; an `--extension-module` one can.
+      //
+      // A SERVED or REPLAYED turn reaches no adapter, so `sawDoneFrame` is false and there is
+      // no frame to have omitted anything -- nothing to refuse.
+      if (sawDoneFrame && servingProvider === undefined) {
+        return {
+          status: "failed",
+          writes: {},
+          usage,
+          error: err.validation(
+            CODES.E_PROVIDER_BAD_REQUEST,
+            `node "${w.node.id}" turn ${String(turn)}: model adapter "${adapter?.provider ?? "(none)"}" ended the turn ` +
+              `without naming the provider that served it — the \`done\` frame's required \`provider\` field was missing ` +
+              `or empty. The journal is the only record of which provider answered, and a wrapper's own name is not that ` +
+              `record. Refusing the turn rather than attributing it to the wrapper.`,
+            { details: { node: w.node.id, turn, adapter: adapter?.provider ?? null } },
+          ),
+        };
+      }
+
       // A TURN THAT DID NOT END BECAUSE THE MODEL WAS FINISHED IS NOT AN ANSWER — see
       // `turnRefusal`. Checked AFTER the appends on purpose: the call happened and cost money,
       // so `model.called` and `effect.completed` must record it, the reservation must settle at
       // the real cost, and a replay must re-derive the same refusal from the same journal rather
       // than find a turn that started and never finished.
-      const refusal = turnRefusal(finish, `node "${w.node.id}" turn ${String(turn)}`, (assistant?.content ?? "").length, turnUsage.outputTokens);
+      const refusal = turnRefusal(
+        finish,
+        `node "${w.node.id}" turn ${String(turn)}`,
+        (assistant?.content ?? "").length,
+        turnUsage.outputTokens,
+        ceiling,
+      );
       if (refusal !== undefined) return { status: "failed", writes: {}, usage, error: refusal };
 
       finalText = assistant?.content ?? finalText;
@@ -5318,18 +5408,20 @@ export class Engine {
     if (served !== undefined) return String(served.result);
 
     const adapter = this.models.require();
+    const req: ModelRequest = {
+      model: "compaction",
+      system: "Summarize the following prior turns in under 200 words. Preserve decisions and identifiers.",
+      messages: [{ role: "user", content: text }],
+      tools: [],
+    };
+    // ASKED BEFORE THE CALL, not after it, and for the same reason `#runAgent` asks before its
+    // reservation: an adapter that cannot say what ceiling it is about to send is refused
+    // before it spends money, rather than after. The number is what a truncation refusal names.
+    const ceiling = outputCeilingOf(adapter, req, `node "${w.node.id}" context summary`);
     let summary = "";
     let finish = "stop";
     let outputTokens = 0;
-    for await (const ev of adapter.stream(
-      {
-        model: "compaction",
-        system: "Summarize the following prior turns in under 200 words. Preserve decisions and identifiers.",
-        messages: [{ role: "user", content: text }],
-        tools: [],
-      },
-      ctx.abort.signal,
-    )) {
+    for await (const ev of adapter.stream(req, ctx.abort.signal)) {
       if (ev.type === "done") {
         summary = ev.message.content;
         finish = ev.finishReason;
@@ -5341,7 +5433,7 @@ export class Engine {
     // place with nothing to say the tail is missing. FX13 was found on the agent turn; this
     // one had never been looked at. Raised before the journal append, unlike `#runAgent`'s:
     // there is no answer to record here, only a replacement that must not be made.
-    const refusal = turnRefusal(finish, `node "${w.node.id}" context summary ${String(ordinal)}`, summary.length, outputTokens);
+    const refusal = turnRefusal(finish, `node "${w.node.id}" context summary ${String(ordinal)}`, summary.length, outputTokens, ceiling);
     if (refusal !== undefined) throw refusal;
 
     await this.#serialize(() =>
@@ -7780,31 +7872,71 @@ function exceededDimension(e: LoomError): { readonly dimension?: "costUsd" | "to
  * The WORST-CASE billed tokens of one model request, for the reservation.
  *
  * The input side is measurable — it is the transcript about to be posted — and the output side is
- * not, so it is bounded by the request's own `maxTokens` and by `DEFAULT_MAX_OUTPUT_TOKENS` when
- * the request declares none. `MockModelAdapter.estimateOf` prices exactly this sum, which is why
- * the number matches what the dollar reservation already assumes rather than inventing a second
- * story about the same request.
+ * not, so it is bounded by the ceiling THE ADAPTER SAYS IT IS ABOUT TO SEND. That is the whole of
+ * D.7.3: this used to end `req.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS`, a constant of 1,024 in
+ * this file, while a second constant of the same name in `providers/http.ts` holds 4,096 and is
+ * what actually goes in the body. The engine never sets `ModelRequest.maxTokens`, so the `??` arm
+ * was the only arm ever taken and the reservation under-described its own request by 4× at the
+ * shipped default and by 31× against the 32,000-token row in
+ * `docs/evolution-loop-2026-08-27.md`. `budget.tokens` therefore did not bind what it said.
+ *
+ * THE ADAPTER IS ASKED BECAUSE ONLY THE ADAPTER KNOWS. `defaultMaxTokens` is per-row because
+ * endpoints differ, and under the CLI the registered adapter is a `RoutingAdapter` that resolves
+ * a different leaf per `req.model` — so no number the engine could hold would be right. The
+ * dollar reservation two branches up already does this correctly with `adapter.estimateOf`; this
+ * is the same request described by the same authority instead of by a guess.
  *
  * OVER-ESTIMATING IS THE SAFE DIRECTION and under-estimating is not: a reservation exists so that
  * 25 fan-out branches cannot each see the same remaining balance, and one that is too small lets
  * them through. `estimateTokens` is chars/4, so a request full of long tokens estimates low —
- * the padding from `maxTokens` is what keeps the reservation conservative in that case.
+ * the padding from the output ceiling is what keeps the reservation conservative in that case.
  */
-function estimateTurnTokens(req: ModelRequest): number {
+/**
+ * The adapter's own output ceiling, or a REFUSAL — never a number this file made up.
+ *
+ * The engine deleted its `DEFAULT_MAX_OUTPUT_TOKENS` because that constant was the defect, so
+ * this has no fallback to return to and must not grow one. `outputCeilingOf` is required on
+ * `ModelAdapter`, which settles it for every adapter TypeScript ever saw; this guard is for the
+ * one it did not — a host-realm adapter handed in through `EngineOptions.models`, or one loaded
+ * from outside the tree. Absent method, `undefined`, `NaN`, `Infinity`, zero or negative all
+ * take the same arm, because none of them is a bound and each of them would otherwise reserve
+ * less than the request can bill.
+ *
+ * WHAT IT DOES WHEN IT CANNOT DECIDE: it refuses the turn before the provider is reached. It
+ * does NOT substitute a constant and continue — that substitution is exactly the shape D.7.3
+ * removed, and restoring it for the adapters nobody in this repo wrote would be the same defect
+ * pointed at the least-trusted code in the process.
+ *
+ * The residual is stated rather than guarded: an adapter that reports a ceiling lower than the
+ * one it then sends cannot be caught by anything here, and the operator's own configuration
+ * already extends it that trust.
+ */
+function outputCeilingOf(adapter: ModelAdapter, req: ModelRequest, where: string): number {
+  const n = (adapter as Partial<ModelAdapter>).outputCeilingOf?.(req);
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
+    throw err.validation(
+      CODES.E_PROVIDER_BAD_REQUEST,
+      `${where}: model adapter "${adapter.provider}" did not state an output ceiling — ` +
+        `\`outputCeilingOf(req)\` returned ${String(n)}, and the token budget reserves against that ` +
+        `number. It must return a finite, positive count of the output tokens this request may bill. ` +
+        `Refusing the turn rather than reserving a number nobody vouched for.`,
+      // `String(n)` and never `n`. The values that reach here are exactly the ones
+      // `canonicalize` refuses on the durable write path — `NaN`, `Infinity`, `undefined` — and
+      // this refusal is journaled. Putting the raw value in `details` turns a clean refusal into
+      // an unhandled `CanonicalizationError` from inside the commit, which is a worse failure
+      // than the one being reported. Measured: `non-finite number NaN at error.details.returned`.
+      { details: { where, provider: adapter.provider, returned: String(n) } },
+    );
+  }
+  return n;
+}
+
+function estimateTurnTokens(req: ModelRequest, ceiling: number): number {
   let n = estimateTokens(req.system);
   for (const m of req.messages) n += estimateTokens(m.content);
   for (const t of req.tools) n += estimateTokens(t.name) + estimateTokens(t.description);
-  return n + (req.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS);
+  return n + ceiling;
 }
-
-/**
- * What a request with no declared `maxTokens` is assumed to be able to emit.
- *
- * The same 1,024 `MockModelAdapter.estimateOf` uses for the dollar estimate, so the two
- * reservations describe one request. It is deliberately a floor on the ESTIMATE and not a cap on
- * the request: nothing here limits what the provider may return.
- */
-const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
 
 /**
  * The verdict on a finished model turn: `undefined` when it is an answer, an error when it is not.
@@ -7857,20 +7989,47 @@ function isServedToolResult(result: unknown): boolean {
   return typeof result === "object" && result !== null && (result as { isError?: unknown }).isError !== true;
 }
 
-function turnRefusal(finish: string, where: string, contentChars: number, outputTokens: number): LoomError | undefined {
-  const details = { where, finishReason: finish, contentChars, outputTokens };
+function turnRefusal(
+  finish: string,
+  where: string,
+  contentChars: number,
+  outputTokens: number,
+  ceiling: number | undefined,
+): LoomError | undefined {
+  const details = { where, finishReason: finish, contentChars, outputTokens, ...(ceiling === undefined ? {} : { ceiling }) };
+  // `undefined` only in a REPLAY, which reaches no adapter and so has nothing to ask. Every
+  // live turn has a number, because the adapter that made the call is the thing that set it.
+  const of = ceiling === undefined ? "" : ` of ${String(ceiling)}`;
   switch (finish) {
     case "stop":
     case "tool_use":
       return undefined;
     case "max_tokens":
-      return err.validation(
-        CODES.E_PROVIDER_BAD_REQUEST,
-        `${where}: the model stopped at its output-token ceiling (finishReason "max_tokens") after ` +
-          `${String(outputTokens)} output tokens and ${String(contentChars)} characters of content. ` +
-          `This turn is truncated, not finished — raise the model's max output tokens; retrying at the same ceiling truncates again.`,
-        { details },
-      );
+      // D.7.4 — TWO OUTCOMES, NOT ONE SENTENCE SAID TWICE. `contentChars === 0` means the turn
+      // never reached content at all: the model spent its whole output allowance reasoning and
+      // stopped before the first character. That is a different problem from a clipped answer
+      // and it needs a different action — an order of magnitude, not a nudge — and this arm
+      // used to say "raise the model's max output tokens" to both. It is the defect that
+      // produced an EMPTY reviewed-file in a live run, got approved by a human, and was written
+      // to disk. The distinction was in hand the whole time and was printed as a number nobody
+      // was told how to read.
+      return contentChars === 0
+        ? err.validation(
+            CODES.E_PROVIDER_BAD_REQUEST,
+            `${where}: the model emitted NO content — it spent all ${String(outputTokens)} output tokens under a ceiling${of} ` +
+              `and stopped before the first character (finishReason "max_tokens"). This is not a clipped answer: the ceiling is ` +
+              `below this model's reasoning floor, so nudging it up returns another empty turn. Raise "defaultMaxTokens" on this ` +
+              `adapter — by an order of magnitude, not a margin — or set "maxTokens" on the request.`,
+            { details },
+          )
+        : err.validation(
+            CODES.E_PROVIDER_BAD_REQUEST,
+            `${where}: the model stopped at its output-token ceiling${of} (finishReason "max_tokens") after ` +
+              `${String(outputTokens)} output tokens and ${String(contentChars)} characters of content. ` +
+              `This turn is truncated, not finished — raise "defaultMaxTokens" on this adapter, or set "maxTokens" on the ` +
+              `request; retrying at the same ceiling truncates again.`,
+            { details },
+          );
     case "content_filter":
     case "refusal":
       return err.policy(

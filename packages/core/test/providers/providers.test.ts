@@ -487,6 +487,7 @@ function failing(code: string, klass: "exhausted" | "unavailable" | "policy" = "
     },
     priceOf: () => 0,
     estimateOf: () => 0,
+    outputCeilingOf: () => 1,
   };
 }
 
@@ -497,6 +498,7 @@ function ok(text: string): ModelAdapter {
       yield { type: "text_delta", text };
       yield {
         type: "done",
+        provider: "ok",
         message: { role: "assistant", content: text },
         finishReason: "stop",
         usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.001, wallMs: 0 },
@@ -504,6 +506,7 @@ function ok(text: string): ModelAdapter {
     },
     priceOf: () => 0.001,
     estimateOf: () => 0.002,
+    outputCeilingOf: () => 1,
   };
 }
 
@@ -558,6 +561,7 @@ test("a mid-stream failure does not fall through — the caller already saw delt
     },
     priceOf: () => 0,
     estimateOf: () => 0,
+    outputCeilingOf: () => 1,
   };
   const chain = new FallbackAdapter({
     primary: { adapter: halfway, model: "big" },

@@ -40,6 +40,16 @@ export interface AnthropicOptions extends HttpOptions {
   /** USD per million tokens, per model. Pinned by config, never guessed at runtime. */
   readonly prices?: Readonly<Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>>;
   readonly defaultMaxTokens?: number;
+  /**
+   * What this row calls itself in the journal, defaulting to `"anthropic"`.
+   *
+   * D.7.6. `provider` used to be a hard-coded literal here while `OpenAIAdapter` already took
+   * the option -- the asymmetry that hid the wider defect. Without it, two anthropic rows named
+   * `claude-fast` and `claude-big` are indistinguishable in `model.called` even once the router
+   * stops overwriting them, so the journal cannot say which of the operator's own configured
+   * endpoints served a turn.
+   */
+  readonly provider?: string;
 }
 
 const DEFAULT_PRICES: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }> = {
@@ -49,11 +59,12 @@ const DEFAULT_PRICES: Record<string, { input: number; output: number; cacheRead?
 };
 
 export class AnthropicAdapter implements ModelAdapter {
-  readonly provider = "anthropic";
+  readonly provider: string;
   readonly #opts: AnthropicOptions;
 
   constructor(opts: AnthropicOptions) {
     if (opts.apiKey === "") throw err.policy(CODES.E_PROVIDER_AUTH, "anthropic adapter requires an apiKey");
+    this.provider = opts.provider ?? "anthropic";
     this.#opts = opts;
   }
 
@@ -216,7 +227,7 @@ export class AnthropicAdapter implements ModelAdapter {
       content: text,
       ...(toolCalls.length === 0 || truncated ? {} : { toolCalls }),
     };
-    yield { type: "done", message, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
+    yield { type: "done", message, provider: this.provider, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
   }
 
   /**
@@ -242,16 +253,25 @@ export class AnthropicAdapter implements ModelAdapter {
     );
   }
 
+  /**
+   * The number this adapter is about to put in `max_tokens`, and nothing else.
+   *
+   * ONE EXPRESSION, THREE READERS — see `OpenAIAdapter.outputCeilingOf` for the defect that
+   * made having three copies of it expensive (D.7.3).
+   */
+  outputCeilingOf(req: ModelRequest): number {
+    return req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+
   estimateOf(req: ModelRequest): number {
-    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
-    return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: maxOut });
+    return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: this.outputCeilingOf(req) });
   }
 
   #body(req: ModelRequest): unknown {
     const messages = req.messages.map((m) => toAnthropicMessage(m));
     const body: Record<string, unknown> = {
       model: req.model,
-      max_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      max_tokens: this.outputCeilingOf(req),
       stream: true,
       // `cache_control` on the last system block marks the stable prefix. It is
       // stable here because context is rebuilt from declared projections, not

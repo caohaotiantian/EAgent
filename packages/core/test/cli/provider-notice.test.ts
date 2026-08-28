@@ -51,6 +51,7 @@ function counting(model: string, failures: number): ModelAdapter & { calls: numb
     },
     priceOf: () => 0,
     estimateOf: () => 0,
+    outputCeilingOf: () => 1,
   };
   return self;
 }

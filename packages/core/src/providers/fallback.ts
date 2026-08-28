@@ -117,6 +117,25 @@ export class FallbackAdapter implements ModelAdapter {
     const primary = this.#tiers[0]!;
     return primary.adapter.estimateOf({ ...req, model: primary.model });
   }
+
+  /**
+   * The MAXIMUM ceiling over every tier, and deliberately not the primary's.
+   *
+   * This is the one place it diverges from `estimateOf` above, and the asymmetry is the point.
+   * A chain does not know which tier will answer until an earlier one has failed, so both
+   * numbers are guesses — but they are guesses about different things and the wrong direction
+   * costs differently. `estimateOf` feeds a DOLLAR reservation, where over-reserving the
+   * priciest tier would starve every run that never falls through. `outputCeilingOf` feeds a
+   * TOKEN reservation whose whole job is to be a bound: under-reserving lets a turn through
+   * that the budget could not afford, which is a broken guard, while over-reserving refuses
+   * work that would have fit, which is a visible and arguable refusal. Only the first is a
+   * defect, so this rounds up.
+   */
+  outputCeilingOf(req: ModelRequest): number {
+    let most = 0;
+    for (const tier of this.#tiers) most = Math.max(most, tier.adapter.outputCeilingOf({ ...req, model: tier.model }));
+    return most;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +181,9 @@ export class RecordingAdapter implements ModelAdapter {
   estimateOf(req: ModelRequest): number {
     return this.#inner.estimateOf(req);
   }
+  outputCeilingOf(req: ModelRequest): number {
+    return this.#inner.outputCeilingOf(req);
+  }
 }
 
 export class ReplayingAdapter implements ModelAdapter {
@@ -183,7 +205,11 @@ export class ReplayingAdapter implements ModelAdapter {
         details: { key, known: Object.keys(this.#cassette.entries).length },
       });
     }
-    for (const ev of events) yield ev;
+    // THE TAPE'S OWN ANSWER WINS. A cassette recorded through `RecordingAdapter` carries the
+    // leaf that actually served, and re-attributing it to this adapter would erase the one fact
+    // the recording was made to preserve. A tape cut before `provider` existed on the frame has
+    // no answer, and then this adapter says so as itself rather than inventing a leaf.
+    for (const ev of events) yield ev.type === "done" && ev.provider === undefined ? { ...ev, provider: this.provider } : ev;
   }
 
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
@@ -191,6 +217,14 @@ export class ReplayingAdapter implements ModelAdapter {
   }
   estimateOf(): number {
     return 0;
+  }
+  /**
+   * A cassette bills nothing, but the reservation still needs a POSITIVE number: the engine
+   * refuses a turn whose adapter reports a non-positive ceiling, because zero is what a missing
+   * answer looks like. One token is the smallest honest bound for a turn served from a tape.
+   */
+  outputCeilingOf(req: ModelRequest): number {
+    return req.maxTokens ?? 1;
   }
 }
 
