@@ -356,27 +356,65 @@ const DEFERRAL_MAX_MS = 60_000;
  */
 const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED]);
 
+/**
+ * THE FAILURES THAT ARE NOT THIS NODE'S FAILURE, and therefore cannot be routed around.
+ *
+ * FIVE MEMBERS, and the criterion they share is one sentence: *no other node's answer is
+ * worth anything, because what broke is the run's ability to say something true.* An
+ * ordinary failed Task takes an `error` edge, and a join with `onBranchError: "skip"`
+ * absorbs it — so a code that belongs here and is missing produces a run reporting
+ * **succeeded** with a rescue arm's value in its output channel. That is the shape below,
+ * and each of these five has been measured in it.
+ *
+ *   `E_BUDGET_EXHAUSTED` · a verdict about the RUN's resources, not about this node's work.
+ *      Routing past it spends more of what has already run out. It is the floor of the D6.5
+ *      ladder (warn → degrade → gate → fail).
+ *
+ *   `E_REPLAY_DIVERGENCE` · the fold and the record disagree, so every decision downstream
+ *      would be reading a value the journal cannot be folded to. Invariant 2 is what makes
+ *      this fatal rather than routable.
+ *
+ *   `E_GATE_REQUIRED` · A SUPERVISION REQUIREMENT THAT CANNOT BE MET. Leaving it out was a
+ *      hole with a very quiet shape: a refused `separationOfDuties` gate is an ordinary
+ *      failed task, so an `error` edge or a skipping join absorbs it — measured, both
+ *      produce a run that reports **succeeded** with ZERO gates on the journal. The graph
+ *      reads "each item is human-approved" and behaves as "nothing was approved and nobody
+ *      was asked" — D7.9's worst available failure, reached through ordinary graph shapes,
+ *      and worse than a rejection because a rejection at least leaves `gate.raised` and
+ *      `gate.decided` behind for an auditor to find.
+ *
+ *   `E_PAYLOAD_UNRESOLVED` · A CHANNEL WHOSE BYTES CANNOT BE PRODUCED, for the reason the
+ *      paragraph above gives about routing. The state this run is meant to be reading is not
+ *      there, so no other node's answer is worth more than the one that could not be
+ *      computed, and "continue without it" is precisely the silent-wrong answer
+ *      externalisation must never introduce.
+ *
+ *   `E_EFFECT_UNRECORDED` · THE RUN NO LONGER KNOWS WHAT IT DID TO THE WORLD. `#servedToolEffect`
+ *      raises it when a re-execution's call sequence has moved and the recorded call at that
+ *      position is non-idempotent; declining to serve is necessary and not sufficient, and this
+ *      is the sufficient half. Measured before it was added, on the fixture in
+ *      `test/run/divergence-is-run-fatal.test.ts` — one `error` edge and a rescue node were
+ *      enough to turn the fail-closed refusal into `status=succeeded out="rescued"`. The
+ *      failure is not "this node's work did not work"; it is "the positional record and the
+ *      body disagree", which is the same class as `E_REPLAY_DIVERGENCE` one door over — and
+ *      it stayed out of this set for as long as it did because it is raised deep inside an
+ *      effect serve rather than by a policy check.
+ *
+ * WHAT IS DELIBERATELY OUT, because a named set needs its boundary:
+ *   - `E_LEASE_LOST` / `E_FENCING_STALE` — another worker owns this Task. The RUN is fine;
+ *     THIS WORKER is not, and ending the run would be one process killing another's work.
+ *   - `E_CAP_DENIED`, `E_TOOL_NOT_FOUND`, `E_TOOL_SOURCE_UNAVAILABLE` — "this node cannot do
+ *     this". A rescue arm genuinely is an answer to that, which is what `error` edges are for.
+ *   - `E_HUMAN_APPROVAL_REQUIRED` — out on purpose and stated so at its raise site: the run
+ *     continues so the ASK can be made. A gate that cannot be asked at all is the member
+ *     above, and the pair is the whole distinction.
+ */
 const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_BUDGET_EXHAUSTED,
   CODES.E_REPLAY_DIVERGENCE,
-  // A SUPERVISION REQUIREMENT THAT CANNOT BE MET IS THE SAME CLASS OF FACT, and leaving it
-  // out was a hole with a very quiet shape. A refused `separationOfDuties` gate is an
-  // ordinary failed task, so it takes an `error` edge and a join with `onBranchError: "skip"`
-  // absorbs it: measured, both produce a run that reports **succeeded** with ZERO gates on
-  // the journal. The graph reads "each item is human-approved" and behaves as "nothing was
-  // approved and nobody was asked" — D7.9's worst available failure, reached through ordinary
-  // graph shapes, and worse than a rejection because a rejection at least leaves `gate.raised`
-  // and `gate.decided` behind for an auditor to find. Nothing here is recoverable by routing:
-  // the run cannot be supervised, and continuing past that is the thing the gate exists to
-  // prevent.
   CODES.E_GATE_REQUIRED,
-  // A CHANNEL WHOSE BYTES CANNOT BE PRODUCED IS THE SAME CLASS, for the reason the paragraph
-  // above gives about routing: an ordinary failed Task takes an `error` edge, and a join with
-  // `onBranchError: "skip"` absorbs it into a run that reports **succeeded**. The state this
-  // run is meant to be reading is not there, so no other node's answer is worth more than the
-  // one that could not be computed, and "continue without it" is precisely the silent-wrong
-  // answer externalisation must never introduce.
   CODES.E_PAYLOAD_UNRESOLVED,
+  CODES.E_EFFECT_UNRECORDED,
 ]);
 
 interface Wave {

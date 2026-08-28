@@ -312,16 +312,27 @@ export const CODES = {
   E_ILLEGAL_TRANSITION: "E_ILLEGAL_TRANSITION",
   E_RESTORE_ILLEGAL: "E_RESTORE_ILLEGAL",
   /**
-   * A body reached a nondeterminism seam with no journaled effect behind it.
+   * A nondeterminism seam with no journaled effect behind it — the run cannot say what it did.
    *
-   * Raised from inside a `function` realm, by the bridge, when `Math.random()` is called in a
-   * body invoked with no `ctx.seed`. Both engine callers of `functions.require` supply one —
-   * `#runFunction` and `#runEvaluator`'s `assertion` arm — so the only way to reach this is to
-   * invoke a `FunctionBody` by hand.
+   * TWO SITES, and only one of them raises this as a CODE. The distinction matters because a
+   * reader who trusts the first paragraph alone will look for the wrong thing:
    *
-   * `conflict` rather than `validation`: the arguments are fine and the body is fine; what is
-   * wrong is the STATE the call was made in. Never retried, which is right — a second attempt
-   * with the same missing seed fails identically.
+   *   - `run/engine.ts`'s `#servedToolEffect`, as `err.validation`. A re-execution's call
+   *     sequence has MOVED — this ordinal's recorded call is not the call being made — and the
+   *     recorded one is non-idempotent, so its new position has no record and performing it
+   *     would act twice. This is the coded raise, and it is in `RUN_FATAL_CODES`: an ordinary
+   *     `error` edge used to absorb it and report the run **succeeded**.
+   *   - `resources/functions.ts`'s `DENY_UNSEEDED`, as MESSAGE TEXT ONLY. It is a guest-realm
+   *     `throw` for `Math.random()` in a body invoked with no `ctx.seed`, and every throw out
+   *     of a realm normalizes to `internal`/`E_INTERNAL` — so what crosses the boundary carries
+   *     this name in its message and a different code. `test/resources/functions.test.ts` says
+   *     so at the assertion, which matches the text for exactly that reason. Both engine callers
+   *     of `functions.require` pass a seed, so that site is reachable only by invoking a
+   *     `FunctionBody` by hand.
+   *
+   * NEVER RETRIED at either site, which is the property both need: a second attempt with the
+   * same missing seed fails identically, and a second attempt at a moved ordinal is the double
+   * call the refusal exists to stop.
    */
   E_EFFECT_UNRECORDED: "E_EFFECT_UNRECORDED",
   /** A sandboxed body reached for a declared effect. It cannot: it may not await a host call. */
