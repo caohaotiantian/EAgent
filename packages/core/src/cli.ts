@@ -15,6 +15,7 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, type Dirent } from "node:fs";
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { InProcessEventBus, type EventBus } from "./bus.ts";
 import { isLoomError, toLoomError, type LoomError } from "./errors.ts";
@@ -55,12 +56,12 @@ import {
   BearerTokenIdentity,
   ControlPlane,
   ownershipWarnings,
-  unanswerableGraphs,
+  gateAnswerability,
   type ControlPlaneOptions,
   type IdentitySource,
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
-import { isSyntheticSubject, POSTURES, type Posture } from "./vocab.ts";
+import { isSyntheticSubject, POSTURES, type Disposable as LoomDisposable, type Posture } from "./vocab.ts";
 import { foldRun, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
@@ -203,7 +204,13 @@ const USAGE = `loom — graph-native multi-agent orchestration
   --as ID           the subject a decision is JOURNALED under, and matched against a
                     gate's approvers. Defaults to "cli", which no approvers list names —
                     so a gate that names anybody needs this. It ends up in the audit
-                    record as the person who approved
+                    record as the person who approved.
+                    IT AUTHENTICATES NOBODY, and that is by construction rather than by
+                    omission: there is no credential anywhere on this path, so the value
+                    is a CLAIM the operator makes about themselves. Filesystem access to
+                    the journal is the whole boundary here. "approvers" is therefore a
+                    RECORD on this door and access control only on the HTTP one, where
+                    --identity-file decides who a caller is
   --data-dir  DIR   journal location (default: <workspace>/.loom). Off limits to the
                     fs tools wherever it is put, including inside the workspace.
   --max-parallelism N  how many nodes of ONE run may be in flight at once (default 16).
@@ -219,6 +226,19 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     goes to. Without it every agent node answers "[mock] …". The API
                     key is named by the file and READ FROM THE ENVIRONMENT, never
                     stored in it. Accepted by every command, not just serve.
+  --extension-module P,P  host-realm modules to load before anything is configured, as a
+                    comma-separated list of paths. Each is imported and its DEFAULT EXPORT
+                    called with {models, tools} — this process's ModelRegistry and
+                    ToolRegistry — so a provider on a wire that is neither Anthropic's nor
+                    OpenAI's, and an in-process tool, need no fork. A models-file "routes"
+                    row may name an adapter registered here.
+                    IT IS ARGV, SO IT IS YOUR OWN CHOICE LOADED INTO YOUR OWN PROCESS: the
+                    module runs unsandboxed with everything this binary has — the same trust
+                    a resources/function body and a hand-registered tool already carry. It
+                    is deliberately loadable from NOWHERE ELSE; a path read out of a config
+                    file or the workspace would let a file decide what code this process
+                    runs. A module that does not resolve, throws, has no function default
+                    export, or registers nothing REFUSES TO BOOT.
   --allow-exec P,P  programs proc.exec may run, matched EXACTLY by name — not as a
                     prefix, not as a path. Without it the tool is not registered and
                     the run cannot execute anything. It is the whole CONTAINMENT
@@ -356,6 +376,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "data-dir",
   "egress",
   "exec-env",
+  "extension-module",
   "grant",
   "graph",
   "help",
@@ -524,6 +545,14 @@ interface Workspace {
   /** `undefined` when `--models-file` was not given: the mock is the only adapter. */
   readonly models: ModelConfig | undefined;
   /**
+   * `undefined` when no `--extension-module` was given.
+   *
+   * Carried for `announce`'s stated rule — every line it prints is read off a constructed
+   * object rather than re-derived from the flags — so the banner names the modules this
+   * process ACTUALLY loaded, the treatment `--allow-exec` already gets.
+   */
+  readonly extensions: ExtensionModules | undefined;
+  /**
    * The two ceilings this Engine was actually CONSTRUCTED with.
    *
    * Carried for `announce`'s stated rule — every line it prints is read off a constructed
@@ -569,6 +598,17 @@ export function openWorkspace(
    * stdio server by a reviewer.
    */
   mcp: readonly McpClient[] = [],
+  /**
+   * What `--extension-module` registered, loaded in `main` BEFORE this function is called.
+   *
+   * A parameter and not a flag read in here for one mechanical reason: `await import()` is
+   * async and `openWorkspace` is not. The ordering it buys is the same one `mcp` buys —
+   * the grant list is a snapshot taken in this function, so a tool registered afterwards is
+   * a tool whose capability nobody holds — and it goes one step further, because
+   * `readModels` runs at the TOP of this function and a `routes` row may name an extension
+   * adapter.
+   */
+  extensions?: ExtensionModules,
 ): Workspace {
   // BEFORE ANYTHING IS CREATED OR OPENED. A malformed channels file is a refusal to start,
   // and a refusal that has already made a directory and opened a SQLite handle is a
@@ -580,7 +620,9 @@ export function openWorkspace(
   // injection every clock and id source in this codebase takes, applied to the one input
   // that is a credential.
   const models =
-    args.flags["models-file"] === undefined ? undefined : readModels(requireFileFlag(args, "models-file"), env, fetchImpl);
+    args.flags["models-file"] === undefined
+      ? undefined
+      : readModels(requireFileFlag(args, "models-file"), env, fetchImpl, extensions?.adapters ?? new Map());
 
   // `pathFlag`, not `String(… ?? default)`. `String(true)` is `"true"`, so `--workspace`
   // with no value used to resolve to `./true` and `loom compile g.json --workspace` printed
@@ -625,7 +667,13 @@ export function openWorkspace(
   // has paid for twice.
   const payloads = filePayloads(join(dataDir, "payloads"));
 
-  const tools = new ToolRegistry();
+  // THE EXTENSION MODULES' REGISTRY, when there is one, rather than a second one beside it.
+  // A tool registered into a registry this function does not use is a tool nothing can call,
+  // and the grant list below is derived from THIS object — so an extension tool has to be in
+  // it before `capabilitiesOf` runs or the capability it needs is one nobody holds. The
+  // built-ins are registered on top, so a name collision leaves the BUILT-IN live: an
+  // extension cannot quietly replace `fs.write`.
+  const tools = extensions?.tools ?? new ToolRegistry();
   // THE JAIL ROOT CONTAINS THE JOURNAL, so containment alone is not the boundary.
   //
   // `root` is the workspace and `dataDir` defaults to `<root>/.loom`, so `journal.db` —
@@ -682,7 +730,7 @@ export function openWorkspace(
   for (const t of builtinTools(jail)) tools.register(t);
   tools.register(fsRestore(jail));
 
-  const modelRegistry = new ModelRegistry();
+  const modelRegistry = extensions?.models ?? new ModelRegistry();
   // OFFLINE BY DEFAULT, AND ONLY ONE OF THE TWO IS EVER REGISTERED.
   //
   // The mock is what makes `loom run` work on a fresh machine with no API key. It is also
@@ -695,13 +743,22 @@ export function openWorkspace(
   // a registered-and-unreachable adapter — the "declared but unread" shape this repo keeps
   // finding. It also makes `announce`'s "the only adapter is the mock" line a fact about
   // the registry rather than a guess about configuration.
-  modelRegistry.register(
-    models?.adapter ??
+  //
+  // AND THE MOCK IS NOT UNCONDITIONAL, which it was. `register(…, true)` CLAIMS THE DEFAULT,
+  // so registering the mock whenever `--models-file` was absent overwrote the claim an
+  // `--extension-module` adapter had already made — a deployment the operator extended with a
+  // real provider, answering every agent node with `[mock] …`. The condition is now the whole
+  // question: register the mock only when nothing else has claimed the default.
+  if (models !== undefined) {
+    modelRegistry.register(models.adapter, true);
+  } else if (extensions?.claimsDefault !== true) {
+    modelRegistry.register(
       new MockModelAdapter({
         script: (req) => ({ text: `[mock] ${req.messages.at(-1)?.content.slice(0, 80) ?? ""}` }),
       }),
-    true,
-  );
+      true,
+    );
+  }
 
   // BUILT BEFORE THE ENGINE, AND HANDED TO IT — which it was not, and the omission cost a
   // whole node type. `Engine` falls back to `{resolve: () => undefined}` when it is given no
@@ -817,6 +874,7 @@ export function openWorkspace(
     execAllowlist: execPrograms,
     delivery,
     models,
+    extensions,
     maxParallelism,
     budget,
     close: () => store.close(),
@@ -1187,6 +1245,248 @@ function fallbackFeed(): FallbackFeed {
   };
 }
 
+/**
+ * `--extension-module` — the door onto the two registries this binary already builds.
+ *
+ * **THE SEAM ALREADY EXISTED; ONLY THE CLI COULD NOT REACH IT.** `ModelAdapter`,
+ * `ModelRegistry` and `ToolRegistry` are all on the pinned public surface, so a LIBRARY
+ * EMBEDDER writes a third-wire provider or an in-process tool and forks nothing:
+ * `Engine` already takes a `ModelRegistry` and `#runAgent` already resolves through it.
+ * README's fork list nevertheless carried two entries — "a wire protocol that is not
+ * Anthropic's or OpenAI's" and "an in-process tool, from the CLI" — under the blanket
+ * reason that the closed sets here are closed by REPLAY. That reason is measurably false
+ * for both: an adapter produces no journal vocabulary at all. `replay.ts` never reaches an
+ * adapter and journals `provider: "replay"`, so a run served by a third-wire adapter
+ * replays against an EMPTY `ModelRegistry` — which is what
+ * `test/cli/extension-module.test.ts` asserts, round trip.
+ *
+ * **THE TRUST POSITION, stated rather than discovered.** A module named here is imported
+ * into THIS process, in the host realm, holding everything the binary holds. That is
+ * exactly the trust a `resources/function/*.js` body and a hand-registered `ToolRegistry`
+ * entry already carry, and it is bounded by one fact: the path comes from ARGV, so it is
+ * the operator's own choice loaded into the operator's own process. There is deliberately
+ * NO sandbox and no validation of what an adapter returns — `node:vm` is scoping and not a
+ * boundary, a streaming adapter is irreducibly async where `resources/realm.ts` refuses an
+ * async body at load, and a coercion applied to a value trusted code produced would be a
+ * guard answering an undecidable question with the passing value.
+ *
+ * **ARGV-ONLY IS LOAD-BEARING, NOT STYLISTIC.** Discovering modules by scanning the
+ * workspace would let a FILE decide what code this process runs, and a run holds
+ * `fs:write` — the escalation `openWorkspace`'s deny-list exists to stop. If this ever
+ * becomes loadable from `--models-file`, a resource ref or the data directory, every
+ * argument above fails and the seam has to move behind a process boundary.
+ *
+ * **IT REFUSES TO BOOT** rather than continue unextended, in five decidable cases, each
+ * naming the path: the module does not resolve; it throws at import; its default export is
+ * not a function; that function throws; or it registers nothing at all. There is no arm in
+ * which a module named on argv is skipped and the process keeps going — that is a
+ * deployment the operator believes is extended and is not. The sixth refusal lives in
+ * `readModels`, where both halves are in hand: an adapter name colliding with a
+ * `--models-file` row would leave one of the two permanently unreachable.
+ *
+ * **SCOPED TO `{models, tools}` EXACTLY** — the two entries this removes from the fork
+ * list, and no more. A delivery transport sits in the same merely-recorded bucket and
+ * should EXTEND this object when it is built, rather than invent a second flag.
+ */
+export interface ExtensionModules {
+  /** Handed to `openWorkspace` in place of the registry it would have constructed. */
+  readonly models: ModelRegistry;
+  readonly tools: ToolRegistry;
+  /**
+   * Adapters by the `provider` name each registered under.
+   *
+   * A MAP and not a bare `ReadonlySet<string>`, and the difference is load-bearing:
+   * `readModels` does not only CHECK a route's adapter name, it resolves the name into the
+   * `RoutingAdapter` it constructs — so a name with no object behind it would produce a
+   * route that reads as configured and throws at the first model call.
+   */
+  readonly adapters: ReadonlyMap<string, ModelAdapter>;
+  /** Tool names the modules registered, for the boot banner. */
+  readonly toolNames: readonly string[];
+  /** Resolved paths, in load order, for the boot banner. */
+  readonly files: readonly string[];
+  /**
+   * Whether a module claimed the DEFAULT adapter.
+   *
+   * Read by `openWorkspace` for one decision: the mock is registered as the default ONLY
+   * when neither a `--models-file` nor an extension module claimed one. Registering it
+   * unconditionally — which is what this file did — would overwrite an extension's claim
+   * and answer every agent node with `[mock] …` in a deployment the operator extended.
+   */
+  readonly claimsDefault: boolean;
+}
+
+/**
+ * `ModelRegistry` has no enumeration API, and three of this loader's answers need one.
+ *
+ * Subclassed rather than reached into: "it registered nothing", "this name collides with a
+ * `--models-file` row" and the boot banner's list of what each module added are all
+ * questions about WHAT WAS REGISTERED, and `register` is the only moment that is knowable.
+ * Adding an enumerator to `run/registry.ts` would put a new method on a pinned public type
+ * to serve one caller in one file.
+ */
+class ObservedModelRegistry extends ModelRegistry {
+  readonly registered = new Map<string, ModelAdapter>();
+  /**
+   * Every `register` CALL, in order, not the distinct names.
+   *
+   * A count off `registered.size` looked equivalent and was not: two modules registering
+   * the same provider name leave the size unchanged, so the second one would have been
+   * refused for "registering nothing" — a refusal in the safe direction carrying a claim
+   * that is simply false, which is worse than the original silence. The size answers
+   * "which adapters exist" and this answers "did THIS module do anything", and they are
+   * different questions.
+   */
+  readonly calls: string[] = [];
+  override register(adapter: ModelAdapter, asDefault = false): LoomDisposable {
+    this.calls.push(adapter.provider);
+    this.registered.set(adapter.provider, adapter);
+    return super.register(adapter, asDefault);
+  }
+}
+
+/**
+ * The same distinction one registry over. `ToolRegistry` keys by name and shadows on
+ * collision, so `list().length` cannot tell "registered nothing" from "registered over
+ * something".
+ */
+class ObservedToolRegistry extends ToolRegistry {
+  readonly calls: string[] = [];
+  override register(tool: Parameters<ToolRegistry["register"]>[0]): LoomDisposable {
+    // AFTER, not before: `register` validates the manifest and throws on a bad one, and a
+    // refused registration must not count as this module having done something.
+    const d = super.register(tool);
+    this.calls.push(tool.name);
+    return d;
+  }
+}
+
+export async function loadExtensionModules(paths: readonly string[]): Promise<ExtensionModules> {
+  const models = new ObservedModelRegistry();
+  const tools = new ObservedToolRegistry();
+  const files: string[] = [];
+  /** Which module registered each adapter name, so a collision refusal can name both. */
+  const owner = new Map<string, string>();
+  for (const raw of paths) {
+    const path = resolve(raw);
+    const refuse: (why: string) => never = (why) => {
+      throw err.validation(CODES.E_CONFIG_INVALID, `--extension-module ${path}: ${why}`);
+    };
+    // TAKEN BEFORE, so the diff below is THIS module's contribution and not the previous
+    // one's. A second module that registers nothing has to be refused even when the first
+    // registered plenty.
+    const adaptersBefore = models.calls.length;
+    const toolsBefore = tools.calls.length;
+    let mod: { default?: unknown };
+    try {
+      // `pathToFileURL`, not the bare path: a relative specifier would resolve against
+      // THIS file rather than against the operator's cwd, and on Windows a drive letter
+      // reads as a URL scheme. Both failure modes are "the wrong module loaded", which is
+      // the one outcome a loader must not have.
+      mod = (await import(pathToFileURL(path).href)) as { default?: unknown };
+    } catch (e) {
+      // ONE ARM FOR TWO CAUSES, deliberately, and the message carries the cause: from here
+      // "there is no such file" and "the file threw while evaluating" are both reasons to
+      // stop. What must never happen is a `catch {}` that cannot tell absent from
+      // unreadable and answers either with "carry on unextended".
+      refuse(`could not be loaded: ${(e as Error).message}`);
+    }
+    const factory = mod.default;
+    if (typeof factory !== "function") {
+      refuse(
+        `has no default export that is a function. An extension module is ` +
+          `\`export default ({models, tools}) => { … }\`, called with this process's ModelRegistry and ` +
+          `ToolRegistry before any configuration is read. Found ` +
+          `${factory === undefined ? "no default export" : `a default export of type ${typeof factory}`}.`,
+      );
+    }
+    try {
+      // AWAITED, because a module that has to read a manifest before it can register
+      // cannot do that synchronously, and a returned promise nobody awaits is a
+      // registration race whose loser is every check below.
+      await (factory as (reg: { models: ModelRegistry; tools: ToolRegistry }) => unknown)({ models, tools });
+    } catch (e) {
+      refuse(`threw while registering: ${isLoomError(e) ? e.message : (e as Error).message}`);
+    }
+    if (models.calls.length === adaptersBefore && tools.calls.length === toolsBefore) {
+      refuse(
+        `registered nothing. Its default export must call \`models.register(adapter)\` or \`tools.register(tool)\`; ` +
+          `a module that registers nothing is a deployment the operator believes is extended and is not.`,
+      );
+    }
+    // TWO MODULES, ONE ADAPTER NAME — the same refusal `readModels` makes about a file row
+    // colliding with an extension, and for the same reason: the registry keys by name, so
+    // one of the two would never be reachable and nothing anywhere would say which.
+    for (const provider of models.calls.slice(adaptersBefore)) {
+      const first = owner.get(provider);
+      if (first !== undefined) {
+        refuse(`registers the adapter name "${provider}", which ${first} already registered. One of them would never be reachable.`);
+      }
+      owner.set(provider, path);
+    }
+    files.push(path);
+  }
+  return {
+    models,
+    tools,
+    adapters: models.registered,
+    toolNames: tools.list().map((t) => t.name),
+    files,
+    // `get()` WITH NO ARGUMENT is the registry's own question — "is there a default?" —
+    // rather than a second rule invented here. `ModelRegistry.register` claims the default
+    // for the first adapter registered even when `asDefault` is false, so a module that
+    // registered one adapter and said nothing about defaults has still claimed it.
+    claimsDefault: models.get() !== undefined,
+  };
+}
+
+/**
+ * The three row shapes `readModels` reads, and the ONLY fields each may declare.
+ *
+ * WHY A LIST AT ALL: `errors.ts` states that a code arrives with its raiser, and a config
+ * key has the mirror of that rule — a key arrives with its reader. Before these three sets,
+ * `readModels` read a fixed handful of keys and silently ignored every other one. Measured:
+ * `headers`, `apiVersion` and `zzz_nonsense` on an adapter row all printed
+ * `ACCEPTED AND IGNORED. adapters=['openai']`. `readChannels`, one function over, already
+ * refuses an unknown `kind` for the stated reason that a skipped field is a deployment that
+ * boots looking configured — and an operator who wrote `headers` believes their gateway is
+ * being sent a header.
+ *
+ * `headers` IS DELIBERATELY NOT HERE, and that is a decision rather than an omission. A
+ * custom auth header is a credential; this file's own rule is that the file holds
+ * configuration and the environment holds the credential, so a `headers` map would put a
+ * secret one `git add` away from being public. A gateway with a bespoke auth scheme is an
+ * `--extension-module`, which is a door that now exists.
+ */
+const ADAPTER_FIELDS: readonly string[] = ["provider", "name", "baseUrl", "apiKeyEnv", "prices", "defaultMaxTokens"];
+const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback"];
+const TIER_FIELDS: readonly string[] = ["adapter", "model", "when"];
+/**
+ * `cacheRead`/`cacheWrite` are NOT here on purpose: both adapters' options carry them and
+ * this reader has never built them, so accepting the spelling would advertise a capability
+ * the file does not have. See the refusal at the call site for the number it costs.
+ */
+const PRICE_FIELDS: readonly string[] = ["input", "output"];
+
+/**
+ * Refuse a field nothing reads, naming it and naming what the row MAY declare.
+ *
+ * NAMING THE MEMBERS is the whole shape of the refusal, and README's own test for an honest
+ * closed set: a refusal that says "unknown field" and stops has told the operator they are
+ * wrong without telling them what right looks like. There is no undecidable case here — a
+ * key is in the set or it is not — and no arm in which an unread key is kept.
+ */
+function onlyKeys(row: Record<string, unknown>, allowed: readonly string[], where: string, refuse: (why: string) => never): void {
+  const unknown = Object.keys(row).filter((k) => !allowed.includes(k));
+  if (unknown.length === 0) return;
+  refuse(
+    `${where} declares ${unknown.map((k) => JSON.stringify(k)).join(", ")}, which ${unknown.length === 1 ? "is a field" : "are fields"} ` +
+      `nothing reads — so ${unknown.length === 1 ? "its value" : "their values"} changed nothing about the adapter this row built. ` +
+      `This row may declare: ${allowed.join(", ")}. A field read by nothing is refused rather than ignored, for the reason an ` +
+      `unknown "provider" is: a skipped field is a deployment that boots looking configured.`,
+  );
+}
+
 export interface ModelConfig {
   /** The single adapter `openWorkspace` registers: a router over the declared ones. */
   readonly adapter: ModelAdapter;
@@ -1252,6 +1552,15 @@ const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string }>> = {
  * An UNSET or EMPTY variable refuses to start rather than constructing an adapter that
  * fails on its first call, which would be an hour later and in a run's error field.
  *
+ * **`"apiKeyEnv": null` DECLARES THAT AN ENDPOINT TAKES NO CREDENTIAL**, and it is the only
+ * way to say so. It requires a `baseUrl`, so it can never claim that a public endpoint is
+ * keyless. Before it existed, a `baseUrl` on the OpenAI wire INFERRED the same thing, and
+ * the inference was wrong in the shape that matters: a hosted gateway whose operator forgot
+ * to export the key booted looking configured.
+ *
+ * **A FIELD NOTHING READS IS REFUSED**, on all three row shapes — see `onlyKeys` and the
+ * three field sets above it.
+ *
  * **A MALFORMED FILE REFUSES TO START**, the trade `readIdentities` and `readChannels` both
  * make, for the reason they make it: booting anyway produces a deployment that looks
  * configured and answers every model call with an error.
@@ -1260,6 +1569,15 @@ export function readModels(
   file: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
   fetchImpl?: HttpOptions["fetch"],
+  /**
+   * Adapters `--extension-module` already registered, by name.
+   *
+   * SEEDED INTO the adapter map rather than merely unioned into the route CHECK, because
+   * this reader does not only validate a route's adapter name — it resolves the name into
+   * the `RoutingAdapter` it constructs. A check alone would accept a row naming an
+   * extension adapter and then hand `RoutingAdapter` a `Map` with nothing behind the key.
+   */
+  preRegistered: ReadonlyMap<string, ModelAdapter> = new Map(),
 ): ModelConfig {
   const path = resolve(file);
   let parsed: unknown;
@@ -1273,15 +1591,25 @@ export function readModels(
   };
 
   const root = (parsed ?? {}) as { adapters?: unknown; routes?: unknown };
-  const rows = root.adapters;
-  if (!Array.isArray(rows) || rows.length === 0) {
+  // ABSENT IS LEGAL ONLY WHEN AN EXTENSION MODULE SUPPLIED THE ADAPTERS, and the condition
+  // says so rather than being inferred from a later failure. A deployment whose only provider
+  // is a third-wire `--extension-module` adapter has no row to write here — `provider` accepts
+  // exactly `anthropic` and `openai` — so requiring one would make the route table reachable
+  // only by an operator who also happened to configure a built-in provider they do not use.
+  const rows = root.adapters ?? [];
+  if (!Array.isArray(rows) || (rows.length === 0 && preRegistered.size === 0)) {
     refuse(
       `must be {"adapters":[{"provider":"anthropic"}],"routes":{"agent_profile/x@stable":{"adapter":"anthropic","model":"claude-sonnet-5"}}} ` +
-        `with at least one adapter`,
+        `with at least one adapter — or, with no "adapters" at all, at least one adapter registered by an --extension-module`,
     );
   }
 
-  const adapters = new Map<string, ModelAdapter>();
+  // WHAT AN EXTENSION MODULE REGISTERED IS ALREADY IN HERE, so a `routes` row may name an
+  // extension adapter while an `adapters` row still constructs only the two built-in
+  // providers. `declared` stays the FILE's own rows: the boot line says "… via <file>" and
+  // naming an adapter this file did not declare would make that sentence false.
+  const adapters = new Map<string, ModelAdapter>(preRegistered);
+  const declared: string[] = [];
   const fallbacks = fallbackFeed();
   /** Adapter names whose row omitted `defaultMaxTokens`. See `ModelConfig.unsetCeilings`. */
   const unsetCeilings: string[] = [];
@@ -1289,6 +1617,9 @@ export function readModels(
     const where = `adapters[${i}]`;
     const row = raw as Record<string, unknown> | null;
     if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    // FIRST, so a misspelled `provider` is diagnosed as the misspelling it is rather than as
+    // an absent one. See `onlyKeys` for why an unread field is a refusal at all.
+    onlyKeys(row, ADAPTER_FIELDS, where, refuse);
     const provider = row["provider"];
     if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
       refuse(
@@ -1301,20 +1632,60 @@ export function readModels(
     // the first with nothing anywhere saying so — the same refusal, for the same reason,
     // that `readChannels` makes about a duplicate channel name.
     const name = row["name"] === undefined ? provider : nonEmpty(row["name"], `${where} "name"`, refuse);
+    // THE SIXTH `--extension-module` REFUSAL, and it lives here because this is the only
+    // place both halves are in hand. The registry keys adapters by name, so a file row and
+    // an extension module claiming one name would leave whichever lost permanently
+    // unreachable with nothing anywhere saying so — the same reason the duplicate-row
+    // refusal below exists, one door over.
+    if (preRegistered.has(name)) {
+      refuse(
+        `${where} declares the adapter name "${name}", which an --extension-module already registered. ` +
+          `One of the two would never be reachable. Rename the row with "name", or drop it and route to the ` +
+          `extension adapter directly.`,
+      );
+    }
     if (adapters.has(name)) refuse(`${where} repeats the adapter name "${name}" — one of them would never be reachable`);
+    declared.push(name);
 
     const baseUrl = row["baseUrl"] === undefined ? undefined : nonEmpty(row["baseUrl"], `${where} ("${name}") "baseUrl"`, refuse);
-    const keyEnv = row["apiKeyEnv"] === undefined ? PROVIDERS[provider]!.keyEnv : nonEmpty(row["apiKeyEnv"], `${where} ("${name}") "apiKeyEnv"`, refuse);
-    const apiKey = env[keyEnv] ?? "";
-    // The one place a keyless adapter is legal, and it is the adapter's own rule rather
-    // than a second one invented here: `OpenAIAdapter` accepts an empty key when a
-    // `baseUrl` is given, because a local endpoint legitimately has no credential.
-    if (apiKey === "" && !(provider === "openai" && baseUrl !== undefined)) {
+    // **`null` IS A DECLARATION: "this endpoint takes no credential."**
+    //
+    // The condition here used to be `apiKey === "" && !(provider === "openai" && baseUrl !==
+    // undefined)`, i.e. a `baseUrl` INFERRED that no credential was wanted. That is this
+    // reader answering its undecidable case with the passing value, in the configuration the
+    // live corpus actually used: a hosted OpenAI-compatible gateway with a `baseUrl` that DOES
+    // want a key, whose operator forgot to export it, booted looking configured and 401'd an
+    // hour later inside a run — the precise failure this check exists to move to boot.
+    //
+    // `null` rather than a new `noApiKey` boolean because `apiKeyEnv` is already the field
+    // that answers "where does the credential come from"; `null` is that question answered,
+    // not a second question. It is REACHABLE BY NO AUTOMATED PATH — it is a line a human wrote
+    // in a file — which is what makes it a declaration rather than a loosening.
+    //
+    // A `baseUrl` IS REQUIRED ALONGSIDE IT, so the declaration tightens and cannot open a
+    // door: an operator cannot declare api.anthropic.com or api.openai.com keyless.
+    const rawKeyEnv = row["apiKeyEnv"];
+    const keyless = rawKeyEnv === null;
+    if (keyless && baseUrl === undefined) {
+      refuse(
+        `${where} ("${name}") sets "apiKeyEnv": null, which declares that this endpoint takes no credential — ` +
+          `but it names no "baseUrl", so it is the ${provider} public endpoint, which does. Give it the "baseUrl" ` +
+          `of the local or gateway endpoint you mean, or name the variable holding the key.`,
+      );
+    }
+    const keyEnv = rawKeyEnv === undefined || keyless ? PROVIDERS[provider]!.keyEnv : nonEmpty(rawKeyEnv, `${where} ("${name}") "apiKeyEnv"`, refuse);
+    const apiKey = keyless ? "" : (env[keyEnv] ?? "");
+    // NO CARVE-OUT FOR `openai` + `baseUrl` ANY MORE. The adapter still accepts an empty key
+    // with a `baseUrl` — that is its own rule and it is right, because a local endpoint
+    // legitimately has none — but the ADAPTER cannot tell "local, keyless" from "gateway whose
+    // key was never exported", and neither can this reader. So it is stated here or it is not
+    // known, and an unstated one is refused.
+    if (!keyless && apiKey === "") {
       refuse(
         `${where} ("${name}") needs the environment variable ${keyEnv}, which is ${env[keyEnv] === undefined ? "not set" : "empty"}. ` +
           `The key is deliberately NOT a field in this file — the file is configuration and the key is a credential. ` +
-          `Set ${keyEnv}, or name a different variable with "apiKeyEnv"` +
-          (provider === "openai" ? `, or give this adapter a "baseUrl" if it is a local endpoint that needs no key.` : `.`),
+          `Set ${keyEnv}, or name a different variable with "apiKeyEnv", or set "apiKeyEnv": null if this endpoint ` +
+          `genuinely takes no credential (which also needs a "baseUrl").`,
       );
     }
 
@@ -1374,6 +1745,7 @@ export function readModels(
     const where = `routes[${JSON.stringify(key)}]`;
     const row = raw as Record<string, unknown> | null;
     if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    onlyKeys(row, ROUTE_FIELDS, where, refuse);
     const adapter = nonEmpty(row["adapter"], `${where} "adapter"`, refuse);
     if (!adapters.has(adapter)) {
       refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
@@ -1398,6 +1770,7 @@ export function readModels(
         const at = `${where} fallback[${String(i)}]`;
         const tier = rawTier as Record<string, unknown> | null;
         if (typeof tier !== "object" || tier === null || Array.isArray(tier)) refuse(`${at} is not an object`);
+        onlyKeys(tier, TIER_FIELDS, at, refuse);
         const name = nonEmpty(tier["adapter"], `${at} "adapter"`, refuse);
         // REFUSED, not skipped — the same rule the adapter rows make, for the same reason: a
         // skipped tier is a chain that looks like resilience and has none.
@@ -1451,7 +1824,7 @@ export function readModels(
 
   return {
     adapter: new RoutingAdapter(adapters, routes, path),
-    adapters: [...adapters.keys()],
+    adapters: declared,
     routes: [...routes.keys()],
     // WHICH ROUTES COST NOTHING, computed here because this is where both halves are in hand.
     // A model outside the adapter's price table prices at ZERO — `priceOf` returns 0 for an
@@ -1565,6 +1938,14 @@ function priceTable(v: unknown, where: string, refuse: (why: string) => never): 
   for (const [model, raw] of Object.entries(v as Record<string, unknown>)) {
     const row = raw as { input?: unknown; output?: unknown } | null;
     if (typeof row !== "object" || row === null) refuse(`${where}.${model} must be {"input":n,"output":n}`);
+    // THE SAME RULE ONE LEVEL DOWN, and this is the sharpest case of it in the file. Both
+    // adapters' `prices` option carries `cacheRead` and `cacheWrite`; this reader builds only
+    // `{input, output}`, so an operator writing `"cacheRead": 0.3` had it dropped and every
+    // cached token priced at `p.cacheRead ?? p.input` — the FULL input rate, a 10x
+    // over-estimate that quietly refuses work a budget would have fit. Over-pricing is the
+    // safe direction and silence is not, so the field is refused rather than accepted and
+    // ignored.
+    onlyKeys(row as Record<string, unknown>, PRICE_FIELDS, `${where}.${model}`, refuse);
     // A price of 0 is legal — a free local endpoint is a real thing — but a NEGATIVE or
     // non-finite one would credit the budget instead of spending it, which turns a bound
     // into an unbounded run.
@@ -3369,6 +3750,16 @@ function startGateClock(ws: Workspace, everyMs: number): { readonly everyMs: num
  *     change. Reading a value off a constructed object is the stronger technique; where it
  *     is unavailable, a refusal at parse time is what is left.
  */
+/**
+ * How many gate-door lines the boot banner prints before summarising the rest.
+ *
+ * A bound and not a taste: `announce`'s whole job is to name the guards that are off, and a
+ * plane serving fifty gated graphs would print a page — which an operator skips, making the
+ * report exactly as useful as the silence it replaced. `checkToolNames` bounds its
+ * suggestion list for the same reason.
+ */
+const MAX_BANNER_GATES = 10;
+
 function announce(
   plane: ControlPlane,
   ws: Workspace,
@@ -3389,6 +3780,25 @@ function announce(
   process.stdout.write(`loom listening on http://${host.includes(":") ? `[${host}]` : host}:${port}\n`);
   process.stdout.write(`  data:   ${ws.dataDir}\n`);
   process.stdout.write(`  graphs: ${Object.keys(opts.graphs ?? {}).join(", ") || "(none)"}\n`);
+  // WHAT WAS LOADED INTO THIS PROCESS, named at boot for the reason `--allow-exec` is: it is
+  // host-realm code the operator asked for, holding everything this binary holds, and a
+  // deployment that has it and one that does not are materially different things. Read off
+  // the loaded object rather than off the flag, so no line can name a module that did not
+  // register what it said it would.
+  //
+  // PRINTED HERE, EARLY, AND THAT IS A FACT ABOUT THE TEST HARNESS. `test/deployment/harness.ts`
+  // returns from `serving` as soon as every key in its named `BANNER_KEYS` set has arrived, and
+  // this line is CONDITIONAL so it cannot join that set — a plain `loom serve` never prints it
+  // and the wait would hang. Emitted before the last named key (`models:`), it can never be the
+  // line still in flight when a caller reads stdout.
+  const ext = ws.extensions;
+  if (ext !== undefined) {
+    process.stdout.write(
+      `  ext:    ${ext.files.join(", ")} → ` +
+        `${[...ext.adapters.keys()].map((n) => `adapter ${n}`).join(", ") || "no adapters"}` +
+        `${ext.toolNames.length === 0 ? "" : `, ${ext.toolNames.map((n) => `tool ${n}`).join(", ")}`}\n`,
+    );
+  }
   process.stdout.write(`  who:    ${identity === undefined ? "(nobody — no identity source)" : identity.name}\n`);
   // Every channel, and for each one the only property that matters to the perimeter:
   // whether a human can answer through it.
@@ -3503,22 +3913,59 @@ function announce(
         `  fix: give a channel a "callbackSecret" to make it answerable\n`,
     );
   }
-  // The single binary's version of the compile-time refusal it cannot have: whether
-  // anyone can be identified is deployment config, so the graphs that need a named
-  // approver and the deployment that cannot supply one only meet here.
+  // WHO CAN ANSWER WHICH GATE, said per GATE rather than per graph, and with three verdicts
+  // rather than a boolean.
   //
-  // SUPPRESSED WHEN A CHANNEL CAN BE ANSWERED, because then they can be: a signed callback
-  // names its own approver, and `GateCallbackRouter` never consults the plane's identity
-  // source. `unanswerableGraphs` answers about the API door alone — it takes
-  // `ControlPlaneOptions`, and whether a channel's subject mapping matches a graph's
-  // approvers list is not visible from there — so the deployment layer is the only place
-  // the two doors are both in view.
-  const stranded = opts.dispatcher === undefined ? unanswerableGraphs(opts) : [];
-  if (stranded.length > 0) {
+  // The two lines this replaces were both suppressions: `opts.dispatcher === undefined ? … :
+  // []` here, and `if (opts.identity !== undefined) return []` one level down. Each fell
+  // silent in exactly the case it could not decide — the comment above the first one even
+  // conceded that whether a channel's subject mapping produces the subjects a graph named
+  // "is not visible from there", and then answered that undecidable case with the empty
+  // list. A report that grants nothing has no passing value available to it, so the only
+  // honest move was to name what it cannot see.
+  //
+  // THERE IS NO SEPARATE "REACHABILITY NOT CHECKED" BANNER, and that is a decision. It was
+  // written, and then deleted before it shipped, because from THIS BINARY it could never
+  // fire: `--identity-file` is the only flag that establishes who a caller is, it builds a
+  // `BearerTokenIdentity`, and that source enumerates. A line no path reaches is the
+  // declared-and-wired-to-nothing shape this repo keeps finding, and it would have read as a
+  // guard while being one. The fact itself is not lost — a source that cannot enumerate
+  // produces a per-gate `cannot-tell` whose `why` says exactly "<source> cannot enumerate its
+  // subjects", on this boot path and on `startControlPlane`'s, which is the path a library
+  // embedder with an OIDC source actually takes.
+  const doors = gateAnswerability(opts);
+  const trouble = doors.filter((d) => d.verdict !== "answerable");
+  // BOUNDED, the way `checkToolNames` bounds its suggestion list: a plane serving many gated
+  // graphs would otherwise print a page nobody reads, which is the same failure as printing
+  // nothing.
+  for (const d of trouble.slice(0, MAX_BANNER_GATES)) {
     process.stderr.write(
-      `! NO IDENTITY SOURCE — these graphs have gates naming approvers and cannot be answered over the API: ${stranded.join(", ")}\n` +
-        `  fix: loom serve --identity-file <file> with {"subjects":[{"subject":"u:you","token":"..."}]}\n` +
-        `   or: loom serve --channels-file <file> with a channel that has a "callbackSecret", so the approver answers through it\n`,
+      `! ${d.verdict === "no-door" ? "NO DOOR" : "CANNOT TELL"} — ${d.graph}/${d.nodeId} names ${d.approvers.join(", ")}: ${d.why}\n`,
+    );
+    // THE TWO CHANNEL FACTS `announce` HELD AND NEVER CROSS-REFERENCED. It has had
+    // `opts.graphs` and `delivery.answerable`/`notifyOnly` in the same scope all along; what
+    // was missing is the join. A channel the dispatcher has never heard of is not a delivery
+    // failure at boot and is not a compile error either — `checkDelivery` deliberately does
+    // not check channel names, because a dispatcher is built by the deployment — so this is
+    // the only place the graph and the deployment are both in view.
+    if (d.unknownChannels.length > 0) {
+      process.stderr.write(
+        `    ${d.unknownChannels.join(", ")}: delivered nowhere but the console fallback — no channel of that name in ${ws.delivery?.file ?? "this deployment"}\n`,
+      );
+    }
+    if (d.notifyOnlyChannels.length > 0) {
+      process.stderr.write(`    ${d.notifyOnlyChannels.join(", ")}: delivered there, not answerable there\n`);
+    }
+  }
+  if (trouble.length > MAX_BANNER_GATES) {
+    process.stderr.write(`  …and ${String(trouble.length - MAX_BANNER_GATES)} more gate(s) in the same state\n`);
+  }
+  if (trouble.length > 0) {
+    process.stderr.write(
+      `  fix: loom serve --identity-file <file> with {"subjects":[{"subject":"u:you","token":"..."}]}\n` +
+        `   or: loom serve --channels-file <file> with a channel that has a "callbackSecret", so the approver answers through it\n` +
+        `   or: nothing — \`loom approve <runId> <gateId> --as <subject>\` answers any gate from this machine, and it\n` +
+        `       authenticates nobody by construction: the subject it writes into the journal is whatever --as said.\n`,
     );
   }
 }
@@ -3611,7 +4058,15 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
   // parameter.
   const mcp = args.flags["mcp-file"] === undefined ? [] : await startMcp(readMcpServers(requireFileFlag(args, "mcp-file")));
-  const ws = openWorkspace(args, process.env, fetchImpl, mcp);
+  // BEFORE THE WORKSPACE, for the reason `mcp` is and one reason more: `openWorkspace` reads
+  // `--models-file` on its first line, and a `routes` row may name an adapter an extension
+  // module registered. `await import()` is why this cannot happen inside that function.
+  //
+  // ONLY IN `main`. `--extension-module` is argv and nothing else — no file, no resource ref,
+  // no directory scan — which is the entire trust argument at `loadExtensionModules`.
+  const extensionPaths = listFlag(args, "extension-module", "a module path");
+  const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths);
+  const ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
   try {
     switch (args.command) {
       case "compile": {

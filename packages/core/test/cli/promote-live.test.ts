@@ -114,9 +114,12 @@ const MODELS_FILE = JSON.stringify({
     {
       provider: "openai",
       name: "stub",
-      // Never dialled: `main(argv, STUB.fetch)` replaces the transport. A `baseUrl` is what
-      // makes a keyless adapter legal, which is what keeps this suite free of a credential.
+      // Never dialled: `main(argv, STUB.fetch)` replaces the transport. `"apiKeyEnv": null`
+      // DECLARES that this endpoint takes no credential, which is what keeps this suite free
+      // of one. A `baseUrl` alone no longer implies it — that inference was the reader
+      // answering an undecidable question with the passing value.
       baseUrl: "http://stub.invalid/v1",
+      apiKeyEnv: null,
       prices: { m1: { input: 1, output: 1 } },
     },
   ],
@@ -516,7 +519,7 @@ test("a live judgement with no adapter, or an unpriced one, is refused rather th
     writeFileSync(
       unpriced,
       JSON.stringify({
-        adapters: [{ provider: "openai", name: "stub", baseUrl: "http://stub.invalid/v1" }],
+        adapters: [{ provider: "openai", name: "stub", baseUrl: "http://stub.invalid/v1", apiKeyEnv: null }],
         routes: { "agent_profile/x@stable": { adapter: "stub", model: "m1" } },
       }),
     );

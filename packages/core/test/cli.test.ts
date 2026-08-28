@@ -472,21 +472,97 @@ test("the API key is read from the ENVIRONMENT, and an unset one refuses to star
   }
 });
 
-test("a LOCAL OpenAI-compatible endpoint needs no key — the adapter's own rule, not a second one", async () => {
+test("A KEYLESS ENDPOINT MUST DECLARE ITSELF — a baseUrl is not a statement about credentials", async () => {
+  // The reader used to INFER `baseUrl => no credential needed` for the OpenAI wire, which is
+  // this codebase's named defect: a guard answering its undecidable case with the passing
+  // value. It cannot tell a keyless local endpoint from a hosted gateway whose operator
+  // forgot to export the key -- and the second boots looking configured and 401s an hour
+  // later inside a run, which is the exact failure the boot check exists to prevent.
   const d = emptyDir();
   try {
-    const file = modelsFile(d.dir, {
-      adapters: [{ name: "ollama", provider: "openai", baseUrl: "http://127.0.0.1:11434/v1" }],
-      routes: { "agent_profile/summarizer@stable": { adapter: "ollama", model: "llama3" } },
-    });
-    assert.deepEqual(readModels(file, {}).adapters, ["ollama"]);
+    const row = { name: "ollama", provider: "openai", baseUrl: "http://127.0.0.1:11434/v1" };
+    const routes = { "agent_profile/summarizer@stable": { adapter: "ollama", model: "llama3" } };
 
-    // ...and the carve-out is exactly as wide as the adapter's: no baseUrl, no exemption.
+    // Undeclared: REFUSED, and the refusal names all three fixes.
+    assert.throws(
+      () => readModels(modelsFile(d.dir, { adapters: [row], routes }), {}),
+      (e: unknown) =>
+        (e as { code: string }).code === "E_CONFIG_INVALID" &&
+        /OPENAI_API_KEY/.test((e as Error).message) &&
+        /"apiKeyEnv": null/.test((e as Error).message),
+    );
+
+    // Declared: BOOTS. The control, proving this did not degenerate into "local endpoints
+    // are banned".
+    assert.deepEqual(readModels(modelsFile(d.dir, { adapters: [{ ...row, apiKeyEnv: null }], routes }), {}).adapters, ["ollama"]);
+
+    // ...and the declaration cannot open a door: without a `baseUrl` it would be claiming
+    // api.openai.com takes no credential.
+    assert.throws(
+      () =>
+        readModels(
+          modelsFile(d.dir, { adapters: [{ provider: "openai", apiKeyEnv: null }], routes: { k: { adapter: "openai", model: "gpt-5" } } }),
+          {},
+        ),
+      /takes no credential.*names no "baseUrl"/s,
+    );
+
+    // The old carve-out's other half is unchanged: no baseUrl, no exemption.
     const noBase = modelsFile(d.dir, {
       adapters: [{ provider: "openai" }],
       routes: { "agent_profile/summarizer@stable": { adapter: "openai", model: "gpt-5" } },
     });
     assert.throws(() => readModels(noBase, {}), /OPENAI_API_KEY/);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("A FIELD NOTHING READS IS REFUSED, on every row shape, naming what the row may declare", async () => {
+  // Measured before this refusal existed: `headers`, `apiVersion` and `zzz_nonsense` on an
+  // adapter row all printed `ACCEPTED AND IGNORED. adapters=['openai']`. An operator who
+  // wrote `headers` believes their gateway is being sent a header.
+  const d = emptyDir();
+  try {
+    const cases: readonly [unknown, RegExp][] = [
+      [
+        { adapters: [{ provider: "anthropic", zzz_nonsense: 1 }], routes: ONE_ANTHROPIC.routes },
+        /adapters\[0\] declares "zzz_nonsense".*may declare: provider, name, baseUrl, apiKeyEnv, prices, defaultMaxTokens/s,
+      ],
+      // `headers` is refused ON PURPOSE and not merely unimplemented: a custom auth header is
+      // a credential, and this file's whole rule is that credentials are not fields in it.
+      [{ adapters: [{ provider: "anthropic", headers: { "x-a": "b" } }], routes: ONE_ANTHROPIC.routes }, /declares "headers"/],
+      [
+        { adapters: [{ provider: "anthropic" }], routes: { "agent_profile/x@stable": { adapter: "anthropic", model: "m", timeout: 1 } } },
+        /declares "timeout".*may declare: adapter, model, fallback/s,
+      ],
+      [
+        {
+          adapters: [{ provider: "anthropic" }],
+          routes: {
+            "agent_profile/x@stable": { adapter: "anthropic", model: "m", fallback: [{ adapter: "anthropic", model: "m2", unless: [] }] },
+          },
+        },
+        /fallback\[0\] declares "unless".*may declare: adapter, model, when/s,
+      ],
+      // A misspelled `provider` is diagnosed as the misspelling rather than as an absent one,
+      // which is why the field check runs first.
+      [{ adapters: [{ providr: "anthropic" }], routes: ONE_ANTHROPIC.routes }, /declares "providr"/],
+      // One level down, and the sharpest case: both adapters' options carry `cacheRead`, this
+      // reader has never built it, and a dropped one prices every cached token at the full
+      // input rate.
+      [
+        { adapters: [{ provider: "anthropic", prices: { m: { input: 1, output: 2, cacheRead: 0.1 } } }], routes: ONE_ANTHROPIC.routes },
+        /prices"\.m declares "cacheRead".*may declare: input, output/s,
+      ],
+    ];
+    for (const [doc, expected] of cases) {
+      assert.throws(
+        () => readModels(modelsFile(d.dir, doc), FAKE_ENV),
+        (e: unknown) => (e as { code: string }).code === "E_CONFIG_INVALID" && expected.test((e as Error).message),
+        JSON.stringify(doc),
+      );
+    }
   } finally {
     d.dispose();
   }
@@ -857,7 +933,7 @@ test("AN UNPRICED ROUTE IS NAMED AT BOOT — a budget cannot bind against a cost
   try {
     const models = join(d.dir, "models.json");
     writeFileSync(models, JSON.stringify({
-      adapters: [{ provider: "openai", baseUrl: "http://127.0.0.1:9/v1", prices: { "gpt-5": { input: 1.25, output: 10 } } }],
+      adapters: [{ provider: "openai", baseUrl: "http://127.0.0.1:9/v1", apiKeyEnv: null, prices: { "gpt-5": { input: 1.25, output: 10 } } }],
       routes: {
         "agent_profile/priced@stable": { adapter: "openai", model: "gpt-5" },
         "agent_profile/free@stable": { adapter: "openai", model: "some-local-model" },

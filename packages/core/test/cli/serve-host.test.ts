@@ -51,7 +51,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createSocket } from "node:net";
 import { request as httpRequest } from "node:http";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -291,6 +291,124 @@ test("AN INBOUND CALLBACK FROM OFF-BOX CAN NOW REACH THE PERIMETER IT WAS BUILT 
     assert.notEqual(status, 401, "the callback route is deliberately outside the bearer check, and this request carried none");
     await s.stop();
     assert.match(s.err, /CALLBACK ROUTE OPEN/, "the route must actually be open, or the line above proves nothing");
+  } finally {
+    await s.stop();
+    w.dispose();
+  }
+});
+
+// ── 5 · which gates can be answered, and where the plane says it cannot tell ─
+
+/**
+ * A gate that names an approver AND says where it is delivered.
+ *
+ * Both halves are load-bearing. Without `approvers` there is nothing to be unanswerable
+ * about, and without `delivery.channels` the answerable channel in the file below is not a
+ * door onto THIS gate — which is itself the distinction the old per-graph boolean could not
+ * make.
+ */
+const GATED_GRAPH = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "needs-a-person", project: "demo", version: 1 },
+  policy: { posture: "out", capabilities: [] },
+  channels: { subject: { type: "string", reduce: "replace" } },
+  inputs: ["subject"],
+  outputs: [],
+  nodes: [
+    {
+      id: "approve",
+      type: "human_gate",
+      reads: ["subject"],
+      writes: [],
+      humanGate: {
+        ref: "oversight/ship@stable",
+        approval: { approvers: ["u:security-lead"] },
+        delivery: { channels: ["slack", "carrier-pigeon"] },
+      },
+    },
+  ],
+  edges: [],
+};
+
+test("A GATE THE PLANE CANNOT VOUCH FOR SAYS SO — `cannot-tell`, not silence", { timeout: 90_000 }, async () => {
+  // THE SUPPRESSION THIS REPLACES, in one line: `announce` read
+  // `opts.dispatcher === undefined ? unanswerableGraphs(opts) : []`, so configuring ANY
+  // dispatcher switched the whole report off — and `unanswerableGraphs` itself opened with
+  // `if (opts.identity !== undefined) return []`. Two branches whose only effect was to fall
+  // silent in the case they could not decide. This deployment has both an answerable channel
+  // and no identity source, so under the old code it printed nothing at all.
+  const w = workspace();
+  const channels = join(w.dir, "channels.json");
+  writeFileSync(
+    channels,
+    JSON.stringify({ channels: [{ name: "slack", url: "https://hooks.example.com/a", callbackSecret: "shhh-not-a-real-secret" }] }),
+  );
+  mkdirSync(join(w.dir, "graphs"), { recursive: true });
+  writeFileSync(join(w.dir, "graphs", "gated.json"), JSON.stringify(GATED_GRAPH));
+  const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--token", "s3cret", "--channels-file", channels]);
+  try {
+    // `awaitErr`, NOT `stop()` then read. `serving` returns on the last STDOUT banner key and
+    // these lines are on STDERR after it, so reading straight away races the pipe — the
+    // hazard this harness exists to remove, and one this file's own `awaitErr` docstring
+    // records. The deadline is a failure deadline, never a measurement.
+    //
+    // The verdict, and the FACT IT IS MISSING rather than a shrug: a signed callback names
+    // its own approver and never consults the identity source, so what `slack` vouches for
+    // is genuinely invisible from this process.
+    await s.awaitErr(/CANNOT TELL — needs-a-person\/approve names u:security-lead/);
+    await s.awaitErr(/whether its subject mapping vouches for u:security-lead is not visible/);
+    // And the two channel facts `announce` held all along and never cross-referenced.
+    await s.awaitErr(/carrier-pigeon: delivered nowhere but the console fallback/);
+  } finally {
+    await s.stop();
+    w.dispose();
+  }
+});
+
+test("AN APPROVER NO CONFIGURED CREDENTIAL COULD EVER BE IS NAMED AT BOOT", { timeout: 90_000 }, async () => {
+  // `approvers` is a list of opaque strings compared by exact equality against
+  // `Actor.subject`, and NOTHING enumerated subjects — so a graph could name an approver the
+  // configured source can never produce and the first sign of it was a 403, hours later, at
+  // the gate. `BearerTokenIdentity` has always known its whole population; it just had no way
+  // to be asked. `knownSubjects()` is that question, and this is its only writer.
+  //
+  // THE OLD CODE CALLED THIS DEPLOYMENT CLEAN. `unanswerableGraphs` opened with
+  // `if (opts.identity !== undefined) return []`, so configuring any identity file at all
+  // silenced the check that this graph's approver is unreachable.
+  const w = workspace();
+  const identities = join(w.dir, "identities.json");
+  writeFileSync(identities, JSON.stringify({ subjects: [{ subject: "u:someone-else", token: "not-a-real-token-0123456789" }] }));
+  mkdirSync(join(w.dir, "graphs"), { recursive: true });
+  writeFileSync(join(w.dir, "graphs", "gated.json"), JSON.stringify(GATED_GRAPH));
+  const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--token", "s3cret", "--identity-file", identities]);
+  try {
+    await s.awaitErr(/NO DOOR — needs-a-person\/approve names u:security-lead/);
+    await s.awaitErr(/enumerates 1 subject\(s\) and none of them is u:security-lead/);
+  } finally {
+    await s.stop();
+    w.dispose();
+  }
+});
+
+test("…AND WHEN IT CAN BE, NOTHING IS PRINTED — the report must not fire where nothing is wrong", { timeout: 90_000 }, async () => {
+  // The control. `answerable` is the one verdict that needs a POSITIVE demonstration, and a
+  // report that shouted on a correct deployment would be a report operators learn to skip —
+  // which is exactly as useful as the suppression it replaced.
+  const w = workspace();
+  const identities = join(w.dir, "identities.json");
+  writeFileSync(identities, JSON.stringify({ subjects: [{ subject: "u:security-lead", token: "not-a-real-token-0123456789" }] }));
+  mkdirSync(join(w.dir, "graphs"), { recursive: true });
+  writeFileSync(join(w.dir, "graphs", "gated.json"), JSON.stringify(GATED_GRAPH));
+  const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--token", "s3cret", "--identity-file", identities]);
+  try {
+    // A NEGATIVE CANNOT BE WAITED FOR, so the wait is on a line this deployment definitely
+    // prints — which is what proves stderr was read complete rather than truncated. Without
+    // that anchor an empty buffer would pass this test for the wrong reason, which is the
+    // same defect class the code under test is fixing.
+    await s.awaitErr(/NO MODEL ADAPTER/);
+    await s.stop();
+    assert.doesNotMatch(s.err, /NO DOOR|CANNOT TELL/, s.err);
   } finally {
     await s.stop();
     w.dispose();
