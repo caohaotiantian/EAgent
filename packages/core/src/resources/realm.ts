@@ -600,11 +600,21 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   // re-read the embedder's copies and launder them into the "own intrinsics" set.
   const governed = safeGlobals(context);
   refuseGovernedGlobals(governed, opts.globals, opts.label);
+  // `Math.random` AS THE CONTEXT SHIPPED IT, captured before one line of body or bridge text has
+  // run. `shadowsHeld` compares against this identity; taking it later would compare a stub
+  // against itself. `governed["Math"]` is the context's own `Math`, so this is a plain read of a
+  // pristine object and no user code can be behind it.
+  const pristineRandom = (governed["Math"] as { random?: unknown } | undefined)?.random;
   // SHADOWS LAST — the order every docstring here has claimed and none had. This is the line that
   // actually closes the hole; `refuseGovernedGlobals` above is what makes ignoring an embedder's
   // argument audible instead of silent. Measured with that call deleted: the escape, `Date` and
   // `Intl` all stay closed. See `refuseGovernedGlobals`.
   Object.assign(context, opts.globals, governed);
+  // DERIVED HERE, AT THE ONE MOMENT THE SANDBOX HOLDS EXACTLY WHAT CROSSED FROM THE HOST. See
+  // `onlyGovernedCrossed` for what is decided and why it is decided by a check. After this line
+  // the body and the bridge run, and both write their own names onto `globalThis` — so a check
+  // placed after them would have to whitelist those names and would grow a hole per bridge.
+  const namespaceIsOwn = onlyGovernedCrossed(context, governed);
   let value: unknown;
   try {
     // The content IS a function expression — no `module.exports` ceremony, no wrapper to get
@@ -687,18 +697,110 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     if (crossedAsThenable(host, where)) refuseThenable(where);
     return host;
   };
-  // THE ONLY PLACE THE BRAND IS APPLIED. See `REALM_BOUND` for what it means and what it does
-  // not, and `isRealmBounded` for how it is read.
-  //
-  // SKIPPED WHOLESALE WHEN THE EMBEDDER SENT GLOBALS, rather than inspected. `RealmOptions.globals`
-  // is a value seam and `refuseGovernedGlobals` reads NAMES: whatever survives the name check
-  // arrives in the body as the very host object that was passed. This module already measures two
-  // of the escapes — `{MY_DATE: Date}` gives a body a live wall clock, `{LOOKUP: {a: 1}}` gives it
-  // `LOOKUP.constructor.constructor("return typeof process")()` → `"object"`. Deciding whether some
-  // particular passed-in object is inert is the verifier-pronouncing-code-safe problem; refusing
-  // the brand is the answer a guard that cannot decide is supposed to give.
-  if (opts.globals === undefined || Object.keys(opts.globals).length === 0) REALM_BOUND.add(call);
+  // THE ONLY PLACE THE BRAND IS APPLIED, AND IT IS APPLIED FROM A CHECK. The three properties it
+  // vouches for are named in `onlyGovernedCrossed`'s header: that function decided the second one
+  // above, and `shadowsHeld` decides the first and third here, on the realm that actually exists
+  // rather than on the arguments it was built from. See `REALM_BOUND` for what membership means
+  // and `isRealmBounded` for how it is read.
+  if (namespaceIsOwn && shadowsHeld(context, governed, pristineRandom)) REALM_BOUND.add(call);
   return call;
+}
+
+/**
+ * WHAT THE BRAND VOUCHES FOR — the named set, and the reason it is three CHECKS and not a branch.
+ *
+ * `isRealmBounded` feeds `ReplayReport.hermetic`, so the sentence behind it has to be one a
+ * reader can hold against the realm: **this body ran under the determinism boundary, so
+ * re-executing it produces what it produced before.** Three properties make that true, and each
+ * one is measured on the realm rather than assumed from the code path that built it:
+ *
+ *   1. THE TWO CLOCKS ARE GONE. `Date` and `Intl` are own data properties whose value is
+ *      `undefined` — still, at the end of compile, not merely at the moment `safeGlobals` set
+ *      them. A body is an EXPRESSION and may run code at definition time, so
+ *      `(function () { globalThis.Date = hostishThing; return f; })()` is a legal resource that
+ *      un-shadows a clock for every later call. `shadowsHeld` reads the slot afterwards.
+ *   2. NOTHING OF THE HOST'S IS IN THE NAMESPACE. Every own key the sandbox object carries when
+ *      the assign finishes is a name `safeGlobals` produced, holding the exact value it
+ *      produced. `onlyGovernedCrossed` decides it.
+ *   3. THE DRAW IS NOT THE PLATFORM'S. `Math.random` is an own data property of the context's
+ *      `Math` and is no longer the function the context shipped — which is what
+ *      `functions.ts`'s `seedingRandom` and `hook-loader.ts`'s `denyingRandom` each splice in
+ *      ahead of the body.
+ *
+ * DERIVED FROM A CHECK RATHER THAN FROM THE CODE PATH, and that is the whole correction. The
+ * stamp used to be `opts.globals === undefined || Object.keys(opts.globals).length === 0` — a
+ * test on the ARGUMENT, which is a proxy for the realm and not the realm. `Object.keys` yields
+ * no symbols while `Object.assign` copies them, so a bag whose only key is `Symbol("MY_DATE")`
+ * holding the host `Date` reported length `0`, landed on the realm's `globalThis`, AND KEPT THE
+ * BRAND. Measured, through `compileRealm`, before this change:
+ *
+ *     Object.keys(globals).length      → 0
+ *     isRealmBounded(call)             → true      ← the brand
+ *     body: Object.getOwnPropertySymbols(globalThis)  → ["Symbol(MY_DATE)"]
+ *           D.now() > 1.7e12                       → true      (a live wall clock)
+ *           D.constructor.constructor("return typeof process")()  → "object"  (the HOST realm)
+ *
+ * `hermetic: true` on a run that is not reproducible, which is the one direction this field may
+ * not be wrong in. Widening the old line to `Reflect.ownKeys` would have closed that ONE
+ * spelling and left `{Promise: hostPromise}` — an ungoverned name, so `refuseGovernedGlobals`
+ * allows it, and it overwrites the context's own `Promise` with the host's — and it would still
+ * be a test on the argument, so the next global to arrive by some other route would inherit the
+ * stamp for free. A check on the realm does not have that shape: **anything a future edit puts
+ * into that namespace costs the brand automatically**, because the check enumerates what is
+ * there instead of predicting it.
+ *
+ * WHAT IT STILL DOES NOT VOUCH FOR is unchanged and is named at `REALM_BOUND`: the host's
+ * default locale and garbage collection are ambient inside the realm and are pinned as PASSING
+ * tests in `test/resources/realm-has-no-clock.test.ts`.
+ *
+ * EVERY UNDECIDABLE CASE IS `false`. Both helpers run inside a `try` and answer `false` on a
+ * throw: a `Proxy` `globals` bag whose `ownKeys` trap raises, a `Math` replaced by something
+ * whose descriptor read fails. A guard that cannot decide refuses.
+ */
+function onlyGovernedCrossed(context: object, governed: Record<string, unknown>): boolean {
+  try {
+    // `vm.createContext({})` leaves the SANDBOX OBJECT empty — measured, `Reflect.ownKeys` of a
+    // fresh one is `[]` while the context's own `globalThis` has 67 own keys — so every key here
+    // is one the host PUT there, and this loop needs no allow-list of intrinsics to subtract.
+    // `Reflect.ownKeys` and not `Object.keys`: it is the symbol half that carried the escape.
+    for (const key of Reflect.ownKeys(context)) {
+      if (typeof key !== "string" || !Object.hasOwn(governed, key)) return false;
+      const d = Object.getOwnPropertyDescriptor(context, key);
+      // `"value" in d` first: an ACCESSOR slot has no `value` and `Object.is(undefined, undefined)`
+      // would pass a getter off as the `undefined` shadow.
+      if (d === undefined || !("value" in d) || !Object.is(d.value, governed[key])) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Properties 1 and 3 of the boundary `onlyGovernedCrossed` names, read off the finished realm.
+ *
+ * DESCRIPTORS AND NEVER A PLAIN READ. `context.Date` would invoke a getter the body installed on
+ * `globalThis` at definition time — user code, on the host thread, outside the `vm` timeout that
+ * bounds everything else here. That is the hazard `crossedAsThenable` refuses to take for the
+ * same reason, and a descriptor read takes none of it.
+ */
+function shadowsHeld(context: object, governed: Record<string, unknown>, pristineRandom: unknown): boolean {
+  try {
+    for (const name of ["Date", "Intl"]) {
+      const d = Object.getOwnPropertyDescriptor(context, name);
+      if (d === undefined || !("value" in d) || d.value !== undefined) return false;
+    }
+    const math = Object.getOwnPropertyDescriptor(context, "Math");
+    if (math === undefined || !("value" in math) || !Object.is(math.value, governed["Math"])) return false;
+    const draw = Object.getOwnPropertyDescriptor(math.value as object, "random");
+    // `pristineRandom` is `undefined` only if the context shipped no `Math.random`, which no
+    // ECMAScript realm does; comparing against it anyway keeps the failure closed rather than
+    // making `undefined === undefined` vouch for a `Math` with no draw at all.
+    if (draw === undefined || !("value" in draw)) return false;
+    return draw.value !== undefined && !Object.is(draw.value, pristineRandom);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -710,9 +812,11 @@ export function compileRealm(opts: RealmOptions): RealmCall {
  * fix is not to journal a body's output — that would put a `function` member in the kernel's
  * forever-vocabulary in order to re-open a fail-open this project already paid to close, and
  * re-execution is the only thing that catches a body regression at all. The fix is to stop
- * claiming more than the runtime can vouch for, and this symbol is what it can vouch for: that
- * a body came out of `compileRealm` with no embedder globals, so its inputs are a JSON payload
- * and its globals are this context's own.
+ * claiming more than the runtime can vouch for, and this set is what it can vouch for: that a
+ * body came out of `compileRealm` and the realm it came out of PASSED THE THREE CHECKS
+ * `onlyGovernedCrossed`'s header names — no host value in its namespace, both clocks still
+ * shadowed, the platform draw replaced — so its inputs are a JSON payload and its globals are
+ * this context's own.
  *
  * A REGISTRY SYMBOL WOULD BE FORGEABLE, WHICH IS THE WHOLE POINT. `Symbol.for(k)` is reachable
  * by any code in the process holding the same string — `engine.ts`'s `REBIND_DEADLINE` is
@@ -758,12 +862,17 @@ export function compileRealm(opts: RealmOptions): RealmCall {
 const REALM_BOUND = new WeakSet<object>();
 
 /**
- * Was this body compiled by `compileRealm` with no embedder globals?
+ * Did this body come out of a `compileRealm` realm that passed the determinism checks?
+ *
+ * The three are named in `onlyGovernedCrossed`'s header. Note what this is NOT: "compiled by
+ * `compileRealm`". A realm is compiled and then MEASURED, and one that ends up holding a host
+ * value, an un-shadowed clock, or the platform's `Math.random` gets no brand.
  *
  * FALSE IS THE ANSWER FOR EVERYTHING THIS MODULE DID NOT MAKE, and that is the fail-closed
- * direction: a hand-registered host closure, a body from a realm carrying `opts.globals`, a
- * plain object, `undefined`. Absence of evidence is reported as unvouched-for, never as
- * bounded, so nothing a caller can pass makes this answer `true` by accident.
+ * direction: a hand-registered host closure, a body from a realm carrying `opts.globals` that
+ * reached the namespace, a plain object, `undefined`. Absence of evidence is reported as
+ * unvouched-for, never as bounded, so nothing a caller can pass makes this answer `true` by
+ * accident.
  *
  * NO `try` HERE, and its absence is the point rather than an omission: `WeakSet.prototype.has`
  * runs no user code. It does not read a property, does not invoke a getter, does not consult a
