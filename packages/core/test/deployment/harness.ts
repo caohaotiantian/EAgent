@@ -385,8 +385,14 @@ export function completeLines(text: string): readonly string[] {
  * drained stdout — so a line added to `announce` and not added here goes RED there instead
  * of silently re-opening the window. That test is the only thing keeping this list honest;
  * this list on its own cannot know about a key it does not name.
+ *
+ * IT HAS ALREADY FIRED ONCE, on the change after the one that wrote it: `limits:` was added
+ * to `announce` by the commit that gave the operator a concurrency and budget ceiling, and
+ * this list did not know. Two changes in flight at the same time, neither able to see the
+ * other, and the red test is the only thing that connected them — which is the argument for
+ * the list rather than a story about it.
  */
-export const BANNER_KEYS = ["data", "graphs", "who", "gates", "clock", "models"] as const;
+export const BANNER_KEYS = ["data", "graphs", "who", "gates", "clock", "limits", "models"] as const;
 
 /**
  * Wait for a COMPLETE line matching `re` in a buffer that is still filling.
