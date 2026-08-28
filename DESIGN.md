@@ -188,9 +188,13 @@ into the artifact hash and into the per-effect fingerprint.
 change keeps old behaviour for graphs that declared an older version.
 
 **Unlimited extensibility** — everything not the kernel is an extension against the same declared
-surface. *As shipped that claim covers a named set and not everything:* eight things need no fork
-and seven do, enumerated with the binary's own refusal text in `README.md`'s "Extending it, and
-where that stops". The tool-extensibility path is a typed API the model writes code against rather than
+surface. *As shipped that claim covers a named set and not everything:* **ten** things need no fork
+and **five** do, enumerated with the binary's own refusal text in `README.md`'s "Extending it, and
+where that stops". Those numbers moved on 2026-08-28 and both directions are the point: the fork
+list was re-counted at seven (an undercount corrected — a ledger that undercounts turns this
+property's alarm into a false all-clear), and `--extension-module` then took it to five. Two of
+the five that remain are DEBTS rather than bounds, and Sequence item 12 is what closes them. The
+tool-extensibility path is a typed API the model writes code against rather than
 N schemas in the context window. That shape cut one vendor's example workflow from ~150k tokens to
 ~2k. It has a cost this project must state: if tools are reached through generated code, the
 reachable-tool set becomes a static-analysis problem rather than a graph-edge one, so **an agent
@@ -204,28 +208,52 @@ harness and LangChain's Deep Agents converged on independently.
 
 ## Sequence
 
+*The roadmap `CLAUDE.md` points at. It runs across the next three sections: this preamble and the
+rule the list is written under, then **The live list** (items 9–13, what to build), then **The
+record** (items 1–8, closed) and **Deliberately not sequenced** (what is left out, and why).*
+
 **Rewritten 2026-08-25**, after an audit and a re-check of every backlog item by running it.
 The previous list had no done markers at all; the DONE that a measurement falsified was in
 `TODO.md` §G, not here. And its item 5 named "labels on branch coordinates" — the option D4's
 own heading rejects and which §G records as tried and reverted.
 
-**ALL EIGHT ARE DONE, 2026-08-28.** Every item's `Fails today` command now passes; verified by
-running all eight. **So this list is no longer a roadmap — it is a record of one**, and the rule
+**ITEMS 1–8 ARE DONE, 2026-08-28.** Every one of their `Fails today` commands now passes; verified
+by running all eight. **So that list is no longer a roadmap — it is a record of one**, and the rule
 it was written under says so plainly: "every item names a command that FAILS today, and an item
-that cannot fail is a wish, not a roadmap entry." By that test these eight are now eight wishes,
-and the honest thing is to stop calling the section a plan rather than to relax the rule.
+that cannot fail is a wish, not a roadmap entry." By that test those eight are now eight wishes,
+and the honest thing was to stop calling them a plan rather than to relax the rule. They are kept,
+verbatim and still numbered 1–8, below the live list — a Sequence with its outcomes attached is
+the only evidence anyone has about what this project's estimates are worth.
 
-**The next Sequence cannot be written here yet, and that is a finding rather than an omission.**
-What comes next is blocked on decisions in `TODO.md` §D that only the maintainer can make —
-thirteen of them, with `D.2` (the real tenant, concurrency and run-rate numbers) first, because
-`D.13` the CPU pool is the last item still resolving on it. Three that were on that list came off
-it on 2026-08-28, and by three different routes: `D.14` retention tiering was ANSWERED BY DELETION
-and turned out not to depend on the numbers at all; `D.19` the circuit breaker and the
-admission-control half of `D.4` were both REFUSED under `D.2` = one machine, one tenant, the
-maintainer's own workflows — the breaker because its verdict is a per-source count spanning runs
-while the journal is addressed per run, admission control because under one tenant the right answer
-to "too much work" is to make it wait and never to say no. See `TODO.md` §D.14, §D.19 and §D.4.
-An implementer who picked one of the rest would be writing a roadmap out of guesses.
+**THE RULE HOLDS FOR ITEMS 9–13 TOO, and it is the only thing that makes the list worth reading.**
+Every one names a command that FAILS at this commit, each was RUN and its failure pasted in, and
+an item whose command passes gets cut rather than reworded. Four candidates were cut that way
+while this list was being written: `loom suite freeze --cohort` (already shipped — see item 5),
+the trajectory fold's blindness to externalised writes (fixed at `7d627b4`), the D.7.6 provider
+refusal that could not re-derive on replay (fixed at `633e265` — for journals carrying the new
+`provider` field; one written between `e6d00f2` and that fix still replays the refused answer
+onto the channel, and no fix can invent a field those journals do not have), and admission
+control's successor, which is not a build at all — see "Deliberately not sequenced".
+
+**THAT BLOCKER IS GONE, 2026-08-28, and the next Sequence is below as items 9–13.** This section
+used to say the next list "cannot be written here yet" because it was blocked on thirteen `TODO.md`
+§D decisions only the maintainer could make, with `D.2` — the real tenant, concurrency and
+run-rate numbers — first. `D.2` was ANSWERED: **one machine, one tenant, the maintainer's own
+workflows; tens of runs a day, retention in weeks, one `loom serve`, one operator.** The other
+twelve were then decided on merit rather than left waiting, and each carries its argument and its
+recorded dissent. Two things about those decisions belong here rather than in the backlog:
+
+- **The answer was a DELETION more often than a build** — `TenantId`, `Budget.tenantUsd`,
+  `ApprovalSpec.mode`/`.k`/`.delegation`, `JoinNode.timeoutMs`, `FunctionNode.cpuBound`,
+  `journal/retention.ts`, `PolicyEngine.clearCeiling`, two `effect.started.kind` members. A
+  vocabulary that declares more than it wires is the shape §B of the backlog had eleven entries
+  of, and D.2 is what made most of them decidable.
+- **Two were refused permanently, and the refusal is the deliverable.** `D.4` admission control:
+  under one tenant the right answer to "too much work" is to make it wait, never to say no, so
+  `E_ADMISSION_REJECTED` stays deleted and what shipped instead is a CEILING
+  (`--max-runs-in-flight`, default 4). `D.19` the circuit breaker: its verdict is a per-source
+  count spanning runs while the journal is addressed per run. `D.10`'s `preAuthorization`
+  envelope makes three.
 
 Evidence for each item below is in `TODO.md` §A0 and
 `docs/audit-2026-08-25.md`; the ones marked `gated` are held by
@@ -238,6 +266,219 @@ budget ceiling without the caller learning the graph. That one is wholly done.
 **Landed in part**, and `TODO.md` §G carries the qualifiers this list must not drop: D2 declared
 effects is done for `function` nodes and still open for `evaluator` bodies and for the sandbox;
 replay divergence is terminal **for the recorded-effect path** only, which was item 4.
+
+---
+
+## The live list — items 9 to 13, written 2026-08-29
+
+**THE ORDERING ARGUMENT, because "what the three properties need" has to be an argument and not a
+preference.** Items 9, 10 and 11 are one defect class wearing three costumes, and it is the class
+`TODO.md` names as accounting for nearly every real finding of the last session: **a guard
+answering its undecidable case with the passing value.** In each, the runtime reaches a question
+it cannot answer from the journal, and answers it `ok` — a rewind permitted on a promise nothing
+keeps, a recorded refusal that does not reproduce, a `hermetic: true` over code the runtime cannot
+vouch for. All three are SILENT: the operator's evidence says the run is fine. Items 12 and 13
+are capability gaps, and both announce themselves — a refusal naming the flag that does not
+exist, a `truncated: true` on every tick and a stderr banner at boot. **Silent-and-wrong outranks
+loud-and-missing**, and that is the whole ordering.
+
+**WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** The seam census is
+**8** today — `git log --grep='^Kernel-seam:' --oneline | wc -l` says 8, and
+`node scripts/check-kernel.mjs` prints `10 files pinned, 164 commits since 86b84c9, 8 declared
+seams` and then lists every one with its reason. Items 10 and 13 are each a `feat` that must touch
+a pinned kernel file — `journal/events.ts`
+for a seventh `effect.started.kind`, `journal/store.ts` for a listing cursor — so each costs one
+`Kernel-seam:` trailer and the census would end this list at **10**. Items 9 and 11 are `fix`es of
+guards that already exist and do not hold; `fix` may touch the kernel freely, which is what a
+kernel is for. Item 12 touches `cli.ts`, which is not kernel. **Two trailers is the price of this
+list, it is not hidden in it, and a maintainer who thinks the census has grown fast enough should
+cut 13 first** — its argument is the weakest, and §13 says so itself.
+
+### 9 · A rewind is permitted BECAUSE a compensation exists, then does not run it
+
+The sharpest of the three, because the refusal that guards it works. `Engine.rewind` descends into
+child runs — `rewind-through-subgraph.test.ts` proves it, and refuses `E_RESTORE_ILLEGAL` when a
+child made an irreversible call with no undo. Declare a `compensation` on that same call and the
+rewind is ALLOWED — that is the second of that file's two tests, and it is correct: the rule is
+about compensation, not about subgraphs. `planCompensation` then reads the PARENT's journal only,
+finds no `tool.called` there to undo, and the rewind returns having run nothing.
+
+So the permission and the promise are decided by two different pieces of code over two different
+journals, and only the permission crosses the boundary. That is a LOOSENING reached through a
+declaration — an author makes a rewind legal by naming an undo, and naming it is all that
+happens. Driven, one `subgraph` node whose child charges `pay.refundable` (irreversible,
+`compensation: {tool: "pay.refund"}`), then `engine.rewind(runId, 1)`:
+
+    charges [ 42 ]  refunds []
+    ✖ A REWIND ALLOWED BECAUSE A CHILD DECLARED A COMPENSATION ACTUALLY RUNS IT
+      AssertionError: the rewind was permitted because an undo was declared — so run it
+      + actual - expected
+      + []
+      - [ 42 ]
+
+*Fails today:* that assertion — a rewind across a `subgraph` node runs the child's declared undo.
+
+**The named siblings go with it, because they are the same walk over the same journal.** There
+are three `run.failed` append sites in `advance` (engine.ts:7060, 7102, 7130) and only the middle
+one calls `#compensate`; the other two are the unmaterialised fan-out and `E_OUTPUT_MISSING`, and
+the budget/fatal floor at the top of `advance` is a fourth path. The engine's own comment argues
+the floor out — rolling back underneath a task still in flight would race the thing it is undoing
+— and leaves the other two unargued, which is the half to close. Separately, `#compensateOne`
+hands the undo `{}` when the original `effect.completed` recorded no `details`: an undo invoked
+with no arguments is not a refusal, and it should be `not_attempted` with a reason, the same
+fail-closed shape its three neighbouring guards already use.
+
+**Not in scope, and the reason is recorded so it is not re-litigated:** `#edgesToTake` still has
+`case "compensation": break;`. A rollback names a CALL and an edge names a NODE; traversing the
+edge would run a node, which is a different feature.
+
+### 10 · Three token and cost ceilings cannot be re-derived by a replay
+
+CLAUDE.md's first non-negotiable is that a value a decision reads must be reconstructable by
+folding the journal, "including across a restart". These three are not: the node `tokens` ceiling,
+the node `costUsd` ceiling, and `ctx.policy.reserve`'s charge against the run's token budget. All
+three fail for one reason — the quantity is an ADAPTER's answer (`outputCeilingOf`, `estimateOf`)
+and no journal row carries it. `wallMs` is exempt only because it is settled-only.
+
+The engine names the class in its own comment and the direction is sound but holed: `ceiling ?? 0`
+is a LOWER bound, so a replay can never refuse a turn the live run allowed, and it CAN fail to
+refuse one the live run refused. Driven, node `budget.tokens` 500:
+
+    LIVE   E_BUDGET_EXHAUSTED | node "ask" would exceed its 500-token budget
+                                (0 spent by this task, 1041 estimated for this turn)
+    REPLAY E_REPLAY_DIVERGENCE | effect "ask@root#0:model:0" is not in the journal
+    MATCH  true
+
+`match: true` is the part that makes this worth an item rather than a comment. `compare()` grades
+both runs `failed` and reports agreement, so a divergence in the one field `evolution/gate.ts`
+reads to decide whether a candidate is promotable announces nothing at all.
+
+*Fails today:* a test asserting `report.replayed.error.code === "E_BUDGET_EXHAUSTED"` for that
+run. `test/run/replay-fidelity.test.ts`'s `THE HOLE THIS DOES NOT CLOSE` pins the current
+behaviour and says in its own body that it should be DELETED when this lands.
+
+**The seam this is asking for, and it is a vocabulary change rather than a repair.** An adapter's
+ceiling is a nondeterministic call, so this repo's own rule applies: record it under a derived key
+and let replay serve the record. That is a seventh member of `effect.started.kind` in
+`journal/events.ts` plus an index for it in `ReplayEffects` — one `Kernel-seam:` trailer, and the
+union's docstring is explicit that its membership is a MEASURED set rather than a place to add a
+field: `test/registries.test.ts`'s `EVERY DECLARED EFFECT KIND HAS A WRITER` re-derives the
+members from `run/engine.ts` on every run, so a seventh word cannot land without the code that
+writes it. Two members have already been added and deleted for exactly that reason (`clock`,
+`mailbox`), which is the history this seam has to survive.
+
+**The alternative is cheaper and is the wrong answer**: skip the check in replay and say so. It
+converts a refusal the live run really made into a refusal the record cannot show, and the whole
+value of `hermetic`/`match` is that a recorded run reproduces including its refusals.
+
+### 11 · `hermetic`'s third conjunct has no producer, so `hermetic: true` still over-claims
+
+`ReplayReport.hermetic` is the field the replay thesis is quoted by, and its third term —
+"no body ran that the runtime could not vouch for" — is inert. The brand exists
+(`resources/realm.ts`'s `isRealmBounded`), the accumulator exists (`ReplayEffects.bodyEntered`),
+and nothing in `src/` calls the accumulator, so `liveBodies` is `[]` on every run.
+
+Why the term had to be its own kind is the part worth keeping: the other two terms are indexed by
+EFFECT KEY, and a `function` or `evaluator{assertion}` body computes no effect key. So on a graph
+of function nodes NO INPUT could make this field false while the bodies re-executed live — a
+guard answering its undecidable case with the passing value, inside the field the product's whole
+offline-replay claim rests on. Driven, one `function` node whose body is a hand-registered host
+closure (`isRealmBounded` false), run then replayed:
+
+    liveBodies = []  hermetic = true
+    ✖ A REPLAY THAT RE-EXECUTED A HAND-REGISTERED HOST BODY REPORTS `hermetic: false`
+      AssertionError: the body the replay could not vouch for must be named
+      + [] - [ 'fn@root#0' ]
+
+*Fails today:* that assertion. Two lines close it, both already named in `replay.ts`'s docstrings:
+`Engine.#functionBody` calls `bodyEntered(taskId, isRealmBounded(body))` at FETCH time (so a body
+that throws or is killed at its deadline still counts — the count may be too high, never too low),
+and `resources/functions.ts` carries the brand onto the `FunctionBody` it wraps around
+`compileRealm`'s `RealmCall`. **The second is not optional**: measured, `isRealmBounded` is `true`
+on the realm call and `false` on the loader's wrapper, so landing only the first makes `hermetic`
+permanently false — fail-closed, and useless.
+
+The proving test is the PAIR, and the pair is what stops this being satisfied by a field that is
+now always false: a hand-registered body giving `hermetic: false` with its taskId in `liveBodies`,
+and the identical graph whose body came through `ResourceStore` giving `hermetic: true`. When it
+lands, `test/run/hermetic-names-the-live-bodies.test.ts`'s source census goes red on purpose and
+sends its author to two docstrings that currently promise the field is inert.
+
+### 12 · The fork ledger's two DEBT rows — the only item property 2 asks for
+
+Property 2's own text says shrinking `README.md`'s fork list is what the property MEANS in
+practice, and that the list moving the other way is the alarm. It has moved both ways: six, then
+SEVEN when an undercount was found and corrected, then **five** after `--extension-module`. Of
+those five, three are BOUNDS with a replay argument — a node type, a reducer, a ninth hook point,
+each a word a journal records and a fold re-reads. **Two are DEBTS: nobody built the seam.**
+
+    $ loom serve --identity-module ./oidc.mjs                        -> exit 1
+    E_CONFIG_INVALID: unknown flag: --identity-module (did you mean --identity-file?)…
+
+    $ loom serve --channels-module ./smtp.mjs                        -> exit 1
+    E_CONFIG_INVALID: unknown flag: --channels-module (did you mean --channels-file?)…
+
+*Fails today:* both of those, run from source as `node packages/core/src/cli.ts …`. They are how
+an operator would boot with a header-trusting identity source and a non-webhook gate transport,
+and there is no flag onto either seam.
+
+Both refusals are honest and both name the wrong door. `IdentitySource`, `startControlPlane`,
+`DeliveryChannel` and `GateDispatcher` are all on `scripts/surface.json`, so a LIBRARY EMBEDDER
+already passes an OIDC source to `startControlPlane({identity})` and a hand-written channel to
+`new GateDispatcher({channels})` and forks nothing. **The bound is the CLI's, and under D.2 the
+CLI is who the one user is** — which is why the split the README records in each row ("from the
+CLI") is a reason to build the seam and not a reason to discount the row.
+
+**One change, two rows.** `cli.ts`'s `ExtensionModules` docstring already prescribes it: it is
+"SCOPED TO `{models, tools}` EXACTLY — the two entries this removes from the fork list, and no
+more. A delivery transport sits in the same merely-recorded bucket and should EXTEND this object
+when it is built, rather than invent a second flag." So the shape is `{models, tools, channels,
+identity}` on the existing `--extension-module`, inheriting its five boot refusals and its
+argv-only trust argument unchanged — **and that argument is the constraint, not a footnote**: the
+day any of this becomes loadable from a config file, a resource ref or the data directory, a FILE
+decides what code a process holding `fs:write` runs, and the seam has to move behind a process
+boundary. Ledger 5 → 3, and the three that remain are bounds with reasons rather than debts.
+
+### 13 · A run past the scan ceiling is reached by no lap
+
+`startRunClock` is the only thing that comes back to a run nothing else is driving. It rotates a
+window over `listRuns(limit)`, derived from the clock so a plane that restarts computes the same
+window one that stayed up would — which is what makes the rotation reconstructable rather than a
+counter in a closure, the defect that preceded it. Above `RUN_CLOCK_SCAN_CEILING` (10,000) the
+listing is truncated and the rotation cannot reach past it. Driven with an injected ceiling of 10,
+twelve runs, twenty laps:
+
+    reached 10 of 12 — missing: [ '01HF7YAT01QJJ2TPQP9P9KK72A', '01HF7YAT02EKAYZM0J8A3KFSR4' ]
+    ✖ EVERY RUN IN A JOURNAL LARGER THAN THE SCAN CEILING IS REACHED BY SOME LAP
+
+*Fails today:* that assertion. `runClockTick`'s own docstring names the fix — "THE REAL FIX IS A
+CURSOR — `listRuns(after)`, so a tick can page rather than re-scan — and it belongs in
+`StateStore` with a conformance test behind it. When that lands, this rotation is the thing to
+delete." `run-clock-window.test.ts`'s bounded-scan case pins the residual and goes with it.
+
+The same cursor answers the second open hole on that axis: two planes over one store now AGREE on
+a window rather than dividing it, which is correct (every write compare-and-swaps on its seq, so
+the loser writes nothing) and wasteful (both pay the fold, and with the widened `due` predicate
+both may pay the model call).
+
+**WHY THIS IS LAST, and it is the D.2 answer doing work rather than a shrug.** Tens of runs a day
+against a ceiling of 10,000 is a horizon of a year, the deployment is one plane, and the failure
+is LOUD: `runClockTick` returns `truncated: true` on every tick that hits it, and `serve` writes a
+three-line banner to stderr naming the ceiling and what to do about it. That banner is printed
+ONCE and not per tick — deliberately, and its comment says why ("a line per tick is how an
+operator learns to stop reading stderr") — so "loud" here means loud at boot, not loud forever.
+This is the item on the list most likely to be right to defer again; what it must not be is
+forgotten, which is why it is here with a command rather than in a comment.
+
+---
+
+## The record — items 1 to 8, all closed
+
+Everything from here to "Deliberately not sequenced" is history, kept verbatim and still numbered
+1–8 because `TODO.md` and the items themselves cite each other by number. It is not a plan and
+nothing in it is outstanding; each item's own text says what it cost and, where the estimate was
+wrong, what it got wrong. Two of them (2 and 5) have had one paragraph corrected since — each
+correction is marked where it sits and says what it replaces.
 
 ### 1 · Oversight correctness — this gates everything below it
 
@@ -293,15 +534,25 @@ could see** — 2,288 tests when this lane started, 2,468 now.
 
 The lane is `test/deployment/`: `harness.ts` (which now owns the spawned-plane machinery
 `serve-host.test.ts` earned, plus `planes(d, n)` for concurrent writers), `two-planes.test.ts`,
-`run-clock-survives-restart.test.ts`, `restart-and-answer.test.ts`, and the three window and
-gate-clock files — 15 tests, of which two spawn a real `loom serve`.
+`run-clock-survives-restart.test.ts`, `restart-and-answer.test.ts`, and the window and
+gate-clock files.
 
-*Fails today:* nothing on this axis, and that is the claim to attack next. The two open holes
-are named where they live rather than here: `RUN_CLOCK_SCAN_CEILING`'s residual — a run past
-10,000 is reached by no lap, and `truncated` is the only reason anyone knows — and the fact
-that two planes now AGREE on a window rather than dividing it, which is correct and wasteful.
-Both want the cursor `runClockTick`'s docstring names: `listRuns(after)` in `StateStore`, with
-a conformance test behind it.
+**CORRECTED 2026-08-29, and the correction is the item's own point made again.** This paragraph
+said "15 tests, of which two spawn a real `loom serve`", and the lane has grown three files since
+under later work — `admission-is-a-ceiling.test.ts`, `boot-banner.test.ts`, `oversight-door.test.ts`.
+Measured (`node --test 'packages/core/test/deployment/*.test.ts'`): **9 files, 28 tests, 0 fail**;
+three of them boot a real `loom serve` through `serving()` and two more spawn a real CLI that is
+expected to refuse. **A count of a thing that grows is a claim with no fixed point** — the number
+was true when written and stale within the week, which is exactly what "state the invariant, not
+the measurement" is for. The invariant is the lane's, not the count's: everything here is
+restart, scale, or a second machine, and nothing here can be checked in one process.
+
+*Fails today:* nothing on this axis. The two open holes are **now Sequence item 13**, where they
+carry a command that fails: `RUN_CLOCK_SCAN_CEILING`'s residual — a run past the ceiling is
+reached by no lap, and `truncated` is the only reason anyone knows — and two planes AGREEING on a
+window rather than dividing it, which is correct and wasteful. Both want the cursor
+`runClockTick`'s docstring names: `listRuns(after)` in `StateStore`, with a conformance test
+behind it.
 
 
 ### 3 · Finish realm determinism (D3)
@@ -383,10 +634,18 @@ one cohort key, `"cohort": {"n": 30}`, `"golden": true`, `"goldenBlockers": []`,
   review that found five of six planted defects scored what one that found none scored. Six
   evaluator nodes, one per case: S1 is k/6. A graph edit, no core change.
 
-**What is still open, and is not this item's to close.** The suite is hand-authored: `loom suite
+**~~What is still open, and is not this item's to close. The suite is hand-authored: `loom suite
 freeze --cohort <runId>`, which would select cases from a cohort by the runs' own journaled
-verdicts, is the missing half of "promoted over them". A promotion's subject is a GRAPH and
-`StateStore` is keyed by runId, so the decision borrows a run's coordinate.
+verdicts, is the missing half of "promoted over them".~~ STRUCK 2026-08-29 — it was true for four
+and a half hours.** It was written at `b711247`, 2026-08-27 17:40; `loom suite freeze --cohort
+<runId> --out <f>` shipped at `a508002` the same evening, 22:07, and stood unmentioned here for
+two days. `loom help` documents it, and it refuses a cohort under 30 and refuses to overwrite an
+existing path ("a re-frozen exam is not frozen"). **This is the third correction inside this one
+item, and it is the same correction every time**: a claim about what is missing decays the moment
+somebody builds it, so it has to be re-run against the binary rather than carried forward from the
+last draft. What survives the strike is the second sentence, still true and a shape rather than a
+gap: a promotion's subject is a GRAPH and `StateStore` is keyed by runId, so the decision borrows
+a run's coordinate.
 
 **AND THE SENTENCE THAT USED TO END THIS PARAGRAPH IS NOW FALSE, so it is struck rather than
 edited.** It said "an offline gate still cannot judge a prompt candidate at all — it can now only
@@ -560,16 +819,58 @@ across versions.
 `packages/core/test/examples-run.test.ts`; the old ordering note pointing at
 `packages/eagent/examples/` was stale and is gone.
 
-### Deliberately not sequenced
+---
+
+## Deliberately not sequenced
+
+Governs both lists. **Leaving something out is a choice and it is recorded here with its reason,
+because an item that quietly stops being mentioned is indistinguishable from one nobody thought
+of.** Each entry says what would put it back.
 
 **Distribution** — publishing and a stranger-facing install. It follows from the first-user
 decision: the next user is the maintainer porting a workflow, not a stranger who found the repo.
-THIS paragraph is where the choice to leave it unsequenced is recorded. Revisit when item 4 lands.
+**Its old revisit condition has been MET and the answer did not change**: that paragraph said
+"revisit when item 4 lands", item 4 landed 2026-08-25 (a real review workflow, against a live
+provider, replayed offline for free), and the maintainer is still the only user. So the condition
+was the wrong one — porting a workflow is evidence about the runtime, not about who else wants it.
+*Restated:* revisit when somebody who is not the maintainer asks to run this, which is a fact
+about the world and not a fact this repository can produce.
 
-The LICENSE was part of this bundle and is no longer: it is at the repository root, recovered
-byte-for-byte from `init` rather than chosen here, and declared in both manifests. Being
-unsequenced was the argument for not designing a distribution story; it was never an argument for
-a tree whose terms nobody can read, and the two had been bundled because the LICENSE arrived in
-the same paragraph as the work it does not actually depend on.
+**Admission control's successor.** `D.4` refused the door permanently and built the operator's
+levers instead — `--max-runs-in-flight` (default 4), `--max-parallelism`, and deployment
+`--budget-usd`/`-tokens`/`-wall-ms` — after measuring that 60 submissions became 60 concurrent
+provider calls and that `loom serve` passed no deployment budget at all. **Whether the dispatcher
+also needs a queue is now an empirical question, and it is not a roadmap entry because it has no
+failing command**: the levers exist, and nobody has yet driven the box hard enough to produce one.
+That is a MEASUREMENT to take, not a mechanism to build, and inventing the entry ahead of the
+measurement is how the last list got an item about labels on branch coordinates. *What would
+sequence it:* a run rate at which the ceiling is reached often enough that "the surplus waits"
+stops being an acceptable answer — which under D.2's tens-of-runs-a-day it is not.
+
+**Splitting `engine.ts`.** 8,152 lines at this commit and the largest kernel file by far. Not
+sequenced, and the reason is unchanged: `scripts/kernel.json`'s header carries three structural
+arguments for co-location and none of them has moved. What the kernel gate establishes is that
+the boundary is OBSERVABLE — a `feat` touching a pinned file costs a `Kernel-seam:` trailer — not
+that the file is decomposable. *What would sequence it:* a seam somebody can name, rather than a
+line count somebody dislikes.
+
+**D5's version pin.** Item 8 says what would reopen it, and the condition is unmet: there is no
+behavioural default this project wants to change while preserving the old one for graphs written
+against it. `GRAPH_API_VERSION` still accepts exactly one value. The rule the pin must carry when
+it arrives is already written down in item 8 so it is not decided under pressure — **a pin may
+preserve a behavioural DEFAULT and never a REFUSAL.**
+
+**A second input shape for the self-improvement corpus.** Item 5's live promotion is n=20 paired
+runs at ONE input shape. "A corpus of one input shape is not a corpus of many" is stated there and
+still holds, and the fix is more live spend on the maintainer's own key rather than a command that
+fails — so it is a decision about money, not an engineering item. *What would sequence it:* a
+second workflow ported, which produces the second shape as a by-product; that is the same argument
+item 4 made and it is the reason porting workflows keeps outranking proving invariants.
+
+**The LICENSE** was part of the distribution bundle and is no longer: it is at the repository
+root, recovered byte-for-byte from `init` rather than chosen here, and declared in both manifests.
+Being unsequenced was the argument for not designing a distribution story; it was never an
+argument for a tree whose terms nobody can read, and the two had been bundled because the LICENSE
+arrived in the same paragraph as the work it does not actually depend on.
 
 Open items and known defects live in `TODO.md`.
