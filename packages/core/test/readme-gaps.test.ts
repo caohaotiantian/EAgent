@@ -171,14 +171,6 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     },
   },
   {
-    row: "Compensation edges",
-    claims: "nothing traverses them at run time",
-    probe: () => {
-      // The arm that does nothing, verbatim: `case "compensation": break;` beside `case "error"`.
-      assert.match(SRC("run/engine.ts"), /case "error":\s*\n\s*case "compensation":\s*\n\s*break;/);
-    },
-  },
-  {
     row: "`onBudgetExhausted: \"gate\" / \"degrade\"`",
     claims: "Compile errors, deliberately",
     probe: () => {
@@ -227,7 +219,11 @@ test("EVERY ROW OF THE GAPS TABLE IS PROBED OR EXCUSED — and nothing is both",
   const end = README.indexOf("## Try it");
   assert.ok(start >= 0 && end > start, "the gaps section moved — this gate reads it by heading");
   const rows = [...README.slice(start, end).matchAll(/^\|\s*\*\*(.+?)\*\*\s*\|/gm)].map((m) => m[1]!);
-  assert.ok(rows.length >= 10, `found ${rows.length} rows — the table scan broke, not the table`);
+  // NINE, down from ten: "Compensation edges" moved to the works table on 2026-08-28 when the
+  // rollback started running. The floor exists to catch a BROKEN SCAN — a heading rename, a
+  // table reformat — not to freeze the table size, so it moves with the table and the reason
+  // is written here rather than inferred from a number nobody can source.
+  assert.ok(rows.length >= 9, `found ${rows.length} rows — the table scan broke, not the table`);
 
   // A row is covered when some probe's `claims` string appears in that row's own text.
   const rowText = new Map<string, string>();
@@ -267,6 +263,22 @@ test("EVERY ROW OF THE GAPS TABLE IS PROBED OR EXCUSED — and nothing is both",
 // growth must never cost a doc edit, and collapse must fail.
 
 const WORKS: readonly { readonly row: string; readonly claims: string; readonly probe: () => void }[] = [
+  {
+    row: "Compensation edges",
+    claims: "a rollback that RUNS",
+    probe: () => {
+      // It moved from the gaps table on 2026-08-28. The probe that used to sit there asserted the
+      // dead arm verbatim — `case "error": case "compensation": break;` — so the row could not
+      // rot in either direction, and that same arm is what the fix deleted.
+      assert.match(SRC("run/engine.ts"), /planCompensation\(/, "the engine must plan a rollback");
+      assert.match(SRC("run/compensation.ts"), /export function planCompensation/);
+      // Three journaled outcomes, not two: "failed to compensate" and "never attempted" are
+      // different facts and the row claims both.
+      for (const state of ["compensated", "failed", "notAttempted"]) {
+        assert.match(SRC("run/compensation.ts") + SRC("run/engine.ts"), new RegExp(state), `the ${state} outcome is gone — update the row`);
+      }
+    },
+  },
   {
     row: "Graph compiler",
     claims: "22 validation rules",
@@ -336,7 +348,7 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
   },
   {
     row: "Gates",
-    claims: "1900+ tests",
+    claims: "2,300+ tests",
     probe: () => {
       // A FLOOR in the prose, so growth costs no doc edit. The number in the README must be at
       // or below what the suite actually holds — checked against the test files rather than a
@@ -393,7 +405,7 @@ test("EVERY CLAIM IN THE README'S \"WHAT WORKS TODAY\" TABLE IS STILL TRUE", () 
   }
 });
 
-test("EVERY ROW OF THE WORKS TABLE IS PROBED — all eight, not most of them", () => {
+test("EVERY ROW OF THE WORKS TABLE IS PROBED — all of them, not most of them", () => {
   const start = README.indexOf("## What works today");
   const end = README.indexOf("## What does not work yet");
   assert.ok(start >= 0 && end > start, "the works section moved");

@@ -82,7 +82,8 @@ loom serve                            # console + API on :8787, from an empty di
 | **Determinism** | Seeded `Math.random`, a clock bound to the task's journaled lease timestamp. Two reads of the time inside one body return the same instant |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 1900+ tests, offline, no API key; zero-dep and public-surface guards. One package, and it has no runtime dependencies to audit |
+| **Gates** | `npm run check` — 2,300+ tests, offline, no API key; three guards: zero-dep, public surface (540 pinned names) and the kernel file list. One package, and it has no runtime dependencies to audit |
+| **Compensation edges** | Compile-time rollback proof, and a rollback that RUNS — on run failure and on rewind, reverse order, with three journaled outcomes (compensated / failed / never attempted) |
 
 ## What does not work yet
 
@@ -92,7 +93,6 @@ Stated because a framework that overstates itself costs its user a day finding o
 |---|---|
 | **`retry` on a function or evaluator node** | **Works**, through the RETURN rather than a throw: a body returns `{ retry: { reason } }` and the engine raises `E_FUNCTION_UNAVAILABLE` on its behalf, which is retryable by class. A *throw* still cannot carry retryability — `isLoomError` is an `instanceof` against the host class and a guest object can never satisfy it, so every throw out of the `vm` is still `E_INTERNAL` |
 | **Reading the clock in a body** | **Reproducible.** `ctx.now()` is the task's journaled lease timestamp, so replay computes the same number with nothing new written. Time does not advance during a task — two reads return the same instant. `Date` is still absent from the sandbox: a frozen `Date` that silently never advances is more surprising than one that is not there, and restoring it means binding the whole constructor |
-| **Compensation edges** | Compile-time rollback proof and a rewind refusal; nothing traverses them at run time |
 | **Hooks** | **Built.** Publish `resources/hook/<name>.js`, name it under `hooks:` in the graph, and it runs in the same hardened `vm` realm a `function` body does. A declared hook the workspace does not publish is a compile error, not a silent skip |
 | **`JoinNode.timeoutMs`** | A node's `timeoutMs` is enforced; a JOIN's is not — nothing reads it, so a barrier whose branch never arrives waits forever. Declaring one is a compile WARNING rather than an error. The decision recorded in `DESIGN.md` is that a timeout FAILS the join; folding whatever arrived is a different feature wearing a timeout's name |
 | **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no automatic reclaim. The path back is `POST /runs/:id/commands {"kind":"rewind","atSeq":N}` on a `loom serve` plane, which re-arms the leases it undoes. **There is no `loom rewind` CLI verb** — `rewind` and `advance` are control-plane commands only, while `cancel` and `approve` are both |
@@ -184,7 +184,9 @@ the build.
 - **`resources/hook/no-secrets.js`** — a `preTool` hook that blocks a credential before it
   reaches the disk.
 - **`graphs/review-bench.json`** — a benchmark whose answer is known: six diffs, three with a
-  planted defect, and an `assertion` evaluator that scores the reviewer against the truth.
+  planted defect, and SIX `assertion` evaluators, one per case, scoring the reviewer against the
+  truth. Six rather than one on purpose: a single evaluator makes S1 one bit, so a review that
+  found five of six planted defects scored exactly what one that found none scored.
 - **`graphs/self-review.json`** — an agent fan-out, a human gate and an irreversible write; the
   first workflow this project ported against a live provider.
 
