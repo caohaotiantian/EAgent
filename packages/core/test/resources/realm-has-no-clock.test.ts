@@ -35,6 +35,15 @@
  *     are `Date` and `Intl`; `Math.random` is the third route to a non-reproducible value and is
  *     handled per-kind by each loader's bridge.
  *
+ * THE TOTAL CLAIM ABOVE HAS BEEN FALSIFIED ONCE, which is the reason it is written as a total
+ * claim rather than a list. The route was `globalThis.__proto__.constructor.constructor` — the
+ * global proxy's prototype was the HOST `Object.prototype`, because `vm.createContext({})` builds
+ * the proxy over a host-realm object, and the host `Function` constructor reached off it compiles
+ * a string in the host realm. `typeof process` came back `"object"` and `Date.now()` came back a
+ * live timestamp. It was found by a reviewer probing a claim, not by this file, and it was absent
+ * from `CLOCK_PROBE` — a total claim checked by a list is only as total as the list. The sandbox
+ * is `Object.create(null)` now and the route is in the probe.
+ *
  * TWO AMBIENT ROUTES TO A NON-REPRODUCIBLE VALUE REMAIN OPEN, and the last two tests in this file
  * pin them as measured facts rather than leaving them to be rediscovered as a broken promise:
  * the host's DEFAULT LOCALE, reachable through `toLocaleString()` and `localeCompare()` with no
@@ -80,6 +89,16 @@ const CLOCK_PROBE = `{
   });
   probe("globalThis.Intl", function () { return globalThis.Intl.DateTimeFormat; });
   probe("performance.now", function () { return performance.now(); });
+  // THE GLOBAL PROXY'S OWN PROTOTYPE. vm.createContext(sandbox) builds the proxy over an
+  // object created in the HOST realm, so if that object has a prototype it is the HOST's
+  // Object.prototype -- and .constructor.constructor off it is the host Function, which
+  // compiles a string in the host realm. Measured before the sandbox became null-prototype:
+  // typeof process was "object" and Date.now() returned a live timestamp, while the in-realm
+  // control ({}).__proto__.constructor.constructor correctly returned "undefined". That pair
+  // is what makes this a route rather than a mistake in the probe.
+  probe("globalThis.__proto__.constructor.constructor", function () {
+    return globalThis.__proto__.constructor.constructor("return Date.now()")();
+  });
   return out;
 }`;
 
@@ -91,6 +110,7 @@ const REFUSED_EVERYWHERE = {
   "Intl.DateTimeFormat().resolvedOptions()": "REFUSED",
   "globalThis.Intl": "REFUSED",
   "performance.now": "REFUSED",
+  "globalThis.__proto__.constructor.constructor": "REFUSED",
 };
 
 test("A HOOK BODY CANNOT READ THE WALL CLOCK — by any ambient route, `Intl` included", () => {

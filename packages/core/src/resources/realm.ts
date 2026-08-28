@@ -36,7 +36,16 @@ import { CODES, err } from "../errors.ts";
  * The globals this module RE-BINDS. **NOT the set a body may see** — the docstring said that for
  * a year and it was the half-truth this codebase keeps finding.
  *
- * `compileRealm` starts from `vm.createContext({})`, and a fresh `vm` context already has every
+ * `compileRealm` starts from `vm.createContext(Object.create(null))` — a NULL-PROTOTYPE sandbox,
+ * and the null prototype is load-bearing rather than tidy. With a plain `{}` the sandbox carries
+ * the HOST realm's `Object.prototype`, the global proxy's lookup walks into it, and
+ * `globalThis.__proto__.constructor.constructor` is the host `Function`: measured, a published
+ * hook body read `typeof process` as `"object"`, called `Date.now()` for a live timestamp, and
+ * read a file off `process.getBuiltinModule("node:fs")`. The in-realm control
+ * `({}).__proto__.constructor.constructor` returned `"undefined"` in the same run, which is what
+ * identified the sandbox object rather than the intrinsics as the door.
+ * `test/resources/realm-has-no-clock.test.ts` now carries that route in `CLOCK_PROBE`.
+ * A fresh `vm` context already has every
  * ECMAScript intrinsic bound as a global. `safeGlobals` is an OVERLAY on that, not an allow-list:
  * it re-reads these names out of the context and shadows the two below. Everything else V8 puts
  * there is still there. What an embedder's `globals` may and may not do to this set is
@@ -594,7 +603,7 @@ function thrownName(e: unknown): string {
 export function compileRealm(opts: RealmOptions): RealmCall {
   // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
   // Seeding it with host objects is what opened the bridge the first time.
-  const context = vm.createContext({});
+  const context = vm.createContext(Object.create(null));
   // Read from the PRISTINE context, before anything the embedder sent can be seen by it: this
   // reads the 16 names back out of the context, so assigning `opts.globals` first would make it
   // re-read the embedder's copies and launder them into the "own intrinsics" set.
@@ -759,7 +768,7 @@ export function compileRealm(opts: RealmOptions): RealmCall {
  */
 function onlyGovernedCrossed(context: object, governed: Record<string, unknown>): boolean {
   try {
-    // `vm.createContext({})` leaves the SANDBOX OBJECT empty — measured, `Reflect.ownKeys` of a
+    // `vm.createContext(Object.create(null))` leaves the SANDBOX OBJECT empty — measured, `Reflect.ownKeys` of a
     // fresh one is `[]` while the context's own `globalThis` has 67 own keys — so every key here
     // is one the host PUT there, and this loop needs no allow-list of intrinsics to subtract.
     // `Reflect.ownKeys` and not `Object.keys`: it is the symbol half that carried the escape.
