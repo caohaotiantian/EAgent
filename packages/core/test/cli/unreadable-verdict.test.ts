@@ -95,12 +95,54 @@ function evalGraph(verdictIsOutput: boolean): string {
   });
 }
 
+/**
+ * THE SAME EVALUATOR, WRITING TWO CHANNELS: one that outgrows the journal and one that does not.
+ * `note` is small, `replace`, not an output and named by no expression — so it is ELIGIBLE for
+ * the payload store and simply too small to go, which is the only shape that can tell "the
+ * channels that left" apart from "the channels the evaluator wrote".
+ */
+const NOISY = `(view) => ({
+  writes: {
+    verdict: { pass: true, confidence: 1, why: "x".repeat(300000) },
+    note: { seen: (view.get("items") || []).length },
+  },
+})`;
+
+function noisyGraph(): string {
+  return JSON.stringify({
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "judged-bench-noisy", project: "demo", version: 1 },
+    policy: { posture: "out" },
+    channels: {
+      items: { type: "array", reduce: "replace" },
+      picked: { type: "array", reduce: "replace" },
+      verdict: { type: "object", reduce: "replace" },
+      note: { type: "object", reduce: "replace" },
+    },
+    inputs: ["items"],
+    outputs: ["picked"],
+    nodes: [
+      { id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+      {
+        id: "check",
+        type: "evaluator",
+        reads: ["items", "picked"],
+        writes: ["verdict", "note"],
+        evaluator: { kind: "assertion", ref: "function/noisy@stable", threshold: 0.5 },
+      },
+    ],
+    edges: [{ id: "e", from: "pick", to: "check", kind: "seq" }],
+  });
+}
+
 function workspace(): { dir: string; graphFile: string; fixedFile: string; dispose: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "loom-verdict-"));
   mkdirSync(join(dir, "graphs"), { recursive: true });
   mkdirSync(join(dir, "resources", "function"), { recursive: true });
   writeFileSync(join(dir, "resources", "function", "pick.js"), PICK);
   writeFileSync(join(dir, "resources", "function", "check.js"), CHECK);
+  writeFileSync(join(dir, "resources", "function", "noisy.js"), NOISY);
   const graphFile = join(dir, "graphs", "judged.json");
   const fixedFile = join(dir, "graphs", "judged-fixed.json");
   writeFileSync(graphFile, evalGraph(false));
@@ -223,6 +265,41 @@ test("AND A PEER NOBODY COULD MEASURE IS EXCLUDED FOR THE REASON THAT APPLIES TO
     assert.match(r.err, /1 peer run\(s\) in this cohort folded WITH their graph/, r.err);
     assert.match(r.err, /left the journal for the payload store/, r.err);
     assert.match(r.err, /Publishing a graph does not bring these back/, "the no-op remedy is withdrawn by name");
+  } finally {
+    w.dispose();
+  }
+});
+
+/**
+ * THE REFUSAL'S OWN LIST WAS THE UNION, AND HALF OF IT WAS FALSE.
+ *
+ * The first version of this refusal built its channel list from `Step.channelsWritten`, which
+ * `trajectory.ts` builds as `writes` UNION `external` — deliberately, so a step that moved
+ * 300 KB is not read as a step that wrote nothing. Measured against the graph below, before the
+ * correction: `ran an evaluator whose channel is a payload handle rather than a value (note,
+ * verdict)`. `note` is four bytes of JSON sitting in the journal; calling it a payload handle is
+ * this refusal committing, one clause along, the defect it was written to fix.
+ *
+ * The list now comes from `task.committed.external`, which is the executor's own declaration of
+ * what left — events.ts states that a fold may not decide this by looking at a value.
+ */
+test("AND THE CHANNELS IT NAMES ARE THE ONES THAT LEFT — an inline channel beside them is not a payload handle", () => {
+  const w = workspace();
+  try {
+    const noisyFile = join(w.dir, "graphs", "judged-noisy.json");
+    writeFileSync(noisyFile, noisyGraph());
+    const runId = drive(w.dir, noisyFile, [1, 2]);
+
+    const r = loom(w.dir, ["score", runId, "--workspace", w.dir]);
+    assert.equal(r.code, 1, `expected a refusal, got ${r.out}`);
+
+    // THE PREMISE: `note` was written by the same evaluator and stayed in the journal.
+    assert.match(r.err, /\(verdict\)/, `only the channel that left may be named: ${r.err}`);
+    assert.equal(
+      /note/.test(r.err),
+      false,
+      `\`note\` is in the journal, so a refusal calling it a payload handle states a false fact: ${r.err}`,
+    );
   } finally {
     w.dispose();
   }

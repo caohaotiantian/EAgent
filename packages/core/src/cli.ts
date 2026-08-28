@@ -70,7 +70,7 @@ import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph } from "./telemetry/spans.ts";
-import type { EdgeId, GateId, NodeId, RunId, Seq } from "./ids.ts";
+import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
@@ -4862,8 +4862,29 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // refusal above already argues.
         if (!t.verdictsResolved) {
           const nodes = new Map(graph.spec.nodes.map((n) => [n.id, n.type]));
+          // THE CHANNELS THAT ACTUALLY LEFT, and not every channel the evaluator wrote.
+          // `Step.channelsWritten` is `writes` UNION `external` — trajectory.ts joins them on
+          // purpose, so a step that moved 300 KB is not read as a step that wrote nothing — so
+          // naming that union here told the operator a channel still sitting in the journal was
+          // a payload handle. MEASURED, on an evaluator writing a 300 kB `verdict` beside a small
+          // `note` that stayed inline: `(note, verdict)`. That is this refusal committing the
+          // defect the refusal exists to fix, one clause along.
+          //
+          // READ FROM THE DECLARATION, not from the values: `task.committed.external` is where
+          // the executor that did the externalising says which channels left, and events.ts
+          // states why a fold may not decide it by looking at a value. LAST COMMIT PER TASK
+          // WINS, which is what `foldTrajectory` does with the same field — a retry that kept
+          // its verdict inline is the state `verdictsResolved` was computed from, so it must be
+          // the state this sentence names.
+          const externalPerTask = new Map<TaskId, readonly string[]>();
+          for (const e of events) {
+            if (!isEvent(e, "task.committed") || e.taskId === undefined) continue;
+            externalPerTask.set(e.taskId, Object.keys(e.payload.external ?? {}));
+          }
           const blind = [
-            ...new Set(t.steps.filter((s) => nodes.get(s.nodeId) === "evaluator").flatMap((s) => s.channelsWritten)),
+            ...new Set(
+              t.steps.filter((s) => nodes.get(s.nodeId) === "evaluator").flatMap((s) => externalPerTask.get(s.taskId) ?? []),
+            ),
           ].sort();
           process.stderr.write(
             `run ${runId} ran an evaluator whose channel is a payload handle rather than a value ` +
@@ -6347,9 +6368,14 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       CODES.E_CONFIG_INVALID,
       `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a promotion needs at least ` +
         `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED, did work, and could be MEASURED — a ` +
-        `run that failed, did nothing, or folded without its graph is excluded from the population as well as from ` +
-        `the medians, so the number here is smaller than the journal row count and that is the point. Any ! line ` +
-        `above says which exclusion applied. Record more runs of this workflow first.`,
+        // THE SET, AND ALL OF IT. This used to end at "folded without its graph", which was the
+        // whole of `specResolved` until `verdictsResolved` joined it; the enumeration did not
+        // move, so the one exclusion an operator cannot fix by publishing a graph was the one it
+        // did not name. CLAUDE.md: name the set a claim covers.
+        `run that failed, did nothing, folded without its graph, or folded WITH its graph while an evaluator's ` +
+        `verdict sat in the payload store is excluded from the population as well as from the medians, so the ` +
+        `number here is smaller than the journal row count and that is the point. Any ! line above says which ` +
+        `exclusion applied. Record more runs of this workflow first.`,
     );
   }
 
