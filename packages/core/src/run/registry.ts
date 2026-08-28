@@ -9,6 +9,7 @@
  */
 
 import type { Disposable as LoomDisposable } from "../vocab.ts";
+import { CLASS_DEFAULT_POSTURE, type IrreversibilityClass } from "../vocab.ts";
 import { CODES, err, type LoomError } from "../errors.ts";
 import type { TaskId } from "../ids.ts";
 import type { JSONSchema } from "../schema.ts";
@@ -57,6 +58,102 @@ export interface ToolDefinition extends ToolManifestLite {
   readonly description: string;
   readonly parameters: JSONSchema;
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> | ToolResult;
+}
+
+/**
+ * THE VOCABULARY, READ OFF THE ONE TABLE THAT DEFINES IT — never a second list here.
+ *
+ * `CLASS_DEFAULT_POSTURE` is keyed by `IrreversibilityClass`, so its key set IS the union and
+ * a member added there is accepted here with no edit. A literal copy in this file would be a
+ * second representation of a vocabulary, which is the drift `registries.test.ts` exists to
+ * catch.
+ *
+ * `Object.hasOwn` and not `in`: `"toString"` and `"constructor"` sit on the prototype of every
+ * object literal, and `in` would call them members.
+ */
+function isIrreversibilityClass(v: unknown): v is IrreversibilityClass {
+  return typeof v === "string" && Object.hasOwn(CLASS_DEFAULT_POSTURE, v);
+}
+
+const CLASS_NAMES = Object.keys(CLASS_DEFAULT_POSTURE).sort().join(", ");
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0;
+}
+
+/** What to call a tool in a message when its own `name` is the thing that is wrong. */
+function label(v: unknown): string {
+  return isNonEmptyString(v) ? `"${v}"` : `a tool whose name is ${show(v)}`;
+}
+
+/** `JSON.stringify` returns `undefined` for `undefined` and for a function; never interpolate it raw. */
+function show(v: unknown): string {
+  try {
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    return "(unserialisable)";
+  }
+}
+
+/**
+ * The manifest check at the door, and WHAT IT DOES WHEN IT CANNOT DECIDE: it REFUSES, by
+ * throwing, with nothing registered.
+ *
+ * WHY HERE AND NOT ONLY IN THE TYPE. `ToolManifestLite.irreversibility` is typed
+ * `IrreversibilityClass` and tsc rejects an uncast `"nuclear"`, so the direct path is closed —
+ * but a type is not present at run time and the untyped seams are real: a manifest parsed from
+ * JSON, an `as` cast, an extension crossing a boundary that erased the type. Measured on the
+ * tree before this function existed, one `register` each, ALL FOUR ACCEPTED:
+ * `irreversibility: "nuclear"`, `irreversibility: "reversible-write"` (hyphen typo),
+ * `name: 42`, `idempotent: "sure"`.
+ *
+ * WHY IT MATTERS THAT THE WORD IS CAUGHT AT ALL. The reads downstream do not agree about the
+ * unreadable case. `maxPosture` and `isLoosening` floor it at the STRONGEST and `isHardToUndo`
+ * is written in the negative, so those fail closed. Five other sites still spell the pair out
+ * in the POSITIVE — `run/engine.ts`'s rewind scan, `graph/mutate.ts`'s `requiresGate`, twice in
+ * `graph/validate.ts`, `telemetry/spans.ts` — so a word outside the union answers `false` there
+ * and walks straight past the guard. Measured, `irreversibility: "nuclear"`: `requiresGate=false`
+ * and a rewind that was ALLOWED, i.e. the system believing it can undo a call it cannot
+ * classify. Those five belong to other layers and are fixed there; this is defence in depth at
+ * the one place the value enters.
+ *
+ * THE MESSAGE NAMES THE TOOL because registration is the ONE moment the typo is attributable to
+ * a person. After this the value is a string in a payload and its author is gone.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CHECK: `description`, `parameters`, `execute`. Those are
+ * `ToolDefinition`'s half, not the manifest's, and each already has an owner — the arg validator
+ * refuses a `parameters` that is not a schema, and a non-callable `execute` fails at the single
+ * dispatch path with the call in hand. What is checked is exactly `ToolManifestLite`: the fields
+ * the COMPILER and the GATES read without ever seeing the implementation.
+ */
+function checkManifest(t: ToolDefinition): void {
+  const refuse = (why: string): never => {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `tool manifest for ${label(t.name)} is invalid and was NOT registered: ${why}`,
+    );
+  };
+  if (!isNonEmptyString(t.name)) refuse(`name must be a non-empty string, got ${show(t.name)}`);
+  if (!isNonEmptyString(t.version)) refuse(`version must be a non-empty string, got ${show(t.version)}`);
+  if (!Array.isArray(t.capabilities) || t.capabilities.some((c) => typeof c !== "string")) {
+    refuse(`capabilities must be an array of strings, got ${show(t.capabilities)}`);
+  }
+  if (!isIrreversibilityClass(t.irreversibility)) {
+    refuse(
+      `irreversibility must be one of ${CLASS_NAMES}, got ${show(t.irreversibility)}. A class outside ` +
+        `that set is not a stricter one: the guards that decide whether a human is asked and whether ` +
+        `an operator may roll back do not recognise it`,
+    );
+  }
+  if (t.idempotent !== true && t.idempotent !== false) {
+    refuse(`idempotent must be a boolean, got ${show(t.idempotent)}`);
+  }
+  if (t.compensation !== undefined) {
+    const c: unknown = t.compensation;
+    if (typeof c !== "object" || c === null || !isNonEmptyString((c as { tool?: unknown }).tool)) {
+      refuse(`compensation must be { tool: <non-empty string> }, got ${show(c)}`);
+    }
+  }
 }
 
 /**
@@ -117,6 +214,12 @@ export class ToolRegistry {
   }
 
   register(tool: ToolDefinition): LoomDisposable {
+    // THE MANIFEST IS CHECKED BEFORE THE SEAL IS, because the two refusals answer different
+    // questions and the author fixing one should not be told about the other first: "this
+    // manifest is malformed" is true whatever the seal says, and it is the one they can act
+    // on. Both throw, and neither mutates the stack — a refused registration leaves whatever
+    // was already there as the live definition.
+    checkManifest(tool);
     // THROW, never no-op. A silent refusal leaves the caller believing its definition is
     // the live one, and the discrepancy surfaces later as the WRONG tool running with no
     // trace of the decision that caused it — which is the audit failure this knob exists
