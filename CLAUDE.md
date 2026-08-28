@@ -40,10 +40,9 @@ it is what a kernel is for. That trailer is the escape hatch and also the ledger
 `git log --grep='^Kernel-seam:'` is the running count of every time the kernel absorbed a feature,
 and it is not a number anyone can quietly reset.
 
-Until `packages/eagent` was deleted, that sentence had no referent here at all and the test could
-be quoted but never run; the one P1 gate that did run, `check-surface.mjs`, pins the exported NAME
-SET and reported green on the day `run/engine.ts` crossed 6,100 lines. The list says nothing about
-whether `engine.ts` should be split — see its header for three arguments against.
+The list says nothing about whether `engine.ts` should be split — see its header for three
+arguments against. `check-surface.mjs` pins the exported NAME SET and nothing else, so it reports
+green however large a pinned file grows; that is the gap `check-kernel.mjs` exists to cover.
 
 ### 2 · Unlimited extensibility
 
@@ -78,10 +77,14 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 
 - **The journal is the only authoritative state.** Everything else is a projection you can rebuild
   by folding it. If a decision reads a value, the journal must be able to reconstruct that value —
-  including across a restart. This has been violated five times and each violation silently
-  switched off a guard. **The five are named** in
-  `packages/core/test/run/oversight-survives-restart.test.ts` — cite that file rather than
-  repeating the number, which nothing else here could check.
+  including across a restart. This has been violated **six** times and each violation silently
+  switched off a guard. Five are named in
+  `packages/core/test/run/oversight-survives-restart.test.ts`; the sixth is
+  `packages/core/test/run/escalation.test.ts` — search either file for `MEMBER`.
+  **The enumeration is split, and that is the lesson, not an accident:** this line used to say
+  "cite that file rather than repeating the number", and the device failed on its first test —
+  the sixth member landed in a different file and the cited one still said five. A pointer to an
+  enumeration is only as good as the enumeration's own discipline about growing.
 - **Every nondeterministic call is recorded under a derived key, and replay serves the record.**
   Derived, never random: an id you cannot recompute breaks replay.
 - **Oversight only tightens.** Nothing raises its own permissions. A human may lower a posture; no
@@ -99,11 +102,17 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 - **Name the set a claim covers.** "This is total" cannot be checked; a claim that names its members
   can.
 - Every module says *why it exists* at the top, not what it does.
-- Tests are offline and deterministic — no network, no API key, no wall-clock dependence.
-- `grep -a` always. A plain grep can silently skip a file, and empty output is not evidence of
-  absence. The trigger is a **NUL byte**, not non-ASCII; **six** tracked files have one, listed in
-  `docs/todo-recheck-2026-08-25.md` §F. Do not count them with grep — a NUL file is only reported
-  when it also matches your pattern, so grep undercounts and the count moves with the search term.
+- Tests are offline and deterministic — no network, no API key, no wall-clock dependence, with
+  ONE declared exception: `test/scale.test.ts` measures compile cost against node count and says
+  in its own header that it must read a clock. It flakes under load, so a single red
+  `compile scales sub-quadratically` in a full run is that test and not a regression — re-run it
+  alone before believing it.
+- `/usr/bin/grep -a` always, and the path matters: this shell's `grep` is a ugrep wrapper that
+  passes `-I`. Empty output is not evidence of absence. **The trigger set is NUL ∪ invalid
+  UTF-8**, not non-ASCII — valid non-ASCII matches fine. **Five** tracked files carry a NUL byte
+  today and none is invalid UTF-8. Do not count them with grep: a skipped file is only reported
+  when it also matches your pattern, so grep undercounts and the count moves with the search
+  term. Census instead — read every `git ls-files` path and test for a zero byte.
 - Commits land under the human author's identity only. No assistant attribution, no co-author
   trailers, no assistant links in commit bodies or pull requests.
 

@@ -663,7 +663,7 @@ Naming that here rather than letting them sit unowned:
   0.111; with the file copied into `graphs/`, `{"id":"S1","value":1,"evidence":"6/6 assertions
   passed"}`, outcome 1, score 0.700. Every candidate cohort therefore scored near zero until
   somebody noticed, and nothing said why. **The third folded-without-its-graph defect in one
-  session** — the other two were `cohortPeers` folding peers without a spec (fixed, 7227a74) and
+  session** — the other two were `cohortPeers` folding peers without a spec (fixed, a9ee3f4) and
   this one's own cousin in `loom score`'s judged run. Evidence:
   `docs/evolution-loop-2026-08-27.md` §4.
 
@@ -889,7 +889,7 @@ Each was verified against the code, not remembered.
   **What is NOT rescued, and it is the one row that stays red.** A 429 arriving after a
   non-idempotent tool `effect.started` with NO `effect.completed` still refuses both a retry
   and a deferral. The world may already have changed and the journal cannot say; refusing is
-  always allowed. `cec0940`'s serve-by-key covers the far more common shape — a tool that
+  always allowed. `f96a691`'s serve-by-key covers the far more common shape — a tool that
   COMPLETED, then a 429 on the next turn — which is why row 3 of the table below is green.
 
   **Residues, none of them fixed here.**
@@ -1012,7 +1012,7 @@ Each was verified against the code, not remembered.
 |---|---|---|
 | `B.1` **Compensation edges** — a compile-time rollback proof and | **done, partly** | Was accurate in all three halves; two of them are now closed. Rollback RUNS on run failure and on rewind (`run/compensation.ts` + `Engine.#compensate`), in three journaled states. `#edgesToTake` still skips `compensation` — deliberately, see the body entry — and four narrower gaps are named there. |
 | `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | open | Claim holds. Two omissions: (a) it is now a compile WARNING, so an author is told; (b) a stale comment contradicts this — packages/core/test/run/skeleton.ts:81-82 says a join … |
-| `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (f2f24f8). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
+| `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (e93f874). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
 | `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
 | `B.5` **Retention tiering** — proven by test, zero callers, so a | open | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. |
 | `B.6` ~~**The evolution subsystem is now REACHABLE but not wired.**~~ | **CLOSED 2026-08-27/28** | Every member the entry named as "still uncalled" now has a caller on the `cli.ts` product path, and the verbs that call them ship: `loom score`, `loom cohort`, `loom promote` (replayed AND `--against-cohort`), `loom suite freeze`. Counted in cli.ts: measureCohort 15, cohortKeyOf 8, isGolden 9, scoreTrajectory 9, promotionCeiling 3, gateCandidate 11, runEvalSuite 6, freezeSuite 3. `readSignals` and `outcomeOf` have ZERO direct callers there and are reached transitively — `score.ts:398` and `:408`, inside `scoreTrajectory` — which is reachability, not a second zombie. Driven end to end against a live provider: `docs/evolution-loop-2026-08-27.md`. |
@@ -1053,7 +1053,7 @@ believes a feature is present.
     `not_attempted` rows goes through a `RunContext` that cannot be rebuilt without the graph.
 - **`JoinNode.timeoutMs`** — a barrier waits forever however small a number is written.
 - ~~**`Budget.tokens` and `Budget.wallMs`** — declared, never read; only cost binds.~~ **Both
-  bind** as of f2f24f8: run and node ceilings, `budget.exhausted` now says which dimension, and
+  bind** as of e93f874: run and node ceilings, `budget.exhausted` now says which dimension, and
   both fold out of `p.usage` so a restart cannot refund them
   (`test/run/budget-triple.test.ts`). **Two limits are deliberate and stated in the source, not
   oversights:** `wallMs` counts PROVIDER time — a run suspended on a human gate accrues none,
@@ -1241,7 +1241,7 @@ is a better view of nothing.
 | `D.1` **The first real workflow to port.** Nobody has yet used t | **DONE** | (i) DECISION: ANSWERED BY DEMONSTRATION 2026-08-27/28 — two workflows are ported, shipped in `examples/graphs/` and DRIVEN against a live GLM-5.2: `self-review` (the one that needs a real model) and `review-bench` (33 live runs, one cohort key, $1.59 all in). The whole record is `docs/evolution-loop-2026-08-27.md`. The observable below is what made the question worth asking and is now false. Original reading. (ii) OBSERVABLE: the only run that ever reached durable storage is a one-node graph named "g" with empty inputs that FAILED before running a body; no graph… |
 | `D.2` **The real numbers** — tenants, concurrent runs, runs/day, | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the word 'tenants' has no referent in the running system — `TenantId` is declared and used nowhere, and no tenant column reaches the sqlit… |
 | `D.3` **When a compensation edge fires** — on task failure, on r | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it — today the answer is 'never, on any of the three'. (ii) OBSERVABLE: a live engine run whose tool node throws leaves the compensation target with no Task at… **ANSWERED + BUILT 2026-08-28.** The maintainer's answer was ON RUN FAILURE AND ON REWIND, and both now run: `planCompensation` walks the journal in descending seq and `#compensate` dispatches each undo through `#invokeTool` under the `compensate` effect kind, with three journaled states (compensated / failed / not attempted) rather than two. Two defects found on the way in and fixed: a rewind that hid the record while leaving the effect standing, and a resumed rollback that undid its own undos. |
-| `D.4` **Rate-limit backpressure and admission control** — see A. | partial | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is still OPEN — `E_ADMISSION_REJECTED` is raised by nothing. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `bb7b702`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
+| `D.4` **Rate-limit backpressure and admission control** — see A. | partial | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is still OPEN — `E_ADMISSION_REJECTED` is raised by nothing. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `e4e4f01`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
 | `D.5` **The identity and permission source of truth** for approv | open | (i) DECISION: OPEN. (ii) OBSERVABLE: an approvers list naming a group or a role compiles clean and can never be satisfied, because the runtime check is exact string equality —… |
 | `D.6` which approval callback is mandatory | open | (i) DECISION: OPEN. (ii) OBSERVABLE: of the three DeliveryChannels that ship, exactly one can be answered. `channel.parseCallback !== undefined` IS the answerability test (del… |
 | `D.7` providers required at launch | partial | (i) DECISION: half ANSWERED IN CODE, half OPEN. The launch set is closed and ENFORCED at boot — `PROVIDERS` (cli.ts:815) is exactly {anthropic, openai}, and OpenAIAdapter with… |

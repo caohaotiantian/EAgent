@@ -1,5 +1,14 @@
 # The self-improvement loop, driven end to end against a live provider
 
+> **Commit hashes in this file predate a history rewrite and no longer resolve.** On
+> 2026-08-28 the branch was filtered to remove a Stripe-shaped fixture string from
+> `docs/audit-2026-08-25.md` (GitHub push protection rejected it; the string was fake, and the
+> reasoning is `TODO.md` §F.16). Filtering rewrote every commit in `86b84c9..HEAD`, so every
+> short hash below points at an object that is gone. **The subjects are unchanged**, so a
+> reference resolves with `git log --grep='<the subject or a phrase from it>'`. The hashes are
+> left as written rather than renumbered: this is a dated record, and a record edited to agree
+> with a later state is no longer a record of anything.
+
 **2026-08-27.** Roadmap item 5's fails-today is *"thirty runs of one workflow sharing a cohort
 key, and a candidate promoted over them because it measurably beat the baseline."* This is the
 record of driving it. Every number here came from running the shipped CLI; nothing is estimated.

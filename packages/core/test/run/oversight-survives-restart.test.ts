@@ -11,7 +11,10 @@
  * journal already had. Invariant 2 in its sharpest form: state that is durable in
  * principle and only in memory in practice is state the journal is not authoritative for.
  *
- * THE CLASS HAS FIVE MEMBERS NOW, and the last two are at the bottom of this file. Taint
+ * THE CLASS HAS SIX MEMBERS, AND THE SIXTH IS NOT IN THIS FILE — it is
+ * `test/run/escalation.test.ts`, "E8 — TAINT SURVIVES A RESTART FOR AN EXTERNALISED CHANNEL
+ * TOO", and it is the reason `CLAUDE.md` stopped delegating the count to this file alone. Five
+ * are below; the last two of those are at the bottom. Taint
  * was the fourth and E4's failure streak the fifth — both live on `RunContext`, both are
  * written by `Engine.#recordEvidence`, and only one of them was being restored. The lesson
  * that generalises past this file: the unit that needs a restore arm is not the FIELD, it

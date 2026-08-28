@@ -51,7 +51,7 @@
     },
     {
       "path": "packages/core/src/run/engine.ts",
-      "why": "The executor. Three rules are enforced by construction rather than review: one tool dispatch path, work parallel but commits serialized through one queue with an explicit expectedSeq, and a fan-out's writes held until its join folds siblings in branch order. It is also the file this guard exists because of: 1,375 to 6,104 lines in 21 days, 28 of 69 feat commits."
+      "why": "The executor. Three rules are enforced by construction rather than review: one tool dispatch path, work parallel but commits serialized through one queue with an explicit expectedSeq, and a fan-out's writes held until its join folds siblings in branch order. It is also the file this guard exists because of: 1,375 to 7,740 lines in 21 days, 28 of 69 feat commits."
     }
   ],
   "notKernel": [

@@ -1,5 +1,14 @@
 # TODO.md re-check — 2026-08-25
 
+> **Commit hashes in this file predate a history rewrite and no longer resolve.** On
+> 2026-08-28 the branch was filtered to remove a Stripe-shaped fixture string from
+> `docs/audit-2026-08-25.md` (GitHub push protection rejected it; the string was fake, and the
+> reasoning is `TODO.md` §F.16). Filtering rewrote every commit in `86b84c9..HEAD`, so every
+> short hash below points at an object that is gone. **The subjects are unchanged**, so a
+> reference resolves with `git log --grep='<the subject or a phrase from it>'`. The hashes are
+> left as written rather than renumbered: this is a dated record, and a record edited to agree
+> with a later state is no longer a record of anything.
+
 **Full record. 107 items, 106 verified by executing something.** `TODO.md`’s per-section
 tables are an index into this file; nothing here is truncated. Verdict tallies:
 {"DONE":19,"PARTIAL":30,"STALE":2,"STILL-OPEN":52,"WRONG":2,"UNVERIFIABLE":2}. Tiers: {"REPRO":106,"CITED":1}.

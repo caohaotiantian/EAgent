@@ -209,8 +209,20 @@ The previous list had no done markers at all; the DONE that a measurement falsif
 `TODO.md` §G, not here. And its item 5 named "labels on branch coordinates" — the option D4's
 own heading rejects and which §G records as tried and reverted.
 
-**Every item names a command that FAILS today and passes when the item is done.** An item that
-cannot fail is a wish, not a roadmap entry. Evidence for each is in `TODO.md` §A0 and
+**ALL EIGHT ARE DONE, 2026-08-28.** Every item's `Fails today` command now passes; verified by
+running all eight. **So this list is no longer a roadmap — it is a record of one**, and the rule
+it was written under says so plainly: "every item names a command that FAILS today, and an item
+that cannot fail is a wish, not a roadmap entry." By that test these eight are now eight wishes,
+and the honest thing is to stop calling the section a plan rather than to relax the rule.
+
+**The next Sequence cannot be written here yet, and that is a finding rather than an omission.**
+What comes next is blocked on decisions in `TODO.md` §D that only the maintainer can make —
+thirteen of them, with `D.2` (the real tenant, concurrency and run-rate numbers) first, because
+`D.13` the CPU pool, `D.14` retention tiering, `D.19` the circuit breaker and the
+admission-control half of `D.4` all resolve differently depending on it. An implementer who
+picked one would be writing a roadmap out of guesses.
+
+Evidence for each item below is in `TODO.md` §A0 and
 `docs/audit-2026-08-25.md`; the ones marked `gated` are held by
 `docs/audit-2026-08-25.md`, which also records the five gated cases that fired as each was
 fixed, and why only executable ones survived.
@@ -260,7 +272,7 @@ nobody having looked.
 
 So the deliverable was never "make the scenario pass". It was to give the gate a lane on this
 axis and make the lane earn its place, which it did: **five defects nothing in the in-process suite
-could see** — 2,288 tests when this lane started, 2,302 now.
+could see** — 2,288 tests when this lane started, 2,468 now.
 
 - `HumanGateBroker.resolve` wrote its decision through `RunLog.append`, the door whose
   docstring says it RETRIES, while its three neighbours use `commit`, the door that never does.
@@ -337,7 +349,7 @@ each read back through `loom cohort`.
 sit here is struck: it said the input bucket "defaults to a digest of the whole input", that "the
 `bucketInput` seam exists for exactly this and has no caller", that "promotion is unreachable for
 any workflow whose inputs vary", and that the remaining work was "one seam, not a redesign". Four
-claims; the first three were fixed at f0c3c11, forty minutes after the paragraph was written, and
+claims; the first three were fixed at 899e22a, forty minutes after the paragraph was written, and
 the fourth was wrong about what was left. `trajectory.ts`'s `defaultBucket` is the input's SHAPE;
 `loom score --bucket` calls the seam and `test/evolution/cohort-bucket.test.ts` drives all three
 modes. Measured through the shipped CLI: thirty runs of one graph over thirty different inputs,
@@ -440,7 +452,7 @@ whole record.
     ⊘ 8-determinism           DID NOT RUN, and is not reported as passed
 
 The candidate is a PROMPT — identical graph, identical functions, one changed ref — which is the
-case D6 aims at and the replayed door structurally cannot see. It was committed at `67c8ab8`
+case D6 aims at and the replayed door structurally cannot see. It was committed at `9ce735b`
 before it was ever run, on the argument that a diff's removed lines carry removed guarantees, and
 not iterated afterwards. The journaled row carries `mode: "live-cohort"`, the cohort's
 statistics, every pair, and `checksNotRun`, and holds no suite fields at all, so a live
@@ -467,7 +479,7 @@ returning nothing.
 
 Only possible after 6, because "the kernel" currently names the package being deleted.
 `grep -rani kernel packages/core/src/` returns one hit, about the OS kernel. Meanwhile
-`engine.ts` went 1,375 to 6,104 lines in 21 days, was touched by 28 of the 69 `feat` commits on
+`engine.ts` went 1,375 to 7,740 lines, was touched by 36 of the 92 `feat` commits on
 this branch, and has never been reduced by more than 32 lines in a single commit — while the one
 running P1 gate measures name-set stability and reported green the day it crossed 6,100.
 
@@ -517,7 +529,10 @@ API. Neither is buildable today and the reason is measured, not aesthetic:
   `@stable` here means a file landed in `resources/<kind>/` and `readResources` picked it up at
   boot. There is no registry and no publish step to refuse at.
 - It costs two `Kernel-seam:` trailers (`graph/spec.ts` for the field, `journal/events.ts` for the
-  event) against a ledger standing at two, to ship a compatibility table with no entries.
+  event) against a ledger standing at EIGHT, to ship a compatibility table with no entries. The
+  arithmetic that made this cheap has inverted: two more trailers was a doubling when the ledger
+  held two and is a 25% rise now, but the ledger is also no longer the small number the original
+  argument leaned on. Re-argue it on the seam, not on the count.
 
 **A file-level `// loom:surface <version>` directive was proposed for this item and REJECTED on a
 control.** Its justification was that such a directive on a hook body compiles `ok`, disarms the
