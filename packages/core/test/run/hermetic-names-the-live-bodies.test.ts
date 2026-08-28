@@ -9,11 +9,20 @@
  *
  * ## What this file pins, in three parts
  *
- * 1. THE BRAND. `resources/realm.ts` records what `compileRealm` returns in a module-private
- *    `WeakSet`, and `isRealmBounded` asks whether a value is in it. Every case this file can
- *    construct that the runtime cannot vouch for answers `false` — a host closure, a realm
- *    carrying embedder globals, a non-function — because absence of evidence must report as
- *    unvouched-for and never as bounded.
+ * 1. THE BRAND. `resources/realm.ts` records in a module-private `WeakSet` the calls whose realm
+ *    PASSED the three determinism checks `onlyGovernedCrossed`'s header names, and
+ *    `isRealmBounded` asks whether a value is in it. Every case this file can construct that the
+ *    runtime cannot vouch for answers `false` — a host closure, a realm whose embedder globals
+ *    reached the namespace, a realm whose draw is still the platform's, a non-function — because
+ *    absence of evidence must report as unvouched-for and never as bounded.
+ *
+ *    THE STAMP IS DERIVED FROM A CHECK ON THE REALM, NOT FROM THE CODE PATH THAT BUILT IT, and
+ *    that is a correction measured rather than reasoned. The first spelling was
+ *    `opts.globals === undefined || Object.keys(opts.globals).length === 0` — a test on the
+ *    ARGUMENT — and `Object.keys` yields no symbols while `Object.assign` copies them, so a bag
+ *    whose only key was `Symbol("MY_DATE")` holding the host `Date` was branded while the body
+ *    read `D.now() > 1.7e12 → true` and escaped to the host realm. `A HOST VALUE SMUGGLED UNDER
+ *    A SYMBOL KEY COSTS THE BRAND` below is that input.
  *
  *    IT IS A `WeakSet` AND NOT D.9'S `Symbol()` BECAUSE THE SYMBOL SPELLING WAS FORGEABLE, which
  *    is a correction to the decision made by running it rather than reading it. A symbol used as
@@ -56,17 +65,36 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { InProcessEventBus } from "../../src/bus.ts";
+import { compileOrThrow } from "../../src/graph/compile.ts";
+import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { NodeId } from "../../src/ids.ts";
+import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { Engine } from "../../src/run/engine.ts";
+import { FunctionRegistry, ModelRegistry, ToolRegistry, type FunctionBody } from "../../src/run/registry.ts";
 import { compileRealm, isRealmBounded, type RealmOptions } from "../../src/resources/realm.ts";
 import { createFunctionLoader } from "../../src/resources/functions.ts";
-import { ReplayEffects } from "../../src/run/replay.ts";
+import { ReplayEffects, replayRun } from "../../src/run/replay.ts";
 import { ResourceStore } from "../../src/resources/store.ts";
 
 const ACTOR = { kind: "human", id: "u:test" } as const;
 
+/**
+ * `Math.random` REPLACED AHEAD OF THE BODY, exactly as `functions.ts`'s `seedingRandom` and
+ * `hook-loader.ts`'s `denyingRandom` each splice it in — a body is an EXPRESSION and may run code
+ * at definition time, so the assignment has to be the wrapper's first statement.
+ *
+ * Written out here rather than imported because it is what a realm must DO to be branded, and a
+ * test that imports the production spelling cannot notice the day it stops happening. The third
+ * check is that `Math.random` is no longer the function the context shipped; `NO STUB` below is
+ * the same realm without this line, and it is refused.
+ */
+const DENY_DRAW = `Math.random = function () { throw new Error('no seed'); };`;
+
 /** A realm whose bridge just hands the parsed payload to the body. Enough to get a `RealmCall`. */
-function realm(globals?: Record<string, unknown>): ReturnType<typeof compileRealm> {
+function realm(globals?: Record<string, unknown>, source = `(a, b) => ({ ok: 1 })`): ReturnType<typeof compileRealm> {
   const opts: RealmOptions = {
-    source: `(a, b) => ({ ok: 1 })`,
+    source: `(function () { ${DENY_DRAW} return (${source}); })()`,
     label: "probe",
     what: "function",
     bridge: `globalThis.__e = function (p) { return globalThis.__loomBody(JSON.parse(p), {}); };`,
@@ -101,6 +129,80 @@ test("A REALM CARRYING EMBEDDER GLOBALS IS REFUSED THE BRAND, rather than inspec
   assert.equal(isRealmBounded(realm({ TENANT: "t1" })), false, "a realm with globals was vouched for");
   // An EMPTY bag is not a door: nothing was passed, so nothing is unvetted.
   assert.equal(isRealmBounded(realm({})), true, "an empty globals bag cost the brand");
+});
+
+test("A HOST VALUE SMUGGLED UNDER A SYMBOL KEY COSTS THE BRAND — the input that made it a check", () => {
+  // BLOCKING FINDING, REPRODUCED AS A TEST. The stamp used to read `Object.keys(opts.globals)`,
+  // which yields no symbols, while `Object.assign` copies them — so this exact bag reported
+  // length 0, KEPT THE BRAND, and put the host `Date` on the realm's `globalThis`. Measured
+  // through `compileRealm` on the tree before the fix, one call:
+  //
+  //     Object.keys(globals).length                          → 0
+  //     isRealmBounded(call)                                 → true        ← the brand
+  //     body: Object.getOwnPropertySymbols(globalThis)        → ["Symbol(MY_DATE)"]
+  //           D.now() > 1.7e12                                → true       (a live wall clock)
+  //           D.constructor.constructor("return typeof process")()  → "object"  (the HOST realm)
+  //
+  // `hermetic: true` on a run that is not reproducible, which is the one direction this may not
+  // be wrong in.
+  const bag: Record<string, unknown> = {};
+  Object.defineProperty(bag, Symbol("MY_DATE"), { value: Date, enumerable: true, writable: true, configurable: true });
+  assert.equal(Object.keys(bag).length, 0, "the bag stopped being invisible to Object.keys — pick another spelling");
+  assert.equal(isRealmBounded(realm(bag)), false, "a host Date under a symbol key was vouched for");
+
+  // AND THE SPELLING A `Reflect.ownKeys` ARGUMENT TEST WOULD STILL HAVE MISSED. `Promise` is not
+  // in `SAFE_GLOBAL_NAMES`, so `refuseGovernedGlobals` allows it and `Object.assign` overwrites
+  // the context's own `Promise` with the HOST's — an existing name, no new key, and a host object
+  // in the realm either way. Only a check on the NAMESPACE sees it.
+  assert.equal(isRealmBounded(realm({ Promise })), false, "the host Promise was vouched for");
+});
+
+test("THE THREE CHECKS ARE READ OFF THE FINISHED REALM, not off the arguments it was built from", () => {
+  // A body is an EXPRESSION and runs at definition time, so each of these is a legal `function`
+  // resource that undoes one of the three properties AFTER `compileRealm` has set it up. The old
+  // stamp — a branch on `opts.globals` — kept the brand through all four.
+  const undoes = (statement: string): boolean =>
+    isRealmBounded(
+      compileRealm({
+        source: `(function () { ${DENY_DRAW} ${statement} return ((a, b) => ({ ok: 1 })); })()`,
+        label: "probe",
+        what: "function",
+        bridge: `globalThis.__e = function (p) { return globalThis.__loomBody(JSON.parse(p), {}); };`,
+        entry: "__e",
+        compileTimeoutMs: 1000,
+        callTimeoutMs: 1000,
+      }),
+    );
+  assert.equal(undoes(`globalThis.Date = { now: function () { return 7; } };`), false, "Date came back, branded");
+  assert.equal(undoes(`globalThis.Intl = {};`), false, "Intl came back, branded");
+  assert.equal(undoes(`globalThis.Math = { random: function () { return 0.5; } };`), false, "Math swapped, branded");
+  // AN ACCESSOR, not a data property — the shape a plain `context.Date` read would have run on
+  // the HOST THREAD, outside the `vm` timeout that bounds everything else. The check reads
+  // descriptors for that reason, and a slot with no `value` is refused rather than inspected.
+  assert.equal(
+    undoes(`Object.defineProperty(globalThis, 'Date', { get: function () { return {}; }, configurable: true });`),
+    false,
+    "a Date getter was vouched for",
+  );
+
+  // NO STUB — the realm's `Math.random` is still the platform's, so the body's draws are not
+  // reproducible and the brand is refused. Both in-tree loaders splice the replacement in; a
+  // third-party bridge that forgets loses the brand rather than silently claiming determinism.
+  assert.equal(
+    isRealmBounded(
+      compileRealm({
+        source: `(a, b) => ({ ok: 1 })`,
+        label: "probe",
+        what: "function",
+        bridge: `globalThis.__e = function (p) { return globalThis.__loomBody(JSON.parse(p), {}); };`,
+        entry: "__e",
+        compileTimeoutMs: 1000,
+        callTimeoutMs: 1000,
+      }),
+    ),
+    false,
+    "a realm holding the platform's Math.random was vouched for",
+  );
 });
 
 test("EVERYTHING THE RUNTIME DID NOT MAKE ANSWERS `false` — absence of evidence is not evidence", () => {
@@ -228,14 +330,114 @@ test("`bodyEntered` RECORDS ONLY THE UNVOUCHED-FOR, and reports them sorted and 
   assert.deepEqual(e.liveBodies, ["a@root#0", "b@root#0"]);
 });
 
+// ── 2b · the conjunct, through a real replay ─────────────────────────────────
+
+/**
+ * One `function` node whose body is HAND-REGISTERED — a host closure, which is precisely the
+ * thing `isRealmBounded` answers `false` for.
+ */
+function oneFunctionNode(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "live", project: "t", version: 1 },
+    channels: { out: { type: "string", reduce: "replace" } },
+    inputs: [],
+    nodes: [{ id: "fn" as NodeId, type: "function", writes: ["out"], function: { ref: "function/host@stable" } }],
+    edges: [],
+    outputs: ["out"],
+  };
+}
+
+test("A REPLAY THAT RE-EXECUTED AN UNVOUCHED-FOR BODY REPORTS `hermetic: false` — driven, not composed", async () => {
+  // THE REVIEW FINDING THIS REPLACES: the previous version of this case rebuilt
+  // `unknownOutcomes.length === 0 && derivedClocks.length === 0 && liveBodies.length === 0` inside
+  // the test and asserted on THAT. Deleting `&& effects.liveBodies.length === 0` from
+  // `run/replay.ts` left all nine tests in this file green — a test built from the same mental
+  // model as the fix certifies the model, not the mechanism. This one reads `hermetic` off a
+  // report `replayRun` produced, so the mutation goes red.
+  //
+  // WHAT IS REAL AND WHAT IS A STAND-IN, stated because the difference is the remaining gap.
+  // Real: the run, the journal, the graph, the `replayRun` call, the body (a host closure), its
+  // `taskId` (taken from the recorded projection), the `isRealmBounded` answer, and the
+  // `hermetic` expression under test. A stand-in: the CALL SITE. Nothing in `src/` calls
+  // `bodyEntered` yet — the census below pins that — so the one thing this test supplies is the
+  // invocation `Engine.#functionBody` will make, with both of its arguments computed for real.
+  // When that line lands, delete the `fromStore` patch and this test keeps its assertions.
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const resources = new ResourceStore({ now: () => 1 });
+  const body: FunctionBody = () => ({ writes: { out: "constant" } });
+  assert.equal(isRealmBounded(body), false, "the host closure this test rests on was branded");
+  const functions = new FunctionRegistry();
+  functions.register("function/host@stable", body);
+  // The REF has to resolve for the graph to compile, and a hand-registered body WINS over a
+  // loaded one — `FunctionRegistry.get` says so, and `isRealmBounded` below is asserted on what
+  // `require` actually returns rather than on which of the two this comment expects.
+  const published = resources.publish({ kind: "function", name: "host", content: `(v, c) => ({})`, actor: ACTOR });
+  resources.promote(published, "canary", ACTOR);
+  resources.promote(published, "stable", ACTOR);
+  const graph = compileOrThrow({ spec: oneFunctionNode(), resolver: resources, tools: {}, tenantCapabilities: [] });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus(),
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    resolver: resources,
+    now: () => 1_700_000_000_000,
+  });
+  const runId = await engine.submit({ graph, inputs: {} });
+  const recorded = await engine.advance(runId);
+  assert.equal(recorded.status, "succeeded", JSON.stringify(recorded.error ?? {}));
+  const taskIds = Object.keys(recorded.tasks);
+  assert.deepEqual(taskIds, ["fn@root#0"], "the graph stopped producing exactly one task");
+
+  const opts = { store, runId, graph, engine: { tools: new ToolRegistry(), functions, models: new ModelRegistry() } };
+
+  // THE CONTROL, FIRST AND FROM THE SAME JOURNAL. Without it "hermetic is false" is satisfiable
+  // by a replay that diverged for some other reason, and the claim "because of the body" would
+  // rest on nothing.
+  const control = await replayRun(opts);
+  assert.equal(control.match, true, JSON.stringify(control.frames.filter((f) => !f.match)));
+  assert.deepEqual(control.liveBodies, []);
+  assert.equal(control.hermetic, true, "the baseline replay was already non-hermetic");
+
+  const original = ReplayEffects.fromStore;
+  let entered: string | undefined;
+  ReplayEffects.fromStore = async (s, r) => {
+    const e = await original.call(ReplayEffects, s, r);
+    // Both arguments computed, not asserted: the body is the one the replay's own registry will
+    // hand the engine, and the taskId is the one the recording holds.
+    entered = taskIds[0]!;
+    e.bodyEntered(entered, isRealmBounded(functions.require("function/host@stable")));
+    return e;
+  };
+  let report;
+  try {
+    report = await replayRun(opts);
+  } finally {
+    ReplayEffects.fromStore = original;
+  }
+
+  // EVERYTHING ELSE AGREED. Same journal, same graph, same registry as the control — so `match`
+  // is still true and `hermetic` moved for exactly one reason, which is the reason it names.
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match)));
+  assert.deepEqual(report.unservedEffects, []);
+  assert.deepEqual(report.liveBodies, [entered], "the report did not name the body it could not vouch for");
+  assert.equal(report.hermetic, false, "a body the runtime could not vouch for did not falsify hermetic");
+});
+
 test("ONE UNVOUCHED-FOR BODY IS ENOUGH — the conjunct is an AND, not a majority", () => {
-  // The composition `replayRun` performs, asserted on the terms rather than through a full run,
-  // because the third term has no producer yet and a run therefore cannot exercise it.
+  // The narrow claim the driven test above cannot make on its own: it is the LENGTH that matters,
+  // so a replay that entered one vouched-for body and one unvouched-for body is still non-
+  // hermetic. Kept as an accumulator-level case because constructing a second, branded
+  // `FunctionBody` is not possible from outside `realm.ts` — the brand has no exported adder,
+  // which is the property `THE BRAND CANNOT BE COPIED OFF A BRANDED CALL` exists to keep.
   const e = new ReplayEffects();
-  const hermetic = () => e.unknownOutcomes.length === 0 && e.derivedClocks.length === 0 && e.liveBodies.length === 0;
-  assert.equal(hermetic(), true);
-  e.bodyEntered("t@root#0", false);
-  assert.equal(hermetic(), false, "a live body did not falsify hermetic");
+  e.bodyEntered("vouched@root#0", true);
+  assert.deepEqual(e.liveBodies, []);
+  e.bodyEntered("live@root#0", false);
+  assert.deepEqual(e.liveBodies, ["live@root#0"], "the unvouched-for body was hidden by the vouched-for one");
 });
 
 // ── 3 · the gap, as a census ─────────────────────────────────────────────────
