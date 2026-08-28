@@ -36,7 +36,7 @@ function gatedGraph(path: string): Record<string, unknown> {
     inputs: ["note"],
     outputs: ["written"],
     nodes: [
-      { id: "approve", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/ship@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+      { id: "approve", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/ship@stable", approval: { approvers: ["u:alice"] } } },
       { id: "write", type: "tool", reads: ["note"], writes: ["written"], tool: { name: "fs.write", version: "1.0", args: { path, body: "${note}" } } },
     ],
     edges: [{ id: "e1", from: "approve", to: "write", kind: "seq" }],

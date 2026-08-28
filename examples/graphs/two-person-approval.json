@@ -1,0 +1,66 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "two-person-approval",
+    "project": "examples",
+    "version": 1,
+    "description": "Two of three named people must approve before the write lands. There is no `approval.mode: quorum` — k-of-n is N gates and a quorum join, which is why the field was deleted.",
+    "labels": {
+      "reads-as": "quorum lives in `join`, not in `approval`",
+      "residue": "a short-circuiting quorum join leaves the unneeded gate OPEN — JoinNode's documented straggler-cancellation gap"
+    }
+  },
+  "policy": { "posture": "out", "capabilities": ["fs:write"] },
+  "channels": {
+    "request": { "type": "string", "reduce": "replace" },
+    "signoffs": { "type": "array", "reduce": "append_ordered" },
+    "written": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["request"],
+  "outputs": ["written"],
+  "nodes": [
+    {
+      "id": "alice",
+      "type": "human_gate",
+      "reads": ["request"],
+      "writes": ["signoffs"],
+      "humanGate": { "ref": "oversight/ship@stable", "approval": { "approvers": ["u:alice"] } }
+    },
+    {
+      "id": "bob",
+      "type": "human_gate",
+      "reads": ["request"],
+      "writes": ["signoffs"],
+      "humanGate": { "ref": "oversight/ship@stable", "approval": { "approvers": ["u:bob"] } }
+    },
+    {
+      "id": "carol",
+      "type": "human_gate",
+      "reads": ["request"],
+      "writes": ["signoffs"],
+      "humanGate": { "ref": "oversight/ship@stable", "approval": { "approvers": ["u:carol"] } }
+    },
+    {
+      "id": "quorum",
+      "type": "join",
+      "reads": ["signoffs"],
+      "writes": ["signoffs"],
+      "join": { "branches": ["alice", "bob", "carol"], "mode": "quorum", "k": 2, "onBranchError": "fail" }
+    },
+    {
+      "id": "save",
+      "type": "tool",
+      "reads": ["request"],
+      "writes": ["written"],
+      "unhandled": true,
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "approved/request.txt", "body": "${request}" } }
+    }
+  ],
+  "edges": [
+    { "id": "j1", "from": "alice", "to": "quorum", "kind": "join" },
+    { "id": "j2", "from": "bob", "to": "quorum", "kind": "join" },
+    { "id": "j3", "from": "carol", "to": "quorum", "kind": "join" },
+    { "id": "then", "from": "quorum", "to": "save", "kind": "seq" }
+  ]
+}

@@ -199,9 +199,19 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
   },
   {
     row: "Approval modes",
-    claims: "Only `single`",
+    claims: "There are none, and `approval` declares two fields",
     probe: () => {
-      assert.match(SRC("graph/validate.ts"), /GRAPH014_APPROVER_INVALID|mode.*quorum/, "the unsupported modes must still be refused");
+      // THE FIELDS MUST STAY OUT OF THE SCHEMA, which is what makes the row true. A `mode` back
+      // in `ApprovalSpec` would be accepted by `NESTED_FIELDS.approval` and the generic refusal
+      // would stop firing — the row would read the same and mean the opposite.
+      assert.match(SRC("graph/spec.ts"), /approval: \["approvers", "separationOfDuties"\]/, "NESTED_FIELDS.approval moved");
+      const iface = /export interface ApprovalSpec\b[\s\S]*?\n}/.exec(SRC("graph/spec.ts"));
+      assert.ok(iface, "ApprovalSpec's declaration moved — this probe reads it by shape");
+      for (const gone of ["mode", "k", "delegation"]) {
+        assert.doesNotMatch(iface[0], new RegExp(`^\\s*readonly ${gone}\\??:`, "m"), `ApprovalSpec grew ${gone} back`);
+      }
+      // …and the row's other half: the replacement recipe is a shipped file, not a sentence.
+      assert.match(SRC("graph/spec.ts"), /two-person-approval\.json/, "the example the row points at is not cited where the fields were");
     },
   },
   {

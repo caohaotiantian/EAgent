@@ -44,7 +44,7 @@ async function runWith(approval: Record<string, unknown>, submittedBy?: Submitte
   return { h, runId, p };
 }
 
-const SOD = { mode: "single" as const, approvers: ["u:alice", "u:bob"], separationOfDuties: true };
+const SOD = { approvers: ["u:alice", "u:bob"], separationOfDuties: true };
 
 // ── the rule ─────────────────────────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ test("A GATE WHOSE ONLY APPROVER IS THE INITIATOR IS REFUSED — the compiler ca
   // `approvers` is static in the spec and the initiator is a runtime fact, so no compile-time
   // check can catch it. `raise` holds both. Without this the run parks on a question nobody
   // can ever answer, until an SLA it may not have.
-  const { p } = await runWith({ mode: "single", approvers: ["u:alice"], separationOfDuties: true }, ALICE);
+  const { p } = await runWith({ approvers: ["u:alice"], separationOfDuties: true }, ALICE);
   assert.equal(p.status, "failed");
   assert.match(String(p.error?.message), /the only approver it names is "u:alice"/);
 });
@@ -303,7 +303,7 @@ test("TWO GATES DO NOT MERGE ACROSS THE RULE — `sameAuthority` learned the exc
         id: "gA" as never,
         type: "human_gate",
         reads: ["a"],
-        humanGate: { ref: "oversight/x@stable", approval: { mode: "single", approvers: ["u:alice", "u:bob"], separationOfDuties: true }, batching: BATCH },
+        humanGate: { ref: "oversight/x@stable", approval: { approvers: ["u:alice", "u:bob"], separationOfDuties: true }, batching: BATCH },
       },
       {
         id: "gB" as never,
@@ -311,7 +311,7 @@ test("TWO GATES DO NOT MERGE ACROSS THE RULE — `sameAuthority` learned the exc
         reads: ["a"],
         humanGate: {
           ref: "oversight/x@stable",
-          approval: { mode: "single", approvers: ["u:alice", "u:bob"], ...(sodOnB ? { separationOfDuties: true } : {}) },
+          approval: { approvers: ["u:alice", "u:bob"], ...(sodOnB ? { separationOfDuties: true } : {}) },
           batching: BATCH,
         },
       },

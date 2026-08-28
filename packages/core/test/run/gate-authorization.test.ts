@@ -56,7 +56,7 @@ function specWithApprovers(approvers: readonly string[]): GraphSpec {
   return {
     ...base,
     nodes: base.nodes.map((n) =>
-      n.id !== APPROVE_NODE ? n : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { mode: "single", approvers } } },
+      n.id !== APPROVE_NODE ? n : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { approvers } } },
     ),
   };
 }
@@ -775,7 +775,7 @@ const withApproval = (approval: Record<string, unknown>): GraphSpec => {
 };
 
 test("a graph can declare its approvers, and the plain case compiles", () => {
-  const d = diagnose(withApproval({ mode: "single", approvers: ["u:alice"] }));
+  const d = diagnose(withApproval({ approvers: ["u:alice"] }));
   assert.deepEqual(d.filter((x) => x.severity === "error"), []);
 });
 
@@ -783,21 +783,39 @@ test("AN APPROVAL RULE THE RUNTIME DOES NOT APPLY IS REFUSED, NOT IGNORED", () =
   // "Looks supervised, is not" is the worst failure this layer has (D7.9), and silently
   // downgrading `quorum: 2` to one approver is exactly it — in the place nobody checks,
   // because the graph says it is covered.
+  //
+  // THE REFUSAL IS NOW THE GENERIC ONE, and that is a tightening rather than a rename.
+  // `mode`, `k` and `delegation` were fields of `ApprovalSpec` declared in order to be rejected
+  // by three bespoke exact-string checks; the fields are deleted, so `NESTED_FIELDS.approval`
+  // rejects them as unknown keys — and rejects `modee`, `quorumK` and `delegate` with them,
+  // none of which the three checks caught. The last two rows here are exactly those.
   for (const approval of [
     { mode: "quorum", k: 2, approvers: ["u:alice", "u:bob"] },
     { mode: "all", approvers: ["u:alice"] },
     { mode: "tiered", approvers: ["u:alice"] },
-    { mode: "single", k: 2, approvers: ["u:alice"] },
-    { mode: "single", approvers: ["u:alice"], delegation: { allowed: true, maxDepth: 2 } },
+    { mode: "single", approvers: ["u:alice"] },
+    { k: 2, approvers: ["u:alice"] },
+    { approvers: ["u:alice"], delegation: { allowed: true, maxDepth: 2 } },
+    { modee: "quorum", approvers: ["u:alice"] },
+    { quorumK: 2, approvers: ["u:alice"] },
+    { delegate: true, approvers: ["u:alice"] },
   ]) {
-    const hit = diagnose(withApproval(approval)).filter((x) => x.code === "GRAPH014_APPROVAL_UNSUPPORTED");
+    const hit = diagnose(withApproval(approval)).filter((x) => x.code === "GRAPH020_UNKNOWN_FIELD");
     assert.ok(hit.length > 0, `${JSON.stringify(approval)} compiled clean`);
     assert.equal(hit[0]!.severity, "error");
+    // THE MESSAGE MUST NAME WHAT `approval` MAY DECLARE, which is README's own stated test for
+    // an honest closed set. `mode` near-misses nothing, so the author reads the members.
+    const forMode = hit.find((x) => /`mode`|`modee`/.test(x.message));
+    if (forMode !== undefined) {
+      assert.match(forMode.fix ?? "", /approvers/);
+      assert.match(forMode.fix ?? "", /separationOfDuties/);
+    }
   }
-  // `separationOfDuties` LEFT THIS LIST BY BEING BUILT, which is how the docstring says
-  // support arrives: by deleting a check. It is the only one that has.
+  // `separationOfDuties` LEFT THIS SET BY BEING BUILT, which is how the docstring says support
+  // arrives: by deleting a check. Quorum left it a different way — it was never missing. N gates
+  // joined by `join{mode:"quorum", k}` do k-of-n today; see examples/graphs/two-person-approval.json.
   assert.deepEqual(
-    diagnose(withApproval({ mode: "single", approvers: ["u:alice"], separationOfDuties: true })).filter((x) => x.severity === "error"),
+    diagnose(withApproval({ approvers: ["u:alice"], separationOfDuties: true })).filter((x) => x.severity === "error"),
     [],
   );
 });
@@ -817,7 +835,10 @@ test("SEPARATION OF DUTIES NARROWS AN APPROVERS LIST — it does not stand in fo
 });
 
 test("declaring a feature and turning it OFF is not an error", () => {
-  const d = diagnose(withApproval({ approvers: ["u:alice"], separationOfDuties: false, delegation: { allowed: false } }));
+  // `delegation: {allowed: false}` used to be the third field here. It is gone with the rest —
+  // and it was never the harmless row it looked like: `delegation: {allowd: true}` compiled
+  // clean, so the refusal it exercised was defeatable by one letter.
+  const d = diagnose(withApproval({ approvers: ["u:alice"], separationOfDuties: false }));
   assert.deepEqual(d.filter((x) => x.severity === "error"), []);
 });
 

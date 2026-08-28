@@ -48,7 +48,7 @@ function specWithApprovers(approvers: readonly string[]): GraphSpec {
   return {
     ...base,
     nodes: base.nodes.map((n) =>
-      n.id !== "approve" ? n : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { mode: "single" as const, approvers } } },
+      n.id !== "approve" ? n : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { approvers } } },
     ),
   };
 }
@@ -2630,7 +2630,7 @@ test("A NAMED APPROVER SEES THE QUESTION ADDRESSED TO THEM, AND NOT THE ONE BESI
   const named = {
     ...spec,
     nodes: spec.nodes.map((n) =>
-      n.id !== "slow" ? n : { ...n, humanGate: { ...n.humanGate!, approval: { mode: "single" as const, approvers: ["u:security-lead"] } } },
+      n.id !== "slow" ? n : { ...n, humanGate: { ...n.humanGate!, approval: { approvers: ["u:security-lead"] } } },
     ),
   };
   const h = harness();

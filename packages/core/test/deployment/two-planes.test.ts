@@ -67,7 +67,7 @@ const GATED = {
       writes: ["note"],
       humanGate: {
         ref: "oversight/ship@stable",
-        approval: { mode: "single", approvers: ["u:alice"] },
+        approval: { approvers: ["u:alice"] },
         sla: { respondWithinMs: 3_600_000, onTimeout: "fail" },
       },
     },

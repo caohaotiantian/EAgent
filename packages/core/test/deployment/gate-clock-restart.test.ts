@@ -46,7 +46,7 @@ const GATED = {
       writes: ["note"],
       humanGate: {
         ref: "oversight/ship@stable",
-        approval: { mode: "single", approvers: ["u:alice"] },
+        approval: { approvers: ["u:alice"] },
         sla: { respondWithinMs: 3_600_000, onTimeout: "escalate" },
         // NO CHANNEL IS CONFIGURED IN THE WORKSPACE, deliberately: a configured channel is a
         // webhook, i.e. the network. The escalation TIER is what this test is about, and it

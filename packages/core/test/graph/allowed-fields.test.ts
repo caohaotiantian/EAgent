@@ -395,7 +395,10 @@ const gate = (humanGate: Record<string, unknown>) =>
 test("AN UNKNOWN KEY IN ANY `humanGate` SUB-BLOCK IS REFUSED", () => {
   const cases: readonly (readonly [string, Record<string, unknown>])[] = [
     ["approval", { approval: { approvres: ["u:alice"] } }],
-    ["approval.delegation", { approval: { approvers: ["u:alice"], delegation: { allowd: true } } }],
+    // `delegation` ITSELF is the unknown key now — D.15 deleted `ApprovalSpec.delegation` and
+    // `DelegationSpec`, so the block that used to need its own scope no longer exists. Kept as a
+    // row because it is the shape an author who read an older README will write.
+    ["approval.delegation", { approval: { approvers: ["u:alice"], delegation: { allowed: true } } }],
     ["sla", { approval: { approvers: ["u:alice"] }, sla: { respondWithinMs: 60_000, onTimout: "escalate" } }],
     ["delivery", { approval: { approvers: ["u:alice"] }, delivery: { channels: ["console"], recipiants: [] } }],
     [
@@ -436,8 +439,9 @@ test("...and a MALFORMED sub-block is a diagnostic naming the node, not a TypeEr
   // instead of the message that had just been written for them. A guard that reports a fault and
   // then trips over it has reported nothing.
   const nested: readonly (readonly [string, Record<string, unknown>])[] = [
-    ["approval.delegation: null", { approval: { approvers: ["u:alice"], delegation: null } }],
     ["delivery.escalation[0]: null", { approval: { approvers: ["u:alice"] }, delivery: { channels: ["console"], escalation: [null] } }],
+    ["sla: null", { approval: { approvers: ["u:alice"] }, sla: null }],
+    ["delivery: null", { approval: { approvers: ["u:alice"] }, delivery: null }],
   ];
   for (const [where, hg] of nested) {
     const r = gate(hg);
@@ -474,7 +478,6 @@ test("EVERY FIELD THESE FOUR INTERFACES DECLARE IS ALLOWED — the guard must no
   // and an author has no way to tell that from a real typo.
   const IFACE: Readonly<Record<keyof typeof NESTED_FIELDS, readonly [string, string]>> = {
     approval: ["ApprovalSpec", SPEC_SRC],
-    delegation: ["DelegationSpec", SPEC_SRC],
     sla: ["GateSlaSpec", SPEC_SRC],
     delivery: ["DeliverySpec", DELIVERY_SRC],
     deliveryEscalation: ["EscalationTier", DELIVERY_SRC],

@@ -106,7 +106,7 @@ function leafSpec(): GraphSpec {
         id: n("approve"),
         type: "human_gate",
         reads: ["doubled"],
-        humanGate: { ref: "oversight/charge@stable", approval: { mode: "single", approvers: [SECURITY_LEAD] } },
+        humanGate: { ref: "oversight/charge@stable", approval: { approvers: [SECURITY_LEAD] } },
       },
       {
         id: n("charge"),

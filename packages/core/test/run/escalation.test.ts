@@ -513,7 +513,7 @@ test("E8 — TAINT SURVIVES A PROCESS RESTART", async () => {
     spec({
       nodes: [
         ...spec().nodes.filter((x) => x.id === "gather"),
-        { id: n("ask"), type: "human_gate", reads: ["goal"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+        { id: n("ask"), type: "human_gate", reads: ["goal"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { approvers: ["u:alice"] } } },
         { id: n("charge"), type: "tool", reads: ["notes"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
       ],
       edges: [
@@ -851,7 +851,7 @@ test("E8 — TAINT SURVIVES A RESTART FOR AN EXTERNALISED CHANNEL TOO", async ()
     spec({
       nodes: [
         ...spec().nodes.filter((x) => x.id === "gather"),
-        { id: n("ask"), type: "human_gate", reads: ["goal"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+        { id: n("ask"), type: "human_gate", reads: ["goal"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { approvers: ["u:alice"] } } },
         { id: n("charge"), type: "tool", reads: ["notes"], writes: ["done"], tool: { name: "pay.charge", version: "1.0" }, unhandled: true },
       ],
       edges: [

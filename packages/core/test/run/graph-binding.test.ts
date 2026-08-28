@@ -58,7 +58,7 @@ function spec(writePath: string): GraphSpec {
     inputs: ["note"],
     outputs: ["out"],
     nodes: [
-      { id: "gate", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+      { id: "gate", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { approvers: ["u:alice"] } } },
       { id: "act", type: "tool", reads: ["note"], writes: ["out"], tool: { name: "demo.write", version: "1.0", args: { path: writePath } } },
     ],
     edges: [{ id: "e", from: "gate", to: "act", kind: "seq" }],

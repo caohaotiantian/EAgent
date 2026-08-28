@@ -824,9 +824,14 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // warn → degrade → gate → fail; only `fail` is built. `gate` read as "ask a human rather than
   // stop", and the engine escalated the ceiling for decisions that would never happen and then
   // failed the run anyway — the same outcome as `fail`, reached through a word that promised
-  // supervision. `degrade` is read by nothing at all. This is the treatment `approval.mode:
-  // quorum` gets and for the identical reason: a graph that reads as supervised and behaves
-  // otherwise is the worst failure available, because nobody goes looking.
+  // supervision. `degrade` is read by nothing at all. The reason is that a graph which reads as
+  // supervised and behaves otherwise is the worst failure available, because nobody goes looking.
+  //
+  // `approval.mode: "quorum"` used to be cited here as the same treatment and no longer is: the
+  // FIELD was deleted, because k-of-n already worked as `join{mode:"quorum", k}` over N gates.
+  // The surviving sibling is `RouterNode.mode: "model"`, and its own docstring says why it is
+  // different — it is REQUIRED, so deleting the value would leave an unknown VALUE nothing
+  // checks. `onBudgetExhausted` is a value in a union too, which is why this refusal stays.
   //
   // Implementing `gate` needs somewhere for the human's answer to GO — a way to raise a budget
   // mid-run — and no such API exists. Delete this refusal in the same change that adds one.
@@ -2286,8 +2291,20 @@ function rule014And019Oversight(
  * The alternative — accept the block and enforce the part we implement — produces a
  * graph that reads as "two of the SRE leads must agree" and behaves as "any one of
  * them", with nothing anywhere saying so. An unsupervised action that LOOKS supervised
- * is worse than an unsupervised action, because nobody goes looking (D7.9). So the
- * unimplemented half is an error, and it becomes supported by deleting a check here.
+ * is worse than an unsupervised action, because nobody goes looking (D7.9).
+ *
+ * THE THREE BESPOKE REFUSALS THAT LIVED HERE ARE GONE, and so are the fields they refused.
+ * `mode`, `k` and `delegation` were declared in `ApprovalSpec` in order to be rejected; they
+ * are deleted, so `NESTED_FIELDS.approval` refuses them as unknown keys along with `modee`,
+ * `quorumK` and `delegate`, which three exact-string checks never caught. The refusals were
+ * also defeatable — `delegation: {allowd: true}` compiled clean. Support for k-of-n did not
+ * arrive by deleting a check: it was already there, as N gates joined by
+ * `join{mode:"quorum", k}`, and `examples/graphs/two-person-approval.json` ships it.
+ *
+ * What remains here is what a compiler can actually decide about the two surviving fields:
+ * the block is an object, its keys are named, `approvers` is a list, the list is not empty,
+ * each entry is a subject rather than a role record or a perimeter marker, and
+ * `separationOfDuties` is a boolean that names somebody to narrow.
  */
 function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   const at = { nodeId: n.id };
@@ -2310,22 +2327,8 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // supervised and admits anybody. `NESTED_FIELDS.approval` is the enumeration; the near-miss
   // hint makes the typo cheap to fix rather than cheap to ignore.
   unknownKeys(block, NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
-  const delegationBlock = objectBlock(
-    block["delegation"],
-    `human_gate "${n.id}"'s \`approval.delegation\``,
-    at,
-    "delegation is `{allowed, maxDepth?, mustStayInGroup?}`",
-    d,
-  );
-  if (delegationBlock !== undefined) {
-    unknownKeys(delegationBlock, NESTED_FIELDS.delegation, `human_gate "${n.id}"'s \`approval.delegation\` block`, at, d);
-  }
   const a = n.humanGate?.approval;
   if (a === undefined) return;
-  const unsupported = (what: string, fix: string): void => {
-    d.push({ severity: "error", code: "GRAPH014_APPROVAL_UNSUPPORTED", message: `human_gate "${n.id}" ${what}`, at, fix });
-  };
-
   // `approvers` MUST BE AN ARRAY, and the loop below is why. `for (const who of a.approvers ?? [])`
   // iterates a STRING's characters, every one of which is a non-empty string, so
   // `approvers: "u:alice"` passed every per-entry check. At run time the list journals as the
@@ -2354,13 +2357,6 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
     });
   }
 
-  if (a.mode !== undefined && a.mode !== "single") {
-    unsupported(
-      `declares approval mode "${a.mode}", which the runtime does not implement`,
-      "use mode: single — quorum, all and tiered are not enforced yet, and a declaration that is not enforced is worse than none",
-    );
-  }
-  if (a.k !== undefined) unsupported("declares a quorum k, which only mode: quorum would use", "remove k");
   // SEPARATION OF DUTIES IS ENFORCED NOW, so the refusal is gone — support arrives by
   // DELETING a check, exactly as this function's docstring says. What replaces it is narrower
   // and answers a question the runtime cannot: the rule bars the initiator, so a gate that
@@ -2383,18 +2379,6 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
       fix: "write `separationOfDuties: true` — a truthy string would be read as absent and the gate would enforce nothing",
     });
   }
-  // READ THROUGH THE GUARDED BLOCK, never through `a.delegation` — `delegation: null` reported
-  // GRAPH003_MALFORMED above and then crashed HERE on `.allowed`, so the author got a raw
-  // TypeError instead of the diagnostic that had just been written for them.
-  if (delegationBlock !== undefined && delegationBlock["allowed"] !== undefined && typeof delegationBlock["allowed"] !== "boolean") {
-    d.push({
-      severity: "error",
-      code: "GRAPH014_APPROVAL_INVALID",
-      message: `human_gate "${n.id}" declares delegation.allowed ${JSON.stringify(delegationBlock["allowed"])}, which is not true or false`,
-      at,
-      fix: "write true or false — a truthy string reads as absent, which here means the UNSUPPORTED refusal below never fires",
-    });
-  }
   if (a.separationOfDuties === true && (a.approvers ?? []).length === 0) {
     d.push({
       severity: "error",
@@ -2404,10 +2388,6 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
       fix: "list the approvers who may decide it — separation of duties narrows that list, it does not stand in for it",
     });
   }
-  if (a.delegation?.allowed === true) {
-    unsupported("declares delegation, which is not enforced", "remove it — a delegated approval would be recorded as the delegate's own");
-  }
-
   // An approvers list that cannot match anything authorizes everyone, because "names
   // nobody" is the permissive case. Better to refuse the graph than to ship a gate that
   // reads as restricted and is not.

@@ -215,8 +215,15 @@ export interface RouterCase {
 /**
  * Which outgoing edges fire.
  *
- * `mode: "model"` IS DECLARED IN ORDER TO BE REFUSED — the same treatment `DelegationSpec`
- * gets, and for the same reason. Nothing dispatches on `mode`: the router evaluates
+ * `mode: "model"` IS DECLARED IN ORDER TO BE REFUSED, and it is now the LAST field in this file
+ * of which that is true — `ApprovalSpec.mode`, `.k` and `DelegationSpec` used to be cited here as
+ * the same treatment and were deleted instead. The distinction that keeps this one is checkable
+ * rather than stylistic: those were OPTIONAL fields, so deleting them makes each key unknown and
+ * `NESTED_FIELDS.approval` refuses it. `mode` here is REQUIRED and sits inside a block
+ * `ALLOWED_FIELDS` already covers, so deleting `"model"` from the union would leave an unknown
+ * VALUE that nothing checks — the refusal below is load-bearing and must stay.
+ *
+ * Nothing dispatches on `mode`: the router evaluates
  * `cases[].when` whichever mode is declared, so accepting `model` would run "a fixed
  * expression picks the branch" under a graph that reads "a model picks the branch", with
  * a model profile pinned in the resolution manifest and never called. The compiler refuses
@@ -282,20 +289,6 @@ export interface EvaluatorNode {
 }
 
 /**
- * A delegation chain, declared but not yet implemented.
- *
- * Present so that a graph asking for delegation is REJECTED rather than run as if it
- * had asked for nothing (GRAPH014_APPROVAL_UNSUPPORTED). `separationOfDuties` has since left
- * that set by being built — support arrives by DELETING a check, which is the whole point of
- * refusing rather than ignoring.
- */
-export interface DelegationSpec {
-  readonly allowed: boolean;
-  readonly maxDepth?: number;
-  readonly mustStayInGroup?: boolean;
-}
-
-/**
  * WHO may answer this gate.
  *
  * D7.2 puts this block on the `oversight/<name>@<version>` Resource, and that is still
@@ -306,17 +299,35 @@ export interface DelegationSpec {
  * this block was added to fix, so the field names are D7.2's verbatim and moving the
  * block into the Resource later is a relocation rather than a redesign.
  *
- * `approvers` and `separationOfDuties` are enforced. What is left — `mode` other than
- * `single`, `k`, and `delegation` — is declared here precisely so that it can be REFUSED at
- * compile time: a graph that says `mode: quorum` and silently gets one-approver behaviour is
- * the "looks supervised, is not" failure D7.9 calls the worst one available, and it would be
- * invisible in exactly the place oversight exists for.
+ * TWO FIELDS, AND BOTH ARE ENFORCED. `mode`, `k` and `delegation` used to sit here declared in
+ * order to be refused, and they are deleted — because what they gestured at either already
+ * exists or was never implementable from its own declaration.
+ *
+ * K-OF-N APPROVAL OVER NAMED PEOPLE ALREADY WORKS, in the shipped graph language, with no new
+ * vocabulary: N `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k}`. Measured
+ * with three gates naming `u:alice`, `u:bob` and `u:carol` guarding an `fs.write` — all three
+ * gates open, approving one leaves `writes=0`, approving the second fires the guarded write, and
+ * the third stays open. Two-of-two is two gates in series. `examples/graphs/two-person-approval.json`
+ * ships that composition and a test drives it, so it is an artifact rather than a claim.
+ *
+ * `tiered` went because NO FIELD ANYWHERE DEFINES A TIER, so unlike quorum it was not
+ * implementable from its declaration — only refusable. `delegation` went because its own
+ * refusal was defeatable: `delegation: {allowd: true}` compiled clean, and
+ * `delegation: {maxDepth: 99, mustStayInGroup: true}` compiled clean with two fields no code
+ * read; `mustStayInGroup` also presupposes a group vocabulary this system declines to add.
+ *
+ * WHAT REFUSES THEM NOW IS STRICTLY BETTER. They were OPTIONAL fields, so deleting them makes
+ * each key unknown and `NESTED_FIELDS.approval` refuses it with `GRAPH020_UNKNOWN_FIELD`, naming
+ * the two members `approval` may declare — along with `modee`, `quorumK`, `delegate` and every
+ * other spelling, where three exact strings were caught before. That is the difference from
+ * `RouterNode.mode: "model"`, which stays declared-in-order-to-be-refused: `mode` there is
+ * REQUIRED, so deleting the value would leave an unknown VALUE nothing checks.
+ *
+ * The one honest loss is message quality: the refusal does not say "use a quorum join instead".
+ * That recipe lives in the shipped example and in README, because putting it in the compiler
+ * would reintroduce the vocabulary being deleted.
  */
 export interface ApprovalSpec {
-  /** Only `single` is implemented. The others compile-error until a wave lands them. */
-  readonly mode?: "single" | "quorum" | "all" | "tiered";
-  /** `quorum` only. */
-  readonly k?: number;
   /**
    * Subject identifiers, compared EXACTLY against a human actor's `subject`.
    *
@@ -339,7 +350,6 @@ export interface ApprovalSpec {
    * such a run FAILS at the gate rather than raising one that bars nobody.
    */
   readonly separationOfDuties?: boolean;
-  readonly delegation?: DelegationSpec;
 }
 
 /**
@@ -926,7 +936,6 @@ export const NESTED_FIELDS: Readonly<
     | "contextProjection"
     | "metadata"
     | "approval"
-    | "delegation"
     | "sla"
     | "delivery"
     | "deliveryEscalation"
@@ -952,8 +961,7 @@ export const NESTED_FIELDS: Readonly<
   // `approvers: []`, `u:mallory` — named by nobody — approves, and the guarded `fs.write` lands.
   // `approvers: "u:alice"` journals as the STRING, so the audit record reads supervised while
   // `String.prototype.includes` lets subject `"u"` and subject `"alice"` each approve.
-  approval: ["mode", "k", "approvers", "separationOfDuties", "delegation"],
-  delegation: ["allowed", "maxDepth", "mustStayInGroup"],
+  approval: ["approvers", "separationOfDuties"],
   sla: ["respondWithinMs", "onTimeout", "reminders"],
   // `DeliverySpec` and `EscalationTier` are `run/delivery.ts`'s, not this file's — the same
   // arrangement `channel` and `contextProjection` already have with `state/channels.ts`, and
