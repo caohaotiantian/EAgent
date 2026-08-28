@@ -11,13 +11,22 @@
  * `packages/core/package.json`, which is what `check-zero-dep.mjs` enforces — so a
  * library consumer of `@loom/core` downloads neither.
  *
+ * The build also stamps the binary with a digest of the sources it compiled, so the
+ * thing it produces knows when it has gone stale — see `binary-freshness.cjs` for why
+ * that is a startup check inside the binary and not a gate in `npm run check`.
  */
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import * as esbuild from "esbuild";
+
+const require = createRequire(import.meta.url);
+const freshness = require("./binary-freshness.cjs");
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const OUT = "bin";
 const NAME = process.platform === "win32" ? "loom.exe" : "loom";
@@ -26,6 +35,20 @@ const BLOB = join(OUT, "loom.blob");
 const TARGET = join(OUT, NAME);
 
 mkdirSync(OUT, { recursive: true });
+
+// ── 0. photograph the sources ────────────────────────────────────────────────
+// The stamp is a digest of `src`, but what goes into the binary is `dist` — so refuse
+// to stamp at all unless dist was compiled from a tree at least this new. Otherwise the
+// binary would certify sources it does not contain, and report itself fresh forever.
+const behind = freshness.distIsBehindSources(repoRoot);
+if (behind !== null) {
+  console.error(`build FAILED: ${behind}.`);
+  console.error("Run `npm run build:binary`, which compiles first — not this script on its own.");
+  process.exit(1);
+}
+// Taken BEFORE the bundle so the digest can only be of a tree at least as old as the
+// binary: an edit racing the build makes the result refuse, never falsely pass.
+const stamp = freshness.stampFor(repoRoot);
 
 // ── 1. bundle ────────────────────────────────────────────────────────────────
 // CJS, because Node's SEA loads a single CommonJS script. The ESM source is
@@ -40,9 +63,13 @@ await esbuild.build({
   // `node:` builtins are provided by the embedded runtime, not bundled.
   external: ["node:*"],
   banner: {
+    // The banner is the only code that runs before the application, which is exactly
+    // what the freshness check needs — a binary that has aged must refuse before it
+    // can answer anything.
+    //
     // `import.meta.url` has no CJS equivalent; the CLI uses it only to decide
     // whether it is the entry point, which inside a SEA it always is.
-    js: "const import_meta_url = 'file:///loom';",
+    js: ["const import_meta_url = 'file:///loom';", freshness.banner(stamp)].join("\n"),
   },
   define: { "import.meta.url": "import_meta_url" },
   logLevel: "warning",
@@ -119,3 +146,6 @@ rmSync(seaConfig, { force: true });
 
 const mb = (statSync(TARGET).size / 1024 / 1024).toFixed(1);
 console.log(`built ${TARGET} — ${mb} MB (application bundle: ${(bundleBytes / 1024).toFixed(0)} KB, 0 third-party modules)`);
+console.log(
+  `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — it refuses to run once ${stamp.dir} moves`,
+);
