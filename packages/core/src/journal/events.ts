@@ -298,23 +298,39 @@ export interface EventPayloads {
 
   // ── effects ──────────────────────────────────────────────────────────────
   /**
-   * `kind` must agree with the kind inside `key`. Two of the four sites did not.
+   * `kind` must agree with the kind inside `key`, and this union is exactly the kinds that are
+   * written.
    *
-   * `effectKey(task, kind, ordinal)` builds `${task}:${kind}:${ordinal}`, and this union is
-   * what the event declares. They were separate lists that drifted: the subgraph effect
-   * keyed `subgraph` and declared `mailbox`, and the summariser keyed `summarize` and
-   * declared `model` — not by choice but because neither word was in this union, so the
-   * honest value would not typecheck. The consequence is not cosmetic: an auditor filtering
-   * `effect.started` by `kind` cannot find a single summarisation, and the telemetry span
-   * for a subgraph is named after a mailbox.
+   * HISTORY, NOT AN OPTION — the drift that `journal/audit.ts`'s `effect.kind-matches-its-key`
+   * rule exists to catch. `effectKey(task, kind, ordinal)` builds `${task}:${kind}:${ordinal}`
+   * while this union declares what the event says, and the two were separate lists: the subgraph
+   * effect keyed `subgraph` and declared a since-deleted `mailbox` member, and the summariser
+   * keyed `summarize` and declared `model` — not by choice but because neither word was in this
+   * union, so the honest value would not typecheck. The consequence was not cosmetic: an auditor
+   * filtering `effect.started` by `kind` could not find a single summarisation, and the telemetry
+   * span for a subgraph was named after a mailbox. Both sites are fixed and the rule is what keeps
+   * them fixed. Read the two words above as the wrong values they were, not as available ones:
+   * `model` is a member but was never the summariser's, and `mailbox` is not a member at all.
    *
-   * `clock` and `random` remain declared and unappended — see CLAUDE.md invariant 4, which
-   * says so — and are kept here rather than removed because removing them would hide a gap
-   * that is better left visible.
+   * THE MEMBERS ARE THE MEASURED SET. Every one is appended somewhere in `run/engine.ts` —
+   * `model`, `subgraph`, `summarize` and `random` at their own sites, `tool` and `compensate`
+   * through the one site that takes the kind as an argument. `test/registries.test.ts`'s
+   * `EVERY DECLARED EFFECT KIND HAS A WRITER` re-derives that from the source on every run and
+   * goes red on a member with no writer, so this list cannot quietly grow a promise again. Two
+   * members did exactly that and are gone: `clock`, because DESIGN.md D3 rejected journalling
+   * clock reads as effects in favour of binding the clock to the journaled task boundary, which
+   * `engine.ts`'s `#bodyClock` now does; and `mailbox`, below.
+   *
+   * AGENT-TO-AGENT MESSAGING WAS CONSIDERED AND IS REFUSED. DESIGN.md's "What we deliberately do
+   * not build" lists "Free-form agent-to-agent chat" — it makes termination unprovable — and a
+   * delivery whose ordering the journal cannot reconstruct cannot be replayed. If that is ever
+   * overturned, the missing seam is an eighth `EdgeKind` in `graph/spec.ts`, which has seven; an
+   * effect kind would FOLLOW it. Re-adding a member here first would be the same declared-and-
+   * wired-to-nothing defect a second time.
    */
   "effect.started": {
     readonly key: string;
-    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "clock" | "random" | "mailbox" | "compensate";
+    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "random" | "compensate";
     readonly attempt: number;
   };
   "effect.completed": { readonly key: string; readonly result: unknown; readonly resultDigest: string };
