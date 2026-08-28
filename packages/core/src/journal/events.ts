@@ -217,7 +217,26 @@ export interface EventPayloads {
   "task.failed": { readonly error: ErrorRecord; readonly attempt: number };
   "task.skipped": { readonly reason: string };
   "task.cancelled": { readonly clean: boolean; readonly reason: string };
-  "task.retry_scheduled": { readonly attempt: number; readonly afterMs: number; readonly code: string };
+  "task.retry_scheduled": {
+    readonly attempt: number;
+    readonly afterMs: number;
+    readonly code: string;
+    /**
+     * This reschedule did NOT consume the node's retry budget.
+     *
+     * A provider rate limit is not the node's failure — the node's work never ran — so it is
+     * requeued without charging an attempt, without consulting `onlyIf`, and without needing a
+     * retry policy to exist. `attempt` is therefore UNCHANGED on a deferral, and this flag is
+     * what tells a reader that the repetition they are looking at is not the node failing over
+     * and over. Absent means an ordinary retry, which is what every event written before this
+     * field existed was.
+     *
+     * It is also the only durable record of how long this Task has been deferred:
+     * `Σ afterMs where deferred` is the ceiling `#retryDecision` checks, so the bound is
+     * reconstructible from the journal rather than held in a counter a restart would clear.
+     */
+    readonly deferred?: boolean;
+  };
   /**
    * A hard-to-undo action is about to run under posture `on`, and the executor is
    * holding for `windowMs` so a supervisor can intervene.

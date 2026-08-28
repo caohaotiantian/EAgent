@@ -2031,9 +2031,14 @@ const MAX_BACKOFF_WAITS = 64;
  * in the product finished that run.
  *
  * The wait is REAL TIME because the backoff is: `retryAfter` is a wall-clock instant the engine
- * journaled, and a run's own retry policy bounds how many there can be. The cap is a backstop
- * against a graph whose retries never exhaust, and it reports rather than looping — a command
- * that hangs is indistinguishable from one that is working.
+ * journaled. TWO THINGS BOUND HOW MANY THERE CAN BE, not one — the node's retry policy bounds
+ * charged retries, and `DEFERRAL_BUDGET_MS` bounds rate-limit deferrals, which are deliberately
+ * not charged to the policy (see `Engine.#retryDecision`). A rate-limited run therefore waits
+ * here for longer than it used to, and that time is the same time the transport used to spend
+ * asleep inside `advance` holding a worker slot; the difference is that it is now visible, and
+ * Ctrl-C reaches it. The cap is a backstop against a graph whose retries never exhaust, and it
+ * reports rather than looping — a command that hangs is indistinguishable from one that is
+ * working.
  */
 async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): Promise<RunProjection> {
   let p = first;

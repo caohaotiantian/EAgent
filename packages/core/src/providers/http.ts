@@ -556,6 +556,33 @@ async function hold(ms: number, signal: AbortSignal, sleep: (ms: number) => Prom
  * different places with two different threat models: `maxAttempts`, `baseDelayMs` and
  * `maxDelayMs` are an embedder's (refused at the top, before a single request is made),
  * and `retryAfterMs` is the PROVIDER'S (clamped per attempt — see `retryDelay`).
+ *
+ * **A RATE LIMIT IS THE ONE FAILURE THIS LOOP DOES NOT WAIT OUT.** Everything here is paid
+ * inside the CALLER'S unit of concurrency — for `@loom/core` that is an engine worker slot —
+ * and the caller is the only layer that knows the slot exists. Measured before the change,
+ * one leased Task against a provider answering `429, Retry-After: 30`:
+ *
+ *     slept                 [8000, 8000, 8000, 8000, 8000, 8000]
+ *     journal at first hold run.submitted … task.leased policy.decided effect.started
+ *
+ * — 48 s of a worker held, with nothing on the journal saying so, so no scheduler could give
+ * the slot to anyone else. A 429 is also the only status where the remote party has SAID the
+ * wait is long, so it is the case where deferring is both possible and worth it: the error
+ * carries `retryAfterMs` out to a caller that can wait without holding anything.
+ *
+ * **WHAT STILL SLEEPS HERE, AND ITS BOUND.** Everything else retryable — a transport reset, a
+ * `503`/`529` overload, `408`/`425` — has no advice worth scheduling and is usually fixed by
+ * trying again in a moment, so paying it here is cheaper than a journal round-trip. The bound
+ * is `maxDelayMs` per hold and `maxAttempts - 1` holds: **16 s by default** (8 s × 2), and
+ * whatever an operator chose if they raised either. That is a conditional sleep on purpose,
+ * and it is bounded by two numbers the deployment picked rather than by the provider's.
+ *
+ * **WITH NO ENGINE PRESENT** — the adapter is embeddable on its own — a 429 now surfaces on
+ * the first response instead of after two hidden holds. That is a behaviour change and it is
+ * the right one: the embedder is handed the provider's own advice and decides, where before
+ * the call silently consumed up to 16 s of their thread and then failed anyway. A fallback
+ * chain (`when: [E_PROVIDER_RATE_LIMIT]`) now moves to its next tier at once, which is what a
+ * fallback chain is for.
  */
 export async function postJson(
   url: string,
@@ -601,6 +628,11 @@ export async function postJson(
     const body = await res.text().catch(() => "");
     last = normalizeError(res.status, body, res.headers);
     if (!last.retryable || attempt === maxAttempts) throw last;
+    // A RATE LIMIT IS REPORTED, NEVER HELD. See `postJson`'s docstring: this call runs inside
+    // the caller's unit of concurrency, and a 429 is the one failure where the remote party has
+    // told us the wait is long. `retryAfterMs` rides out on the error, so the caller can wait
+    // somewhere it is not holding a slot.
+    if (last.code === CODES.E_PROVIDER_RATE_LIMIT) throw last;
     // Honour the provider's own advice AS FAR AS THE OPERATOR AGREED TO — it knows better
     // than a fixed curve does about its own capacity, and nothing about how long this
     // deployment is willing to wait.
