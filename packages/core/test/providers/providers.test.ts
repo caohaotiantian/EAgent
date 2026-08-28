@@ -487,6 +487,7 @@ function failing(code: string, klass: "exhausted" | "unavailable" | "policy" = "
     },
     priceOf: () => 0,
     estimateOf: () => 0,
+    outputCeilingOf: () => 1,
   };
 }
 
@@ -504,6 +505,7 @@ function ok(text: string): ModelAdapter {
     },
     priceOf: () => 0.001,
     estimateOf: () => 0.002,
+    outputCeilingOf: () => 1,
   };
 }
 
@@ -558,6 +560,7 @@ test("a mid-stream failure does not fall through — the caller already saw delt
     },
     priceOf: () => 0,
     estimateOf: () => 0,
+    outputCeilingOf: () => 1,
   };
   const chain = new FallbackAdapter({
     primary: { adapter: halfway, model: "big" },

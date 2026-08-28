@@ -139,9 +139,20 @@ export class OpenAIAdapter implements ModelAdapter {
     return round6((usage.inputTokens / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output);
   }
 
+  /**
+   * The number this adapter is about to put in `max_completion_tokens`, and nothing else.
+   *
+   * ONE EXPRESSION, THREE READERS. It used to be written out at `estimateOf` and again in
+   * `#body`, and the engine's token reservation had a third copy with a DIFFERENT constant —
+   * 1,024 against this file's 4,096 — so `budget.tokens` reserved a quarter of what the body
+   * asked for. D.7.3. The resolution rule now lives here and the body reads it.
+   */
+  outputCeilingOf(req: ModelRequest): number {
+    return req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+
   estimateOf(req: ModelRequest): number {
-    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
-    return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: maxOut });
+    return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: this.outputCeilingOf(req) });
   }
 
   #body(req: ModelRequest): unknown {
@@ -172,7 +183,7 @@ export class OpenAIAdapter implements ModelAdapter {
       // Without this many OpenAI-compatible servers omit usage entirely, and cost
       // accounting silently reports zero.
       stream_options: { include_usage: true },
-      max_completion_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      max_completion_tokens: this.outputCeilingOf(req),
       messages,
     };
     if (req.tools.length > 0) body["tools"] = req.tools.map(toOpenAITool);

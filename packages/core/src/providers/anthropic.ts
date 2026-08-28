@@ -242,16 +242,25 @@ export class AnthropicAdapter implements ModelAdapter {
     );
   }
 
+  /**
+   * The number this adapter is about to put in `max_tokens`, and nothing else.
+   *
+   * ONE EXPRESSION, THREE READERS — see `OpenAIAdapter.outputCeilingOf` for the defect that
+   * made having three copies of it expensive (D.7.3).
+   */
+  outputCeilingOf(req: ModelRequest): number {
+    return req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+
   estimateOf(req: ModelRequest): number {
-    const maxOut = req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
-    return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: maxOut });
+    return this.priceOf(req.model, { inputTokens: roughTokens(req), outputTokens: this.outputCeilingOf(req) });
   }
 
   #body(req: ModelRequest): unknown {
     const messages = req.messages.map((m) => toAnthropicMessage(m));
     const body: Record<string, unknown> = {
       model: req.model,
-      max_tokens: req.maxTokens ?? this.#opts.defaultMaxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      max_tokens: this.outputCeilingOf(req),
       stream: true,
       // `cache_control` on the last system block marks the stable prefix. It is
       // stable here because context is rebuilt from declared projections, not

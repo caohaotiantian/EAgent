@@ -1527,6 +1527,17 @@ class RoutingAdapter implements ModelAdapter {
     return to.adapter.estimateOf({ ...req, model: to.model });
   }
 
+  /**
+   * ROUTES TOO, and this is the reason `ModelAdapter.outputCeilingOf` is a METHOD taking the
+   * request rather than a field. `defaultMaxTokens` is per adapter ROW, and this class is the
+   * only adapter `openWorkspace` ever registers — so the ceiling for a turn is a fact about
+   * the row `req.model` resolves to, and a field on this object could not name it.
+   */
+  outputCeilingOf(req: ModelRequest): number {
+    const to = this.#resolve(req.model);
+    return to.adapter.outputCeilingOf({ ...req, model: to.model });
+  }
+
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
     const to = this.#resolve(model);
     return to.adapter.priceOf(to.model, usage);

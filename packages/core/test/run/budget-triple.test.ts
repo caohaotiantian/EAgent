@@ -67,7 +67,9 @@ interface TurnCost {
  *
  * `estimateOf` returns the turn's real cost rather than a padded worst case, so the DOLLAR
  * ceiling never fires by accident in a test about tokens — every refusal below is attributable
- * to the dimension the test names.
+ * to the dimension the test names. `outputCeilingOf` reports the turn's real output count for
+ * the same reason: the TOKEN reservation is then exactly what the turn bills, so the numbers in
+ * every assertion below stay arithmetic rather than gaining a padding term.
  */
 class TimedAdapter implements ModelAdapter {
   readonly provider = "timed";
@@ -95,6 +97,10 @@ class TimedAdapter implements ModelAdapter {
 
   estimateOf(): number {
     return this.#cost.costUsd;
+  }
+
+  outputCeilingOf(): number {
+    return this.#cost.outputTokens;
   }
 }
 

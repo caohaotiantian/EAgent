@@ -61,9 +61,9 @@ function spec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-function rig(script: MockScript): { engine: Engine; store: MemoryStateStore } {
+function rig(script: MockScript, defaultMaxTokens = 1024): { engine: Engine; store: MemoryStateStore } {
   const models = new ModelRegistry();
-  models.register(new MockModelAdapter({ script }), true);
+  models.register(new MockModelAdapter({ script, defaultMaxTokens }), true);
   const store = new MemoryStateStore({ now: () => NOW });
   const engine = new Engine({
     store,
@@ -79,8 +79,11 @@ function rig(script: MockScript): { engine: Engine; store: MemoryStateStore } {
   return { engine, store };
 }
 
-async function run(script: MockScript): Promise<{ status: string; a: unknown; error: unknown; events: { type: string; payload: Record<string, unknown> }[] }> {
-  const r = rig(script);
+async function run(
+  script: MockScript,
+  defaultMaxTokens = 1024,
+): Promise<{ status: string; a: unknown; error: unknown; events: { type: string; payload: Record<string, unknown> }[] }> {
+  const r = rig(script, defaultMaxTokens);
   const runId = await r.engine.submit({
     graph: compileOrThrow({ spec: spec(), resolver: RESOLVER, tools: {}, tenantCapabilities: [] }),
     inputs: { q: "the diff" },
@@ -110,6 +113,46 @@ test("FX13 — the reason survives even when the truncated turn produced text", 
 
   assert.notEqual(out.status, "succeeded", `a cut-off answer is not an answer; got ${out.status}`);
   assert.notEqual(out.a, "The first file looks fine, and the second", "half an answer must not be written as the answer");
+});
+
+// -- D.7.4: two outcomes wearing one message ---------------------------------
+
+/**
+ * "The budget never reached content" and "the answer was clipped" are different failures with
+ * different fixes, and `turnRefusal` had both facts in hand -- `contentChars` and, after D.7.3,
+ * the ceiling -- while printing the same sentence at 0 characters as at 4,000.
+ *
+ * This is the defect that silently produced an EMPTY reviewed-file in the live run at the top
+ * of this file, got approved by a human, and was written to disk. The operator's next action
+ * differs by an order of magnitude between the two arms, and the old message could not tell
+ * them which one they were in -- nor what the ceiling was, so "raise it" had no starting point.
+ */
+test("D.7.4 -- A CEILING THAT NEVER REACHED CONTENT SAYS SO, and names the number to change", async () => {
+  const out = await run(() => ({ text: "", finishReason: "max_tokens", outputTokens: 16_001 }), 16_000);
+  const msg = String((out.error as { message?: unknown } | undefined)?.message ?? "");
+
+  assert.match(msg, /emitted NO content/, `the empty case must be named as its own outcome: ${msg}`);
+  assert.match(msg, /reasoning floor/, "and it must say a nudge will not help");
+  assert.match(msg, /16000/, `the refusal must name the ceiling in effect: ${msg}`);
+  assert.match(msg, /defaultMaxTokens/, "and the field the operator has to change");
+  // The two arms must not be confusable: this is not a clipped answer and must not read as one.
+  assert.doesNotMatch(msg, /truncated, not finished/, `the clipped-answer sentence must not appear here: ${msg}`);
+});
+
+test("D.7.4 -- A CLIPPED ANSWER IS THE OTHER ARM, and still names the ceiling", async () => {
+  const out = await run(() => ({ text: "The first file looks fine, and the second", finishReason: "max_tokens" }), 16_000);
+  const msg = String((out.error as { message?: unknown } | undefined)?.message ?? "");
+
+  assert.match(msg, /truncated, not finished/, `a turn that produced text is the clipped arm: ${msg}`);
+  assert.match(msg, /16000/, "and it names the ceiling too");
+  assert.doesNotMatch(msg, /emitted NO content/, "the two arms must not both fire");
+});
+
+test("D.7.4 -- the ceiling reaches the JOURNAL, not only the console", async () => {
+  // `details.ceiling` is what an auditor folding the run reads. The message is for the operator
+  // at the terminal; the field is for everybody who arrives later.
+  const out = await run(() => ({ text: "", finishReason: "max_tokens", outputTokens: 9_001 }), 9_000);
+  assert.equal((out.error as { details?: { ceiling?: unknown } } | undefined)?.details?.ceiling, 9_000, JSON.stringify(out.error ?? {}));
 });
 
 test("FX13 — a provider refusal fails as a POLICY fact, not as a truncation", async () => {
