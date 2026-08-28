@@ -25,7 +25,7 @@ import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
-import { filePayloads, type PayloadStore } from "./journal/payloads.ts";
+import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
 import { builtinTools, fsRestore } from "./builtin/tools.ts";
 import { Engine } from "./run/engine.ts";
@@ -70,7 +70,7 @@ import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph } from "./telemetry/spans.ts";
-import type { EdgeId, GateId, NodeId, RunId, Seq } from "./ids.ts";
+import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
@@ -242,7 +242,9 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     is deliberately loadable from NOWHERE ELSE; a path read out of a config
                     file or the workspace would let a file decide what code this process
                     runs. A module that does not resolve, throws, has no function default
-                    export, or registers nothing REFUSES TO BOOT.
+                    export, or registers nothing REFUSES TO BOOT. So does a REPEATED
+                    --extension-module: flags here are last-wins, so a second one would
+                    discard the first module in silence. Use the comma form for two.
   --allow-exec P,P  programs proc.exec may run, matched EXACTLY by name — not as a
                     prefix, not as a path. Without it the tool is not registered and
                     the run cannot execute anything. It is the whole CONTAINMENT
@@ -297,10 +299,41 @@ export interface DeliveryConfig {
   readonly file: string;
 }
 
+/**
+ * What an empty `--egress`/`--allow-exec`/`--exec-env` would actually do — shared by those three
+ * and by nothing else, which is the point. See `listFlag`'s `otherwise`.
+ */
+const TOOL_ENABLING =
+  "while still registering the tool the flag enables. Omit the flag entirely to leave that tool unregistered.";
+
+/**
+ * `--extension-module`'s own consequence. It enables no tool: the process would try to IMPORT a
+ * file called "true" and refuse two steps from the mistake.
+ */
+const NO_MODULE_CALLED_TRUE =
+  'and this process would try to import a module called "true". Omit the flag entirely to run unextended.';
+
+/**
+ * `--take`'s own consequence. `steer` registers nothing either; the route would be confined to an
+ * edge id no graph declares, and `Engine.steer` would refuse against the compiled edge set.
+ */
+const NO_EDGE_CALLED_TRUE =
+  'and no graph declares an edge called "true". Omit the flag to leave the route to the router.';
+
 interface Args {
   readonly command: string;
   readonly positional: readonly string[];
   readonly flags: Readonly<Record<string, string | true>>;
+  /**
+   * Flag names that appeared MORE THAN ONCE on argv.
+   *
+   * `flags` is last-wins and stays that way — `loom serve $DEFAULTS --port 9000` over a
+   * `$DEFAULTS` that already said `--port 8080` is a wrapper-script idiom, and for `--egress`,
+   * `--allow-exec` and `--exec-env` a dropped repeat only ever NARROWS what the process may
+   * reach. This set exists so the one flag where dropping the earlier value LOOSENS can refuse:
+   * see `refuseRepeated`.
+   */
+  readonly repeated: ReadonlySet<string>;
 }
 
 /**
@@ -438,6 +471,15 @@ function assertKnownFlags(args: Args): void {
 export function parseArgs(argv: readonly string[]): Args {
   const positional: string[] = [];
   const flags: Record<string, string | true> = {};
+  // WHICH NAMES WERE SEEN TWICE, recorded here because this is the only place that can see it:
+  // `flags` overwrites, so by the time any caller reads it the earlier value is gone and no
+  // caller can tell an override from a loss. `Args.repeated` says why one flag cares.
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  const note = (name: string): void => {
+    if (seen.has(name)) repeated.add(name);
+    seen.add(name);
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (!a.startsWith("--")) {
@@ -448,10 +490,12 @@ export function parseArgs(argv: readonly string[]): Args {
     if (eq > 2) {
       // `--name=` yields "", which is a value the caller gave. It is NOT the same as an
       // absent flag, and the `--token` guard depends on being able to tell them apart.
+      note(a.slice(2, eq));
       flags[a.slice(2, eq)] = a.slice(eq + 1);
       continue;
     }
     const name = a.slice(2);
+    note(name);
     const next = argv[i + 1];
     if (next === undefined || next.startsWith("--")) flags[name] = true;
     else {
@@ -459,7 +503,42 @@ export function parseArgs(argv: readonly string[]): Args {
       i++;
     }
   }
-  return { command: positional[0] ?? "help", positional: positional.slice(1), flags };
+  return { command: positional[0] ?? "help", positional: positional.slice(1), flags, repeated };
+}
+
+/**
+ * REFUSE A REPEATED FLAG WHOSE DROPPED VALUE IS A LOSS RATHER THAN AN OVERRIDE.
+ *
+ * `parseArgs` is last-wins for everything, and for everything else that is right: an override is
+ * how a wrapper script layers defaults, and for the three other `listFlag` flags — `--egress`,
+ * `--allow-exec`, `--exec-env` — a dropped repeat only ever narrows what the process may reach,
+ * which is the safe direction.
+ *
+ * `--extension-module` is the one where it is not. Driven, two valid tool modules:
+ *
+ *     $ loom serve … --extension-module $S/a.mjs --extension-module $S/b.mjs
+ *       ext:    /tmp/…/b.mjs → no adapters, tool b.ping
+ *
+ * `a.mjs` was named on argv, is absent from the process, and the plane came up. That is exactly
+ * the outcome `loadExtensionModules` refuses six other ways — its own docstring says "there is no
+ * arm in which a module named on argv is skipped and the process keeps going — that is a
+ * deployment the operator believes is extended and is not" — and USAGE says every failure mode
+ * REFUSES TO BOOT. This was the arm that existed.
+ *
+ * REFUSED RATHER THAN ACCUMULATED, and the flag's own help text is why: it promises "a
+ * comma-separated list of paths", so the vocabulary for two modules already exists and a second
+ * spelling would be a second thing to keep true. Accumulating would also make this flag the only
+ * one on the CLI where repetition means something other than what it means everywhere else — a
+ * rule that has to be remembered per flag. The comma form is named in the refusal.
+ */
+function refuseRepeated(args: Args, name: string, consequence: string): void {
+  if (!args.repeated.has(name)) return;
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `--${name} was given more than once. Flags on this CLI are last-wins, so every earlier ` +
+      `--${name} would be silently discarded — ${consequence} Pass one --${name} with the values ` +
+      `comma-separated instead: --${name} a,b`,
+  );
 }
 
 /**
@@ -699,9 +778,9 @@ export function openWorkspace(
   // this line does not already give and would hide the run's own history from the person
   // looking for it.
   // READ BEFORE THE JAIL IS BUILT, so a malformed flag refuses before any tool is registered.
-  const egressHosts = listFlag(args, "egress", "a hostname");
-  const execPrograms = listFlag(args, "allow-exec", "a program name");
-  const execEnvNames = listFlag(args, "exec-env", "an environment variable name");
+  const egressHosts = listFlag(args, "egress", "a hostname", TOOL_ENABLING);
+  const execPrograms = listFlag(args, "allow-exec", "a program name", TOOL_ENABLING);
+  const execEnvNames = listFlag(args, "exec-env", "an environment variable name", TOOL_ENABLING);
   const jail = {
     root,
     // `resources/` JOINS THE DATA DIR, and for a sharper reason than the journal has. Its
@@ -1433,7 +1512,19 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
   return {
     models,
     tools,
-    adapters: models.registered,
+    // A COPY, BECAUSE `models.registered` IS STILL LIVE. `openWorkspace` is handed this same
+    // registry and registers the mock and the `--models-file` `RoutingAdapter` into it, so a
+    // field aliasing the map grew AFTER the loader returned — and the boot line reads it. Driven
+    // on a tool-only module with no `--models-file`:
+    //
+    //   ext:    /tmp/…/tool.mjs → adapter mock, tool house.ping
+    //
+    // `mock` is `MockModelAdapter`, which the operator's module did not register. The comment at
+    // the boot line says the opposite — "Read off the loaded object rather than off the flag, so
+    // no line can name a module that did not register what it said it would" — and it was true
+    // of the flag and false of the object. `toolNames` and `files` were already snapshots; this
+    // was the one field that was not.
+    adapters: new Map(models.registered),
     toolNames: tools.list().map((t) => t.name),
     files,
     // `get()` WITH NO ARGUMENT is the registry's own question — "is there a default?" —
@@ -1517,9 +1608,29 @@ export interface ModelConfig {
 }
 
 /** The two adapters this binary can construct. A typo here must not become a silent mock. */
-const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string }>> = {
-  anthropic: { keyEnv: "ANTHROPIC_API_KEY" },
-  openai: { keyEnv: "OPENAI_API_KEY" },
+/**
+ * `keyless` IS THE ADAPTER'S OWN RULE, RESTATED WHERE THE FILE IS READ.
+ *
+ * `openai.ts` accepts an empty `apiKey` when a `baseUrl` is given ("a local endpoint legitimately
+ * needs no key"); `anthropic.ts` throws `E_PROVIDER_AUTH: anthropic adapter requires an apiKey`
+ * on an empty key, `baseUrl` or not. This reader used to know only the first half, so the
+ * missing-key refusal offered `"apiKeyEnv": null` to every row and an operator who took the
+ * advice on an `anthropic` row walked into a second, differently-worded refusal one layer down.
+ * Driven:
+ *
+ *     {"provider":"anthropic","baseUrl":"http://127.0.0.1:9"}
+ *       → E_CONFIG_INVALID: … or set "apiKeyEnv": null if this endpoint genuinely takes no
+ *         credential (which also needs a "baseUrl").
+ *     the same row + "apiKeyEnv": null
+ *       → E_CONFIG_INVALID: adapters[0] ("anthropic"): anthropic adapter requires an apiKey
+ *
+ * It failed closed, so nothing was ever loosened — but a remedy that cannot work is the same
+ * defect as a cause that is not true. The flag is here rather than in a `provider === "openai"`
+ * test at the two sites so a third provider has to answer the question.
+ */
+const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string; readonly keyless: boolean }>> = {
+  anthropic: { keyEnv: "ANTHROPIC_API_KEY", keyless: false },
+  openai: { keyEnv: "OPENAI_API_KEY", keyless: true },
 };
 
 /**
@@ -1677,6 +1788,18 @@ export function readModels(
           `of the local or gateway endpoint you mean, or name the variable holding the key.`,
       );
     }
+    // AND THE DECLARATION IS REFUSED WHERE THE ADAPTER WOULD REFUSE IT ANYWAY — here, naming the
+    // adapter's rule, rather than at construction naming a field this file never mentioned. See
+    // `PROVIDERS.keyless` for the measurement: accepting it here produced a second refusal in
+    // other words, for an operator who had just done what the first one said.
+    if (keyless && !PROVIDERS[provider]!.keyless) {
+      refuse(
+        `${where} ("${name}") sets "apiKeyEnv": null, but the ${provider} adapter requires a key at every ` +
+          `endpoint — unlike the OpenAI wire, it has no local, keyless form, and it would refuse this row at ` +
+          `construction with "${provider} adapter requires an apiKey". Name the variable holding the key with ` +
+          `"apiKeyEnv", or point this row at an OpenAI-wire endpoint if the endpoint you mean speaks that wire.`,
+      );
+    }
     const keyEnv = rawKeyEnv === undefined || keyless ? PROVIDERS[provider]!.keyEnv : nonEmpty(rawKeyEnv, `${where} ("${name}") "apiKeyEnv"`, refuse);
     const apiKey = keyless ? "" : (env[keyEnv] ?? "");
     // NO CARVE-OUT FOR `openai` + `baseUrl` ANY MORE. The adapter still accepts an empty key
@@ -1688,8 +1811,12 @@ export function readModels(
       refuse(
         `${where} ("${name}") needs the environment variable ${keyEnv}, which is ${env[keyEnv] === undefined ? "not set" : "empty"}. ` +
           `The key is deliberately NOT a field in this file — the file is configuration and the key is a credential. ` +
-          `Set ${keyEnv}, or name a different variable with "apiKeyEnv", or set "apiKeyEnv": null if this endpoint ` +
-          `genuinely takes no credential (which also needs a "baseUrl").`,
+          `Set ${keyEnv}, or name a different variable with "apiKeyEnv"` +
+          // OFFERED ONLY WHERE IT WORKS. On `anthropic` this sentence sent the operator into a
+          // second refusal; see `PROVIDERS.keyless`.
+          (PROVIDERS[provider]!.keyless
+            ? `, or set "apiKeyEnv": null if this endpoint genuinely takes no credential (which also needs a "baseUrl").`
+            : `. The ${provider} adapter has no keyless form, so there is no third option here.`),
       );
     }
 
@@ -4068,7 +4195,15 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   //
   // ONLY IN `main`. `--extension-module` is argv and nothing else — no file, no resource ref,
   // no directory scan — which is the entire trust argument at `loadExtensionModules`.
-  const extensionPaths = listFlag(args, "extension-module", "a module path");
+  //
+  // AND A REPEAT IS REFUSED, not resolved last-wins: see `refuseRepeated` for the measurement.
+  refuseRepeated(
+    args,
+    "extension-module",
+    "a module named on argv would not be loaded, and the plane would come up as a deployment " +
+      "the operator believes is extended and is not.",
+  );
+  const extensionPaths = listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
   const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths);
   const ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
   try {
@@ -4356,7 +4491,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         if (typeof nodeId !== "string" || nodeId.trim() === "") {
           throw err.validation(CODES.E_CONFIG_INVALID, "steer needs --node NODE_ID: the node whose route is being overridden");
         }
-        const take = listFlag(args, "take", "one or more edge ids") ?? [];
+        const take = listFlag(args, "take", "one or more edge ids", NO_EDGE_CALLED_TRUE) ?? [];
         const raw = args.flags["reason"];
         const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
         // BIND FIRST, or every steer on a restarted workspace answers "not attached" — which is
@@ -4704,13 +4839,66 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // join. `cohortPeers` therefore takes it too, and a test counts the members.
         const bucketInput = bucketFlag(args);
         // `graph` is not optional here any more — the block above returned 1 rather than fold
-        // without it, which is what makes `t.specResolved` true for the judged run by
-        // construction. Peers are a different question; see below.
+        // without it. THAT USED TO BE THE WHOLE OF `t.specResolved`, and this comment said so:
+        // "which is what makes `t.specResolved` true for the judged run by construction". It
+        // stopped being true when `verdictsResolved` was ANDed into the field, and nothing here
+        // noticed — so a run folded WITH its graph could still arrive unmeasured, be scored 0,
+        // and be journaled with a golden blocker announcing a missing graph. Peers are a
+        // different question; see below.
         const t = foldTrajectory(events, {
           promotedGraphHashes,
           graph,
           ...(bucketInput === undefined ? {} : { bucketInput }),
         });
+        // THE OTHER HALF OF "NO SPEC, NO SCORE" — a refusal, not a zero, for the same reason.
+        // With the graph in hand the only remaining way the ladder comes back unreadable is a
+        // verdict that left the journal, and the two deserve the same treatment: `measureCohort`
+        // would drop this run from its own cohort, `isGolden` would refuse it, and the number
+        // journaled beside those facts would still be a 0 that reads as "this run was bad".
+        // Worse, `components` carries no `specResolved`, so the row a `suite freeze` reads back
+        // has `delivered: true` and nothing at all saying nobody measured it — the run enters
+        // the exam as a case, ordered by a score of 0 it did not earn. Appending that row would
+        // put a fiction in the only authoritative state, which is the sentence the no-graph
+        // refusal above already argues.
+        if (!t.verdictsResolved) {
+          const nodes = new Map(graph.spec.nodes.map((n) => [n.id, n.type]));
+          // THE CHANNELS THAT ACTUALLY LEFT, and not every channel the evaluator wrote.
+          // `Step.channelsWritten` is `writes` UNION `external` — trajectory.ts joins them on
+          // purpose, so a step that moved 300 KB is not read as a step that wrote nothing — so
+          // naming that union here told the operator a channel still sitting in the journal was
+          // a payload handle. MEASURED, on an evaluator writing a 300 kB `verdict` beside a small
+          // `note` that stayed inline: `(note, verdict)`. That is this refusal committing the
+          // defect the refusal exists to fix, one clause along.
+          //
+          // READ FROM THE DECLARATION, not from the values: `task.committed.external` is where
+          // the executor that did the externalising says which channels left, and events.ts
+          // states why a fold may not decide it by looking at a value. LAST COMMIT PER TASK
+          // WINS, which is what `foldTrajectory` does with the same field — a retry that kept
+          // its verdict inline is the state `verdictsResolved` was computed from, so it must be
+          // the state this sentence names.
+          const externalPerTask = new Map<TaskId, readonly string[]>();
+          for (const e of events) {
+            if (!isEvent(e, "task.committed") || e.taskId === undefined) continue;
+            externalPerTask.set(e.taskId, Object.keys(e.payload.external ?? {}));
+          }
+          const blind = [
+            ...new Set(
+              t.steps.filter((s) => nodes.get(s.nodeId) === "evaluator").flatMap((s) => externalPerTask.get(s.taskId) ?? []),
+            ),
+          ].sort();
+          process.stderr.write(
+            `run ${runId} ran an evaluator whose channel is a payload handle rather than a value ` +
+              `(${blind.join(", ")}): its canonical form passed ${String(EXTERNALISE_ABOVE_BYTES)} bytes, so the ` +
+              `engine moved it out of the journal and this fold cannot read the verdict it held. Every signal ` +
+              `that evaluator carried would read as absent, and outcome 0 is the same number a run that failed ` +
+              `every assertion earns. Refusing instead: nothing was measured, so nothing is journaled. This run ` +
+              `is not recoverable — the value is not in its journal, and no graph or flag puts it back. ` +
+              `fix: for later runs, keep the evaluator's verdict under that size, or make its channel ineligible ` +
+              `for the payload store by declaring it in the graph's outputs or naming it in an edge or router ` +
+              `expression.\n`,
+          );
+          return 1;
+        }
         const key = cohortKeyOf(t);
         // AND THE PEERS GET IT TOO. A cohort key pins one `graphHash`, so a peer of this run ran
         // these same bytes — the whole point of a CANDIDATE cohort is thirty runs of one
@@ -4740,16 +4928,17 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // `run.submitted`'s hash, so two runs of two different authored graphs that mutate to the
         // same successor share a key and need not share a lookup. Stated rather than asserted:
         // this branch has no end-to-end coverage, and `test/evolution/score.test.ts` covers the
-        // arithmetic it guards.
-        const unmeasured = peers.members.filter((m) => !m.specResolved);
-        if (unmeasured.length > 0) {
-          const hashes = [...new Set(unmeasured.map((m) => m.graphHash))].sort();
-          process.stderr.write(
-            `! ${String(unmeasured.length)} peer run(s) in this cohort folded without their graph ` +
-              `(${hashes.join(", ")}) and are EXCLUDED from the population rather than scored 0 — a peer nobody ` +
-              `could measure would otherwise drag p90Score, and p90Score is the bar this run has to clear. ` +
-              `Publish those graphs in ${join(ws.root, "graphs")} to put them back in the cohort.\n`,
-          );
+        // arithmetic it guards. THE VERDICT HALF IS NOT SO RARE: a peer resolves its graph and
+        // still comes back unmeasured whenever its evaluator's verdict outgrew the journal, which
+        // is why the sentence is chosen by `unmeasuredNotes` and not fixed here.
+        for (const note of unmeasuredNotes(
+          peers.members,
+          join(ws.root, "graphs"),
+          "peer run(s)",
+          `are EXCLUDED from the population rather than scored 0 — a peer nobody could measure would otherwise ` +
+            `drag p90Score, and p90Score is the bar this run has to clear.`,
+        )) {
+          process.stderr.write(note);
         }
         const cohort = measureCohort(key, [t, ...peers.members]);
         const scored = scoreTrajectory(t, cohort);
@@ -5124,6 +5313,57 @@ function lastScore(events: readonly JournalEvent[]): EventPayloads["evolution.sc
   let found: EventPayloads["evolution.scored"] | undefined;
   for (const e of events) if (isEvent(e, "evolution.scored")) found = e.payload;
   return found;
+}
+
+/**
+ * WHY A COHORT SHRANK, SAID IN THE TERMS OF THE THING THAT ACTUALLY WENT WRONG.
+ *
+ * `measureCohort` drops a member whose `specResolved` is false, and two verbs announce that
+ * exclusion rather than let a cohort quietly get smaller. Both of them used to announce it with
+ * one sentence — "folded without their graph … Publish those graphs in graphs/" — because for a
+ * while that was the only way `specResolved` could be false. It stopped being the only way when
+ * `Trajectory.verdictsResolved` was ANDed into the field, and the sentence did not move: a run
+ * whose graph resolved perfectly was reported as missing it, with a remediation that republishes
+ * a graph already on disk and brings nothing back. CLAUDE.md: a correction that replaces a false
+ * claim with a differently-false one is worse than the original, because it asserts verified
+ * accuracy and is believed harder.
+ *
+ * THE TWO CAUSES ARE DISJOINT BY CONSTRUCTION, not by preference. With no graph the fold has no
+ * node types, no step is known to be an `evaluator`, and `verdictsResolved` comes back vacuously
+ * true — so `!verdictsResolved` proves the graph WAS there, and `!specResolved && verdictsResolved`
+ * is exactly the no-graph half. One helper for both call sites so the split cannot drift back.
+ *
+ * `noun` because one caller is looking at peers and the other at a population that includes its
+ * own anchor; `consequence` because the exclusion costs a `score` run its `p90Score` bar and a
+ * `promote` run its pairing, which are different sentences about the same drop.
+ */
+function unmeasuredNotes(
+  members: readonly Trajectory[],
+  graphsDir: string,
+  noun: string,
+  consequence: string,
+): readonly string[] {
+  const hashesOf = (ms: readonly Trajectory[]): string => [...new Set(ms.map((m) => m.graphHash))].sort().join(", ");
+  const notes: string[] = [];
+  const noGraph = members.filter((m) => !m.specResolved && m.verdictsResolved);
+  if (noGraph.length > 0) {
+    notes.push(
+      `! ${String(noGraph.length)} ${noun} in this cohort folded without their graph (${hashesOf(noGraph)}) and ` +
+        `${consequence} Publish those graphs in ${graphsDir} to put them back in the cohort.\n`,
+    );
+  }
+  const noVerdict = members.filter((m) => !m.verdictsResolved);
+  if (noVerdict.length > 0) {
+    notes.push(
+      `! ${String(noVerdict.length)} ${noun} in this cohort folded WITH their graph (${hashesOf(noVerdict)}) but an ` +
+        `evaluator's channel had passed ${String(EXTERNALISE_ABOVE_BYTES)} bytes and left the journal for the ` +
+        `payload store, so no verdict could be read, and ${consequence} Publishing a graph does not bring these ` +
+        `back — the values are not in their journals. To make later runs measurable, keep an evaluator's verdict ` +
+        `under that size, or make its channel ineligible for the payload store by declaring it in the graph's ` +
+        `outputs or naming it in an edge or router expression.\n`,
+    );
+  }
+  return notes;
 }
 
 /** What `--bucket` builds: `FoldTrajectoryOptions["bucketInput"]`, named so it can be passed on. */
@@ -6110,15 +6350,17 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   }
   // Said here for the reason `loom score` says it: `measureCohort` drops a member it could not
   // measure, and a cohort that shrank has to say why or the `n < MIN_COHORT_SIZE` refusal below
-  // blames the operator's corpus for the operator's graphs/ directory.
-  const specless = [anchorT, ...peers.members].filter((m) => !m.specResolved);
-  if (specless.length > 0) {
-    const hashes = [...new Set(specless.map((m) => m.graphHash))].sort();
-    process.stderr.write(
-      `! ${String(specless.length)} run(s) in this cohort folded without their graph (${hashes.join(", ")}) and ` +
-        `are excluded from the population AND from the pairing — an unmeasured baseline scores 0, and pairing ` +
-        `against a 0 hands this candidate that whole score as improvement it did not earn.\n`,
-    );
+  // blames the operator's corpus for the operator's graphs/ directory. WHICH why is the point —
+  // "publish the graph" is a no-op for a member whose graph resolved and whose verdict did not,
+  // so the two causes get their own sentence. See `unmeasuredNotes`.
+  for (const note of unmeasuredNotes(
+    [anchorT, ...peers.members],
+    join(ws.root, "graphs"),
+    "run(s)",
+    `are excluded from the population AND from the pairing — an unmeasured baseline scores 0, and pairing ` +
+      `against a 0 hands this candidate that whole score as improvement it did not earn.`,
+  )) {
+    process.stderr.write(note);
   }
   const cohort = measureCohort(key, [anchorT, ...peers.members]);
   if (cohort.n < MIN_COHORT_SIZE) {
@@ -6126,9 +6368,14 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       CODES.E_CONFIG_INVALID,
       `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a promotion needs at least ` +
         `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED, did work, and could be MEASURED — a ` +
-        `run that failed, did nothing, or folded without its graph is excluded from the population as well as from ` +
-        `the medians, so the number here is smaller than the journal row count and that is the point. Any ! line ` +
-        `above says which exclusion applied. Record more runs of this workflow first.`,
+        // THE SET, AND ALL OF IT. This used to end at "folded without its graph", which was the
+        // whole of `specResolved` until `verdictsResolved` joined it; the enumeration did not
+        // move, so the one exclusion an operator cannot fix by publishing a graph was the one it
+        // did not name. CLAUDE.md: name the set a claim covers.
+        `run that failed, did nothing, folded without its graph, or folded WITH its graph while an evaluator's ` +
+        `verdict sat in the payload store is excluded from the population as well as from the medians, so the ` +
+        `number here is smaller than the journal row count and that is the point. Any ! line above says which ` +
+        `exclusion applied. Record more runs of this workflow first.`,
     );
   }
 
@@ -6338,16 +6585,22 @@ function requirePositional(args: Args, i: number, what: string): string {
  * This is the `String(true)` family `--token`, `--port`, `--input`, `--as`, `--reason` and every
  * `pathFlag` already refuse. Three flags had escaped it; they are the three that decide what
  * this process may reach outside itself.
+ *
+ * `otherwise` IS A PARAMETER BECAUSE THE CONSEQUENCE IS NOT SHARED. The sentence used to be
+ * fixed — "while still registering the tool the flag enables. Omit the flag entirely to leave
+ * that tool unregistered" — which is `--egress`/`--allow-exec`/`--exec-env`'s reason attached to
+ * every caller. Driven: `loom gates … --extension-module` printed it, and `--extension-module`
+ * enables no tool; so does `--take`, on a verb with no tools in it at all. Five callers, and the
+ * two that inherited someone else's reason are the whole of this defect class.
  */
-function listFlag(args: Args, name: string, what: string): readonly string[] | undefined {
+function listFlag(args: Args, name: string, what: string, otherwise: string): readonly string[] | undefined {
   const v = args.flags[name];
   if (v === undefined) return undefined;
   if (v === true || v === "") {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `--${name} needs ${what}: ${v === "" ? `the one given was empty (\`--${name} "$VAR"\` does this when the variable is unset)` : "the flag was given with no value at all"}. ` +
-        `It would otherwise read as the single entry "true", while still registering the tool the flag enables. ` +
-        `Omit the flag entirely to leave that tool unregistered.`,
+        `It would otherwise read as the single entry "true", ${otherwise}`,
     );
   }
   // An entry that is blank after trimming is a stray comma, not a name. Dropping them silently

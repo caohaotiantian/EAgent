@@ -21,14 +21,22 @@
  * installed. A source tree that is there but will not read is the undecidable case, and that
  * refuses like the rest.
  *
- * THAT SILENT CASE IS ONE ERRNO WIDE, and `sourceDirState` below is where it is decided: only
- * `ENOENT` from `lstat` on the source path — no directory entry of any kind — is the shipped
- * copy. This sentence used to be false. Until 2026-08-28 the test was `try { statSync(dir)
- * .isDirectory() } catch { false }`, which answered the undecidable case with the passing
- * value three ways: an `EACCES` anywhere on the path (measured: `packages/core` chmod 000 with
- * the sources genuinely edited ran the stale binary, exit 0), a regular file at the path, and a
- * dangling symlink there — `statSync` follows links, so it reports that last one as ENOENT and
- * it was indistinguishable from having no sources at all.
+ * THAT SILENT CASE IS `ENOENT` ALL THE WAY UP, and `sourceDirState` below is where it is
+ * decided: `lstat` must report `ENOENT` on the source path AND on every ancestor of it as far as
+ * the directory the binary sits beside, until one of them resolves to a real directory. Only
+ * then is there no directory entry of any kind on the way to the sources, which is the shipped
+ * copy.
+ *
+ * THIS SENTENCE HAS BEEN FALSE TWICE, and the second time is why it now says "all the way up".
+ * Until 2026-08-28 the test was `try { statSync(dir).isDirectory() } catch { false }`, which
+ * answered the undecidable case with the passing value three ways: an `EACCES` anywhere on the
+ * path (measured: `packages/core` chmod 000 with the sources genuinely edited ran the stale
+ * binary, exit 0), a regular file at the path, and a dangling symlink there — `statSync` follows
+ * links, so it reported that last one as ENOENT and it was indistinguishable from having no
+ * sources at all. The fix checked the LAST component and the sentence claimed the whole path, so
+ * the same hole survived one component up: with `packages` a dangling symlink and the sources
+ * stale, exit 0, `APP RAN`. A directory entry did exist; it merely did not resolve.
+ * `ancestorState` is that half.
  *
  * CONSTRAINTS. It is CommonJS and it is inlined verbatim into the bundle, so it may use only
  * `node:` builtins — the same zero-runtime-dependency rule `check-zero-dep.mjs` holds
@@ -178,17 +186,23 @@ function said(err) {
  * source directory the digest can be taken over, and `{ present: true, why }` for the
  * undecidable case, where `why` is the sentence the refusal prints.
  *
- * THE SET THAT PASSES SILENTLY, named so it can be checked: `ENOENT` from `lstat`, and nothing
- * else. Every other errno — `EACCES` on this directory or any parent, `ENOTDIR`, `ELOOP`,
- * `EPERM` — and every non-directory at the path refuses, because none of them is evidence that
- * there are no sources here to be behind. It is only evidence that this code cannot tell.
+ * THE SET THAT PASSES SILENTLY, named so it can be checked: `ENOENT` from `lstat` here AND an
+ * `ancestorState` that finds a real directory above with nothing missing but this path. Every
+ * other errno — `EACCES` on this directory or any parent, `ENOTDIR`, `ELOOP`, `EPERM` — and
+ * every non-directory at the path or at any ancestor refuses, because none of them is evidence
+ * that there are no sources here to be behind. It is only evidence that this code cannot tell.
+ *
+ * `root` bounds the ancestor walk, and it is a PARAMETER so a test can pin that boundary. It is
+ * a belt to `ancestorState`'s own braces rather than the only stop: the walk also ends at the
+ * first ancestor that resolves to a directory, and the binary's own directory is one, so an
+ * omitted `root` cannot in practice climb past the tree the binary is in.
  */
-function sourceDirState(dir) {
+function sourceDirState(dir, root) {
   let entry;
   try {
     entry = lstatSync(dir);
   } catch (err) {
-    if (err && err.code === "ENOENT") return { present: false, why: null };
+    if (err && err.code === "ENOENT") return ancestorState(dir, root);
     return { present: true, why: "the source path could not be examined (" + said(err) + ")" };
   }
 
@@ -208,6 +222,69 @@ function sourceDirState(dir) {
   }
   if (!target.isDirectory()) return { present: true, why: "the source path is a symlink to something that is not a directory" };
   return { present: true, why: null };
+}
+
+/**
+ * `ENOENT` ON THE SOURCE PATH IS NOT YET "NOTHING IS HERE" — the ancestors decide.
+ *
+ * `lstat` reports `ENOENT` for a path whose PARENT does not resolve just as it does for one whose
+ * parent is a directory with nothing in it, and only the second means "no sources beside this
+ * binary". Until 2026-08-28 the check stopped at the source path, so the fix that closed a
+ * dangling symlink AT `packages/core/src` left the same hole one component up:
+ *
+ *     packages is a DANGLING symlink, sources STALE   exit=0  stdout=[APP RAN]
+ *
+ * The header sentence — "no directory entry of any kind" — was a claim about the whole path that
+ * the code only checked at its last component. A directory entry did exist; it simply did not
+ * resolve, which is the undecidable case wearing the passing answer, and this file exists because
+ * that shape has now cost the same guard twice.
+ *
+ * WALKS UP TO `root` AND NO FURTHER, which is what keeps it from wandering into a user's
+ * filesystem: `root` is the directory the binary is in the `bin/` of, and everything above it is
+ * somebody else's business. The first ancestor that RESOLVES TO A DIRECTORY ends the walk with
+ * `present: false` — the sources are genuinely not here. Anything else there refuses: a
+ * non-directory, a symlink that does not resolve or resolves to a non-directory, or any errno
+ * other than `ENOENT`.
+ *
+ * WHICH OF THOSE ARMS ACTUALLY FIRES, measured rather than assumed, because this file's own
+ * defect class is a claim wider than its code. On POSIX `lstat` answers ENOTDIR — not ENOENT —
+ * for a path whose parent is a regular file, and EACCES for one whose parent cannot be searched,
+ * so `sourceDirState`'s own `errno !== "ENOENT"` arm has already refused both before this
+ * function is reached. Driven on this tree: `packages` a symlink to a FILE, and
+ * `packages/core` a symlink to a FILE, both come back "the source path could not be examined
+ * (ENOTDIR…)". THE ONE ARM HERE THAT ANSWERS A CASE NOTHING ELSE ANSWERS is the dangling symlink
+ * — `lstat` on the child of a link that resolves to nothing really is ENOENT. The rest are
+ * belt-and-braces and are kept because the cost is three `lstat` calls on the install path and
+ * the alternative is a guard whose fail-closed shape depends on an errno table.
+ */
+function ancestorState(dir, root) {
+  let at = dirname(dir);
+  for (;;) {
+    let entry;
+    try {
+      entry = lstatSync(at);
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") {
+        return { present: true, why: "an ancestor of the source path (" + at + ") could not be examined (" + said(err) + ")" };
+      }
+      // Nothing here either. Stop at `root`, and stop at the filesystem root, so a `root` that
+      // is itself absent cannot spin.
+      const up = dirname(at);
+      if (at === root || up === at) return { present: false, why: null };
+      at = up;
+      continue;
+    }
+    if (entry.isDirectory()) return { present: false, why: null };
+    if (!entry.isSymbolicLink()) {
+      return { present: true, why: "an ancestor of the source path (" + at + ") is not a directory, so nothing under it can be examined" };
+    }
+    try {
+      if (statSync(at).isDirectory()) return { present: false, why: null };
+    } catch (err) {
+      return { present: true, why: "an ancestor of the source path (" + at + ") is a symlink that does not resolve (" + said(err) + ")" };
+    }
+    return { present: true, why: "an ancestor of the source path (" + at + ") is a symlink to something that is not a directory" };
+  }
 }
 
 function report(stamp, headline, detail) {
@@ -244,9 +321,12 @@ function report(stamp, headline, detail) {
  * WITHOUT BEING TOLD, not that nobody drives one.
  */
 function check(stamp) {
-  const dir = join(sourceRoot(), stamp.dir);
+  const root = sourceRoot();
+  const dir = join(root, stamp.dir);
 
-  const state = sourceDirState(dir);
+  // `root` bounds the ancestor walk: the silent case is a claim about the path BETWEEN the
+  // binary and its sources, and nothing above that is this check's business.
+  const state = sourceDirState(dir, root);
   if (!state.present) return; // a shipped copy: no sources here, so nothing to be behind
 
   // `state.why` is already a refusal; only a directory that resolved gets as far as the digest.
