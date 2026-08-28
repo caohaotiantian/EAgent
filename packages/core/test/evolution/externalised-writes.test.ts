@@ -25,7 +25,7 @@ import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { RunId } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
-import { EXTERNALISE_ABOVE_BYTES, memoryPayloads, type PayloadStore } from "../../src/journal/payloads.ts";
+import { EXTERNALISE_ABOVE_BYTES, memoryPayloads, payloadHandle, type PayloadStore } from "../../src/journal/payloads.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
@@ -212,4 +212,43 @@ test("a node body that writes a literal handle shape is an ordinary value", asyn
   // The value was never externalised, so the fold must digest the value it actually holds —
   // not the substitute it would build for a declared handle.
   assert.equal(step.observationDigest, digest({ report: { $payload: { digest: "deadbeef", bytes: 9 } } }));
+});
+
+// ── The shape the two folds agree on ─────────────────────────────────────────
+
+/**
+ * THE DESIGN ARGUMENT FOR `observed()` IS THAT IT USES `payloadHandle`, THE SAME FUNCTION
+ * `run/projection.ts` BUILDS `withHandles` FROM — "so the two folds describe an externalised
+ * channel one way rather than two". Nothing pinned it. A reviewer replaced `payloadHandle(ref)`
+ * in `observed()` with `{ $payload: { digest: ref.digest } }`, dropping `bytes` and diverging
+ * from `projection.ts:withHandles`, and all five tests above stayed green.
+ *
+ * The digest is over the WHOLE handle, so `bytes` is inside it — which is what makes one
+ * assertion enough, and which is also why the divergence was invisible: every test above
+ * compares a digest to another digest built the same wrong way, or to `digest({})`. This one
+ * compares it to the handle rebuilt from the JOURNAL's own `{digest, bytes}` instead.
+ */
+test("an externalised channel folds to the handle shape the projection uses, `bytes` included", async () => {
+  const graph = compile(spec());
+  const { engine, store } = rig(memoryPayloads());
+  const runId = await engine.submit({ graph, inputs: { src: BIG } });
+  assert.equal((await engine.advance(runId)).status, "succeeded");
+  const events = await eventsOf(store, runId);
+
+  const committed = events.find((e) => e.type === "task.committed" && String(e.taskId).startsWith("write@"));
+  assert.ok(committed !== undefined && committed.type === "task.committed");
+  const ref = (committed.payload.external ?? {})["report"];
+  assert.ok(ref !== undefined && typeof ref.bytes === "number" && ref.bytes > 0, "the journal records digest AND bytes");
+
+  const step = foldTrajectory(events, { graph }).steps.find((s) => String(s.nodeId) === "write")!;
+  assert.equal(
+    step.observationDigest,
+    digest({ report: payloadHandle(ref) }),
+    "the trajectory's handle must be the projection's handle — same function, same fields, `bytes` too",
+  );
+  assert.notEqual(
+    step.observationDigest,
+    digest({ report: { $payload: { digest: ref.digest } } }),
+    "…and specifically not a handle with `bytes` dropped, which is the mutation nothing caught",
+  );
 });

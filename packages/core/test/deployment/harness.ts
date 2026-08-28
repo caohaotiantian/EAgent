@@ -377,9 +377,20 @@ export function completeLines(text: string): readonly string[] {
  * `serving` used to wait for the substring `"  clock:"` and both copies of it wrote the
  * reason down as a fact — "the LAST stdout line", "seeing it means the whole block has
  * landed". `announce` writes `  models:` after it, so the fact was false and the conclusion
- * unsupported: `serving` returned with 60 bytes of banner in flight, every time, and every
- * assertion a caller made on `out` before `stop()` was reading a prefix that happened to be
- * long enough. Reproduced deterministically before this change; see `boot-banner.test.ts`.
+ * unsupported: boot could return with 60 bytes of banner in flight, and an assertion a caller
+ * made on `out` before `stop()` would then be reading a prefix that happened to be long enough.
+ *
+ * HOW OFTEN, MEASURED, because the first version of this note said "every time" and that was
+ * not true of the code that shipped. Re-run on 2026-08-28 with the old `"  clock:"` wait put
+ * back, ten boots per condition, reading `out` at the instant boot returned:
+ *
+ *     5 ms poll (what this helper actually does)   0/10 boots left anything in flight
+ *     tight poll (`setImmediate`)                  3/10, exactly 60 bytes — the `models:` line
+ *
+ * So the window is REAL and it is NARROWER THAN THE POLL. That is a latent hazard and not an
+ * observed failure, and it is why this waits on a named set: the next line added to `announce`
+ * — or a slower machine, or a smaller pipe chunk — widens a window nothing else in the tree
+ * would notice. `limits:` was in fact added later, which is the same hazard arriving twice.
  *
  * A named set can be checked, and `boot-banner.test.ts` checks it against a real child's
  * drained stdout — so a line added to `announce` and not added here goes RED there instead
@@ -425,6 +436,49 @@ export function bannerKeysIn(text: string): readonly string[] {
   return keys;
 }
 
+/**
+ * WHAT THE BANNER IS STILL MISSING, as names. Empty means the whole banner has landed and boot
+ * may return; anything in it is a line still in flight.
+ *
+ * A FUNCTION AND NOT A CONDITION INLINE IN `serving`, because a condition inline in `serving`
+ * is a condition only a real child can drive, and a real child delivers this banner in one
+ * chunk on an idle machine — measured, 10 boots out of 10. That is why the defect this replaces
+ * survived: every integration test around it passed with the wrong wait in place. `awaitBanner`
+ * below is what makes the wait itself checkable against a buffer that fills on demand.
+ */
+export function bannerMissing(out: string): readonly string[] {
+  const have = new Set(bannerKeysIn(out));
+  const missing: string[] = BANNER_KEYS.filter((k) => !have.has(k));
+  if (!completeLines(out).some((l) => /^loom listening on http:\/\//.test(l))) missing.unshift("the address line");
+  return missing;
+}
+
+/**
+ * Wait until `read()` holds the WHOLE banner — every key in `BANNER_KEYS` plus the address
+ * line, all as COMPLETE lines.
+ *
+ * WHEN IT CANNOT DECIDE IT REFUSES: on `abort()` returning a reason (the child died), and on
+ * the deadline, naming what never arrived. It never returns on a prefix, which is the entire
+ * property. The deadline is a FAILURE deadline and never a measurement — nothing here asserts
+ * how fast a boot is.
+ */
+export async function awaitBanner(
+  read: () => string,
+  abort: () => string | null,
+  describe: (missing: readonly string[]) => string,
+  deadlineMs = 15_000,
+): Promise<void> {
+  const giveUp = Date.now() + deadlineMs;
+  for (;;) {
+    const missing = bannerMissing(read());
+    if (missing.length === 0) return;
+    const dead = abort();
+    if (dead !== null) throw new Error(dead);
+    if (Date.now() > giveUp) throw new Error(describe(missing));
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 export interface Serving {
   readonly out: string;
   readonly err: string;
@@ -466,23 +520,16 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
     // fast a boot is. WHEN IT CANNOT DECIDE IT REFUSES — it names the keys that never
     // arrived and prints both streams, rather than returning a plane whose banner is a
     // prefix.
-    const deadline = Date.now() + 15_000;
-    for (;;) {
-      const have = new Set(bannerKeysIn(out));
-      const missing = BANNER_KEYS.filter((k) => !have.has(k));
-      const addressed = completeLines(out).some((l) => /^loom listening on http:\/\//.test(l));
-      if (addressed && missing.length === 0) break;
-      if (died !== undefined) {
-        throw new Error(`\`loom ${argv.join(" ")}\` exited (${died}) before it finished booting.\nstdout:\n${out}\nstderr:\n${err}`);
-      }
-      if (Date.now() > deadline) {
-        throw new Error(
-          `\`loom ${argv.join(" ")}\` never booted — no complete line for: ${missing.join(", ") || "(the address line)"}.\n` +
-            `stdout:\n${out}\nstderr:\n${err}`,
-        );
-      }
-      await new Promise((r) => setTimeout(r, 5));
-    }
+    await awaitBanner(
+      () => out,
+      () =>
+        died === undefined
+          ? null
+          : `\`loom ${argv.join(" ")}\` exited (${died}) before it finished booting.\nstdout:\n${out}\nstderr:\n${err}`,
+      (missing) =>
+        `\`loom ${argv.join(" ")}\` never booted — no complete line for: ${missing.join(", ")}.\n` +
+        `stdout:\n${out}\nstderr:\n${err}`,
+    );
     // Run over COMPLETE lines, so the port cannot be a prefix of itself.
     const m = /loom listening on http:\/\/(\[[^\]]+\]|[^:\s]+):(\d+)/.exec(completeLines(out).join("\n"));
     if (m?.[1] === undefined || m[2] === undefined) throw new Error(`no address line in:\n${out}`);

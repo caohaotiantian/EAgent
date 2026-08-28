@@ -21,13 +21,22 @@
  * installed. A source tree that is there but will not read is the undecidable case, and that
  * refuses like the rest.
  *
+ * THAT SILENT CASE IS ONE ERRNO WIDE, and `sourceDirState` below is where it is decided: only
+ * `ENOENT` from `lstat` on the source path — no directory entry of any kind — is the shipped
+ * copy. This sentence used to be false. Until 2026-08-28 the test was `try { statSync(dir)
+ * .isDirectory() } catch { false }`, which answered the undecidable case with the passing
+ * value three ways: an `EACCES` anywhere on the path (measured: `packages/core` chmod 000 with
+ * the sources genuinely edited ran the stale binary, exit 0), a regular file at the path, and a
+ * dangling symlink there — `statSync` follows links, so it reports that last one as ENOENT and
+ * it was indistinguishable from having no sources at all.
+ *
  * CONSTRAINTS. It is CommonJS and it is inlined verbatim into the bundle, so it may use only
  * `node:` builtins — the same zero-runtime-dependency rule `check-zero-dep.mjs` holds
  * `packages/core` to — and it must run to completion before anything else.
  */
 
 const { createHash } = require("node:crypto");
-const { readdirSync, readFileSync, statSync, writeSync } = require("node:fs");
+const { lstatSync, readdirSync, readFileSync, statSync, writeSync } = require("node:fs");
 const { dirname, join, sep } = require("node:path");
 
 /**
@@ -152,6 +161,55 @@ function sourceRoot() {
   return dirname(dirname(anchor));
 }
 
+/** An errno's own words where it has them; `String(err)` where it does not. Never empty. */
+function said(err) {
+  return err && err.message ? String(err.message) : String(err);
+}
+
+/**
+ * ABSENT vs UNREADABLE — the one distinction that decides whether this whole check is allowed
+ * to be silent, so it is made rather than assumed.
+ *
+ * `lstatSync` and not `statSync`, because the question is about the PATH and not about what it
+ * points at: `statSync` follows symlinks, so a dangling one reports `ENOENT` and is therefore
+ * indistinguishable from having no sources at all — which is the passing answer.
+ *
+ * Returns `{ present: false }` for the shipped copy, `{ present: true, why: null }` for a
+ * source directory the digest can be taken over, and `{ present: true, why }` for the
+ * undecidable case, where `why` is the sentence the refusal prints.
+ *
+ * THE SET THAT PASSES SILENTLY, named so it can be checked: `ENOENT` from `lstat`, and nothing
+ * else. Every other errno — `EACCES` on this directory or any parent, `ENOTDIR`, `ELOOP`,
+ * `EPERM` — and every non-directory at the path refuses, because none of them is evidence that
+ * there are no sources here to be behind. It is only evidence that this code cannot tell.
+ */
+function sourceDirState(dir) {
+  let entry;
+  try {
+    entry = lstatSync(dir);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { present: false, why: null };
+    return { present: true, why: "the source path could not be examined (" + said(err) + ")" };
+  }
+
+  if (entry.isDirectory()) return { present: true, why: null };
+
+  if (!entry.isSymbolicLink()) {
+    return { present: true, why: "the source path is not a directory, so no digest can be taken over it" };
+  }
+
+  // Something IS here — a symlink — so "nothing to be behind" is already ruled out. All that is
+  // left is whether it lands on a directory, and both other answers are refusals.
+  let target;
+  try {
+    target = statSync(dir);
+  } catch (err) {
+    return { present: true, why: "the source path is a symlink that does not resolve (" + said(err) + ")" };
+  }
+  if (!target.isDirectory()) return { present: true, why: "the source path is a symlink to something that is not a directory" };
+  return { present: true, why: null };
+}
+
 function report(stamp, headline, detail) {
   const lines = [
     "",
@@ -188,20 +246,18 @@ function report(stamp, headline, detail) {
 function check(stamp) {
   const dir = join(sourceRoot(), stamp.dir);
 
-  let present = false;
-  try {
-    present = statSync(dir).isDirectory();
-  } catch {
-    present = false;
-  }
-  if (!present) return; // a shipped copy: no sources here, so nothing to be behind
+  const state = sourceDirState(dir);
+  if (!state.present) return; // a shipped copy: no sources here, so nothing to be behind
 
+  // `state.why` is already a refusal; only a directory that resolved gets as far as the digest.
   let now = null;
-  let failure = null;
-  try {
-    now = digestSources(dir);
-  } catch (err) {
-    failure = err && err.message ? String(err.message) : String(err);
+  let failure = state.why;
+  if (failure === null) {
+    try {
+      now = digestSources(dir);
+    } catch (err) {
+      failure = said(err);
+    }
   }
 
   if (failure !== null) {
@@ -246,6 +302,7 @@ module.exports = {
   digestSources,
   stampFor,
   distIsBehindSources,
+  sourceDirState,
   sourceRoot,
   check,
   banner,

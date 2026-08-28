@@ -145,11 +145,17 @@ function fastest(label: string, fn: () => void, runs = 5): number {
  *
  * A COUNT AND NOT A CLOCK. The timed half of the guard below cannot be made robust by any
  * statistic, and this is why: a machine under load does not slow the two sizes equally.
- * Measured against `node --test packages/core/test/scale.test.ts` with fourteen CPU burners
- * alongside, the failing run read `compile 100 nodes: 4.5 ms` — its ordinary figure — and
- * `compile 500 nodes: 213.3 ms` against an ordinary 55, for `46.9×`. The disturbance is
- * superlinear in working-set size, so a RATIO between two sizes amplifies it instead of
- * cancelling it, and min-of-N cannot dodge what lasts longer than the samples.
+ * Measured 2026-08-28 on a 16-core machine, `node --test packages/core/test/scale.test.ts`
+ * against forty CPU burners, four consecutive runs — every one of them RED, at 31.3×, 41.0×,
+ * 45.9× and 51.6×, while `compile 100 nodes` never moved off its ordinary 4.4–4.5 ms and
+ * `compile 500 nodes` went 139.9 → 228.6 ms. The disturbance is superlinear in working-set
+ * size, so a RATIO between two sizes amplifies it instead of cancelling it, and min-of-N
+ * cannot dodge what lasts longer than the samples.
+ *
+ * THE NUMBER THAT MATTERS IS THE ONE BESIDE IT: in all four of those red runs the count below
+ * read `314356 → 5616756 (17.87×)`, digit for digit, the same figure it gives on an idle
+ * machine. The algorithm had not moved at all. That is the whole case for the count, and it is
+ * why a red clock here is not on its own evidence of anything.
  *
  * A count has none of that: it is byte-identical run to run and machine to machine, because
  * it counts what the code does rather than how long the machine took to do it.
@@ -211,13 +217,21 @@ test("compile scales sub-quadratically from 100 to 500 nodes", () => {
   );
   assert.ok(bigReads < smallReads * 25, `100→500 nodes cost ${(bigReads / smallReads).toFixed(2)}× the spec reads`);
 
-  // AND THE CLOCK, for the class the counter cannot see. Its noise is reduced by the two
-  // things that were measured to help, and by nothing that was not: the spec is built OUTSIDE
-  // the timed region (it was inside, so every sample timed 5,400 object allocations that are
-  // not compile), and `runs` is 15 rather than 5. Under fourteen CPU burners the old form was
-  // 14/15 with one 46.9× excursion; this form was 15/15 with the whole spread inside
-  // 14.9×–18.9×. Idle, both are 30/30. Interleaving the two sizes was tried and measured to
-  // change nothing.
+  // AND THE CLOCK, for the class the counter cannot see. Two things reduce its noise and were
+  // kept because they measured: the spec is built OUTSIDE the timed region (it was inside, so
+  // every sample timed 5,400 object allocations that are not compile), and `runs` is 15 rather
+  // than 5. Interleaving the two sizes was tried and measured to change nothing.
+  //
+  // WHAT THEY DO NOT DO IS MAKE IT ROBUST, and an earlier version of this comment implied they
+  // had. Re-measured 2026-08-28, 16 cores, this form:
+  //
+  //     alone, load average ~3      10/10 pass, 15.5×–16.6×
+  //     14 CPU burners               6/6 pass, 14.7×–19.6×
+  //     40 CPU burners               0/4 pass, 31.3×–51.6×
+  //
+  // Interleaved against the pre-2026-08-28 form under those same 40 burners, that form failed
+  // 3 of 4. Neither form survives real contention; this one is not the more robust of the two,
+  // it is the one that reports a second, load-immune number when it goes red.
   const smallSpec = bigSpec(10, 10);
   const bigSpecOnce = bigSpec(50, 10);
   const small = fastest("compile 100 nodes", () => compileBig(smallSpec), 15);

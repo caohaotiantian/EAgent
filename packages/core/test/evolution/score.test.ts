@@ -67,6 +67,7 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
     // The fold had the graph. A fixture that said otherwise would be scoring a run nobody
     // measured, which is what `specResolved` exists to refuse — see the tests that set it false.
     specResolved: true,
+    verdictsResolved: true,
     ...over,
   };
 }
