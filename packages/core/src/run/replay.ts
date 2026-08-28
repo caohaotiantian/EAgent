@@ -20,6 +20,15 @@
  * side effect. See `the design notes` B11. If replay needs an effect the journal does not contain, that is
  * `E_REPLAY_DIVERGENCE`, a loud failure, never a silent live call.
  *
+ * RE-EXECUTION STAYS. Serving a body's output from the record was the obvious answer and it is
+ * the wrong one twice over: it would put a `function` member in `journal/events.ts`'s
+ * forever-vocabulary to hold a fact the journal already holds as `state.reduced`, and it would
+ * re-open a fail-open — `evolution/gate.ts` reads `report.match` for
+ * `EvalCase.expect.identicalToRecording`, so a candidate graph whose ONLY change is a body would
+ * produce no divergent frame and the promotion gate would certify a body it never exercised.
+ * Re-execution is the only thing that catches a body regression. What was wrong was not the
+ * re-execution but the REPORT: see `ReplayReport.hermetic` and `ReplayEffects.liveBodies`.
+ *
  * Three uses, one mechanism: debugging (step a run), regression evaluation (D10
  * replays a frozen suite against a candidate), and verification (CI replays fixtures
  * and asserts every `state.hash` matches — which is how a reducer regression is
@@ -117,6 +126,14 @@ export class ReplayEffects {
   readonly #leases = new Map<string, number[]>();
   /** Keys `leaseAt` could not answer. See `derivedClocks`. */
   readonly #clockDerived = new Set<string>();
+  /**
+   * Tasks whose body this replay re-executed unvouched-for. See `bodyEntered`.
+   *
+   * Sits with `#clockDerived` rather than with the effect maps because it is the same KIND of
+   * accumulator: a fact about what the replay had to do, not a fact the recording holds. Neither
+   * is keyed by an effect key, which is exactly why `hermetic` could not see either of them.
+   */
+  readonly #liveBodies = new Set<string>();
 
   static fromEvents(events: Iterable<JournalEvent>): ReplayEffects {
     const r = new ReplayEffects();
@@ -266,6 +283,51 @@ export class ReplayEffects {
     return [...this.#clockDerived].sort();
   }
 
+  /**
+   * Record that a replay reached a `function` or `evaluator{assertion}` body, and whether the
+   * runtime can vouch for it. See `liveBodies` for what the answer is for.
+   *
+   * `bounded` is `isRealmBounded(body)` and nothing else — a fact about where the body came
+   * from, decided by an unforgeable brand `resources/realm.ts` stamps and no caller can name.
+   * A `false` is what an embedder's hand-registered host closure gives, and what a realm built
+   * over a non-empty `RealmOptions.globals` gives, because those two are the cases the runtime
+   * genuinely cannot decide.
+   *
+   * CALLED AT FETCH TIME, BEFORE INVOCATION, so a body that throws, is terminated at its
+   * deadline, or is aborted still counts. The count can therefore be too HIGH and never too
+   * low, which is the only direction a term of `hermetic` may err in.
+   */
+  bodyEntered(taskId: string, bounded: boolean): void {
+    if (!bounded) this.#liveBodies.add(taskId);
+  }
+
+  /**
+   * Tasks whose body the replay RE-EXECUTED without being able to vouch for it.
+   *
+   * This is the term `hermetic` was missing, and the reason it was missing is worth keeping:
+   * the other two terms are indexed by EFFECT KEY, and a `function` or `evaluator{assertion}`
+   * body computes no effect key. So "a body ran live" was not expressible over the vocabulary
+   * the report had, and the field answered its undecidable case with the passing value.
+   *
+   * NOT A LIST OF EVERY BODY THAT RAN. A branded body re-executes too — that is deliberate, and
+   * it is the only thing that catches a body regression, since serving a body's output by key
+   * would let `evolution/gate.ts` certify a candidate graph whose only change IS the body. What
+   * this names is the narrower set: the bodies whose reproducibility the runtime has no ground
+   * to assert.
+   *
+   * EMPTY IS NOT YET EVIDENCE — NOTHING IN `src/` CALLS `bodyEntered`. The two call sites are
+   * `Engine.#runFunction` and `Engine.#runEvaluator`'s assertion arm, both by way of
+   * `#functionBody`, and `run/engine.ts` is owned by another change. Until that line lands this
+   * getter answers `[]` on every run and `hermetic` over-claims exactly as it did before — see
+   * `ReplayReport.hermetic`, which says so in the field's own docstring rather than here where a
+   * reader of the report would not find it.
+   * `test/run/hermetic-names-the-live-bodies.test.ts` pins the un-wired state as a source census,
+   * so the day a caller appears that assertion goes red and sends its author to both docstrings.
+   */
+  get liveBodies(): readonly string[] {
+    return [...this.#liveBodies].sort();
+  }
+
   /** Recorded effects the replay never asked for — a divergence in the other direction. */
   get unserved(): readonly string[] {
     return [...this.#completed.keys()].filter((k) => !this.#served.has(k)).sort();
@@ -340,19 +402,58 @@ export interface ReplayReport {
    */
   readonly unservedEffects: readonly string[];
   /**
+   * Tasks whose `function` or `evaluator{assertion}` body this replay RE-EXECUTED without being
+   * able to vouch for it — a hand-registered host closure, or a realm built over embedder
+   * globals. See `ReplayEffects.bodyEntered`, which decides it, and `liveBodies`, which explains
+   * why the answer is about provenance rather than about purity.
+   *
+   * Surfaced as the list and not folded into the boolean, because "not hermetic" without the
+   * taskIds sends its reader to the wrong file — the same argument `unservedEffects` makes one
+   * field up, and the reason `loom replay` prints frames rather than a verdict.
+   *
+   * ALWAYS EMPTY IN THIS TREE. Nothing calls `bodyEntered` yet; see `hermetic` below.
+   */
+  readonly liveBodies: readonly string[];
+  /**
    * Nothing this replay needed had to be RE-DERIVED instead of served from the record.
    *
-   * Two things can falsify it, and both are "the journal could not answer":
+   * Three things can falsify it. Two are "the journal could not answer":
    *   - a recorded effect that started and never recorded an outcome (`unknownOutcomes`) — the
    *     original process died mid-call, and replay cannot invent what the world did;
    *   - a body clock the recording has no lease for (`ReplayEffects.derivedClocks`) — the replay
    *     ran a `function` or `evaluator{assertion}` body the recording did not lease at that
    *     attempt, so `ctx.now()` came from the shadow's own lease rather than from history.
    *
-   * NOT "nothing ran live", which is how it reads and how it was read. `function` and
-   * assertion bodies compute no effect key, so they never appear in `unknownOutcomes` and
-   * `hermetic` stays true while they re-execute — measured alongside `match: false` on a body
-   * calling `Math.random()`. See this module's header.
+   * The third is "the RUNTIME could not answer", and it is a different question:
+   *   - `liveBodies` — a body re-executed that the runtime cannot vouch for. Bodies re-execute
+   *     on purpose; what this term adds is whether the one that ran was realm-bounded.
+   *
+   * WHY THE THIRD TERM HAD TO BE ITS OWN KIND. The first two are indexed by effect key, and a
+   * `function` or `evaluator{assertion}` body computes NO effect key — so on a graph of function
+   * nodes no input could make this field false, while the bodies re-executed live. That is a
+   * guard answering its undecidable case with the passing value, inside the one field the replay
+   * thesis is quoted by. "A body ran live" was not expressible over the terms the report had.
+   *
+   * AND IT IS STILL NOT FALSIFIABLE ON THIS TREE, WHICH IS WHY THE ADMISSION STAYS. The term
+   * exists and the brand behind it exists (`resources/realm.ts`'s `isRealmBounded`), but nothing
+   * in `src/` calls `ReplayEffects.bodyEntered`, so `liveBodies` is `[]` on every run and this
+   * field means exactly what it meant before: `function` and assertion bodies never appear in
+   * `unknownOutcomes` and `hermetic` stays true while they re-execute — measured alongside
+   * `match: false` on a body calling `Math.random()`. Two lines, both outside this change, close
+   * it: `Engine.#functionBody` must call `bodyEntered(taskId, isRealmBounded(body))` at fetch
+   * time, and `resources/functions.ts` must carry the brand onto the `FunctionBody` it wraps
+   * around `compileRealm`'s `RealmCall` — measured, `isRealmBounded` is `true` on the realm call
+   * and `false` on the loader's wrapper, so today every function body would read as unvouched-for.
+   * Publishing the field early is deliberate: `test/run/hermetic-names-the-live-bodies.test.ts`
+   * pins the un-wired state, so the day either line lands the census goes red and its author is
+   * sent here to delete this paragraph rather than left to discover it.
+   *
+   * WHAT `hermetic: true` WILL MEAN, once wired, and it is narrower than it reads: "no body ran
+   * that the runtime could not vouch for", not "nothing nondeterministic happened". A branded
+   * body can still read the host's default locale and observe garbage collection — both are
+   * PASSING tests, `THE HOST'S DEFAULT LOCALE IS AMBIENT` and `GARBAGE COLLECTION IS OBSERVABLE`
+   * in `test/resources/realm-has-no-clock.test.ts`. Naming that set is what keeps this from
+   * becoming a smaller version of the same overclaim.
    */
   readonly hermetic: boolean;
   /**
@@ -688,11 +789,15 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     original,
     replayed,
     unservedEffects: unserved,
+    liveBodies: effects.liveBodies,
     // Non-hermetic when the recorded run had effects with no outcome: replay cannot
     // invent what the world did while the process was dying — or when a body read a clock
-    // this recording could not answer, which is the same statement one field over. See
-    // `ReplayEffects.derivedClocks` and `ReplayReport.hermetic`.
-    hermetic: effects.unknownOutcomes.length === 0 && effects.derivedClocks.length === 0,
+    // this recording could not answer, which is the same statement one field over — or when a
+    // body re-executed that the runtime cannot vouch for. The third conjunct has no producer in
+    // this tree and is therefore inert; `ReplayReport.hermetic` names the two lines that give it
+    // one, and why it is published before them. See also `ReplayEffects.derivedClocks`.
+    hermetic:
+      effects.unknownOutcomes.length === 0 && effects.derivedClocks.length === 0 && effects.liveBodies.length === 0,
     graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound },
     reboundEffects: rebound,
     unverifiedModelEffects: unverified,

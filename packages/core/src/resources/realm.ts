@@ -660,7 +660,7 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   }
 
   const where = `${opts.what} resource "${opts.label}"`;
-  return (payload) => {
+  const call: RealmCall = (payload) => {
     // ONLY JSON CROSSES *HERE*. Every value this call hands the body is rebuilt from this string
     // INSIDE the context, so no host object reaches it BY THIS ROUTE. `opts.globals` is the route
     // that is not this one, and it is not rebuilt — see `RealmOptions.globals`.
@@ -687,6 +687,92 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     if (crossedAsThenable(host, where)) refuseThenable(where);
     return host;
   };
+  // THE ONLY PLACE THE BRAND IS APPLIED. See `REALM_BOUND` for what it means and what it does
+  // not, and `isRealmBounded` for how it is read.
+  //
+  // SKIPPED WHOLESALE WHEN THE EMBEDDER SENT GLOBALS, rather than inspected. `RealmOptions.globals`
+  // is a value seam and `refuseGovernedGlobals` reads NAMES: whatever survives the name check
+  // arrives in the body as the very host object that was passed. This module already measures two
+  // of the escapes — `{MY_DATE: Date}` gives a body a live wall clock, `{LOOKUP: {a: 1}}` gives it
+  // `LOOKUP.constructor.constructor("return typeof process")()` → `"object"`. Deciding whether some
+  // particular passed-in object is inert is the verifier-pronouncing-code-safe problem; refusing
+  // the brand is the answer a guard that cannot decide is supposed to give.
+  if (opts.globals === undefined || Object.keys(opts.globals).length === 0) REALM_BOUND.add(call);
+  return call;
+}
+
+/**
+ * THE BRAND, AND WHY IT IS A `WeakSet` RATHER THAN A SYMBOL PROPERTY.
+ *
+ * `ReplayReport.hermetic` used to be a claim nothing could falsify on a graph of `function`
+ * nodes: its two terms are indexed by effect key, and a `function` or `evaluator{assertion}`
+ * body computes none, so no input made the field false while the bodies RE-EXECUTED LIVE. The
+ * fix is not to journal a body's output — that would put a `function` member in the kernel's
+ * forever-vocabulary in order to re-open a fail-open this project already paid to close, and
+ * re-execution is the only thing that catches a body regression at all. The fix is to stop
+ * claiming more than the runtime can vouch for, and this symbol is what it can vouch for: that
+ * a body came out of `compileRealm` with no embedder globals, so its inputs are a JSON payload
+ * and its globals are this context's own.
+ *
+ * A REGISTRY SYMBOL WOULD BE FORGEABLE, WHICH IS THE WHOLE POINT. `Symbol.for(k)` is reachable
+ * by any code in the process holding the same string — `engine.ts`'s `REBIND_DEADLINE` is
+ * `Symbol.for("@loom/core:function.rebindDeadline")` and is spelled out in two files — so an
+ * embedder could stamp it on a host closure and the spoof would land on the PASSING side of the
+ * flag.
+ *
+ * AND A MODULE-PRIVATE `Symbol()` IS FORGEABLE TOO, WHICH IS THE PART THAT HAD TO BE MEASURED
+ * RATHER THAN REASONED. The obvious fix is `const REALM_BOUND = Symbol()` closed inside this
+ * module, stamped with `Object.defineProperty(call, REALM_BOUND, …)`, on the argument that
+ * "nothing outside this file can name it, so nothing outside this file can claim it". That
+ * argument is FALSE, and the thing that makes it false is that a symbol used as a property key
+ * is no longer private — the object carries it, and any holder of the object can read it back.
+ * Measured against that spelling, three ways, all `true` where `false` was the whole point:
+ *
+ *     branded call            -> true
+ *     own symbols on the call -> 1 [Symbol()]
+ *     FORGED host closure     -> true      Object.getOwnPropertySymbols(branded), copied over
+ *     FORGED via Reflect      -> true      Reflect.ownKeys(branded), same route
+ *     FORGED via prototype    -> true      setPrototypeOf(closure, branded) — `in` walks the chain
+ *
+ * A `WeakSet` writes NOTHING onto the object, so there is nothing to enumerate and nothing to
+ * copy, and `has` consults no prototype chain. Membership is a fact held in this module's own
+ * closure about an identity, not a mark travelling on the value. It is also the reason there is
+ * no exported adder: the only way into the set is to have been RETURNED BY `compileRealm`, so
+ * possession of one branded call buys nothing that could be transferred to another object.
+ * That difference is the difference between a brand and a hint, and a hint is not something a
+ * replay report may rest a hermeticity claim on.
+ *
+ * The cost, stated: a `WeakSet` keyed on the call means a body's brand dies with the body, which
+ * is correct — and it means `isRealmBounded` cannot answer for a body serialized and revived,
+ * which nothing does and which would be a different claim anyway.
+ *
+ * WHAT THE BRAND DOES NOT MEAN, named because the field it feeds is exactly the kind that gets
+ * read as total. A branded body is realm-bounded; it is not proven deterministic. Two ambient
+ * routes to a value replay cannot reproduce are still open inside the realm and are pinned as
+ * PASSING tests in `test/resources/realm-has-no-clock.test.ts` — `THE HOST'S DEFAULT LOCALE IS
+ * AMBIENT` and `GARBAGE COLLECTION IS OBSERVABLE`. So `hermetic: true` with this conjunct means
+ * "no body ran that the runtime could not vouch for", not "nothing nondeterministic happened".
+ * The direction is what makes it progress rather than motion: the old inaccuracy over-claimed,
+ * this one under-claims, and an under-claiming guard is the only kind that is safe to be wrong.
+ */
+const REALM_BOUND = new WeakSet<object>();
+
+/**
+ * Was this body compiled by `compileRealm` with no embedder globals?
+ *
+ * FALSE IS THE ANSWER FOR EVERYTHING THIS MODULE DID NOT MAKE, and that is the fail-closed
+ * direction: a hand-registered host closure, a body from a realm carrying `opts.globals`, a
+ * plain object, `undefined`. Absence of evidence is reported as unvouched-for, never as
+ * bounded, so nothing a caller can pass makes this answer `true` by accident.
+ *
+ * NO `try` HERE, and its absence is the point rather than an omission: `WeakSet.prototype.has`
+ * runs no user code. It does not read a property, does not invoke a getter, does not consult a
+ * `has` trap, and does not walk a prototype chain — so unlike every other guard in this file it
+ * has no undecidable case to fail closed on. A hostile `Proxy` gets `false` because it is not in
+ * the set, which is the same answer for the same reason as every other stranger.
+ */
+export function isRealmBounded(fn: unknown): boolean {
+  return typeof fn === "function" && REALM_BOUND.has(fn);
 }
 
 /**
