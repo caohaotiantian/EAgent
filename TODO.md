@@ -13,6 +13,86 @@ green at 524 exports.
 2,302 tests passing; four guards green — zero-dep, public surface at 527 exports, and the
 kernel file list.
 
+## State at 2026-08-28 — what the long session closed, and what it left
+
+**116 commits on `loom` since `86b84c9`. Gate: 2,468 tests, 0 fail; zero-dep, surface at 540
+pinned exports, kernel at 10 files. Live provider spend across the whole session: $1.59.**
+
+**THE ROADMAP IS CLOSED.** All eight items in `DESIGN.md`'s Sequence now name a command that
+passes. The last one — "a candidate promoted over that cohort because it measurably beat the
+baseline" — was met against a live provider: 20 paired inputs, 20 wins, 0 losses, one-sided 95%
+lower bound 0.1059, and the candidate 42% cheaper. It is a PROMPT candidate, which is what D6
+defines self-improvement as and precisely what the replayed gate structurally cannot see. The
+record is `docs/evolution-loop-2026-08-27.md`.
+
+**THE KERNEL SEAM CENSUS WENT 2 -> 8**, four distinct seams declared twice each by their two
+halves: an operator command the executor must consult, a payload that is a REFERENCE, running
+the undo of an effect that already happened, and a durable fact gaining a discriminant. That
+ledger exists so this cannot happen quietly; `git log --grep='^Kernel-seam:'` is the count.
+Whether four new seams in one session is the right price is the maintainer's call, not the
+implementer's.
+
+**THE DEFECT CLASS THAT ACCOUNTED FOR NEARLY EVERY REAL FINDING**, stated once because it will
+recur: *a guard answering its undecidable case with the passing value.* Members found this
+session — `gateCandidate` certifying a candidate it never ran; 0% vs 0% satisfying
+"non-inferior"; an empty suite reported valid; a new audit rule firing on healthy journals the
+product itself writes; a cost ratio over a zero baseline reported as "1.00x"; a deferral budget
+that bounded everything except the last deferral; `loom score` reporting outcome 0 for a run
+whose graph it could not find. Three of those were introduced BY this session and caught by its
+own reviewers.
+
+### What is still open, by section
+
+| section | open | the shape of it |
+|---|---|---|
+| §A0 | 17 bullets | audit findings; five are NEW measurements from this session |
+| §A | 3 | defects and unguarded behaviour |
+| §B | 10 (6 open, 4 partial) | declared and wired to nothing — down from 13 |
+| §C | 11 | unbuilt observability; §C.4 closed by the subgraph span |
+| §D | 13 | **decisions, and they are the maintainer's** — see below |
+| §E | 7 | deferred on purpose; do not revive without reading the reason |
+| §F/§G/§H | 19 | facts to carry forward, field-survey work, housekeeping |
+
+### §D — the thirteen the implementer must not answer alone
+
+`D.2` **the real numbers** (tenants, concurrent runs, runs/day, retention) is the one to answer
+first: `D.13` (CPU pool), `D.14` (retention tiering), `D.19` (circuit breaker) and the
+admission-control half of `D.4` all resolve differently depending on it, and `TenantId` is
+declared and used nowhere. Then `D.5` identity source of truth, `D.6` which approval callback
+is mandatory, `D.7` providers at launch (half answered in code), `D.8` what a join timeout
+does, `D.9` whether a function body's output becomes a journaled effect, `D.10` the
+`preAuthorization` envelope, `D.15` quorum and delegation, `D.18` the mailbox.
+
+### Named residue from this session's lanes, so it is not rediscovered
+
+- **Budgets** — a subgraph child inherits neither new ceiling (only the dollar slice); `wallMs`
+  is settled-only so it cannot refuse the call that CROSSES the ceiling, only the next one; and
+  node-level `wallMs` is implemented but demonstrated only at the run level.
+- **Operator** — `kill` is NOT built, and the reason is measured rather than a shortfall: §D.4
+  defines it as "cancel that does not wait" and `cancel` does not wait
+  (`test/run/cancel-does-not-wait.test.ts`). `steer`'s refusal names ONE node type, the one
+  that was demonstrated; it is not a proof about the other seven.
+- **Compensation** — a rewind whose rollback FAILS still appends `checkpoint.restored`;
+  `#compensateOne` invents the undo's arguments when the original recorded no `details`; the
+  `nodeApproved: false` at the compensation dispatch is load-bearing and no test discriminates
+  on it.
+- **Externalisation** — `evolution/trajectory.ts` folds `task.committed.writes` and not the
+  `external` map, so a step's externalised writes are invisible to the self-improvement
+  evidence; several hardening branches in `run/externalise.ts` are green on arrival.
+- **Rate limits** — one row of §A's failure table stays RED: a 429 arriving after a
+  non-idempotent `effect.started` with no `effect.completed` refuses both a retry and a
+  deferral, because the world may already have changed. A deferral still counts toward E4's
+  consecutive-failure streak. **Admission control is untouched** — `E_ADMISSION_REJECTED` is
+  raised by nothing and `POST /runs` admits everything it can authenticate.
+- **Subgraph spans** — there is no OTLP exporter in the repo, so `SpanLink.traceId` has no
+  consumer outside the splice; there is no HTTP trace endpoint; the span taxonomy was NOT grown
+  (a subgraph still renders as `loom.tool`), because a ninth name is a D9.1 decision.
+- **`suite freeze`** — its unresolved-gate exclusion is a guard over a state nobody has
+  constructed. Mutating it away leaves the suite green. Dead code to delete with an argument, or
+  a reachable state that needs a fixture; nobody knows which.
+
+---
+
 Nothing here is a plan. **An item surviving is a choice; an item being dropped is also a
 choice.** The roadmap lives in `DESIGN.md`'s Sequence, not here.
 
