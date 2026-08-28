@@ -82,7 +82,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Determinism** | Seeded `Math.random`, a clock bound to the task's journaled lease timestamp. Two reads of the time inside one body return the same instant |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
-| **Gates** | `npm run check` — 2,300+ tests, offline, no API key; three guards: zero-dep, public surface (525 pinned names) and the kernel file list. One package, and it has no runtime dependencies to audit |
+| **Gates** | `npm run check` — 2,300+ tests, offline, no API key; three guards: zero-dep, public surface (the exported NAME SET, enumerated in `scripts/surface.json`) and the kernel file list (`scripts/kernel.json`). One package, and it has no runtime dependencies to audit |
 | **Compensation edges** | Compile-time rollback proof, and a rollback that RUNS — on run failure and on rewind, reverse order, with three journaled outcomes (compensated / failed / never attempted) |
 
 ## What does not work yet
@@ -136,7 +136,6 @@ A gate is a row in the journal, not a promise in memory, so the process that ask
 process that answers.
 
 ```bash
-mkdir -p resources/prompt
 cat > graphs/gated.json <<'EOF'
 {"apiVersion":"loom.dev/v1","kind":"GraphSpec",
  "metadata":{"name":"gated","project":"demo","version":1},
@@ -173,8 +172,9 @@ Three things that command does not do, and each was a real defect:
 [`examples/`](examples/) is a workspace, not a snippet dump: copy the directory, `cd` into it, and
 follow [`examples/README.md`](examples/README.md). Its §§1–4 work offline with no key; §§5–6 have
 an `agent` node and want a real model, and that README's table says which is which — this
-paragraph used to say "every command works offline with no key" and that was wrong for two of the
-four graphs. `packages/core/test/examples-run.test.ts` compiles every graph in the directory on
+paragraph used to say "every command works offline with no key" and that was wrong for exactly the
+graphs with an `agent` node, which is the set that moves when a graph is added and the count is
+not. `packages/core/test/examples-run.test.ts` compiles every graph in the directory on
 every `npm run check` and runs the two that need no model, so an example that stops working stops
 the build.
 
@@ -217,9 +217,9 @@ lists below were each driven through the shipped binary rather than read off a h
 | a subgraph | `resources/subgraph/*.json` | ditto |
 | a `function` node body | `resources/function/*.js`, `*.mjs` — a bare function expression | `examples/README.md` §2 |
 | a `hook` body, at any of the eight points | `resources/hook/*.js` | §3 |
-| a tool | `--mcp-file` — any MCP server, stdio | §"Try it" above |
-| a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl`. A keyless endpoint says so: `"apiKeyEnv": null` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1","apiKeyEnv":null}` → `ok`, exit 0; the same row *without* `apiKeyEnv` → `E_CONFIG_INVALID: … needs the environment variable OPENAI_API_KEY, which is not set` |
-| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools}` and registers a `ModelAdapter` (which must implement `provider`, `stream`, `priceOf`, `estimateOf` and `outputCeilingOf`, and yield `provider` on its `done` frame); a `--models-file` `routes` row may then name it | `loom run … --extension-module ./bedrock.mjs` → `"draft": "[bedrock-converse] anthropic.claude-3-5-sonnet-…"`, and `loom replay` of that run → `{"match": true, "hermetic": true}` |
+| a tool | `--mcp-file` — any MCP server, stdio | driven against a 30-line stdio server: `loom run --mcp-file …` reaches its tool as `mcp__demo__reverse`, holding capability `mcp:demo`, and it GATES before it runs, because every MCP tool is irreversible. `test/mcp/client.test.ts` is the shipped reproduction |
+| a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl`. A keyless endpoint says so: `"apiKeyEnv": null` | the adapters row `{"provider":"openai","name":"local","baseUrl":"http://127.0.0.1:9/v1","apiKeyEnv":null}`, in a file that also carries `routes` → `ok`, exit 0; the same row *without* `apiKeyEnv` → `E_CONFIG_INVALID: … adapters[0] ("local") needs the environment variable OPENAI_API_KEY, which is not set` |
+| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools}` and registers a `ModelAdapter` (which must implement `provider`, `stream`, `priceOf`, `estimateOf` and `outputCeilingOf`, and yield `provider` on its `done` frame); a `--models-file` `routes` row may then name it | a 25-line module on an invented wire, driven offline: an `agent` node routed to it answers `"draft": "[echowire] echo-1 answered"`, and `loom replay` of that run *without* the module → `{"match": true, "hermetic": true}`. `test/cli/extension-module.test.ts` is the shipped reproduction. `examples/extensions/bedrock-converse.mjs` is the worked real-provider version and needs an AWS signer it deliberately does not ship, so it is a reference and not a reproduction |
 | an in-process tool | `--extension-module` — the same module's `tools.register(…)`; it is registered before the grant list is derived, so its capability is held | `test/cli/extension-module.test.ts` |
 | a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | see the fork list's note on transports |
 
@@ -246,9 +246,9 @@ reproduce by running the thing does not belong on it.
 - **an identity source, from the CLI** — OIDC, mTLS, a proxy-set header. `--identity-file` is the
   only flag that establishes WHO a caller is (`--token` is one shared secret and names nobody),
   and it is `BearerTokenIdentity`'s options file: an OIDC-shaped one gets `E_CONFIG_INVALID:
-  --identity-file …: must be {"subjects":[{"subject":"u:you","token":"…"}]} with at least one
+  --identity-file <path> must be {"subjects":[{"subject":"u:you","token":"…"}]} with at least one
   entry`, and there is no module flag to point at anything else — `E_CONFIG_INVALID: unknown flag:
-  --identity-module (did you mean --identity-file?)`. SPLIT again, and the same shape: `IdentitySource`
+  --identity-module (did you mean --identity-file?) …`. SPLIT again, and the same shape: `IdentitySource`
   and `startControlPlane` are both on `scripts/surface.json`, so a LIBRARY EMBEDDER passes a
   header-trusting or OIDC source straight to `startControlPlane({identity})` and forks nothing —
   measured. This row is a DEBT, not a bound: a CLI seam for an identity source deletes it.
