@@ -776,8 +776,56 @@ Each was verified against the code, not remembered.
 
 - **`E_ADMISSION_REJECTED` is raised by nothing.** `POST /runs` admits everything it can
   authenticate. There is no queue, no depth limit, no token bucket.
-- **A provider rate limit sleeps holding the worker slot — AND THAT SLEEP IS THE ONLY THING
-  MAKING A 429 SURVIVABLE.** Reframed 2026-08-26 after an attempt to fix the stated defect made
+- ~~**A provider rate limit sleeps holding the worker slot — AND THAT SLEEP IS THE ONLY THING
+  MAKING A 429 SURVIVABLE.**~~ **FIXED 2026-08-28, on the third attempt.** What changed is not
+  the implementation but the MODEL QUESTION the two failures kept escalating and neither
+  answered: *is a provider rate limit a node failure at all?* **No.** The node's work never ran.
+  So a 429 is now a DEFERRAL — requeued without charging an attempt, without consulting
+  `onlyIf`, and without needing a retry policy to exist — which is what makes the engine's
+  requeue a UNIVERSAL rescue and therefore a lossless replacement for the in-slot sleep. The
+  two earlier attempts swapped a universal rescue for a conditional one; this one made the
+  requeue unconditional first. Everything below is the record of the failures, kept verbatim.
+
+  **What it cost, said plainly.** `task.retry_scheduled` gained `deferred?: boolean` (kernel:
+  `journal/events.ts`), the fold gained `TaskRecord.deferredMs`/`deferrals` (kernel:
+  `projection.ts`), and `#retryDecision` split into two arms (kernel: `engine.ts`). All three
+  are kernel files and this landed as a `fix`, so no seam was spent — the census stays at 8.
+
+  **The bound, because "wait as long as the provider likes" is the same defect reversed.**
+  `DEFERRAL_BUDGET_MS` is 900 s of TOTAL deferred time per Task, summed from the journal, after
+  which a rate limit becomes an ordinary failure. Folded, not remembered: measured with a new
+  `Engine` built on every lap, a process-local counter would have deferred forever.
+
+  **The set is TWO, not one, and the second member was found by measurement rather than
+  argued for.** `DEFERRABLE_CODES` = {`E_PROVIDER_RATE_LIMIT`, `E_SUBGRAPH_FAILED`}. With only
+  the rate limit deferring, a 429 in a CHILD asking two minutes killed the PARENT — the parent
+  burns `DEFAULT_SUBGRAPH_RETRY`'s twenty charged polls on a 250 ms→5 s curve in about 82 s,
+  which is precisely the "> ~78 s" row of the table below, reproduced from the other side by
+  moving the wait into the child. A parent asking whether its child is done did not fail
+  either. Only the RETRYABLE arm of that code can reach the set; the `internal` arm — a child
+  that ended failed — is refused one line earlier by `!error.retryable`.
+
+  **What is NOT rescued, and it is the one row that stays red.** A 429 arriving after a
+  non-idempotent tool `effect.started` with NO `effect.completed` still refuses both a retry
+  and a deferral. The world may already have changed and the journal cannot say; refusing is
+  always allowed. `cec0940`'s serve-by-key covers the far more common shape — a tool that
+  COMPLETED, then a 429 on the next turn — which is why row 3 of the table below is green.
+
+  **Residues, none of them fixed here.**
+  - A deferral still counts toward E4's consecutive-failure streak (`#recordEvidence` runs
+    before the retry decision), so a long rate-limit outage escalates a node's posture sooner
+    than it used to. Left alone deliberately: not counting it would be LOOSENING oversight.
+  - `trajectory.ts` folds `attempts` from `task.retry_scheduled.attempt`, so a deferral no
+    longer inflates a trajectory's attempt count. That matches that fold's own stated rule —
+    "two runs of one strategy, one of which hit a flaky network, must not look like two
+    strategies" — but nobody has checked what it does to scoring.
+  - `loom run`'s `MAX_BACKOFF_WAITS` is 64 and a deferral can be up to 60 s, so a wide
+    fan-out of rate-limited tasks can still exhaust the CLI's patience. It reports rather than
+    hangs, which is why it was left.
+  - `E_ADMISSION_REJECTED` is still raised by nothing. This fixes the backpressure half of
+    D.4; admission control is untouched.
+
+  Original entry, reframed 2026-08-26 after an attempt to fix the stated defect made
   the product worse, which is the useful outcome.
 
   The stated half is true: `postJson` loops `maxAttempts` and awaits the backoff INSIDE the call,
@@ -823,15 +871,19 @@ Each was verified against the code, not remembered.
   limit a NODE FAILURE at all?** The node's work never ran. Charging a 429 against the node's
   retry budget, or refusing it because a tool the node already ran was non-idempotent, conflates
   "the provider is busy" with "the work failed". Every row in that table follows from that
-  conflation. Escalated rather than answered.
+  conflation. Escalated rather than answered. **ANSWERED 2026-08-28 — see the head of this
+  entry.** Rows 1, 2 and 4 are now green, measured in
+  `packages/core/test/run/rate-limit-defers.test.ts`; row 3's non-idempotent case is green when
+  the tool COMPLETED and still red when it started and left no completion.
 
   Worth naming as a defect CLASS rather than an instance: *a complete mechanism with no caller,
   because a lower layer silently pre-empted it.* That is §B's shape hiding under an §A symptom,
   and it is the second time this programme has found one (the other was `LeasedScheduler`).
 
-- ~~**A provider rate limit sleeps holding the worker slot.**~~ Original entry: A 429 is absorbed by a retry that
-  waits *inside* the concurrency slot, so one rate-limited provider can idle the whole node. This
-  is the most consequential live defect in the list.
+- ~~**A provider rate limit sleeps holding the worker slot.**~~ **FIXED 2026-08-28** — see the
+  entry above for how, what it cost, and what stayed red. Original entry: A 429 is absorbed by a
+  retry that waits *inside* the concurrency slot, so one rate-limited provider can idle the whole
+  node. This is the most consequential live defect in the list.
 - **A cancelled run can be left holding a queued task.** Measured 2026-08-26, and confirmed
   IDENTICAL with and without the change that surfaced it, so it is pre-existing rather than
   introduced: an abort landing between `stopped()` and `#commit` journals
@@ -1106,7 +1158,7 @@ is a better view of nothing.
 | `D.1` **The first real workflow to port.** Nobody has yet used t | **DONE** | (i) DECISION: ANSWERED BY DEMONSTRATION 2026-08-27/28 — two workflows are ported, shipped in `examples/graphs/` and DRIVEN against a live GLM-5.2: `self-review` (the one that needs a real model) and `review-bench` (33 live runs, one cohort key, $1.59 all in). The whole record is `docs/evolution-loop-2026-08-27.md`. The observable below is what made the question worth asking and is now false. Original reading. (ii) OBSERVABLE: the only run that ever reached durable storage is a one-node graph named "g" with empty inputs that FAILED before running a body; no graph… |
 | `D.2` **The real numbers** — tenants, concurrent runs, runs/day, | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the word 'tenants' has no referent in the running system — `TenantId` is declared and used nowhere, and no tenant column reaches the sqlit… |
 | `D.3` **When a compensation edge fires** — on task failure, on r | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it — today the answer is 'never, on any of the three'. (ii) OBSERVABLE: a live engine run whose tool node throws leaves the compensation target with no Task at… **ANSWERED + BUILT 2026-08-28.** The maintainer's answer was ON RUN FAILURE AND ON REWIND, and both now run: `planCompensation` walks the journal in descending seq and `#compensate` dispatches each undo through `#invokeTool` under the `compensate` effect kind, with three journaled states (compensated / failed / not attempted) rather than two. Two defects found on the way in and fixed: a rewind that hid the record while leaving the effect standing, and a resumed rollback that undid its own undos. |
-| `D.4` **Rate-limit backpressure and admission control** — see A. | open | (i) DECISION: OPEN, and the first half is confirmed a live bug. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? YES. `hold()` (http.ts:512) awaits inline in postJso… |
+| `D.4` **Rate-limit backpressure and admission control** — see A. | partial | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is still OPEN — `E_ADMISSION_REJECTED` is raised by nothing. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `bb7b702`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
 | `D.5` **The identity and permission source of truth** for approv | open | (i) DECISION: OPEN. (ii) OBSERVABLE: an approvers list naming a group or a role compiles clean and can never be satisfied, because the runtime check is exact string equality —… |
 | `D.6` which approval callback is mandatory | open | (i) DECISION: OPEN. (ii) OBSERVABLE: of the three DeliveryChannels that ship, exactly one can be answered. `channel.parseCallback !== undefined` IS the answerability test (del… |
 | `D.7` providers required at launch | partial | (i) DECISION: half ANSWERED IN CODE, half OPEN. The launch set is closed and ENFORCED at boot — `PROVIDERS` (cli.ts:815) is exactly {anthropic, openai}, and OpenAIAdapter with… |

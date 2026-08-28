@@ -284,6 +284,66 @@ const TERMINAL_TASK_STATES: ReadonlySet<TaskState> = new Set<TaskState>(["succee
  */
 const RETRY_AFTER_CEILING_MS = 300_000;
 
+/**
+ * The longest ONE TASK may spend deferred on provider rate limits, summed across every deferral.
+ *
+ * A deferral charges no attempt (see `#retryDecision`), so `maxAttempts` cannot bound it and
+ * something has to: without this, a provider stuck at 429 requeues one Task forever and the run
+ * never ends. Fifteen minutes is a judgement, and here is the argument for it. A rate-limit
+ * window is measured in seconds to a minute — that is what `retry-after` says in practice — so
+ * this is more than an order of magnitude of headroom over the case it exists to survive, and
+ * still short enough that an operator watching a run notices. Past it the rate limit stops being
+ * "the provider is busy" and starts being "this deployment cannot use this provider", which is a
+ * failure worth reporting rather than waiting through.
+ *
+ * The sum is FOLDED from the journal (`TaskRecord.deferredMs`), so a restart does not refill it.
+ * It is the scheduled time, not measured elapsed time: a decision that read a clock would not be
+ * reproducible from the log.
+ */
+const DEFERRAL_BUDGET_MS = 900_000;
+
+/**
+ * The deferral's own curve, used only when the provider named no `retry-after`.
+ *
+ * A deferral that always requeued after a fixed 1 s would be a hot loop pointed at a provider
+ * that just said it was overloaded — `parseRetryAfter`'s "Retry-After: 0" defect, rebuilt one
+ * layer up. So it doubles on the Task's DEFERRAL COUNT (folded, not remembered), which is a pure
+ * function of the journal and therefore replayable. `retry-after`, when present, still wins: the
+ * scheduled delay is `max(curve, honoured advice)`.
+ */
+const DEFERRAL_INITIAL_MS = 1_000;
+const DEFERRAL_MAX_MS = 60_000;
+
+/**
+ * The failures that are NOT this node's failure — the whole membership test for a deferral.
+ *
+ * Named as a set rather than checked inline because the claim "these and no others" is the
+ * dangerous half: every member is a case where a Task is re-entered without being charged, and
+ * a wrong member is an unbounded-in-attempts loop wearing a policy's clothes.
+ *
+ *   `E_PROVIDER_RATE_LIMIT` · the provider refused to serve us. The node's work never ran, and
+ *      nothing about this run caused it. Charging it makes a `maxAttempts: 3` node die of
+ *      somebody else's traffic. It is NOT enough to match the `exhausted` class:
+ *      `E_BUDGET_EXHAUSTED` shares that class and is a verdict about this run — it is fatal,
+ *      caught by `RUN_FATAL_CODES`, and the code test here is the second lock on that door.
+ *
+ *   `E_SUBGRAPH_FAILED` · **only its retryable arm**, and the two arms are what make this safe
+ *      to key on the code alone. `#runSubgraph` raises this code twice: `err.unavailable` for a
+ *      child that HAS NOT FINISHED ("not finished is not failed", as that site's own comment
+ *      says) and `err.internal` for a child that ended failed. `internal` is not in `RETRYABLE`,
+ *      so the `!error.retryable` refusal above has already returned by the time this set is
+ *      consulted, and only the poll can reach it. **A third, retryable arm added at that site
+ *      would silently join this set** — if one is ever added, split the code rather than
+ *      widening this comment.
+ *
+ * Why the poll belongs here at all: measured. With only the rate limit deferring, a 429 in a
+ * CHILD asking for two minutes killed the PARENT, because `DEFAULT_SUBGRAPH_RETRY` spends its
+ * twenty charged polls on a 250 ms→5 s curve in about 82 seconds — the "> ~78 s" row of the
+ * failure table in TODO §A, reproduced exactly by moving the wait into the child. The parent
+ * node did not fail either; it asked whether the child was done and the answer was "not yet".
+ */
+const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED]);
+
 const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_BUDGET_EXHAUSTED,
   CODES.E_REPLAY_DIVERGENCE,
@@ -1246,8 +1306,8 @@ export class Engine {
   async #narrowRetry(
     ctx: RunContext,
     w: Wave,
-    policyRetry: { afterMs: number; code: string },
-  ): Promise<{ retry?: { afterMs: number; code: string }; changedBy: readonly string[] }> {
+    policyRetry: { afterMs: number; code: string; deferred?: boolean },
+  ): Promise<{ retry?: { afterMs: number; code: string; deferred?: boolean }; changedBy: readonly string[] }> {
     const hooks = this.#hooksFor(ctx, "onError");
     if (hooks.length === 0) return { retry: policyRetry, changedBy: [] };
     const out = await runFilters<ErrorDecision>(
@@ -1258,8 +1318,15 @@ export class Engine {
       narrowErrorDecision,
     );
     if (out.value.retry === false) return { changedBy: out.changedBy };
+    // A HOOK MAY LENGTHEN A DEFERRAL BUT NOT RECLASSIFY IT. `deferred` is carried through
+    // untouched: whether an attempt was charged is the engine's answer about what happened,
+    // not a knob, and a hook that could clear the flag could hand a node an unlimited budget.
     return {
-      retry: { afterMs: Math.max(policyRetry.afterMs, out.value.afterMs ?? 0), code: policyRetry.code },
+      retry: {
+        afterMs: Math.max(policyRetry.afterMs, out.value.afterMs ?? 0),
+        code: policyRetry.code,
+        ...(policyRetry.deferred === true ? { deferred: true } : {}),
+      },
       changedBy: out.changedBy,
     };
   }
@@ -5637,7 +5704,15 @@ export class Engine {
             ...hookRows,
             {
               type: "task.retry_scheduled",
-              payload: { attempt: w.task.attempt + 1, afterMs: retry.afterMs, code: retry.code },
+              payload: {
+                // THE ATTEMPT IS THE BUDGET, so a deferral repeats it rather than advancing it.
+                // This one expression is the whole of "a rate limit is not charged to the node":
+                // the fold reads `attempt` from here and nowhere else.
+                attempt: retry.deferred === true ? w.task.attempt : w.task.attempt + 1,
+                afterMs: retry.afterMs,
+                code: retry.code,
+                ...(retry.deferred === true ? { deferred: true } : {}),
+              },
               actor: SYSTEM_ACTOR("executor"),
               taskId: w.task.taskId,
             },
@@ -5826,21 +5901,48 @@ export class Engine {
   }
 
   /**
-   * Whether to retry, and after how long.
+   * Whether to reschedule this Task, after how long, and whether that costs it an attempt.
    *
-   * Three independent refusals, each for a different reason:
+   * TWO ANSWERS, NOT ONE, and the difference is a model decision rather than an implementation
+   * one. A RETRY says "this node failed; do it again" and is charged: it needs a policy, it
+   * respects `maxAttempts` and `onlyIf`, and it runs out. A DEFERRAL says "the node never ran"
+   * — the provider refused to serve us — and is not charged to anybody, because charging it
+   * conflates "the provider is busy" with "the work failed", and a `maxAttempts: 3` node then
+   * dies of somebody else's traffic.
+   *
+   * ONLY `E_PROVIDER_RATE_LIMIT` DEFERS, and the narrowness is the point. It is the one failure
+   * where the remote party has explicitly said *not now*, usually with a number attached, and
+   * where nothing this run did is implicated. An overload (`E_PROVIDER_OVERLOADED`) is a
+   * judgement about capacity that may or may not be about us, and a transport reset says nothing
+   * at all — both stay ordinary retries. `E_BUDGET_EXHAUSTED` shares the `exhausted` CLASS with
+   * a rate limit and must never share this path; it is in `RUN_FATAL_CODES`, checked below, and
+   * the code test above is what keeps the two apart even so.
+   *
+   * WHY THIS FUNCTION EXISTS IN THIS SHAPE. Half two of the rate-limit fix failed twice, both
+   * times by deleting the transport's in-slot sleep and leaving only the retry arm: the sleep
+   * was a UNIVERSAL rescue and a policy retry is a CONDITIONAL one, so the swap lost every case
+   * where a condition did not hold. The deferral arm restores universality — no policy needed,
+   * no `onlyIf`, no attempt charged — which is what makes removing the sleep lossless.
+   *
+   * FOUR REFUSALS, each for a different reason, and the first three bind BOTH answers:
    *   - a NON-RETRYABLE class (validation, policy) will fail identically next time;
    *   - a RUN-FATAL code is not about this Task at all;
    *   - a NON-IDEMPOTENT tool that reached its sandbox and left NO completion may have
    *     done its work anyway. Retrying is the dangerous option, so the answer is no, and
-   *     the run takes its error edge or surfaces the gap.
+   *     the run takes its error edge or surfaces the gap. **A deferral obeys this too**: it
+   *     re-enters the node body exactly as a retry does, so the bell can ring twice for
+   *     exactly the same reason. This is the one row of the old failure table a deferral does
+   *     not rescue, and it fails closed rather than quietly.
+   *   - and for a deferral only, `DEFERRAL_BUDGET_MS`: past it the rate limit stops being a
+   *     deferral and falls through to the retry arm, which will usually fail the Task. Nothing
+   *     here can wait forever.
    */
   async #retryDecision(
     ctx: RunContext,
     p: RunProjection,
     w: Wave,
     outcome: NodeOutcome,
-  ): Promise<{ afterMs: number; code: string } | undefined> {
+  ): Promise<{ afterMs: number; code: string; deferred?: boolean } | undefined> {
     // THE COMPILED POLICY, NOT THE AUTHORED ONE. This read `w.node.retry` — a field an author
     // sets and nothing computes — so on every graph this product ships (four examples, zero
     // `"retry"` between them, and `agent()`'s own compiled spec) `policy` was `undefined` and
@@ -5852,43 +5954,35 @@ export class Engine {
     // whose `plans` a caller assembled without the compiler.
     const policy = ctx.graph.plans[w.node.id]?.retry ?? w.node.retry;
     const error = outcome.error;
-    if (policy === undefined || error === undefined) return undefined;
+    if (error === undefined) return undefined;
 
-    const attempt = w.task.attempt + 1;
-    if (attempt >= policy.maxAttempts) return undefined;
     if (!error.retryable) return undefined;
     if (RUN_FATAL_CODES.has(error.code)) return undefined;
-    if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
 
-    // A TOOL EFFECT, not any effect. The reachable set is the right question for a
-    // POSTURE — what a node might do decides how closely it is watched — and it is fine
-    // here too, PROVIDED the second half of the conjunction asks about a tool. It did
-    // not: `#effectStarted` matches any key prefixed by the taskId, `:model:` included,
-    // so an agent lost its retry policy the moment its first MODEL call started and a
-    // transport blip on turn one read as a non-idempotent tool that might have rung the
-    // bell.
-    const nonIdempotentReachable = reachableToolNames(w.node).some((name) => {
-      const t = this.tools.get(name);
-      return t !== undefined && !t.idempotent;
-    });
-    //
-    // The signal has to stay DURABLE — `startedEffects` is folded from the journal, so it
-    // survives a restart, where an in-memory list of calls does not. What was wrong was
-    // its precision, not its source: `${taskId}:` matches `:model:` too.
-    //
-    // Only refuse once the call REACHED the sandbox. A failure before that (schema
-    // validation, a policy deny) touched nothing, so retrying it is safe even for a
-    // non-idempotent tool.
-    //
-    // NARROWED FROM "STARTED" TO "STARTED AND NOT COMPLETED", which is what `#invokeTool`'s
-    // serve-by-key bought. A tool effect that COMPLETED is handed back from the record on the
-    // next attempt and its body is never entered, so re-running the Task cannot ring the bell
-    // twice — and that is the whole case this refusal was blocking: a charge that went through
-    // followed by a 429 on the next turn, which is the shape the rate-limit work kept failing
-    // on. What serve-by-key cannot cover is the other half: `effect.started` with no
-    // `effect.completed` — the tool threw, or the process died mid-call — where the world may
-    // already have changed and the record cannot say. There the refusal stands, unchanged.
-    if (nonIdempotentReachable && (await this.#unfinishedToolEffect(ctx, p, w.task.taskId)) !== undefined) return undefined;
+    // HONOUR WHAT THE SOURCE ASKED FOR, bounded. Computed once because both arms want it: the
+    // provider is the only party that knows when it will serve us again, and `retry-after:
+    // 86400` is a legal header, so a faithful record still needs a ceiling before it reaches a
+    // scheduler. `retryAfterMs` is read off the RECORDED error, so replay computes the same
+    // number from the same journal.
+    const asked = error.retryAfterMs;
+    const honoured =
+      typeof asked === "number" && Number.isFinite(asked) && asked > 0 ? Math.min(asked, RETRY_AFTER_CEILING_MS) : 0;
+
+    // A DEFERRAL, decided before the policy is consulted at all — that ordering IS the fix.
+    const task = p.tasks[w.task.taskId];
+    const deferrable = DEFERRABLE_CODES.has(error.code) && (task?.deferredMs ?? 0) < DEFERRAL_BUDGET_MS;
+    if (deferrable && !(await this.#mayHaveRungABell(ctx, p, w))) {
+      const curve = Math.min(DEFERRAL_INITIAL_MS * 2 ** (task?.deferrals ?? 0), DEFERRAL_MAX_MS);
+      // The attempt is REPEATED, not advanced: `task.retry_scheduled` is the event that moves
+      // the budget, so writing the same number is what "not charged" means durably.
+      return { afterMs: Math.max(curve, honoured), code: error.code, deferred: true };
+    }
+
+    if (policy === undefined) return undefined;
+    const attempt = w.task.attempt + 1;
+    if (attempt >= policy.maxAttempts) return undefined;
+    if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
+    if (await this.#mayHaveRungABell(ctx, p, w)) return undefined;
 
     const initial = policy.initialMs ?? 500;
     const max = policy.maxMs ?? 30_000;
@@ -5897,22 +5991,50 @@ export class Engine {
     // replay diverges. Real jitter belongs in the distributed scheduler, where the
     // delay is not part of the recorded decision.
     const curve = Math.min(raw, max);
-
-    // HONOUR WHAT THE SOURCE ASKED FOR. A provider that answers 429 with `retry-after` is
-    // telling us the one thing our curve cannot know: when it will serve us again. Retrying
-    // before then is not merely wasted, it is how a rate limit becomes a longer rate limit.
-    //
-    // Still deterministic. `retryAfterMs` is read off the RECORDED error, so a replay computes
-    // the same delay from the same journal — the property the no-jitter rule above protects.
-    //
-    // Bounded, because the field is a faithful record of a request rather than a promise that
-    // the request was reasonable: `retry-after: 86400` is a legal header, and a task parked for
-    // a day with nothing in the log explaining it is indistinguishable from a hang.
-    const asked = error.retryAfterMs;
-    const honoured =
-      typeof asked === "number" && Number.isFinite(asked) && asked > 0 ? Math.min(asked, RETRY_AFTER_CEILING_MS) : 0;
-
     return { afterMs: Math.max(curve, honoured), code: error.code };
+  }
+
+  /**
+   * Whether re-entering this node's body might repeat a side effect the journal cannot account
+   * for — the refusal both `#retryDecision` arms share.
+   *
+   * A TOOL EFFECT, not any effect. The reachable set is the right question for a
+   * POSTURE — what a node might do decides how closely it is watched — and it is fine
+   * here too, PROVIDED the second half of the conjunction asks about a tool. It did
+   * not: `#effectStarted` matches any key prefixed by the taskId, `:model:` included,
+   * so an agent lost its retry policy the moment its first MODEL call started and a
+   * transport blip on turn one read as a non-idempotent tool that might have rung the
+   * bell.
+   *
+   * The signal has to stay DURABLE — `startedEffects` is folded from the journal, so it
+   * survives a restart, where an in-memory list of calls does not. What was wrong was
+   * its precision, not its source: `${taskId}:` matches `:model:` too.
+   *
+   * Only refuse once the call REACHED the sandbox. A failure before that (schema
+   * validation, a policy deny) touched nothing, so retrying it is safe even for a
+   * non-idempotent tool.
+   *
+   * NARROWED FROM "STARTED" TO "STARTED AND NOT COMPLETED", which is what `#invokeTool`'s
+   * serve-by-key bought. A tool effect that COMPLETED is handed back from the record on the
+   * next attempt and its body is never entered, so re-running the Task cannot ring the bell
+   * twice — and that is the whole case this refusal was blocking: a charge that went through
+   * followed by a 429 on the next turn, which is the shape the rate-limit work kept failing
+   * on. What serve-by-key cannot cover is the other half: `effect.started` with no
+   * `effect.completed` — the tool threw, or the process died mid-call — where the world may
+   * already have changed and the record cannot say. There the refusal stands, unchanged.
+   *
+   * IT BINDS A DEFERRAL AS WELL AS A RETRY. A deferred Task re-enters the same body by the
+   * same path, so "the provider was busy" changes nothing about whether the bell may ring
+   * twice. Refusing is always allowed; this is the one place the rate-limit work fails a run
+   * it could have saved, and it fails closed on purpose.
+   */
+  async #mayHaveRungABell(ctx: RunContext, p: RunProjection, w: Wave): Promise<boolean> {
+    const nonIdempotentReachable = reachableToolNames(w.node).some((name) => {
+      const t = this.tools.get(name);
+      return t !== undefined && !t.idempotent;
+    });
+    if (!nonIdempotentReachable) return false;
+    return (await this.#unfinishedToolEffect(ctx, p, w.task.taskId)) !== undefined;
   }
 
   /**

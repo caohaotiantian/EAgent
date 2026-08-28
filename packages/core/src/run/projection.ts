@@ -84,6 +84,17 @@ export interface TaskRecord {
   readonly error?: ErrorRecord;
   readonly retryAfter?: number;
   /**
+   * How long this Task has been DEFERRED, summed, and how many times.
+   *
+   * A deferral is a reschedule that charged no attempt — today only a provider rate limit,
+   * which is not the node's failure. `attempt` therefore cannot bound it, so something else
+   * must, or a provider stuck at 429 requeues one Task forever. These two are that bound and
+   * that curve, and they are FOLDED rather than counted in memory for the reason every other
+   * decision input here is: a plane that restarts must not get a fresh budget.
+   */
+  readonly deferredMs?: number;
+  readonly deferrals?: number;
+  /**
    * Who holds this Task, and since when.
    *
    * The journal has always recorded it; the read model discarded it, because with one
@@ -965,7 +976,16 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     return;
   }
   if (isEvent(e, "task.retry_scheduled") && e.taskId) {
-    upsertTask(p, e.taskId, { state: "retrying", attempt: e.payload.attempt, retryAfter: e.ts + e.payload.afterMs });
+    // A DEFERRAL ACCUMULATES; A RETRY DOES NOT. `attempt` is the retry budget and the writer
+    // leaves it unchanged on a deferral, so without these two the only bound on "the provider
+    // is still busy" would be the wall clock, and a restart would reset even that.
+    const held = e.payload.deferred === true ? (p.tasks[e.taskId]?.deferredMs ?? 0) + e.payload.afterMs : undefined;
+    upsertTask(p, e.taskId, {
+      state: "retrying",
+      attempt: e.payload.attempt,
+      retryAfter: e.ts + e.payload.afterMs,
+      ...(held === undefined ? {} : { deferredMs: held, deferrals: (p.tasks[e.taskId]?.deferrals ?? 0) + 1 }),
+    });
     return;
   }
 

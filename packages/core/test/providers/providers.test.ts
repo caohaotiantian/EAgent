@@ -140,7 +140,17 @@ async function backoffs(
   return slept;
 }
 
-const rateLimited = (retryAfter: string) => (): Response => new Response("{}", { status: 429, headers: { "retry-after": retryAfter } });
+/**
+ * A retryable failure carrying the provider's own `Retry-After`.
+ *
+ * IT IS A 529 RATHER THAN A 429, and that changed when the rate limit stopped being held
+ * in-slot at all: `postJson` now throws a 429 on the first response, so it can no longer
+ * exercise the clamp these tests exist for. `normalizeError` attaches `retryAfterMs` to the
+ * overload arm (529/503/502/504) and the transport arm (408/425) from the same
+ * `parseRetryAfter` call, and `retryDelay` is downstream of all three, so every number
+ * asserted below is unchanged — only the status that reaches the clamp is.
+ */
+const advised = (retryAfter: string) => (): Response => new Response("{}", { status: 529, headers: { "retry-after": retryAfter } });
 
 test("A HOSTILE `Retry-After` CANNOT PARK A WORKER OR SPIN ONE — the header is bounded at both ends", async () => {
   // `retryAfterMs` is the only number in this file that a REMOTE PARTY chooses, and it
@@ -167,22 +177,22 @@ test("A HOSTILE `Retry-After` CANNOT PARK A WORKER OR SPIN ONE — the header is
   const max = 8_000;
 
   // Advice that fits is still honoured — this is what the bound must not break.
-  assert.deepEqual(await backoffs(rateLimited("30"), { maxDelayMs: 60_000 }), [30_000, 30_000], "30s of advice, taken");
+  assert.deepEqual(await backoffs(advised("30"), { maxDelayMs: 60_000 }), [30_000, 30_000], "30s of advice, taken");
 
   // Advice ABOVE the operator's ceiling is capped at the ceiling, not obeyed.
-  assert.deepEqual(await backoffs(rateLimited("86400")), [max, max], "a day of advice is capped at maxDelayMs");
+  assert.deepEqual(await backoffs(advised("86400")), [max, max], "a day of advice is capped at maxDelayMs");
 
   // Advice BELOW our own curve is floored at our own curve, not obeyed — `Retry-After: 0`
   // is legal, means "retry now", and is the cheapest way to aim a hot loop at a provider.
-  assert.deepEqual(await backoffs(rateLimited("0")), [base, base * 2], "Retry-After: 0 must not undercut the local curve");
+  assert.deepEqual(await backoffs(advised("0")), [base, base * 2], "Retry-After: 0 must not undercut the local curve");
   assert.deepEqual(
-    await backoffs(rateLimited("1"), { baseDelayMs: 4_000 }),
+    await backoffs(advised("1"), { baseDelayMs: 4_000 }),
     [4_000, 8_000],
     "one second of advice under a four-second curve is floored, not obeyed",
   );
   // …and one second of advice ABOVE the curve is simply taken, which is the ordinary case
   // the floor must not break.
-  assert.deepEqual(await backoffs(rateLimited("1"), { baseDelayMs: 100, maxDelayMs: 8_000 }), [1_000, 1_000], "advice above the curve wins");
+  assert.deepEqual(await backoffs(advised("1"), { baseDelayMs: 100, maxDelayMs: 8_000 }), [1_000, 1_000], "advice above the curve wins");
 
   // A header that is not `delay-seconds` and not an HTTP-date is NO ADVICE — which is a
   // different thing from advice of zero, and `Number()` used to conflate them.
@@ -197,7 +207,7 @@ test("A HOSTILE `Retry-After` CANNOT PARK A WORKER OR SPIN ONE — the header is
       undefined,
       `Retry-After: ${JSON.stringify(header)} is not usable advice, so it must not reach the error either`,
     );
-    assert.deepEqual(await backoffs(rateLimited(header)), [base, base * 2], `Retry-After: ${JSON.stringify(header)} falls back to the local curve`);
+    assert.deepEqual(await backoffs(advised(header)), [base, base * 2], `Retry-After: ${JSON.stringify(header)} falls back to the local curve`);
   }
 });
 
@@ -218,7 +228,7 @@ test("`retryAfterMs` RECORDS THE ADVICE; it does not bound it — and the docstr
   // Which is correct, and is the whole reason the bound lives one layer out: the FIELD is
   // a faithful record of what the provider asked for, and the DELAY is what this
   // deployment agreed to. The same header, the same call, two different numbers.
-  assert.deepEqual(await backoffs(rateLimited("86400"), { maxDelayMs: 8_000 }), [8_000, 8_000], "the delay obeys maxDelayMs, not the header");
+  assert.deepEqual(await backoffs(advised("86400"), { maxDelayMs: 8_000 }), [8_000, 8_000], "the delay obeys maxDelayMs, not the header");
 
   // The residual duty this pins, because it is the one a reader will get wrong: any OTHER
   // consumer of `retryAfterMs` — an HTTP 429 handler, a scheduler requeue — is holding a
@@ -248,7 +258,7 @@ test("the operator's half of the backoff is bounded by the same ceiling as every
   // The largest delay a timer CAN hold stays legal, so the refusal is a ceiling and not
   // an off-by-one that refuses a working configuration.
   assert.deepEqual(
-    await backoffs(rateLimited("1"), { baseDelayMs: 2 ** 31 - 1, maxDelayMs: 2 ** 31 - 1 }),
+    await backoffs(advised("1"), { baseDelayMs: 2 ** 31 - 1, maxDelayMs: 2 ** 31 - 1 }),
     [2 ** 31 - 1, 2 ** 31 - 1],
     "the ceiling itself is a legal delay",
   );
@@ -264,7 +274,10 @@ test("an abort ends the backoff hold instead of waiting the provider's delay out
     "https://provider.example.com/v1",
     { headers: {}, body: {}, signal: controller.signal },
     {
-      fetch: async () => new Response("{}", { status: 429, headers: { "retry-after": "30" } }),
+      // A 529, not a 429: the rate limit is no longer held here at all, so it can no longer
+      // reach the hold this test is about. The abort question is the same for every status
+      // that still backs off.
+      fetch: async () => new Response("{}", { status: 529, headers: { "retry-after": "30" } }),
       maxAttempts: 3,
       maxDelayMs: 60_000,
       // A sleep that NEVER resolves. Only the abort can end the hold.
@@ -411,17 +424,45 @@ test("a tool round-trip serialises back into provider shape", async () => {
 
 // ── retry / transport ────────────────────────────────────────────────────────
 
-test("a 429 is retried, then succeeds", async () => {
+test("a 529 is retried, then succeeds", async () => {
+  // THIS TEST USED TO SAY 429, and the status is the whole point of the edit rather than a
+  // fixture detail. Everything retryable that is not a rate limit is still absorbed here, on
+  // the operator's own bounded curve; a rate limit is now reported instead — see the next test
+  // and `postJson`'s docstring for why the two are no longer the same case.
   let calls = 0;
   const fetchFn = async (): Promise<Response> => {
     calls++;
-    if (calls === 1) return new Response("{}", { status: 429, headers: { "retry-after": "0" } });
+    if (calls === 1) return new Response("{}", { status: 529, headers: { "retry-after": "0" } });
     return new Response(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n`, { status: 200 });
   };
   const a = new AnthropicAdapter({ apiKey: "k", fetch: fetchFn, sleep: async () => undefined });
   const done = (await collect(a.stream(REQ, ac()))).at(-1)!;
   assert.equal(done.type, "done");
   assert.equal(calls, 2);
+});
+
+test("A 429 IS REPORTED ON THE FIRST RESPONSE, with the provider's advice, and is never held", async () => {
+  // The rate limit is the one retryable failure this loop does not wait out, because the wait
+  // is paid inside the CALLER'S unit of concurrency and only the caller knows what that costs.
+  // Measured before the change, through an engine: six 8-second holds inside one leased Task,
+  // with nothing on the journal to reschedule against — see
+  // `test/run/rate-limit-defers.test.ts`.
+  let calls = 0;
+  const slept: number[] = [];
+  const a = new AnthropicAdapter({
+    apiKey: "k",
+    fetch: async () => {
+      calls++;
+      return new Response("{}", { status: 429, headers: { "retry-after": "30" } });
+    },
+    sleep: async (ms) => void slept.push(ms),
+  });
+  await assert.rejects(
+    () => collect(a.stream(REQ, ac())),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_PROVIDER_RATE_LIMIT && e.retryAfterMs === 30_000,
+  );
+  assert.equal(calls, 1, "one request, not three: the caller decides when to come back");
+  assert.deepEqual(slept, [], "and nothing was held while it decided");
 });
 
 test("a 400 is NOT retried", async () => {
