@@ -838,8 +838,11 @@ about the world and not a fact this repository can produce.
 
 **Admission control's successor.** `D.4` refused the door permanently and built the operator's
 levers instead — `--max-runs-in-flight` (default 4), `--max-parallelism`, and deployment
-`--budget-usd`/`-tokens`/`-wall-ms` — after measuring that 60 submissions became 60 concurrent
-provider calls and that `loom serve` passed no deployment budget at all. **Whether the dispatcher
+`--budget-usd`/`-tokens`/`-wall-ms` — on a measurement recorded with that decision (60 submissions
+became 60 concurrent provider calls, and `loom serve` passed no deployment budget at all, so the
+only money ceiling on the box was whatever each graph declared). All five flags are in `loom help`
+at this commit; the concurrency figure is quoted from the decision record and has not been re-run
+here. **Whether the dispatcher
 also needs a queue is now an empirical question, and it is not a roadmap entry because it has no
 failing command**: the levers exist, and nobody has yet driven the box hard enough to produce one.
 That is a MEASUREMENT to take, not a mechanism to build, and inventing the entry ahead of the
@@ -847,7 +850,9 @@ measurement is how the last list got an item about labels on branch coordinates.
 sequence it:* a run rate at which the ceiling is reached often enough that "the surplus waits"
 stops being an acceptable answer — which under D.2's tens-of-runs-a-day it is not.
 
-**Splitting `engine.ts`.** 8,152 lines at this commit and the largest kernel file by far. Not
+**Splitting `engine.ts`.** 8,152 lines at this commit, against 3,552 for the next largest pinned
+file (`run/gates.ts`) and 18,338 for all ten together — 44% of the kernel by line count, in one
+file. Not
 sequenced, and the reason is unchanged: `scripts/kernel.json`'s header carries three structural
 arguments for co-location and none of them has moved. What the kernel gate establishes is that
 the boundary is OBSERVABLE — a `feat` touching a pinned file costs a `Kernel-seam:` trailer — not
