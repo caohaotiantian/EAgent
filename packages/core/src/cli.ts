@@ -242,7 +242,9 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     is deliberately loadable from NOWHERE ELSE; a path read out of a config
                     file or the workspace would let a file decide what code this process
                     runs. A module that does not resolve, throws, has no function default
-                    export, or registers nothing REFUSES TO BOOT.
+                    export, or registers nothing REFUSES TO BOOT. So does a REPEATED
+                    --extension-module: flags here are last-wins, so a second one would
+                    discard the first module in silence. Use the comma form for two.
   --allow-exec P,P  programs proc.exec may run, matched EXACTLY by name — not as a
                     prefix, not as a path. Without it the tool is not registered and
                     the run cannot execute anything. It is the whole CONTAINMENT
@@ -297,10 +299,41 @@ export interface DeliveryConfig {
   readonly file: string;
 }
 
+/**
+ * What an empty `--egress`/`--allow-exec`/`--exec-env` would actually do — shared by those three
+ * and by nothing else, which is the point. See `listFlag`'s `otherwise`.
+ */
+const TOOL_ENABLING =
+  "while still registering the tool the flag enables. Omit the flag entirely to leave that tool unregistered.";
+
+/**
+ * `--extension-module`'s own consequence. It enables no tool: the process would try to IMPORT a
+ * file called "true" and refuse two steps from the mistake.
+ */
+const NO_MODULE_CALLED_TRUE =
+  'and this process would try to import a module called "true". Omit the flag entirely to run unextended.';
+
+/**
+ * `--take`'s own consequence. `steer` registers nothing either; the route would be confined to an
+ * edge id no graph declares, and `Engine.steer` would refuse against the compiled edge set.
+ */
+const NO_EDGE_CALLED_TRUE =
+  'and no graph declares an edge called "true". Omit the flag to leave the route to the router.';
+
 interface Args {
   readonly command: string;
   readonly positional: readonly string[];
   readonly flags: Readonly<Record<string, string | true>>;
+  /**
+   * Flag names that appeared MORE THAN ONCE on argv.
+   *
+   * `flags` is last-wins and stays that way — `loom serve $DEFAULTS --port 9000` over a
+   * `$DEFAULTS` that already said `--port 8080` is a wrapper-script idiom, and for `--egress`,
+   * `--allow-exec` and `--exec-env` a dropped repeat only ever NARROWS what the process may
+   * reach. This set exists so the one flag where dropping the earlier value LOOSENS can refuse:
+   * see `refuseRepeated`.
+   */
+  readonly repeated: ReadonlySet<string>;
 }
 
 /**
@@ -438,6 +471,15 @@ function assertKnownFlags(args: Args): void {
 export function parseArgs(argv: readonly string[]): Args {
   const positional: string[] = [];
   const flags: Record<string, string | true> = {};
+  // WHICH NAMES WERE SEEN TWICE, recorded here because this is the only place that can see it:
+  // `flags` overwrites, so by the time any caller reads it the earlier value is gone and no
+  // caller can tell an override from a loss. `Args.repeated` says why one flag cares.
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  const note = (name: string): void => {
+    if (seen.has(name)) repeated.add(name);
+    seen.add(name);
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (!a.startsWith("--")) {
@@ -448,10 +490,12 @@ export function parseArgs(argv: readonly string[]): Args {
     if (eq > 2) {
       // `--name=` yields "", which is a value the caller gave. It is NOT the same as an
       // absent flag, and the `--token` guard depends on being able to tell them apart.
+      note(a.slice(2, eq));
       flags[a.slice(2, eq)] = a.slice(eq + 1);
       continue;
     }
     const name = a.slice(2);
+    note(name);
     const next = argv[i + 1];
     if (next === undefined || next.startsWith("--")) flags[name] = true;
     else {
@@ -459,7 +503,42 @@ export function parseArgs(argv: readonly string[]): Args {
       i++;
     }
   }
-  return { command: positional[0] ?? "help", positional: positional.slice(1), flags };
+  return { command: positional[0] ?? "help", positional: positional.slice(1), flags, repeated };
+}
+
+/**
+ * REFUSE A REPEATED FLAG WHOSE DROPPED VALUE IS A LOSS RATHER THAN AN OVERRIDE.
+ *
+ * `parseArgs` is last-wins for everything, and for everything else that is right: an override is
+ * how a wrapper script layers defaults, and for the three other `listFlag` flags — `--egress`,
+ * `--allow-exec`, `--exec-env` — a dropped repeat only ever narrows what the process may reach,
+ * which is the safe direction.
+ *
+ * `--extension-module` is the one where it is not. Driven, two valid tool modules:
+ *
+ *     $ loom serve … --extension-module $S/a.mjs --extension-module $S/b.mjs
+ *       ext:    /tmp/…/b.mjs → no adapters, tool b.ping
+ *
+ * `a.mjs` was named on argv, is absent from the process, and the plane came up. That is exactly
+ * the outcome `loadExtensionModules` refuses six other ways — its own docstring says "there is no
+ * arm in which a module named on argv is skipped and the process keeps going — that is a
+ * deployment the operator believes is extended and is not" — and USAGE says every failure mode
+ * REFUSES TO BOOT. This was the arm that existed.
+ *
+ * REFUSED RATHER THAN ACCUMULATED, and the flag's own help text is why: it promises "a
+ * comma-separated list of paths", so the vocabulary for two modules already exists and a second
+ * spelling would be a second thing to keep true. Accumulating would also make this flag the only
+ * one on the CLI where repetition means something other than what it means everywhere else — a
+ * rule that has to be remembered per flag. The comma form is named in the refusal.
+ */
+function refuseRepeated(args: Args, name: string, consequence: string): void {
+  if (!args.repeated.has(name)) return;
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `--${name} was given more than once. Flags on this CLI are last-wins, so every earlier ` +
+      `--${name} would be silently discarded — ${consequence} Pass one --${name} with the values ` +
+      `comma-separated instead: --${name} a,b`,
+  );
 }
 
 /**
@@ -699,9 +778,9 @@ export function openWorkspace(
   // this line does not already give and would hide the run's own history from the person
   // looking for it.
   // READ BEFORE THE JAIL IS BUILT, so a malformed flag refuses before any tool is registered.
-  const egressHosts = listFlag(args, "egress", "a hostname");
-  const execPrograms = listFlag(args, "allow-exec", "a program name");
-  const execEnvNames = listFlag(args, "exec-env", "an environment variable name");
+  const egressHosts = listFlag(args, "egress", "a hostname", TOOL_ENABLING);
+  const execPrograms = listFlag(args, "allow-exec", "a program name", TOOL_ENABLING);
+  const execEnvNames = listFlag(args, "exec-env", "an environment variable name", TOOL_ENABLING);
   const jail = {
     root,
     // `resources/` JOINS THE DATA DIR, and for a sharper reason than the journal has. Its
@@ -1433,7 +1512,19 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
   return {
     models,
     tools,
-    adapters: models.registered,
+    // A COPY, BECAUSE `models.registered` IS STILL LIVE. `openWorkspace` is handed this same
+    // registry and registers the mock and the `--models-file` `RoutingAdapter` into it, so a
+    // field aliasing the map grew AFTER the loader returned — and the boot line reads it. Driven
+    // on a tool-only module with no `--models-file`:
+    //
+    //   ext:    /tmp/…/tool.mjs → adapter mock, tool house.ping
+    //
+    // `mock` is `MockModelAdapter`, which the operator's module did not register. The comment at
+    // the boot line says the opposite — "Read off the loaded object rather than off the flag, so
+    // no line can name a module that did not register what it said it would" — and it was true
+    // of the flag and false of the object. `toolNames` and `files` were already snapshots; this
+    // was the one field that was not.
+    adapters: new Map(models.registered),
     toolNames: tools.list().map((t) => t.name),
     files,
     // `get()` WITH NO ARGUMENT is the registry's own question — "is there a default?" —
@@ -1517,9 +1608,29 @@ export interface ModelConfig {
 }
 
 /** The two adapters this binary can construct. A typo here must not become a silent mock. */
-const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string }>> = {
-  anthropic: { keyEnv: "ANTHROPIC_API_KEY" },
-  openai: { keyEnv: "OPENAI_API_KEY" },
+/**
+ * `keyless` IS THE ADAPTER'S OWN RULE, RESTATED WHERE THE FILE IS READ.
+ *
+ * `openai.ts` accepts an empty `apiKey` when a `baseUrl` is given ("a local endpoint legitimately
+ * needs no key"); `anthropic.ts` throws `E_PROVIDER_AUTH: anthropic adapter requires an apiKey`
+ * on an empty key, `baseUrl` or not. This reader used to know only the first half, so the
+ * missing-key refusal offered `"apiKeyEnv": null` to every row and an operator who took the
+ * advice on an `anthropic` row walked into a second, differently-worded refusal one layer down.
+ * Driven:
+ *
+ *     {"provider":"anthropic","baseUrl":"http://127.0.0.1:9"}
+ *       → E_CONFIG_INVALID: … or set "apiKeyEnv": null if this endpoint genuinely takes no
+ *         credential (which also needs a "baseUrl").
+ *     the same row + "apiKeyEnv": null
+ *       → E_CONFIG_INVALID: adapters[0] ("anthropic"): anthropic adapter requires an apiKey
+ *
+ * It failed closed, so nothing was ever loosened — but a remedy that cannot work is the same
+ * defect as a cause that is not true. The flag is here rather than in a `provider === "openai"`
+ * test at the two sites so a third provider has to answer the question.
+ */
+const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string; readonly keyless: boolean }>> = {
+  anthropic: { keyEnv: "ANTHROPIC_API_KEY", keyless: false },
+  openai: { keyEnv: "OPENAI_API_KEY", keyless: true },
 };
 
 /**
@@ -1677,6 +1788,18 @@ export function readModels(
           `of the local or gateway endpoint you mean, or name the variable holding the key.`,
       );
     }
+    // AND THE DECLARATION IS REFUSED WHERE THE ADAPTER WOULD REFUSE IT ANYWAY — here, naming the
+    // adapter's rule, rather than at construction naming a field this file never mentioned. See
+    // `PROVIDERS.keyless` for the measurement: accepting it here produced a second refusal in
+    // other words, for an operator who had just done what the first one said.
+    if (keyless && !PROVIDERS[provider]!.keyless) {
+      refuse(
+        `${where} ("${name}") sets "apiKeyEnv": null, but the ${provider} adapter requires a key at every ` +
+          `endpoint — unlike the OpenAI wire, it has no local, keyless form, and it would refuse this row at ` +
+          `construction with "${provider} adapter requires an apiKey". Name the variable holding the key with ` +
+          `"apiKeyEnv", or point this row at an OpenAI-wire endpoint if the endpoint you mean speaks that wire.`,
+      );
+    }
     const keyEnv = rawKeyEnv === undefined || keyless ? PROVIDERS[provider]!.keyEnv : nonEmpty(rawKeyEnv, `${where} ("${name}") "apiKeyEnv"`, refuse);
     const apiKey = keyless ? "" : (env[keyEnv] ?? "");
     // NO CARVE-OUT FOR `openai` + `baseUrl` ANY MORE. The adapter still accepts an empty key
@@ -1688,8 +1811,12 @@ export function readModels(
       refuse(
         `${where} ("${name}") needs the environment variable ${keyEnv}, which is ${env[keyEnv] === undefined ? "not set" : "empty"}. ` +
           `The key is deliberately NOT a field in this file — the file is configuration and the key is a credential. ` +
-          `Set ${keyEnv}, or name a different variable with "apiKeyEnv", or set "apiKeyEnv": null if this endpoint ` +
-          `genuinely takes no credential (which also needs a "baseUrl").`,
+          `Set ${keyEnv}, or name a different variable with "apiKeyEnv"` +
+          // OFFERED ONLY WHERE IT WORKS. On `anthropic` this sentence sent the operator into a
+          // second refusal; see `PROVIDERS.keyless`.
+          (PROVIDERS[provider]!.keyless
+            ? `, or set "apiKeyEnv": null if this endpoint genuinely takes no credential (which also needs a "baseUrl").`
+            : `. The ${provider} adapter has no keyless form, so there is no third option here.`),
       );
     }
 
@@ -4068,7 +4195,15 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   //
   // ONLY IN `main`. `--extension-module` is argv and nothing else — no file, no resource ref,
   // no directory scan — which is the entire trust argument at `loadExtensionModules`.
-  const extensionPaths = listFlag(args, "extension-module", "a module path");
+  //
+  // AND A REPEAT IS REFUSED, not resolved last-wins: see `refuseRepeated` for the measurement.
+  refuseRepeated(
+    args,
+    "extension-module",
+    "a module named on argv would not be loaded, and the plane would come up as a deployment " +
+      "the operator believes is extended and is not.",
+  );
+  const extensionPaths = listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
   const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths);
   const ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
   try {
@@ -4356,7 +4491,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         if (typeof nodeId !== "string" || nodeId.trim() === "") {
           throw err.validation(CODES.E_CONFIG_INVALID, "steer needs --node NODE_ID: the node whose route is being overridden");
         }
-        const take = listFlag(args, "take", "one or more edge ids") ?? [];
+        const take = listFlag(args, "take", "one or more edge ids", NO_EDGE_CALLED_TRUE) ?? [];
         const raw = args.flags["reason"];
         const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
         // BIND FIRST, or every steer on a restarted workspace answers "not attached" — which is
@@ -6424,16 +6559,22 @@ function requirePositional(args: Args, i: number, what: string): string {
  * This is the `String(true)` family `--token`, `--port`, `--input`, `--as`, `--reason` and every
  * `pathFlag` already refuse. Three flags had escaped it; they are the three that decide what
  * this process may reach outside itself.
+ *
+ * `otherwise` IS A PARAMETER BECAUSE THE CONSEQUENCE IS NOT SHARED. The sentence used to be
+ * fixed — "while still registering the tool the flag enables. Omit the flag entirely to leave
+ * that tool unregistered" — which is `--egress`/`--allow-exec`/`--exec-env`'s reason attached to
+ * every caller. Driven: `loom gates … --extension-module` printed it, and `--extension-module`
+ * enables no tool; so does `--take`, on a verb with no tools in it at all. Five callers, and the
+ * two that inherited someone else's reason are the whole of this defect class.
  */
-function listFlag(args: Args, name: string, what: string): readonly string[] | undefined {
+function listFlag(args: Args, name: string, what: string, otherwise: string): readonly string[] | undefined {
   const v = args.flags[name];
   if (v === undefined) return undefined;
   if (v === true || v === "") {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `--${name} needs ${what}: ${v === "" ? `the one given was empty (\`--${name} "$VAR"\` does this when the variable is unset)` : "the flag was given with no value at all"}. ` +
-        `It would otherwise read as the single entry "true", while still registering the tool the flag enables. ` +
-        `Omit the flag entirely to leave that tool unregistered.`,
+        `It would otherwise read as the single entry "true", ${otherwise}`,
     );
   }
   // An entry that is blank after trimming is a stray comma, not a name. Dropping them silently

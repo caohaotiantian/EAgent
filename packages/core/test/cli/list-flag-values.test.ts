@@ -23,8 +23,27 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { openWorkspace, parseArgs } from "../../src/cli.ts";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { main, openWorkspace, parseArgs } from "../../src/cli.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
+
+const SRC = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), "utf8");
+
+/** `main`, with both streams muted — the refusals below are thrown, never printed. */
+async function quietly(argv: readonly string[]): Promise<number> {
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    return await main([...argv]);
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+}
 
 function workspace(): { dir: string; dispose: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "loom-listflag-"));
@@ -41,7 +60,66 @@ function opened(dir: string, argv: readonly string[]) {
   }
 }
 
-const LIST_FLAGS = ["egress", "allow-exec", "exec-env"] as const;
+/**
+ * DERIVED FROM THE SOURCE, not restated here.
+ *
+ * This used to be a hand-written `["egress", "allow-exec", "exec-env"]`, and `listFlag` grew two
+ * more callers — `--extension-module` and `--take` — without it moving. CLAUDE.md's lesson about
+ * pointers to enumerations is exactly that: an enumeration is only as good as its own discipline
+ * about growing, so this one reads the callers rather than remembering them, and the assertion
+ * below pins the set so a sixth caller is a decision somebody has to make rather than a silent
+ * addition.
+ */
+function listFlagCallers(): readonly string[] {
+  return [...new Set([...SRC.matchAll(/listFlag\(args, "([a-z-]+)"/g)].map((x) => x[1]!))].sort();
+}
+
+/** The three whose empty value would register a tool. The other two enable no tool at all. */
+const TOOL_ENABLING_FLAGS = ["allow-exec", "egress", "exec-env"] as const;
+const LIST_FLAGS = TOOL_ENABLING_FLAGS;
+
+test("EVERY FLAG `listFlag` SERVES IS NAMED HERE, and each gets the consequence that is ITS OWN", () => {
+  // The set. A sixth caller goes red here, which is the point — its empty-value sentence has to
+  // be chosen, not inherited.
+  assert.deepEqual(listFlagCallers(), ["allow-exec", "egress", "exec-env", "extension-module", "take"]);
+
+  // AND THE SENTENCE IS NOT SHARED. `listFlag`'s refusal used to end with a fixed clause —
+  // "while still registering the tool the flag enables. Omit the flag entirely to leave that
+  // tool unregistered" — printed for all five. Driven before the fix:
+  //
+  //     $ loom gates ... --extension-module
+  //     E_CONFIG_INVALID: --extension-module needs a module path: ... It would otherwise read as
+  //     the single entry "true", while still registering the tool the flag enables.
+  //
+  // `--extension-module` enables no tool, and neither does `--take`. Read off the call sites,
+  // because `--take`'s refusal sits behind a runId and a --node this suite has no run for.
+  for (const flag of TOOL_ENABLING_FLAGS) {
+    assert.match(
+      SRC,
+      new RegExp(`listFlag\\(args, "${flag}", "[^"]+", TOOL_ENABLING\\)`),
+      `--${flag} keeps the tool-enabling sentence`,
+    );
+  }
+  assert.match(SRC, /listFlag\(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE\)/);
+  assert.match(SRC, /listFlag\(args, "take", "one or more edge ids", NO_EDGE_CALLED_TRUE\)/);
+});
+
+test("...AND THE ONE THAT IS DRIVEN SAYS IT — --extension-module names importing, not registering", async () => {
+  const w = workspace();
+  try {
+    await assert.rejects(
+      () => quietly(["compile", "nope.json", "--workspace", w.dir, "--extension-module"]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        e.code === CODES.E_CONFIG_INVALID &&
+        /import a module called "true"/.test(e.message) &&
+        !/registering the tool the flag enables/.test(e.message),
+      "the refusal must name what this flag would actually do",
+    );
+  } finally {
+    w.dispose();
+  }
+});
 
 test("A LIST FLAG WITH NO VALUE IS REFUSED — it would read as the single entry \"true\"", () => {
   const w = workspace();

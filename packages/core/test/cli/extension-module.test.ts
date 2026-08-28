@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadExtensionModules, main, openWorkspace, parseArgs, readModels } from "../../src/cli.ts";
+import { completeLines, serving } from "../deployment/harness.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { ModelRegistry } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
@@ -381,6 +382,103 @@ test("a models file with NO adapters row is legal only when an extension supplie
     const cfg = readModels(w.models, {}, undefined, ext.adapters);
     assert.deepEqual(cfg.adapters, [], "the boot line names the FILE's rows, and this file declares none");
     assert.deepEqual(cfg.routes, ["agent_profile/writer@stable"]);
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── what the boot line may say ───────────────────────────────────────────────
+
+/** A module that registers a tool and NO adapter — the shape that exposed the defect. */
+const TOOL_ONLY = `
+export default ({ tools }) => {
+  tools.register({
+    name: "NAME.ping",
+    version: "1.0",
+    description: "A tool this binary has never heard of.",
+    capabilities: ["NAME:ping"],
+    irreversibility: "read_only",
+    idempotent: true,
+    parameters: { type: "object", properties: {} },
+    execute: () => ({ pong: true }),
+  });
+};
+`;
+
+test("THE `ext:` LINE NAMES ONLY WHAT THE MODULE REGISTERED — the adapter map is a SNAPSHOT", async () => {
+  const w = workspace();
+  try {
+    const only = moduleAt(w.dir, "tool-only.mjs", TOOL_ONLY.replaceAll("NAME", "house"));
+    const ext = await loadExtensionModules([only]);
+    assert.deepEqual([...ext.adapters.keys()], [], "the premise: this module registered no adapter");
+
+    // THE DEFECT. `adapters` used to BE `ObservedModelRegistry.registered`, the live map, and
+    // `openWorkspace` registers the mock (and, with a --models-file, the RoutingAdapter) into
+    // that same registry — so the field grew after the loader returned and the boot line printed
+    // `→ adapter mock, tool house.ping` for a module that registered neither.
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]), process.env, undefined, [], ext);
+    try {
+      assert.equal(ws.engine.models.get("mock")?.provider, "mock", "the premise: the mock really was registered");
+      assert.deepEqual([...ext.adapters.keys()], [], "…into the registry, and NOT into the loader's answer");
+    } finally {
+      ws.close();
+    }
+    assert.deepEqual([...ext.toolNames], ["house.ping"], "and the tool half was always a snapshot");
+  } finally {
+    w.dispose();
+  }
+});
+
+test("…AND THE PRINTED LINE SAYS SO, driven against a real boot", async () => {
+  // The half a unit test cannot reach: `announce` renders `[...ext.adapters.keys()]`, and until
+  // this test nothing in the tree asserted the line's CONTENT — the suite passed either way,
+  // which is the second half of the finding. Spawns `loom serve` on port 0 and reads its banner.
+  const w = workspace();
+  try {
+    const only = moduleAt(w.dir, "tool-only.mjs", TOOL_ONLY.replaceAll("NAME", "house"));
+    const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--extension-module", only]);
+    try {
+      const line = completeLines(s.out).find((l) => l.trimStart().startsWith("ext:"));
+      assert.ok(line !== undefined, `no ext: line in:\n${s.out}`);
+      assert.equal(/adapter mock/.test(line), false, `the module registered no adapter: ${line}`);
+      assert.match(line, /→ no adapters, tool house\.ping$/, line);
+    } finally {
+      await s.stop();
+    }
+  } finally {
+    w.dispose();
+  }
+});
+
+test("A REPEATED --extension-module IS REFUSED — last-wins would drop a module named on argv", async () => {
+  const w = workspace();
+  try {
+    const a = moduleAt(w.dir, "a.mjs", TOOL_ONLY.replaceAll("NAME", "aa"));
+    const b = moduleAt(w.dir, "b.mjs", TOOL_ONLY.replaceAll("NAME", "bb"));
+
+    // THE DEFECT: `parseArgs` is last-wins, so `a` was dropped and the plane BOOTED — the one
+    // arm `loadExtensionModules`' docstring says does not exist ("there is no arm in which a
+    // module named on argv is skipped and the process keeps going") and USAGE says refuses.
+    await assert.rejects(
+      () => cli(["compile", "nope.json", "--workspace", w.dir, "--extension-module", a, "--extension-module", b]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        e.code === CODES.E_CONFIG_INVALID &&
+        /--extension-module was given more than once/.test(e.message) &&
+        /comma-separated/.test(e.message),
+      "a repeat must refuse, and name the spelling that works",
+    );
+
+    // AND THE COMMA FORM IS THE ONE THAT WORKS, so the refusal is not a dead end: both modules
+    // load, in argv order.
+    const ext = await loadExtensionModules([a, b]);
+    assert.deepEqual([...ext.toolNames].sort(), ["aa.ping", "bb.ping"]);
+
+    // THE CONTROL — repetition is refused for THIS flag only. `--grant` repeated is still
+    // last-wins, because for every other flag a dropped repeat is an override or a narrowing.
+    const twice = parseArgs(["compile", "g.json", "--grant", "a:b", "--grant", "c:d"]);
+    assert.equal(twice.flags["grant"], "c:d");
+    assert.deepEqual([...twice.repeated], ["grant"], "seen, and deliberately not refused");
   } finally {
     w.dispose();
   }
