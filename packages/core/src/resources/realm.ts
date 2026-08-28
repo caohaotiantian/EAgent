@@ -395,6 +395,166 @@ const ASYNC_RULE =
   "synchronously. A body that must wait on something is describing an effect, and effects " +
   "belong on a tool node";
 
+/**
+ * THE SECOND SHAPE — and `ASYNC_RULE` did not cover it, which is the residue that docstring left.
+ *
+ * `ASYNC_RULE` refuses a body DECLARED `async`, decided from its prototype at load. A plain
+ * `function () { return new Promise(…) }` is synchronous at the seam: it has the ordinary
+ * Function prototype, it loads clean, and it hands back a thenable that `run/hooks.ts` and
+ * `Engine.#dispatchBody` both `await`. `functions.ts` caught that second shape when the body
+ * RETURNED; `hook-loader.ts` had no equivalent, and `test/resources/async-body-refused-at-the-
+ * seam.test.ts` pinned the gap as a fact rather than closing it. Measured through the hook
+ * loader at `callTimeoutMs: 100`, before this existed:
+ *
+ *     (input) => new Promise(res => res({late: true}))
+ *       returned [object Promise] in 0 ms; resolved {"late":true};
+ *       Object.getPrototypeOf(resolved) === Object.prototype  →  false
+ *     (input) => new Promise(res => res(0)).then(() => { for (var n=0;n<4e9;n++){} … })
+ *       returned in 0 ms, resolved at 1,948 ms
+ *     the identical spin written synchronously
+ *       threw `Script execution timed out after 100ms` at 102 ms
+ *
+ * Both harms `ASYNC_RULE` names, through the shape it does not name.
+ *
+ * AT THE SEAM, AND `functions.ts`'s COPY IS DELETED rather than joined by a second — the move
+ * `ARGUMENT_BRIDGE`'s async check already made, for the reason `SHAPE_RULE` gives: two copies of
+ * one rule in two loaders is how those two files came to disagree in the first place.
+ *
+ * THE TEST RUNS INSIDE THE CONTEXT, and that is the part worth reading twice. `typeof v.then` is
+ * a property read, and a body may define `then` as a getter; done host-side, after
+ * `runInContext` has returned, that getter is USER CODE ON THE HOST THREAD AFTER THE VM TIMEOUT
+ * HAS STOPPED APPLYING — the exact hazard that moved `isAsyncBody` off `.constructor` and onto
+ * `getPrototypeOf`, reintroduced by the check enforcing the rule next door. Run as part of the
+ * call expression, the read is inside `vm`'s `timeout` and a spinning getter is terminated like
+ * any other synchronous work.
+ *
+ * The refusal crosses back as a THROW gated on `.name`, never `instanceof`: a cross-realm error's
+ * prototype is not the host's — the same trap the `SyntaxError` arm below documents.
+ *
+ * WHAT IT THROWS IS AN OBJECT LITERAL, not `new Error(…)`, and that was measured rather than
+ * preferred. `Error` is a binding a body can replace, and the first version of this used it: a
+ * body installing `globalThis.Error = function (m) { var e = new RealError(m);
+ * Object.defineProperty(e, "name", {value: "Nope", writable: false}); return e; }` and then
+ * returning a promise produced a bare `LoomThenableReturn` at the caller — the marker string, no
+ * rule, no resource named. Fail-closed (the call still threw, no value crossed) but useless to
+ * read. A literal consults no binding a body can reach.
+ */
+const THENABLE_MARK = "LoomThenableReturn";
+
+const THENABLE_RULE =
+  "no deadline can bound one. The vm timeout that enforces a node's timeoutMs and a hook's " +
+  "callTimeoutMs covers synchronous execution only, and the body has already satisfied it by " +
+  "returning — its continuation is on the microtask queue, where no timer, no AbortSignal and no " +
+  "deadline reach it. Measured at callTimeoutMs 100, a body handing back a promise that spins " +
+  "4e9 times returned in 0 ms and resolved at 1,948 ms, where the same work written synchronously " +
+  "was terminated at 102 ms. What it resolves to is not rebuilt either: await unwraps the promise " +
+  "after intoHostRealm is behind it, so a vm-context object reaches the host — measured, " +
+  "Object.getPrototypeOf(resolved) === Object.prototype was false. THIS REFUSAL DOES NOT STOP THE " +
+  "CONTINUATION and nothing in this process can; what it buys is a named failure and a value that " +
+  "never crosses. Return the outcome directly. A body that must wait on something is describing " +
+  "an effect, and effects belong on a tool node";
+
+/**
+ * A value whose `then` could not even be READ is refused too, under `intoHostRealm`'s rule.
+ *
+ * `typeof v.then` is not total: on a revoked `Proxy` it raises `TypeError: Cannot perform 'get'
+ * on a proxy that has been revoked`, and a hook body returning one is the H4 case exactly.
+ * Without this the call still failed — the TypeError propagates — but as a message about proxies,
+ * naming no resource and no boundary. Refusing rather than reading on is the same choice
+ * `intoHostRealm` makes and for the same reason: the three reads it is about to make throw on
+ * this value too.
+ *
+ * THE RESIDUE THIS ADMITS: a `Proxy` whose `get` trap throws for `then` ALONE would survive the
+ * host-side rebuild, and is refused here anyway. That is a guard refusing a value it cannot
+ * classify, which is the direction a guard is allowed to be wrong in.
+ */
+const UNREADABLE_MARK = "LoomUnreadableReturn";
+
+/**
+ * Wrap the call expression in the in-context return guard. See `THENABLE_RULE`.
+ *
+ * `typeof v === "function"` is in the test because `await` unwraps a thenable FUNCTION exactly as
+ * it does a thenable object, and a body returning one is the same mistake wearing a different
+ * `typeof`.
+ *
+ * Written as an IIFE around the call rather than as a global helper the bridge installs: a global
+ * is a name a body can overwrite between compile and call, and this one is not worth handing a
+ * body a switch for. For the same reason it throws an OBJECT LITERAL and not `new Error(…)` —
+ * see `THENABLE_RULE` for the body that defeated the `Error` version.
+ *
+ * ONE LINE, for `seedingRandom`'s reason one file over: `compileRealm` passes `opts.label` as the
+ * `filename` of every script it runs here, so a multi-line wrapper puts frames at lines that look
+ * like the body's own and are not. The concatenation below is across SOURCE lines; the string it
+ * builds carries no newline.
+ */
+function guardingReturn(callExpr: string): string {
+  const thenable = JSON.stringify(THENABLE_MARK);
+  const unreadable = JSON.stringify(UNREADABLE_MARK);
+  return (
+    `(function (v) { if (v === null || (typeof v !== "object" && typeof v !== "function")) return v; ` +
+    `var t; try { t = v.then; } catch (e) { var m = "the reason could not be read either"; ` +
+    `try { m = String(e.message); } catch (e2) {} throw { name: ${unreadable}, message: m }; } ` +
+    `if (typeof t === "function") { throw { name: ${thenable}, message: ${thenable} }; } ` +
+    `return v; })(${callExpr})`
+  );
+}
+
+/** ONE sentence for the shape, said by the in-context read and by the host-side one alike. */
+function refuseThenable(where: string): never {
+  throw err.validation(CODES.E_RESOURCE_INVALID, `${where} returned a promise, and ${THENABLE_RULE}.`);
+}
+
+/**
+ * THE IN-CONTEXT READ IS ONE READ, AND A GETTER GETS TO ANSWER IT.
+ *
+ * Found by attacking the guard above rather than by reading it: a body returning
+ * `{get then() { n++; return n > 1 ? function (r) { r(1); } : undefined; }}` answered `undefined`
+ * to the guard's read and a FUNCTION to the next one — and the next one is the host's own `await`.
+ * Measured before this check existed: that body's value crossed, carrying a callable `then` and
+ * `Object.getPrototypeOf(v) === Object.prototype` true. A guard that reads a value the value
+ * controls has to be applied to the thing that actually crosses, not to the thing it saw.
+ *
+ * SAFE TO READ HOST-SIDE, and that is the whole reason it can be a second check rather than a
+ * second hazard: `intoHostRealm` copies with `Object.entries`, which INVOKES every getter and
+ * stores its result, so a rebuilt object holds data properties only. The prototype test is what
+ * confines this to rebuilt values — anything the rebuild passed through untouched still carries
+ * its own prototype and is not read here, because reading it is the hazard `THENABLE_RULE`
+ * describes.
+ *
+ * WHAT IT STILL DOES NOT CATCH, named because the pair is not a total answer: a body's thenable
+ * hidden inside a value the rebuild passes through, such as a cross-realm `Map`. Those are
+ * refused by the canonicalizer for being a `Map` at all, which is the message worth getting.
+ */
+function crossedAsThenable(v: unknown, where: string): boolean {
+  if (v === null || typeof v !== "object") return false;
+  try {
+    if (Object.getPrototypeOf(v) !== Object.prototype) return false;
+    return typeof (v as { then?: unknown }).then === "function";
+  } catch (e) {
+    // A pass-through value whose prototype trap throws only on a LATER call reaches here. Same
+    // rule as the rebuild's: a value the host cannot inspect does not cross.
+    refuseUnrebuildable(where, why(e));
+  }
+}
+
+/**
+ * The `name` of a thrown value, costing that value and never this caller.
+ *
+ * A body chooses what it throws, and a revoked `Proxy` is a legal thing to throw: reading any
+ * property off one raises `TypeError: Cannot perform 'get' on a proxy that has been revoked`.
+ * A bare `(e as Error).name` here would turn the marker test into a second failure with a
+ * message about proxies. Not deciding means "not the marker", which rethrows the body's own
+ * error unchanged — the refusing branch, since the call fails either way.
+ */
+function thrownName(e: unknown): string {
+  try {
+    const n = (e as { name?: unknown } | null)?.name;
+    return typeof n === "string" ? n : "";
+  } catch {
+    return "";
+  }
+}
+
 export function compileRealm(opts: RealmOptions): RealmCall {
   // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
   // Seeding it with host objects is what opened the bridge the first time.
@@ -463,20 +623,39 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     throw err.internal(CODES.E_INTERNAL, `bridge for "${opts.label}" did not define ${opts.entry}`);
   }
 
+  const where = `${opts.what} resource "${opts.label}"`;
   return (payload) => {
     // ONLY JSON CROSSES *HERE*. Every value this call hands the body is rebuilt from this string
     // INSIDE the context, so no host object reaches it BY THIS ROUTE. `opts.globals` is the route
     // that is not this one, and it is not rebuilt — see `RealmOptions.globals`.
-    const out = vm.runInContext(`${opts.entry}(${JSON.stringify(JSON.stringify(payload))})`, context, {
-      timeout: opts.callTimeoutMs,
-      filename: opts.label,
-    });
-    return intoHostRealm(out);
+    let out: unknown;
+    try {
+      // WRAPPED, not read afterwards: the return guard is part of the expression `timeout`
+      // bounds. See `THENABLE_RULE`.
+      out = vm.runInContext(guardingReturn(`${opts.entry}(${JSON.stringify(JSON.stringify(payload))})`), context, {
+        timeout: opts.callTimeoutMs,
+        filename: opts.label,
+      });
+    } catch (e) {
+      const mark = thrownName(e);
+      if (mark === THENABLE_MARK) refuseThenable(where);
+      // Same sentence `intoHostRealm` says, because it is the same rule — the value simply
+      // failed the FIRST read instead of one of the three that come after it.
+      if (mark === UNREADABLE_MARK) refuseUnrebuildable(where, why(e));
+      throw e;
+    }
+    const host = intoHostRealm(out, where);
+    // AND THE SAME TEST ON THE VALUE THAT ACTUALLY CROSSES. See `crossedAsThenable`: the
+    // in-context read is one read, and a `then` GETTER gets to answer it differently than it
+    // answers the host's.
+    if (crossedAsThenable(host, where)) refuseThenable(where);
+    return host;
   };
 }
 
 /**
- * Rebuild a value using the HOST's intrinsics.
+ * `intoHostRealm` — rebuild a value using the HOST's intrinsics, or refuse it. This block is the
+ * argument for both halves; the machinery follows it.
  *
  * Recursive and structural: primitives pass through, arrays and plain objects are rebuilt, and
  * anything else (a function, a class instance, a cross-realm `Map`) is returned as-is so the
@@ -488,20 +667,95 @@ export function compileRealm(opts: RealmOptions): RealmCall {
  * looks identical, passes `typeof`, and fails `deepStrictEqual` — and any downstream prototype
  * check would quietly disagree with itself depending on whether a body was loaded or
  * hand-registered.
+ *
+ * ## AND IT IS WHERE AN EXTENSION'S VALUE ENTERS THE HOST, so it is where a value that cannot be
+ * inspected has to be refused
+ *
+ * Every read this rebuild makes runs on the HOST thread, on an object an extension chose. Three
+ * of them are not total, and none of the three was guarded — measured end to end on this tree,
+ * a hook body and a function body each returning `Proxy.revocable({a:1},{}).proxy` after
+ * revoking it:
+ *
+ *     TypeError: Cannot perform 'IsArray' on a proxy that has been revoked
+ *
+ * out of `Array.isArray`, and `Object.getPrototypeOf` and `Object.entries` throw on the same
+ * value one line later. `redact.ts`, `run/delivery.ts` and `telemetry/spans.ts` each carry a
+ * private `isList` for exactly this. A self-referential return is the same class through a
+ * different door: `{o.self = o}` from a hook body exhausted the stack, measured,
+ * `RangeError: Maximum call stack size exceeded`. Neither reached a caller as anything naming
+ * the resource that produced it.
+ *
+ * ONE `try` AROUND THE WHOLE WALK, rather than a guarded copy of each read. It is not the cheaper
+ * spelling of the same thing — it is a different claim, and the stronger one: any throw from any
+ * read, present or added later, becomes the same refusal. Guarding `Array.isArray` alone would
+ * have left `getPrototypeOf` and `entries` to be found separately, which is how this class gets
+ * rediscovered.
+ *
+ * REFUSING, NOT DEGRADING, and that is the choice `run/delivery.ts` makes the other way on
+ * purpose. There, a value that cannot be read is being RENDERED for a channel and "(unrenderable)"
+ * is a true thing to print. Here the value is on its way to the canonicalizer and the journal;
+ * passing it through means the same throw further downstream with nothing left naming the
+ * resource. A guard that cannot decide what a value is refuses it.
+ *
+ * WHAT IT DOES NOT CLOSE, named rather than implied: a trap or getter that SPINS instead of
+ * throwing. `Object.entries` on a `Proxy` whose `ownKeys` never returns is user code on the host
+ * thread with the vm's timeout already satisfied, and no `try` reaches it. That is the same
+ * unbounded-continuation limit `THENABLE_RULE` states, and like it, only a process boundary
+ * (`sandbox/subprocess.ts`) closes it. Code resources are A13 trusted; what this catches is the
+ * value that arrives by mistake or by a third party's proxy, not an author attacking their own run.
  */
-export function intoHostRealm(value: unknown): unknown {
+const UNREBUILDABLE_RULE =
+  "a value the host cannot inspect cannot cross this boundary. Rebuilding a return calls " +
+  "Array.isArray, Object.getPrototypeOf and Object.entries on it, and all three throw on a " +
+  "revoked Proxy, while a value that refers to itself exhausts the stack. Returning it anyway " +
+  "would raise the same failure further downstream with nothing left to name the resource that " +
+  "produced it. Return plain JSON-shaped data";
+
+/** Why the rebuild could not finish, costing that value and never this caller. */
+function why(e: unknown): string {
+  try {
+    const m = (e as { message?: unknown } | null)?.message;
+    return typeof m === "string" ? m : "the reason could not be read either";
+  } catch {
+    return "the reason could not be read either";
+  }
+}
+
+/** ONE sentence for the whole class, said by the rebuild and by the seam's first read alike. */
+function refuseUnrebuildable(at: string, detail: string): never {
+  throw err.validation(
+    CODES.E_RESOURCE_INVALID,
+    `${at} returned a value the host cannot rebuild: ${UNREBUILDABLE_RULE} — ${detail}.`,
+  );
+}
+
+/**
+ * `at` names the resource in the refusal — `compileRealm` passes `hook resource "hook/x@stable"`.
+ * It has a default because this is exported and an embedder calling it directly has no ref to
+ * give; what it must never be is absent from the message, which is what the raw `TypeError` was.
+ */
+export function intoHostRealm(value: unknown, at = "a code resource"): unknown {
+  try {
+    return rebuild(value);
+  } catch (e) {
+    refuseUnrebuildable(at, why(e));
+  }
+}
+
+/** The walk itself. Every throw out of it is `intoHostRealm`'s refusal — see its docstring. */
+function rebuild(value: unknown): unknown {
   if (value === null || typeof value !== "object") return value;
   // `Array.from`, NOT `.map`: `map` goes through ArraySpeciesCreate, which uses the ARRAY'S OWN
   // constructor — so mapping a cross-realm array produces another cross-realm array and the
   // rebuild silently does nothing.
-  if (Array.isArray(value)) return Array.from(value, intoHostRealm);
+  if (Array.isArray(value)) return Array.from(value, rebuild);
   const proto = Object.getPrototypeOf(value) as unknown;
   // A plain object in ANY realm has either the null prototype or one whose own constructor is
   // named "Object" — which is what distinguishes it from a Map.
   const isPlain = proto === null || (proto as { constructor?: { name?: string } })?.constructor?.name === "Object";
   if (!isPlain) return value;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = intoHostRealm(v);
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = rebuild(v);
   return out;
 }
 

@@ -42,7 +42,12 @@
  * report, because a spinning microtask never hands the loop back. So an async body is refused
  * at LOAD — by `realm.ts`'s `ASYNC_RULE`, at the seam BOTH loaders call, because this rule used
  * to live in `ARGUMENT_BRIDGE` below and therefore did not exist for hook bodies at all — and a
- * synchronous body that RETURNS a thenable is refused when it returns, here.
+ * synchronous body that RETURNS a thenable is refused when it returns, by `THENABLE_RULE` at that
+ * same seam. That second refusal lived HERE, in this file, which is why it did not exist for hook
+ * bodies either: measured through the hook loader at `callTimeoutMs: 100`, a body returning
+ * `new Promise(res => res(0)).then(spin 4e9)` came back in 0 ms and resolved at 1,948 ms, and the
+ * resolved object had skipped `intoHostRealm` — `Object.getPrototypeOf(v) === Object.prototype`
+ * was `false`. One rule, one seam, both kinds.
  *
  * WHAT IS STILL UNBOUNDED, stated plainly because a half-guard that reads as a whole one is
  * worse than none:
@@ -253,6 +258,21 @@ function seedingRandom(source: string): string {
 }
 
 /**
+ * The `code` of a thrown value, costing that value and never this caller.
+ *
+ * The one host-side property read this module makes on a value a BODY chose. See `invoke`, which
+ * is the only caller and carries the measurement.
+ */
+function thrownCode(e: unknown): string {
+  try {
+    const c = (e as { code?: unknown } | null)?.code;
+    return typeof c === "string" ? c : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * THE ARGUMENTS WERE THE HOLE, and the globals fix did not close them.
  *
  * `safeGlobals` rebuilds the body's globals out of the context's own intrinsics, so
@@ -451,7 +471,13 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
       try {
         return call(payload);
       } catch (e) {
-        if ((e as { code?: unknown } | null)?.code !== "ERR_SCRIPT_EXECUTION_TIMEOUT") throw e;
+        // GUARDED, because a body chooses what it throws and this read is on the host thread.
+        // `throw Proxy.revocable({}, {}).proxy` after revoking it made this bare read raise
+        // `TypeError: Cannot perform 'get' on a proxy that has been revoked` — measured through
+        // this loader — so the body's failure was replaced by a failure about proxies. Not
+        // deciding means "not a timeout", which rethrows what the body threw: the refusing
+        // branch, since the call has already failed either way.
+        if (thrownCode(e) !== "ERR_SCRIPT_EXECUTION_TIMEOUT") throw e;
         throw err.timeout(
           CODES.E_TASK_TIMEOUT,
           // "timed out" is load-bearing wording, not decoration: `functions.test.ts` pins the
@@ -486,29 +512,15 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
         // travels is just enough to build a stub that names each one when it is called.
         ...(callCtx.effects === undefined ? {} : { declaredEffects: Object.keys(callCtx.effects) }),
       });
-      // A THENABLE IS REFUSED, and the refusal is honest about what it does not fix.
-      //
-      // `realm.ts` refuses an `async` body at load; this is the other shape — a plain
-      // function that RETURNS a promise. The vm timeout is satisfied the moment it returns, so
-      // whatever the continuation does is beyond every deadline in this process. Refusing gives
-      // the node a NAMED failure instead of the engine awaiting a promise that may never settle.
-      //
-      // IT DOES NOT STOP THE BODY, AND IT IS NOT EVEN TIMELY. The continuation is already on the
-      // microtask queue when this throws: measured, a continuation spinning ~2.3s let the node
-      // fail `E_RESOURCE_INVALID` but `Engine.advance` did not return for 2,350 ms, and
-      // `while (true) {}` never returned at all. See the module docstring's "what is still
-      // unbounded" — nothing short of a process boundary fixes it.
-      if (typeof (out as { then?: unknown } | null)?.then === "function") {
-        throw err.validation(
-          CODES.E_RESOURCE_INVALID,
-          `function "${label}" returned a promise, and no deadline can bound one: the vm timeout ` +
-            `that enforces this node's timeoutMs covers synchronous execution only, so the rest of ` +
-            `this body runs after its node has failed and cannot be stopped. Return the outcome ` +
-            `directly; a body that must wait on something is describing an effect, and effects ` +
-            `belong on a tool node.`,
-          { details: { ref: label } },
-        );
-      }
+      // A THENABLE IS REFUSED BY `realm.ts`'s `THENABLE_RULE`, at the seam both loaders call,
+      // and the check that used to be HERE is deleted rather than kept beside it — the move
+      // `ARGUMENT_BRIDGE`'s async check already made, for the reason `SHAPE_RULE` gives. It
+      // covered `function` bodies only, so a hook body could hand back a promise and did:
+      // measured through the hook loader at `callTimeoutMs: 100`, a returned promise resolving
+      // after a 4e9 spin came back at 1,948 ms with `Object.getPrototypeOf(v) === Object.prototype`
+      // false. The seam's version is also strictly stronger: it reads `then` INSIDE the context,
+      // where a `then` getter is bounded by the vm timeout instead of running on the host thread
+      // after it has been satisfied.
       return out as ReturnType<FunctionBody>;
     };
     // See `REBIND_DEADLINE`: this is how a node's declared `timeoutMs` reaches `vm`'s `timeout`.
