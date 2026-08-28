@@ -108,19 +108,25 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 - **Name the set a claim covers.** "This is total" cannot be checked; a claim that names its members
   can.
 - Every module says *why it exists* at the top, not what it does.
-- Tests are offline and deterministic — no network, no API key, no wall-clock dependence, with
-  ONE declared exception: `packages/core/test/scale.test.ts` measures compile cost against node
-  count and says in its own header that it must read a clock. It asserts twice — once on a count
-  of the compiler's spec reads, which is byte-identical run to run, and once on the clock.
-  **Read the count before believing the clock.** Re-measured 2026-08-28 on 16 cores: alone,
-  10/10 pass; under fourteen CPU burners, 6/6; under forty, **0/4**, at 31.3×–51.6× against a
-  bound of 25×. In every one of those red runs the count read `314356 → 5616756 (17.87×)`, digit
-  for digit, so the algorithm had provably not moved. A red clock with the count unchanged is
-  load and nothing else — re-run it on a machine that is not busy. **A count that has moved is
-  the real thing, and no amount of re-running will clear it.**
-  Two claims that used to stand here are gone because they did not reproduce: that the test fails
-  1 run in 10 *alone* (both this form and the pre-2026-08-28 one passed 10/10 alone), and
-  "**Believe a red one**" (measured red 4 times out of 4 from load, with the algorithm still).
+- **Tests are offline and deterministic — no network, no API key, no wall-clock dependence, and
+  as of 2026-08-29 there is NO declared exception.** `packages/core/test/scale.test.ts` was that
+  exception. It now asserts only on a count of the compiler's spec reads — byte-identical run to
+  run — and REPORTS the wall-clock ratio without asserting on it.
+  **This entry has carried a claim that did not reproduce three times, always about the same
+  measurement, and that is the fact worth keeping rather than the numbers.** The first said the
+  test flakes 1 run in 10 alone; the second said "believe a red one"; the third said "alone,
+  10/10 pass". Measured 2026-08-29 on an idle machine, three runs of each tree: HEAD 29.6× 42.9×
+  48.5× (0/3 would pass) and `2c36026` 27.9× / 35.6× plus one pass — **and that one pass came
+  from a 100-node sample of 15.5 ms against 4.5–5.0 ms everywhere else.** The assertion was
+  `t500/t100 < 25`, so a noisy-SLOW denominator is what made it green: it was likeliest to pass
+  when its baseline sample was worst. It had been failing on both trees before this session
+  touched the compiler, and the read count reads an identical `17.89×` on both, which is how we
+  know the algorithm never moved.
+  The lesson, which is the reason this is still here at all: **a ratio of two timings is not a
+  more robust measurement than one timing, it is a less robust one** — the noise does not cancel,
+  it compounds, and it compounds asymmetrically. A constant-factor regression is now caught by an
+  absolute bound in its own test ("a 500-node graph compiles well inside a second"), which is a
+  single measurement and has none of this failure mode.
 - `/usr/bin/grep -a` always, and the path matters: this shell's `grep` is a ugrep wrapper that
   passes `-I`. Empty output is not evidence of absence. **The trigger set is NUL ∪ invalid
   UTF-8**, not non-ASCII — valid non-ASCII matches fine. **Five** tracked files carry a NUL byte
