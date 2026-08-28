@@ -38,7 +38,10 @@
  * CONDITION as well as a reason, and each condition is a claim about the tree that the work
  * landing will break:
  *
- *   - `E_JOIN_TIMEOUT` stands while no executor reads a join deadline.
+ *   - no error code stands at all: the last one, `E_JOIN_TIMEOUT`, went with `JoinNode.timeoutMs`,
+ *     the field it was reserved for, and the list went with it. The census below now asserts the
+ *     EMPTY SET, which is a rule rather than a list and is strictly tighter than the pin it
+ *     replaces — a new declared-and-unraised code fails it with nowhere to be excused.
  *   - each unappended event type stands while the files blocking its decision still name it.
  *   - no effect kind stands at all: `EFFECT_KINDS` is empty, which is the steady state a closed
  *     vocabulary should be in, and it is a pinned set rather than a floor so a new member with no
@@ -118,33 +121,20 @@ const reasonsAreReal = (rows: readonly { readonly why: string }[], what: string)
 // ── error codes ──────────────────────────────────────────────────────────────
 
 /**
- * THE CODES NOTHING RAISES. There is one, and its excuse has a condition that can fail.
+ * THE CODES NOTHING RAISES. There are none, and that is asserted rather than listed.
  *
- * There were TEN, each with a sentence beside it and no way for any of those sentences to
- * stop being true. Nine were deleted; `errors.ts`'s `CODES` docstring names them and says why
- * each was a promise rather than a plan — briefly: three named a condition the tree ALREADY
- * raises under another code or deliberately does not raise at all (`E_FENCING_STALE` for a
- * lost lease, `E_GATE_ALREADY_RESOLVED` for too late, a `goldenBlocker` for a thin cohort),
- * and the rest named a seam that does not exist (no secret resolver, no remote policy service,
- * no checkpoint addressed by id, no capacity mapping, no admission control).
+ * There were TEN, each with a sentence beside it and no way for any of those sentences to stop
+ * being true. Nine were deleted; `errors.ts`'s `CODES` docstring names them and says why each was
+ * a promise rather than a plan. The tenth, `E_JOIN_TIMEOUT`, stood on a condition — "no executor
+ * reads a join deadline" — that could only end by the deadline being BUILT. It ended the other
+ * way: `JoinNode.timeoutMs` was deleted, so the code named a mechanism the tree will not contain,
+ * and a code that outlives its field is the graveyard this list was cut down to escape.
  *
- * WHAT MAKES THE SURVIVOR DIFFERENT, and it is not that its subject is more important: a file
- * this list cannot edit NAMES it, in a recorded reversal — `graph/spec.ts`, on
- * `JoinNode.timeoutMs`: "when the deadline lands, this becomes required again,
- * `E_JOIN_TIMEOUT` leaves `NEVER_RAISED`". Deleting a code another module promises by name is
- * how a docstring becomes a lie. So it stands, and the test below states the condition it
- * stands ON — that no executor reads a join deadline — so the excuse expires by the work
- * landing rather than by somebody remembering.
+ * WHAT REPLACES THE LIST IS A RULE. `errors.ts` already says a code arrives with its raiser, in
+ * the same change. With the census at zero there is nothing left to excuse, so the assertion is
+ * the empty set and a new unraised code has no row to hide in. That is tighter than the pin it
+ * replaces, and it is why the census test stands rather than going with the array.
  */
-const NEVER_RAISED: readonly { readonly code: string; readonly why: string }[] = [
-  {
-    code: "E_JOIN_TIMEOUT",
-    why:
-      "`graph/spec.ts` names it in the recorded reversal for `JoinNode.timeoutMs`, which is declared and read by no executor; " +
-      "`graph/validate.ts:1697` warns an author that the barrier has no deadline. The code goes when the deadline lands, " +
-      "and the test below is that condition rather than a date",
-  },
-];
 
 test("THE CODES NOTHING RAISES ARE EXACTLY THE ONES PINNED HERE", () => {
   const referenced = new Set<string>();
@@ -155,66 +145,9 @@ test("THE CODES NOTHING RAISES ARE EXACTLY THE ONES PINNED HERE", () => {
   const unraised = [...declaredCodes].filter((c) => !referenced.has(c)).sort();
   assert.deepEqual(
     unraised,
-    NEVER_RAISED.map((e) => e.code).sort(),
-    "a code became raisable (or stopped being raised) — reconcile what promised it, then update this list",
-  );
-});
-
-test("every unraised code is one this file can name a reason for", () => {
-  reasonsAreReal(NEVER_RAISED, "NEVER_RAISED");
-  const unknown = NEVER_RAISED.map((e) => e.code).filter((c) => !declaredCodes.has(c));
-  assert.deepEqual(unknown, [], "pinned as never-raised but not a declared error code at all");
-});
-
-/**
- * The condition `E_JOIN_TIMEOUT`'s excuse rests on, as a predicate over the tree.
- *
- * "No EXECUTOR reads a join deadline" and not "nothing reads it": `graph/validate.ts:1693`
- * reads `join.timeoutMs` today, to WARN that nobody enforces it, and `graph/spec.ts:699` lists
- * the field name. Both of those are the field being declared and refused, which is the state
- * the excuse describes; a read under `src/run/` is the field being USED, which is the state
- * that ends it.
- *
- * Passed the texts rather than reading files itself, so the self-test below can hand it a
- * synthetic tree and prove it is capable of answering `true`. A condition that cannot fail is
- * an indefinite pass wearing a function.
- */
-function anExecutorReadsAJoinDeadline(texts: Iterable<readonly [string, string]>): boolean {
-  for (const [file, text] of texts) {
-    if (!file.includes("/run/")) continue;
-    for (const line of text.split("\n")) {
-      if (line.includes("timeoutMs") && line.includes("join")) return true;
-    }
-  }
-  return false;
-}
-
-test("E_JOIN_TIMEOUT'S EXCUSE STILL HOLDS — no executor reads a join deadline", () => {
-  assert.equal(
-    anExecutorReadsAJoinDeadline(CODE_TEXT),
-    false,
-    "something under src/run/ now reads a join's timeoutMs — the deadline landed, so E_JOIN_TIMEOUT must be raised " +
-      "where it fires and leave NEVER_RAISED, and graph/spec.ts's reversal note goes with it",
-  );
-});
-
-test("and that condition is one that can fail", () => {
-  // The real function, not a restatement of it: asserting a copy is how a gate that stopped
-  // discriminating keeps reporting success.
-  assert.equal(
-    anExecutorReadsAJoinDeadline([["src/run/engine.ts", "const ms = join.timeoutMs ?? Infinity;"]]),
-    true,
-    "an executor reading a join deadline must be detected",
-  );
-  assert.equal(
-    anExecutorReadsAJoinDeadline([["src/graph/validate.ts", "if (join.timeoutMs !== undefined) {"]]),
-    false,
-    "the validator's refusal of the field is not an executor reading it",
-  );
-  assert.equal(
-    anExecutorReadsAJoinDeadline([["src/run/engine.ts", "if (w.node.timeoutMs !== undefined) {"]]),
-    false,
-    "a NODE timeout, which IS enforced, must not be mistaken for a join deadline",
+    [],
+    "a declared error code has no raiser — raise it where it belongs, or do not declare it until you do; " +
+      "there is no excuse list any more, and re-adding one is the thing to argue in a commit message",
   );
 });
 
@@ -539,11 +472,6 @@ test("NO EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () =>
   // shrinking these lists must not cost a test edit. Growing them must, and must be argued in
   // a commit message rather than a string. `audit-coverage.test.ts` holds the same ratchet
   // over its `todo` excuses for the same reason.
-  assert.ok(
-    NEVER_RAISED.length <= 1,
-    `${NEVER_RAISED.length} error codes are declared with no raiser; it was TEN before the sweep and is ` +
-      `ONE now — raise the new one where it belongs, or do not declare it until you do`,
-  );
   assert.ok(
     NEVER_APPENDED.length <= 5,
     `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX and is FIVE — ` +

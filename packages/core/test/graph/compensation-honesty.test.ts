@@ -77,7 +77,7 @@ function joinSpec(onBranchError: "fail" | "skip" | "compensate"): GraphSpec {
         type: "join",
         reads: ["out"],
         writes: ["out"],
-        join: { branches: [n("work")], mode: "all", onBranchError, timeoutMs: 60_000 },
+        join: { branches: [n("work")], mode: "all", onBranchError },
       },
     ],
     edges: [

@@ -565,7 +565,7 @@ test("`onGate` ENRICHES WHAT THE HUMAN SEES, and does NOT thereby move what is B
           type: "human_gate",
           reads: ["note"],
           writes: ["out"],
-          humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } },
+          humanGate: { ref: "oversight/g@stable", approval: { approvers: ["u:alice"] } },
         },
       ],
     }) as unknown as GraphSpec;
@@ -718,7 +718,7 @@ test("A SKIPPING HOOK DOES NOT DEFEAT A GATE — policy stops the run before `pr
         type: "human_gate",
         reads: ["note"],
         writes: ["out"],
-        humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } },
+        humanGate: { ref: "oversight/g@stable", approval: { approvers: ["u:alice"] } },
       },
     ],
   } as unknown as GraphSpec;

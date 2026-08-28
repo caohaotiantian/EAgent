@@ -217,7 +217,7 @@ const TWO_GATES = {
   nodes: [
     { id: "slow", type: "human_gate", reads: ["plan"], humanGate: { ref: "oversight/deploy@stable", sla: { respondWithinMs: 900_000, onTimeout: "fail" } } },
     { id: "urgent", type: "human_gate", reads: ["plan"], humanGate: { ref: "oversight/deploy@stable", sla: { respondWithinMs: 60_000, onTimeout: "fail" } } },
-    { id: "collect", type: "join", join: { branches: ["slow", "urgent"], mode: "all", onBranchError: "fail", timeoutMs: 60_000 } },
+    { id: "collect", type: "join", join: { branches: ["slow", "urgent"], mode: "all", onBranchError: "fail" } },
     {
       id: "apply",
       type: "tool",

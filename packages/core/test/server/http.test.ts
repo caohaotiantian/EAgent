@@ -55,7 +55,7 @@ function specWithApprovers(approvers: readonly string[], channels?: readonly str
             ...n,
             humanGate: {
               ref: n.humanGate!.ref,
-              approval: { mode: "single" as const, approvers },
+              approval: { approvers },
               ...(channels === undefined ? {} : { delivery: { channels } }),
             },
           },
@@ -2709,7 +2709,7 @@ test("A NAMED APPROVER SEES THE QUESTION ADDRESSED TO THEM, AND NOT THE ONE BESI
   const named = {
     ...spec,
     nodes: spec.nodes.map((n) =>
-      n.id !== "slow" ? n : { ...n, humanGate: { ...n.humanGate!, approval: { mode: "single" as const, approvers: ["u:security-lead"] } } },
+      n.id !== "slow" ? n : { ...n, humanGate: { ...n.humanGate!, approval: { approvers: ["u:security-lead"] } } },
     ),
   };
   const h = harness();
@@ -4323,7 +4323,7 @@ function twoGateSpec(): GraphSpec {
       // first — and the queue must put `urgent` there instead.
       gate("slow", 900_000),
       gate("urgent", 60_000),
-      { id: "collect", type: "join", join: { branches: ["slow", "urgent"], mode: "all", onBranchError: "fail", timeoutMs: 60_000 } },
+      { id: "collect", type: "join", join: { branches: ["slow", "urgent"], mode: "all", onBranchError: "fail" } },
       { id: "finish", type: "function", reads: ["seed"], writes: ["done"], function: { ref: "function/two-gates-done@stable" } },
     ],
     edges: [

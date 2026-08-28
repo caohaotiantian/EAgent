@@ -44,7 +44,7 @@ async function runWith(approval: Record<string, unknown>, submittedBy?: Submitte
   return { h, runId, p };
 }
 
-const SOD = { mode: "single" as const, approvers: ["u:alice", "u:bob"], separationOfDuties: true };
+const SOD = { approvers: ["u:alice", "u:bob"], separationOfDuties: true };
 
 // ── the rule ─────────────────────────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ test("A GATE WHOSE ONLY APPROVER IS THE INITIATOR IS REFUSED — the compiler ca
   // `approvers` is static in the spec and the initiator is a runtime fact, so no compile-time
   // check can catch it. `raise` holds both. Without this the run parks on a question nobody
   // can ever answer, until an SLA it may not have.
-  const { p } = await runWith({ mode: "single", approvers: ["u:alice"], separationOfDuties: true }, ALICE);
+  const { p } = await runWith({ approvers: ["u:alice"], separationOfDuties: true }, ALICE);
   assert.equal(p.status, "failed");
   assert.match(String(p.error?.message), /the only approver it names is "u:alice"/);
 });
@@ -206,6 +206,36 @@ test("AN EMPTY EXCLUSION IS REFUSED AT THE EMBEDDER DOOR", async () => {
   );
 });
 
+test("AND THE SYMMETRIC ONE FOR `approvers` — a non-array and an empty list are both refused", async () => {
+  // The same door, one field over, and the non-array is the worse of the two: `#authorize` asks
+  // whether the list CONTAINS the subject, and `String.prototype.includes` answers `true` for
+  // every substring — so `approvers: "u:alice"` journals a string that READS supervised in the
+  // audit record while subject `"u"` and subject `"alice"` each approve. The empty list is the
+  // familiar half: "names nobody on purpose" and "could not read who it names" produce one value,
+  // and the runtime documents the first as permissive.
+  const h = harness();
+  const runId = await h.engine.submit({ graph: compileSkeleton(skeletonSpec()), inputs: { paths: DOCS } });
+  const broker = new HumanGateBroker();
+  const log = new RunLog(runId, { store: h.store, now: () => 1 });
+  const raise = (approvers: unknown) =>
+    broker.raise(log, {
+      runId,
+      taskId: "approve@root#0" as never,
+      nodeId: "approve" as never,
+      policyRef: "p",
+      payload: {},
+      approvers: approvers as never,
+    });
+
+  await assert.rejects(() => raise("u:alice"), /not a list of subject ids/);
+  await assert.rejects(() => raise([]), /EMPTY approvers/);
+
+  // ABSENT STILL MEANS ANYONE MAY DECIDE, and that asymmetry is the point — most gates in this
+  // repo name nobody and must keep working. If this ever starts throwing, the refusal above has
+  // stopped distinguishing "no rule" from "an unreadable rule", which is the defect it closes.
+  await raise(undefined);
+});
+
 test("A PRE-AUTHORIZED DEFAULT ACTION CANNOT STAND IN FOR THE PERSON THE RULE NAMES", async () => {
   // The exclusion is enforced for HUMAN actors only, correctly — the system actors that reach
   // `#authorize` are the replayer, the dedup inheritor and the timeout, none of which could be
@@ -273,7 +303,7 @@ test("TWO GATES DO NOT MERGE ACROSS THE RULE — `sameAuthority` learned the exc
         id: "gA" as never,
         type: "human_gate",
         reads: ["a"],
-        humanGate: { ref: "oversight/x@stable", approval: { mode: "single", approvers: ["u:alice", "u:bob"], separationOfDuties: true }, batching: BATCH },
+        humanGate: { ref: "oversight/x@stable", approval: { approvers: ["u:alice", "u:bob"], separationOfDuties: true }, batching: BATCH },
       },
       {
         id: "gB" as never,
@@ -281,7 +311,7 @@ test("TWO GATES DO NOT MERGE ACROSS THE RULE — `sameAuthority` learned the exc
         reads: ["a"],
         humanGate: {
           ref: "oversight/x@stable",
-          approval: { mode: "single", approvers: ["u:alice", "u:bob"], ...(sodOnB ? { separationOfDuties: true } : {}) },
+          approval: { approvers: ["u:alice", "u:bob"], ...(sodOnB ? { separationOfDuties: true } : {}) },
           batching: BATCH,
         },
       },

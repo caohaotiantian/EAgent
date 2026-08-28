@@ -78,8 +78,9 @@ export function skeletonSpec(over: Partial<GraphSpec> = {}): GraphSpec {
         type: "join",
         reads: ["digests"],
         writes: ["digests"],
-        // No `timeoutMs`: nothing read it, and it is a compile error now
-        // (`GRAPH008_JOIN_TIMEOUT_UNSUPPORTED`).
+        // No `timeoutMs`. The field was deleted from `JoinNode`, so writing one here is
+        // `GRAPH020_UNKNOWN_FIELD` and the graph is refused. This comment used to name
+        // `GRAPH008_JOIN_TIMEOUT_UNSUPPORTED`, a code that has never existed in this tree.
         join: { branches: [n("summarize")], mode: "all", onBranchError: "skip" },
       },
       {

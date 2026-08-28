@@ -11,16 +11,28 @@ export PATH="$PWD/bin:$PATH"
 cd examples
 ```
 
-**Four graphs, and they do not all run the same way.** This paragraph used to say "everything here
-runs offline" and "both graphs", and both halves were wrong — there are four, and two of them have
-an `agent` node:
+**Five graphs, and they do not all run the same way.** This paragraph used to say "everything here
+runs offline" and "both graphs", and both halves were wrong — there are five now, and two of them
+have an `agent` node:
 
 | graph | §  | needs a model? |
 |---|---|---|
 | `graphs/fan-out-join.json` | 1 | **no.** `function` nodes only; measured, `loom run` writes not one byte to stderr |
 | `graphs/guarded-write.json` | 3 | **no.** one `tool` node and a `preTool` hook; same, zero bytes of stderr |
+| `graphs/two-person-approval.json` | — | **no**, and it does not run to completion either: it parks on three human gates and waits for people. `packages/core/test/graph/two-person-approval.test.ts` drives it |
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see below |
 | `graphs/self-review.json` | 6 | **yes.** it is here because it is the workflow this project ported first |
+
+**`graphs/two-person-approval.json` is here to answer one question**: how do you make two of three
+named people approve before a write lands? Not with `approval.mode: "quorum"` — that field was
+deleted, and writing it is now `GRAPH020_UNKNOWN_FIELD`. **Quorum lives in `join`, not in
+`approval`**: three `human_gate` nodes, one per person, joined by
+`join{branches:[…], mode:"quorum", k:2}` guarding the write. Two-of-two is two gates in series;
+N-of-N is `mode: "all"`. Measured, and the test asserts each line: all three gates open, approving
+one leaves the file unwritten, approving the second fires the write — and the third gate stays
+OPEN, because a short-circuiting join keeps its remaining branches running. That last part is a
+real gap (`JoinNode`'s straggler-cancellation note), not a detail, so it is in the graph's own
+`labels` as well as here.
 
 Without `--models-file`, the only registered adapter is the offline mock and `loom run` says so
 on stderr before it starts. §§1–4 need no key, no network and no adapter at all.

@@ -129,7 +129,6 @@
       "humanGate": {
         "ref": "oversight/ship@stable",
         "approval": {
-          "mode": "single",
           "approvers": [
             "u:deepsky"
           ]

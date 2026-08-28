@@ -3475,11 +3475,11 @@ export class ControlPlane {
    *     that by construction rather than by a naming convention.
    *
    * It is a RUNTIME refusal and not a compile-time one, which is the opposite of
-   * `GRAPH014_APPROVAL_UNSUPPORTED` and for a reason worth stating: whether identity
-   * exists is deployment configuration, not graph configuration. The same graph is
+   * `GRAPH020_UNKNOWN_FIELD` on an `approval` block and for a reason worth stating: whether
+   * identity exists is deployment configuration, not graph configuration. The same graph is
    * perfectly answerable in a deployment with an identity source and unanswerable in one
    * without, and the compiler sees neither. What the compiler CAN refuse — an approval
-   * rule the runtime does not implement at all — it still does. `startControlPlane`
+   * rule it has no vocabulary for at all — it still does. `startControlPlane`
    * closes the remaining gap by naming the affected graphs loudly at boot, which is the
    * earliest moment both halves are in the same process.
    */

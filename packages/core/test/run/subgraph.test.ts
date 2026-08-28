@@ -472,7 +472,7 @@ function guardedChild(): GraphSpec {
         id: n("approve"),
         type: "human_gate",
         reads: ["doubled"],
-        humanGate: { ref: "oversight/charge@stable", approval: { mode: "single", approvers: [SECURITY_LEAD] } },
+        humanGate: { ref: "oversight/charge@stable", approval: { approvers: [SECURITY_LEAD] } },
       },
     ],
     edges: [
@@ -505,7 +505,7 @@ function twoGateChild(): GraphSpec {
         id: n("guard"),
         type: "human_gate",
         reads: ["doubled"],
-        humanGate: { ref: "oversight/charge@stable", approval: { mode: "single", approvers: [SECURITY_LEAD] } },
+        humanGate: { ref: "oversight/charge@stable", approval: { approvers: [SECURITY_LEAD] } },
       },
     ],
     edges: [
@@ -550,7 +550,7 @@ test("AND THE CHILD'S SEPARATION OF DUTIES BINDS IT TOO — the same hole, one f
             ...x,
             humanGate: {
               ref: "oversight/charge@stable",
-              approval: { mode: "single" as const, approvers: [SECURITY_LEAD, "u:second"], separationOfDuties: true },
+              approval: { approvers: [SECURITY_LEAD, "u:second"], separationOfDuties: true },
             },
           },
     ),

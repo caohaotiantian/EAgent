@@ -52,7 +52,7 @@ function spec(): GraphSpec {
         writes: ["out"],
         humanGate: {
           ref: "oversight/ship@stable",
-          approval: { mode: "single", approvers: ["u:alice"] },
+          approval: { approvers: ["u:alice"] },
           sla: { respondWithinMs: 1000, onTimeout: "escalate" },
           delivery: {
             channels: ["console"],

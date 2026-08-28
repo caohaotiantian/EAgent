@@ -49,7 +49,7 @@ function spec(pick: "router" | "function", takes: string): GraphSpec {
     outputs: ["out"],
     nodes: [
       front,
-      { id: "approve", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { mode: "single", approvers: ["u:alice"] } } },
+      { id: "approve", type: "human_gate", reads: ["note"], writes: [], humanGate: { ref: "oversight/g@stable", approval: { approvers: ["u:alice"] } } },
       { id: "write", type: "tool", reads: ["note"], writes: ["out"], tool: { name: "demo.write", version: "1.0", args: {} } },
     ],
     edges: [

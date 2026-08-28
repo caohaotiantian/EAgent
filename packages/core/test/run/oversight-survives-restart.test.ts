@@ -181,7 +181,7 @@ const STREAK_SPEC = {
       type: "join",
       reads: ["results"],
       writes: ["done"],
-      join: { branches: ["flaky"], mode: "all", onBranchError: "skip", timeoutMs: 100_000 },
+      join: { branches: ["flaky"], mode: "all", onBranchError: "skip" },
     },
   ],
   edges: [

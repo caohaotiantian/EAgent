@@ -49,7 +49,7 @@ const GATED = {
       type: "human_gate",
       reads: ["note"],
       writes: ["note"],
-      humanGate: { ref: "oversight/ship@stable", approval: { mode: "single", approvers: ["u:alice"] } },
+      humanGate: { ref: "oversight/ship@stable", approval: { approvers: ["u:alice"] } },
     },
     { id: "apply", type: "tool", reads: ["note"], writes: ["out"], tool: { name: "fs.write", version: "1.0", args: { path: "out/x.txt", body: "${note}" } } },
   ],

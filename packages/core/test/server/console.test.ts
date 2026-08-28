@@ -26,7 +26,7 @@ async function rig(opts: { approvers?: readonly string[]; token?: string } = {})
           nodes: skeletonSpec().nodes.map((n) =>
             n.id !== "approve"
               ? n
-              : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { mode: "single" as const, approvers: opts.approvers! } } },
+              : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { approvers: opts.approvers! } } },
           ),
         };
   const graph = compileSkeleton(spec);

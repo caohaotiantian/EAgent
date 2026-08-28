@@ -649,14 +649,14 @@ function fanSpec(): GraphSpec {
         type: "join",
         reads: ["findings"],
         writes: ["findings"],
-        join: { branches: ["handle"], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: ["handle"], mode: "all", onBranchError: "skip" },
       },
       {
         id: "gatherP",
         type: "join",
         reads: ["findings"],
         writes: ["findings"],
-        join: { branches: ["tag"], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: ["tag"], mode: "all", onBranchError: "skip" },
       },
     ],
     edges: [

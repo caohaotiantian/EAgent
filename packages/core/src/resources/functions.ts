@@ -64,8 +64,11 @@
  *   - Only the `function` and `evaluator{assertion}` node types run these bodies. A tool or a
  *     model adapter that blocks the thread is unbounded by anything here.
  *
- * The real answer to all three is a process boundary — `sandbox/subprocess.ts` exists and
- * `cpuBound` in the schema currently only warns. That is a change to how a body EXECUTES, not
+ * The real answer to all three is a process boundary — `sandbox/subprocess.ts` exists. It is not
+ * reached through the graph schema: `FunctionNode.cpuBound` was DELETED rather than wired to it,
+ * because a `function` body is re-executed on replay while a tool result is served from the
+ * journal, so a second execution host would need a second copy of the determinism boundary. Work
+ * that needs a process goes out as a TOOL. Either way it is a change to how a body EXECUTES, not
  * to how it is loaded, and it is not this module's to make.
  *
  * AND ONE CAVEAT ABOUT REPLAY, because this deadline is the one thing here that is not a

@@ -63,7 +63,7 @@ function spec(): GraphSpec {
         type: "join",
         reads: ["findings"],
         writes: ["findings"],
-        join: { branches: [n("inner")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: [n("inner")], mode: "all", onBranchError: "skip" },
       },
       {
         id: n("outerJoin"),
@@ -71,7 +71,7 @@ function spec(): GraphSpec {
         reads: ["findings"],
         writes: ["findings"],
         // GRAPH021 forces the fan-out TARGET (`outer`) to be named here.
-        join: { branches: [n("outer"), n("innerJoin")], mode: "all", onBranchError: "skip", timeoutMs: 1000 },
+        join: { branches: [n("outer"), n("innerJoin")], mode: "all", onBranchError: "skip" },
       },
       { id: n("finish"), type: "function", reads: ["findings"], writes: ["report"], function: { ref: "function/report@stable" } },
     ],

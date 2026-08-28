@@ -111,11 +111,14 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     },
   },
   {
-    row: "`JoinNode.timeoutMs`",
-    claims: "nothing reads it, so a barrier whose branch never arrives waits forever",
+    row: "A barrier deadline",
+    claims: "declaring one is now a compile ERROR",
     probe: () => {
-      // STILL A GAP. If a reader ever wires it, this fails and the row has to change.
+      // STILL A GAP, and now a refused one. If a reader ever wires it, this fails and the row
+      // has to change; and the field must stay out of the schema, or the refusal below stops
+      // being a refusal and goes back to being silence.
       assert.doesNotMatch(SRC("run/engine.ts"), /join[?.]*\.timeoutMs/, "a join timeout is read now — update the row");
+      assert.doesNotMatch(SRC("graph/spec.ts"), /join: \[[^\]]*"timeoutMs"/, "the field is back in ALLOWED_FIELDS.join");
       const spec = {
         ...BASE,
         channels: { n: { type: "object", reduce: "replace" }, items: { type: "array", reduce: "replace" }, item: { type: "string", reduce: "replace" } },
@@ -132,7 +135,7 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
           { id: "e2" as never, from: "j" as never, to: "d" as never, kind: "seq" },
         ],
       } as unknown as GraphSpec;
-      assert.ok(diagnostics(spec).includes("GRAPH008_JOIN_TIMEOUT_INERT"), "and declaring one must warn");
+      assert.ok(diagnostics(spec).includes("GRAPH020_UNKNOWN_FIELD"), "and declaring one must be refused");
     },
   },
   {
@@ -196,9 +199,19 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
   },
   {
     row: "Approval modes",
-    claims: "Only `single`",
+    claims: "There are none, and `approval` declares two fields",
     probe: () => {
-      assert.match(SRC("graph/validate.ts"), /GRAPH014_APPROVER_INVALID|mode.*quorum/, "the unsupported modes must still be refused");
+      // THE FIELDS MUST STAY OUT OF THE SCHEMA, which is what makes the row true. A `mode` back
+      // in `ApprovalSpec` would be accepted by `NESTED_FIELDS.approval` and the generic refusal
+      // would stop firing — the row would read the same and mean the opposite.
+      assert.match(SRC("graph/spec.ts"), /approval: \["approvers", "separationOfDuties"\]/, "NESTED_FIELDS.approval moved");
+      const iface = /export interface ApprovalSpec\b[\s\S]*?\n}/.exec(SRC("graph/spec.ts"));
+      assert.ok(iface, "ApprovalSpec's declaration moved — this probe reads it by shape");
+      for (const gone of ["mode", "k", "delegation"]) {
+        assert.doesNotMatch(iface[0], new RegExp(`^\\s*readonly ${gone}\\??:`, "m"), `ApprovalSpec grew ${gone} back`);
+      }
+      // …and the row's other half: the replacement recipe is a shipped file, not a sentence.
+      assert.match(SRC("graph/spec.ts"), /two-person-approval\.json/, "the example the row points at is not cited where the fields were");
     },
   },
   {

@@ -8,7 +8,7 @@
  * The rules exist to make three claims true *before* anything executes:
  *   - the run terminates (bounded by construction, not proved — GRAPH006/007/018)
  *   - concurrent writes are deterministic (GRAPH010)
- *   - oversight cannot be weakened anywhere (GRAPH014, GRAPH019)
+ *   - oversight cannot be weakened anywhere (GRAPH014, GRAPH019_POSTURE_NO_EFFECT)
  *
  */
 
@@ -436,7 +436,6 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
   rule013Reducers(spec, d);
   rule014And019Oversight(spec, idx, ctx, d);
-  rule019InertDeclarations(spec, d);
   rule015Resources(spec, ctx.resolver, d);
   rule016Subgraphs(spec, ctx, expansion, d);
   rule017Capabilities(spec, ctx, d);
@@ -825,9 +824,14 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // warn → degrade → gate → fail; only `fail` is built. `gate` read as "ask a human rather than
   // stop", and the engine escalated the ceiling for decisions that would never happen and then
   // failed the run anyway — the same outcome as `fail`, reached through a word that promised
-  // supervision. `degrade` is read by nothing at all. This is the treatment `approval.mode:
-  // quorum` gets and for the identical reason: a graph that reads as supervised and behaves
-  // otherwise is the worst failure available, because nobody goes looking.
+  // supervision. `degrade` is read by nothing at all. The reason is that a graph which reads as
+  // supervised and behaves otherwise is the worst failure available, because nobody goes looking.
+  //
+  // `approval.mode: "quorum"` used to be cited here as the same treatment and no longer is: the
+  // FIELD was deleted, because k-of-n already worked as `join{mode:"quorum", k}` over N gates.
+  // The surviving sibling is `RouterNode.mode: "model"`, and its own docstring says why it is
+  // different — it is REQUIRED, so deleting the value would leave an unknown VALUE nothing
+  // checks. `onBudgetExhausted` is a value in a union too, which is why this refusal stays.
   //
   // Implementing `gate` needs somewhere for the human's answer to GO — a way to raise a budget
   // mid-run — and no such API exists. Delete this refusal in the same change that adds one.
@@ -1019,8 +1023,9 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     //
     // NOT `fatal`, on this file's own stated rule: a lost bound costs a limit, not a posture, and
     // no later rule reasons from `retry` — so the author gets this diagnostic alongside the rest
-    // of the graph's faults rather than instead of them. It is still an ERROR: unlike the inert
-    // declarations GRAPH019 warns about, this graph does not mean what it says.
+    // of the graph's faults rather than instead of them. It is still an ERROR: unlike
+    // `GRAPH019_POSTURE_NO_EFFECT`, where the author wrote something real that cannot take
+    // effect, this graph does not mean what it says.
     const retryBlock = objectBlock(
       n.retry,
       `node "${n.id}"'s \`retry\``,
@@ -1076,11 +1081,17 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // the author who wrote it and is not one. `ALLOWED_FIELDS` is the enumeration; see its
     // docstring for why it lives beside `REQUIRED_FIELDS`.
     //
-    // An ERROR rather than a warning. The two other treatments in this family — GRAPH019's inert
-    // declaration and GRAPH013's unknown tool — warn because the graph still means what it says
-    // and the author has merely been told less than they think. An unknown KEY means the author
-    // wrote something the compiler cannot interpret at all, and the nearest-name hint below makes
-    // a typo cheap to fix rather than cheap to ignore.
+    // An ERROR rather than a warning. The other treatments in this family —
+    // `GRAPH019_POSTURE_NO_EFFECT` and GRAPH013's unknown tool — warn because the graph still
+    // means what it says and the author has merely been told less than they think. An unknown
+    // KEY means the author wrote something the compiler cannot interpret at all, and the
+    // nearest-name hint below makes a typo cheap to fix rather than cheap to ignore.
+    //
+    // THIS RULE IS WHERE THE INERT-DECLARATION FAMILY ENDED UP. `GRAPH019_CPUBOUND_NO_EFFECT`
+    // and `GRAPH008_JOIN_TIMEOUT_INERT` were both bespoke warnings for one field each; both
+    // fields were deleted, and the generic refusal here is what an author meets instead. It has
+    // no undecidable case — a key is in `ALLOWED_FIELDS` or the graph is refused — where a
+    // per-field warning had to be argued into existence one field at a time.
     const holder = REQUIRED_BLOCK[n.type];
     const declared = (n as unknown as Record<string, unknown>)[holder as string] as Record<string, unknown> | undefined;
     if (declared !== undefined && typeof declared === "object") {
@@ -1687,25 +1698,6 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       }
     }
 
-    // A BARRIER TIMEOUT IS INERT, AND THE COMPILER SAYS SO — a warning, deliberately not an error.
-    //
-    // `JoinNode.timeoutMs` is shape-validated as a duration and read by NOTHING. That looks like
-    // the shape `router.mode: "model"`, `onBudgetExhausted: "gate"`, `approval.mode: "quorum"`
-    // and `sla.onTimeout: "default_action"` are each a compile ERROR for — and it is not quite,
-    // which is why the treatment differs.
-    //
-    // Those four SUBSTITUTE: they run something semantically different from what the graph says,
-    // so accepting them ships a graph that reads as supervised and behaves otherwise. This one
-    // does nothing at all, and `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` says so in three places — the node table,
-    // the field table and the `mode: all` row all state there is no join deadline. The design is
-    // not drifting; it made a choice.
-    //
-    // So refusing would be taking a product decision HANDOFF §3 explicitly reserves — whether a
-    // barrier timeout should FAIL the join or FOLD what arrived, the latter being a semantics
-    // change under `mode: all` rather than a timeout. A warning closes the real gap without
-    // taking it: an author who never read D5 finds out from the compiler instead of from a
-    // barrier that waits forever. This is the treatment `GRAPH019_POSTURE_NO_EFFECT` gets, and
-    // for the same reason — you declared something that changes nothing.
     // A JOIN CAN ONLY PROPAGATE WHAT ITS BRANCHES WROTE, and declaring otherwise compiled clean.
     //
     // `#foldJoin` folds each branch task's committed `writes` per channel and commits the result
@@ -1748,53 +1740,6 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
             : `its branches write nothing, so this join can only signal that they finished`,
       });
     }
-
-    if (join.timeoutMs !== undefined) {
-      d.push({
-        severity: "warning",
-        code: "GRAPH008_JOIN_TIMEOUT_INERT",
-        message: `join "${n.id}" declares timeoutMs ${String(join.timeoutMs)}, which no executor reads — this barrier has no deadline`,
-        at: { nodeId: n.id },
-        fix: `remove timeoutMs, or bound the BRANCHES with node timeoutMs, which is enforced`,
-      });
-    }
-  }
-}
-
-// ── GRAPH019: a declaration that changes nothing ─────────────────────────────
-
-/**
- * A field the runtime does not read is reported rather than silently accepted.
- *
- * `FunctionNode.cpuBound` is the case this was written for, and it differs from
- * `GRAPH008_JOIN_TIMEOUT_INERT` in the way that decides the severity. The join deadline is a
- * choice the design MADE — `design/loom/02-EXECUTION-GRAPH.md (deleted at f975f9f)` states in three places that there is no
- * barrier deadline. This one is DRIFT: two documents said the opposite of the code, the node
- * table's `function` row ("Runs in a worker thread if `cpuBound: true`") and D3's pool diagram
- * ("worker_threads if cpuBound"), while `packages/core/src` contains no `worker_threads` import
- * at all. Both have been corrected; this is what stops an author believing the old sentence.
- *
- * MEASURED, because "nothing reads it" and "it does not run in parallel" are different claims:
- * two independent `cpuBound: true` function nodes took 2646 ms of compute against 1325 ms for
- * one — 1.997x, exactly serial, on a multi-core machine.
- *
- * A warning and not an error, because nothing SUBSTITUTES — unlike `onBudgetExhausted: "gate"`,
- * which ran something semantically different from what the graph said. The function computes the
- * right answer on the wrong thread. What is lost is isolation: a long body blocks the event loop,
- * and with it every other task in the wave and any `loom serve` plane sharing the process.
- */
-function rule019InertDeclarations(spec: GraphSpec, d: Diagnostic[]): void {
-  if (!Array.isArray(spec.nodes)) return;
-  for (const n of spec.nodes) {
-    if (n?.type !== "function") continue;
-    if ((n.function as { readonly cpuBound?: unknown } | undefined)?.cpuBound !== true) continue;
-    d.push({
-      severity: "warning",
-      code: "GRAPH019_CPUBOUND_NO_EFFECT",
-      message: `function node "${n.id}" declares cpuBound, which nothing reads — the body runs on the main thread and blocks it`,
-      at: { nodeId: n.id },
-      fix: "remove cpuBound, or keep the body short enough to run inline — there is no worker pool",
-    });
   }
 }
 
@@ -2346,24 +2291,72 @@ function rule014And019Oversight(
  * The alternative — accept the block and enforce the part we implement — produces a
  * graph that reads as "two of the SRE leads must agree" and behaves as "any one of
  * them", with nothing anywhere saying so. An unsupervised action that LOOKS supervised
- * is worse than an unsupervised action, because nobody goes looking (D7.9). So the
- * unimplemented half is an error, and it becomes supported by deleting a check here.
+ * is worse than an unsupervised action, because nobody goes looking (D7.9).
+ *
+ * THE THREE BESPOKE REFUSALS THAT LIVED HERE ARE GONE, and so are the fields they refused.
+ * `mode`, `k` and `delegation` were declared in `ApprovalSpec` in order to be rejected; they
+ * are deleted, so `NESTED_FIELDS.approval` refuses them as unknown keys along with `modee`,
+ * `quorumK` and `delegate`, which three exact-string checks never caught. The refusals were
+ * also defeatable — `delegation: {allowd: true}` compiled clean. Support for k-of-n did not
+ * arrive by deleting a check: it was already there, as N gates joined by
+ * `join{mode:"quorum", k}`, and `examples/graphs/two-person-approval.json` ships it.
+ *
+ * What remains here is what a compiler can actually decide about the two surviving fields:
+ * the block is an object, its keys are named, `approvers` is a list, the list is not empty,
+ * each entry is a subject rather than a role record or a perimeter marker, and
+ * `separationOfDuties` is a boolean that names somebody to narrow.
  */
 function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  // BLOCK GUARD FIRST, and it is not defensive tidying. `approval: null` reached `a.mode` and
+  // crashed the compiler with `E_INTERNAL: TypeError: Cannot read properties of null (reading
+  // 'mode')` — a raw stack instead of a diagnostic naming the node. `approval: 42` and
+  // `approval: []` were worse: they read as `undefined` at every field and the whole function
+  // returned having checked nothing, so a gate whose approval block was a typed-wrong value
+  // compiled clean and raised as a gate naming nobody.
+  const block = objectBlock(
+    n.humanGate?.approval,
+    `human_gate "${n.id}"'s \`approval\``,
+    at,
+    "an approval rule is `{approvers?, separationOfDuties?}` — an array, a number or null names no one and enforces nothing",
+    d,
+  );
+  if (block === undefined) return;
+  // EVERY KEY IS NAMED, because a dropped one here is not a lost setting. `approvres`,
+  // `separationOfDutys` and `delegate` each compiled clean and produced a gate that reads as
+  // supervised and admits anybody. `NESTED_FIELDS.approval` is the enumeration; the near-miss
+  // hint makes the typo cheap to fix rather than cheap to ignore.
+  unknownKeys(block, NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
   const a = n.humanGate?.approval;
   if (a === undefined) return;
-  const at = { nodeId: n.id };
-  const unsupported = (what: string, fix: string): void => {
-    d.push({ severity: "error", code: "GRAPH014_APPROVAL_UNSUPPORTED", message: `human_gate "${n.id}" ${what}`, at, fix });
-  };
-
-  if (a.mode !== undefined && a.mode !== "single") {
-    unsupported(
-      `declares approval mode "${a.mode}", which the runtime does not implement`,
-      "use mode: single — quorum, all and tiered are not enforced yet, and a declaration that is not enforced is worse than none",
-    );
+  // `approvers` MUST BE AN ARRAY, and the loop below is why. `for (const who of a.approvers ?? [])`
+  // iterates a STRING's characters, every one of which is a non-empty string, so
+  // `approvers: "u:alice"` passed every per-entry check. At run time the list journals as the
+  // string and `String.prototype.includes` then lets subject `"u"` and subject `"alice"` each
+  // approve. Refused here because the shape is decidable from the spec alone.
+  if (a.approvers !== undefined && !Array.isArray(a.approvers)) {
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVER_INVALID",
+      message: `human_gate "${n.id}" declares approvers ${JSON.stringify(a.approvers)}, which is not a list of subject ids`,
+      at,
+      fix: "approvers is an array of opaque subject strings; a bare string is read character by character and admits every prefix of itself",
+    });
+  } else if (Array.isArray(a.approvers) && a.approvers.length === 0) {
+    // AN EMPTY LIST IS A RULE THAT NAMES NOBODY, and the runtime reads "names nobody" as
+    // permissive. So "this gate deliberately names no one" and "the compiler could not read who
+    // it names" produced the identical value, on the one block oversight exists for. Absent
+    // still means anyone may decide — that asymmetry is the point, and `gate-authorization.test.ts`
+    // records that most gates in this repo name nobody and must keep working.
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVAL_INCOMPLETE",
+      message: `human_gate "${n.id}" declares an EMPTY approvers list, which reads as a rule and names nobody`,
+      at,
+      fix: "omit the field to mean anyone may decide, or list the subjects who must — an empty list is indistinguishable from a list the compiler could not read",
+    });
   }
-  if (a.k !== undefined) unsupported("declares a quorum k, which only mode: quorum would use", "remove k");
+
   // SEPARATION OF DUTIES IS ENFORCED NOW, so the refusal is gone — support arrives by
   // DELETING a check, exactly as this function's docstring says. What replaces it is narrower
   // and answers a question the runtime cannot: the rule bars the initiator, so a gate that
@@ -2386,15 +2379,6 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
       fix: "write `separationOfDuties: true` — a truthy string would be read as absent and the gate would enforce nothing",
     });
   }
-  if (a.delegation !== undefined && a.delegation.allowed !== undefined && typeof a.delegation.allowed !== "boolean") {
-    d.push({
-      severity: "error",
-      code: "GRAPH014_APPROVAL_INVALID",
-      message: `human_gate "${n.id}" declares delegation.allowed ${JSON.stringify(a.delegation.allowed)}, which is not true or false`,
-      at,
-      fix: "write true or false — a truthy string reads as absent, which here means the UNSUPPORTED refusal below never fires",
-    });
-  }
   if (a.separationOfDuties === true && (a.approvers ?? []).length === 0) {
     d.push({
       severity: "error",
@@ -2404,10 +2388,6 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
       fix: "list the approvers who may decide it — separation of duties narrows that list, it does not stand in for it",
     });
   }
-  if (a.delegation?.allowed === true) {
-    unsupported("declares delegation, which is not enforced", "remove it — a delegated approval would be recorded as the delegate's own");
-  }
-
   // An approvers list that cannot match anything authorizes everyone, because "names
   // nobody" is the permissive case. Better to refuse the graph than to ship a gate that
   // reads as restricted and is not.
@@ -2421,7 +2401,13 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // three: the signed-callback route and `loom approve --as` each construct the actor
   // themselves. Refusing the SHAPE at compile time closes it everywhere at once, and
   // closes it for markers nobody has minted yet.
-  for (const who of a.approvers ?? []) {
+  //
+  // ARRAY-GUARDED, because the shape refusal above REPORTS and does not return. Without this the
+  // first version of that refusal pushed a diagnostic and then crashed here — `for…of 42` throws
+  // `TypeError: number 42 is not iterable`, so an author got a raw stack instead of the
+  // diagnostic that had just been written for them. A guard that reports a fault and then trips
+  // over it has reported nothing.
+  for (const who of Array.isArray(a.approvers) ? a.approvers : []) {
     if (typeof who !== "string" || who.trim() === "") {
       d.push({
         severity: "error",
@@ -2450,9 +2436,21 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
  * nobody answered. Everything checkable is therefore checked at compile time.
  */
 function checkSla(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  const block = objectBlock(
+    n.humanGate?.sla,
+    `human_gate "${n.id}"'s \`sla\``,
+    at,
+    "an sla is `{respondWithinMs, onTimeout?, reminders?}` — a non-object declares a clock and gets none",
+    d,
+  );
+  if (block === undefined) return;
+  // `onTimout: "escalate"` compiled clean and the gate silently kept the default `fail`: a graph
+  // that asked for someone else to be paged, and expires instead. That is `checkSla`'s own
+  // argument about `default_action`, one misspelling out.
+  unknownKeys(block, NESTED_FIELDS.sla, `human_gate "${n.id}"'s \`sla\` block`, at, d);
   const sla = n.humanGate?.sla;
   if (sla === undefined) return;
-  const at = { nodeId: n.id };
   const bad = (what: string, fix: string): void => {
     d.push({ severity: "error", code: "GRAPH014_SLA_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
   };
@@ -2607,6 +2605,9 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a batching block that is not an object",
         "batching is {enabled, key, windowMs, maxBatch}; an array, a Map or a Date has no fields the runtime can read and would merge nothing",
       );
+    } else if (unknownKeys(batching, NESTED_FIELDS.batching, `human_gate "${n.id}"'s \`batching\` block`, at, d)) {
+      // An unknown key here is checked BEFORE the value rules, so `windowMz` is reported as the
+      // typo it is rather than as a missing `windowMs` — the author who wrote one is told which.
     } else if (typeof batching["enabled"] !== "boolean") {
       bad(
         `declares batching.enabled ${String(batching["enabled"])}, which is not a boolean`,
@@ -2645,6 +2646,8 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a dedupe block that is not an object",
         "dedupe is {enabled, windowMs}; an array, a Map or a Date has no fields the runtime can read and would collapse nothing",
       );
+    } else if (unknownKeys(dedupe, NESTED_FIELDS.dedupe, `human_gate "${n.id}"'s \`dedupe\` block`, at, d)) {
+      // Same ordering as `batching`, and the same reason.
     } else if (typeof dedupe["enabled"] !== "boolean") {
       bad(
         `declares dedupe.enabled ${String(dedupe["enabled"])}, which is not a boolean`,
@@ -2698,9 +2701,20 @@ interface EscalationTierLike {
  * would be the compiler asserting a semantic the runtime does not have.
  */
 function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  const block = objectBlock(
+    n.humanGate?.delivery,
+    `human_gate "${n.id}"'s \`delivery\``,
+    at,
+    "a delivery block is `{channels, recipients?, redact?, redactAs?, escalation?}` — a non-object reaches nobody",
+    d,
+  );
+  if (block === undefined) return;
+  // `recipiants: []` compiled clean, so the gate was durable and queued and NOBODY WAS TOLD —
+  // the one mode in which "an SLA fired and nobody knew" is possible, reached by one letter.
+  unknownKeys(block, NESTED_FIELDS.delivery, `human_gate "${n.id}"'s \`delivery\` block`, at, d);
   const spec = n.humanGate?.delivery;
   if (spec === undefined) return;
-  const at = { nodeId: n.id };
   const bad = (what: string, fix: string): void => {
     d.push({ severity: "error", code: "GRAPH014_DELIVERY_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
   };
@@ -2733,6 +2747,20 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
   const chain = asArray<EscalationTierLike>(spec.escalation);
   for (const [i, tier] of chain.entries()) {
     const where = `delivery.escalation[${i}]`;
+    // EVERY TIER, not the block. A tier is where the escalation chain names NEW people, so an
+    // unread key here is a director who is never told while the graph says they are.
+    const tierBlock = objectBlock(
+      tier as unknown,
+      `human_gate "${n.id}"'s \`${where}\``,
+      at,
+      "a tier is `{afterMs, to?, channels?, action?}`",
+      d,
+    );
+    // MALFORMED TIER, DONE. Continuing past it is what made `escalation: [null]` report
+    // GRAPH003_MALFORMED and then crash on `tier.action` — the diagnostic was written and the
+    // author never saw it.
+    if (tierBlock === undefined) continue;
+    unknownKeys(tierBlock, NESTED_FIELDS.deliveryEscalation, `human_gate "${n.id}"'s \`${where}\``, at, d);
     if (tier.action === "fail") {
       // A TERMINAL TIER ENDS THE CHAIN WHEREVER IT SITS. `nextTier` returns `undefined` at
       // the first `action: "fail"`, so every tier after it is unreachable — a graph naming

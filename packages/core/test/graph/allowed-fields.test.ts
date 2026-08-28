@@ -38,6 +38,8 @@ import { resolver } from "../run/skeleton.ts";
 const SPEC_SRC = readFileSync(fileURLToPath(new URL("../../src/graph/spec.ts", import.meta.url)), "utf8");
 /** `ChannelSpec` and `ContextProjection` live in the state layer, so the cross-check reads two files. */
 const CHANNELS_SRC = readFileSync(fileURLToPath(new URL("../../src/state/channels.ts", import.meta.url)), "utf8");
+/** `DeliverySpec` and `EscalationTier` live in `run/delivery.ts`, for the same reason — three files. */
+const DELIVERY_SRC = readFileSync(fileURLToPath(new URL("../../src/run/delivery.ts", import.meta.url)), "utf8");
 
 /** The interface each node type's block is typed as, e.g. `evaluator` → `EvaluatorNode`. */
 const BLOCK_INTERFACE: Readonly<Record<NodeType, string>> = {
@@ -311,11 +313,176 @@ test("AN UNKNOWN `metadata` FIELD IS REFUSED", () => {
   assert.match(nested(r)!.fix ?? "", /`name`/);
 });
 
+/**
+ * `preAuthorization` IS REFUSED AT EVERY AUTHORING SCOPE, and that is the whole of the answer.
+ *
+ * The envelope — cost ceiling, blast radius, tool scope, data classification, allowed side
+ * effects, audit completeness, demotion triggers — has been proposed three times as a block of
+ * `GraphSpec`/`NodeSpec`/`GraphPolicy`. `graph/spec.ts`'s docstring above `GraphPolicy` states
+ * the refusal and maps each part onto its existing home; this is the mechanical half, so the
+ * refusal is a fact about the compiler rather than a sentence in a comment.
+ *
+ * NAMED SCOPES, not "everywhere": the graph root, a node, `policy`, `policy.budget` and
+ * `metadata`. `metadata` was the last silent one and closed most recently — before that, the
+ * envelope could be written there with zero diagnostics.
+ *
+ * The reason it is refused rather than built is in that docstring, and its sharp end is the
+ * seventh part: a "demotion trigger" is an automated rule that LOWERS a posture, which
+ * `PolicyEngine.escalate` and the audit rule `policy.deescalation-is-human` exist to make
+ * impossible. A graph does not write its own grant.
+ */
+test("THE `preAuthorization` ENVELOPE IS REFUSED WHEREVER IT IS WRITTEN", () => {
+  const envelope = { costCeilingUsd: 5, blastRadius: "wide", demotionTriggers: [{ when: "true", to: "out" }] };
+  const scopes: readonly (readonly [string, Parameters<typeof full>[0]])[] = [
+    ["the graph root", { spec: { preAuthorization: envelope } }],
+    ["a node", { node: { preAuthorization: envelope } }],
+    ["`policy`", { spec: { policy: { posture: "out", budget: { costUsd: 1 }, capabilities: [], preAuthorization: envelope } } }],
+    ["`policy.budget`", { spec: { policy: { posture: "out", budget: { costUsd: 1, preAuthorization: envelope }, capabilities: [] } } }],
+    ["`metadata`", { spec: { metadata: { name: "sc", project: "test", version: 1, preAuthorization: envelope } } }],
+  ];
+  for (const [where, over] of scopes) {
+    const r = full(over);
+    assert.equal(r.ok, false, `${where}: the envelope compiled clean`);
+    const diag = r.diagnostics.find((x) => x.code === "GRAPH020_UNKNOWN_FIELD" && /preAuthorization/.test(x.message));
+    assert.ok(diag !== undefined, `${where}: ${r.diagnostics.map((x) => x.code).join(", ") || "(no diagnostics)"}`);
+  }
+});
+
+test("...and `labels` is the sanctioned home for the annotation it was reaching for", () => {
+  // The control. Closing `metadata` must not have removed the ability to attach arbitrary keys —
+  // it forces them into the place built for them, which is what makes the refusal cost nothing
+  // legitimate.
+  const r = full({ spec: { metadata: { name: "sc", project: "test", version: 1, labels: { preAuthorization: "reviewed-by-hand" } } } });
+  assert.equal(r.ok, true, r.diagnostics.map((x) => `${x.severity}:${x.code}`).join(", "));
+});
+
+/**
+ * THE `humanGate` SCOPES, where a dropped key is not a lost setting but an unsupervised action.
+ *
+ * `unknownKeys` reached six scopes and none of `humanGate`'s. Measured on a structurally valid
+ * graph, every one of these compiled with ZERO gate diagnostics:
+ *
+ *     approval: {approvres: [...]}                          →  nothing
+ *     approval: {approvers: "u:alice"}                       →  nothing
+ *     approval: {approvers: []}                              →  nothing
+ *     approval: 42                                           →  nothing
+ *     approval: {..., separationOfDutys: true}               →  nothing
+ *     approval: {..., delegation: {allowd: true}}            →  nothing
+ *     sla: {respondWithinMs: 60000, onTimout: "escalate"}    →  nothing
+ *     delivery: {channels: ["console"], recipiants: []}      →  nothing
+ *     approval: null                                         →  E_INTERNAL TypeError, no diagnostic
+ *
+ * Driven through the engine with a restart between raise and resolve, the first typo journals
+ * `approvers: []`, `u:mallory` — named by nobody — approves, and the guarded `fs.write` lands.
+ * `"u:alice"` journals as the STRING, so the audit record READS supervised while
+ * `String.prototype.includes` lets subject `"u"` and subject `"alice"` each approve and write.
+ *
+ * This is `policyy: {posture: "in"}` one nesting level deeper with worse consequences, and it is
+ * the same fix: the enumeration lives in `NESTED_FIELDS` beside the interfaces, and the drift
+ * test below reads those interfaces out of the source rather than restating them.
+ */
+const gate = (humanGate: Record<string, unknown>) =>
+  full({
+    node: {
+      id: "n",
+      type: "human_gate",
+      reads: ["a"],
+      humanGate: { ref: "oversight/gate@stable", ...humanGate },
+      function: undefined,
+    },
+  });
+
+test("AN UNKNOWN KEY IN ANY `humanGate` SUB-BLOCK IS REFUSED", () => {
+  const cases: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["approval", { approval: { approvres: ["u:alice"] } }],
+    // `delegation` ITSELF is the unknown key now — D.15 deleted `ApprovalSpec.delegation` and
+    // `DelegationSpec`, so the block that used to need its own scope no longer exists. Kept as a
+    // row because it is the shape an author who read an older README will write.
+    ["approval.delegation", { approval: { approvers: ["u:alice"], delegation: { allowed: true } } }],
+    ["sla", { approval: { approvers: ["u:alice"] }, sla: { respondWithinMs: 60_000, onTimout: "escalate" } }],
+    ["delivery", { approval: { approvers: ["u:alice"] }, delivery: { channels: ["console"], recipiants: [] } }],
+    [
+      "delivery.escalation[0]",
+      {
+        approval: { approvers: ["u:alice"] },
+        delivery: { channels: ["console"], escalation: [{ afterMs: 1000, too: [{ kind: "user", id: "u:bob" }] }] },
+      },
+    ],
+    ["batching", { approval: { approvers: ["u:alice"] }, batching: { enabled: true, key: "k", windowMs: 5, maxBatch: 2, windowMz: 5 } }],
+    ["dedupe", { approval: { approvers: ["u:alice"] }, dedupe: { enabled: true, windowMs: 5, keyy: "x" } }],
+  ];
+  for (const [where, hg] of cases) {
+    const r = gate(hg);
+    assert.equal(r.ok, false, `${where}: compiled clean`);
+    const diag = unknownField(r);
+    assert.ok(diag !== undefined, `${where}: ${r.diagnostics.map((x) => x.code).join(", ") || "(no diagnostics)"}`);
+    assert.equal(diag.severity, "error", `${where}: an unknown key on a gate must not be a warning`);
+  }
+});
+
+test("...and a MALFORMED sub-block is a diagnostic naming the node, not a TypeError", () => {
+  // `approval: null` reached `a.mode` and crashed the compiler with a raw stack.
+  // `approval: 42` and `approval: []` read as `undefined` at every field, so the whole check
+  // returned having checked nothing — the block was typed wrong and the gate compiled clean.
+  for (const approval of [null, 42, [], "u:alice"]) {
+    const r = gate({ approval });
+    assert.equal(r.ok, false, `approval: ${JSON.stringify(approval)} compiled clean`);
+    assert.ok(
+      r.diagnostics.some((x) => x.code === "GRAPH003_MALFORMED" && /approval/.test(x.message)),
+      `approval: ${JSON.stringify(approval)} → ${r.diagnostics.map((x) => x.code).join(", ") || "(none)"}`,
+    );
+  }
+
+  // TWO MORE THAT THE FIRST DRAFT OF THIS CHANGE REPORTED AND THEN CRASHED ON, which is the
+  // defect class in miniature: `objectBlock` pushed the diagnostic and the code below it read
+  // through the raw value anyway, so the author got `TypeError: Cannot read properties of null`
+  // instead of the message that had just been written for them. A guard that reports a fault and
+  // then trips over it has reported nothing.
+  const nested: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["delivery.escalation[0]: null", { approval: { approvers: ["u:alice"] }, delivery: { channels: ["console"], escalation: [null] } }],
+    ["sla: null", { approval: { approvers: ["u:alice"] }, sla: null }],
+    ["delivery: null", { approval: { approvers: ["u:alice"] }, delivery: null }],
+  ];
+  for (const [where, hg] of nested) {
+    const r = gate(hg);
+    assert.equal(r.ok, false, `${where}: compiled clean`);
+    assert.ok(
+      r.diagnostics.some((x) => x.code === "GRAPH003_MALFORMED"),
+      `${where}: ${r.diagnostics.map((x) => x.code).join(", ") || "(none)"}`,
+    );
+  }
+});
+
+test("A GATE THAT DECLARES ALL SIX BLOCKS CORRECTLY STILL COMPILES — the control", () => {
+  // The anti-cry-wolf half, and it matters more here than anywhere else in this file: refusing a
+  // correct gate is refusing the graph, and an author has no way to tell that from a real typo.
+  const r = gate({
+    approval: { approvers: ["u:alice"], separationOfDuties: true },
+    sla: { respondWithinMs: 60_000, onTimeout: "escalate", reminders: [{ afterMs: 30_000 }] },
+    delivery: {
+      channels: ["console"],
+      recipients: [{ kind: "user", id: "u:alice" }],
+      redact: ["email"],
+      redactAs: "pii",
+      escalation: [{ afterMs: 30_000, to: [{ kind: "role", id: "sre" }], channels: ["console"] }],
+    },
+    batching: { enabled: true, key: "deploys", windowMs: 5_000, maxBatch: 3 },
+    dedupe: { enabled: true, windowMs: 5_000 },
+  });
+  assert.equal(r.ok, true, r.diagnostics.map((x) => `${x.severity}:${x.code} ${x.message}`).join(" | "));
+});
+
 test("EVERY FIELD THESE FOUR INTERFACES DECLARE IS ALLOWED — the guard must not refuse valid graphs", () => {
   // The same anti-cry-wolf check as the three above, and the one that matters most here: a field
   // added to `ChannelSpec` and not to this table refuses a channel declaration that is correct,
   // and an author has no way to tell that from a real typo.
   const IFACE: Readonly<Record<keyof typeof NESTED_FIELDS, readonly [string, string]>> = {
+    approval: ["ApprovalSpec", SPEC_SRC],
+    sla: ["GateSlaSpec", SPEC_SRC],
+    delivery: ["DeliverySpec", DELIVERY_SRC],
+    deliveryEscalation: ["EscalationTier", DELIVERY_SRC],
+    batching: ["BatchingSpec", SPEC_SRC],
+    dedupe: ["DedupeSpec", SPEC_SRC],
     retry: ["RetryPolicy", SPEC_SRC],
     channel: ["ChannelSpec", CHANNELS_SRC],
     contextProjection: ["ContextProjection", CHANNELS_SRC],

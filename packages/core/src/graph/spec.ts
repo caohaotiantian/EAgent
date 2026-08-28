@@ -49,6 +49,52 @@ export interface ExpansionBudget {
   readonly maxLoopIterations: number;
 }
 
+/**
+ * THE `preAuthorization` ENVELOPE IS REFUSED PERMANENTLY, and this paragraph is the refusal.
+ *
+ * It has been proposed three times — a block declaring a cost ceiling, a blast radius, a tool
+ * scope, a data classification, allowed side effects, audit completeness and demotion triggers,
+ * so that a node "may run out-of-the-loop only if all of these are declared". It is not a field
+ * of anything in this tree and it is not going to become one. Where each part already lives:
+ *
+ *   cost ceiling          `policy.budget.{costUsd,tokens,wallMs}` — all three bind, at the run
+ *                         ceiling and the node ceiling, and survive a restart.
+ *   blast radius          `IrreversibilityClass` + `CLASS_DEFAULT_POSTURE` (`vocab.ts`).
+ *   tool scope            `policy.capabilities`, checked against `reachableToolNames`.
+ *   data classification   `Classification` + `dataFloorOf`, over `observedChannels`.
+ *   allowed side effects  `FunctionNode.effects`, folded into `reachableToolNames`.
+ *   audit completeness    ABSENT. `journal/audit.ts` holds the rule set; no graph declares
+ *                         which rules its run must satisfy, and nothing here proposes one.
+ *   demotion triggers     FORBIDDEN, and that is different from absent.
+ *
+ * TWO REASONS, AND THE SECOND IS THE ONE THAT MAKES IT PERMANENT.
+ *
+ * REDUNDANCY. Six of the seven already bind through orthogonal mechanisms, so a bundle gives an
+ * author a SECOND spelling for facts one place already states. This repository has the
+ * reproduction on file for exactly that at one-fifth the scale: `dataFloorOf` exists because
+ * `compile.ts` and `validate.ts` computed the same six lines one word apart and the validator
+ * reasoned about a LOWER floor than the compiler enforces. An envelope is that failure across
+ * five axes at once, and its fail-closed question has no good answer — when
+ * `preAuthorization.costCeilingUsd` says 5 and `policy.budget.costUsd` says 50, one of them
+ * loses, and whichever loses was a declaration an author believed.
+ *
+ * THE NAME IS A LOOSENING VERB. A graph author writing `preAuthorization` is the graph
+ * pre-approving its own out-of-the-loop execution, and the seventh part makes that concrete
+ * rather than rhetorical: a "demotion trigger" is an AUTOMATED rule that lowers a posture when
+ * conditions are met. That is precisely what this system enforces against, at two levels —
+ * `PolicyEngine.escalate` returns without firing when `maxPosture(from, to) === from`, and the
+ * audit rule `policy.deescalation-is-human` flags any `policy.deescalated` whose actor kind is
+ * not `human`. Declaring the field would put a name in the schema for the one thing the system
+ * exists to make impossible. "Oversight only tightens" is not a property a graph may opt out of.
+ *
+ * A graph does not write its own grant.
+ *
+ * The scope is closed at both ends: `SPEC_FIELDS`, `NODE_FIELDS`, `POLICY_FIELDS`,
+ * `ALLOWED_FIELDS` and `NESTED_FIELDS.metadata` between them refuse an unknown key at every
+ * authoring scope the compiler has, so `preAuthorization` is `GRAPH020_UNKNOWN_FIELD` wherever
+ * it is written — including inside `metadata`, which was the last silent one. Arbitrary
+ * annotation has a sanctioned home: `GraphMetadata.labels`.
+ */
 export interface GraphPolicy {
   readonly posture?: Posture;
   readonly budget?: Budget;
@@ -83,9 +129,33 @@ export type NodeType =
   | "human_gate"
   | "subgraph";
 
+/**
+ * THERE IS NO `cpuBound` FIELD, and there is no worker pool.
+ *
+ * It was declared here, accepted into `ALLOWED_FIELDS.function`, and read at exactly one site:
+ * the diagnostic whose whole job was to stop an author believing in it. `packages/core/src`
+ * contains no `worker_threads` import — the only occurrence of the word was a comment saying so.
+ * A body declaring it ran on the main thread and blocked the event loop, every other task in the
+ * wave, the gate-SLA sweep, and any `loom serve` plane sharing the process. Measured: two
+ * independent `cpuBound: true` nodes took 2,646 ms against 1,325 ms for one — 1.997x, exactly
+ * serial — and four took 5.989x on a 16-core machine. "Looks parallel, serialises" is the
+ * operational twin of "looks supervised, is not", and across a fan-out an author believed the
+ * declaration was N-way when it was 1-way.
+ *
+ * Declaring one is now `GRAPH020_UNKNOWN_FIELD`. The pool was refused rather than deferred
+ * because a `function` body is RE-EXECUTED on replay while a tool result is SERVED from the
+ * journal: out-of-process work AS A TOOL (`proc.exec`, an MCP tool) needs no second copy of the
+ * determinism vocabulary, and a worker pool needs one — Date/Intl/Math.random/`ctx.now` would
+ * have to be re-established inside the worker, permanently doubling the surface on which
+ * invariant 4 can silently break. Two deleted design documents once promised the thread; the
+ * schema outlived them by keeping the field.
+ *
+ * WHAT DOES NOT CHANGE: a body that burns CPU still blocks the loop. It is bounded by the node's
+ * declared `timeoutMs` or by `resources/functions.ts`'s `opts.callTimeoutMs ?? 30_000` through
+ * `vm`'s per-call timeout, which can enforce it because it terminates synchronous execution.
+ */
 export interface FunctionNode {
   readonly ref: ResourceRef;
-  readonly cpuBound?: boolean;
   /**
    * Tools this body may invoke — DECLARED here, never chosen at run time.
    *
@@ -145,8 +215,15 @@ export interface RouterCase {
 /**
  * Which outgoing edges fire.
  *
- * `mode: "model"` IS DECLARED IN ORDER TO BE REFUSED — the same treatment `DelegationSpec`
- * gets, and for the same reason. Nothing dispatches on `mode`: the router evaluates
+ * `mode: "model"` IS DECLARED IN ORDER TO BE REFUSED, and it is now the LAST field in this file
+ * of which that is true — `ApprovalSpec.mode`, `.k` and `DelegationSpec` used to be cited here as
+ * the same treatment and were deleted instead. The distinction that keeps this one is checkable
+ * rather than stylistic: those were OPTIONAL fields, so deleting them makes each key unknown and
+ * `NESTED_FIELDS.approval` refuses it. `mode` here is REQUIRED and sits inside a block
+ * `ALLOWED_FIELDS` already covers, so deleting `"model"` from the union would leave an unknown
+ * VALUE that nothing checks — the refusal below is load-bearing and must stay.
+ *
+ * Nothing dispatches on `mode`: the router evaluates
  * `cases[].when` whichever mode is declared, so accepting `model` would run "a fixed
  * expression picks the branch" under a graph that reads "a model picks the branch", with
  * a model profile pinned in the resolution manifest and never called. The compiler refuses
@@ -166,7 +243,30 @@ export interface RouterNode {
 /**
  * The barrier: which branches, how many of them, and what a failed one means.
  *
- * THERE IS NO `drain` FIELD, and its absence is the honest form of what the runtime does.
+ * THERE IS NO `timeoutMs` FIELD, and there is no barrier deadline. It was declared here,
+ * shape-validated as a duration, warned about at compile, and read by no executor; declaring
+ * one is now `GRAPH020_UNKNOWN_FIELD` and the graph is refused. Every branch of a join already
+ * has an author-declarable, ENFORCED deadline at its own locus — a node branch through
+ * `NodeSpec.timeoutMs` and `#withNodeDeadline`, a gate branch through `slaMs` + `onTimeout` and
+ * `GateSweeper` — so the field bought a second spelling and no bound.
+ *
+ * The reason it is not coming back as a warning is that a barrier deadline's undecidable case
+ * has no journaled answer: "is this branch stranded, or legitimately slow?" A join sees only
+ * that a sibling has not committed, and `#deadlineOf` deliberately gives a gate with no `slaMs`
+ * NO deadline at all — so a branch parked on a human gate is indistinguishable from a hung
+ * socket, and a firing barrier would fail runs that are correctly waiting for a person. Firing
+ * over whatever arrived is worse: `#foldJoin` has no transform, so a partial fold under
+ * `mode: "all"` commits a value no reader can tell from a complete one. An author who wants
+ * partial evidence has `mode: "any"` and `mode: "quorum"`, which are journaled as partial by
+ * construction.
+ *
+ * DELETING IT DOES NOT CLOSE THE "WAITS FOREVER" HOLE, and nothing here should be read as
+ * claiming otherwise: `engine.ts`'s `#withNodeDeadline` returns straight through when a node
+ * declares no `timeoutMs`, so an `agent` or `tool` node with none hangs its task forever. That
+ * is a default node deadline's job, at the one enforcement point that already covers every
+ * node type.
+ *
+ * THERE IS NO `drain` FIELD EITHER, and its absence is the honest form of what the runtime does.
  * It meant "keep non-arriving branches running after the join fires", and the runtime
  * keeps them running unconditionally — a short-circuiting `any` or `quorum` join fires and
  * the remaining branches run to completion, with no `task.cancelled` appended anywhere.
@@ -180,47 +280,12 @@ export interface JoinNode {
   /** `quorum` only: an integer count, or a fraction of the branch width. */
   readonly k?: number;
   readonly onBranchError: "fail" | "skip" | "compensate";
-  /**
-   * DECLARED AND UNENFORCED: THERE IS NO JOIN DEADLINE.
-   *
-   * `#maybeFireJoin` decides on `branches`, `mode` and `k`, and `#foldJoin` on
-   * `onBranchError`. Neither reads a clock, nothing in `src/` reads this field at all, and
-   * `E_JOIN_TIMEOUT` is declared in `errors.ts` with no call site — so a run whose branch
-   * never arrives waits forever, however small a number is written here. It was REQUIRED
-   * by this type, so every author had to write one that decides nothing, which is the
-   * "looks supervised" shape one field over from the gates that refuse it.
-   *
-   * Optional rather than refused, and the difference is only who can act: refusing it is
-   * the right answer and it belongs in the change that implements the deadline, because a
-   * deadline needs lease reclaim to be worth anything — a branch held by a dead worker is
-   * what actually strands a join under multi-process workers, and a timer would fire
-   * against a task nobody is running. Until then the type says what is true and an author
-   * who omits it loses nothing.
-   *
-   * Reversal: when the deadline lands, this becomes required again, `E_JOIN_TIMEOUT`
-   * leaves `NEVER_RAISED`, and the note in `design/HANDOFF.md` goes with it.
-   */
-  readonly timeoutMs?: number;
 }
 
 export interface EvaluatorNode {
   readonly kind: "assertion" | "rubric";
   readonly ref: ResourceRef;
   readonly threshold: number;
-}
-
-/**
- * A delegation chain, declared but not yet implemented.
- *
- * Present so that a graph asking for delegation is REJECTED rather than run as if it
- * had asked for nothing (GRAPH014_APPROVAL_UNSUPPORTED). `separationOfDuties` has since left
- * that set by being built — support arrives by DELETING a check, which is the whole point of
- * refusing rather than ignoring.
- */
-export interface DelegationSpec {
-  readonly allowed: boolean;
-  readonly maxDepth?: number;
-  readonly mustStayInGroup?: boolean;
 }
 
 /**
@@ -234,17 +299,35 @@ export interface DelegationSpec {
  * this block was added to fix, so the field names are D7.2's verbatim and moving the
  * block into the Resource later is a relocation rather than a redesign.
  *
- * `approvers` and `separationOfDuties` are enforced. What is left — `mode` other than
- * `single`, `k`, and `delegation` — is declared here precisely so that it can be REFUSED at
- * compile time: a graph that says `mode: quorum` and silently gets one-approver behaviour is
- * the "looks supervised, is not" failure D7.9 calls the worst one available, and it would be
- * invisible in exactly the place oversight exists for.
+ * TWO FIELDS, AND BOTH ARE ENFORCED. `mode`, `k` and `delegation` used to sit here declared in
+ * order to be refused, and they are deleted — because what they gestured at either already
+ * exists or was never implementable from its own declaration.
+ *
+ * K-OF-N APPROVAL OVER NAMED PEOPLE ALREADY WORKS, in the shipped graph language, with no new
+ * vocabulary: N `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k}`. Measured
+ * with three gates naming `u:alice`, `u:bob` and `u:carol` guarding an `fs.write` — all three
+ * gates open, approving one leaves `writes=0`, approving the second fires the guarded write, and
+ * the third stays open. Two-of-two is two gates in series. `examples/graphs/two-person-approval.json`
+ * ships that composition and a test drives it, so it is an artifact rather than a claim.
+ *
+ * `tiered` went because NO FIELD ANYWHERE DEFINES A TIER, so unlike quorum it was not
+ * implementable from its declaration — only refusable. `delegation` went because its own
+ * refusal was defeatable: `delegation: {allowd: true}` compiled clean, and
+ * `delegation: {maxDepth: 99, mustStayInGroup: true}` compiled clean with two fields no code
+ * read; `mustStayInGroup` also presupposes a group vocabulary this system declines to add.
+ *
+ * WHAT REFUSES THEM NOW IS STRICTLY BETTER. They were OPTIONAL fields, so deleting them makes
+ * each key unknown and `NESTED_FIELDS.approval` refuses it with `GRAPH020_UNKNOWN_FIELD`, naming
+ * the two members `approval` may declare — along with `modee`, `quorumK`, `delegate` and every
+ * other spelling, where three exact strings were caught before. That is the difference from
+ * `RouterNode.mode: "model"`, which stays declared-in-order-to-be-refused: `mode` there is
+ * REQUIRED, so deleting the value would leave an unknown VALUE nothing checks.
+ *
+ * The one honest loss is message quality: the refusal does not say "use a quorum join instead".
+ * That recipe lives in the shipped example and in README, because putting it in the compiler
+ * would reintroduce the vocabulary being deleted.
  */
 export interface ApprovalSpec {
-  /** Only `single` is implemented. The others compile-error until a wave lands them. */
-  readonly mode?: "single" | "quorum" | "all" | "tiered";
-  /** `quorum` only. */
-  readonly k?: number;
   /**
    * Subject identifiers, compared EXACTLY against a human actor's `subject`.
    *
@@ -267,7 +350,6 @@ export interface ApprovalSpec {
    * such a run FAILS at the gate rather than raising one that bars nobody.
    */
   readonly separationOfDuties?: boolean;
-  readonly delegation?: DelegationSpec;
 }
 
 /**
@@ -707,11 +789,11 @@ export const REQUIRED_FIELDS: Readonly<Record<NodeType, readonly (readonly [stri
  * added — a guard that cries wolf on correct code is worse than no guard.
  */
 export const ALLOWED_FIELDS: Readonly<Record<NodeType, readonly string[]>> = {
-  function: ["ref", "cpuBound", "effects"],
+  function: ["ref", "effects"],
   agent: ["profile", "prompt", "outputSchema", "maxTurns", "tools", "canMutate"],
   tool: ["name", "version", "args"],
   router: ["mode", "cases", "fallbackEdge", "profile"],
-  join: ["branches", "mode", "k", "onBranchError", "timeoutMs"],
+  join: ["branches", "mode", "k", "onBranchError"],
   evaluator: ["kind", "ref", "threshold"],
   human_gate: ["ref", "approval", "sla", "batching", "dedupe", "delivery"],
   subgraph: ["ref", "inputs", "outputs", "budgetShare"],
@@ -847,11 +929,47 @@ export const EDGE_FIELDS: readonly string[] = [
  * `channel` and `contextProjection` are `ChannelSpec` and `ContextProjection` from
  * `state/channels.ts`, not from this file; the test reads that file too rather than restating them.
  */
-export const NESTED_FIELDS: Readonly<Record<"retry" | "channel" | "contextProjection" | "metadata", readonly string[]>> = {
+export const NESTED_FIELDS: Readonly<
+  Record<
+    | "retry"
+    | "channel"
+    | "contextProjection"
+    | "metadata"
+    | "approval"
+    | "sla"
+    | "delivery"
+    | "deliveryEscalation"
+    | "batching"
+    | "dedupe",
+    readonly string[]
+  >
+> = {
   retry: ["maxAttempts", "backoff", "initialMs", "maxMs", "jitter", "onlyIf"],
   channel: ["type", "reduce", "initial", "classification", "contextProjection", "identityKey", "onConflict"],
   contextProjection: ["fields", "take", "maxTokens", "overflow"],
   metadata: ["name", "project", "version", "description", "labels"],
+  // THE `humanGate` SCOPES, and they are the reason this table is worth its cost. A dropped key
+  // elsewhere is a lost setting; here it is an unsupervised action. Measured on a structurally
+  // valid graph before these six rows existed, every one of these compiled with ZERO gate
+  // diagnostics: `approval:{approvres:[…]}`, `approval:{approvers:"u:alice"}`,
+  // `approval:{approvers:[]}`, `approval:42`, `separationOfDutys:true`,
+  // `delegation:{allowd:true}`, `sla:{…,onTimout:"escalate"}`,
+  // `delivery:{channels:["console"],recipiants:[]}` — and `approval:null` crashed the compiler
+  // with `E_INTERNAL: TypeError: Cannot read properties of null (reading 'mode')`.
+  //
+  // Driven through the engine with a restart between raise and resolve, the typo journals
+  // `approvers: []`, `u:mallory` — named by nobody — approves, and the guarded `fs.write` lands.
+  // `approvers: "u:alice"` journals as the STRING, so the audit record reads supervised while
+  // `String.prototype.includes` lets subject `"u"` and subject `"alice"` each approve.
+  approval: ["approvers", "separationOfDuties"],
+  sla: ["respondWithinMs", "onTimeout", "reminders"],
+  // `DeliverySpec` and `EscalationTier` are `run/delivery.ts`'s, not this file's — the same
+  // arrangement `channel` and `contextProjection` already have with `state/channels.ts`, and
+  // `allowed-fields.test.ts` reads that file too rather than restating them here.
+  delivery: ["channels", "recipients", "redact", "redactAs", "escalation"],
+  deliveryEscalation: ["afterMs", "to", "channels", "action"],
+  batching: ["enabled", "key", "windowMs", "maxBatch"],
+  dedupe: ["enabled", "windowMs"],
 };
 
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
@@ -1007,6 +1125,50 @@ export function launderedChannels(
 }
 
 /**
+ * The ONE parse of what is written between `${` and `}`, because there were two and they
+ * disagreed about the syntax this product documents.
+ *
+ * A template expression is a dotted path with an optional `| json` suffix asking for text.
+ * `run/engine.ts`'s `resolveArgs` strips that suffix BEFORE `lookup`, so `${secret | json}`
+ * hands the tool the same plaintext `${secret}` does. `observedChannels` used to take
+ * `expr.trim().split(".")[0]` with no knowledge of the suffix, so for the same channel it named
+ * `"secret | json"` — a channel that does not exist — and MISSED `secret`. Measured on one graph
+ * differing only in the template form:
+ *
+ *   observedChannels `${secret}`        ["plain","secret"]    plan.posture `in`, GRAPH014_SECRET_LAUNDERED
+ *   observedChannels `${secret | json}` ["plain","secret | json"]  plan.posture `out`, no warning
+ *
+ * So every decision derived from the observed set — `dataFloorOf`'s classification floor,
+ * `launderedChannels`, and `applyTaint`'s integrity check, all of which call `observedChannels`
+ * — was defeated by adding four documented characters. The confidentiality axis dropped `in` to
+ * `out`; the integrity axis lost the taint edge the same way. It also produced WRONG ADVICE on a
+ * graph this repo ships: `examples/graphs/self-review.json` was told to declare a channel named
+ * `"report | json"`, which `isSafeId` would reject.
+ *
+ * EXPORTED SO `resolveArgs` CAN IMPORT IT rather than keeping a second copy of the regex. Two
+ * representations of one vocabulary is the drift this tree pays for repeatedly — `dataFloorOf`
+ * exists for the same reason one function down — and the failure mode here is not a wrong
+ * message but a guard that stops firing.
+ *
+ * ONE SUFFIX, NOT A PIPELINE. `${x | json | json}` strips the trailing `| json` and leaves the
+ * path `x | json`, which `lookup` resolves to `undefined` and which this function reports as the
+ * root `x | json`. Both ends agree and the tool receives nothing, so it is a bad graph the
+ * compiler warns about, not a bypass. Stripping repeatedly would make that expression RESOLVE,
+ * which is new syntax and not this function's business.
+ */
+export function parseTemplateExpr(expr: string): { readonly path: string; readonly asText: boolean } {
+  // TRIMMED HERE, not by the caller. The suffix regex is anchored at `$`, so `${x | json  }`
+  // matched for `resolveArgs` — which trimmed first — and not for `observedChannels`, which did
+  // not. That is the same divergence one whitespace character down, and a function that depends
+  // on its callers agreeing about normalisation is a function that will diverge again.
+  const trimmed = expr.trim();
+  const asText = TEMPLATE_JSON.test(trimmed);
+  return { path: trimmed.replace(TEMPLATE_JSON, "").trim(), asText };
+}
+
+const TEMPLATE_JSON = /\s*\|\s*json$/;
+
+/**
  * Every channel this node can OBSERVE — not the ones it declares in `reads`.
  *
  * `#runToolNode` resolves `tool.args` against `scopeFor(...)`, the WHOLE channel scope, so a
@@ -1052,7 +1214,7 @@ export function observedChannels(node: NodeSpec): readonly string[] {
   const scan = (v: unknown): void => {
     if (typeof v === "string") {
       for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
-        const root = m[1]!.trim().split(".")[0];
+        const root = parseTemplateExpr(m[1]!).path.split(".")[0];
         if (root !== undefined && root !== "") out.add(root);
       }
       return;
