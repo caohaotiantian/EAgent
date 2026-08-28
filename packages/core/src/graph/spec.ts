@@ -49,6 +49,52 @@ export interface ExpansionBudget {
   readonly maxLoopIterations: number;
 }
 
+/**
+ * THE `preAuthorization` ENVELOPE IS REFUSED PERMANENTLY, and this paragraph is the refusal.
+ *
+ * It has been proposed three times — a block declaring a cost ceiling, a blast radius, a tool
+ * scope, a data classification, allowed side effects, audit completeness and demotion triggers,
+ * so that a node "may run out-of-the-loop only if all of these are declared". It is not a field
+ * of anything in this tree and it is not going to become one. Where each part already lives:
+ *
+ *   cost ceiling          `policy.budget.{costUsd,tokens,wallMs}` — all three bind, at the run
+ *                         ceiling and the node ceiling, and survive a restart.
+ *   blast radius          `IrreversibilityClass` + `CLASS_DEFAULT_POSTURE` (`vocab.ts`).
+ *   tool scope            `policy.capabilities`, checked against `reachableToolNames`.
+ *   data classification   `Classification` + `dataFloorOf`, over `observedChannels`.
+ *   allowed side effects  `FunctionNode.effects`, folded into `reachableToolNames`.
+ *   audit completeness    ABSENT. `journal/audit.ts` holds the rule set; no graph declares
+ *                         which rules its run must satisfy, and nothing here proposes one.
+ *   demotion triggers     FORBIDDEN, and that is different from absent.
+ *
+ * TWO REASONS, AND THE SECOND IS THE ONE THAT MAKES IT PERMANENT.
+ *
+ * REDUNDANCY. Six of the seven already bind through orthogonal mechanisms, so a bundle gives an
+ * author a SECOND spelling for facts one place already states. This repository has the
+ * reproduction on file for exactly that at one-fifth the scale: `dataFloorOf` exists because
+ * `compile.ts` and `validate.ts` computed the same six lines one word apart and the validator
+ * reasoned about a LOWER floor than the compiler enforces. An envelope is that failure across
+ * five axes at once, and its fail-closed question has no good answer — when
+ * `preAuthorization.costCeilingUsd` says 5 and `policy.budget.costUsd` says 50, one of them
+ * loses, and whichever loses was a declaration an author believed.
+ *
+ * THE NAME IS A LOOSENING VERB. A graph author writing `preAuthorization` is the graph
+ * pre-approving its own out-of-the-loop execution, and the seventh part makes that concrete
+ * rather than rhetorical: a "demotion trigger" is an AUTOMATED rule that lowers a posture when
+ * conditions are met. That is precisely what this system enforces against, at two levels —
+ * `PolicyEngine.escalate` returns without firing when `maxPosture(from, to) === from`, and the
+ * audit rule `policy.deescalation-is-human` flags any `policy.deescalated` whose actor kind is
+ * not `human`. Declaring the field would put a name in the schema for the one thing the system
+ * exists to make impossible. "Oversight only tightens" is not a property a graph may opt out of.
+ *
+ * A graph does not write its own grant.
+ *
+ * The scope is closed at both ends: `SPEC_FIELDS`, `NODE_FIELDS`, `POLICY_FIELDS`,
+ * `ALLOWED_FIELDS` and `NESTED_FIELDS.metadata` between them refuse an unknown key at every
+ * authoring scope the compiler has, so `preAuthorization` is `GRAPH020_UNKNOWN_FIELD` wherever
+ * it is written — including inside `metadata`, which was the last silent one. Arbitrary
+ * annotation has a sanctioned home: `GraphMetadata.labels`.
+ */
 export interface GraphPolicy {
   readonly posture?: Posture;
   readonly budget?: Budget;

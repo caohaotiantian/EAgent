@@ -311,6 +311,49 @@ test("AN UNKNOWN `metadata` FIELD IS REFUSED", () => {
   assert.match(nested(r)!.fix ?? "", /`name`/);
 });
 
+/**
+ * `preAuthorization` IS REFUSED AT EVERY AUTHORING SCOPE, and that is the whole of the answer.
+ *
+ * The envelope — cost ceiling, blast radius, tool scope, data classification, allowed side
+ * effects, audit completeness, demotion triggers — has been proposed three times as a block of
+ * `GraphSpec`/`NodeSpec`/`GraphPolicy`. `graph/spec.ts`'s docstring above `GraphPolicy` states
+ * the refusal and maps each part onto its existing home; this is the mechanical half, so the
+ * refusal is a fact about the compiler rather than a sentence in a comment.
+ *
+ * NAMED SCOPES, not "everywhere": the graph root, a node, `policy`, `policy.budget` and
+ * `metadata`. `metadata` was the last silent one and closed most recently — before that, the
+ * envelope could be written there with zero diagnostics.
+ *
+ * The reason it is refused rather than built is in that docstring, and its sharp end is the
+ * seventh part: a "demotion trigger" is an automated rule that LOWERS a posture, which
+ * `PolicyEngine.escalate` and the audit rule `policy.deescalation-is-human` exist to make
+ * impossible. A graph does not write its own grant.
+ */
+test("THE `preAuthorization` ENVELOPE IS REFUSED WHEREVER IT IS WRITTEN", () => {
+  const envelope = { costCeilingUsd: 5, blastRadius: "wide", demotionTriggers: [{ when: "true", to: "out" }] };
+  const scopes: readonly (readonly [string, Parameters<typeof full>[0]])[] = [
+    ["the graph root", { spec: { preAuthorization: envelope } }],
+    ["a node", { node: { preAuthorization: envelope } }],
+    ["`policy`", { spec: { policy: { posture: "out", budget: { costUsd: 1 }, capabilities: [], preAuthorization: envelope } } }],
+    ["`policy.budget`", { spec: { policy: { posture: "out", budget: { costUsd: 1, preAuthorization: envelope }, capabilities: [] } } }],
+    ["`metadata`", { spec: { metadata: { name: "sc", project: "test", version: 1, preAuthorization: envelope } } }],
+  ];
+  for (const [where, over] of scopes) {
+    const r = full(over);
+    assert.equal(r.ok, false, `${where}: the envelope compiled clean`);
+    const diag = r.diagnostics.find((x) => x.code === "GRAPH020_UNKNOWN_FIELD" && /preAuthorization/.test(x.message));
+    assert.ok(diag !== undefined, `${where}: ${r.diagnostics.map((x) => x.code).join(", ") || "(no diagnostics)"}`);
+  }
+});
+
+test("...and `labels` is the sanctioned home for the annotation it was reaching for", () => {
+  // The control. Closing `metadata` must not have removed the ability to attach arbitrary keys —
+  // it forces them into the place built for them, which is what makes the refusal cost nothing
+  // legitimate.
+  const r = full({ spec: { metadata: { name: "sc", project: "test", version: 1, labels: { preAuthorization: "reviewed-by-hand" } } } });
+  assert.equal(r.ok, true, r.diagnostics.map((x) => `${x.severity}:${x.code}`).join(", "));
+});
+
 test("EVERY FIELD THESE FOUR INTERFACES DECLARE IS ALLOWED — the guard must not refuse valid graphs", () => {
   // The same anti-cry-wolf check as the three above, and the one that matters most here: a field
   // added to `ChannelSpec` and not to this table refuses a channel declaration that is correct,
