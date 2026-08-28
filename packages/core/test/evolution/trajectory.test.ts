@@ -245,6 +245,7 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
     fromUnpromotedCandidate: false,
     /** The fold had the graph; `score.ts` refuses to call a `false` here a measurement. */
     specResolved: true,
+    verdictsResolved: true,
     ...over,
   };
 }

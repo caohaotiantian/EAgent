@@ -33,9 +33,18 @@
  * journal; `task.committed.external` holds `{digest, bytes}` for the channels that did not.
  * This fold read only the first, so a step whose output was large enough to externalise folded
  * as a step that wrote nothing. `observed()` is the repair and the ONE place the two are
- * joined. Two residues it does NOT close, both named rather than assumed:
- *   - `firstVerdict` reads values, so an evaluator whose verdict channel externalised is a
- *     signal this fold cannot see. It stays invisible; it does not become a false verdict.
+ * joined.
+ *
+ * ONE RESIDUE THAT NOTE CLAIMED WAS HARMLESS, AND WAS NOT. It said: "`firstVerdict` reads
+ * values, so an evaluator whose verdict channel externalised is a signal this fold cannot see.
+ * It stays invisible; it does not become a false verdict." The second sentence is true and
+ * the conclusion drawn from it is false — `outcomeOf` averages over the signals that are
+ * PRESENT, so a failing verdict going invisible scores strictly BETTER than a failing verdict
+ * that is read. Measured: 0.5000 → 1.0000 on one graph, between two runs differing only in the
+ * length of a `why` string. `verdictsResolved` is the repair; it holds the reproduction and
+ * the reason the fold now refuses instead.
+ *
+ * ONE RESIDUE THAT STANDS:
  *   - a run with a payload store and one without produce different `observationDigest`s for
  *     the same document, because one digests the value and the other digests the handle. That
  *     divergence already exists in `stateInHash` / `stateOutHash`, which are copied from
@@ -201,12 +210,56 @@ export interface Trajectory {
    * scored near zero until somebody noticed. `score.ts` reads this field and refuses to call
    * the result a measurement; `loom score` refuses outright.
    *
-   * It is `opts.graph !== undefined` and nothing more. It does NOT claim the spec is the one
-   * the run ENDED on: a run that appended `graph.mutated` folds its successor's `graphHash`
-   * while this fold holds only the authored graph, and that gap is a different one this field
-   * does not close.
+   * IT IS NO LONGER `opts.graph !== undefined` AND NOTHING MORE, and the name is now narrower
+   * than the field. It is that AND `verdictsResolved` below — the two ways the ladder comes
+   * back unreadable, joined here because this is the flag every consumer already checks and
+   * the alternative was a second flag nothing reads. The name was left alone deliberately:
+   * renaming it means editing `score.ts` and five sites in `cli.ts`, which is a bigger change
+   * than the defect. Read it as "the fold could read the ladder", and read `verdictsResolved`
+   * when you need to know which of the two failed.
+   *
+   * It still does NOT claim the spec is the one the run ENDED on: a run that appended
+   * `graph.mutated` folds its successor's `graphHash` while this fold holds only the authored
+   * graph, and that gap is a different one this field does not close.
    */
   readonly specResolved: boolean;
+
+  /**
+   * WHETHER EVERY EVALUATOR'S VERDICT WAS STILL IN THE JOURNAL FOR THIS FOLD TO READ.
+   *
+   * A verdict is a VALUE, and `run/externalise.ts` will move any `replace` channel that is not
+   * an output and is named by no expression out of `task.committed.writes` once its canonical
+   * form passes `EXTERNALISE_ABOVE_BYTES`. An evaluator's verdict channel is usually all three,
+   * so a big enough verdict leaves the journal and `firstVerdict` finds nothing.
+   *
+   * THE HEADER USED TO CALL THAT SAFE — "it stays invisible; it does not become a false
+   * verdict" — and invisible is not safe, because `outcomeOf` averages over the signals that
+   * are PRESENT. A failing verdict that vanishes is scored better than a failing verdict that
+   * is read. Measured on a real `Engine`, one graph, two runs differing only in the length of
+   * the `why` string on a failing assertion:
+   *
+   * ```
+   * why 5 B        external []          assertions [check:false, good:true]  outcome 0.5000
+   * why 300,000 B  external [verdict]   assertions [good:true]               outcome 1.0000
+   * ```
+   *
+   * A perfect score, earned by writing more prose. And `VERDICT_SCHEMA` puts no length bound
+   * on a rubric's `reasons`, so a model judging a model can pad its own way past the threshold
+   * — which is CLAUDE.md property 3's "the measurement has to be one that cannot be gamed by
+   * the thing being measured", failing.
+   *
+   * SO THE FOLD REFUSES INSTEAD. `false` here makes `specResolved` false, which `score.ts`
+   * already treats as the guard-that-cannot-decide case: outcome 0, score 0, and
+   * `measureCohort` drops the member from the population rather than counting it. Refusing is
+   * always allowed; loosening never is.
+   *
+   * THE CONDITION IS DELIBERATELY BLUNT: any externalised channel on any `evaluator` step, not
+   * "the channel that held the verdict". The fold cannot see what is in a handle, so it cannot
+   * know whether the verdict was in there — and an evaluator that wrote a readable verdict
+   * beside an unreadable second one would otherwise report the readable one and drop the
+   * other, which is the same hole one step further in.
+   */
+  readonly verdictsResolved: boolean;
 }
 
 export interface FoldTrajectoryOptions {
@@ -593,6 +646,7 @@ export function foldTrajectory(
   const canonical = canonicalizeBranches(raw);
 
   const bucket = opts.bucketInput?.(inputs) ?? defaultBucket(inputs);
+  const verdictsAreResolved = allVerdictsResolved(canonical, nodeTypes);
 
   return {
     runId,
@@ -636,9 +690,22 @@ export function foldTrajectory(
     // FAILS CLOSED: an unanswered promotion set is not a certificate of promotion.
     fromUnpromotedCandidate:
       opts.promotedGraphHashes === undefined || !opts.promotedGraphHashes.has(graphHash),
-    // The one input `nodeTypes` above is built from. See the field.
-    specResolved: opts.graph !== undefined,
+    // BOTH WAYS THE LADDER COMES BACK UNREADABLE, joined. See the two fields.
+    specResolved: opts.graph !== undefined && verdictsAreResolved,
+    verdictsResolved: verdictsAreResolved,
   };
+}
+
+/**
+ * An `evaluator` step with a channel in the payload store is a verdict this fold cannot read.
+ * See `Trajectory.verdictsResolved` for the measurement and for why the test is any external
+ * channel rather than the verdict's own.
+ */
+function allVerdictsResolved(steps: readonly RawStep[], nodeTypes: ReadonlyMap<NodeId, NodeType>): boolean {
+  for (const s of steps) {
+    if (nodeTypes.get(s.nodeId) === "evaluator" && Object.keys(s.external).length > 0) return false;
+  }
+  return true;
 }
 
 /**
@@ -894,8 +961,11 @@ function extractSignals(
  * out of it — and an externalised channel's value is not in the journal to read. Handing this
  * the handle would change nothing (a `{$payload}` object has neither key, so it is skipped
  * exactly as an absent channel is), but it would read as though the fold might recover a
- * verdict from a handle, and it cannot. A verdict channel large enough to externalise is
- * therefore a signal this fold does not see; see the file header's residue note.
+ * verdict from a handle, and it cannot.
+ *
+ * A VERDICT CHANNEL LARGE ENOUGH TO EXTERNALISE IS THEREFORE A SIGNAL THIS FUNCTION DOES NOT
+ * SEE, and the fold must not simply carry on without it — see `Trajectory.verdictsResolved`,
+ * which is what stops an unread verdict from reading as a better run than a read one.
  */
 function firstVerdict(writes: Readonly<Record<string, unknown>>): Verdict | undefined {
   for (const key of Object.keys(writes).sort()) {
