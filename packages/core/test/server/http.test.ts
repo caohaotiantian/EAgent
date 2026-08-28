@@ -15,16 +15,17 @@ import {
   ControlPlane,
   UNIDENTIFIED_SUBJECT,
   startControlPlane,
-  unanswerableGraphs,
+  gateAnswerability,
   type AuthContext,
   type ControlPlaneOptions,
+  type GateDoors,
   type IdentityRequest,
   type IdentitySource,
 } from "../../src/server/http.ts";
 import { CODES, LoomError, isLoomError } from "../../src/errors.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { CONSOLE_HTML } from "../../src/server/console.ts";
-import { ConsoleChannel, GateDispatcher, SignedWebhookChannel, type DeliveryChannel } from "../../src/run/delivery.ts";
+import { ConsoleChannel, GateDispatcher, SignedWebhookChannel, WebhookChannel, type DeliveryChannel } from "../../src/run/delivery.ts";
 import type { Actor, HumanActor, JournalEvent } from "../../src/journal/events.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { GateId, RunId } from "../../src/ids.ts";
@@ -42,13 +43,22 @@ interface Rig {
   close: () => Promise<void>;
 }
 
-/** The skeleton, with the gate node declaring who may answer it. */
-function specWithApprovers(approvers: readonly string[]): GraphSpec {
+/** The skeleton, with the gate node declaring who may answer it — and optionally where it is told. */
+function specWithApprovers(approvers: readonly string[], channels?: readonly string[]): GraphSpec {
   const base = skeletonSpec();
   return {
     ...base,
     nodes: base.nodes.map((n) =>
-      n.id !== "approve" ? n : { ...n, humanGate: { ref: n.humanGate!.ref, approval: { mode: "single" as const, approvers } } },
+      n.id !== "approve"
+        ? n
+        : {
+            ...n,
+            humanGate: {
+              ref: n.humanGate!.ref,
+              approval: { mode: "single" as const, approvers },
+              ...(channels === undefined ? {} : { delivery: { channels } }),
+            },
+          },
     ),
   };
 }
@@ -2297,15 +2307,84 @@ test("BearerTokenIdentity refuses a configuration that would make identity ambig
   assert.equal(source.identify({ method: "POST", path: "/x", headers: {} }), undefined);
 });
 
-test("a deployment that cannot answer its own graphs is named at boot, by graph", () => {
+test("EVERY GATE GETS ONE OF THREE VERDICTS, and the third one is `I cannot tell`", () => {
   // The compile-time refusal this cannot be: whether identity exists is DEPLOYMENT
   // config, so the compiler never sees it. Boot is the first moment both halves are in
   // one process, and this is what `startControlPlane` shouts.
+  //
+  // THE OLD SHAPE WAS A PER-GRAPH BOOLEAN and it opened with `if (opts.identity !== undefined)
+  // return []` — so a graph naming an approver no configured credential could ever be reported
+  // CLEAN, because a source existed at all. Rows two and three below are that case.
   const h = harness();
   const base = { engine: h.engine, store: h.store, graphs: { needs: compileSkeleton(specWithApprovers(["u:security-lead"])) } };
-  assert.deepEqual(unanswerableGraphs(base), ["needs"]);
-  assert.deepEqual(unanswerableGraphs({ ...base, identity: people() }), [], "with an identity source there is nothing to warn about");
-  assert.deepEqual(unanswerableGraphs({ ...base, graphs: { plain: compileSkeleton() } }), [], "a graph naming nobody is answerable as ever");
+  const one = (opts: Parameters<typeof gateAnswerability>[0]): { verdict: string; why: string } => {
+    const rows = gateAnswerability(opts);
+    assert.equal(rows.length, 1, JSON.stringify(rows));
+    return { verdict: rows[0]!.verdict, why: rows[0]!.why };
+  };
+
+  // No source at all: nothing can be the named approver, and no channel can be answered.
+  assert.equal(one(base).verdict, "no-door");
+
+  // A source that CAN enumerate and DOES name them: the only way to earn `answerable`.
+  assert.equal(one({ ...base, identity: people() }).verdict, "answerable");
+
+  // A source that can enumerate and does NOT name them. Decidable, and the old code called
+  // this clean.
+  const other = new BearerTokenIdentity({ subjects: [{ token: "t", subject: "u:someone-else" }] });
+  const missing = one({ ...base, identity: other });
+  assert.equal(missing.verdict, "no-door");
+  assert.match(missing.why, /none of them is u:security-lead/);
+
+  // A source that CANNOT enumerate. Not a clean bill and not a refusal — the third verdict.
+  const opaque: IdentitySource = { name: "oidc", identify: () => undefined };
+  const unknown = one({ ...base, identity: opaque });
+  assert.equal(unknown.verdict, "cannot-tell");
+  assert.match(unknown.why, /oidc cannot enumerate its subjects/);
+
+  // `undefined` from `knownSubjects` means the same thing as not having the method, and must
+  // NEVER be read as the empty array — that would say "this source authenticates nobody".
+  const shrugs: IdentitySource = { name: "oidc", identify: () => undefined, knownSubjects: () => undefined };
+  assert.equal(one({ ...base, identity: shrugs }).verdict, "cannot-tell");
+  const nobody: IdentitySource = { name: "empty", identify: () => undefined, knownSubjects: () => [] };
+  assert.equal(one({ ...base, identity: nobody }).verdict, "no-door", "an empty source is a DIFFERENT fact from an unknowable one");
+
+  // A graph naming nobody produces no row at all: there is nothing to be unanswerable about.
+  assert.deepEqual(gateAnswerability({ ...base, graphs: { plain: compileSkeleton() } }), []);
+});
+
+test("A CHANNEL SPLITS THREE WAYS, and an answerable one earns `cannot-tell` and never `answerable`", () => {
+  // `GateCallbackRouter` never consults the identity source, so what a signed callback
+  // vouches for is genuinely invisible from here. The suppression this replaces treated the
+  // mere existence of a dispatcher as proof that the gate was fine.
+  const h = harness();
+  const dispatcher = new GateDispatcher({
+    channels: [
+      new SignedWebhookChannel({ name: "slack", url: "https://x.invalid", callbackSecret: CALLBACK_SECRET }),
+      new WebhookChannel({ name: "pager", url: "https://y.invalid" }),
+    ],
+  });
+  const at = (channels: readonly string[]): GateDoors => {
+    const rows = gateAnswerability({
+      engine: h.engine,
+      store: h.store,
+      graphs: { needs: compileSkeleton(specWithApprovers(["u:security-lead"], channels)) },
+      dispatcher,
+    });
+    assert.equal(rows.length, 1, JSON.stringify(rows));
+    return rows[0]!;
+  };
+
+  const signed = at(["slack", "pager", "carrier-pigeon"]);
+  assert.equal(signed.verdict, "cannot-tell");
+  assert.match(signed.why, /whether its subject mapping vouches for u:security-lead is not visible/);
+  // THE THREE FACTS `announce` HELD AND NEVER CROSS-REFERENCED, now one row.
+  assert.deepEqual(signed.answerableChannels, ["slack"]);
+  assert.deepEqual(signed.notifyOnlyChannels, ["pager"]);
+  assert.deepEqual(signed.unknownChannels, ["carrier-pigeon"], "a channel this dispatcher never heard of goes to the console fallback");
+
+  // Notify-only alone is NOT a door: it is delivered there and cannot be answered there.
+  assert.equal(at(["pager"]).verdict, "no-door");
 });
 
 // ── what a principal is ALLOWED to do ────────────────────────────────────────

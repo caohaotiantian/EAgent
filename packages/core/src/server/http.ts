@@ -368,6 +368,29 @@ export interface IdentitySource {
    */
   readonly operators?: number;
   identify(req: IdentityRequest): Promise<AuthContext | undefined> | AuthContext | undefined;
+  /**
+   * Every subject this source could ever establish, if it can say.
+   *
+   * ADVISORY, and used for exactly one thing: `gateAnswerability` asks it whether a gate's
+   * `approvers` list names anybody this deployment can produce, so `loom serve` can say at
+   * boot that a graph names an approver no credential here will ever be. It GRANTS NOTHING
+   * and REFUSES NOTHING; `#authorize` still decides, by comparing `Actor.subject` against
+   * the list, and still throws `E_GATE_NOT_AUTHORIZED` for anyone not on it.
+   *
+   * **`undefined` MEANS "THIS SOURCE CANNOT ENUMERATE", AND IT MUST NEVER BE COLLAPSED WITH
+   * AN EMPTY ARRAY.** An OIDC or mTLS source legitimately cannot list its population, and
+   * the honest report for it is "not checked" — an empty array would say "this source can
+   * authenticate nobody", which is a different fact and would make every named approver look
+   * unreachable. Not implementing the method at all means the same thing as returning
+   * `undefined`, which is why it is optional: an existing source keeps working and gets the
+   * NOT CHECKED line rather than a wrong clean bill.
+   *
+   * It must never become a refusal either. Refusing to boot on "I cannot tell" would make
+   * every non-enumerable source unbootable, and that is a guard turning an unknown into a
+   * decision — the opposite direction from the one this project's rules ask for, because it
+   * would DELETE a legitimate deployment rather than tighten one.
+   */
+  knownSubjects?(): readonly string[] | undefined;
 }
 
 export interface BearerSubject {
@@ -411,6 +434,8 @@ export class BearerTokenIdentity implements IdentitySource {
   readonly principals: number;
   readonly operators: number;
   readonly #bySha = new Map<string, AuthContext>();
+  /** Distinct subjects, sorted, so the boot report reads the same on every boot. */
+  readonly #subjects: readonly string[];
 
   constructor(opts: { readonly subjects: readonly BearerSubject[]; readonly name?: string }) {
     this.name = opts.name ?? "bearer-token";
@@ -499,6 +524,10 @@ export class BearerTokenIdentity implements IdentitySource {
         ...(operator === true ? { operator: true } : {}),
       });
     }
+    // KEPT, not just counted. `knownSubjects` needs the members and this is the one place
+    // they are all in hand; re-deriving them from `#bySha` would work today and would break
+    // the moment two tokens map to one subject, which this class explicitly allows.
+    this.#subjects = [...subjects].sort();
     this.principals = subjects.size;
     // Countable here, which is why the advisory field exists: this source knows exactly how
     // many operator credentials it issued, and the boot warning can say so instead of saying
@@ -510,6 +539,19 @@ export class BearerTokenIdentity implements IdentitySource {
     const header = req.headers["authorization"] ?? "";
     if (!header.startsWith("Bearer ")) return undefined;
     return this.#bySha.get(sha256(header.slice(7)));
+  }
+
+  /**
+   * THIS SOURCE CAN ENUMERATE, and it is the only one in the tree that can.
+   *
+   * Its whole population is the file the operator wrote, so "is `u:nobody` a subject here"
+   * is a question with an answer — which is what makes the boot report say something rather
+   * than shrug. An EMPTY array is a truthful answer for `new BearerTokenIdentity({subjects:
+   * []})`: that source really can authenticate nobody, and every approver a graph names is
+   * really unreachable through it.
+   */
+  knownSubjects(): readonly string[] {
+    return this.#subjects;
   }
 }
 
@@ -4416,27 +4458,162 @@ export function ownershipWarnings(plane: {
 }
 
 /**
- * Graphs whose gates name approvers no caller of THIS PLANE'S API could ever be.
+ * ONE GATE'S DOORS, and what this process can and cannot say about them.
  *
- * The earliest point at which "this deployment cannot identify anyone" and "this graph
- * requires a named person" are both in the same process. The compiler can see the second
- * and never the first, so this is where the two meet — at boot, by name, rather than at
- * the first refused approval.
+ * THREE VERDICTS, NOT TWO, and that is the decision this type carries. "no dispatcher is
+ * configured" and "a door exists but nothing here can say whether it admits the people this
+ * gate names" are different facts, and collapsing them is how the suppression this replaced
+ * got written: `unanswerableGraphs` returned `[]` whenever an identity source existed, and
+ * `announce` skipped it entirely whenever a dispatcher existed. Two branches whose only
+ * effect was to fall silent in the case they could not decide.
  *
- * IT ANSWERS ABOUT ONE OF THE TWO DOORS, and the title used to overstate that. A signed
- * callback names its own approver — `GateCallbackRouter` never consults `identity`, which
- * is the entire reason that route is reachable without a bearer token — so a deployment
- * with an answerable channel can answer these gates while having no identity source at
- * all. This function cannot see that: `ControlPlaneOptions.dispatcher` says a route
- * exists, not whether a channel's subject mapping produces the subjects a graph named.
- * The caller with both facts in view is the deployment layer, and `loom serve` is where
- * the two are weighed — see `announce` in `cli.ts`.
+ * A REPORT, NOT A GUARD. It grants nothing and refuses nothing, so it has no passing value
+ * available to it — the only refusal a printer has is a refusal to CLAIM, which is what
+ * `cannot-tell` is. It must never print `answerable` on a guess.
  */
-export function unanswerableGraphs(opts: ControlPlaneOptions): readonly string[] {
-  if (opts.identity !== undefined) return [];
-  return Object.entries(opts.graphs ?? {})
-    .filter(([, g]) => g.spec.nodes.some((n) => (n.humanGate?.approval?.approvers ?? []).length > 0))
-    .map(([name]) => name);
+export interface GateDoors {
+  readonly graph: string;
+  readonly nodeId: string;
+  /** The subjects this gate's `approval.approvers` names. Non-empty, or the gate is not here. */
+  readonly approvers: readonly string[];
+  /** Every channel the node declares, across the base spec and every escalation tier. */
+  readonly channels: readonly string[];
+  /** Of those, the ones the loaded dispatcher says can be ANSWERED (they have `parseCallback`). */
+  readonly answerableChannels: readonly string[];
+  /** Of those, the ones it can only TELL. A pager is legitimately one of these. */
+  readonly notifyOnlyChannels: readonly string[];
+  /** Of those, the ones the dispatcher has no channel for: delivered nowhere but the console fallback. */
+  readonly unknownChannels: readonly string[];
+  readonly verdict: "answerable" | "no-door" | "cannot-tell";
+  /** The fact the verdict rests on, in words an operator can act on. */
+  readonly why: string;
+}
+
+/**
+ * Every gate that names approvers, and which of this deployment's doors could answer it.
+ *
+ * THE PREMISE THE OLD VERSION RESTED ON WAS WRONG, and it is worth stating because the
+ * question it answered has now changed. `channel.parseCallback !== undefined` is the
+ * answerability test for a CHANNEL, and exactly one shipped channel has it — but a channel
+ * is where a gate is TOLD, not where it is ANSWERED. `POST /runs/:id/gates/:gateId` is
+ * registered unconditionally and `loom approve <runId> <gateId> --as ID` reaches
+ * `Engine.resolveGate` with no dispatcher anywhere on the path. So nothing is STRANDED in
+ * the sense the old name implied; what this reports is which of the two REMOTE doors — the
+ * API and a signed callback — could carry an answer, and whether the plane can tell.
+ *
+ * WHAT MAKES A VERDICT DECIDABLE, in one place so nothing else has to re-derive it:
+ *
+ *  - `answerable` needs a POSITIVE demonstration: the identity source enumerates its
+ *    subjects and one of them is on this gate's approvers list. Nothing else earns it.
+ *  - `no-door` is decidable too: there is no identity source that could produce any named
+ *    approver AND no declared channel this dispatcher can be answered through. Note the
+ *    first half is satisfied both by "no identity source at all" and by "a source that
+ *    enumerates and contains none of them" — the second is the case a boolean could not say.
+ *  - `cannot-tell` is everything else, and it names the missing fact rather than shrugging:
+ *    a source that cannot enumerate, or an answerable channel whose subject mapping this
+ *    process cannot see. `GateCallbackRouter` never consults `identity`, so what a signed
+ *    callback vouches for is genuinely invisible from here.
+ *
+ * The CLI door is deliberately not a verdict. `loom approve --as` authenticates nobody by
+ * construction, so it is available to anyone with filesystem access to the journal and
+ * cannot distinguish two deployments.
+ */
+export function gateAnswerability(opts: ControlPlaneOptions): readonly GateDoors[] {
+  const source = opts.identity;
+  // ONE CALL, into a local. `knownSubjects` is injected code, and a method that returns one
+  // population to the "can it enumerate" test and another to the membership test would make
+  // this report say something no source ever claimed — the same rule `BearerTokenIdentity`'s
+  // constructor states about reading each field once.
+  const known = source?.knownSubjects?.();
+  const out: GateDoors[] = [];
+  for (const [graph, g] of Object.entries(opts.graphs ?? {})) {
+    for (const n of g.spec.nodes) {
+      const approvers = n.humanGate?.approval?.approvers ?? [];
+      if (approvers.length === 0) continue;
+      const delivery = n.humanGate?.delivery;
+      // EVERY TIER, not just the base spec. An escalation tier may name channels the base
+      // spec does not, and a gate whose only answerable channel appears at tier 2 is still
+      // answerable — reporting otherwise would be a false alarm on a correct deployment.
+      const channels = [...new Set([...(delivery?.channels ?? []), ...(delivery?.escalation ?? []).flatMap((t) => t.channels ?? [])])];
+      const resolved = channels.map((name) => ({ name, channel: opts.dispatcher?.channel(name) }));
+      const answerableChannels = resolved.filter((c) => c.channel?.parseCallback !== undefined).map((c) => c.name);
+      const notifyOnlyChannels = resolved.filter((c) => c.channel !== undefined && c.channel.parseCallback === undefined).map((c) => c.name);
+      const unknownChannels = opts.dispatcher === undefined ? [] : resolved.filter((c) => c.channel === undefined).map((c) => c.name);
+
+      const named = known === undefined ? undefined : approvers.filter((a) => known.includes(a));
+      if (named !== undefined && named.length > 0) {
+        out.push({
+          graph,
+          nodeId: n.id,
+          approvers,
+          channels,
+          answerableChannels,
+          notifyOnlyChannels,
+          unknownChannels,
+          verdict: "answerable",
+          why: `${source?.name ?? "the identity source"} can authenticate ${named.join(", ")}`,
+        });
+        continue;
+      }
+      if (answerableChannels.length > 0) {
+        out.push({
+          graph,
+          nodeId: n.id,
+          approvers,
+          channels,
+          answerableChannels,
+          notifyOnlyChannels,
+          unknownChannels,
+          verdict: "cannot-tell",
+          why:
+            `${answerableChannels.join(", ")} can carry an answer, but whether its subject mapping vouches for ` +
+            `${approvers.join(", ")} is not visible from this process — a signed callback names its own approver and ` +
+            `never consults the identity source`,
+        });
+        continue;
+      }
+      if (source === undefined) {
+        out.push({
+          graph,
+          nodeId: n.id,
+          approvers,
+          channels,
+          answerableChannels,
+          notifyOnlyChannels,
+          unknownChannels,
+          verdict: "no-door",
+          why: "there is no identity source, so no API caller can be any of these approvers, and no declared channel can be answered",
+        });
+        continue;
+      }
+      if (known === undefined) {
+        out.push({
+          graph,
+          nodeId: n.id,
+          approvers,
+          channels,
+          answerableChannels,
+          notifyOnlyChannels,
+          unknownChannels,
+          verdict: "cannot-tell",
+          why: `${source.name} cannot enumerate its subjects, so whether any of ${approvers.join(", ")} can hold a credential is unknown here`,
+        });
+        continue;
+      }
+      out.push({
+        graph,
+        nodeId: n.id,
+        approvers,
+        channels,
+        answerableChannels,
+        notifyOnlyChannels,
+        unknownChannels,
+        verdict: "no-door",
+        why: `${source.name} enumerates ${String(known.length)} subject(s) and none of them is ${approvers.join(", ")}`,
+      });
+    }
+  }
+  return out;
 }
 
 /** Convenience for tests and the CLI. */
@@ -4451,13 +4628,19 @@ export async function startControlPlane(opts: ControlPlaneOptions, port = 0): Pr
     // plane rather than re-derived from `opts`, so this line and `/health` cannot disagree.
     console.error("[loom] control plane started with NO TOKEN — every caller is authorized");
   }
-  const stranded = unanswerableGraphs(opts);
-  if (stranded.length > 0) {
-    // Louder, because the failure mode is a run that waits forever at a gate nobody can
-    // answer — and the operator's first sight of it is otherwise a 403 hours later.
-    console.error(
-      `[loom] NO IDENTITY SOURCE — gates naming approvers cannot be answered through the API. Affected graphs: ${stranded.join(", ")}`,
-    );
+  // NO SHORT-CIRCUIT ON `opts.dispatcher` OR ON `opts.identity`. Both used to exist and both
+  // were the same mistake: a branch whose only effect was to fall silent in the case it could
+  // not decide. What is printed now is the per-gate verdict, and the two that are worth an
+  // operator's attention are printed for different reasons — `no-door` is a fact this process
+  // established, `cannot-tell` is a fact it is missing and is saying so instead of nothing.
+  const doors = gateAnswerability(opts);
+  for (const d of doors.filter((x) => x.verdict === "no-door")) {
+    // Louder, because the failure mode is a run that waits forever at a gate no remote door
+    // can answer — and the operator's first sight of it is otherwise a 403 hours later.
+    console.error(`[loom] NO DOOR — ${d.graph}/${d.nodeId} names ${d.approvers.join(", ")}: ${d.why}`);
+  }
+  for (const d of doors.filter((x) => x.verdict === "cannot-tell")) {
+    console.error(`[loom] CANNOT TELL — ${d.graph}/${d.nodeId} names ${d.approvers.join(", ")}: ${d.why}`);
   }
   // WHO CAN SEE WHOSE RUNS, said out loud to the only person who can weigh it.
   //

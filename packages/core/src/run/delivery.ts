@@ -124,6 +124,32 @@ export interface DeliveryTarget {
   readonly tier: number;
 }
 
+/**
+ * **DECISION, 2026-08-28: no callback is mandatory, permanently. A channel is where a gate
+ * is TOLD, not where it is ANSWERED.**
+ *
+ * That sentence is written here as a decision rather than a description, because the open
+ * question it closes was asked of this interface. It is the answer to "which channel must
+ * be answerable", and the answer is NONE.
+ *
+ * The premise the question rested on does not hold. `POST /runs/:id/gates/:gateId` is
+ * registered unconditionally, and `loom approve <runId> <gateId> --as ID` reaches
+ * `Engine.resolveGate` with no dispatcher anywhere on the path. A gate delivered only to a
+ * notify-only webhook is answerable; a gate whose every channel FAILS is answerable, because
+ * `GateDispatcher.deliver` falls back to `ConsoleChannel` and journals the failures. Nothing
+ * is stranded by a channel that cannot answer — `parseCallback` gates one convenience,
+ * answering from the tool that paged you, and never human oversight itself.
+ *
+ * SO `parseCallback` STAYS OPTIONAL, and making it mandatory is the move to refuse: it would
+ * force `ConsoleChannel` to fake an inbound path, which the method's own docstring forbids
+ * on the grounds that a channel defining it and refusing every call destroys the signal, and
+ * it would grow README's fork list, since every embedder writing a pager would have to
+ * invent a return path it does not have.
+ *
+ * What the deployment layer owes an operator instead is a truthful report, and that is
+ * `gateAnswerability` in `server/http.ts` — three verdicts, per gate, naming the fact it is
+ * missing where it cannot decide.
+ */
 export interface DeliveryChannel {
   readonly name: string;
   /**

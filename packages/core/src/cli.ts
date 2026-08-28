@@ -56,7 +56,7 @@ import {
   BearerTokenIdentity,
   ControlPlane,
   ownershipWarnings,
-  unanswerableGraphs,
+  gateAnswerability,
   type ControlPlaneOptions,
   type IdentitySource,
 } from "./server/http.ts";
@@ -204,7 +204,13 @@ const USAGE = `loom — graph-native multi-agent orchestration
   --as ID           the subject a decision is JOURNALED under, and matched against a
                     gate's approvers. Defaults to "cli", which no approvers list names —
                     so a gate that names anybody needs this. It ends up in the audit
-                    record as the person who approved
+                    record as the person who approved.
+                    IT AUTHENTICATES NOBODY, and that is by construction rather than by
+                    omission: there is no credential anywhere on this path, so the value
+                    is a CLAIM the operator makes about themselves. Filesystem access to
+                    the journal is the whole boundary here. "approvers" is therefore a
+                    RECORD on this door and access control only on the HTTP one, where
+                    --identity-file decides who a caller is
   --data-dir  DIR   journal location (default: <workspace>/.loom). Off limits to the
                     fs tools wherever it is put, including inside the workspace.
   --max-parallelism N  how many nodes of ONE run may be in flight at once (default 16).
@@ -3693,6 +3699,16 @@ function startGateClock(ws: Workspace, everyMs: number): { readonly everyMs: num
  *     change. Reading a value off a constructed object is the stronger technique; where it
  *     is unavailable, a refusal at parse time is what is left.
  */
+/**
+ * How many gate-door lines the boot banner prints before summarising the rest.
+ *
+ * A bound and not a taste: `announce`'s whole job is to name the guards that are off, and a
+ * plane serving fifty gated graphs would print a page — which an operator skips, making the
+ * report exactly as useful as the silence it replaced. `checkToolNames` bounds its
+ * suggestion list for the same reason.
+ */
+const MAX_BANNER_GATES = 10;
+
 function announce(
   plane: ControlPlane,
   ws: Workspace,
@@ -3713,6 +3729,25 @@ function announce(
   process.stdout.write(`loom listening on http://${host.includes(":") ? `[${host}]` : host}:${port}\n`);
   process.stdout.write(`  data:   ${ws.dataDir}\n`);
   process.stdout.write(`  graphs: ${Object.keys(opts.graphs ?? {}).join(", ") || "(none)"}\n`);
+  // WHAT WAS LOADED INTO THIS PROCESS, named at boot for the reason `--allow-exec` is: it is
+  // host-realm code the operator asked for, holding everything this binary holds, and a
+  // deployment that has it and one that does not are materially different things. Read off
+  // the loaded object rather than off the flag, so no line can name a module that did not
+  // register what it said it would.
+  //
+  // PRINTED HERE, EARLY, AND THAT IS A FACT ABOUT THE TEST HARNESS. `test/deployment/harness.ts`
+  // returns from `serving` as soon as every key in its named `BANNER_KEYS` set has arrived, and
+  // this line is CONDITIONAL so it cannot join that set — a plain `loom serve` never prints it
+  // and the wait would hang. Emitted before the last named key (`models:`), it can never be the
+  // line still in flight when a caller reads stdout.
+  const ext = ws.extensions;
+  if (ext !== undefined) {
+    process.stdout.write(
+      `  ext:    ${ext.files.join(", ")} → ` +
+        `${[...ext.adapters.keys()].map((n) => `adapter ${n}`).join(", ") || "no adapters"}` +
+        `${ext.toolNames.length === 0 ? "" : `, ${ext.toolNames.map((n) => `tool ${n}`).join(", ")}`}\n`,
+    );
+  }
   process.stdout.write(`  who:    ${identity === undefined ? "(nobody — no identity source)" : identity.name}\n`);
   // Every channel, and for each one the only property that matters to the perimeter:
   // whether a human can answer through it.
@@ -3755,19 +3790,6 @@ function announce(
   process.stdout.write(
     `  models: ${models === undefined ? "(mock only — every agent node answers \"[mock] …\")" : `${models.adapters.join(", ")} via ${models.file}`}\n`,
   );
-  // WHAT WAS LOADED INTO THIS PROCESS, named at boot for the reason `--allow-exec` is: it is
-  // host-realm code the operator asked for, holding everything this binary holds, and a
-  // deployment that has it and one that does not are materially different things. Read off
-  // the loaded object rather than off the flag, so no line can name a module that did not
-  // register what it said it would.
-  const ext = ws.extensions;
-  if (ext !== undefined) {
-    process.stdout.write(
-      `  ext:    ${ext.files.join(", ")} → ` +
-        `${[...ext.adapters.keys()].map((n) => `adapter ${n}`).join(", ") || "no adapters"}` +
-        `${ext.toolNames.length === 0 ? "" : `, ${ext.toolNames.map((n) => `tool ${n}`).join(", ")}`}\n`,
-    );
-  }
   warnAboutModels(models, "serve");
   // The plane's own posture, not a third derivation of it: `openToEveryCaller` is
   // what `/health` reports and what `#principal` admits on, so this line cannot
@@ -3840,22 +3862,59 @@ function announce(
         `  fix: give a channel a "callbackSecret" to make it answerable\n`,
     );
   }
-  // The single binary's version of the compile-time refusal it cannot have: whether
-  // anyone can be identified is deployment config, so the graphs that need a named
-  // approver and the deployment that cannot supply one only meet here.
+  // WHO CAN ANSWER WHICH GATE, said per GATE rather than per graph, and with three verdicts
+  // rather than a boolean.
   //
-  // SUPPRESSED WHEN A CHANNEL CAN BE ANSWERED, because then they can be: a signed callback
-  // names its own approver, and `GateCallbackRouter` never consults the plane's identity
-  // source. `unanswerableGraphs` answers about the API door alone — it takes
-  // `ControlPlaneOptions`, and whether a channel's subject mapping matches a graph's
-  // approvers list is not visible from there — so the deployment layer is the only place
-  // the two doors are both in view.
-  const stranded = opts.dispatcher === undefined ? unanswerableGraphs(opts) : [];
-  if (stranded.length > 0) {
+  // The two lines this replaces were both suppressions: `opts.dispatcher === undefined ? … :
+  // []` here, and `if (opts.identity !== undefined) return []` one level down. Each fell
+  // silent in exactly the case it could not decide — the comment above the first one even
+  // conceded that whether a channel's subject mapping produces the subjects a graph named
+  // "is not visible from there", and then answered that undecidable case with the empty
+  // list. A report that grants nothing has no passing value available to it, so the only
+  // honest move was to name what it cannot see.
+  //
+  // THERE IS NO SEPARATE "REACHABILITY NOT CHECKED" BANNER, and that is a decision. It was
+  // written, and then deleted before it shipped, because from THIS BINARY it could never
+  // fire: `--identity-file` is the only flag that establishes who a caller is, it builds a
+  // `BearerTokenIdentity`, and that source enumerates. A line no path reaches is the
+  // declared-and-wired-to-nothing shape this repo keeps finding, and it would have read as a
+  // guard while being one. The fact itself is not lost — a source that cannot enumerate
+  // produces a per-gate `cannot-tell` whose `why` says exactly "<source> cannot enumerate its
+  // subjects", on this boot path and on `startControlPlane`'s, which is the path a library
+  // embedder with an OIDC source actually takes.
+  const doors = gateAnswerability(opts);
+  const trouble = doors.filter((d) => d.verdict !== "answerable");
+  // BOUNDED, the way `checkToolNames` bounds its suggestion list: a plane serving many gated
+  // graphs would otherwise print a page nobody reads, which is the same failure as printing
+  // nothing.
+  for (const d of trouble.slice(0, MAX_BANNER_GATES)) {
     process.stderr.write(
-      `! NO IDENTITY SOURCE — these graphs have gates naming approvers and cannot be answered over the API: ${stranded.join(", ")}\n` +
-        `  fix: loom serve --identity-file <file> with {"subjects":[{"subject":"u:you","token":"..."}]}\n` +
-        `   or: loom serve --channels-file <file> with a channel that has a "callbackSecret", so the approver answers through it\n`,
+      `! ${d.verdict === "no-door" ? "NO DOOR" : "CANNOT TELL"} — ${d.graph}/${d.nodeId} names ${d.approvers.join(", ")}: ${d.why}\n`,
+    );
+    // THE TWO CHANNEL FACTS `announce` HELD AND NEVER CROSS-REFERENCED. It has had
+    // `opts.graphs` and `delivery.answerable`/`notifyOnly` in the same scope all along; what
+    // was missing is the join. A channel the dispatcher has never heard of is not a delivery
+    // failure at boot and is not a compile error either — `checkDelivery` deliberately does
+    // not check channel names, because a dispatcher is built by the deployment — so this is
+    // the only place the graph and the deployment are both in view.
+    if (d.unknownChannels.length > 0) {
+      process.stderr.write(
+        `    ${d.unknownChannels.join(", ")}: delivered nowhere but the console fallback — no channel of that name in ${ws.delivery?.file ?? "this deployment"}\n`,
+      );
+    }
+    if (d.notifyOnlyChannels.length > 0) {
+      process.stderr.write(`    ${d.notifyOnlyChannels.join(", ")}: delivered there, not answerable there\n`);
+    }
+  }
+  if (trouble.length > MAX_BANNER_GATES) {
+    process.stderr.write(`  …and ${String(trouble.length - MAX_BANNER_GATES)} more gate(s) in the same state\n`);
+  }
+  if (trouble.length > 0) {
+    process.stderr.write(
+      `  fix: loom serve --identity-file <file> with {"subjects":[{"subject":"u:you","token":"..."}]}\n` +
+        `   or: loom serve --channels-file <file> with a channel that has a "callbackSecret", so the approver answers through it\n` +
+        `   or: nothing — \`loom approve <runId> <gateId> --as <subject>\` answers any gate from this machine, and it\n` +
+        `       authenticates nobody by construction: the subject it writes into the journal is whatever --as said.\n`,
     );
   }
 }
