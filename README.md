@@ -218,7 +218,7 @@ lists below were each driven through the shipped binary rather than read off a h
 | a `function` node body | `resources/function/*.js`, `*.mjs` — a bare function expression | `examples/README.md` §2 |
 | a `hook` body, at any of the eight points | `resources/hook/*.js` | §3 |
 | a tool | `--mcp-file` — any MCP server, stdio | §"Try it" above |
-| a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1"}` → `ok`, exit 0 |
+| a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl`. A keyless endpoint says so: `"apiKeyEnv": null` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1","apiKeyEnv":null}` → `ok`, exit 0; the same row *without* `apiKeyEnv` → `E_CONFIG_INVALID: … needs the environment variable OPENAI_API_KEY, which is not set` |
 | a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools}` and registers a `ModelAdapter`; a `--models-file` `routes` row may then name it | `loom run … --extension-module ./bedrock.mjs` → `"draft": "[bedrock-converse] anthropic.claude-3-5-sonnet-…"`, and `loom replay` of that run → `{"match": true, "hermetic": true}` |
 | an in-process tool | `--extension-module` — the same module's `tools.register(…)`; it is registered before the grant list is derived, so its capability is held | `test/cli/extension-module.test.ts` |
 | a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | see the fork list's note on transports |

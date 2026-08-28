@@ -1394,6 +1394,53 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
   };
 }
 
+/**
+ * The three row shapes `readModels` reads, and the ONLY fields each may declare.
+ *
+ * WHY A LIST AT ALL: `errors.ts` states that a code arrives with its raiser, and a config
+ * key has the mirror of that rule — a key arrives with its reader. Before these three sets,
+ * `readModels` read a fixed handful of keys and silently ignored every other one. Measured:
+ * `headers`, `apiVersion` and `zzz_nonsense` on an adapter row all printed
+ * `ACCEPTED AND IGNORED. adapters=['openai']`. `readChannels`, one function over, already
+ * refuses an unknown `kind` for the stated reason that a skipped field is a deployment that
+ * boots looking configured — and an operator who wrote `headers` believes their gateway is
+ * being sent a header.
+ *
+ * `headers` IS DELIBERATELY NOT HERE, and that is a decision rather than an omission. A
+ * custom auth header is a credential; this file's own rule is that the file holds
+ * configuration and the environment holds the credential, so a `headers` map would put a
+ * secret one `git add` away from being public. A gateway with a bespoke auth scheme is an
+ * `--extension-module`, which is a door that now exists.
+ */
+const ADAPTER_FIELDS: readonly string[] = ["provider", "name", "baseUrl", "apiKeyEnv", "prices", "defaultMaxTokens"];
+const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback"];
+const TIER_FIELDS: readonly string[] = ["adapter", "model", "when"];
+/**
+ * `cacheRead`/`cacheWrite` are NOT here on purpose: both adapters' options carry them and
+ * this reader has never built them, so accepting the spelling would advertise a capability
+ * the file does not have. See the refusal at the call site for the number it costs.
+ */
+const PRICE_FIELDS: readonly string[] = ["input", "output"];
+
+/**
+ * Refuse a field nothing reads, naming it and naming what the row MAY declare.
+ *
+ * NAMING THE MEMBERS is the whole shape of the refusal, and README's own test for an honest
+ * closed set: a refusal that says "unknown field" and stops has told the operator they are
+ * wrong without telling them what right looks like. There is no undecidable case here — a
+ * key is in the set or it is not — and no arm in which an unread key is kept.
+ */
+function onlyKeys(row: Record<string, unknown>, allowed: readonly string[], where: string, refuse: (why: string) => never): void {
+  const unknown = Object.keys(row).filter((k) => !allowed.includes(k));
+  if (unknown.length === 0) return;
+  refuse(
+    `${where} declares ${unknown.map((k) => JSON.stringify(k)).join(", ")}, which ${unknown.length === 1 ? "is a field" : "are fields"} ` +
+      `nothing reads — so ${unknown.length === 1 ? "its value" : "their values"} changed nothing about the adapter this row built. ` +
+      `This row may declare: ${allowed.join(", ")}. A field read by nothing is refused rather than ignored, for the reason an ` +
+      `unknown "provider" is: a skipped field is a deployment that boots looking configured.`,
+  );
+}
+
 export interface ModelConfig {
   /** The single adapter `openWorkspace` registers: a router over the declared ones. */
   readonly adapter: ModelAdapter;
@@ -1459,6 +1506,15 @@ const PROVIDERS: Readonly<Record<string, { readonly keyEnv: string }>> = {
  * An UNSET or EMPTY variable refuses to start rather than constructing an adapter that
  * fails on its first call, which would be an hour later and in a run's error field.
  *
+ * **`"apiKeyEnv": null` DECLARES THAT AN ENDPOINT TAKES NO CREDENTIAL**, and it is the only
+ * way to say so. It requires a `baseUrl`, so it can never claim that a public endpoint is
+ * keyless. Before it existed, a `baseUrl` on the OpenAI wire INFERRED the same thing, and
+ * the inference was wrong in the shape that matters: a hosted gateway whose operator forgot
+ * to export the key booted looking configured.
+ *
+ * **A FIELD NOTHING READS IS REFUSED**, on all three row shapes — see `onlyKeys` and the
+ * three field sets above it.
+ *
  * **A MALFORMED FILE REFUSES TO START**, the trade `readIdentities` and `readChannels` both
  * make, for the reason they make it: booting anyway produces a deployment that looks
  * configured and answers every model call with an error.
@@ -1515,6 +1571,9 @@ export function readModels(
     const where = `adapters[${i}]`;
     const row = raw as Record<string, unknown> | null;
     if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    // FIRST, so a misspelled `provider` is diagnosed as the misspelling it is rather than as
+    // an absent one. See `onlyKeys` for why an unread field is a refusal at all.
+    onlyKeys(row, ADAPTER_FIELDS, where, refuse);
     const provider = row["provider"];
     if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
       refuse(
@@ -1543,17 +1602,44 @@ export function readModels(
     declared.push(name);
 
     const baseUrl = row["baseUrl"] === undefined ? undefined : nonEmpty(row["baseUrl"], `${where} ("${name}") "baseUrl"`, refuse);
-    const keyEnv = row["apiKeyEnv"] === undefined ? PROVIDERS[provider]!.keyEnv : nonEmpty(row["apiKeyEnv"], `${where} ("${name}") "apiKeyEnv"`, refuse);
-    const apiKey = env[keyEnv] ?? "";
-    // The one place a keyless adapter is legal, and it is the adapter's own rule rather
-    // than a second one invented here: `OpenAIAdapter` accepts an empty key when a
-    // `baseUrl` is given, because a local endpoint legitimately has no credential.
-    if (apiKey === "" && !(provider === "openai" && baseUrl !== undefined)) {
+    // **`null` IS A DECLARATION: "this endpoint takes no credential."**
+    //
+    // The condition here used to be `apiKey === "" && !(provider === "openai" && baseUrl !==
+    // undefined)`, i.e. a `baseUrl` INFERRED that no credential was wanted. That is this
+    // reader answering its undecidable case with the passing value, in the configuration the
+    // live corpus actually used: a hosted OpenAI-compatible gateway with a `baseUrl` that DOES
+    // want a key, whose operator forgot to export it, booted looking configured and 401'd an
+    // hour later inside a run — the precise failure this check exists to move to boot.
+    //
+    // `null` rather than a new `noApiKey` boolean because `apiKeyEnv` is already the field
+    // that answers "where does the credential come from"; `null` is that question answered,
+    // not a second question. It is REACHABLE BY NO AUTOMATED PATH — it is a line a human wrote
+    // in a file — which is what makes it a declaration rather than a loosening.
+    //
+    // A `baseUrl` IS REQUIRED ALONGSIDE IT, so the declaration tightens and cannot open a
+    // door: an operator cannot declare api.anthropic.com or api.openai.com keyless.
+    const rawKeyEnv = row["apiKeyEnv"];
+    const keyless = rawKeyEnv === null;
+    if (keyless && baseUrl === undefined) {
+      refuse(
+        `${where} ("${name}") sets "apiKeyEnv": null, which declares that this endpoint takes no credential — ` +
+          `but it names no "baseUrl", so it is the ${provider} public endpoint, which does. Give it the "baseUrl" ` +
+          `of the local or gateway endpoint you mean, or name the variable holding the key.`,
+      );
+    }
+    const keyEnv = rawKeyEnv === undefined || keyless ? PROVIDERS[provider]!.keyEnv : nonEmpty(rawKeyEnv, `${where} ("${name}") "apiKeyEnv"`, refuse);
+    const apiKey = keyless ? "" : (env[keyEnv] ?? "");
+    // NO CARVE-OUT FOR `openai` + `baseUrl` ANY MORE. The adapter still accepts an empty key
+    // with a `baseUrl` — that is its own rule and it is right, because a local endpoint
+    // legitimately has none — but the ADAPTER cannot tell "local, keyless" from "gateway whose
+    // key was never exported", and neither can this reader. So it is stated here or it is not
+    // known, and an unstated one is refused.
+    if (!keyless && apiKey === "") {
       refuse(
         `${where} ("${name}") needs the environment variable ${keyEnv}, which is ${env[keyEnv] === undefined ? "not set" : "empty"}. ` +
           `The key is deliberately NOT a field in this file — the file is configuration and the key is a credential. ` +
-          `Set ${keyEnv}, or name a different variable with "apiKeyEnv"` +
-          (provider === "openai" ? `, or give this adapter a "baseUrl" if it is a local endpoint that needs no key.` : `.`),
+          `Set ${keyEnv}, or name a different variable with "apiKeyEnv", or set "apiKeyEnv": null if this endpoint ` +
+          `genuinely takes no credential (which also needs a "baseUrl").`,
       );
     }
 
@@ -1613,6 +1699,7 @@ export function readModels(
     const where = `routes[${JSON.stringify(key)}]`;
     const row = raw as Record<string, unknown> | null;
     if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    onlyKeys(row, ROUTE_FIELDS, where, refuse);
     const adapter = nonEmpty(row["adapter"], `${where} "adapter"`, refuse);
     if (!adapters.has(adapter)) {
       refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
@@ -1637,6 +1724,7 @@ export function readModels(
         const at = `${where} fallback[${String(i)}]`;
         const tier = rawTier as Record<string, unknown> | null;
         if (typeof tier !== "object" || tier === null || Array.isArray(tier)) refuse(`${at} is not an object`);
+        onlyKeys(tier, TIER_FIELDS, at, refuse);
         const name = nonEmpty(tier["adapter"], `${at} "adapter"`, refuse);
         // REFUSED, not skipped — the same rule the adapter rows make, for the same reason: a
         // skipped tier is a chain that looks like resilience and has none.
@@ -1793,6 +1881,14 @@ function priceTable(v: unknown, where: string, refuse: (why: string) => never): 
   for (const [model, raw] of Object.entries(v as Record<string, unknown>)) {
     const row = raw as { input?: unknown; output?: unknown } | null;
     if (typeof row !== "object" || row === null) refuse(`${where}.${model} must be {"input":n,"output":n}`);
+    // THE SAME RULE ONE LEVEL DOWN, and this is the sharpest case of it in the file. Both
+    // adapters' `prices` option carries `cacheRead` and `cacheWrite`; this reader builds only
+    // `{input, output}`, so an operator writing `"cacheRead": 0.3` had it dropped and every
+    // cached token priced at `p.cacheRead ?? p.input` — the FULL input rate, a 10x
+    // over-estimate that quietly refuses work a budget would have fit. Over-pricing is the
+    // safe direction and silence is not, so the field is refused rather than accepted and
+    // ignored.
+    onlyKeys(row as Record<string, unknown>, PRICE_FIELDS, `${where}.${model}`, refuse);
     // A price of 0 is legal — a free local endpoint is a real thing — but a NEGATIVE or
     // non-finite one would credit the budget instead of spending it, which turns a bound
     // into an unbounded run.

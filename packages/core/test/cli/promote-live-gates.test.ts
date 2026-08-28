@@ -136,9 +136,12 @@ const MODELS_FILE = JSON.stringify({
     {
       provider: "openai",
       name: "stub",
-      // Never dialled: `main(argv, STUB.fetch)` replaces the transport. A `baseUrl` is what
-      // makes a keyless adapter legal, which is what keeps this suite free of a credential.
+      // Never dialled: `main(argv, STUB.fetch)` replaces the transport. `"apiKeyEnv": null`
+      // DECLARES that this endpoint takes no credential, which is what keeps this suite free
+      // of one. A `baseUrl` alone no longer implies it — that inference was the reader
+      // answering an undecidable question with the passing value.
       baseUrl: "http://stub.invalid/v1",
+      apiKeyEnv: null,
       prices: { m1: { input: 1, output: 1 } },
     },
   ],
