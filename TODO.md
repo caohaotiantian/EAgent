@@ -1363,15 +1363,18 @@ boundary" — and that boundary now exists and is proven: a seeded PRNG from a j
 clock bound to a journaled task boundary, `Date` and `Intl` absent, an embedder `globals` seam
 that refuses a governed name. A user-authored reducer would run under exactly the machinery that
 was not there when the deferral was written. Property 2 says extensibility should be unlimited;
-a closed reducer set is one of the six things the audit found still require a fork.
+a closed reducer set is one of the seven things the audit found still require a fork.
 
-**Those six now live in `README.md`, "Extending it, and where that stops"**, beside the eight that
-need no fork, each quoted from the refusal the binary prints. Two of the six moved while being
+**Those seven now live in `README.md`, "Extending it, and where that stops"**, beside the eight
+that need no fork, each quoted from the refusal the binary prints. Two of them moved while being
 written down: an in-process tool needs a fork from the CLI and NOT from a library embedder
 (`ToolRegistry` is pinned in `scripts/surface.json`; `openWorkspace` and `compileRealm` are not),
 and it is a non-webhook delivery TRANSPORT that needs a fork rather than "a delivery channel" —
-any HTTP endpoint is a config row. Do not re-enumerate the set here: one list, in the file a
-stranger opens first.
+any HTTP endpoint is a config row. The count went SIX to SEVEN on 2026-08-28 by being measured
+again: an identity source was on no list at all, while `--identity-file` is the binary's only
+identity door and `IdentitySource`/`startControlPlane` are both pinned, so it carries the same
+library-embedder split the tool row does. Do not re-enumerate the set here: one list, in the file
+a stranger opens first.
 
 
 **Re-checked 2026-08-25 — 8 items: 4 partial · 3 open · 1 n/a.**
@@ -1417,7 +1420,7 @@ Kept because re-deriving these costs more than reading them, and each was a real
 
 ## F · Hard-won facts worth carrying forward
 
-**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 16 items: 7 DONE · 5 partial · 4 open.**
+**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 16 items: 7 DONE · 6 partial · 3 open.**
 
 | item | verdict | what running it showed |
 |---|---|---|
@@ -1432,7 +1435,7 @@ Kept because re-deriving these costs more than reading them, and each was a real
 | `F.9` **A self-describing claim has no fixed point.** State the  | partial | HELD exactly where the lesson was applied. The docstrings at spec.ts:791 and 821-823 state the PROPERTY ("every hit is a declaration, the surface pin, or prose; none is a read… |
 | `F.10` **`node:vm` is not a sandbox** — it is scoping. Untrusted  | **DONE** | HELD, and the tree carries the property correctly at all five live sites: packages/core/src/resources/realm.ts:18-24 ("## This is NOT a security boundary, and says so… Untrust… |
 | `F.11` **Absence is not zero, and an empty allow-list is the perm | **DONE** | HELD in both places I could reach it, and each keeps the two cases distinct rather than collapsing them. The `=== undefined \|\|` shape appears 56 times across 20 core source … |
-| `F.12` **Approve means "go ahead", not "consider it done"** — on  | open | COUNT REFRESHED: NodeType has 8 members (packages/core/src/graph/spec.ts:76-84 — function, agent, tool, router, join, evaluator, human_gate, subgraph), so "every node type exc… |
+| `F.12` **Approve means "go ahead", not "consider it done"** — on  | partial | HALF PINNED, and by the type system rather than by a count. packages/core/test/run/approve-means-go-ahead.test.ts drives one gated graph per node type off a `Record<NodeType, Case>`, so a ninth member is a COMPILE error here — verified by adding one: `TS2741: Property 'ninth' is missing … but required in type 'Record<NodeType, Case>'`. Each of the seven work types asserts journaled evidence its work ran AFTER the approval and not before; `human_gate` asserts no dispatch and no second raise. MUTATION RUN: flipping the branch to `if (true || node.type === "human_gate" || …)` turns 6 of the 10 tests red — `join` and `human_gate` stay green, and the header says why. STILL OPEN, the other half of A.3: `#compensateOne` dispatches every undo with `nodeApproved` FALSE (packages/core/src/run/engine.ts:1105-1110) and nothing in the suite fails if that flips. |
 | `F.13` **A terminal operation is not final until every producer o | **DONE** | HELD with both arms and a negative control. NEWEST INSTANCE: 5b5c496 (2026-08-24, "a cancel stops the tasks too") — #commit returned early on a terminal run so an in-flight Ta… |
 | `F.14` **Cross-realm values look identical and are not**; assert  | **DONE** | HELD, every clause verified independently. (a) cross-realm array: `instanceof Array` false and `getPrototypeOf !== Array.prototype`, so the prototype IS the discriminator; (b)… |
 | `F.15` **macOS `grep` silently skips files containing non-ASCII b | partial | WRONG on both halves of the stated cause, though the prescription survives. (1) The trigger is a NUL byte, not non-ASCII: the five files are packages/core/src/evolution/trajec… |
