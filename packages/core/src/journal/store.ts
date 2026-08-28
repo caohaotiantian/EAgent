@@ -12,6 +12,15 @@
  * per (run, task); a write carrying a token below the highest already seen is
  * rejected with E_FENCING_STALE.
  *
+ * **THE JOURNAL IS ADDRESSED PER RUN, SO NO DECISION MAY READ A FACT THAT SPANS RUNS.** That
+ * is the shape of `read(runId, fromSeq)` and it is a constraint rather than an inconvenience:
+ * "the journal is the only authoritative state" means a value a decision reads must be
+ * reconstructable by folding, and there is nothing here to fold a cross-run value out of. It is
+ * written down because the mechanism it refuses is one somebody re-derives from first
+ * principles every time: a circuit breaker wants a per-SOURCE failure count spanning runs, and
+ * every version of it gets as far as the counter before finding this out. `listRuns` is a
+ * listing of heads and not a fold, and it is not the missing read.
+ *
  */
 
 import { CODES, err } from "../errors.ts";

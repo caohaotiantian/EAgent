@@ -218,10 +218,14 @@ and the honest thing is to stop calling the section a plan rather than to relax 
 **The next Sequence cannot be written here yet, and that is a finding rather than an omission.**
 What comes next is blocked on decisions in `TODO.md` §D that only the maintainer can make —
 thirteen of them, with `D.2` (the real tenant, concurrency and run-rate numbers) first, because
-`D.13` the CPU pool, `D.19` the circuit breaker and the admission-control half of `D.4` all
-resolve differently depending on it. An implementer who picked one would be writing a roadmap
-out of guesses. `D.14` retention tiering was on that list and is now ANSWERED, by deletion —
-see `TODO.md` §D.14.
+`D.13` the CPU pool is the last item still resolving on it. Three that were on that list came off
+it on 2026-08-28, and by three different routes: `D.14` retention tiering was ANSWERED BY DELETION
+and turned out not to depend on the numbers at all; `D.19` the circuit breaker and the
+admission-control half of `D.4` were both REFUSED under `D.2` = one machine, one tenant, the
+maintainer's own workflows — the breaker because its verdict is a per-source count spanning runs
+while the journal is addressed per run, admission control because under one tenant the right answer
+to "too much work" is to make it wait and never to say no. See `TODO.md` §D.14, §D.19 and §D.4.
+An implementer who picked one of the rest would be writing a roadmap out of guesses.
 
 Evidence for each item below is in `TODO.md` §A0 and
 `docs/audit-2026-08-25.md`; the ones marked `gated` are held by

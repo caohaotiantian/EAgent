@@ -61,7 +61,7 @@
  * submitted it, and two predicates govern the routes:
  *
  *   - `ownsRun` — owner, unowned, or operator — for `GET /runs`, `GET /runs/:id`,
- *     `GET /runs/:id/events` and `POST /runs/:id/commands`;
+ *     `GET /runs/:id/events`, `POST /runs/:id/commands` and `POST /runs/:id/oversight`;
  *   - `mayReachGates` — that, OR named on one of this run's gates — for the two routes that
  *     carry gates, and only those.
  *
@@ -190,7 +190,7 @@ import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
-import { gateDecisionOf, isSyntheticSubject, maxClassification, type Classification, type GateDecision } from "../vocab.ts";
+import { gateDecisionOf, isSyntheticSubject, maxClassification, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
 import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
@@ -973,6 +973,28 @@ export interface ControlPlaneOptions {
    * like a policy, and it is the same one-character deployment slip as an empty token.
    */
   readonly allowedHosts?: readonly string[];
+  /**
+   * WHERE A FRESHLY-ACCEPTED RUN IS HANDED OFF, instead of `void engine.advance(runId)`.
+   *
+   * The 202 handler drove every accepted run itself, immediately, with nothing bounding how
+   * many of those ran at once. Measured: 60 submissions driven the way this handler drives
+   * them produced **60 concurrent provider calls**, and the only money ceiling on the box was
+   * whatever each graph happened to declare.
+   *
+   * IT IS NOT ADMISSION CONTROL AND MUST NEVER BECOME IT. This plane still answers 202
+   * unconditionally — the body says "accepted means this WILL run" and that promise is
+   * unchanged — and a `drive` that is full is expected to do NOTHING rather than to refuse.
+   * The deployment's run clock re-derives the run from the journal and offers it again, which
+   * is why the queue can be a scheduling hint whose loss is safe: it is not a data structure,
+   * it is the journal.
+   *
+   * ABSENT KEEPS TODAY'S BEHAVIOUR — an unbounded `advance` per submission — so a library
+   * embedder of `ControlPlane` sees no change. That default is the WIDER of the two, which is
+   * the wrong direction for a ceiling and is a deliberate compatibility choice rather than an
+   * oversight: this option bounds a resource, it grants no permission, and an embedder driving
+   * their own runs unbounded is what they were already doing.
+   */
+  readonly drive?: (runId: RunId) => void;
 }
 
 /**
@@ -1314,6 +1336,66 @@ function checkedReason(v: unknown, fallback: string): string {
   return v;
 }
 
+/**
+ * The three body fields of `POST /runs/:id/oversight`, checked and never cast.
+ *
+ * They are `cli.ts`'s `postureFlag`/`justificationFlag`/`ceilingScope` at the other door, and
+ * they are duplicated rather than shared for the reason `#refuseUnidentifiedApproval` gives
+ * about borrowing wording: the two doors take their input from different places — argv versus
+ * a JSON body an untrusted client wrote — so the SHAPES they have to refuse differ, and the one
+ * thing they must agree on is the answer, not the sentence.
+ *
+ * ALL THREE REFUSE WHEN THEY CANNOT DECIDE. A posture outside the union has no rank and every
+ * comparison against it in `PolicyEngine.floorFor` is false; a blank justification is a
+ * loosening with no account of itself; a scope naming another run journals a ceiling into this
+ * run's log that the other run can never fold back. None of them has a permissive fallback.
+ */
+function postureOf(v: unknown): Posture {
+  if (typeof v !== "string" || !POSTURES.includes(v as Posture)) {
+    throw err.validation(
+      CODES.E_PROVIDER_BAD_REQUEST,
+      `"to" must be one of ${POSTURES.map((p) => `"${p}"`).join(", ")}, not ${v === undefined ? "omitted" : typeof v === "string" ? `"${v}"` : typeof v}. ` +
+        `It is journaled on policy.deescalated and folded into the run's ceilings, and a posture outside that set has no rank to compare against.`,
+    );
+  }
+  return v as Posture;
+}
+
+function justificationOf(v: unknown): string {
+  if (typeof v !== "string" || v.trim() === "") {
+    throw err.validation(
+      CODES.E_PROVIDER_BAD_REQUEST,
+      `"why" must be a non-empty justification, not ${v === undefined ? "omitted" : typeof v === "string" ? "blank" : typeof v}. ` +
+        `Lowering oversight is journaled with this text and replayed as a human input, so it is the only account of why supervision was reduced.`,
+    );
+  }
+  return v;
+}
+
+function ceilingScopeOf(v: unknown, runId: RunId): string {
+  const shape = `"scope" must be "run:${runId}" or "node:${runId}/<nodeId>"`;
+  if (typeof v !== "string" || v === "") {
+    throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `${shape}: it was ${v === undefined ? "omitted" : typeof v === "string" ? "empty" : typeof v}. There is no default scope.`);
+  }
+  const named = v.startsWith("run:") ? v.slice(4) : v.startsWith("node:") ? v.slice(5).split("/")[0]! : undefined;
+  if (named === undefined || (v.startsWith("node:") && !/^node:[^/]+\/[^/]+$/.test(v))) {
+    throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `${shape}, not "${v}". Those are the two scopes PolicyEngine reads.`);
+  }
+  if (named !== runId) {
+    // NOT AN AUTHORIZATION CHECK — `ownsRun` above is. This is well-formedness with a durable
+    // consequence: `PolicyEngine` keys ceilings by an opaque string and `Engine.deescalate`
+    // appends to the log of the run in the URL, so a cross-run scope lowers the other run's
+    // posture in THIS process and is re-seeded from a journal that other run never reads.
+    // A loosening the journal cannot reconstruct is the first non-negotiable, inverted.
+    throw err.validation(
+      CODES.E_PROVIDER_BAD_REQUEST,
+      `"scope" names run ${named} and this route names run ${runId}. The ceiling would be journaled in ${runId}'s log, ` +
+        `so ${named} would lose it as soon as this process restarts.`,
+    );
+  }
+  return v;
+}
+
 interface Route {
   readonly method: string;
   readonly pattern: RegExp;
@@ -1368,6 +1450,15 @@ export class ControlPlane {
    * day is outside it, which is the case the number was chosen against.
    */
   readonly #idempotency = new Map<string, unknown>();
+  /**
+   * `ControlPlaneOptions.drive`, captured ONCE at construction.
+   *
+   * The same rule as `#token`, `#identity` and `#identityName`: `ControlPlaneOptions` is a
+   * record a caller builds, so re-reading the field on every submission would let a mutated
+   * options object change how many runs this plane drives at once, per request, with nothing
+   * to see it happen.
+   */
+  readonly #drive: ((runId: RunId) => void) | undefined;
   readonly #callbacks: GateCallbackRouter | undefined;
   /**
    * The identity source's own name, read ONCE here and never off the object again.
@@ -1674,6 +1765,7 @@ export class ControlPlane {
     // `store`, `bus` and `now` spelled as `opts.store`, `opts.bus`, `opts.now` here were
     // reads of the caller's record long after the constructor returned, in the one place
     // whose output is durable. See the field block above for what that measured.
+    this.#drive = opts.drive;
     const dispatcher = opts.dispatcher;
     this.#callbacks =
       dispatcher === undefined
@@ -2740,6 +2832,16 @@ export class ControlPlane {
 
           // Drive it after responding: the client is not made to wait on execution.
           //
+          // THROUGH `drive` WHEN THE DEPLOYMENT SUPPLIED ONE, which is what puts a ceiling on
+          // how many accepted runs this process drives at once. It is a hand-off and not a
+          // gate: the 202 above is already sent, unconditionally, and a full dispatcher does
+          // nothing rather than refusing — the deployment's run clock re-derives the run from
+          // the journal and offers it again. See `ControlPlaneOptions.drive`.
+          if (this.#drive !== undefined) {
+            this.#drive(runId);
+            return;
+          }
+          //
           // AND THE REJECTION IS REPORTED, WHICH IT USED TO NOT BE. This was
           // `.catch(() => undefined)`, which dropped every failure of the one call that
           // drives a freshly-accepted run. The 202 four lines up says, in those words,
@@ -2761,10 +2863,23 @@ export class ControlPlane {
             // conversion. The `try` is the backstop for the rest: `console.error` itself,
             // and a `name`/`message` getter that traps.
             try {
+              // WHAT THIS LINE USED TO SAY WAS FALSE ONCE THE RUN CLOCK EXISTED, and it is the
+              // instruction half that was wrong rather than the diagnosis: "nothing is driving
+              // this run" was true of a plane with no clock and is not true of `loom serve`,
+              // whose `runClockTick` re-derives every `running` run with a `ready` task from
+              // the journal on every tick and offers it again. Telling an operator that their
+              // run is stranded — and that a manual POST is the only way back — is worse than
+              // saying nothing, because it is a fact they can act on and it is wrong.
+              //
+              // A LIBRARY EMBEDDER WITH NO CLOCK IS THE CASE WHERE IT WAS TRUE, and that is
+              // now the case this branch is FOR: `drive` is absent, so nothing above this
+              // handler is bounding or retrying anything. The line says which of the two the
+              // reader is in rather than asserting one.
               console.error(
                 `[loom] run ${runId} was ACCEPTED (202) and its first advance() FAILED: ${describeFailure(e)}. ` +
-                  `The journal holds run.submitted and run.compiled and nothing after them, so nothing is driving this run — ` +
-                  `POST /runs/${runId}/commands {"kind":"advance"} to retry it.`,
+                  `The journal holds run.submitted and run.compiled and nothing after them. This plane was built with no ` +
+                  `ControlPlaneOptions.drive, so nothing here will come back for it: POST /runs/${runId}/commands ` +
+                  `{"kind":"advance"} to retry it, or run this plane behind a deployment with a run clock.`,
               );
             } catch {
               // Nothing above this frame can be told anything, and taking the process down
@@ -2993,6 +3108,72 @@ export class ControlPlane {
             default:
               throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `unknown command "${String(cmd["kind"])}"`);
           }
+        },
+      },
+
+      {
+        method: "POST",
+        pattern: /^\/runs\/([^/]+)\/oversight$/,
+        /**
+         * THE ONE ROUTE THAT LOWERS SOMETHING. Every other write on this plane tightens.
+         *
+         * ITS OWN ROUTE RATHER THAN A SEVENTH `commands` VERB, and the reason is the journal
+         * rather than the URL space: `POST /runs/:id/commands` journals `operator.command`,
+         * and a de-escalation is already `policy.deescalated` — it folds into `p.ceilings`,
+         * `PolicyEngine.restore` re-seeds it, and `replay.ts` replays it as a human input.
+         * Two durable vocabularies for one fact is exactly what that separation avoids, and
+         * an auditor asking "what lowered oversight on this run" must have one place to look.
+         *
+         * `ownsRun`, NEVER `mayReachGates`. Being named an approver on one of this run's gates
+         * is a grant to answer one question; it is not a key to the run's oversight posture.
+         *
+         * IT ADDS ONE REFUSAL AND REIMPLEMENTS NONE. `PolicyEngine.deescalate` refuses a
+         * non-`human` actor, a deny-listed identity from three separate sources in descending
+         * order of authority, and a blank justification; `#ceilingScope` below refuses a scope
+         * naming another run. The refusal that is this route's own is for the case the library
+         * never had: a caller the perimeter could not identify. `#decider` mints
+         * `(unidentified)` for every non-human credential — the shared bearer token included,
+         * which arrives as `(shared-token)` and collapses to it — and that is a statement about
+         * the perimeter rather than a person, so it is refused HERE, before the engine, and
+         * never allowed to fall back to the run's owner.
+         */
+        handle: async ({ res, params, body, auth }) => {
+          const runId = params[0] as RunId;
+          const who = mustAuth(auth);
+          const existing = await engine.projection(runId);
+          if (existing === undefined || !ownsRun(existing, who)) {
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          }
+          const input = await body();
+          const claimed: unknown = input["actor"];
+          if (claimed !== undefined && typeof claimed !== "string") {
+            throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `"actor" must be a subject string when it is present, not ${typeof claimed}`);
+          }
+          const actor = this.#decider(auth, claimed);
+          // UNCONDITIONAL, and that is the difference from `#refuseUnidentifiedApproval`, which
+          // this route deliberately does NOT reuse: that one returns silently when the gate
+          // names no approvers, because a gate naming nobody is answerable by whoever can
+          // reach it. There is no such case here. Nothing in the graph can name a principal
+          // as entitled to lower oversight, so "the perimeter identified nobody" is the whole
+          // answer and it is a refusal.
+          if (isSyntheticSubject(actor.subject) || SYNTHETIC_SUBJECTS.includes(actor.subject)) {
+            throw err.policy(
+              CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN,
+              `this credential identifies no person (method "${auth?.method ?? "none"}", subject "${actor.subject}"), and only a human may lower oversight. ` +
+                `"${actor.subject}" is what this perimeter concluded, not somebody who can be held to a justification. ` +
+                `Present a per-subject credential from an identity source — the shared bearer token authenticates a deployment.`,
+            );
+          }
+          const scope = ceilingScopeOf(input["scope"], runId);
+          const to = postureOf(input["to"]);
+          const why = justificationOf(input["why"]);
+          // AFTER every refusal above, so nothing an unauthorized caller sends makes this
+          // process go looking for a graph — the ordering `POST /runs/:id/gates/:gateId` uses.
+          await this.#bindFromIndex(runId);
+          // A run this engine holds no context for is `E_RUN_NOT_FOUND` from `Engine.#require`,
+          // never a silently-created ceiling on a run nobody folded.
+          const p = await engine.deescalate(runId, scope, to, why, { kind: "human", id: actor.subject }, actor.via);
+          send(res, 200, { runId, scope, from: existing.ceilings[scope], to, ceiling: p.ceilings[scope], justification: why });
         },
       },
 

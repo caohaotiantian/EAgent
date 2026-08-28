@@ -86,9 +86,18 @@ export interface Reservation {
 }
 
 export interface BudgetLimits {
-  /** Per run. `undefined` means unbounded, which the compiler warns about. */
+  /**
+   * Per run. `undefined` means unbounded, which the compiler warns about.
+   *
+   * `loom serve --budget-usd` is the deployment's value for it, and `Engine.submit` folds it
+   * by MIN against the graph's own `policy.budget.costUsd` and against `loom run --budget`, so
+   * a graph may lower an operator's ceiling and can never raise it.
+   */
   readonly runUsd?: number;
-  readonly tenantUsd?: number;
+  // `tenantUsd` WAS HERE and is deleted. Nothing ever read it and nothing ever wrote it —
+  // `reserve`, `settle`, `spentFor` and `#budget` are all keyed on the run — so it was a
+  // ceiling the type advertised and no code enforced. It was waiting on the same question
+  // `TenantId` was, and that question is answered: one machine, one tenant.
   /**
    * `inputTokens + outputTokens` per run, folded from the journal exactly as dollars are.
    * `cacheReadTokens`, `cacheWriteTokens` and `reasoningTokens` are deliberately NOT in the

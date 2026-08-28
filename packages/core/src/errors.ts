@@ -2,9 +2,15 @@
  * One error taxonomy for every interface boundary.
  *
  * `class` answers "what should the caller do?" and is the only thing generic
- * machinery (retry policy, HTTP status mapping, circuit breakers) is allowed to
- * branch on. `code` answers "what exactly happened?" and is for humans, tests, and
- * declarative `retry.onlyIf` lists.
+ * machinery — the retry policy and the HTTP status mapping, which are the two that
+ * exist — is allowed to branch on. `code` answers "what exactly happened?" and is
+ * for humans, tests, and declarative `retry.onlyIf` lists.
+ *
+ * "Circuit breakers" used to be listed there as a third. There is none: `SourceHealth` is
+ * zero hits across `src/` and `test/`, nothing measures a provider's health and nothing
+ * withholds an unhealthy one. Naming an absent mechanism in the list of things allowed to
+ * branch on `class` reads as evidence that one exists, which is the whole reason the list
+ * names its members.
  *
  * Implementations wrap native errors here and never leak provider payloads into
  * `message` (they may contain secrets); structured context goes in `details`, which

@@ -449,7 +449,12 @@ test("`onError` CAN SUPPRESS a retry the policy allowed", async () => {
   await drain(bare, runId2);
 
   assert.ok(bare.calls() > 1, `the control must actually retry: ${String(bare.calls())} call(s)`);
-  assert.equal(withHook.calls(), 1, "a circuit breaker stops the retry after the first failure");
+  // NOT "a circuit breaker", which is what this message said. A green test whose message names
+  // a breaker is the strongest possible false signal that one exists — and none does. The hook
+  // is handed `{retry, afterMs}` and a context of `{point, runId, taskId, signal}`: no code, no
+  // class, no source, and nowhere to hold state across calls. What it can express is a BLANKET
+  // suppression keyed on the run and the node, which is what this hook does.
+  assert.equal(withHook.calls(), 1, "a blanket suppressor stops the retry after the first failure");
 });
 
 test("`onError` IS NOT CONSULTED once the policy has refused — containment is structural", async () => {

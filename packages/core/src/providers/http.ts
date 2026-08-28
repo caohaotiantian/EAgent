@@ -11,6 +11,25 @@
  * a mapping wrong is how a content-policy refusal ends up being retried against
  * three providers in turn.
  *
+ * **WHAT A DEAD PROVIDER COSTS, MEASURED — AND WHY THERE IS NO CIRCUIT BREAKER.** The backlog
+ * claimed "a source that is failing every call is retried at full rate". That is false. A dead
+ * provider costs **3 engine attempts x 3 `postJson` attempts = 9 requests and about 2.25 s of a
+ * held worker slot**, and then the run FAILS naming `E_PROVIDER_OVERLOADED`; the holds are
+ * bounded by `maxDelayMs x (maxAttempts - 1)` and `E_PROVIDER_AUTH` is not retryable at all, so
+ * a bad key costs one call. What a breaker would have bought against that: with no chain
+ * configured, 8 of 9 requests on a run that already fails in about three seconds naming its
+ * code; with a chain configured, three requests and ~750 ms per model turn on a run that
+ * already succeeds. It is refused on VALUE, not on danger — and the fact that decides it is in
+ * `journal/store.ts`'s header: the journal is addressed per run, and a breaker's verdict is a
+ * per-source count spanning runs, so no fold can reconstruct it.
+ *
+ * The real cost is the one that is NOT bounded: `FallbackAdapter` is stateless, so a configured
+ * chain with a dead primary pays those three requests on every model turn, indefinitely, while
+ * runs succeed. `cli.ts`'s `providerNotice` is the answer to that — a report, not a guard.
+ *
+ * Reopen the question if a provider is reached that BILLS FOR 5xx RESPONSES: the eight wasted
+ * calls stop being free and the arithmetic above changes side.
+ *
  */
 
 import { CODES, LoomError, err, isLoomError, toLoomError } from "../errors.ts";

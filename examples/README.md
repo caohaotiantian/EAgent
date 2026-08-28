@@ -252,7 +252,10 @@ export OPENAI_API_KEY=...            # your key
 cat > models.json <<'JSON'
 { "adapters": [ { "provider": "openai", "name": "m", "baseUrl": "https://api.openai.com/v1",
                   "apiKeyEnv": "OPENAI_API_KEY", "defaultMaxTokens": 16000 } ],
-  "routes": { "agent_profile/reviewer@stable": { "adapter": "m", "model": "gpt-5" } } }
+  "routes": { "agent_profile/reviewer@stable": {
+    "adapter": "m", "model": "gpt-5",
+    "fallback": [ { "adapter": "m", "model": "gpt-5-mini",
+                    "when": ["E_PROVIDER_OVERLOADED", "E_PROVIDER_RATE_LIMIT"] } ] } } }
 JSON
 
 git diff HEAD~1 > subject.diff
@@ -265,6 +268,16 @@ loom approve <runId> <gateId> --as u:you --graph graphs/self-review.json
 # → out/review.json now exists
 loom replay <runId> --graph graphs/self-review.json     # match: true, zero model calls
 ```
+
+**`fallback` IS THE SHIPPED ANSWER TO AN OUTAGE, and it is STATELESS SUBSTITUTION rather than a
+circuit breaker.** There is no breaker in this system and there is not going to be one — the
+reason is in `packages/core/src/journal/store.ts`'s header. What a chain does is enter tier 0 on
+every call and fall through on a throw whose code its `when` list names. So a primary that is
+down costs the failed call on **every turn**, forever: the runs succeed and the box is slower and
+poorer than it looks. `loom serve` says so once on stderr when it starts happening and once when
+it stops — that line is the whole outage story, and if it appears, edit this file rather than
+waiting for something to trip. A `policy`-class code (`E_CONTENT_FILTERED`) in a `when` list is
+refused at construction: retrying a content filter elsewhere is evasion, not resilience.
 
 **Set `defaultMaxTokens` generously.** A reasoning model spends most of its budget before it
 writes anything: measured on GLM-5.2, roughly 17 reasoning tokens per content token. At 4,096 it
