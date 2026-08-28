@@ -239,6 +239,14 @@ const CLASSES: ReadonlySet<ErrorClass> = new Set<ErrorClass>([
  * non-idempotent tool is a `#retryDecision` of "no"). A second spelling of a live decision is
  * worse than no spelling: it invites the next author to raise the one nothing catches.
  *
+ * A CODE ALSO LEAVES WITH ITS RAISER, and that is a different case from the nine. Those were
+ * declared ahead of a raiser that never came. `E_AUDIT_IMMUTABLE` HAD one — the append-only
+ * `MemoryTierStore` in `journal/retention.ts` refused an overwrite with different content —
+ * and it went when that file did. A code whose only raiser is deleted is not a code that
+ * "might come back"; it is a promise about a mechanism the tree no longer contains, and
+ * keeping it would have made `registries.test.ts`'s unraised set grow by one silently.
+ * That test is what caught it, and it is the reason the deletion was one commit and not two.
+ *
  * Adding a code costs one line at the moment of first use, and this file is deliberately NOT
  * kernel (`scripts/kernel.json`: "Adding an error code IS adding capability") — so declaring
  * one early saves nothing and promises something. `registries.test.ts` pins the unraised set,
@@ -306,8 +314,6 @@ export const CODES = {
   E_SEQ_CONFLICT: "E_SEQ_CONFLICT",
   E_FENCING_STALE: "E_FENCING_STALE",
   E_IDEMPOTENCY_MISMATCH: "E_IDEMPOTENCY_MISMATCH",
-  /** A WORM store was asked to overwrite a record with different content. */
-  E_AUDIT_IMMUTABLE: "E_AUDIT_IMMUTABLE",
   E_GATE_ALREADY_RESOLVED: "E_GATE_ALREADY_RESOLVED",
   E_ILLEGAL_TRANSITION: "E_ILLEGAL_TRANSITION",
   E_RESTORE_ILLEGAL: "E_RESTORE_ILLEGAL",

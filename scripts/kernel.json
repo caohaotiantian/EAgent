@@ -69,7 +69,7 @@
     },
     {
       "path": "packages/core/src/journal/sqlite.ts",
-      "why": "A backend behind store.ts, along with memory.ts, retention.ts and audit.ts. The seam is the interface; that the backend is swappable is exactly what makes the list mean something."
+      "why": "A backend behind store.ts, along with memory.ts and audit.ts. The seam is the interface; that the backend is swappable is exactly what makes the list mean something."
     }
   ]
 }

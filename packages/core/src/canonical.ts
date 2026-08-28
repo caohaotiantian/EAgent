@@ -36,8 +36,10 @@ export type Digest = `sha256:${string}`;
  * record the deepest container it entered, then running the suite's run, graph, state,
  * resource, telemetry, evolution, workflow, server, builtin, retention, CLI and scale
  * files — every real payload, graph spec, tool result, gate payload and channel map the
- * project has — the deepest value ever canonicalized was NINE containers. The
- * distribution: 29 processes peaked at 7, and only two reached 9.
+ * project had then — the deepest value ever canonicalized was NINE containers. The
+ * distribution: 29 processes peaked at 7, and only two reached 9. `retention` names a
+ * suite deleted with `journal/retention.ts`; the list stays as measured rather than being
+ * edited to match today's tree, because it records an input set and not a live citation.
  *
  * So 256 sits ~15x below the worst crash depth measured and ~28x above the deepest real
  * value measured. That two-sided gap is what makes the limit a property of this file
@@ -280,8 +282,11 @@ export function frozenClone<T>(value: T): T {
  * left that call dying on the same bare `RangeError` a few frames earlier, with the new
  * guard never reached.
  *
- * Refusing rather than clipping, for `canonicalize`'s reason: `retention.ts` digests
- * `argsShape`, so a clipped shape is a content address over a shape that is not the shape.
+ * Refusing rather than clipping, for `canonicalize`'s reason: `evolution/trajectory.ts`
+ * digests `argsShape` — `branchDigest` → `actionKey` — so a clipped shape is a content
+ * address over a shape that is not the shape. Reproduced by running: two fan-out arms
+ * differing ONLY in `argsShape` canonicalise to a stable order whichever way they arrived,
+ * and clipping both to the same prefix collapses that order.
  *
  * The refusal says `<shape>` where `canonicalize`'s says a path: this function does not
  * build one, and inventing a path here would be a claim about a location it never tracked.
