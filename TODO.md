@@ -57,9 +57,11 @@ own reviewers.
 ### §D — the thirteen the implementer must not answer alone
 
 `D.2` **the real numbers** (tenants, concurrent runs, runs/day, retention) is the one to answer
-first: `D.13` (CPU pool), `D.14` (retention tiering), `D.19` (circuit breaker) and the
-admission-control half of `D.4` all resolve differently depending on it, and `TenantId` is
-declared and used nowhere. Then `D.5` identity source of truth, `D.6` which approval callback
+first: `D.13` (CPU pool) and `D.14` (retention tiering) resolve differently depending on it.
+**`D.19` and the admission-control half of `D.4` no longer wait on it: both were decided
+2026-08-28 under `D.2` = one machine, one tenant, the maintainers' own workflows, and both were
+REFUSED.** `TenantId`, `ProjectId` and `Budget.tenantUsd` were deleted in that change — three
+types waiting on a question that has been answered. Then `D.5` identity source of truth, `D.6` which approval callback
 is mandatory, `D.7` providers at launch (half answered in code), `D.8` what a join timeout
 does, `D.9` whether a function body's output becomes a journaled effect, `D.10` the
 `preAuthorization` envelope, `D.15` quorum and delegation, `D.18` the mailbox.
@@ -83,10 +85,14 @@ does, `D.9` whether a function body's output becomes a journaled effect, `D.10` 
 - **Rate limits** — one row of §A's failure table stays RED: a 429 arriving after a
   non-idempotent `effect.started` with no `effect.completed` refuses both a retry and a
   deferral, because the world may already have changed. A deferral still counts toward E4's
-  consecutive-failure streak. **Admission control is untouched**: `POST /runs` admits everything
-  it can authenticate. The code that would refuse, `E_ADMISSION_REJECTED`, was DELETED rather
-  than left unraised — `errors.ts` cut nine such codes under "a code arrives with its raiser, in
-  the same change" — so the gap is a missing mechanism, not a declared code nobody raises.
+  consecutive-failure streak. **Admission control is DECIDED AND WILL NOT BE BUILT** (2026-08-28,
+  §D.4): `POST /runs` admits everything it can authenticate and always will, because under one
+  tenant the right answer to "too much work" is to make it wait, never to say no. What ships
+  instead is a CEILING — `loom serve --max-runs-in-flight N` (default 4) bounds how many runs
+  this process drives at once, the surplus waits, and `runClockTick`'s widened `due` predicate
+  re-derives it from the journal. `E_ADMISSION_REJECTED` was DELETED rather than left unraised
+  and stays deleted; so do a queue-depth field, a token-bucket config block and the
+  `loom.schedule.admit` span.
 - **Subgraph spans** — there is no OTLP exporter in the repo, so `SpanLink.traceId` has no
   consumer outside the splice; there is no HTTP trace endpoint; the span taxonomy was NOT grown
   (a subgraph still renders as `loom.tool`), because a ninth name is a D9.1 decision.
@@ -908,7 +914,9 @@ Each was verified against the code, not remembered.
     fan-out of rate-limited tasks can still exhaust the CLI's patience. It reports rather than
     hangs, which is why it was left.
   - `E_ADMISSION_REJECTED` was DELETED rather than left unraised (`errors.ts`: "a code arrives with its raiser, in the same change"). This fixes the backpressure half of
-    D.4; admission control is untouched.
+    D.4. The admission half was DECIDED 2026-08-28 and will not be built — the code stays
+    deleted permanently, and the bound that ships is `--max-runs-in-flight`, which withholds
+    rather than refuses.
 
   Original entry, reframed 2026-08-26 after an attempt to fix the stated defect made
   the product worse, which is the useful outcome.
@@ -977,8 +985,15 @@ Each was verified against the code, not remembered.
   already terminal. §F.13 states the property this breaks: *a terminal operation is not final
   until every producer of the state it ends is stopped.*
 
-- **No circuit breaker.** Nothing measures a source's health and nothing withholds an unhealthy
-  one. `SourceHealth` appears nowhere in the code.
+- **No circuit breaker, and there will not be one** (DECIDED 2026-08-28, §D.19). Nothing
+  measures a source's health and nothing withholds an unhealthy one; `SourceHealth` appears
+  nowhere in the code and is now permanently out of the vocabulary, along with a
+  `source.withheld` event, an `E_SOURCE_UNHEALTHY`-shaped code and a shipped `BreakerAdapter`.
+  The reason is the first non-negotiable: a breaker's verdict is a per-source failure count
+  SPANNING RUNS, and `StateStore.read(runId, fromSeq)` addresses the journal per run, so no fold
+  can reconstruct it. What ships instead is the sightline — `providerNotice` in `cli.ts`, one
+  latched stderr line on the way down and one on the way back — because the measured problem
+  was never the retries, it was that a configured fallback chain degrades SILENTLY.
 - ~~**A subgraph's cost ceiling binds nothing.**~~ **WRONG, re-checked 2026-08-25.** There is a
   point at which the cap refuses rather than reports: `engine.ts:3726` computes
   `slice = ctx.policy.remainingUsd * share`, journals it as `subgraph.started.budgetUsd`, and
@@ -1127,10 +1142,10 @@ believes a feature is present.
 
 | item | verdict | what running it showed |
 |---|---|---|
-| `C.1` **Eight span names are designed and unbuilt** | open | COUNT IS EXACTLY RIGHT: 8. The members are recoverable only from git history (design corpus deleted at f975f9f, an ancestor of HEAD; `git show f975f9f^:packages/core/test/docs… |
+| `C.1` **Seven span names are designed and unbuilt** | open | THE COUNT WAS 8 AND IS NOW **7**: `loom.schedule.admit` was struck 2026-08-28 when §D.4 decided admission control will never be built — a count moving DOWN by a decision rather than by a build. The members are recoverable only from git history (design corpus deleted at f975f9f, an ancestor of HEAD; `git show f975f9f^:packages/core/test/docs… |
 | `C.1.1` loom.request | open | Registry reason: no journal event covers ingress; first append is run.submitted. |
 | `C.1.2` loom.compile | open | Its attributes did not vanish: run.compiled folds graph.nodes/graph.edges/resources.pinned onto loom.run (spans.ts:426). |
-| `C.1.3` loom.schedule.admit | open | Consistent with section A: admission control is itself unbuilt, so there is no event to fold. |
+| `C.1.3` loom.schedule.admit | ~~open~~ **STRUCK** | §D.4 decided 2026-08-28 that admission control will never be built, so there is no decision for this span to name. It is out of the vocabulary permanently, and it is why the C.1 count is 7. |
 | `C.1.4` loom.schedule.pick | open | This is the one the deleted 05 doc flagged as marked in two documents but absent from its own inventory table; it is nonetheless a genuine ninth-name gap and is correctly insi… |
 | `C.1.5` loom.context.assemble | open | run/context.ts assembles but journals nothing, so the fold has no input. |
 | `C.1.6` loom.effect | open | A naive `grep -c loom.effect` returns nonzero and would wrongly read as built. Every effect folds into loom.model or loom.tool at spans.ts:712 — including `kind: "subgraph"`, … |
@@ -1142,7 +1157,10 @@ believes a feature is present.
 | `C.5` **No scheduler-tick telemetry**, so queue behaviour is unm | partial | FIRST HALF STILL-OPEN, SECOND HALF WRONG. No scheduler-tick telemetry: confirmed — `loom.scheduler.tick` is emitted nowhere and run/scheduler.ts contains no tick loop to instr… |
 
 
-- **Eight span names are designed and unbuilt** — count verified exactly. ~~roughly fifteen
+- ~~**Eight span names are designed and unbuilt**~~ → **SEVEN**, 2026-08-28: `loom.schedule.admit`
+  was struck when §D.4 decided admission control will never be built, so the span has no
+  decision left to name. A count moving DOWN by a decision rather than by a build.
+  ~~roughly fifteen
   documented span attributes~~ → **eleven**, recounted 2026-08-25 and enumerated:
   `budget.cost_usd`, `trigger.kind`, `node.type`, `capability`, `gen_ai.request.max_tokens`,
   `loom.replayed` (two spans), `tool.attempt`, `tool.source`, `reducers`, `gate.posture`,
@@ -1245,7 +1263,7 @@ is a better view of nothing.
 | `D.1` **The first real workflow to port.** Nobody has yet used t | **DONE** | (i) DECISION: ANSWERED BY DEMONSTRATION 2026-08-27/28 — two workflows are ported, shipped in `examples/graphs/` and DRIVEN against a live GLM-5.2: `self-review` (the one that needs a real model) and `review-bench` (33 live runs, one cohort key, $1.59 all in). The whole record is `docs/evolution-loop-2026-08-27.md`. The observable below is what made the question worth asking and is now false. Original reading. (ii) OBSERVABLE: the only run that ever reached durable storage is a one-node graph named "g" with empty inputs that FAILED before running a body; no graph… |
 | `D.2` **The real numbers** — tenants, concurrent runs, runs/day, | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the word 'tenants' has no referent in the running system — `TenantId` is declared and used nowhere, and no tenant column reaches the sqlit… |
 | `D.3` **When a compensation edge fires** — on task failure, on r | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it — today the answer is 'never, on any of the three'. (ii) OBSERVABLE: a live engine run whose tool node throws leaves the compensation target with no Task at… **ANSWERED + BUILT 2026-08-28.** The maintainer's answer was ON RUN FAILURE AND ON REWIND, and both now run: `planCompensation` walks the journal in descending seq and `#compensate` dispatches each undo through `#invokeTool` under the `compensate` effect kind, with three journaled states (compensated / failed / not attempted) rather than two. Two defects found on the way in and fixed: a rewind that hid the record while leaving the effect standing, and a resumed rollback that undid its own undos. |
-| `D.4` **Rate-limit backpressure and admission control** — see A. | partial | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is still OPEN — `E_ADMISSION_REJECTED` was deleted, not left unraised. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `e4e4f01`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
+| `D.4` **Rate-limit backpressure and admission control** — see A. | **DONE** | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is ANSWERED 2026-08-28 as WILL NOT BUILD — `E_ADMISSION_REJECTED` stays deleted permanently, because under one tenant the right answer to "too much work" is to make it wait and never to say no. What was measured and closed instead: 60 submissions driven the way `POST /runs` drives them produced **60 concurrent provider calls**, and `openWorkspace` built its Engine with `policy: { granted }` and no budget, so the deployment half of `minDefined` was always undefined. Five flags now ship — `--max-runs-in-flight` (default 4), `--max-parallelism` (default 16), `--budget-usd`, `--budget-tokens`, `--budget-wall-ms` — each refusing to boot on a malformed value, with the arithmetic printed at boot. `--max-runs-in-flight` is a CEILING: the surplus waits and the run clock's widened `due` predicate re-derives it from the journal. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `e4e4f01`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
 | `D.5` **The identity and permission source of truth** for approv | open | (i) DECISION: OPEN. (ii) OBSERVABLE: an approvers list naming a group or a role compiles clean and can never be satisfied, because the runtime check is exact string equality —… |
 | `D.6` which approval callback is mandatory | open | (i) DECISION: OPEN. (ii) OBSERVABLE: of the three DeliveryChannels that ship, exactly one can be answered. `channel.parseCallback !== undefined` IS the answerability test (del… |
 | `D.7` providers required at launch | partial | (i) DECISION: half ANSWERED IN CODE, half OPEN. The launch set is closed and ENFORCED at boot — `PROVIDERS` (cli.ts:815) is exactly {anthropic, openai}, and OpenAIAdapter with… |
@@ -1260,7 +1278,7 @@ is a better view of nothing.
 | `D.16` `run.cancelled.forced` | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it. (ii) OBSERVABLE: the field is written by exactly one site as a constant `false` and read by nothing — so `run.cancelled` carries a boolean that has never o… **ANSWERED 2026-08-28, by deletion.** The field is gone. Its own docstring said the removal cost three files; it was seven files and nine sites, which is why it kept being deferred. The operator lane separately established that §D.4's definition of `kill` — 'cancel that does not wait' — is FALSIFIED, because `cancel` does not wait: measured in `test/run/cancel-does-not-wait.test.ts`. So the field was not held open for a verb that cannot exist as specified. |
 | `D.17` the operator surface | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it. (ii) OBSERVABLE: the whole operator vocabulary over HTTP is three verbs — cancel, rewind, advance (http.ts:2780-2797) — and five of the words §B names are … **ANSWERED + PARTLY BUILT 2026-08-28.** The maintainer's answer was the full set. `pause` and `resume` ship as journaled facts that survive a restart (`RunProjection.paused`, deliberately separate from `status` so a `gate.decided`'s unconditional `run.resumed` cannot undo an operator's stop), and `steer` ships confined to the compiled edge set. `kill` was NOT built and the reason is measured, not a shortfall: it was specified as 'cancel that does not wait' and `cancel` does not wait, so it would have been a synonym. A steer aimed at a `human_gate` is now REFUSED — it was accepted, journaled and never read, because a gate resumes through `resolveGate` and `#dispatchNode` never sees it. |
 | `D.18` the mailbox | open | (i) DECISION: OPEN. (ii) OBSERVABLE: `mailbox` is a legal value of `effect.started.kind` that nothing can ever produce — so a reader of events.ts believes agent-to-agent messa… |
-| `D.19` the circuit breaker | open | (i) DECISION: OPEN. (ii) OBSERVABLE: nothing measures a provider's health and nothing withholds an unhealthy one, so a source that is failing every call is retried at full rat… |
+| `D.19` the circuit breaker | **DECIDED — REFUSED** | (i) DECISION: ANSWERED 2026-08-28. No breaker: no `SourceHealth`, no `source.withheld`, no `E_SOURCE_UNHEALTHY`, no `BreakerAdapter`. (ii) THE OLD OBSERVABLE WAS FALSE. "retried at full rate" is not what happens: a dead provider costs 3 engine attempts x 3 `postJson` attempts = **9 requests and ~2.25 s of held slot**, and then the run FAILS naming `E_PROVIDER_OVERLOADED`. (iii) WHAT IS TRUE, and it is the thing no row named: `FallbackAdapter` is stateless, so a configured chain with a dead primary pays **three wasted requests and ~750 ms of a worker slot on EVERY model turn, forever**, while every run succeeds — and `FallbackOptions.onFallback` was declared, tested and wired by nobody, so it happened in silence. (iv) BUILT: the callback is wired at the `new FallbackAdapter(…)` construction and `providerNotice` latches one stderr line down and one up. It DECIDES NOTHING — `test/cli/provider-notice.test.ts` asserts all eleven calls still reach the provider. (v) WHY REFUSED: a breaker reads a per-source count spanning runs and the journal is addressed per run, recorded in `journal/store.ts`'s header. Reopens only if an extension author names a hook they cannot write, if `StateStore` grows a cross-run read, if D.2 becomes more than one process, or if a provider bills for 5xx. |
 | `D.20` Two are now answered — the UI is the web console | **DONE** | (i) DECISION: ANSWERED, and the answer is load-bearing rather than declarative. (ii) OBSERVABLE: an unauthenticated GET / on a live control plane serves 25 KB of console HTML … |
 | `D.21` and the terminal client is deleted | **DONE** | (i) DECISION: ANSWERED, by deletion, with a commit that says why. (ii) OBSERVABLE: no TUI source, no ink dependency and no release script remain; the four TUI design documents… |
 

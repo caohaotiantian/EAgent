@@ -16,8 +16,8 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, type D
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 
-import { InProcessEventBus } from "./bus.ts";
-import { isLoomError, toLoomError } from "./errors.ts";
+import { InProcessEventBus, type EventBus } from "./bus.ts";
+import { isLoomError, toLoomError, type LoomError } from "./errors.ts";
 import { parseYamlSpec } from "./graph/yaml.ts";
 import { compile } from "./graph/compile.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
@@ -28,6 +28,7 @@ import { filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
 import { builtinTools, fsRestore } from "./builtin/tools.ts";
 import { Engine } from "./run/engine.ts";
+import type { BudgetLimits } from "./run/policy.ts";
 import {
   ConsoleChannel,
   GateDispatcher,
@@ -59,7 +60,7 @@ import {
   type IdentitySource,
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
-import { isSyntheticSubject } from "./vocab.ts";
+import { isSyntheticSubject, POSTURES, type Posture } from "./vocab.ts";
 import { foldRun, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
@@ -99,6 +100,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                [--channels-file channels.json]             how gates reach humans, and how
                                                            humans answer them
                [--sweep-ms 1000]                           how often gate SLAs are checked
+               [--max-runs-in-flight 4]                    how many runs this process drives
+                                                           at once. A CEILING, never a door:
+                                                           nothing is refused, the surplus
+                                                           waits and the run clock comes
+                                                           back for it. Times
+                                                           --max-parallelism, this is the
+                                                           box's concurrent-provider-call
+                                                           ceiling, printed at boot
   loom compile <graph.json|yaml>                           validate and print diagnostics
 
   A workspace publishes resources/ by directory, one directory per kind:
@@ -121,6 +130,15 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom steer   <runId> --node ID --take E,E --as ID        put a node on edges the AUTHOR
                [--reason WHY]                               declared; an invented one is
                                                             refused. Needs the graph
+  loom deescalate <runId> --scope run:<id>|node:<id>/<node> THE ONE THING THAT LOWERS
+               --to out|on|in --why "<justification>"        oversight. Every other verb
+               --as ID                                       tightens. There is no force
+                                                             flag and no way to skip the
+                                                             justification: it is journaled
+                                                             and replayed as a human input.
+                                                             --as AUTHENTICATES NOBODY —
+                                                             this verb is as strong as
+                                                             shell access to the host
   loom replay  <runId> --graph <graph.json|yaml>           replay and verify
   loom trace   <runId> --graph <graph.json|yaml>           print the span tree
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
@@ -188,6 +206,15 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     record as the person who approved
   --data-dir  DIR   journal location (default: <workspace>/.loom). Off limits to the
                     fs tools wherever it is put, including inside the workspace.
+  --max-parallelism N  how many nodes of ONE run may be in flight at once (default 16).
+                    Accepted by every command. A malformed value REFUSES TO BOOT rather
+                    than falling back to 16 — a bare flag is 1 and an unset variable is 0
+  --budget-usd N    THIS DEPLOYMENT's ceiling per run, in US dollars. Composes by MIN
+  --budget-tokens N  with the graph's own policy.budget and with loom run --budget, so a
+  --budget-wall-ms N graph may lower it and can never raise it. Without these the
+                    deployment half of that fold is undefined and the only money ceiling
+                    on the box is whatever each graph happens to declare — a graph
+                    declaring none has none. wall-ms is PROVIDER time, not elapsed time
   --models-file F   which providers to call, and which model each ModelRequest.model
                     goes to. Without it every agent node answers "[mock] …". The API
                     key is named by the file and READ FROM THE ENVIRONMENT, never
@@ -320,6 +347,9 @@ const KNOWN_FLAGS: readonly string[] = [
   "baseline",
   "bucket",
   "budget",
+  "budget-tokens",
+  "budget-usd",
+  "budget-wall-ms",
   "cases",
   "channels-file",
   "cohort",
@@ -332,6 +362,8 @@ const KNOWN_FLAGS: readonly string[] = [
   "host",
   "identity-file",
   "input",
+  "max-parallelism",
+  "max-runs-in-flight",
   "mcp-file",
   "models-file",
   "node",
@@ -341,10 +373,13 @@ const KNOWN_FLAGS: readonly string[] = [
   "reason",
   "reject",
   "runs",
+  "scope",
   "suite",
   "sweep-ms",
   "take",
+  "to",
   "token",
+  "why",
   "workspace",
 ];
 
@@ -488,6 +523,16 @@ interface Workspace {
   readonly delivery: DeliveryConfig | undefined;
   /** `undefined` when `--models-file` was not given: the mock is the only adapter. */
   readonly models: ModelConfig | undefined;
+  /**
+   * The two ceilings this Engine was actually CONSTRUCTED with.
+   *
+   * Carried for `announce`'s stated rule — every line it prints is read off a constructed
+   * object rather than re-derived from the flags — and `EngineOptions` is write-only, so
+   * there is nothing to read them back off. This is the constructor's own argument, captured
+   * at the point it was passed, which is as close as this file can get.
+   */
+  readonly maxParallelism: number;
+  readonly budget: BudgetLimits | undefined;
   close(): void;
 }
 
@@ -716,6 +761,10 @@ export function openWorkspace(
   for (const client of mcp) for (const t of mcpTools(client)) tools.register(t);
 
   const granted = capabilitiesOf(tools, grantFlag(args));
+  // BOTH REFUSALS ARE SPENT BEFORE THE ENGINE EXISTS, so a malformed ceiling is a process that
+  // does not start rather than one that starts without the ceiling it was told to hold.
+  const maxParallelism = boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
+  const budget = deploymentBudget(args);
   const engine = new Engine({
     store,
     bus,
@@ -737,16 +786,41 @@ export function openWorkspace(
     // exactly right, and injecting an identical one would be a second place for the
     // broker's construction to drift from `EngineOptions`.
     ...(delivery === undefined ? {} : { gates: new HumanGateBroker({ dispatcher: delivery.dispatcher }) }),
+    // HOW WIDE ONE RUN MAY FAN OUT, and it was never passed. `Engine` defaults it to 16 and
+    // `cli.ts` set nothing, so an operator running the binary had no concurrency dial at all;
+    // the number is here rather than in the `serve` arm because it bounds `loom run` too.
+    maxParallelism,
     // systemFloor defaults to `on`: everything is observable and interruptible,
     // and irreversibility classes still force a gate where one is warranted.
-      policy: { granted },
+    //
+    // AND THE DEPLOYMENT'S OWN MONEY CEILINGS, which this call has never supplied. `Engine.submit`
+    // folds `policy.budget.{runUsd,runTokens,runWallMs}` by MIN against the graph's declaration,
+    // so with none here the deployment half of that fold was always `undefined` and the only
+    // ceiling on the box was whatever each graph happened to declare. See `deploymentBudget`.
+      policy: { granted, ...(budget === undefined ? {} : { budget }) },
     // EXPLICIT, so `armForeignGates` can hold the same number. The sweep's window and the
     // arming's window are the same window or the clock has a hole in it — see
     // `GATE_CLOCK_LIMIT`, which is the only place either of them reads it from.
     sweep: { limit: GATE_CLOCK_LIMIT },
   });
 
-  return { root, dataDir, store, engine, bus, payloads, resolver, hooks, granted, execAllowlist: execPrograms, delivery, models, close: () => store.close() };
+  return {
+    root,
+    dataDir,
+    store,
+    engine,
+    bus,
+    payloads,
+    resolver,
+    hooks,
+    granted,
+    execAllowlist: execPrograms,
+    delivery,
+    models,
+    maxParallelism,
+    budget,
+    close: () => store.close(),
+  };
 }
 
 /**
@@ -1064,6 +1138,55 @@ interface Route {
   readonly model: string;
 }
 
+/**
+ * WHERE A FALL-THROUGH GOES, and until this existed the answer was nowhere.
+ *
+ * `FallbackOptions.onFallback` has been declared since the provider layer landed, is covered by
+ * `test/providers.test.ts`, and was passed by NOBODY in `src/`: `new FallbackAdapter({provider,
+ * primary, fallback: tiers})` in `readModels` supplied no callback. So a chain fell through in
+ * total silence — and `FallbackAdapter` is stateless by construction, entering tier 0 on every
+ * call and only falling through on a throw, which means an operator whose primary is dead and
+ * whose chain is configured pays three wasted requests and about 750 ms of a worker slot on
+ * EVERY model turn, indefinitely, while every run still succeeds and nothing says so.
+ *
+ * A LATE-BOUND SINK RATHER THAN AN ARGUMENT, because the two ends are built at different times:
+ * the chain is constructed while the `--models-file` is read, and the reporter that consumes it
+ * is constructed in the `serve` arm after the plane binds. One indirection, and no ordering
+ * between them to get wrong.
+ *
+ * IT IS A REPORT AND NOT A GUARD. Nothing here can withhold a call or permit one — see
+ * `providerNotice`, and the assertion in its test that every call still reaches the provider.
+ */
+export interface FallbackFeed {
+  /** Install a listener. The returned function removes it; a second install is a second listener. */
+  subscribe(fn: (from: string, to: string, error: LoomError) => void): () => void;
+  /** Called by `FallbackAdapter`. Never by anything that decides. */
+  emit(from: string, to: string, error: LoomError): void;
+}
+
+function fallbackFeed(): FallbackFeed {
+  const listeners = new Set<(from: string, to: string, error: LoomError) => void>();
+  return {
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    emit: (from, to, error) => {
+      // A LISTENER THAT THROWS MUST NOT BREAK THE MODEL TURN. This is called from inside
+      // `FallbackAdapter.stream`'s `catch`, on the path that is already handling a provider
+      // failure; a reporter that raised there would turn a survivable fall-through into a
+      // failed run, which is a report deciding something.
+      for (const fn of listeners) {
+        try {
+          fn(from, to, error);
+        } catch {
+          // Nothing above this frame can be told, and a failed report must not fail a run.
+        }
+      }
+    },
+  };
+}
+
 export interface ModelConfig {
   /** The single adapter `openWorkspace` registers: a router over the declared ones. */
   readonly adapter: ModelAdapter;
@@ -1082,6 +1205,11 @@ export interface ModelConfig {
    */
   readonly unsetCeilings: readonly string[];
   readonly file: string;
+  /**
+   * Every fall-through every configured chain takes. Empty of listeners until something
+   * subscribes, and empty of EVENTS when no row declares a `fallback` — see `FallbackFeed`.
+   */
+  readonly fallbacks: FallbackFeed;
 }
 
 /** The two adapters this binary can construct. A typo here must not become a silent mock. */
@@ -1154,6 +1282,7 @@ export function readModels(
   }
 
   const adapters = new Map<string, ModelAdapter>();
+  const fallbacks = fallbackFeed();
   /** Adapter names whose row omitted `defaultMaxTokens`. See `ModelConfig.unsetCeilings`. */
   const unsetCeilings: string[] = [];
   rows.forEach((raw, i) => {
@@ -1288,7 +1417,18 @@ export function readModels(
       chainTiers.set(key, [{ adapter, model }, ...(rawTiers as Record<string, unknown>[]).map((tr, i) => ({ adapter: String(tr["adapter"]), model: String(tr["model"] ?? `?${String(i)}`) }))]);
       const chainName = `chain(${key})`;
       try {
-        adapters.set(chainName, new FallbackAdapter({ provider: chainName, primary: { adapter: adapters.get(adapter)!, model }, fallback: tiers }));
+        adapters.set(
+          chainName,
+          new FallbackAdapter({
+            provider: chainName,
+            primary: { adapter: adapters.get(adapter)!, model },
+            fallback: tiers,
+            // THE CALLBACK THAT HAS SHIPPED DECLARED AND WIRED TO NOTHING. Without it a chain
+            // falls through in silence: the runs succeed, the operator's primary is dead, and
+            // the only evidence is three wasted requests per model turn that nobody counts.
+            onFallback: (from, to, e) => fallbacks.emit(from, to, e),
+          }),
+        );
       } catch (e) {
         // `FallbackAdapter` refuses a chain naming a policy-class code AT CONSTRUCTION —
         // retrying a content filter elsewhere is evasion, not resilience. Re-raised naming the
@@ -1330,6 +1470,7 @@ export function readModels(
     }),
     unsetCeilings,
     file: path,
+    fallbacks,
   };
 }
 
@@ -1497,6 +1638,111 @@ const MAX_TIMER_MS = 2_147_483_647;
  * exemption whose justification is a claim about how a different file happens to use the
  * value today; and a signature replay window wider than three weeks is not a window.
  */
+/**
+ * HOW MANY RUNS THIS PROCESS DRIVES AT ONCE, and how wide each one may fan out.
+ *
+ * Their product is the ceiling on concurrent provider calls, and until these flags existed the
+ * box had neither number. Measured at HEAD, driving 60 submissions the way `POST /runs` drives
+ * them: **60 concurrent provider calls**. `EngineOptions.maxParallelism` bounds fan-out INSIDE
+ * one run and defaults to 16; nothing bounded how many runs were in flight, because the 202
+ * handler ended in a bare `void engine.advance(runId)`.
+ *
+ * FOUR IS A DELIBERATELY SMALL DEFAULT and the honest objection to it is that nobody can size
+ * it: 4 x 16 = 64 concurrent provider calls is already more than most single-box deployments
+ * want, and a maintainer's 50-run sweep now takes thirteen rounds instead of one. It is a
+ * CEILING, not a queue depth — nothing is refused, the surplus waits and the run clock comes
+ * back for it — so the failure mode of a wrong value is a slower box, never a lost run.
+ * `announce` prints the arithmetic at boot so the number is never silent.
+ */
+const DEFAULT_MAX_RUNS_IN_FLIGHT = 4;
+
+/** `EngineOptions.maxParallelism`'s own default, named here so `announce` can print it. */
+const DEFAULT_MAX_PARALLELISM = 16;
+
+/**
+ * The upper bound on both concurrency dials.
+ *
+ * Not defensive typing: each of these multiplies into simultaneous outbound HTTP requests and
+ * simultaneous SQLite writers, and a `--max-parallelism 100000` typed for `--budget-tokens` is
+ * a process that dies to file-descriptor exhaustion at a point far from the flag. Refused at
+ * parse time, where the operator is still watching.
+ */
+const MAX_CONCURRENCY = 1024;
+
+/**
+ * A caller-supplied WHOLE COUNT — `positive`'s sibling for the numbers that are not
+ * milliseconds on a timer, and the discipline all five deployment flags share.
+ *
+ * WHAT IT DOES WHEN IT CANNOT DECIDE: it refuses, and the process does not boot. That is the
+ * whole point of it existing rather than `Number(raw) || fallback`, which is how every one of
+ * these would otherwise have been written:
+ *
+ *   - `--max-parallelism` with no value is `true` from `parseArgs` and `Number(true)` is **1**,
+ *     a box that runs one node at a time and says nothing;
+ *   - `--max-parallelism=` with an unset variable is `""` and `Number("")` is **0**, which
+ *     `Engine` clamps back to 1 by `Math.max(1, …)`, so the flag is silently disregarded;
+ *   - `--budget-usd NaN`, or any non-numeric string, is the dangerous one: every comparison
+ *     against `NaN` is FALSE, so a `NaN` ceiling is not a loose cap, it is NO cap, on a
+ *     process that reports having one.
+ *
+ * A malformed value therefore never falls through to 16, to 1, or to "no ceiling".
+ */
+function boundedCount(raw: string | true | undefined, flag: string, fallback: number, max: number): number {
+  if (raw === undefined) return fallback;
+  const n = typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n <= 0 || n > max) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${flag} must be a whole number from 1 to ${max}, not ${raw === true ? "a bare flag with no value" : `"${raw}"`}. ` +
+        `Omit it for the default of ${fallback}.`,
+    );
+  }
+  return n;
+}
+
+/**
+ * `--budget-usd`, `--budget-tokens`, `--budget-wall-ms` — the DEPLOYMENT's ceilings.
+ *
+ * Distinct from `loom run --budget`, which is one run's allotment. These are
+ * `policy.budget.{runUsd,runTokens,runWallMs}` on the Engine, and `Engine.submit` folds all
+ * three by `minDefined` against the graph's own `policy.budget` — so a graph may lower an
+ * operator's ceiling and can never raise it.
+ *
+ * THE HOLE THESE CLOSE. `openWorkspace` built its Engine with `policy: { granted }` and no
+ * `budget` at all, so the deployment half of every one of those three folds was `undefined`
+ * and the only money ceiling on the whole box was whatever each graph happened to declare. A
+ * graph declaring none had none.
+ *
+ * DOLLARS ARE FRACTIONAL AND THE OTHER TWO ARE NOT, which is why this does not go through
+ * `boundedCount` for the first: `--budget-usd 0.50` is an ordinary value and a whole-number
+ * check would refuse it. `NaN` is refused for all three and for the same reason.
+ */
+function deploymentBudget(args: Args): BudgetLimits | undefined {
+  const usdRaw = args.flags["budget-usd"];
+  const runUsd = ((): number | undefined => {
+    if (usdRaw === undefined) return undefined;
+    const n = typeof usdRaw === "string" ? Number(usdRaw) : NaN;
+    if (!Number.isFinite(n) || n <= 0) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `--budget-usd must be a positive number of US dollars, not ${usdRaw === true ? "a bare flag with no value" : `"${usdRaw}"`}. ` +
+          `It is this deployment's ceiling per run; omit it for no deployment ceiling, and note that a graph declaring none then has none.`,
+      );
+    }
+    return n;
+  })();
+  const tokensRaw = args.flags["budget-tokens"];
+  const runTokens = tokensRaw === undefined ? undefined : boundedCount(tokensRaw, "--budget-tokens", 0, Number.MAX_SAFE_INTEGER);
+  const wallRaw = args.flags["budget-wall-ms"];
+  const runWallMs = wallRaw === undefined ? undefined : boundedCount(wallRaw, "--budget-wall-ms", 0, Number.MAX_SAFE_INTEGER);
+  if (runUsd === undefined && runTokens === undefined && runWallMs === undefined) return undefined;
+  return {
+    ...(runUsd === undefined ? {} : { runUsd }),
+    ...(runTokens === undefined ? {} : { runTokens }),
+    ...(runWallMs === undefined ? {} : { runWallMs }),
+  };
+}
+
 /**
  * `--budget USD`, refused rather than clamped — the same family as every other caller-supplied
  * number in this file.
@@ -2511,10 +2757,36 @@ export interface RunClockTick {
  * seconds after `retryAfter` elapsed, and moved only when a human POSTed `{"kind":"advance"}`
  * by hand, once per attempt.
  *
- * ONLY RUNS WITH A DUE RETRY, which is what keeps this from fighting whoever else is driving.
- * A run being actively advanced does not sit with an elapsed `retryAfter`; and if two processes
- * do collide, the loser writes nothing — every commit compare-and-swaps on the seq the decision
- * was taken at, which is the same argument `GateSweeper` makes for itself one file over.
+ * EVERY RUNNING RUN WITH A READY TASK, not only one whose backoff has elapsed — and that
+ * widening is what makes the dispatcher's withholding safe rather than terminal.
+ *
+ * The predicate used to be `t.retryAfter !== undefined && t.retryAfter <= now`, which was
+ * correct while the only thing that could leave a run un-driven was a backoff. It is not any
+ * more: `drive` holds at most `--max-runs-in-flight` `advance` calls at once and DOES NOT
+ * DISPATCH beyond that, so a submitted run can sit `running` with a `ready` task whose
+ * `retryAfter` is `undefined` — invisible to the old predicate forever. Measured before this
+ * widened: a run submitted and never advanced projects exactly that shape, and no lap of the
+ * clock would ever have touched it. The surplus waits for a tick; the tick has to be able to
+ * see it.
+ *
+ * WHAT THEN KEEPS THIS FROM FIGHTING A LIVE DRIVER, since "it has a due retry" no longer does,
+ * is three things and they are worth naming individually because only the first is new:
+ *
+ *   1. **The dispatcher's dedupe set.** A run already in flight is not dispatched again, so a
+ *      tick landing on top of an HTTP-driven run is a no-op inside `drive` rather than a second
+ *      `advance`.
+ *   2. **`Engine.advance` CHAINS rather than coalescing** — a second call on the same run is
+ *      serialized behind the first. Two calls that do get through cost a fold, not a race.
+ *   3. **Commit-time CAS on seq.** Every commit compare-and-swaps on the seq its decision was
+ *      taken at, so where two processes collide the loser writes nothing — the same argument
+ *      `GateSweeper` makes for itself one file over.
+ *
+ * (2) AND (3) HOLD ACROSS PROCESSES AND (1) DOES NOT, and that is the fact to inherit rather
+ * than the reassurance. Two `loom serve` processes each hold their own dedupe set and their own
+ * N, so the box's real bound is 2N and the widened predicate broadens the double-dispatch
+ * window from "backed-off runs" to "every running run". Both processes then pay the model call
+ * while only one writes. That is acceptable at one process over one store, which is what this
+ * deployment is; it is not a property to carry into a second.
  *
  * A RUN WHOSE GRAPH THIS PROCESS DOES NOT HOLD IS SKIPPED, not failed. `RunGraph` is not
  * journaled, so re-attaching means finding the graph whose hash the journal names; a deployment
@@ -2608,6 +2880,23 @@ export async function runClockTick(
    * nobody knows the behaviour of. */
   ceiling: number = RUN_CLOCK_SCAN_CEILING,
   lapMs: number = RUN_CLOCK_LAP_MS,
+  /**
+   * WHERE A RUN IS HANDED OFF, and it must not block this loop.
+   *
+   * The tick awaits serially, so with the widened predicate above an `await advance` on a
+   * long-running run would hold the whole window and starve the retries this clock exists for
+   * — which is exactly why the widening and the dispatcher land together and neither is
+   * useful alone. `serve` passes `runDispatcher(...).drive`, which is bounded, deduped and
+   * synchronous.
+   *
+   * DEFAULTED TO TODAY'S BEHAVIOUR — an awaited `advance` — for the callers that have no
+   * dispatcher, which today is the tests. It is the SERIAL shape, so the default is slower
+   * than the shipped path and never wider: the direction a default on a concurrency dial has
+   * to be wrong in.
+   */
+  drive: (runId: RunId) => void | Promise<void> = async (runId) => {
+    await ws.engine.advance(runId);
+  },
 ): Promise<RunClockTick> {
   // THE WHOLE REACHABLE SET, IN ONE LISTING, and it is not the cost it looks like. `LIMIT` is
   // a cap and not a fetch count: a store holding three runs answers `listRuns(10_000)` with
@@ -2629,7 +2918,11 @@ export async function runClockTick(
   for (const row of visible) {
     const p = await ws.engine.projection(row.runId);
     if (p === undefined || p.status !== "running") continue;
-    const due = Object.values(p.tasks).some((t) => t.state === "ready" && t.retryAfter !== undefined && t.retryAfter <= now);
+    // A TASK THAT IS READY AND NOT HOLDING OFF. `retryAfter === undefined` is the submitted-
+    // never-driven case the dispatcher's withholding creates; `retryAfter <= now` is the
+    // backoff case this clock was written for. See the header for the three things that keep
+    // the wider predicate from fighting a live driver.
+    const due = Object.values(p.tasks).some((t) => t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now));
     if (!due) continue;
     index ??= graphsByHash(ws).index;
     const wanted = await ws.engine.compiledGraphHash(row.runId);
@@ -2637,12 +2930,218 @@ export async function runClockTick(
     if (graph === undefined) continue;
     ws.engine.attach(row.runId, graph);
     await ws.engine.rehydrateGates(row.runId);
-    await ws.engine.advance(row.runId);
+    await drive(row.runId);
   }
   return { visited: visible.map((r) => r.runId), truncated };
 }
 
-function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop(): void } {
+/**
+ * HOW MANY RUNS THIS PROCESS DRIVES AT ONCE — a ceiling, never a door.
+ *
+ * `POST /runs` ended in a bare `void engine.advance(runId)` with nothing bounding how many of
+ * those ran at once, and 60 submissions produced 60 concurrent provider calls. The answer to
+ * "too much work" under one tenant is to make it WAIT, never to say no: refusing throws away
+ * work the operator explicitly asked for and breaks the promise the 202 already makes in its
+ * own words — "accepted means this WILL run". So there is no admission-rejected code here (the
+ * one `errors.ts` names among the nine it cut under "a code arrives with its raiser" stays cut,
+ * permanently, and this decision is what stops it coming back), no queue depth, no token bucket,
+ * and nothing this function can answer with that means "no".
+ *
+ * The code is not spelled out because `test/registries.test.ts` gates it: every `E_*` token in
+ * `src/` must be one `errors.ts` declares, comments included, and that gate is the reason a
+ * deleted code cannot quietly re-enter the vocabulary through a docstring.
+ *
+ * **THE QUEUE IS NOT A DATA STRUCTURE AND THIS OBJECT DOES NOT HOLD ONE.** That is the whole
+ * design. When every slot is taken, `drive` returns having done nothing; the run stays
+ * `running` with a `ready` task, and `runClockTick`'s widened predicate re-derives it from the
+ * journal on the next tick and offers it again. The slots and the dedupe set are process
+ * memory that a restart empties — which costs at most one repeated fold, because nothing a
+ * decision reads lives here.
+ *
+ * WHAT IT DOES WHEN IT CANNOT DECIDE: it does not dispatch. The undecidable case is "I cannot
+ * tell whether that slot released" — an `advance` whose promise never settles — and the slot
+ * is then never released. The failure mode is a box that runs FEWER runs at once, never more,
+ * and the recovery that makes withholding safe rather than terminal is the clock. This object
+ * reaches no authorization decision, so there is no permission it could grant by defaulting.
+ *
+ * WHAT IT IS NOT FAIR ABOUT, said plainly: nothing here chooses BETWEEN waiting runs. The
+ * clock's rotation is bounded-lap fair and explicitly not fair against a stream of new
+ * submissions, so a run pushed below a passing window waits a further lap while newer runs are
+ * driven immediately. That is a scheduling policy nobody chose, and it is the honest cost of
+ * putting the bound here rather than in `Scheduler.select` — which is the theoretically right
+ * home and is closed today: `SelectInput` carries exactly one `projection` and one `graph`, so
+ * a `Scheduler` cannot be asked a cross-run question at all.
+ */
+export function runDispatcher(
+  /**
+   * THE ONE METHOD IT USES, not the whole `Workspace` — so a test can drive this with an
+   * `advance` it controls rather than with a run. A `Workspace` satisfies it structurally, and
+   * the narrower type is what makes "the slot is released in a `finally`" checkable at all: the
+   * assertion needs a promise the test settles, and there is no run whose completion a test can
+   * hold open without reading a clock.
+   */
+  ws: { readonly engine: { advance(runId: RunId): Promise<unknown> } },
+  max: number,
+  onError: (runId: RunId, e: unknown) => void,
+): { drive(runId: RunId): void; readonly inFlight: number } {
+  // ONE SET, NOT A COUNTER. A counter and a dedupe set can disagree, and the way they disagree
+  // is a leaked slot that never comes back — a box that quietly stops driving anything.
+  const inFlight = new Set<RunId>();
+  return {
+    get inFlight() {
+      return inFlight.size;
+    },
+    drive: (runId: RunId): void => {
+      if (inFlight.has(runId)) return;
+      // FULL MEANS WAIT, and waiting is spelled "do nothing". The clock re-offers this run.
+      if (inFlight.size >= max) return;
+      inFlight.add(runId);
+      void ws.engine
+        .advance(runId)
+        .catch((e: unknown) => {
+          // THE LAST FRAME, the same one `POST /runs` documents: this runs inside a `.catch`
+          // on a promise nobody awaits, so a throw here is an unhandled rejection and the
+          // process. `onError` is deployment code from here — it writes to stderr, and a
+          // `name`/`message` getter that traps is a real shape — so it is contained.
+          // Measured before this `try` existed: a reporter that threw took the whole test
+          // runner down with `unhandledRejection`, from a dispatcher whose only job is to
+          // hold a number.
+          try {
+            onError(runId, e);
+          } catch {
+            // Nothing above this frame can be told anything, and taking the process down to
+            // report that a report failed is strictly worse than the silence.
+          }
+        })
+        // RELEASED IN A `finally`, not in the `catch` above and not in a `.then`: both of
+        // those are skipped on one of the two settle paths, and a slot held by a settled
+        // promise is the one leak this shape can have — the one that ends with a box driving
+        // nothing at all. What it CANNOT release is a slot whose `advance` never settles, and
+        // that is the undecidable case this object answers by not dispatching: fewer runs at
+        // once, never more, with the run clock as the recovery.
+        .finally(() => {
+          inFlight.delete(runId);
+        });
+    },
+  };
+}
+
+/**
+ * THE OPERATOR CAN SEE THAT THEIR PRIMARY IS DEAD. **THIS THING DECIDES NOTHING.**
+ *
+ * Say that first because the shape invites the opposite reading. There is no circuit breaker
+ * here and there is not going to be one: no `SourceHealth`, no `source.withheld` event, no
+ * source-unhealthy error code (unspelled for the reason `runDispatcher` gives — the code
+ * registry gate reads comments too, which is what keeps a refused vocabulary refused), no
+ * `BreakerAdapter`. A breaker reads a per-source failure count that
+ * spans runs, and `StateStore.read(runId, fromSeq)` is why that cannot exist — the journal is
+ * authoritative PER RUN, so a decision keyed on a cross-run fact is a decision no fold can
+ * reconstruct. That is the first non-negotiable, and it is the reason the breaker is refused
+ * rather than deferred.
+ *
+ * WHAT THE MEASUREMENT ACTUALLY FOUND, because the backlog's claim was false. TODO §D.19 said
+ * "a source that is failing every call is retried at full rate"; at HEAD a dead provider costs
+ * 3 engine attempts x 3 `postJson` attempts = 9 requests and about 2.25 s of held slot, and
+ * then the run FAILS naming `E_PROVIDER_OVERLOADED`. Nothing is retried forever. Two real
+ * facts survive that correction, and this function exists for the second:
+ *
+ *   1. `FallbackAdapter` is stateless by construction — `stream()` enters tier 0 on every call
+ *      and falls through only on a throw — so with a chain configured, a dead primary costs
+ *      three wasted requests and ~750 ms of a worker slot on EVERY model turn, forever.
+ *   2. **The operator is told none of it.** Runs still succeed. Half of them take the slow
+ *      path. Nothing in the process says so, and property 3's bar — a later run measurably
+ *      better because of an earlier one — cannot be met by somebody who cannot see that.
+ *
+ * A LATCH, NOT A LOG. One line on the transition INTO failure and one on recovery, in the
+ * shape `startRunClock`'s `failing` latch already uses, because a line per turn is how an
+ * operator learns to stop reading stderr — which is where every honest line in this file
+ * lives.
+ *
+ * TWO FEEDS, because a deployment with no chain has the same problem and produces no
+ * fall-throughs. `onFallback` covers the chain case with the model id in hand; a cross-run
+ * `effect.failed` subscription covers the rest. The two are keyed apart on purpose:
+ * `effect.failed` carries `{key, error}` and NO model id — measured, `journal/events.ts:321` —
+ * so the no-chain half can only honestly key on the error CODE, and pretending otherwise would
+ * put a model name in a line that was never told one.
+ *
+ * ITS LATCH IS A MEMO AND NOT STATE A DECISION READS. After a restart it is empty, which costs
+ * at most one repeated down-line; the subscription is `drop_oldest`, so under load it can miss
+ * a recovery and say nothing rather than say something false. Neither can withhold a call or
+ * permit one.
+ *
+ * STOPPED BY THE CALLER, and `serve` stops it in the same closure that stops both clocks — a
+ * second un-stopped subscriber is the defect `startRunClock`'s own comment names.
+ */
+export function providerNotice(
+  ws: { readonly bus: EventBus; readonly models: { readonly fallbacks: FallbackFeed } | undefined },
+  write: (line: string) => void = (line) => void process.stderr.write(line),
+): { stop(): void } {
+  /** `chain:<model>` for a fall-through, `direct:<code>` for a model effect that failed. */
+  const down = new Set<string>();
+  const fell = (from: string, to: string, code: string, message: string): void => {
+    if (down.has(`chain:${from}`)) return;
+    down.add(`chain:${from}`);
+    write(
+      `! PRIMARY MODEL "${from}" IS FAILING — every turn falls through to "${to}" (${code}: ${message}).\n` +
+        `  Runs still succeed. The chain is STATELESS, so each turn pays the failed call first and keeps paying it\n` +
+        `  until the primary recovers or you edit the --models-file.\n`,
+    );
+  };
+  const failed = (code: string, message: string): void => {
+    if (down.has(`direct:${code}`)) return;
+    down.add(`direct:${code}`);
+    write(`! MODEL CALLS ARE FAILING — ${code}: ${message}. No fallback chain is configured for the route that raised it.\n`);
+  };
+  const succeeded = (model: string): void => {
+    const was = down.size;
+    down.delete(`chain:${model}`);
+    // ANY SUCCESSFUL TURN RETRACTS EVERY CODE-KEYED LINE, because a code is not a source: the
+    // line said "model calls are failing" and a model call just succeeded, so the claim is
+    // spent. A model-keyed line is retracted only by ITS OWN model succeeding.
+    for (const k of [...down]) if (k.startsWith("direct:")) down.delete(k);
+    if (down.size !== was) write(`! model calls recovered — "${model}" answered\n`);
+  };
+
+  const unsubscribe = ws.models?.fallbacks.subscribe((from, to, e) => fell(from, to, e.code, e.message));
+  // CROSS-RUN BY TYPE. `EventFilter.runId` is optional, so a subscription that spans runs is
+  // already expressible — it is the READ that spans runs, which grants nothing, and not a
+  // durable fact a decision consults.
+  const sub = ws.bus.subscribe(
+    { types: ["effect.failed", "model.called"] },
+    // `drop_oldest`, because losing a line is the correct failure for a memo. `close` would
+    // cut the subscription on the first burst and this reporter would then be silent forever,
+    // which is the one outcome it exists to prevent.
+    { queueSize: 256, onOverflow: "drop_oldest" },
+  );
+  void (async () => {
+    try {
+      for await (const ev of sub) {
+        if (isEvent(ev, "model.called")) {
+          succeeded(ev.payload.model);
+          continue;
+        }
+        if (!isEvent(ev, "effect.failed")) continue;
+        // `effectKey(task, kind, ordinal)` is `${task}:${kind}:${ordinal}`, so the kind is the
+        // second-to-last segment. A tool or a subgraph failing is not this reporter's subject.
+        const parts = ev.payload.key.split(":");
+        if (parts[parts.length - 2] !== "model") continue;
+        failed(ev.payload.error.code, ev.payload.error.message);
+      }
+    } catch {
+      // A cut subscription ends the report and nothing else. `SubscriberOverflowError` is the
+      // only thing this loop can be thrown, and the recovery for a memo is to say less.
+    }
+  })();
+
+  return {
+    stop: () => {
+      unsubscribe?.();
+      sub.dispose();
+    },
+  };
+}
+
+function startRunClock(ws: Workspace, everyMs: number, limit: number, drive?: (runId: RunId) => void): { stop(): void } {
   let running = false;
   let failing = false;
   // NOTHING IS CARRIED ACROSS TICKS ANY MORE, and that is the point. This closure used to hold
@@ -2655,7 +3154,7 @@ function startRunClock(ws: Workspace, everyMs: number, limit: number): { stop():
     running = true;
     void (async () => {
       // ITS OWN PERIOD AS THE LAP, so one tick advances the window by exactly one window.
-      const t = await runClockTick(ws, limit, Date.now(), RUN_CLOCK_SCAN_CEILING, everyMs);
+      const t = await runClockTick(ws, limit, Date.now(), RUN_CLOCK_SCAN_CEILING, everyMs, drive);
       // ONCE, for the reason the outage lines above are once: a deployment big enough to hit
       // the ceiling hits it every lap, and a line per tick is how an operator learns to stop
       // reading stderr. It is not an outage — nothing is failing — so it does not use the
@@ -2865,6 +3364,7 @@ function announce(
   opts: ControlPlaneOptions,
   sweepMs: number,
   bound: { readonly port: number; readonly host: string; readonly loopback: boolean },
+  maxRunsInFlight: number,
 ): void {
   const delivery = ws.delivery;
   const identity = opts.identity;
@@ -2887,6 +3387,28 @@ function announce(
         ? "(no channels — a gate is delivered nowhere, and is answered through the API or the CLI)"
         : [...delivery.answerable.map((n) => `${n} (answerable)`), ...delivery.notifyOnly.map((n) => `${n} (notify-only)`)].join(", ")
     }\n`,
+  );
+  // THE ARITHMETIC, NOT THE TWO NUMBERS. `4 x 16` is a pair of flags an operator set; `at most
+  // 64 concurrent provider calls` is the thing they were trying to decide, and the multiplication
+  // is where this file has the numbers and they do not. Both are read off the constructed
+  // Workspace, per this function's own rule, so no line can promise a ceiling the running
+  // process does not hold. `--max-runs-in-flight` is a CEILING and never a door: nothing is
+  // refused, the surplus waits for the run clock.
+  //
+  // BEFORE the `clock:` line and not after it, which is a fact about the TEST HARNESS and is
+  // worth stating because it is otherwise invisible. `test/deployment/harness.ts`'s `serving`
+  // waits for `  clock:` before returning, and the caller then SIGINTs the child — so every
+  // line printed after it is racing the shutdown. Adding one there made
+  // `cli.test.ts`'s callback-banner assertion flake on its first run.
+  const ceilings = [
+    ws.budget?.runUsd === undefined ? undefined : `$${ws.budget.runUsd.toFixed(2)}`,
+    ws.budget?.runTokens === undefined ? undefined : `${ws.budget.runTokens} tok`,
+    ws.budget?.runWallMs === undefined ? undefined : `${ws.budget.runWallMs} ms`,
+  ].filter((s): s is string => s !== undefined);
+  process.stdout.write(
+    `  limits: ${maxRunsInFlight} runs driven at once x ${ws.maxParallelism} parallel nodes = at most ` +
+      `${maxRunsInFlight * ws.maxParallelism} concurrent provider calls; run ceilings: ` +
+      `${ceilings.length === 0 ? "(none — only what each graph declares)" : ceilings.join(" / ")}\n`,
   );
   // The gate clock is the difference between a declared SLA and an enforced one, so it is
   // stated as a fact about the running process rather than left to be inferred from a flag.
@@ -3089,28 +3611,55 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       }
 
       case "serve": {
-        const opts = controlPlaneOptions(ws, args);
         // Every refusal is spent before the socket exists: the plane's own, in its
-        // constructor, and the clock's and the port's, here.
+        // constructor, and the clock's, the port's and the dispatcher's bound, here.
+        const inFlight = boundedCount(args.flags["max-runs-in-flight"], "--max-runs-in-flight", DEFAULT_MAX_RUNS_IN_FLIGHT, MAX_CONCURRENCY);
+        // ONE DISPATCHER FOR BOTH DRIVERS, and that is the point of building it here rather
+        // than inside either. `POST /runs` and the run clock are the two things in this
+        // process that call `advance`, and a bound each would be two bounds — the box's real
+        // ceiling would be their sum, which is not a number anybody set.
+        const dispatch = runDispatcher(ws, inFlight, (runId, e) => {
+          // THE SAME SINK THE 202 USED TO WRITE TO, moved here so both drivers share it.
+          // `advance` is called by nobody who can be told, so the operator is the only
+          // audience — and the line names the recovery, because there is one: the run clock
+          // comes back for this run on its next tick, and `POST /runs/:id/commands
+          // {"kind":"advance"}` is the manual door.
+          process.stderr.write(
+            `! run ${runId} FAILED TO ADVANCE: ${(e as Error).message}\n` +
+              `  Its journal is intact. The run clock re-derives it from the journal and will offer it again;\n` +
+              `  POST /runs/${runId}/commands {"kind":"advance"} drives it by hand.\n`,
+          );
+        });
+        const opts: ControlPlaneOptions = { ...controlPlaneOptions(ws, args), drive: dispatch.drive };
         const everyMs = gateClockInterval(args);
         const wanted = httpPort(args);
         const wantedHost = httpHost(args);
         const plane = new ControlPlane(opts);
         const bound = await plane.listen(wanted, wantedHost);
         const clock = startGateClock(ws, everyMs);
-        const runs = startRunClock(ws, everyMs, DEFAULT_RUN_CLOCK_LIMIT);
-        announce(plane, ws, opts, clock.everyMs, bound);
+        // THE SAME `drive`, so the clock cannot outrun the ceiling the plane holds — and so a
+        // run the plane is already driving is deduped rather than folded twice.
+        const runs = startRunClock(ws, everyMs, DEFAULT_RUN_CLOCK_LIMIT, dispatch.drive);
+        // THE THIRD THING WITH A TEARDOWN, and it decides nothing — see `providerNotice`. It
+        // exists because a configured fallback chain degrades SILENTLY and indefinitely: the
+        // runs succeed, half of them take the slow path, and until this line nothing in the
+        // process said so.
+        const providers = providerNotice(ws);
+        announce(plane, ws, opts, clock.everyMs, bound, inFlight);
         // SIGINT IS AN EVENT HANDLER, so nothing above it catches, and its exit code is
         // the only thing a supervisor reads. Both facts live in `serveUntilInterrupt`,
         // which returns what this command should exit with — see its docstring for why a
         // failed shutdown is 1 and not 0 and not 130.
-        // BOTH CLOCKS STOP. `serveUntilInterrupt` takes one thing to stop, and a second timer
-        // left running is a process that will not exit — the `.unref()` saves it in practice and
-        // relying on that is how the first one would have been missed.
+        // BOTH CLOCKS STOP, AND SO DOES THE PROVIDER REPORTER. `serveUntilInterrupt` takes one
+        // thing to stop, and a second timer left running is a process that will not exit — the
+        // `.unref()` saves it in practice and relying on that is how the first one would have
+        // been missed. The reporter is not a timer, it is a BUS SUBSCRIPTION, and an
+        // un-disposed one holds a queue that every appended event is copied into forever.
         return await serveUntilInterrupt(plane, {
           stop: () => {
             clock.stop();
             runs.stop();
+            providers.stop();
           },
         });
       }
@@ -3351,6 +3900,40 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           via: "cli",
         });
         process.stdout.write(`${JSON.stringify({ runId, node: nodeId, take, status: p.status }, null, 2)}\n`);
+        return 0;
+      }
+
+      case "deescalate": {
+        // THE ONLY VERB IN THIS FILE THAT LOWERS ANYTHING, and until it existed the human
+        // half of CLAUDE.md's "oversight only tightens; a human may lower a posture" was
+        // reachable from the test suite and from nowhere else. `PolicyEngine.deescalate` has
+        // refused a non-human actor, three deny-lists and an empty justification since it was
+        // written; `Engine.deescalate` journals `policy.deescalated`, which folds into
+        // `p.ceilings` and is re-seeded by `PolicyEngine.restore`, so the ceiling survives a
+        // restart and replays. What was missing was a door.
+        //
+        // NO FORCE FLAG AND NO WAY TO SKIP `--why`. A justification nobody typed is exactly
+        // the loosening this whole path is guarded against, so the flag is required here and
+        // the engine refuses a blank one again underneath.
+        //
+        // `--as` AUTHENTICATES NOBODY — `subjectFlag`'s own docstring states that limit, and
+        // on this verb the consequence is worth restating rather than inheriting: the CLI
+        // writes to the journal directly, so this command is as strong as shell access to the
+        // host. Every refusal that decides anything on this path is the ENGINE's; this door
+        // adds well-formedness checks and no authorization of its own.
+        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const scope = ceilingScope(args, runId);
+        const to = postureFlag(args);
+        const why = justificationFlag(args);
+        // BIND FIRST, exactly as `steer` does: `Engine.deescalate` goes through `#require`, so
+        // a run this process has not attached is `E_RUN_NOT_FOUND` rather than a ceiling
+        // installed on a run nobody folded. A workspace that has not published the graph
+        // therefore refuses, which is the honest answer and not a silent success.
+        const wanted = await ws.engine.compiledGraphHash(runId);
+        const found = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
+        if (found !== undefined) ws.engine.attach(runId, found);
+        const p = await ws.engine.deescalate(runId, scope, to, why, { kind: "human", id: subjectFlag(args) }, "cli");
+        process.stdout.write(`${JSON.stringify({ runId, scope, ceiling: p.ceilings[scope], status: p.status }, null, 2)}\n`);
         return 0;
       }
 
@@ -5357,6 +5940,92 @@ function pathFlag(args: Args, name: string): string | undefined {
  * journal directly, so anyone who can run it can name anyone. Refusing a value the shell
  * invented is not a claim to have fixed that; it is a refusal to invent one ourselves.
  */
+/**
+ * `--to`, the posture a de-escalation lowers to — CHECKED AGAINST THE UNION, never cast.
+ *
+ * WHAT IT DOES WHEN IT CANNOT DECIDE: it refuses. `Posture` is a three-member union and
+ * `POSTURES` is derived from `POSTURE_RANK`, so a value this binary does not recognise has no
+ * rank; a cast would put that string into `policy.deescalated.to`, where `foldRun` installs it
+ * as a ceiling and `PolicyEngine.floorFor` compares it with `postureRank`. `POSTURE_RANK[x]` is
+ * `undefined` for an unknown member and every `<` against `undefined` is FALSE, so the clamp
+ * would answer with the computed floor in some places and with the unknown value in others —
+ * an unranked posture is not a stricter posture, it is a posture nothing can order, on the one
+ * path in this system that is allowed to loosen at all.
+ */
+function postureFlag(args: Args): Posture {
+  const v = args.flags["to"];
+  if (typeof v !== "string" || !POSTURES.includes(v as Posture)) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--to must be one of ${POSTURES.join(", ")}, not ${v === undefined ? "omitted" : v === true ? "a bare flag with no value" : `"${v}"`}. ` +
+        `\`in\` gates every action for a human, \`on\` runs with a human watching and able to interrupt, \`out\` runs unsupervised.`,
+    );
+  }
+  return v as Posture;
+}
+
+/**
+ * `--why`, and there is no way around it.
+ *
+ * `PolicyEngine.deescalate` already refuses an empty justification with
+ * `E_HUMAN_APPROVAL_REQUIRED`; this refuses the three shapes that never reach it as a string at
+ * all — omitted, `--why` with no value (which `parseArgs` makes `true`, and `String(true)` would
+ * journal the four letters "true" as a person's stated reason, the slip `--as`, `--token` and
+ * `--reason` each already guard against), and whitespace. It is the one field on this verb that
+ * a later reader has to be able to hold the operator to.
+ */
+function justificationFlag(args: Args): string {
+  const v = args.flags["why"];
+  if (typeof v !== "string" || v.trim() === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--why needs a justification: ${v === undefined ? "the flag was omitted" : v === true ? "the flag was given with no value at all" : "the one given was blank"}. ` +
+        `Lowering oversight is journaled on policy.deescalated with this text and replayed as a human input, so it is ` +
+        `the only account of why supervision was reduced. There is no flag that skips it.`,
+    );
+  }
+  return v;
+}
+
+/**
+ * `--scope`, the thing a ceiling is installed on — `run:<runId>` or `node:<runId>/<nodeId>`.
+ *
+ * THE SCOPE'S RUN MUST BE THE RUN NAMED ON THE COMMAND LINE, and that check is the reason this
+ * is a function rather than a `stringFlag`. `PolicyEngine` keys `#ceilings` by an OPAQUE string
+ * and `Engine.deescalate` journals it into the log of the run in the first argument, so
+ * `loom deescalate A --scope run:B` writes a ceiling for B into A's journal: in-process it
+ * lowers B's posture, and after a restart `PolicyEngine.restore` re-seeds it from A's journal
+ * and B never sees it again. That is a loosening the journal cannot reconstruct — the first
+ * non-negotiable, in its loosening direction — so the mismatch is refused here.
+ *
+ * A SCOPE THIS FILE CANNOT PARSE IS REFUSED RATHER THAN PASSED THROUGH. Nothing consults an
+ * unrecognised scope, so a typo would exit 0, print a ceiling, and change nothing: a
+ * de-escalation an operator believes happened and did not is worse than one that failed loudly.
+ */
+function ceilingScope(args: Args, runId: RunId): string {
+  const v = args.flags["scope"];
+  const shape = `--scope must be run:${runId} or node:${runId}/<nodeId>`;
+  if (typeof v !== "string" || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${shape}: ${v === undefined ? "the flag was omitted" : v === true ? "the flag was given with no value at all" : "the one given was empty"}. ` +
+        `A ceiling is installed on a scope, and there is no default scope — "the whole run" is spelled run:<runId>.`,
+    );
+  }
+  const named = v.startsWith("run:") ? v.slice(4) : v.startsWith("node:") ? v.slice(5).split("/")[0]! : undefined;
+  if (named === undefined || (v.startsWith("node:") && !/^node:[^/]+\/[^/]+$/.test(v))) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `${shape}, not "${v}". Those are the two scopes PolicyEngine reads.`);
+  }
+  if (named !== runId) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--scope "${v}" names run ${named}, and this command names run ${runId}. The ceiling would be journaled in ` +
+        `${runId}'s log and re-seeded from it on every restart, so ${named} would lose it the moment this process exits.`,
+    );
+  }
+  return v;
+}
+
 function subjectFlag(args: Args): string {
   const v = args.flags["as"];
   if (v === undefined) return "cli";
