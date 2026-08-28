@@ -205,7 +205,7 @@ comment:
 ## Extending it, and where that stops
 
 Read this before you fork, not after. Loom's stated property is *unlimited extensibility*, and the
-honest version of that sentence names its set. **Eight things need no fork. Seven do**, and the two
+honest version of that sentence names its set. **Ten things need no fork. Five do**, and the two
 lists below were each driven through the shipped binary rather than read off a header.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
@@ -218,7 +218,9 @@ lists below were each driven through the shipped binary rather than read off a h
 | a `function` node body | `resources/function/*.js`, `*.mjs` — a bare function expression | `examples/README.md` §2 |
 | a `hook` body, at any of the eight points | `resources/hook/*.js` | §3 |
 | a tool | `--mcp-file` — any MCP server, stdio | §"Try it" above |
-| a provider | `--models-file` — any OpenAI-wire endpoint at any `baseUrl` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1"}` → `ok`, exit 0 |
+| a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1"}` → `ok`, exit 0 |
+| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools}` and registers a `ModelAdapter`; a `--models-file` `routes` row may then name it | `loom run … --extension-module ./bedrock.mjs` → `"draft": "[bedrock-converse] anthropic.claude-3-5-sonnet-…"`, and `loom replay` of that run → `{"match": true, "hermetic": true}` |
+| an in-process tool | `--extension-module` — the same module's `tools.register(…)`; it is registered before the grant list is derived, so its capability is held | `test/cli/extension-module.test.ts` |
 | a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | see the fork list's note on transports |
 
 **Fork required.** Each of these is a CLOSED SET, and the binary names its members when you miss —
@@ -229,7 +231,6 @@ reproduce by running the thing does not belong on it.
 - **a node type** — `GRAPH020_UNKNOWN_TYPE … fix: use one of function, agent, tool, router, join, evaluator, human_gate, subgraph`
 - **a reducer** — `GRAPH003_UNKNOWN_REDUCER … fix: use one of replace, append_ordered, merge_object, sum, max, min, union_set, last_write_wins_by_ts`
 - **a ninth hook point** — `GRAPH003_UNKNOWN_HOOK_POINT … fix: one of: preNode, preModel, postModel, preTool, postTool, onError, onGate, onComplete`
-- **a wire protocol that is not Anthropic's or OpenAI's** — `E_CONFIG_INVALID: … provider "bedrock", which must be one of: anthropic, openai`. An OpenAI-*compatible* endpoint is not a fork; a genuinely different wire is.
 - **a delivery TRANSPORT that is not an HTTP webhook, from the CLI** — email, SMS, a Slack app
   rather than a Slack webhook URL. `--channels-file` builds `WebhookChannel` or
   `SignedWebhookChannel` and nothing else. A `{"transport":"smtp"}` entry is refused —
@@ -238,7 +239,7 @@ reproduce by running the thing does not belong on it.
   the FIELD, not the scheme. `{"url":"mailto:ops@example.invalid"}` boots (`gates: ops-email
   (notify-only)`) and fails at delivery, not at config. The bound is that there is nothing but an
   HTTP POST behind the row, not that the parser knows what you meant. SPLIT, the same way the
-  tool row below is: `DeliveryChannel` and `GateDispatcher` are both on `scripts/surface.json`,
+  identity row below is: `DeliveryChannel` and `GateDispatcher` are both on `scripts/surface.json`,
   so a LIBRARY EMBEDDER hands a hand-written channel to `new GateDispatcher({channels: […]})` and
   forks nothing — measured with a stdout channel, which the dispatcher then reports as answerable
   because it defines `parseCallback`.
@@ -251,33 +252,37 @@ reproduce by running the thing does not belong on it.
   and `startControlPlane` are both on `scripts/surface.json`, so a LIBRARY EMBEDDER passes a
   header-trusting or OIDC source straight to `startControlPlane({identity})` and forks nothing —
   measured. This row is a DEBT, not a bound: a CLI seam for an identity source deletes it.
-- **an in-process tool, from the CLI.** This one is split, and the split is the part nobody had
-  written down: `ToolRegistry` is on the pinned public surface, so a LIBRARY EMBEDDER registers a
-  host-realm tool with no fork at all. The CLI has no seam for one — `openWorkspace` and
-  `compileRealm` are not in `scripts/surface.json` and `src/index.ts` re-exports neither — so from
-  the binary, an in-process tool needs a fork and an MCP server does not (`E_CONFIG_INVALID:
-  unknown flag: --tool-module (did you mean --token?)`).
 
-**Three of those seven say "from the CLI", and the count keeps them.** A row that a library
+**Two of those five say "from the CLI", and the count keeps them.** A row that a library
 embedder can walk around is still a fork for the person holding the binary, which is who this
 list is written for; merging the two claims into one number is the compromise, and the split is
 spelled out in each row rather than hidden in it.
 
-**The reason the first four are closed is replay, not taste.** Each of them is journaled
-vocabulary. A run
-is replayed by folding its journal, and a fold can only reproduce a decision whose vocabulary the
-folding binary already knows; a node type or a reducer that arrived from a config file would make
-a recorded run unreadable by anything but the process that wrote it. So the sets are closed on
-purpose, and the tell that a closed set is honest is that its refusal NAMES ITS MEMBERS. The four
-schema and wire-protocol sets above do exactly that. The three CLI rows cannot — a flag parser
-does not know what an identity source is — so they name the door that does exist instead of the
-one you asked for, which is the weaker version and is why each of those three also says which
-pinned type a library embedder would build against.
+**Each row's reason is its own, and the blanket one this section used to carry was measurably
+false.** It read *"the reason is replay, not taste — every one of those closed sets is journaled
+vocabulary"*, and it covered a wire protocol, which is not journaled vocabulary at all. So:
 
-**The three CLI rows are closed for a weaker reason, and it should stay visible: nobody has built
-the seam.** Replay does not require it — the library already accepts all three, so a run using
-one of them folds fine. That is what makes them debts rather than bounds, and why the honest
-direction for this list is three rows shorter, not a better argument for keeping them.
+- **a node type, a reducer, a ninth hook point — replay.** Each is a word a journal records and a
+  fold re-reads, and a fold can only reproduce a decision whose vocabulary the folding binary
+  already knows. A node type that arrived from a config file would make a recorded run unreadable
+  by anything but the process that wrote it. These three are BOUNDS, and the tell that each is
+  honest is that its refusal names its members — all three above do.
+- **a delivery transport, an identity source — nobody built the seam.** Replay does not require
+  either: the library already accepts both, so a run using one folds fine. A flag parser cannot
+  name the members of "an identity source", so these two refusals name the door that does exist
+  instead of the one you asked for — the weaker version, which is why each row also says which
+  pinned type a library embedder builds against. These two are DEBTS, and the honest direction for
+  this list is two rows shorter.
+
+**A wire protocol and an in-process tool used to be on this list under the replay reason, and it
+did not apply to either.** An adapter produces no journal vocabulary: `replay.ts` never reaches an
+adapter, journals `provider: "replay"`, and `reboundEffects` excludes the provider from
+comparison — so a run served by a third-wire adapter replays `{"match": true, "hermetic": true}`
+against an EMPTY `ModelRegistry`, in a binary that has never heard of it. Both were artefacts of
+the CLI having no door onto `ModelRegistry` and `ToolRegistry`, which are pinned public types a
+library embedder always reached. `--extension-module` is that door. It loads host-realm code from
+ARGV and nowhere else — not from a config file, not from the workspace — because the whole trust
+argument is that the operator who passes the path already chose which binary to run.
 
 `TODO.md` carries the entries under active reconsideration; custom reducers are argued on the
 merits there. This list is a bound with a reason, not an apology.

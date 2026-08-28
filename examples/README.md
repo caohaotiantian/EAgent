@@ -341,3 +341,41 @@ is a script and not a test: `npm run check` must never call a model. The offline
 `packages/core/test/evolution/close-the-loop.test.ts`, which proves the same loop on thirty real
 Engine runs in 284 ms for $0. Read the script's header before running it: it says what the golden
 yield is likely to be, and why widening the benchmark until it passes would be cheating.
+
+## 7 · An extension module — a wire the binary does not speak
+
+`extensions/bedrock-converse.mjs` is the answer to "my provider is not on the OpenAI wire". It is
+a plain module that imports nothing from `@loom/core`: `loom` hands its default export
+`{models, tools}` — this process's `ModelRegistry` and `ToolRegistry` — before any configuration
+is read, and whatever it registers is what the run uses.
+
+```bash
+cat > models.json <<'JSON'
+{ "routes": { "agent_profile/reviewer@stable":
+    { "adapter": "bedrock", "model": "anthropic.claude-3-5-sonnet-20240620-v1:0" } } }
+JSON
+loom run graphs/self-review.json --models-file models.json \
+     --extension-module examples/extensions/bedrock-converse.mjs
+```
+
+The file has **no `"adapters"` block at all**, which is the point: `provider` is a closed set of
+`anthropic` and `openai`, and an adapter registered by a module is a legal target for a `routes`
+row without being one of them. `loom serve` prints an `ext:` line naming every module it loaded
+and what each registered — read off the loaded object, so it cannot name a module that did not.
+
+**A module named on argv is trusted like the binary itself.** It runs unsandboxed, with your
+filesystem, network and environment — the same trust a `resources/function/*.js` body already
+carries. That is why `--extension-module` is argv and *nothing else*: no config-file field, no
+resource ref, no directory scan. A path read out of a file would let a file decide what code the
+process runs, and a run holds `fs:write`.
+
+Everything can still refuse. A module that does not resolve, throws while loading, has no
+function default export, throws while registering, or **registers nothing** stops the boot naming
+the path — because a module that silently did nothing is a deployment you believe is extended and
+is not. So does an adapter name that collides with a `--models-file` row: one of the two would
+never be reachable and the registry cannot say which.
+
+The same door registers an in-process TOOL. `tools.register({name, version, capabilities,
+irreversibility, parameters, execute})` runs before the grant list is derived, so the capability
+its manifest declares is one this process actually holds; the built-ins are registered on top, so
+an extension cannot quietly replace `fs.write`.

@@ -220,6 +220,47 @@ const CASES: readonly Case[] = [
     fixture: { files: { "index.ts": "export const load = () => import(`lodash`);\n" } },
     refusal: /dynamic import\(\) with a specifier this guard cannot read/,
   },
+  // ── check 5: the ONE audited runtime load, and the three pins on it ────────
+  //
+  // `--extension-module` puts a dynamic `import(<operator path>)` in `src/cli.ts`, which
+  // check 3 refuses by construction and correctly so for everything else. The allowance is
+  // pinned by FILE, by exact MESSAGE and by exact COUNT, and all four rows below were
+  // watched: the first passes, and the other three are the ways an allowance normally rots
+  // into a hole.
+  {
+    how: "the audited dynamic import in the file the allowance names",
+    fixture: { files: { "cli.ts": "export const load = (p: string) => import(`${p}`);\n" } },
+    refusal: undefined,
+  },
+  {
+    how: "…and a SECOND one in the same file is one over budget",
+    fixture: { files: { "cli.ts": "export const a = (p: string) => import(`${p}`);\nexport const b = (q: string) => import(`${q}`);\n" } },
+    refusal: /dynamic import\(\) with a specifier this guard cannot read/,
+  },
+  {
+    how: "…and a DIFFERENT unreadable load in that file is still refused — the message is pinned, not just the count",
+    fixture: {
+      files: {
+        "cli.ts": 'import { createRequire } from "node:module";\nexport const lodash = createRequire(import.meta.url)("lodash");\n',
+      },
+    },
+    refusal: /createRequire/,
+  },
+  {
+    how: "…and an allowance nobody spends is STALE, which is a failure in the other direction",
+    fixture: { files: { "cli.ts": 'import { readFileSync } from "node:fs";\nexport const r = readFileSync;\n' } },
+    refusal: /stale allowance is an unaudited licence/,
+  },
+  {
+    how: "the same import in ANY OTHER file is refused — the allowance covers one place",
+    fixture: {
+      files: {
+        "cli.ts": "export const load = (p: string) => import(`${p}`);\n",
+        "other.ts": "export const load = (p: string) => import(`${p}`);\n",
+      },
+    },
+    refusal: /other\.ts: dynamic import\(\)/,
+  },
   {
     how: "process.dlopen, which loads a native addon with no specifier at all",
     fixture: {

@@ -44,7 +44,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 
 const CORE = process.argv[2] ?? "packages/core";
@@ -168,6 +168,40 @@ function auditFile(file) {
   return { specifiers, unauditable };
 }
 
+/**
+ * THE EXCEPTIONS TO CHECK 3, AND THE ONLY WAY TO HAVE ONE — pinned by file, by count, and by
+ * the exact message.
+ *
+ * Check 3 asks "is naming a module the only way in", and its answer for anything it cannot
+ * read is NO. That is right for `require`, `createRequire` and friends, and it is also right
+ * for `import(<not a literal>)` in general. But `--extension-module` is a load this guard is
+ * being asked about for the first time and the answer is genuinely different: the specifier
+ * is a path the OPERATOR typed on argv, it names no package, `npm install` never sees it,
+ * and the single-file binary does not have to bundle it. It adds no dependency. What it adds
+ * is a trust position, and that is argued at the call site rather than here.
+ *
+ * THREE PINS, so this cannot rot into a hole:
+ *
+ *  - the FILE, relative to the audited tree, so the allowance covers one place;
+ *  - the exact MESSAGE, so a `createRequire` appearing in that file is still a failure —
+ *    an allowance keyed only to a count would let any other unreadable load in behind it;
+ *  - the COUNT, EXACTLY. Fewer is a failure too: a stale allowance is an unaudited licence
+ *    sitting in a guard, and the whole value of this file is that nobody can quietly widen
+ *    it. Delete the entry when the load goes.
+ *
+ * Adding an entry here is a decision about invariant 1 and belongs in a commit body.
+ */
+const AUDITED_RUNTIME_LOADS = new Map([
+  [
+    join("src", "cli.ts"),
+    {
+      count: 1,
+      how: "dynamic import() with a specifier this guard cannot read (a template literal is not a string literal)",
+      why: "loadExtensionModules — `--extension-module <path>`, an operator-supplied path from ARGV. It names no package, adds no dependency, and is loadable from nowhere but argv.",
+    },
+  ],
+]);
+
 const SRC_ROOT = resolve(join(CORE, "src"));
 const files = walk(join(CORE, "src"));
 for (const file of files) {
@@ -198,7 +232,25 @@ for (const file of files) {
     if (spec.startsWith("node:")) continue; // builtin, explicitly prefixed
     failures.push(`${file}: imports bare specifier "${spec}" (core must be zero-dep)`);
   }
-  for (const how of unauditable) failures.push(`${file}: ${how} (core must be zero-dep)`);
+  // The allowance is spent against the EXACT message, and only that many times. Anything
+  // left over is a failure, and an allowance that went unspent is a failure in the other
+  // direction — see `AUDITED_RUNTIME_LOADS`.
+  const rel = relative(resolve(CORE), resolve(file));
+  const audited = AUDITED_RUNTIME_LOADS.get(rel);
+  let budget = audited?.count ?? 0;
+  for (const how of unauditable) {
+    if (audited !== undefined && how === audited.how && budget > 0) {
+      budget -= 1;
+      continue;
+    }
+    failures.push(`${file}: ${how} (core must be zero-dep)`);
+  }
+  if (audited !== undefined && budget > 0) {
+    failures.push(
+      `${file}: AUDITED_RUNTIME_LOADS allows ${String(audited.count)} × "${audited.how}" and the file has ` +
+        `${String(audited.count - budget)}. A stale allowance is an unaudited licence — delete the entry. (${audited.why})`,
+    );
+  }
 }
 
 if (failures.length > 0) {
