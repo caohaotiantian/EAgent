@@ -21,8 +21,25 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { globSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  cpSync,
+  globSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const require_ = createRequire(import.meta.url);
 
 import { compile } from "../src/graph/compile.ts";
 import type { GraphSpec } from "../src/graph/spec.ts";
@@ -343,6 +360,9 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
     probe: () => {
       // Claimed of the BINARY, so the source is not the evidence — `bin/loom` is gitignored and
       // may be absent or stale, which is why this checks what goes INTO it rather than the file.
+      // The staleness half of that is no longer a hole this probe has to live with: the binary
+      // now carries its own source digest and refuses when it has aged. See the freshness tests
+      // at the bottom of this file.
       assert.match(SRC("server/http.ts"), /text\/html/, "the plane must still serve the console");
     },
   },
@@ -420,4 +440,249 @@ test("EVERY ROW OF THE WORKS TABLE IS PROBED — all of them, not most of them",
   }
   const uncovered = rows.filter((r) => !WORKS.some((w) => (rowText.get(r) ?? "").includes(w.claims)));
   assert.deepEqual(uncovered, [], "these rows claim something no probe checks");
+});
+
+/**
+ * ── "Ships inside the binary" is a claim about a FILE NOBODY REBUILDS ─────────────────────────
+ *
+ * README:66 tells a reader to run `npm run build:binary` and then drive `bin/loom`. `bin/` is
+ * gitignored, no hook rebuilds it, and CI never builds it — so from the second source edit
+ * onward the file on disk is a photograph of an older tree. On 2026-08-25 that bit: an auditor
+ * measured behaviour through a `bin/loom` 109 seconds behind `packages/core/src` and wrote down
+ * the older code's answers (`docs/todo-recheck-2026-08-25.md`:1858). Re-measured on 2026-08-28
+ * the same checked-out binary was three days and 40 source files behind and still printed
+ * `--help` with exit 0.
+ *
+ * The Console row above says the source is the evidence "because `bin/loom` … may be absent or
+ * stale". That is still the right call for a row about what goes INTO the binary — but it means
+ * NOTHING here ever catches the staleness, and a gate would not have helped the auditor anyway:
+ * they were running the binary directly, hours after the last `npm run check`.
+ *
+ * So the check rides in the binary. `scripts/build-binary.mjs` hashes the sources it compiled and
+ * bakes the digest — and the checking code itself — into the SEA bundle's banner, which runs
+ * before any application code. These tests drive that banner the way it actually runs: a real
+ * child process, loading a real bundle, against a real source tree on disk.
+ */
+const freshness = require_(fileURLToPath(new URL("../../../scripts/binary-freshness.cjs", import.meta.url))) as {
+  SOURCE_DIR: string;
+  digestSources: (dir: string) => { digest: string; count: number };
+  stampFor: (root: string) => { dir: string; digest: string; count: number; builtAt: string };
+  distIsBehindSources: (root: string) => string | null;
+  banner: (stamp: unknown) => string;
+};
+
+/** A throwaway repo: `<root>/packages/core/src/*.ts` plus `<root>/bin/loom.cjs`, the fake binary. */
+function fakeRepo(files: Readonly<Record<string, string>>): string {
+  const root = mkdtempSync(join(tmpdir(), "loom-freshness-"));
+  const src = join(root, freshness.SOURCE_DIR);
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(dirname(join(src, rel)), { recursive: true });
+    writeFileSync(join(src, rel), body);
+  }
+  mkdirSync(join(root, "bin"), { recursive: true });
+  return root;
+}
+
+/**
+ * Write the fake binary: the banner the real build injects, followed by one line of
+ * "application" — so `APP RAN` on stdout means the guard let the program through.
+ */
+function buildFake(root: string): string {
+  const bin = join(root, "bin", "loom.cjs");
+  writeFileSync(bin, `${freshness.banner(freshness.stampFor(root))}\nconsole.log("APP RAN");\n`);
+  return bin;
+}
+
+function runFake(bin: string, env: Readonly<Record<string, string>> = {}): { code: number; out: string; err: string } {
+  const r = spawnSync(process.execPath, [bin], { encoding: "utf8", env: { ...process.env, ...env } });
+  return { code: r.status ?? -1, out: r.stdout, err: r.stderr };
+}
+
+const ONE_FILE = { "a.ts": "export const a = 1;\n", "run/b.ts": "export const b = 2;\n" };
+
+test("a binary built from the sources beside it runs — the guard is not just a refusal generator", () => {
+  const root = fakeRepo(ONE_FILE);
+  const r = runFake(buildFake(root));
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /APP RAN/);
+  assert.equal(r.err, "", "a fresh binary says nothing");
+});
+
+test("THE DEFECT: a binary whose sources have since been edited refuses to run", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  writeFileSync(join(root, freshness.SOURCE_DIR, "run/b.ts"), "export const b = 3;\n");
+  const r = runFake(bin);
+  assert.equal(r.code, 1, "a stale binary must not run");
+  assert.doesNotMatch(r.out, /APP RAN/, "…and must not reach the application");
+  assert.match(r.err, /STALE/, `the refusal must say so: ${JSON.stringify(r.err)}`);
+  assert.match(r.err, /npm run build:binary/, "…and must name the command that fixes it");
+});
+
+test("an ADDED source file is staleness too — the digest covers the file set, not just contents", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  writeFileSync(join(root, freshness.SOURCE_DIR, "c.ts"), "export const c = 3;\n");
+  const r = runFake(bin);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /STALE/);
+});
+
+test("a REMOVED source file is staleness too", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  rmSync(join(root, freshness.SOURCE_DIR, "a.ts"));
+  const r = runFake(bin);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /STALE/);
+});
+
+test("a RENAMED source file is staleness too — the path is inside the digest", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  const src = join(root, freshness.SOURCE_DIR);
+  renameSync(join(src, "a.ts"), join(src, "renamed.ts"));
+  const r = runFake(bin);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /STALE/);
+});
+
+test("a source file touched but not changed is NOT staleness — content, never mtime", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  const f = join(root, freshness.SOURCE_DIR, "a.ts");
+  const body = readFileSync(f, "utf8");
+  writeFileSync(f, "tmp");
+  writeFileSync(f, body);
+  const r = runFake(bin);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /APP RAN/);
+});
+
+test("WHEN IT CANNOT DECIDE IT REFUSES: a source tree it cannot read is a refusal, not a pass", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  // A dangling symlink where a `.ts` file was. The file SET is unchanged — the walk still sees
+  // `a.ts` — so this isolates the read failure from staleness, and it raises for every user
+  // including root, unlike a chmod. (A directory named `a.ts` does not work: the walk descends
+  // into it and the path leaves the set, which is a removal and is caught as staleness instead.)
+  const f = join(root, freshness.SOURCE_DIR, "a.ts");
+  rmSync(f);
+  symlinkSync(join(root, freshness.SOURCE_DIR, "nowhere.ts"), f);
+  const r = runFake(bin);
+  assert.equal(r.code, 1, "an unreadable source tree must not be reported fresh");
+  assert.doesNotMatch(r.out, /APP RAN/);
+  assert.match(r.err, /could not be read/, r.err);
+});
+
+test("NO source tree beside it is silent — that is every copy a user installed", () => {
+  // The shipped case, and it is decidable rather than undecidable: a binary with no sources next
+  // to it cannot be behind them. If this refused, `bin/loom` would be undistributable.
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  rmSync(join(root, "packages"), { recursive: true });
+  const r = runFake(bin);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /APP RAN/);
+  assert.equal(r.err, "", "a shipped binary must not nag about sources it will never have");
+});
+
+test("the binary is located by ITSELF, not by the path it was built at — a moved repo still checks", () => {
+  const root = fakeRepo(ONE_FILE);
+  buildFake(root);
+  const moved = mkdtempSync(join(tmpdir(), "loom-freshness-moved-"));
+  cpSync(root, moved, { recursive: true });
+  rmSync(root, { recursive: true });
+  writeFileSync(join(moved, freshness.SOURCE_DIR, "a.ts"), "export const a = 99;\n");
+  const r = runFake(join(moved, "bin", "loom.cjs"));
+  assert.equal(r.code, 1, "the guard must anchor on its own location, not on a baked absolute path");
+  assert.match(r.err, /STALE/);
+});
+
+test("LOOM_STALE_BINARY=allow lowers the refusal to a warning — and still tells you", () => {
+  // The escape hatch is a human's, set per invocation. It never silences the message: the README
+  // bar is that nobody drives a stale binary WITHOUT BEING TOLD, not that nobody drives one.
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  writeFileSync(join(root, freshness.SOURCE_DIR, "a.ts"), "export const a = 2;\n");
+  const r = runFake(bin, { LOOM_STALE_BINARY: "allow" });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /APP RAN/);
+  assert.match(r.err, /STALE/, "the override must still print the whole refusal");
+  assert.match(r.err, /LOOM_STALE_BINARY/);
+});
+
+test("any other value of LOOM_STALE_BINARY still refuses — an unrecognised posture is not permission", () => {
+  const root = fakeRepo(ONE_FILE);
+  const bin = buildFake(root);
+  writeFileSync(join(root, freshness.SOURCE_DIR, "a.ts"), "export const a = 2;\n");
+  for (const v of ["1", "true", "yes", "ALLOW", ""]) {
+    const r = runFake(bin, { LOOM_STALE_BINARY: v });
+    assert.equal(r.code, 1, `LOOM_STALE_BINARY=${JSON.stringify(v)} must not loosen anything`);
+  }
+});
+
+test("the digest covers a NAMED set — every *.ts under packages/core/src, and nothing else", () => {
+  assert.equal(freshness.SOURCE_DIR, "packages/core/src");
+  const root = fakeRepo(ONE_FILE);
+  const before = freshness.digestSources(join(root, freshness.SOURCE_DIR)).digest;
+  // Not a `.ts` file, and not under src: neither may move the digest, or an unrelated edit would
+  // strand the binary.
+  writeFileSync(join(root, freshness.SOURCE_DIR, "notes.md"), "hello");
+  writeFileSync(join(root, "package.json"), "{}");
+  assert.equal(freshness.digestSources(join(root, freshness.SOURCE_DIR)).digest, before);
+});
+
+test("THE BUILD ACTUALLY BAKES IT IN — the guard is wired into the esbuild banner, not merely available", () => {
+  // Without this the whole mechanism can be deleted from `build-binary.mjs` and every test above
+  // keeps passing against a module nothing calls.
+  const build = readFileSync(fileURLToPath(new URL("../../../scripts/build-binary.mjs", import.meta.url)), "utf8");
+  assert.match(build, /binary-freshness\.cjs/, "the build must load the freshness module");
+  assert.match(build, /\.banner\(/, "…and put its banner into the bundle");
+  assert.match(build, /banner: \{/, "…in the banner esbuild injects, which is where it runs first");
+});
+
+/**
+ * The stamp is a digest of `packages/core/src`, but what the bundler eats is `packages/core/dist`.
+ * If those disagree the binary certifies sources it does not contain — a guard answering with the
+ * passing value, which is the defect class this repo keeps rediscovering. So the BUILD refuses
+ * first, and these are the cases where it must.
+ */
+function distTree(root: string, srcMtime: number, distMtime: number | null): void {
+  const src = join(root, freshness.SOURCE_DIR);
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "a.ts"), "export const a = 1;\n");
+  utimesSync(join(src, "a.ts"), srcMtime / 1000, srcMtime / 1000);
+  if (distMtime !== null) {
+    const dist = join(root, "packages", "core", "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(join(dist, "a.js"), "export const a = 1;\n");
+    utimesSync(join(dist, "a.js"), distMtime / 1000, distMtime / 1000);
+  }
+}
+
+test("the build refuses to stamp when dist is older than src — the stamp would be a lie", () => {
+  const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  distTree(root, 2_000_000, 1_000_000);
+  assert.match(String(freshness.distIsBehindSources(root)), /a\.ts is newer than the compiled dist/);
+});
+
+test("the build refuses when there is no dist at all", () => {
+  const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  distTree(root, 2_000_000, null);
+  assert.match(String(freshness.distIsBehindSources(root)), /nothing has been built/);
+});
+
+test("the build refuses when dist exists but holds no compiled .js", () => {
+  const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  distTree(root, 2_000_000, null);
+  mkdirSync(join(root, "packages", "core", "dist"), { recursive: true });
+  writeFileSync(join(root, "packages", "core", "dist", "README"), "");
+  assert.match(String(freshness.distIsBehindSources(root)), /holds no compiled \.js/);
+});
+
+test("…and stamps when dist is newer than src, which is what `npm run build:binary` guarantees", () => {
+  const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  distTree(root, 1_000_000, 2_000_000);
+  assert.equal(freshness.distIsBehindSources(root), null);
 });
