@@ -490,6 +490,56 @@ export class PolicyEngine {
   /**
    * `max` over every contributing floor. Because every term enters through `max`,
    * no single declaration can weaken the result — the asymmetry rule as arithmetic.
+   *
+   * ## WHICH TERMS A HUMAN CEILING MAY CLAMP — the whole set, six terms
+   *
+   * A ceiling is a judgement about **the graph the human read**, so a term is clampable
+   * exactly when the human could see it at the moment they lowered the posture. The
+   * enumeration, not a rule of thumb:
+   *
+   * | term                            | clampable | why |
+   * |---------------------------------|-----------|-----|
+   * | `#systemFloor`                  | yes | the deployment default the graph they read ran under. `deescalate` already demands a human, a justification and three deny-list checks; the hard floor below stops it reaching `out` for hard-to-undo work. |
+   * | `CLASS_DEFAULT_POSTURE[irrev.]` | yes | the tool's own class, written in the graph. This is the term de-escalation EXISTS for — an irreversible action always computes to `in`, so without clamping it "let this run on-the-loop" could never be said and the intervention window could never fire. |
+   * | `dataFloor` (declared)          | yes | `dataClassification` comes from the channel declarations in that same graph. Its unseen twin, `carriesSecret`, is not a term here — it raises the hard floor instead. See below. |
+   * | `req.declaredPosture`           | yes | the graph author's own compile-time fold. Read. |
+   * | `#escalations` `run:<runId>`    | **no** | see below |
+   * | `#escalations` `node:<runId>/<nodeId>` | **no** | see below |
+   *
+   * ## WHY NO ESCALATION IS CLAMPABLE, AND WHY THAT STILL LEAVES DE-ESCALATION USABLE
+   *
+   * Every one of E1–E10 fires on evidence that arrived AFTER the graph was authored — a
+   * verdict that came back weak, three failures in a row, an n-gram nobody has seen, a
+   * graph that grew a node. None of it is in what the human read, so a ceiling is not an
+   * answer to any of it. Measured before this held: a run-scope de-escalation to `out`
+   * clamped E10 `mutation_introduced_irreversible` — whose `engine.ts` comment promises it
+   * gates "whatever the run's posture" — and an agent-introduced `pay.charge` node charged
+   * with zero gates raised. `test/run/oversight-floor-mutation.test.ts` is that run.
+   *
+   * This does not make de-escalation useless, because a human clears an escalation by
+   * de-escalating **the scope it was raised on**: `deescalate` deletes `#escalations[scope]`
+   * before installing the ceiling, and `projection.ts` folds `policy.deescalated` the same
+   * way. So an escalation still present at a scope is one raised AFTER the human spoke
+   * about that scope — which is the ordering fact this needs, and it is carried in the map
+   * itself rather than in a timestamp, so it survives a restart and replays identically.
+   * The E9 flow still works end to end: operator interrupts → `run:` escalates to `in` →
+   * human de-escalates `run:` → the escalation is deleted and the ceiling covers the rest.
+   *
+   * What it does cost: a `run:` ceiling no longer answers a `node:` escalation, and a
+   * `node:` ceiling no longer answers a `run:` one. The human must de-escalate the scope
+   * the escalation names — which forces them to name the node, and naming it is the
+   * evidence that they looked at it. That is the failing-closed direction.
+   *
+   * ## WHAT THIS DOES NOT REACH
+   *
+   * The four clampable terms are still clampable, so a mutation-added node is protected
+   * only as far as an escalation actually fires on it. E10 fires off `graph/mutate.ts`'s
+   * `gatedNodes`, which asks `reachableToolNames` — `node.tool`, `agent.tools`,
+   * `function.effects`, and nothing else. A mutation adding a `subgraph` node whose CHILD
+   * charges reaches no name in that set, so E10 stays silent and the run ceiling clamps
+   * the class default as before. The sweep that found this bug measured that route gating
+   * anyway — in the child's own policy engine and again at the parent's mirror gate — but
+   * that is a second mechanism, not this one, and nothing here pins it.
    */
   effectivePosture(req: PolicyRequest): Posture {
     const dataFloor = maxPosture(
@@ -500,11 +550,16 @@ export class PolicyEngine {
     // at `in` in this same `max`. It was written here, it was the identity for every input,
     // and E8 therefore did nothing for the whole life of the mechanism. Taint is read at
     // the ceiling instead — the one place it can change an answer. See below.
-    const floor = maxPosture(
+    const clampable = maxPosture(
       this.#systemFloor,
       CLASS_DEFAULT_POSTURE[req.irreversibility],
       dataFloor,
       req.declaredPosture,
+    );
+    // The two unclampable terms, kept OUT of the clamped `max` rather than subtracted from
+    // it afterwards: a floor that has already been folded into a number cannot be taken
+    // back out, and the version of this that tried was the hole.
+    const escalated = maxPosture(
       this.#escalations.get(`run:${req.runId}`) ?? "out",
       this.#escalations.get(`node:${req.runId}/${req.nodeId}`) ?? "out",
     );
@@ -515,7 +570,7 @@ export class PolicyEngine {
     // intervention window could never fire.
     const ceiling =
       this.#ceilings.get(`node:${req.runId}/${req.nodeId}`) ?? this.#ceilings.get(`run:${req.runId}`);
-    if (ceiling === undefined) return floor;
+    if (ceiling === undefined) return maxPosture(clampable, escalated);
 
     // THE HARD FLOOR. A human may lower a hard-to-undo action to `on` — someone is
     // still watching and can interrupt — but never to `out`, where nobody is.
@@ -533,7 +588,9 @@ export class PolicyEngine {
     const unseen = req.tainted === true || req.carriesSecret === true;
     const clamped = isHardToUndo(req.irreversibility) ? maxPosture(ceiling, unseen ? "in" : "on") : ceiling;
 
-    return postureRank(clamped) < postureRank(floor) ? clamped : floor;
+    const lowered = postureRank(clamped) < postureRank(clampable) ? clamped : clampable;
+    // `max`, so the ceiling can only ever lower the four terms it is a judgement about.
+    return maxPosture(lowered, escalated);
   }
 
   // ── the asymmetry rule ────────────────────────────────────────────────────
