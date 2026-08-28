@@ -1648,9 +1648,13 @@ export function childRunIdsOf(spans: readonly Span[]): readonly string[] {
  * of a real boundary — two journals, two replays, two gate sets — and it errs in the
  * tightening direction, which is the only direction this repo allows a scope to move.
  *
- * AND WHAT IT DOES TO CONFORMANCE: a spliced trace covers two graphs, and `reconstructGraph`
- * refuses it rather than certifying against whichever `loom.run` span sorted last. See
- * `MULTIPLE_GRAPHS`. `loom trace` therefore computes conformance over the PARENT's own fold,
+ * AND WHAT IT DOES TO CONFORMANCE, stated as narrowly as it is true: a spliced trace covers two
+ * graphs, so `reconstructGraph` reports `graphHash: "(multiple)"` rather than certifying
+ * against whichever `loom.run` span sorted last. That is a SENTINEL NO REAL HASH MATCHES, not
+ * a refusal — a caller who passes `"(multiple)"` as the expected hash still gets a match, and
+ * `MULTIPLE_GRAPHS`' own docstring says so. The distinction matters because the trace is the
+ * untrusted half here and the caller is not: this defends against a trace claiming to be one
+ * graph, and does not pretend to defend against a caller who asks the wrong question. `loom trace` therefore computes conformance over the PARENT's own fold,
  * which is the question it was always answering.
  *
  * Total over both arguments for `childRunIdsOf`'s reason; an unreadable argument splices
