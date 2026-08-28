@@ -389,6 +389,13 @@ export interface IdentitySource {
    * every non-enumerable source unbootable, and that is a guard turning an unknown into a
    * decision — the opposite direction from the one this project's rules ask for, because it
    * would DELETE a legitimate deployment rather than tighten one.
+   *
+   * **THROWING IS NOT CAUGHT, and the process does not boot.** That is deliberate and it is
+   * the one place this method is allowed to stop anything: a source whose own directory
+   * errored has not said "I cannot enumerate", it has failed, and a `catch {}` here could
+   * not tell the two apart — it would report the failure as the answer `undefined`, which is
+   * this codebase's named defect. `identify` makes the same distinction one method over:
+   * `undefined` establishes nobody, throwing refuses.
    */
   knownSubjects?(): readonly string[] | undefined;
 }

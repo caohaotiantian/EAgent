@@ -284,6 +284,52 @@ test("a SECOND module that registers nothing is refused even though the first re
   }
 });
 
+test("TWO MODULES CLAIMING ONE ADAPTER NAME are refused — and NOT as \"registered nothing\"", async () => {
+  // The counter behind "registered nothing" is the number of `register` CALLS and not the
+  // number of distinct names, and this is the case that forces the distinction. Off
+  // `registered.size` the second module leaves the size unchanged and would have been
+  // refused for registering nothing — a refusal in the safe direction carrying a claim that
+  // is false, which is worse than the silence it replaced.
+  const w = workspace();
+  try {
+    const second = moduleAt(
+      w.dir,
+      "bedrock-again.mjs",
+      `export default ({ models }) => { models.register({ provider: "bedrock", stream(){}, priceOf(){return 0;}, estimateOf(){return 0;} }); };\n`,
+    );
+    await assert.rejects(
+      () => loadExtensionModules([w.module, second]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        /registers the adapter name "bedrock", which .* already registered/.test(e.message) &&
+        e.message.includes(w.module) &&
+        e.message.includes(second),
+    );
+  } finally {
+    w.dispose();
+  }
+});
+
+test("a module that registers a tool OVER another module's tool still counts as having registered", async () => {
+  // `ToolRegistry` shadows on name collision, so `list().length` cannot tell "did nothing"
+  // from "replaced something" either. Shadowing is legal — the registry's whole disposal
+  // discipline is built on it — so this must NOT be refused.
+  const w = workspace();
+  try {
+    const shadow = moduleAt(
+      w.dir,
+      "shadow.mjs",
+      `export default ({ tools }) => { tools.register({ name: "house.ping", version: "2.0", description: "d", ` +
+        `capabilities: ["house:ping"], irreversibility: "read_only", idempotent: true, parameters: { type: "object", properties: {} }, ` +
+        `execute: () => ({ pong: false }) }); };\n`,
+    );
+    const ext = await loadExtensionModules([w.module, shadow]);
+    assert.equal(ext.tools.require("house.ping").version, "2.0", "the later module's definition is live");
+  } finally {
+    w.dispose();
+  }
+});
+
 test("an adapter name that COLLIDES with a --models-file row refuses, naming both", async () => {
   const w = workspace();
   try {

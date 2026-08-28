@@ -1327,16 +1327,46 @@ export interface ExtensionModules {
  */
 class ObservedModelRegistry extends ModelRegistry {
   readonly registered = new Map<string, ModelAdapter>();
+  /**
+   * Every `register` CALL, in order, not the distinct names.
+   *
+   * A count off `registered.size` looked equivalent and was not: two modules registering
+   * the same provider name leave the size unchanged, so the second one would have been
+   * refused for "registering nothing" — a refusal in the safe direction carrying a claim
+   * that is simply false, which is worse than the original silence. The size answers
+   * "which adapters exist" and this answers "did THIS module do anything", and they are
+   * different questions.
+   */
+  readonly calls: string[] = [];
   override register(adapter: ModelAdapter, asDefault = false): LoomDisposable {
+    this.calls.push(adapter.provider);
     this.registered.set(adapter.provider, adapter);
     return super.register(adapter, asDefault);
   }
 }
 
+/**
+ * The same distinction one registry over. `ToolRegistry` keys by name and shadows on
+ * collision, so `list().length` cannot tell "registered nothing" from "registered over
+ * something".
+ */
+class ObservedToolRegistry extends ToolRegistry {
+  readonly calls: string[] = [];
+  override register(tool: Parameters<ToolRegistry["register"]>[0]): LoomDisposable {
+    // AFTER, not before: `register` validates the manifest and throws on a bad one, and a
+    // refused registration must not count as this module having done something.
+    const d = super.register(tool);
+    this.calls.push(tool.name);
+    return d;
+  }
+}
+
 export async function loadExtensionModules(paths: readonly string[]): Promise<ExtensionModules> {
   const models = new ObservedModelRegistry();
-  const tools = new ToolRegistry();
+  const tools = new ObservedToolRegistry();
   const files: string[] = [];
+  /** Which module registered each adapter name, so a collision refusal can name both. */
+  const owner = new Map<string, string>();
   for (const raw of paths) {
     const path = resolve(raw);
     const refuse: (why: string) => never = (why) => {
@@ -1345,8 +1375,8 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     // TAKEN BEFORE, so the diff below is THIS module's contribution and not the previous
     // one's. A second module that registers nothing has to be refused even when the first
     // registered plenty.
-    const adaptersBefore = models.registered.size;
-    const toolsBefore = tools.list().length;
+    const adaptersBefore = models.calls.length;
+    const toolsBefore = tools.calls.length;
     let mod: { default?: unknown };
     try {
       // `pathToFileURL`, not the bare path: a relative specifier would resolve against
@@ -1378,11 +1408,21 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     } catch (e) {
       refuse(`threw while registering: ${isLoomError(e) ? e.message : (e as Error).message}`);
     }
-    if (models.registered.size === adaptersBefore && tools.list().length === toolsBefore) {
+    if (models.calls.length === adaptersBefore && tools.calls.length === toolsBefore) {
       refuse(
         `registered nothing. Its default export must call \`models.register(adapter)\` or \`tools.register(tool)\`; ` +
           `a module that registers nothing is a deployment the operator believes is extended and is not.`,
       );
+    }
+    // TWO MODULES, ONE ADAPTER NAME — the same refusal `readModels` makes about a file row
+    // colliding with an extension, and for the same reason: the registry keys by name, so
+    // one of the two would never be reachable and nothing anywhere would say which.
+    for (const provider of models.calls.slice(adaptersBefore)) {
+      const first = owner.get(provider);
+      if (first !== undefined) {
+        refuse(`registers the adapter name "${provider}", which ${first} already registered. One of them would never be reachable.`);
+      }
+      owner.set(provider, path);
     }
     files.push(path);
   }
