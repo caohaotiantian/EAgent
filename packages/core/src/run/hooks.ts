@@ -141,11 +141,24 @@ export function narrowNodeDecision(prev: NodeDecision, raw: unknown): NodeDecisi
  * `onError`. What a hook may do to a retry the POLICY already allowed.
  *
  * Both fields narrow and neither widens, which is rule 2 applied to failure handling:
- * `retry: false` suppresses a retry the policy would have taken (a circuit breaker, a cost
- * guard); `retry: true` is IGNORED, because forcing one would let an extension re-run a
- * non-idempotent tool that already reached its sandbox — the case `#retryDecision` refuses on
- * purpose and the most dangerous thing a hook could ask for. `afterMs` may only LENGTHEN the
- * backoff; a shorter one is clamped to the policy's.
+ * `retry: false` suppresses a retry the policy would have taken; `retry: true` is IGNORED,
+ * because forcing one would let an extension re-run a non-idempotent tool that already reached
+ * its sandbox — the case `#retryDecision` refuses on purpose and the most dangerous thing a
+ * hook could ask for. `afterMs` may only LENGTHEN the backoff; a shorter one is clamped to the
+ * policy's.
+ *
+ * **WHAT IT CAN DECIDE, AND WHAT IT CANNOT — AND IT IS NOT A CIRCUIT BREAKER.** This docstring
+ * used to offer "a circuit breaker, a cost guard" as the examples, and the first is not
+ * writable at this point. The hook is handed exactly `{retry, afterMs}` — the engine's own
+ * summary of a decision it has already fully taken — and a context of
+ * `{point, runId, taskId, signal}`. So it can suppress or lengthen a retry KEYED ON THE RUN AND
+ * THE NODE, and it can key on neither the error nor the source: not the code, not the class,
+ * not which of two `--models-file` endpoints failed, and with nowhere to hold a count across
+ * calls. A breaker is a decision about a SOURCE across runs; this point cannot see one.
+ *
+ * The seam that would change that is nameable and unbuilt: the hook bus threads a DECISION but
+ * never the FACT the decision was about. If an extension author ever needs one, that is the
+ * thing to design — not a built-in breaker.
  *
  * The hook is not consulted at all when the policy already said no, so it cannot resurrect a
  * retry by any route.
