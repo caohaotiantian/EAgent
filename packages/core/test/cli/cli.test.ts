@@ -452,6 +452,26 @@ test("a subgraph is not a tool, and the trace stops calling it one", async () =>
     const r = await run(["trace", runId, "--graph", parentFile, "--workspace", d.dir]);
     assert.equal(r.code, 0, r.err);
     assert.match(r.out, /loom\.tool \(subgraph\)/, `the child graph must not read as a plain tool:\n${r.out}`);
+
+    // AND THE TRACE FOLLOWS IT. Naming the effect kind stopped the line LYING; it did not
+    // make the child reachable, and the run below is where the reader wanted to go. Measured
+    // at `bb7b702`, the whole of what this command could say about a delegated run:
+    //
+    //     loom.tool (subgraph) [ok] 0ms
+    //
+    // — zero-width, because `effect.started` and `effect.completed` are appended in ONE batch
+    // after the child finished, and terminal, because the child's spans are in another
+    // journal under `${parent}~${taskId}` that nothing read.
+    const lines = r.out.split("\n");
+    const at = lines.findIndex((l) => l.includes("(subgraph)"));
+    assert.ok(at >= 0, r.out);
+    const indent = (l: string): number => l.length - l.trimStart().length;
+    assert.match(lines[at]!, new RegExp(`-> ${runId}~call@root#0 `), `the child's run id is the route, and it belongs on the line:\n${r.out}`);
+
+    const inner = lines.findIndex((l) => l.includes("loom.task w "));
+    assert.ok(inner > at, `the child's own node must appear, below the subgraph that started it:\n${r.out}`);
+    assert.ok(indent(inner < 0 ? "" : lines[inner]!) > indent(lines[at]!), `the child's interior must nest UNDER the subgraph span:\n${r.out}`);
+    assert.match(r.out, /conformance: ok/, "conformance is a question about THIS run's graph, and splicing a child must not change its answer");
   } finally {
     d.dispose();
   }

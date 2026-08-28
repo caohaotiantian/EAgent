@@ -67,7 +67,7 @@ import { HookRegistry } from "./run/hooks.ts";
 import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
-import { conformsToGraph, reconstructGraph, spansFrom } from "./telemetry/spans.ts";
+import { childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph } from "./telemetry/spans.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, shapeOf } from "./canonical.ts";
@@ -3397,7 +3397,44 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         const graph = loadGraph(ws, requireFileFlag(args, "graph"));
         const events = [];
         for await (const e of ws.store.read(runId, 1)) events.push(e);
-        const spans = spansFrom(events);
+        // THE PARENT'S OWN FOLD, KEPT — it is what conformance is computed over, at the bottom
+        // of this block. A spliced trace covers two graphs and `reconstructGraph` refuses it by
+        // design (see `MULTIPLE_GRAPHS`), so folding the two together and then asserting would
+        // turn every subgraph run's `loom trace` into a non-zero exit. The question this command
+        // has always answered — "did THIS run take an edge its graph does not declare?" — is a
+        // question about one journal.
+        const own = spansFrom(events);
+        // AND THIS IS WHERE THE I/O LIVES, which is the whole reason `spansFrom` does not do it.
+        // A `subgraph` node's child runs under `${parent}~${taskId}` with its own journal, so the
+        // fold can only mint a LINK; following it is a second read, and a command that already
+        // has a store is the right place for one. Without this the trace went blind at the most
+        // interesting node in the graph: the line said `loom.tool (subgraph)` and nothing led to
+        // the child.
+        //
+        // BREADTH-FIRST, BOUNDED, AND CYCLE-GUARDED. A child can itself have a subgraph, so this
+        // is a queue rather than one hop. `seen` makes re-reading a run impossible — a cycle is
+        // unreachable today (a child's id is strictly longer than its parent's) and the guard is
+        // free. The count bound is a cost guard on a command that reads whatever the workspace
+        // holds; past it the remaining children keep their links and lose their spliced interior,
+        // which is the same picture this command gave before it could follow one at all.
+        let spans = own;
+        const visited = new Set<string>([runId]);
+        const queue = [...childRunIdsOf(own)];
+        while (queue.length > 0 && visited.size <= MAX_TRACED_SUBGRAPHS) {
+          const child = queue.shift()!;
+          if (visited.has(child)) continue;
+          visited.add(child);
+          const childEvents = await journalOf(ws, child as RunId);
+          // A CHILD WITH NO JOURNAL IN THIS WORKSPACE IS NOT AN ERROR. `subgraph.started` is
+          // journaled BEFORE `submit`, so a crash between the two leaves a link to a run that
+          // never existed; a pruned or remote child reads empty the same way. The link stays on
+          // the parent's span either way, which is the honest answer: this is the run, and it is
+          // not here.
+          if (childEvents.length === 0) continue;
+          const childSpans = spansFrom(childEvents);
+          spans = spliceSubgraph(spans, childSpans);
+          queue.push(...childRunIdsOf(childSpans));
+        }
         // A TREE IS WALKED, NOT INFERRED FROM ARRAY ORDER. Two defects lived in one line here,
         // `const depth = s.parentSpanId === undefined ? 0 : 1`, and the second was hidden by the
         // first.
@@ -3452,14 +3489,23 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             typeof node === "string" && node !== ""
               ? ` ${node}${typeof branch === "string" && branch !== "" ? ` ${branch}` : ""}`
               : "";
-          process.stdout.write(`${"  ".repeat(depth)}${sp.name}${where}${qualifier} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
+          // THE CHILD'S RUN ID, ON THE LINE. It is the route out of this journal and into the
+          // one the interior below actually came from, and it is the answer when the interior is
+          // NOT below — a child whose journal is not in this workspace, or one past the splice
+          // bound. `loom trace <that id>` is then a command the reader can type, which is what
+          // "a trace can follow a subgraph" has to mean when the follow itself failed.
+          const childRun = sp.attributes?.["subgraph.child_run_id"];
+          const into = typeof childRun === "string" && childRun !== "" ? ` -> ${childRun}` : "";
+          process.stdout.write(`${"  ".repeat(depth)}${sp.name}${where}${qualifier}${into} [${sp.status}] ${sp.endTime - sp.startTime}ms\n`);
           for (const child of kids.get(sp.spanId) ?? []) emit(child, depth + 1);
         };
         for (const r of roots) emit(r, 0);
         // Anything a cycle kept out of the walk is still printed, because a renderer that silently
         // drops a span is worse than one that prints it flat.
         for (const sp of spans) if (!seen.has(sp.spanId)) emit(sp, 0);
-        const conformance = conformsToGraph(reconstructGraph(spans), graph.spec, graph.graphHash);
+        // `own`, NOT `spans` — see the note above the splice. A child is a different graph, and
+        // `--graph` names one.
+        const conformance = conformsToGraph(reconstructGraph(own), graph.spec, graph.graphHash);
         process.stdout.write(`\nconformance: ${conformance.ok ? "ok" : JSON.stringify(conformance)}\n`);
         return conformance.ok ? 0 : 1;
       }
@@ -3987,6 +4033,20 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
  * condition 2 clears. A truncation nobody is told about lowers a promotion bar.
  */
 const COHORT_SCAN_LIMIT = 500;
+
+/**
+ * How many child runs `loom trace` will read before it stops following links.
+ *
+ * A COST GUARD ON A READ, not a claim about how deep a graph may nest. `trace` follows
+ * `subgraph.child_run_id` breadth-first, and each hop is a full journal read; a run that fanned
+ * a subgraph out across a hundred branches is a command that appears to hang, which is the same
+ * failure `COHORT_SCAN_LIMIT` exists for one screen down.
+ *
+ * REACHING IT COSTS NOTHING THAT WAS THERE BEFORE. The links stay on every parent span and the
+ * run ids stay on the rendered lines, so a child past the bound is a `loom trace <id>` the reader
+ * can type — which is exactly the picture this command gave when it could not follow one at all.
+ */
+const MAX_TRACED_SUBGRAPHS = 64;
 
 /** The whole journal of one run, in order. Every read side here starts with this. */
 async function journalOf(ws: Workspace, runId: RunId): Promise<JournalEvent[]> {
