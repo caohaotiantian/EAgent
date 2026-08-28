@@ -2319,6 +2319,24 @@ export class Engine {
    * caught by `journal/audit.ts`'s `run.terminal-is-last-and-once`, so it is a defect somebody
    * eventually finds. A duplicated operator intervention was invisible to every rule that file
    * had — which is why the fix for these two ships with the rule that makes them visible.
+   *
+   * THE READ, THE DECISION AND THE COMMIT ARE ONE `#serialize` SLOT, and that is load-bearing
+   * rather than tidy. The first version of this loop read the projection and decided OUTSIDE
+   * the chain and entered it only for the commit, so every append the engine's OWN running
+   * graph made landed between the two — a busy run moved the head under all eight laps and
+   * the operator's brake came back `E_SEQ_CONFLICT` with the run still going. Measured on one
+   * Engine over a `MemoryStateStore`, a 20-node `seq` chain with `advance` in flight: pause
+   * refused at 38, 40, 42, 52 and 56 microtask ticks, `run.suspended` rows 0, journal 144
+   * events, run succeeded. That is `loom serve` exactly — the engine answering the HTTP pause
+   * is the engine driving the run — so the in-process window was the common case, not the
+   * exotic one. `RunLog.append`, the door this replaced, never lost it because its retry loop
+   * ran entirely inside ONE slot. `pause-beats-a-busy-run.test.ts` holds the range.
+   *
+   * NO DEADLOCK, and the reason is a fact about one method: `#requireLive` reads through
+   * `Engine.projection`, which folds the journal and does NOT go through `#serialize`. A lap
+   * therefore never waits on the chain it is already holding. The lap loop stays, because the
+   * conflict it was built for — another PROCESS over the same journal — is still real and
+   * `#serialize` cannot order writers it cannot see.
    */
   async #intervene(
     runId: RunId,
@@ -2326,12 +2344,18 @@ export class Engine {
     decide: (p: RunProjection) => readonly NewEvent[] | undefined,
   ): Promise<RunProjection> {
     for (let attempt = 0; ; attempt++) {
-      const p = await this.#requireLive(runId, verb);
-      const events = decide(p);
-      if (events === undefined) return p;
-      const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
       try {
-        await this.#serialize(() => log.commit(p.seq, events));
+        // `undefined` means "the decision was to append nothing"; a projection is that
+        // already-true answer, returned as `pause`'s documented no-op.
+        const settled = await this.#serialize(async (): Promise<RunProjection | undefined> => {
+          const p = await this.#requireLive(runId, verb);
+          const events = decide(p);
+          if (events === undefined) return p;
+          const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
+          await log.commit(p.seq, events);
+          return undefined;
+        });
+        if (settled !== undefined) return settled;
         return (await this.projection(runId))!;
       } catch (e) {
         if (!isLoomError(e) || e.code !== CODES.E_SEQ_CONFLICT) throw e;
