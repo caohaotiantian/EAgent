@@ -117,7 +117,8 @@
 
 import { digestOf } from "../canonical.ts";
 import { redactAttributes } from "../security/redact.ts";
-import type { EdgeId, NodeId, RunId } from "../ids.ts";
+import { effectKey } from "../ids.ts";
+import type { EdgeId, NodeId, RunId, TaskId } from "../ids.ts";
 import { isEvent, type JournalEvent } from "../journal/events.ts";
 import type { GraphSpec } from "../graph/spec.ts";
 import type { Classification } from "../vocab.ts";
@@ -127,6 +128,18 @@ export type SpanStatus = "unset" | "ok" | "error";
 
 export interface SpanLink {
   readonly spanId: string;
+  /**
+   * The trace the linked span lives in, when it is not this one — and the field exists
+   * because of the subgraph arms below.
+   *
+   * A link was a bare `spanId` while D9.1's producer-Task links were the only design for
+   * one, and those are same-trace: a span id alone resolves. A child run is a DIFFERENT
+   * trace (`traceId` is `digest(runId)` and the child's run id is `${parent}~${taskId}`),
+   * so a bare span id points at nothing an OTLP collector can follow — `SpanContext`
+   * requires both halves. Optional rather than required so every existing producer of a
+   * same-trace link keeps its shape.
+   */
+  readonly traceId?: string;
   readonly attributes?: Readonly<Record<string, unknown>>;
 }
 
@@ -271,6 +284,26 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
    */
   const startOrder = new Map<string, number>();
   let startOrdinal = 0;
+
+  /**
+   * THE SUBGRAPH LEDGER, and the reason there are two maps rather than one.
+   *
+   * A `subgraph` node's child is a separate run with its own journal, so THIS fold can only
+   * ever produce a link — see the SUBGRAPH arms below. What it needs to carry across events
+   * is which effect span the child's `subgraph.started` opened, and it is asked two
+   * different questions about that:
+   *
+   *   - `subgraph.completed` asks BY CHILD RUN ID, because that is the only id on its
+   *     payload and matching on it cannot pair a completion with the wrong child;
+   *   - `task.committed` / `task.cancelled` / `task.skipped` ask BY TASK, because a child
+   *     the parent never heard finish has to be closed by the parent's own terminal event
+   *     rather than left open. That list's LENGTH is also the effect ordinal, which is what
+   *     keeps the span id equal to the one `effect.started` will derive.
+   */
+  const subgraphSpanOf = new Map<string, string>();
+  const subgraphSpansOfTask = new Map<string, string[]>();
+  /** The same ids as a set, because `effect.completed` asks only "is this one of them?". */
+  const subgraphSpanIds = new Set<string>();
   const start = (id: string, o: Open): void => {
     if (open.has(id)) return;
     open.set(id, o);
@@ -328,8 +361,20 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // `redactAttributes` already do) would lose the reason an operator opened the trace
       // for. `security/redact.ts`'s `DETECTORS` states the trade in full.
       attributes: redactAttributes({ ...o.attributes, ...extra }, ATTRIBUTE_CLASSES, runId),
+      // THE REBUILD IS FIELD-BY-FIELD AND `traceId` IS ONE OF THE FIELDS — said here because
+      // this arm reconstructs the link rather than patching it, so a field it forgets is
+      // silently DROPPED rather than left alone. `traceId` was added for the subgraph link
+      // below and is the first optional field a link has ever had; the redaction branch is
+      // the only place in this file that could lose it, and losing it turns a
+      // follow-the-child link into a span id in nobody's trace.
       links: o.links.map((l) =>
-        l.attributes === undefined ? l : { spanId: l.spanId, attributes: redactAttributes(l.attributes, ATTRIBUTE_CLASSES, runId) },
+        l.attributes === undefined
+          ? l
+          : {
+              spanId: l.spanId,
+              ...(l.traceId === undefined ? {} : { traceId: l.traceId }),
+              attributes: redactAttributes(l.attributes, ATTRIBUTE_CLASSES, runId),
+            },
       ),
       events: o.events.map((ev) =>
         ev.attributes === undefined
@@ -341,6 +386,33 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   const attr = (id: string, patch: Record<string, unknown>): void => {
     const o = open.get(id);
     if (o !== undefined) Object.assign(o.attributes, patch);
+  };
+  /**
+   * A CHILD THE PARENT NEVER HEARD FINISH IS NOT A CHILD STILL WORKING.
+   *
+   * Every non-success exit of `#runSubgraph` returns BEFORE the batch that writes
+   * `effect.started` / `effect.completed` / `subgraph.completed`, so a failed child, a
+   * cancelled one, and one that gave up on a gate all leave the parent's journal holding a
+   * `subgraph.started` and nothing else about the child. Left alone, that span fell out of
+   * the end-of-journal sweep with `status: "unset"` at the LAST event in the run — which
+   * renders exactly like a child still in flight, at the wrong end time, on the one span a
+   * reader opened the trace to look at.
+   *
+   * The parent's own terminal task event is the honest place to close it: it is the moment
+   * the parent stopped waiting. A RETRY is deliberately not that moment — `task.failed`
+   * without a commit is the retryable-unavailable path, where the child genuinely is still
+   * going and the parent will re-enter — so this fires on `task.committed`, `task.cancelled`
+   * and `task.skipped` only, and a span that spans three attempts is telling the truth.
+   *
+   * `subgraph.status: "unreported"` is the one value on that key that is not a child run
+   * status, and it means precisely that: THIS journal records no verdict, go read the
+   * child's. Claiming `failed` here would be inventing one — the parent knows its own task
+   * failed and not whether the child failed, was cancelled, or is still running.
+   */
+  const closeUnreportedSubgraphs = (taskId: string, ts: number, status: SpanStatus): void => {
+    for (const id of subgraphSpansOfTask.get(taskId) ?? []) {
+      if (open.has(id)) close(id, ts, status, { "subgraph.status": "unreported" });
+    }
   };
   const note = (id: string, name: string, ts: number, attributes?: Record<string, unknown>): void => {
     open.get(id)?.events.push(attributes === undefined ? { name, time: ts } : { name, time: ts, attributes });
@@ -742,8 +814,118 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       });
       continue;
     }
+    // ── the subgraph arms ───────────────────────────────────────────────────────
+    //
+    // ONE TREE OR TWO, ANSWERED: **two on the wire, one on the screen.** The fold LINKS;
+    // `spliceSubgraph` — a separate, pure function a caller reaches for after doing its own
+    // I/O — joins two folds into one picture. The argument, because it is the whole design:
+    //
+    //   - `spansFrom` is a pure fold over ONE journal, and the child's events are in
+    //     ANOTHER one under `${parent}~${taskId}`. Reaching them is I/O, and this function
+    //     may not do I/O for the same reason `foldRun` may not: a projection you cannot
+    //     rebuild synchronously from the events in hand is not a projection. So the fold
+    //     produces the only thing the parent's journal actually holds — the child's run id,
+    //     its ref, its graph hash, its budget slice, and whatever terminal facts came back.
+    //   - Splicing is what an OPERATOR wants, and it is a claim the wire format should not
+    //     make on its own: it rewrites the child's `traceId` to the parent's and parents a
+    //     span on one that lives in another journal. Both are fine in a renderer and wrong
+    //     in an exporter, where the two runs are two traces that a collector joins BY THE
+    //     LINK. Doing it in the fold would also mean `spansFrom(parent)` could not be
+    //     computed without a store, which is the property this file opens by claiming.
+    //
+    // So the honest boundary is preserved in the data and the readable picture is one
+    // function call away, and neither is paid for by the other.
+    //
+    // THE SPAN IS THE EFFECT SPAN, NOT A SECOND ONE BESIDE IT. `#runSubgraph` journals
+    // `subgraph.started` when it submits the child, and `effect.started` + `effect.completed`
+    // + `subgraph.completed` in ONE batch after the child finished — so a span built from the
+    // effect pair alone is ZERO-WIDTH for a child that ran for an hour, and a span built from
+    // `subgraph.started` under its own id would be a second row for one thing. Opening the
+    // effect span here, under the id `effect.started` will derive, gives one span whose width
+    // is the child's actual life. `start` is a no-op on an id already open, so the
+    // `effect.started` arm above needs no change and still covers a journal that somehow
+    // carries the effect pair without the `subgraph.started`.
+    //
+    // THE ORDINAL IS COUNTED, NOT ASSUMED. `effectKey(task, "subgraph", n)` is the engine's
+    // own convention and `#runSubgraph`'s single call site passes `0` today; counting the
+    // starts this task has already made is that same numbering rather than a constant that
+    // would silently address the FIRST child's span if a second ever appeared.
+    if (isEvent(e, "subgraph.started")) {
+      const child = idText(e.payload.childRunId);
+      const opened = subgraphSpansOfTask.get(tid) ?? [];
+      const id = spanId(runId, "effect", effectKey(tid as TaskId, "subgraph", opened.length));
+      opened.push(id);
+      subgraphSpansOfTask.set(tid, opened);
+      subgraphSpanOf.set(child, id);
+      subgraphSpanIds.add(id);
+      start(id, {
+        name: "loom.tool",
+        kind: "client",
+        start: ts,
+        parent: taskSpan,
+        attributes: {
+          "loom.effect.key": effectKey(tid as TaskId, "subgraph", opened.length - 1),
+          "effect.kind": "subgraph",
+          "subgraph.ref": e.payload.ref,
+          // THE WHOLE ROUTE, and it costs one attribute. Without it the most interesting
+          // node in the graph is where the trace goes blind: the reader can see that a
+          // child ran and has no way to name the run it was.
+          "subgraph.child_run_id": child,
+          "subgraph.graph_hash": e.payload.graphHash,
+          // `null` means unbounded (the payload says so), and an attribute reading
+          // `subgraph.budget_usd: null` is a limit that looks declared. Absent means absent.
+          ...(e.payload.budgetUsd === null || e.payload.budgetUsd === undefined ? {} : { "subgraph.budget_usd": e.payload.budgetUsd }),
+        },
+        // A LINK, WITH BOTH HALVES OF A SPAN CONTEXT. The child's root span id is a pure
+        // function of its run id — `spanId(childRunId, "run")` — so this is derivable here
+        // without reading a byte of the child's journal, which is exactly why linking is
+        // what a pure fold can honestly do. `traceId` rides along because the child is a
+        // different trace and a bare span id would resolve in nobody's.
+        links: [
+          {
+            spanId: spanId(child, "run"),
+            traceId: digestOf(child).slice("sha256:".length, "sha256:".length + 32),
+            attributes: { "run.id": child, "subgraph.ref": e.payload.ref },
+          },
+        ],
+        events: [],
+      });
+      continue;
+    }
+    if (isEvent(e, "subgraph.completed")) {
+      // BY CHILD RUN ID, and a completion whose start is not in this journal is DROPPED
+      // rather than given a span: the id it would be filed under is derived from an ordinal
+      // this fold never saw, so inventing one would draw a subgraph in the wrong place.
+      // (Reachable through a rewind that suppressed the start, or a truncated read.)
+      const id = subgraphSpanOf.get(idText(e.payload.childRunId));
+      if (id === undefined) continue;
+      close(id, ts, e.payload.status === "succeeded" ? "ok" : "error", {
+        "effect.outcome": "completed",
+        // THE CHILD'S OWN VERDICT, which is the fact this arm exists for: a parent whose
+        // task succeeded tells you nothing about whether the child it delegated to did.
+        "subgraph.status": e.payload.status,
+        "subgraph.outputs": claimedList(e.payload.outputs).length,
+        // The child's whole spend, which `#runSubgraph` settles against the parent's
+        // ceilings — so a reader can see where a parent's budget went without opening the
+        // child's journal. `outputs` is a COUNT and never the values: the fold's narrow-egress
+        // rule (see the header) reads a key and never a result.
+        "usage.input_tokens": e.payload.usage.inputTokens,
+        "usage.output_tokens": e.payload.usage.outputTokens,
+        "cost.total_usd": e.payload.usage.costUsd,
+      });
+      continue;
+    }
+
     if (isEvent(e, "effect.completed")) {
-      close(spanId(runId, "effect", e.payload.key), ts, "ok", { "effect.outcome": "completed" });
+      const id = spanId(runId, "effect", e.payload.key);
+      // A SUBGRAPH IS CLOSED BY ITS OWN COMPLETION, one event later in the SAME append.
+      // `effect.completed` carries no `kind`, so without this test the span closed here and
+      // the `subgraph.completed` that follows found a closed span and was dropped — the
+      // child's status, its usage and its output count lost to an ordering inside one batch.
+      // Both events carry the same `ts`, so nothing about the span's width depends on which
+      // one closes it; what depends on it is whether the child's verdict is on the trace.
+      if (subgraphSpanIds.has(id)) continue;
+      close(id, ts, "ok", { "effect.outcome": "completed" });
       continue;
     }
     if (isEvent(e, "effect.failed")) {
@@ -789,6 +971,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     }
     if (isEvent(e, "task.committed")) {
       attr(taskSpan, { "edges.taken": claimedList(e.payload.take), "task.status": e.payload.status });
+      closeUnreportedSubgraphs(tid, ts, e.payload.status === "succeeded" ? "unset" : "error");
       close(taskSpan, ts, e.payload.status === "succeeded" ? "ok" : "error");
       continue;
     }
@@ -797,10 +980,12 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "task.cancelled")) {
+      closeUnreportedSubgraphs(tid, ts, "error");
       close(taskSpan, ts, "error", { "task.status": "cancelled", "cancel.clean": e.payload.clean });
       continue;
     }
     if (isEvent(e, "task.skipped")) {
+      closeUnreportedSubgraphs(tid, ts, "unset");
       close(taskSpan, ts, "unset", { "task.status": "skipped" });
       continue;
     }
@@ -1059,6 +1244,20 @@ function claimedList(v: unknown): readonly unknown[] {
 /** A bound on a hostile `length`, far above anything a compiled graph produces. */
 const MAX_CLAIMED = 65_536;
 
+/**
+ * `ReconstructedGraph.graphHash` when the trace claimed more than one — a REFUSAL wearing
+ * the shape of an answer that nothing can match.
+ *
+ * Parenthesised for the same reason `idText`'s `(null)` and `(object)` are: it is a marker
+ * naming a shape, not a value from the trace, and this file's readers already know that
+ * spelling. It inherits `idText`'s stated limit too — nothing validates the FORMAT of a
+ * graph hash, so `conformsToGraph(r, spec, "(multiple)")` is a call anybody can make and
+ * would certify. That is the weaker honest claim rather than an open hole: every hash this
+ * repo computes is `sha256:…` from `digestOf`, and the caller supplying the expected hash
+ * is the trusted half here — it is the TRACE this function defends against.
+ */
+const MULTIPLE_GRAPHS = "(multiple)";
+
 export interface ReconstructedGraph {
   readonly nodes: readonly NodeId[];
   readonly edges: readonly EdgeId[];
@@ -1154,7 +1353,8 @@ export function reconstructGraph(spans: readonly Span[]): ReconstructedGraph {
   const edges = new Set<EdgeId>();
   const instances = new Set<string>();
   const unreadable: string[] = [];
-  let graphHash = "";
+  // A SET, BECAUSE A SPLICED TRACE HAS MORE THAN ONE `loom.run` SPAN. See `MULTIPLE_GRAPHS`.
+  const hashes = new Set<string>();
 
   // THE ARGUMENT IS A TRACE, AND A TRACE IS UNTRUSTED — including the array around it. This
   // is `conformsToGraph`'s `Array.isArray(claimed)` guard, which was written for exactly this
@@ -1234,7 +1434,7 @@ export function reconstructGraph(spans: readonly Span[]): ReconstructedGraph {
         unreadable.push(`#${i}`);
         continue;
       }
-      graphHash = idText(claimed);
+      hashes.add(idText(claimed));
       continue;
     }
     // NOT JUDGED, and that is deliberate: this function reads no claim off a `loom.gate` or
@@ -1306,7 +1506,14 @@ export function reconstructGraph(spans: readonly Span[]): ReconstructedGraph {
   return {
     nodes: [...nodes].sort(),
     edges: [...edges].sort(),
-    graphHash,
+    // ONE GRAPH OR A REFUSAL — and until `spliceSubgraph` existed there was no third case,
+    // which is why the old `graphHash = …` was LAST-WRITE-WINS and nobody noticed. A spliced
+    // trace carries the parent's `loom.run` span and the child's, each claiming its own hash,
+    // so the verdict `conformsToGraph` reached depended on which run's span happened to sort
+    // last — certifying a two-graph trace against whichever spec the caller held. `hashMatches`
+    // is a claim about ONE graph; a trace covering two cannot satisfy it, and the honest
+    // answer is a hash equal to neither.
+    graphHash: hashes.size > 1 ? MULTIPLE_GRAPHS : ([...hashes][0] ?? ""),
     instances: [...instances].sort(),
     // Already in ascending position order, and NOT sorted as text: `#10` sorts before `#2`.
     unreadableSpans: unreadable,
@@ -1375,6 +1582,179 @@ export function conformsToGraph(reconstructed: ReconstructedGraph, spec: GraphSp
     hashMatches,
     unreadableSpans,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Following a subgraph
+// ---------------------------------------------------------------------------
+
+/**
+ * The child runs this trace points at — the READ half of the subgraph link.
+ *
+ * Exported rather than left as three lines in `cli.ts` because the attribute key is the
+ * contract: a caller that has to spell `"subgraph.child_run_id"` itself is a second copy of
+ * the vocabulary, and this file has already paid twice for a bag nobody enumerated. It is
+ * also the whole of what a caller needs to know before doing the I/O the fold refuses to do:
+ * fold the parent, ask this, read those journals, fold each, `spliceSubgraph`.
+ *
+ * Deduplicated and in first-seen order, which for a fold of one journal is the order the
+ * children were started in.
+ *
+ * TOTAL over a hostile trace, like everything else on this side of the file: the argument is
+ * a value whose premise says it need not have come from `spansFrom`, so the container, its
+ * length and every element go through `isList` / `readProp`, and an element that answers
+ * nothing readable contributes nothing rather than throwing. An unreadable trace yields no
+ * children, which is the fail-CLOSED direction here — the cost of a missed link is a picture
+ * that stops at the boundary, which is exactly where it stopped before this existed.
+ */
+export function childRunIdsOf(spans: readonly Span[]): readonly string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  if (!isList(spans)) return out;
+  const n = readProp(spans, "length");
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) return out;
+  for (let i = 0; i < n; i++) {
+    const claimed = readProp(readProp(readProp(spans, String(i)), "attributes"), "subgraph.child_run_id");
+    if (typeof claimed !== "string" || claimed === "" || seen.has(claimed)) continue;
+    seen.add(claimed);
+    out.push(claimed);
+  }
+  return out;
+}
+
+/**
+ * Join a child run's fold into its parent's, for a reader — the SPLICE half.
+ *
+ * PURE, AND SEPARATE FROM `spansFrom`, which is the decision this pair exists to record.
+ * The fold cannot reach a child's journal without becoming asynchronous, and a `spansFrom`
+ * that needs a store is no longer the pure function of one journal this file opens by
+ * claiming. So the caller does the I/O — `cli.ts`'s `trace` reads each linked run and folds
+ * it — and this function performs the two edits that turn two traces into one tree:
+ *
+ *   - every child span takes the PARENT'S `traceId`. One tree is one trace id; a spliced
+ *     child keeping its own is two trees wearing one, and no viewer would draw it;
+ *   - the child's ROOT span takes the parent's subgraph span as its parent, found through
+ *     the link the fold already minted. Nothing is matched by run id or by name: the join
+ *     is the link, so a trace with no link splices nothing.
+ *
+ * NOTHING IS INVENTED AND NOTHING IS DROPPED. A child span whose id is already present is
+ * skipped, so a caller walking a queue that reaches the same child twice gets the same
+ * answer — `loom trace` does exactly that. Ids cannot collide by accident: `spanId` is
+ * derived from the run id, and two runs have two ids.
+ *
+ * WHAT THIS COSTS, SAID PLAINLY. `pii` attributes are tokenised at `close` under the RUN
+ * that produced them, so a spliced tree carries tokens minted under two scopes: the same
+ * approver in a parent and in its child does not compare equal. That is a truthful picture
+ * of a real boundary — two journals, two replays, two gate sets — and it errs in the
+ * tightening direction, which is the only direction this repo allows a scope to move.
+ *
+ * AND WHAT IT DOES TO CONFORMANCE: a spliced trace covers two graphs, and `reconstructGraph`
+ * refuses it rather than certifying against whichever `loom.run` span sorted last. See
+ * `MULTIPLE_GRAPHS`. `loom trace` therefore computes conformance over the PARENT's own fold,
+ * which is the question it was always answering.
+ *
+ * Total over both arguments for `childRunIdsOf`'s reason; an unreadable argument splices
+ * nothing.
+ */
+export function spliceSubgraph(parent: readonly Span[], child: readonly Span[]): readonly Span[] {
+  const base = readSpans(parent);
+  const incoming = readSpans(child);
+  // AN EMPTY PARENT SPLICES NOTHING — there is no tree to splice into, and grafting a child
+  // into thin air would invent a root the caller did not ask for. `loom trace` cannot reach
+  // this: a parent with no spans has no links, so the queue is empty.
+  if (base.length === 0 || incoming.length === 0) return base;
+
+  const traceId = base[0]!.traceId;
+  const present = new Set(base.map((s) => s.spanId));
+  // WHICH PARENT SPAN CLAIMS WHICH CHILD ROOT — built from `links`, which is the one place
+  // the fold wrote the join down. A link whose target is not a root in `child` matches
+  // nothing and costs nothing.
+  const linkTarget = new Map<string, string>();
+  for (const s of base) for (const l of s.links) if (typeof l.spanId === "string") linkTarget.set(l.spanId, s.spanId);
+
+  const out: Span[] = [...base];
+  for (const s of incoming) {
+    if (present.has(s.spanId)) continue;
+    present.add(s.spanId);
+    const graft = s.parentSpanId === undefined ? linkTarget.get(s.spanId) : undefined;
+    out.push({
+      ...s,
+      traceId,
+      ...(graft === undefined ? {} : { parentSpanId: graft }),
+    });
+  }
+  // Stable by start time, so the merged array is still the waterfall `spansFrom` promises.
+  // A tie keeps insertion order — parent spans before the child spans grafted under them —
+  // which is what `cli.ts`'s tree walk reads for sibling order.
+  return out.sort((a, b) => a.startTime - b.startTime);
+}
+
+/**
+ * A trace, read as a list of spans this file can work with — the shared front door for the
+ * two functions above.
+ *
+ * An element is kept only if the three fields the splice actually writes are readable
+ * (`spanId`, `traceId`, `startTime`); everything else rides along on the clone. Skipping
+ * rather than throwing is `readProp`'s conflation one level up: a rendering function that
+ * dies on a malformed span costs the operator the whole picture, and invariant 8 says
+ * telemetry may drop data.
+ *
+ * **THE CLONE IS A READ TOO, AND THE SPREAD IS THE ONE THAT IS NOT `readProp`.** `{...s}`
+ * runs `ownKeys`, a descriptor lookup and a `[[Get]]` per key, all of them `Proxy` traps —
+ * so a claim of totality that stopped at the field reads would have had its counterexample
+ * in the line below it, which is the split this file has now paid for four times. It is in a
+ * `try` and a span that will not be copied is one this function did not read.
+ *
+ * `links` IS REBUILT RATHER THAN CARRIED, for the same reason and one level in: `isList`
+ * unwraps a `Proxy` to its target, so a link bag that ANSWERS the container test can still
+ * throw out of the `for…of` in `spliceSubgraph` — the `edges.taken` defect, in the one loop
+ * the join is about. Bounded indexing through `readProp`, and a link with no readable
+ * `spanId` joins nothing and is dropped.
+ *
+ * `MAX_CLAIMED` bounds the walk, so a trace claiming more than 65,536 spans splices nothing
+ * at all. Stated rather than hidden: it is a cost guard, the bound is far above any run this
+ * repo produces, and the failure is a picture that stops at the boundary — where it stopped
+ * before this function existed.
+ */
+function readSpans(v: unknown): Span[] {
+  if (!isList(v)) return [];
+  const n = readProp(v, "length");
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_CLAIMED) return [];
+  const out: Span[] = [];
+  for (let i = 0; i < n; i++) {
+    const s = readProp(v, String(i));
+    const id = readProp(s, "spanId");
+    const traceId = readProp(s, "traceId");
+    const startTime = readProp(s, "startTime");
+    if (typeof id !== "string" || typeof traceId !== "string" || typeof startTime !== "number") continue;
+    try {
+      out.push({ ...(s as Span), spanId: id, traceId, startTime, links: readLinks(readProp(s, "links")) });
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+/** A span's `links`, walked the way every other untrusted list in this file is. */
+function readLinks(v: unknown): readonly SpanLink[] {
+  if (!isList(v)) return [];
+  const n = readProp(v, "length");
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_CLAIMED) return [];
+  const out: SpanLink[] = [];
+  for (let i = 0; i < n; i++) {
+    const l = readProp(v, String(i));
+    const target = readProp(l, "spanId");
+    if (typeof target !== "string") continue;
+    const traceId = readProp(l, "traceId");
+    const attributes = readProp(l, "attributes");
+    out.push({
+      spanId: target,
+      ...(typeof traceId === "string" ? { traceId } : {}),
+      ...(attributes === undefined ? {} : { attributes: attributes as Readonly<Record<string, unknown>> }),
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
