@@ -108,10 +108,16 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 - **Name the set a claim covers.** "This is total" cannot be checked; a claim that names its members
   can.
 - Every module says *why it exists* at the top, not what it does.
-- **Tests are offline and deterministic — no network, no API key, no wall-clock dependence, and
-  as of 2026-08-29 there is NO declared exception.** `packages/core/test/scale.test.ts` was that
-  exception. It now asserts only on a count of the compiler's spec reads — byte-identical run to
-  run — and REPORTS the wall-clock ratio without asserting on it.
+- **Tests are offline and deterministic — no network, no API key, and as of 2026-08-29 no test
+  asserts on a RATIO OF TWO TIMINGS.** That distinction is the whole content of this entry, so
+  state it precisely rather than as "no wall-clock dependence": eight assertions still read a
+  clock, and all eight are ABSOLUTE bounds with an order-of-magnitude margin
+  (`ms < 100`, `elapsed < 3000`, and so on). Those are fine and are not what kept going red.
+  The two RATIOS are gone. `scale.test.ts` now asserts on a count of the compiler's spec reads
+  and merely reports its wall-clock ratio; `server/layout.test.ts` counts the reads
+  `layoutGraph` makes instead of timing it, which also made it STRICTER — the timing bound was
+  60x and a quadratic sweep is 25x, so the old assertion could not have caught the thing it was
+  written to catch, while the read ratio measures 5.37x against a bound of 10x.
   **This entry has carried a claim that did not reproduce three times, always about the same
   measurement, and that is the fact worth keeping rather than the numbers.** The first said the
   test flakes 1 run in 10 alone; the second said "believe a red one"; the third said "alone,

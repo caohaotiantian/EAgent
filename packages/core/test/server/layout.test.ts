@@ -168,21 +168,58 @@ test("layout with 500 live tasks is still a few milliseconds", () => {
   assert.ok(ms < 200);
 });
 
+/**
+ * How many property reads `layoutGraph` makes over the compiled graph, counted through a Proxy.
+ *
+ * The instrument, and the reason it replaced a stopwatch: `layoutGraph` reads the graph as it
+ * works, so this number IS its cost, and it is byte-identical run to run. The timing ratio it
+ * replaced could not be measured at this scale — re-measured 2026-08-29 over five runs, the
+ * 100-node sample came back 1.4, 1.5, 1.7, 23.7 and 58.7 ms, and TWICE the 500-node sample was
+ * faster than the 100-node one. A 30-iteration warm-up was tried and changed nothing, so it is
+ * not JIT. Copied from `test/scale.test.ts`'s `specReads`, which is the same instrument for the
+ * compiler and the precedent for this shape.
+ */
+function layoutReads(width: number, depth: number): number {
+  let reads = 0;
+  const seen = new WeakMap<object, unknown>();
+  const wrap = (v: unknown): unknown => {
+    if (typeof v !== "object" || v === null) return v;
+    const already = seen.get(v);
+    if (already !== undefined) return already;
+    const p = new Proxy(v, {
+      get(t, k, r) {
+        reads++;
+        return wrap(Reflect.get(t, k, r));
+      },
+    });
+    seen.set(v, p);
+    return p;
+  };
+  layoutGraph(wrap(bigGraph(width, depth)) as ReturnType<typeof bigGraph>);
+  return reads;
+}
+
 test("layout scales LINEARLY from 100 to 500 nodes", () => {
   // The real guard. Positions come from a precomputed rank, so this is arithmetic over
   // (nodes + edges) — anything super-linear means an accidental nested scan.
-  const small = bigGraph(10, 10);
-  const big = bigGraph(50, 10);
-  const time = (g: ReturnType<typeof bigGraph>): number => {
-    const t0 = process.hrtime.bigint();
-    for (let i = 0; i < 20; i++) layoutGraph(g);
-    return Number(process.hrtime.bigint() - t0) / 1e6;
-  };
-  const a = time(small);
-  const b = time(big);
-  console.log(`    100 nodes ×20: ${a.toFixed(1)} ms · 500 nodes ×20: ${b.toFixed(1)} ms`);
-  // 5× the nodes and 25× the edges; a quadratic sweep would be far past this.
-  assert.ok(b < Math.max(a, 1) * 60, `100→500 cost ${(b / Math.max(a, 0.01)).toFixed(1)}×`);
+  const small = layoutReads(10, 10);
+  const big = layoutReads(50, 10);
+  const ratio = big / small;
+  console.log(`    layout reads: ${String(small)} → ${String(big)} (${ratio.toFixed(2)}×)`);
+
+  // THE COUNTER MUST NOT GO BLIND — the same refusal `specReads` carries. If layout ever copies
+  // the graph on entry and works on the copy, every read collapses to one pass and the ratio
+  // measures the GRAPH's growth rather than layout's. Ten reads per element is far under what a
+  // real pass costs and far over one, so this fails rather than silently certifying.
+  const elements = 500 + 499;
+  assert.ok(
+    big > elements * 10,
+    `only ${String(big)} reads for ${String(elements)} nodes+edges — layout is no longer reading ` +
+      `the graph as it works, so this counter can no longer see its cost. Re-derive it before trusting it.`,
+  );
+  // 5× the nodes. Linear means ~5×; the bound is 10× so a constant-factor wobble is not a
+  // failure, while a quadratic sweep — which would be 25× — cannot hide under it.
+  assert.ok(big < small * 10, `100→500 cost ${ratio.toFixed(2)}× the graph reads`);
 });
 
 test("the layout carries its graphHash, so a client caches structure and never recomputes", () => {
