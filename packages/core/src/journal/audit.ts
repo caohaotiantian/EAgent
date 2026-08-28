@@ -52,6 +52,7 @@ export const AUDIT_RULES = [
   "task.leased-once",
   "run.submitted-is-first-and-once",
   "run.terminal-is-last-and-once",
+  "run.operator-pause-alternates",
   "gate.decided-once",
   "call-pairs-with-its-effect",
   "compensation.names-a-recorded-call",
@@ -266,6 +267,42 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const gateClosures = new Map<string, { seq: number; type: string }>();
   /** The FIRST terminal event, so a second one is reported against the end that really happened. */
   let terminalAt: { seq: number; type: string } | undefined;
+  /** Is an OPERATOR's pause currently in force? `projection.ts`'s `p.paused`, folded here. */
+  let operatorPaused = false;
+  let operatorPausedAt: number | undefined;
+
+  /**
+   * Effect keys that were IN FLIGHT when the run ended — read by the exemption below.
+   *
+   * Only keys started BEFORE the terminal event go in, which is the whole discrimination: an
+   * effect that STARTS after the end is new work on a dead run and stays a violation.
+   */
+  const startedBeforeTheEnd = new Set<string>();
+
+  /**
+   * THE ONE SHAPE `run.terminal-is-last-and-once` MUST NOT FIRE ON, and it fires on a journal
+   * the product writes on purpose.
+   *
+   * `cancel` does not wait for an in-flight effect to settle — `test/run/cancel-does-not-wait.ts`
+   * measures that and `run.cancelled.clean: false` is how the run says so. The effect then
+   * settles AFTER the terminal event, and `#invokeTool` journals what it did: `10 run.cancelled
+   * | 11 tool.called | 12 effect.completed`. Measured, this rule called both of those
+   * violations. They are not: `tool.called` and `effect.completed`/`effect.failed` for a key
+   * whose `effect.started` is already on the log are a RECORD OF WHAT HAPPENED, not an advance
+   * — `run.cancelled.unknownEffects` names that very effect as unaccounted for, so losing the
+   * record would be strictly worse than keeping it. Nothing schedules off them: `#commit`
+   * returns early on a terminal run, so the `task.committed`/`state.reduced`/`task.ready` that
+   * used to follow are gone, and those three are still in the set and still checked.
+   *
+   * THE EXEMPTION IS THREE TYPES AND A PRECONDITION, not a type list. An `effect.started` after
+   * the end is still a violation, and so is a settlement for a key that never started — both
+   * are a second writer doing new work, which is the case this rule exists for.
+   */
+  const settlesAnEffectStartedBefore = (e: JournalEvent): boolean => {
+    if (e.type !== "tool.called" && e.type !== "effect.completed" && e.type !== "effect.failed") return false;
+    const key = str(obj(e.payload)?.["key"]);
+    return key !== undefined && startedBeforeTheEnd.has(key);
+  };
 
   for (const e of live) {
     const seq = Number(e.seq);
@@ -285,13 +322,16 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           `the run already ended at seq ${String(terminalAt.seq)} with ${terminalAt.type}, and ends again here with ${e.type} — a run reaches a terminal state once`,
         );
       }
-    } else if (terminalAt !== undefined && ADVANCES_A_RUN.has(e.type)) {
+    } else if (terminalAt !== undefined && ADVANCES_A_RUN.has(e.type) && !settlesAnEffectStartedBefore(e)) {
       saw.add("run.terminal-is-last-and-once");
       add(
         "run.terminal-is-last-and-once",
         seq,
         `${e.type} at seq ${String(seq)} moves a run that ended at seq ${String(terminalAt.seq)} with ${terminalAt.type}`,
       );
+    } else if (terminalAt === undefined && e.type === "effect.started") {
+      const key = str(obj(e.payload)?.["key"]);
+      if (key !== undefined) startedBeforeTheEnd.add(key);
     }
 
     const p = obj(e.payload);
@@ -544,6 +584,58 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
       case "run.submitted":
         submissions.push(seq);
         break;
+      // ── run.operator-pause-alternates ──────────────────────────────────────────────────
+      //
+      // THE ONE INTERVENTION NO OTHER RULE CAN SEE. A duplicated terminal event is caught by
+      // `run.terminal-is-last-and-once`; a duplicated decision by `gate.decided-once`; a
+      // duplicated commit by `task.committed-once`. A duplicated PAUSE was caught by nothing,
+      // so it was invisible for ever — and the append that produced it was, until the commit
+      // that added this rule, an unconditional `RunLog.append` behind a `p.paused` check.
+      // Measured, two Engines over one store: `operator.command | run.suspended |
+      // operator.command | run.suspended`, both calls fulfilled. Two rows that read, to anyone
+      // folding this log, like two separate people stopping the run.
+      //
+      // WHY ALTERNATION AND NOT AT-MOST-ONCE. A run may legitimately be paused and resumed any
+      // number of times, so counting is the wrong question. What the fold makes true is the
+      // alternation itself: `projection.ts` sets `p.paused` on `run.suspended{reason:
+      // "operator"}` and clears it ONLY on `run.resumed{by:"operator"}`, and the engine's two
+      // verbs are guarded on that flag — `pause` returns early when it is set, `resume` refuses
+      // when it is not. So a second operator suspension with no operator resume between them is
+      // a state the engine cannot produce, and neither is the mirror.
+      //
+      // OPERATOR ROWS ONLY, and that is what keeps it off a healthy run — this file's first
+      // lesson. The gate broker writes `run.suspended{reason:"gate"}` per raise, so two gates
+      // raised in one wave put two suspensions in a row with no resume between, and its resumes
+      // carry `by:"gate"`. Neither touches `p.paused`, and neither is examined here.
+      //
+      // `by:"operator"` HAS EXACTLY ONE APPENDER — `Engine.resume`, which refuses unless
+      // `p.paused` — and `reason:"operator"` has exactly one, `Engine.pause`. Counted, not
+      // assumed: `/usr/bin/grep -ran '"run.resumed"' packages/core/src` finds two writers
+      // (`engine.ts`, `gates.ts`) and `projection.ts`' claim that a sweeper writes `by:"timer"`
+      // matches no appender in the tree. So a `by:"operator"` row with nothing behind it is not
+      // a shape the product can currently produce, and the mirror arm below is guarding a door
+      // rather than reporting a known case.
+      case "run.suspended":
+      case "run.resumed": {
+        const operator =
+          e.type === "run.suspended" ? str(p["reason"]) === "operator" : str(p["by"]) === "operator";
+        if (!operator) break;
+        saw.add("run.operator-pause-alternates");
+        const wants = e.type === "run.suspended";
+        if (operatorPaused === wants) {
+          const since = operatorPausedAt === undefined ? "no operator row precedes it" : `seq ${String(operatorPausedAt)}`;
+          add(
+            "run.operator-pause-alternates",
+            seq,
+            wants
+              ? `the run was already paused by an operator (${since}) and is paused again here with no operator resume between — two rows for one intervention`
+              : `this operator resume landed on a run no operator had paused (${since})`,
+          );
+        }
+        operatorPaused = wants;
+        operatorPausedAt = seq;
+        break;
+      }
       case "gate.raised": {
         const id = str(p["gateId"]);
         // THE OTHER HALF OF THE OVERSIGHT RECORD. A gate is the output of the guard chain, and

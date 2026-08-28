@@ -327,6 +327,15 @@ const DEFERRAL_INITIAL_MS = 1_000;
 const DEFERRAL_MAX_MS = 60_000;
 
 /**
+ * How many times `#intervene` re-decides against a moved head before it gives up.
+ *
+ * Eight, matching `gates.ts`' `MAX_DECISION_LAPS`, and for its reason: a bound rather than a
+ * spin, because the loop's exit depends on other writers stopping. Exhausting it is a refusal
+ * (`E_SEQ_CONFLICT`), never a write — the fail-closed answer for a guard that cannot decide.
+ */
+const MAX_INTERVENTION_LAPS = 8;
+
+/**
  * The failures that are NOT this node's failure — the whole membership test for a deferral.
  *
  * Named as a set rather than checked inline because the claim "these and no others" is the
@@ -356,27 +365,65 @@ const DEFERRAL_MAX_MS = 60_000;
  */
 const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED]);
 
+/**
+ * THE FAILURES THAT ARE NOT THIS NODE'S FAILURE, and therefore cannot be routed around.
+ *
+ * FIVE MEMBERS, and the criterion they share is one sentence: *no other node's answer is
+ * worth anything, because what broke is the run's ability to say something true.* An
+ * ordinary failed Task takes an `error` edge, and a join with `onBranchError: "skip"`
+ * absorbs it — so a code that belongs here and is missing produces a run reporting
+ * **succeeded** with a rescue arm's value in its output channel. That is the shape below,
+ * and each of these five has been measured in it.
+ *
+ *   `E_BUDGET_EXHAUSTED` · a verdict about the RUN's resources, not about this node's work.
+ *      Routing past it spends more of what has already run out. It is the floor of the D6.5
+ *      ladder (warn → degrade → gate → fail).
+ *
+ *   `E_REPLAY_DIVERGENCE` · the fold and the record disagree, so every decision downstream
+ *      would be reading a value the journal cannot be folded to. Invariant 2 is what makes
+ *      this fatal rather than routable.
+ *
+ *   `E_GATE_REQUIRED` · A SUPERVISION REQUIREMENT THAT CANNOT BE MET. Leaving it out was a
+ *      hole with a very quiet shape: a refused `separationOfDuties` gate is an ordinary
+ *      failed task, so an `error` edge or a skipping join absorbs it — measured, both
+ *      produce a run that reports **succeeded** with ZERO gates on the journal. The graph
+ *      reads "each item is human-approved" and behaves as "nothing was approved and nobody
+ *      was asked" — D7.9's worst available failure, reached through ordinary graph shapes,
+ *      and worse than a rejection because a rejection at least leaves `gate.raised` and
+ *      `gate.decided` behind for an auditor to find.
+ *
+ *   `E_PAYLOAD_UNRESOLVED` · A CHANNEL WHOSE BYTES CANNOT BE PRODUCED, for the reason the
+ *      paragraph above gives about routing. The state this run is meant to be reading is not
+ *      there, so no other node's answer is worth more than the one that could not be
+ *      computed, and "continue without it" is precisely the silent-wrong answer
+ *      externalisation must never introduce.
+ *
+ *   `E_EFFECT_UNRECORDED` · THE RUN NO LONGER KNOWS WHAT IT DID TO THE WORLD. `#servedToolEffect`
+ *      raises it when a re-execution's call sequence has moved and the recorded call at that
+ *      position is non-idempotent; declining to serve is necessary and not sufficient, and this
+ *      is the sufficient half. Measured before it was added, on the fixture in
+ *      `test/run/divergence-is-run-fatal.test.ts` — one `error` edge and a rescue node were
+ *      enough to turn the fail-closed refusal into `status=succeeded out="rescued"`. The
+ *      failure is not "this node's work did not work"; it is "the positional record and the
+ *      body disagree", which is the same class as `E_REPLAY_DIVERGENCE` one door over — and
+ *      it stayed out of this set for as long as it did because it is raised deep inside an
+ *      effect serve rather than by a policy check.
+ *
+ * WHAT IS DELIBERATELY OUT, because a named set needs its boundary:
+ *   - `E_LEASE_LOST` / `E_FENCING_STALE` — another worker owns this Task. The RUN is fine;
+ *     THIS WORKER is not, and ending the run would be one process killing another's work.
+ *   - `E_CAP_DENIED`, `E_TOOL_NOT_FOUND`, `E_TOOL_SOURCE_UNAVAILABLE` — "this node cannot do
+ *     this". A rescue arm genuinely is an answer to that, which is what `error` edges are for.
+ *   - `E_HUMAN_APPROVAL_REQUIRED` — out on purpose and stated so at its raise site: the run
+ *     continues so the ASK can be made. A gate that cannot be asked at all is the member
+ *     above, and the pair is the whole distinction.
+ */
 const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_BUDGET_EXHAUSTED,
   CODES.E_REPLAY_DIVERGENCE,
-  // A SUPERVISION REQUIREMENT THAT CANNOT BE MET IS THE SAME CLASS OF FACT, and leaving it
-  // out was a hole with a very quiet shape. A refused `separationOfDuties` gate is an
-  // ordinary failed task, so it takes an `error` edge and a join with `onBranchError: "skip"`
-  // absorbs it: measured, both produce a run that reports **succeeded** with ZERO gates on
-  // the journal. The graph reads "each item is human-approved" and behaves as "nothing was
-  // approved and nobody was asked" — D7.9's worst available failure, reached through ordinary
-  // graph shapes, and worse than a rejection because a rejection at least leaves `gate.raised`
-  // and `gate.decided` behind for an auditor to find. Nothing here is recoverable by routing:
-  // the run cannot be supervised, and continuing past that is the thing the gate exists to
-  // prevent.
   CODES.E_GATE_REQUIRED,
-  // A CHANNEL WHOSE BYTES CANNOT BE PRODUCED IS THE SAME CLASS, for the reason the paragraph
-  // above gives about routing: an ordinary failed Task takes an `error` edge, and a join with
-  // `onBranchError: "skip"` absorbs it into a run that reports **succeeded**. The state this
-  // run is meant to be reading is not there, so no other node's answer is worth more than the
-  // one that could not be computed, and "continue without it" is precisely the silent-wrong
-  // answer externalisation must never introduce.
   CODES.E_PAYLOAD_UNRESOLVED,
+  CODES.E_EFFECT_UNRECORDED,
 ]);
 
 interface Wave {
@@ -2188,16 +2235,14 @@ export class Engine {
    * would read, to anyone folding the log, like two separate interventions.
    */
   async pause(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
-    const p = await this.#requireLive(runId, "pause");
-    if (p.paused) return p;
-    const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
-    await this.#serialize(() =>
-      log.append([
-        { type: "operator.command", payload: { kind: "pause", args: { reason } }, actor: by },
-        { type: "run.suspended", payload: { reason: "operator" }, actor: by },
-      ]),
+    return this.#intervene(runId, "pause", (p) =>
+      p.paused
+        ? undefined
+        : [
+            { type: "operator.command", payload: { kind: "pause", args: { reason } }, actor: by },
+            { type: "run.suspended", payload: { reason: "operator" }, actor: by },
+          ],
     );
-    return (await this.projection(runId))!;
   }
 
   /**
@@ -2212,22 +2257,82 @@ export class Engine {
    * names what it is stuck on rather than an unblock nobody asked for.
    */
   async resume(runId: RunId, reason = "operator", by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
-    const p = await this.#requireLive(runId, "resume");
-    if (!p.paused) {
-      throw err.conflict(
-        CODES.E_ILLEGAL_TRANSITION,
-        `run ${runId} is not paused (it is ${p.status}${p.suspendedReason === undefined ? "" : `, suspended on ${p.suspendedReason}`}); resume undoes a pause and nothing else`,
-        { details: { runId, status: p.status } },
-      );
-    }
-    const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
-    await this.#serialize(() =>
-      log.append([
+    return this.#intervene(runId, "resume", (p) => {
+      if (!p.paused) {
+        throw err.conflict(
+          CODES.E_ILLEGAL_TRANSITION,
+          `run ${runId} is not paused (it is ${p.status}${p.suspendedReason === undefined ? "" : `, suspended on ${p.suspendedReason}`}); resume undoes a pause and nothing else`,
+          { details: { runId, status: p.status } },
+        );
+      }
+      return [
         { type: "operator.command", payload: { kind: "resume", args: { reason } }, actor: by },
         { type: "run.resumed", payload: { by: "operator" }, actor: by },
-      ]),
-    );
-    return (await this.projection(runId))!;
+      ];
+    });
+  }
+
+  /**
+   * ONE OPERATOR INTERVENTION, DECIDED AGAINST A HEAD AND WRITTEN CONDITIONAL ON IT.
+   *
+   * `pause` and `resume` used to write through `RunLog.append`, and `RunLog`'s own docstrings
+   * say why that is the wrong door: `append` "retries on seq conflict because the events are
+   * unconditional", `commit` "NEVER retries — the caller decided something was true at
+   * `expectedSeq`… the primitive that turns at-least-once execution into exactly-once state".
+   * Everything either verb does before its write is a decision conditional on the head — the
+   * run is not terminal AT `p.seq`, and it is (or is not) paused AT `p.seq`. Writing through
+   * the retrying door meant two writers who both read "not paused" both landed.
+   *
+   * MEASURED, two Engines over one store — a `loom serve` and a CLI, which is the ordinary
+   * deployment — with `Promise.allSettled` over two pauses. Both calls returned FULFILLED and
+   * the journal read `5 operator.command | 6 run.suspended | 7 operator.command | 8
+   * run.suspended`. `pause`'s own docstring already claimed the opposite: "IDEMPOTENT: a
+   * second pause on a paused run appends nothing. Two `run.suspended` rows would read, to
+   * anyone folding the log, like two separate interventions."
+   *
+   * THIS IS `HumanGateBroker.resolve`'S DEFECT, ONE DOOR OVER, and it is fixed the same way —
+   * so the shape is copied rather than reinvented. THE RETRY IS HERE AND IT IS NOT A
+   * RE-COMMIT: `commit` never retries, so a conflict comes back to the top and re-decides
+   * against the NEW head. A conflict raised by an unrelated append (a wave committing, a
+   * sweeper) is served by the next lap; a conflict raised by the OTHER operator's pause meets
+   * `p.paused` on the next lap and becomes the documented no-op, which is the right answer
+   * and the one the concurrent case never used to give. A bare re-`commit` at a refreshed seq
+   * would be the original defect with an extra step.
+   *
+   * `decide` returning `undefined` means "already true, append nothing"; throwing is a
+   * refusal, and it is re-evaluated on every lap so a loser reaches the same refusal a
+   * latecomer would.
+   *
+   * WHY THESE TWO AND NOT EVERY GUARDED APPEND IN THIS FILE. `#cancelTree` and `#finish` have
+   * the same read-then-append shape and are NOT converted here: a duplicate from either is
+   * caught by `journal/audit.ts`'s `run.terminal-is-last-and-once`, so it is a defect somebody
+   * eventually finds. A duplicated operator intervention was invisible to every rule that file
+   * had — which is why the fix for these two ships with the rule that makes them visible.
+   */
+  async #intervene(
+    runId: RunId,
+    verb: string,
+    decide: (p: RunProjection) => readonly NewEvent[] | undefined,
+  ): Promise<RunProjection> {
+    for (let attempt = 0; ; attempt++) {
+      const p = await this.#requireLive(runId, verb);
+      const events = decide(p);
+      if (events === undefined) return p;
+      const log = this.#runs.get(runId)?.log ?? this.#logFor(runId);
+      try {
+        await this.#serialize(() => log.commit(p.seq, events));
+        return (await this.projection(runId))!;
+      } catch (e) {
+        if (!isLoomError(e) || e.code !== CODES.E_SEQ_CONFLICT) throw e;
+        if (attempt + 1 >= MAX_INTERVENTION_LAPS) {
+          throw err.conflict(
+            CODES.E_SEQ_CONFLICT,
+            `run ${runId} could not be ${verb}d in ${MAX_INTERVENTION_LAPS} attempts — the journal head moved under every one`,
+            { details: { runId, verb } },
+          );
+        }
+      }
+    }
   }
 
   /**
@@ -5684,6 +5789,38 @@ export class Engine {
     }
 
     this.#recordEvidence(ctx, w, outcome);
+
+    // THE RUN MAY HAVE ENDED WHILE THIS TASK WAS IN FLIGHT — and until this line only the
+    // GATE arm above said so. `#cancelTree` already states the property this restores: "`#commit`
+    // returns early on a terminal run, so a Task that was `leased` when the cancel landed stayed
+    // `leased`". It did not; it returned early on one of its four exits, and the other three went
+    // on producing state for a run that was over.
+    //
+    // BOTH POST-OUTCOME ARMS, because both create work the cancel's sweep cannot reach — the
+    // sweep runs against the Tasks that exist WHEN IT RUNS, and everything below post-dates it:
+    //
+    //   - FAILURE: `task.retry_scheduled` + `task.ready`. Measured, on a tool that threw after
+    //     the cancel landed: `9 task.cancelled | 10 run.cancelled | 11 effect.failed |
+    //     12 task.retry_scheduled | 13 task.ready` — a Task in state `ready` inside a
+    //     `cancelled` run, which nothing will lease and nothing will ever end.
+    //   - SUCCESS: `task.committed` + `state.reduced` + the `task.ready` that `#activate`
+    //     emits for every edge this commit takes. A single-node graph cannot see that one;
+    //     with a second node behind a `seq` edge it is the node the operator cancelled the
+    //     run to prevent, readied by the run that was cancelled to prevent it.
+    //
+    // WHAT STOPS IS SCHEDULING, NOT EVIDENCE, and that split is deliberate. `#invokeTool` has
+    // already journaled `tool.called`/`effect.completed` (or `effect.failed`) by the time
+    // control reaches here, and those stay: `run.cancelled.unknownEffects` names this effect as
+    // unaccounted for, so the record of what it actually did is the one thing an operator
+    // reading that field will want. `#recordEvidence` is above this line for the same reason.
+    // Losing either would trade a scheduling defect for an auditing one.
+    //
+    // The lease is released, exactly as the two exits below do it, so the slot is not held by a
+    // Task that will never commit.
+    if (isTerminal(p.status)) {
+      ctx.leases.delete(w.task.taskId);
+      return;
+    }
 
     // A retryable failure with attempts left is rescheduled instead of committed.
     // The slot is released during the backoff, so a retry storm costs queue depth

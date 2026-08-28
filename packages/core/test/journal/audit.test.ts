@@ -426,6 +426,78 @@ test("run.terminal-is-last-and-once — a run that ended twice, and a run that k
     ev("gate.callback_rejected", { channel: "slack", reason: "run_not_found" }),
   ]);
   assert.deepEqual(rulesHit(scoredAfterwards), [], "an event outside the named ADVANCES_A_RUN set is not this rule's business");
+
+  // AND THE THIRD NEIGHBOUR, which this rule DID fire on: a cancel that landed mid-effect.
+  // `cancel` does not wait — `test/run/cancel-does-not-wait.test.ts` measures that, and
+  // `run.cancelled.clean: false` is how the run says so — so the effect settles afterwards and
+  // `#invokeTool` records what it did. Measured on a real engine run:
+  // `10 run.cancelled | 11 tool.called | 12 effect.completed`, both called violations.
+  const settledAfterTheCancel = fixture(() => [
+    ev("effect.started", { key: "slow@root#0:tool:0", kind: "tool", attempt: 1 }, { taskId: "slow@root#0" }),
+    ev("run.cancelled", { reason: "stop", clean: false, unknownEffects: ["slow@root#0:tool:0"] }, { actor: HUMAN }),
+    ev("tool.called", { key: "slow@root#0:tool:0", name: "slow.write", version: "1.0", ok: true }, { taskId: "slow@root#0" }),
+    ev("effect.completed", { key: "slow@root#0:tool:0", result: {}, resultDigest: "d" }, { taskId: "slow@root#0" }),
+  ]);
+  assert.deepEqual(
+    rulesHit(settledAfterTheCancel),
+    [],
+    "an effect that was ALREADY IN FLIGHT recording what it did is not the run moving forward",
+  );
+
+  // …AND THE EXEMPTION HAS A FLOOR. An effect that STARTS after the end is new work on a dead
+  // run, which is exactly what this rule is for, and a settlement for a key that never started
+  // is the same writer with its start missing.
+  const startedAfterTheEnd = fixture(() => [
+    ev("run.cancelled", { reason: "stop", clean: true }, { actor: HUMAN }),
+    ev("effect.started", { key: "late@root#0:tool:0", kind: "tool", attempt: 1 }, { taskId: "late@root#0" }),
+    ev("effect.completed", { key: "late@root#0:tool:0", result: {}, resultDigest: "d" }, { taskId: "late@root#0" }),
+  ]);
+  const late = audit(startedAfterTheEnd).violations.filter((v) => v.rule === "run.terminal-is-last-and-once");
+  assert.equal(late.length, 2, "a NEW effect after the end is still both events' worth of violation");
+});
+
+test("run.operator-pause-alternates — one pause that two planes both wrote, and its mirror", () => {
+  // THE INTERVENTION NO OTHER RULE IN THIS FILE COULD SEE. `Engine.pause` reads `p.paused` and
+  // then wrote through the RETRYING `RunLog.append`, so two planes over one journal both read
+  // "not paused" and both landed: `operator.command | run.suspended | operator.command |
+  // run.suspended`, both calls fulfilled. Nothing here fired on it — a duplicated terminal has
+  // `run.terminal-is-last-and-once`, a duplicated decision has `gate.decided-once`, and a
+  // duplicated operator intervention had nothing at all.
+  const pausedTwice = fixture(() => [
+    ev("operator.command", { kind: "pause", args: { reason: "console" } }, { actor: HUMAN }),
+    ev("run.suspended", { reason: "operator" }, { actor: HUMAN }),
+    ev("operator.command", { kind: "pause", args: { reason: "script" } }, { actor: HUMAN }),
+    ev("run.suspended", { reason: "operator" }, { actor: HUMAN }),
+  ]);
+  assert.deepEqual(rulesHit(pausedTwice), ["run.operator-pause-alternates"]);
+
+  // THE MIRROR, which is the same race one verb over: two resumes on one pause.
+  const resumedTwice = fixture(() => [
+    ev("run.suspended", { reason: "operator" }, { actor: HUMAN }),
+    ev("run.resumed", { by: "operator" }, { actor: HUMAN }),
+    ev("run.resumed", { by: "operator" }, { actor: HUMAN }),
+  ]);
+  assert.deepEqual(rulesHit(resumedTwice), ["run.operator-pause-alternates"]);
+
+  // WHAT IT DELIBERATELY DOES NOT CLAIM, and this is the half that keeps it off healthy runs.
+  // The gate broker writes `run.suspended{reason:"gate"}` per raise, so TWO GATES RAISED IN ONE
+  // WAVE put two suspensions in a row with no resume between them, and its resumes carry
+  // `by:"gate"`. Neither moves `p.paused`, so neither is examined. A pause/resume/pause cycle
+  // is legal too — the rule is alternation, not a count. (`by:"timer"` is in this fixture
+  // because `projection.ts` names it; no appender in `src/` writes it, and the rule treats it
+  // the same as any other non-operator value either way.)
+  const gatesAndCycles = fixture(() => [
+    ev("run.suspended", { reason: "gate" }),
+    ev("run.suspended", { reason: "gate" }),
+    ev("run.resumed", { by: "gate" }, { actor: HUMAN }),
+    ev("run.resumed", { by: "timer" }),
+    ev("run.suspended", { reason: "operator" }, { actor: HUMAN }),
+    ev("run.resumed", { by: "operator" }, { actor: HUMAN }),
+    ev("run.suspended", { reason: "operator" }, { actor: HUMAN }),
+    ev("run.resumed", { by: "operator" }, { actor: HUMAN }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(gatesAndCycles), [], "gate suspensions are outside the rule, and a cycle is not a duplicate");
 });
 
 test("task.leased-once — two fencing tokens for one attempt", () => {
