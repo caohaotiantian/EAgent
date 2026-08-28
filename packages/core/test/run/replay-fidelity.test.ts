@@ -22,7 +22,15 @@ import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver } from "../../src/graph/validate.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
+import type { RunProjection } from "../../src/run/projection.ts";
+import {
+  FunctionRegistry,
+  MockModelAdapter,
+  ModelRegistry,
+  ToolRegistry,
+  type ModelAdapter,
+  type ModelEvent,
+} from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
 
 const NOW = 1_700_000_000_000;
@@ -134,4 +142,141 @@ test("A SPEC THAT MOVED IS STILL REPORTED AS THE GRAPH HASH", async () => {
   assert.ok(frame !== undefined);
   assert.equal(frame!.expected, original.graphHash, "a spec change reports the recorded graph hash");
   assert.equal(frame!.actual, changed.graphHash);
+});
+
+/**
+ * A GUARD THAT ONLY THE LIVE PATH CAN EVALUATE IS A REPLAY DIVERGENCE.
+ *
+ * D.7.6 added a refusal for an adapter whose terminal `done` frame names no provider, and built it
+ * out of two locals that exist only while the stream is being read — `sawDoneFrame` and
+ * `servingProvider`. Neither reached the journal, so `RecordedModelTurn` carried nothing the guard
+ * could read and the refusal could not fire on replay. MEASURED, through `replayRun`:
+ *
+ *   LIVE   status= failed err= E_PROVIDER_BAD_REQUEST a= undefined
+ *   REPLAY match= false
+ *    { k: task.committed, e: "failed",   a: "succeeded" }
+ *    { k: state.reduced,  e: {"q":"hi"}, a: {"q":"hi","a":"an answer nobody may use"} }
+ *    { k: run.failed,     e: "failed",   a: "succeeded" }
+ *
+ * The shadow run wrote to the channel the exact string the live run had refused. That is
+ * CLAUDE.md's first non-negotiable — "a value a decision reads must be reconstructable by folding
+ * the journal" — and the SIBLING guard in the same function is built the other way on purpose:
+ * `turnRefusal` re-derives because `finishReason` IS in `RecordedModelTurn`. The fix puts
+ * `provider` there beside it.
+ *
+ * THE FIELD IS TRI-STATE, AND THE THIRD TEST BELOW IS WHY. `""` is a frame that arrived and named
+ * nobody, which refuses; ABSENT is no terminal frame at all, which the live path allows — and
+ * absent is also what every journal written before this field says, so collapsing the two would
+ * make an old recording replay as a refusal of a run that succeeded.
+ */
+
+/** An untyped adapter: a terminal frame with no `provider`. Only `--extension-module` code can. */
+class NamelessAdapter implements ModelAdapter {
+  readonly provider = "wrapper";
+  async *stream(): AsyncIterable<ModelEvent> {
+    yield { type: "text_delta", text: "an answer nobody may use" } as ModelEvent;
+    yield {
+      type: "done",
+      message: { role: "assistant", content: "an answer nobody may use" },
+      finishReason: "stop",
+      usage: { inputTokens: 5, outputTokens: 5, costUsd: 0.0001, wallMs: 0 },
+    } as unknown as ModelEvent;
+  }
+  priceOf(): number {
+    return 0;
+  }
+  estimateOf(): number {
+    return 0;
+  }
+  outputCeilingOf(): number {
+    return 1024;
+  }
+}
+
+/** The other shape: a stream that ends with no terminal frame at all. The live path ALLOWS it. */
+class FramelessAdapter implements ModelAdapter {
+  readonly provider = "wrapper";
+  async *stream(): AsyncIterable<ModelEvent> {
+    yield { type: "text_delta", text: "partial" } as ModelEvent;
+  }
+  priceOf(): number {
+    return 0;
+  }
+  estimateOf(): number {
+    return 0;
+  }
+  outputCeilingOf(): number {
+    return 1024;
+  }
+}
+
+/** Run one agent node live under `adapter`, then replay the journal it wrote. */
+async function liveThenReplay(adapter: ModelAdapter): Promise<{
+  live: RunProjection;
+  report: Awaited<ReturnType<typeof replayRun>>;
+}> {
+  const res = shifting();
+  const models = new ModelRegistry();
+  models.register(adapter, true);
+  const store = new MemoryStateStore({ now: () => NOW });
+  const tools = new ToolRegistry();
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions: new FunctionRegistry(),
+    models,
+    now: () => NOW,
+    sleep: async () => {},
+    resolver: res.resolver,
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 10 } },
+  });
+  const graph = compileOrThrow({ spec: spec(), resolver: res.resolver, tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { q: "hi" } });
+  const live = await engine.advance(runId);
+  const report = await replayRun({
+    store,
+    runId,
+    graph,
+    engine: { tools, functions: new FunctionRegistry(), models, resolver: res.resolver },
+  });
+  return { live, report };
+}
+
+const diverged = (r: Awaited<ReturnType<typeof replayRun>>): string => JSON.stringify(r.frames.filter((f) => !f.match));
+
+test("A PROVIDER REFUSAL THE JOURNAL RECORDED REFUSES AGAIN ON REPLAY, and the refused text stays off the channel", async () => {
+  const { live, report } = await liveThenReplay(new NamelessAdapter());
+
+  assert.equal(live.status, "failed");
+  assert.equal(live.error?.code, "E_PROVIDER_BAD_REQUEST");
+  assert.equal(live.channels["a"], undefined, "the live run refused, so nothing reached the channel");
+
+  assert.equal(report.match, true, `a faithfully recorded refusal must replay green: ${diverged(report)}`);
+  assert.equal(report.replayed.status, "failed", "the replay must reach the same verdict");
+  assert.equal(report.replayed.error?.code, "E_PROVIDER_BAD_REQUEST", "and for the same reason, re-derived from the record");
+  assert.equal(report.replayed.channels["a"], undefined, "the shadow run must not write the string the live run refused");
+});
+
+test("THE CONTROL: a frame that NAMES its provider replays green", async () => {
+  const named = new MockModelAdapter({ provider: "leaf", script: () => ({ text: "ok", finishReason: "stop" }) });
+  const { live, report } = await liveThenReplay(named);
+
+  assert.equal(live.status, "succeeded", JSON.stringify(live.error ?? {}));
+  assert.equal(report.match, true, diverged(report));
+  assert.equal(report.replayed.status, "succeeded");
+  assert.equal(report.replayed.channels["a"], "ok");
+});
+
+test("A TURN WITH NO TERMINAL FRAME IS NOT A REFUSAL — absent must not be read as the empty string", async () => {
+  // The live path allows this: a stream that never finished is a different question from a frame
+  // that named nobody, and D.7.6 answers only the second. What matters here is that the replay
+  // AGREES with it — and this is the same reading every journal written before
+  // `RecordedModelTurn.provider` gets, so it is also the test that old recordings are not
+  // re-judged under a rule their binary never had.
+  const { live, report } = await liveThenReplay(new FramelessAdapter());
+
+  assert.equal(live.status, "succeeded", JSON.stringify(live.error ?? {}));
+  assert.equal(report.match, true, diverged(report));
+  assert.equal(report.replayed.status, "succeeded", "an absent `provider` must replay as the run it was, not as a refusal");
 });

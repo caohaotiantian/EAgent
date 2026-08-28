@@ -4571,12 +4571,28 @@ export class Engine {
       const shaped = await this.#filterHook(ctx, w.task, "preModel", req);
 
       let recordedProvider = "replay";
-      let servingProvider: string | undefined;
-      // Whether a live stream produced a terminal `done` frame at all. Distinct from
-      // `servingProvider === undefined`, which cannot tell "the adapter named nobody" from
-      // "the adapter never finished" -- and only the first is D.7.6's refusal. An adapter that
-      // yields no `done` frame is a separate question this change does not answer.
-      let sawDoneFrame = false;
+      // WHO THE TERMINAL `done` FRAME NAMED — TRI-STATE, AND JOURNALLED. D.7.6's refusal below
+      // reads exactly this value, and a replay has to reach the same verdict from the record
+      // alone, so the record has to carry it: `RecordedModelTurn.provider`.
+      //
+      //   `undefined`  no terminal `done` frame at all. Nothing named anything, so there is
+      //                nothing to refuse -- and it is also what a journal written before this
+      //                field says, which reads correctly rather than by luck: the run such a
+      //                journal records did not refuse here either, so neither does its replay.
+      //                Replay reproduces what happened; it does not re-judge old runs under new
+      //                rules. (`""` and `undefined` are therefore NOT interchangeable here, and
+      //                that is the whole reason the empty string is written rather than omitted.)
+      //   `""`         a frame arrived and named nobody. THAT is the refusal.
+      //   a name       the leaf that served it -- read off the frame rather than off the adapter
+      //                this loop is holding, because that adapter is a `RoutingAdapter` in every
+      //                CLI deployment and a `FallbackAdapter` may have answered from a tier
+      //                nobody named.
+      //
+      // TWO LIVE-ONLY LOCALS USED TO STAND HERE (`sawDoneFrame`, `servingProvider`) and neither
+      // survived the append, so the guard could only ever fire on the live path: a faithfully
+      // recorded refusal replayed `succeeded` and wrote the refused text to the channel. One
+      // value that the journal carries is what makes it fire on all three paths.
+      let framedProvider: string | undefined;
       let reservation;
       // THE CEILING THIS TURN WAS SENT UNDER, hoisted out of the reservation because two things
       // need it: the token budget charges against it, and a turn that comes back truncated has
@@ -4765,14 +4781,24 @@ export class Engine {
       try {
         if (servedTurn !== undefined) {
           const rec = servedTurn.result as RecordedModelTurn;
+          // The same tri-state the live loop below writes, read back. A turn this task already
+          // completed and had refused is refused again on the resume, rather than let through by
+          // a guard that only the first attempt could evaluate.
+          framedProvider = rec.provider;
           assistant = { role: "assistant", content: rec.content, ...(rec.toolCalls === undefined ? {} : { toolCalls: rec.toolCalls }) };
           finish = rec.finishReason;
           turnUsage = rec.usage;
         } else if (this.#replay !== undefined) {
           // Served, not called. `adapter.stream` is never reached, so replay makes
           // no network request and costs nothing.
-          const rec = this.#replay.require(key) as { result: RecordedModelTurn & { provider?: string } };
-          recordedProvider = rec.result.provider ?? recordedProvider;
+          const rec = this.#replay.require(key) as { result: RecordedModelTurn };
+          framedProvider = rec.result.provider;
+          // The LEAF the recording named, so the shadow journal's `model.called.provider` says
+          // what the original's did instead of the literal `"replay"`. `""` is not a name: it is
+          // the frame that named nobody, which the refusal below handles and which must not be
+          // written into a field whose readers (`telemetry/spans.ts`'s `gen_ai.system`) treat it
+          // as an identity.
+          recordedProvider = rec.result.provider !== undefined && rec.result.provider !== "" ? rec.result.provider : recordedProvider;
           assistant = { role: "assistant", content: rec.result.content, ...(rec.result.toolCalls === undefined ? {} : { toolCalls: rec.result.toolCalls }) };
           finish = rec.result.finishReason;
           turnUsage = rec.result.usage;
@@ -4782,14 +4808,12 @@ export class Engine {
               assistant = ev.message;
               finish = ev.finishReason;
               turnUsage = ev.usage;
-              // WHO ACTUALLY SERVED IT — D.7.6. Read off the frame rather than off the adapter
-              // this loop is holding, because that adapter is a `RoutingAdapter` in every CLI
-              // deployment and a `FallbackAdapter` may have answered from a tier nobody named.
-              // Left `undefined` when the frame omits it, which only an untyped adapter can do;
-              // the refusal below is what happens then, and it is deliberately NOT a fallback
-              // to `adapter.provider` — that fallback IS the bug this removes.
-              sawDoneFrame = true;
-              servingProvider = typeof ev.provider === "string" && ev.provider !== "" ? ev.provider : undefined;
+              // WHO ACTUALLY SERVED IT — D.7.6. `""` when the frame omits it, which only an
+              // untyped adapter can do; the refusal below is what happens then, and it is
+              // deliberately NOT a fallback to `adapter.provider` — that fallback IS the bug this
+              // removes. Assigned here and nowhere else on this path, so "a frame arrived" and
+              // "it named nobody" are one fact and get journalled as one field.
+              framedProvider = typeof ev.provider === "string" ? ev.provider : "";
             }
           }
         }
@@ -4804,6 +4828,10 @@ export class Engine {
         );
         throw le;
       }
+
+      // A NAME, OR NOTHING — never the empty string, which is `framedProvider`'s "the frame named
+      // nobody" and is not an identity anything may be attributed to.
+      const servingProvider = framedProvider === undefined || framedProvider === "" ? undefined : framedProvider;
 
       // A SERVED TURN COST NOTHING THIS TIME. The reservation is released at zero, so the run's
       // spend is not charged twice for one call; the task-local `usage` still accumulates the
@@ -4862,6 +4890,14 @@ export class Engine {
                     content: assistant?.content ?? "",
                     finishReason: finish,
                     usage: turnUsage,
+                    // WHAT THE `done` FRAME NAMED, INCLUDING WHEN IT NAMED NOBODY. The refusal
+                    // below is decided from this field on every path that does not make the call,
+                    // exactly as `turnRefusal` is decided from `finishReason` beside it — the
+                    // sibling guard was built this way on purpose and this one was not, so a
+                    // recorded refusal replayed green and put the refused text on the channel.
+                    // Omitted only when there was no frame at all, which is the one case that
+                    // must NOT refuse; see `framedProvider`.
+                    ...(framedProvider === undefined ? {} : { provider: framedProvider }),
                     ...(assistant?.toolCalls === undefined ? {} : { toolCalls: assistant.toolCalls }),
                   };
                   return { key, result: rec, resultDigest: digest(rec) };
@@ -4884,16 +4920,20 @@ export class Engine {
       // wrote. `outputCeilingOf` above is required on `ModelAdapter` and so is this field, so a
       // well-typed adapter cannot reach this arm; an `--extension-module` one can.
       //
-      // A SERVED or REPLAYED turn reaches no adapter, so `sawDoneFrame` is false and there is
-      // no frame to have omitted anything -- nothing to refuse.
-      if (sawDoneFrame && servingProvider === undefined) {
+      // A SERVED or REPLAYED turn reaches no adapter, and it does not need one: the frame's
+      // answer is in the record, so the refusal RE-DERIVES rather than switching itself off.
+      // It used to read two live-only locals, which is the shape `replay-fidelity.test.ts`
+      // exists to condemn — a faithfully recorded refusal replayed `match: false` with
+      // `state.reduced` carrying the exact string the live run had refused.
+      if (framedProvider === "") {
+        const who = adapter === undefined ? "the recorded turn" : `model adapter "${adapter.provider}"`;
         return {
           status: "failed",
           writes: {},
           usage,
           error: err.validation(
             CODES.E_PROVIDER_BAD_REQUEST,
-            `node "${w.node.id}" turn ${String(turn)}: model adapter "${adapter?.provider ?? "(none)"}" ended the turn ` +
+            `node "${w.node.id}" turn ${String(turn)}: ${who} ended the turn ` +
               `without naming the provider that served it — the \`done\` frame's required \`provider\` field was missing ` +
               `or empty. The journal is the only record of which provider answered, and a wrapper's own name is not that ` +
               `record. Refusing the turn rather than attributing it to the wrapper.`,
@@ -7294,6 +7334,19 @@ interface RecordedModelTurn {
   readonly content: string;
   readonly finishReason: string;
   readonly usage: UsageRecord;
+  /**
+   * WHO THE `done` FRAME NAMED — the input to D.7.6's refusal, recorded so a replay can reach
+   * the same verdict.
+   *
+   * OPTIONAL, AND THE THREE STATES ARE NOT TWO. A name is the leaf that served the turn; `""` is
+   * a frame that arrived and named nobody, which `#runAgent` refuses; ABSENT is "no terminal
+   * frame at all", which it does not — and absent is also what every journal written before this
+   * field says, so an old recording replays as the run it actually was rather than being
+   * re-judged under a rule its binary never had. `model.called.provider` beside it is not a
+   * substitute: that field falls back to the wrapper's own name, so it cannot tell a turn nobody
+   * claimed from one the router served.
+   */
+  readonly provider?: string;
   readonly toolCalls?: readonly ModelToolCall[];
 }
 
