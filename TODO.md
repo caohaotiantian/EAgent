@@ -83,8 +83,10 @@ does, `D.9` whether a function body's output becomes a journaled effect, `D.10` 
 - **Rate limits** — one row of §A's failure table stays RED: a 429 arriving after a
   non-idempotent `effect.started` with no `effect.completed` refuses both a retry and a
   deferral, because the world may already have changed. A deferral still counts toward E4's
-  consecutive-failure streak. **Admission control is untouched** — `E_ADMISSION_REJECTED` is
-  raised by nothing and `POST /runs` admits everything it can authenticate.
+  consecutive-failure streak. **Admission control is untouched**: `POST /runs` admits everything
+  it can authenticate. The code that would refuse, `E_ADMISSION_REJECTED`, was DELETED rather
+  than left unraised — `errors.ts` cut nine such codes under "a code arrives with its raiser, in
+  the same change" — so the gap is a missing mechanism, not a declared code nobody raises.
 - **Subgraph spans** — there is no OTLP exporter in the repo, so `SpanLink.traceId` has no
   consumer outside the splice; there is no HTTP trace endpoint; the span taxonomy was NOT grown
   (a subgraph still renders as `loom.tool`), because a ninth name is a D9.1 decision.
@@ -725,16 +727,18 @@ Naming that here rather than letting them sit unowned:
 ---
 ## A · Defects and unguarded behaviour
 
-**Re-checked 2026-08-25 — 4 items: 1 DONE · 2 partial · 1 open.** One line each; the command,
-the output and the full finding for every item are in
-[`docs/todo-recheck-2026-08-25.md`](docs/todo-recheck-2026-08-25.md#section-h).
+**Re-checked 2026-08-25 — 22 findings, written as prose below.**
+The command and its output for every finding are in
+[`docs/todo-recheck-2026-08-25.md`](docs/todo-recheck-2026-08-25.md) — search it for the finding's
+own text. The anchor that stood here was `#section-h`, which is §H's, and came with the copied
+table below.
 
-| item | verdict | finding |
-|---|---|---|
-| `H.1` `packages/eagent/tui` — **deleted** as part of this … | partial | COUNT WRONG: 'two tests that assert the directory exists' is ONE. |
-| `H.2` The web frontend was already designed once and closed, … | partial | Accurate, and now sharper than written: the terminal client was dropped 2026-07-27, REBUILT two days later as e9b8701 'feat(phase2): the tui/ package …. |
-| `H.3` `bin/loom` is gitignored and goes stale on any source … | open | Standing condition, correctly stated, and it bit during this audit — the checked-out binary is already 109s behind src at HEAD. |
-| `H.4` Commits land under the human author's identity only. No … | **DONE** | NOT A BACKLOG ITEM — it is a standing project rule already stated at CLAUDE.md:76-77, so TODO.md:310-311 is a duplicate of a contract file and will …. |
+**§A's items are the bullets below, not a table.** The four-row table that stood here was a
+verbatim copy of §H's — same rows `H.1`–`H.4`, same tally, same `#section-h` anchor — so this
+section indexed somebody else's work and its header counted somebody else's items. Removed
+rather than rebuilt: §A's re-check produced 22 findings and they are written as prose below,
+where each carries its own reproduction. A table that restates them would be a second place to
+keep in sync, which is how the copy got here.
 
 
 **The whole product path has now been walked end to end**, on a real graph through `bin/loom`:
@@ -855,7 +859,7 @@ Each was verified against the code, not remembered.
   NOTHING, because the validator computed the floor from `reads` alone and concluded the
   declaration was meaningful.
 
-- **`E_ADMISSION_REJECTED` is raised by nothing.** `POST /runs` admits everything it can
+- **`E_ADMISSION_REJECTED` was deleted, not left unraised.** `POST /runs` admits everything it can
   authenticate. There is no queue, no depth limit, no token bucket.
 - ~~**A provider rate limit sleeps holding the worker slot — AND THAT SLEEP IS THE ONLY THING
   MAKING A 429 SURVIVABLE.**~~ **FIXED 2026-08-28, on the third attempt.** What changed is not
@@ -903,7 +907,7 @@ Each was verified against the code, not remembered.
   - `loom run`'s `MAX_BACKOFF_WAITS` is 64 and a deferral can be up to 60 s, so a wide
     fan-out of rate-limited tasks can still exhaust the CLI's patience. It reports rather than
     hangs, which is why it was left.
-  - `E_ADMISSION_REJECTED` is still raised by nothing. This fixes the backpressure half of
+  - `E_ADMISSION_REJECTED` was DELETED rather than left unraised (`errors.ts`: "a code arrives with its raiser, in the same change"). This fixes the backpressure half of
     D.4; admission control is untouched.
 
   Original entry, reframed 2026-08-26 after an attempt to fix the stated defect made
@@ -1006,7 +1010,7 @@ Each was verified against the code, not remembered.
 
 ## B · Declared and wired to nothing
 
-**Re-checked 2026-08-25 — 13 items: 4 partial · 9 open.**
+**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 11 items: 1 DONE · 4 partial · 6 open.**
 
 | item | verdict | what running it showed |
 |---|---|---|
@@ -1015,7 +1019,7 @@ Each was verified against the code, not remembered.
 | `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (e93f874). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
 | `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
 | `B.5` **Retention tiering** — proven by test, zero callers, so a | open | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. |
-| `B.6` ~~**The evolution subsystem is now REACHABLE but not wired.**~~ | **CLOSED 2026-08-27/28** | Every member the entry named as "still uncalled" now has a caller on the `cli.ts` product path, and the verbs that call them ship: `loom score`, `loom cohort`, `loom promote` (replayed AND `--against-cohort`), `loom suite freeze`. Counted in cli.ts: measureCohort 15, cohortKeyOf 8, isGolden 9, scoreTrajectory 9, promotionCeiling 3, gateCandidate 11, runEvalSuite 6, freezeSuite 3. `readSignals` and `outcomeOf` have ZERO direct callers there and are reached transitively — `score.ts:398` and `:408`, inside `scoreTrajectory` — which is reachability, not a second zombie. Driven end to end against a live provider: `docs/evolution-loop-2026-08-27.md`. |
+| `B.6` ~~**The evolution subsystem is now REACHABLE but not wired.**~~ **CLOSED 2026-08-27/28** — every member named below has callers on the `cli.ts` product path behind shipped verbs (`loom score`, `cohort`, `promote` in both modes, `suite freeze`), and the loop was driven end to end against a live provider. See `B.6` and `docs/evolution-loop-2026-08-27.md`. Original reading:~~ | **CLOSED 2026-08-27/28** | Every member the entry named as "still uncalled" now has a caller on the `cli.ts` product path, and the verbs that call them ship: `loom score`, `loom cohort`, `loom promote` (replayed AND `--against-cohort`), `loom suite freeze`. Counted in cli.ts: measureCohort 15, cohortKeyOf 8, isGolden 9, scoreTrajectory 9, promotionCeiling 3, gateCandidate 11, runEvalSuite 6, freezeSuite 3. `readSignals` and `outcomeOf` have ZERO direct callers there and are reached transitively — `score.ts:398` and `:408`, inside `scoreTrajectory` — which is reachability, not a second zombie. Driven end to end against a live provider: `docs/evolution-loop-2026-08-27.md`. |
 | `B.7` **Quorum, delegation and trust-tier approvals** — delibera | open | Confirmed, all four shapes. "trust-tier" is ApprovalSpec `mode: "tiered"`. The refusals are at graph/validate.ts:1997-2002 (mode), :2003 (k), :2044-2046 (delegation), and each… |
 | `B.8` **The operator intervention surface** — no pause, resume,  | partial | Four of the five named verbs are genuinely absent (pause, resume, steer, kill) and cancel does exist, so that half stands. "redirect" is wrong: a human answering a gate can re… |
 | `B.9` **The agent-to-agent mailbox** — designed, unbuilt; the ed | open | Both halves confirmed. `mailbox` is a declared effect kind with no writer, which is the same defect class as B.12's event types but is not covered by either registry there. |
@@ -1069,7 +1073,7 @@ believes a feature is present.
   reach INSIDE `policy` or `budget`; see §A0.
 - **Retention tiering** — proven by test, zero callers, so a journal never leaves the hot tier and
   grows without bound.
-- **The evolution subsystem is now REACHABLE but not wired.** `agent().trajectory(runId)` folds a
+- ~~**The evolution subsystem is now REACHABLE but not wired.**~~ **CLOSED 2026-08-27/28** — every member named below has callers on the `cli.ts` product path behind shipped verbs (`loom score`, `cohort`, `promote` in both modes, `suite freeze`), and the loop was driven end to end against a live provider. See `B.6` and `docs/evolution-loop-2026-08-27.md`. Original reading: `agent().trajectory(runId)` folds a
   run into the shape the scorer reads, so capture has a caller for the first time. Still uncalled:
   cohort measurement, promotion ceilings and baselines — and the generator stays deferred, because
   under roughly thirty scored trajectories per cohort any candidate is fitted to noise.
@@ -1106,7 +1110,7 @@ believes a feature is present.
 - **A worker pool for CPU-bound function bodies** — declared on the schema, warns at compile that
   it does nothing; a long body blocks the event loop and every task in the wave with it.
 - **`run.cancelled.forced`** — written once as `false`, read by nobody, named by no document.
-- **Ten error codes and six event types with no writer**, each excused in a registry.
+- ~~**Ten error codes and six event types with no writer**~~ **STALE 2026-08-28** — the excuse lists were cut and the sets shrank: ONE unraised code (`E_JOIN_TIMEOUT`) and FIVE unappended event types. `E_ADMISSION_REJECTED`, named here and three other places as "raised by nothing", no longer exists at all — `errors.ts` deleted it under the rule "a code arrives with its raiser, in the same change". Original reading: **with no writer**, each excused in a registry.
   **Recounted 2026-08-25:** the event-type half is exactly right; the error-code half was stale by
   one — `E_TOOL_SCHEMA_INVALID` gained a raiser in `069faf4` and the count was not updated. Both
   sets are pinned as exact sets with length-checked reasons in `registries.test.ts`.
@@ -1119,7 +1123,7 @@ believes a feature is present.
 
 ## C · Unbuilt observability, which several other items depend on
 
-**Re-checked 2026-08-25 — 13 items: 2 partial · 10 open · 1 stale.**
+**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 13 items: 1 DONE · 2 partial · 9 open · 1 stale.**
 
 | item | verdict | what running it showed |
 |---|---|---|
@@ -1241,7 +1245,7 @@ is a better view of nothing.
 | `D.1` **The first real workflow to port.** Nobody has yet used t | **DONE** | (i) DECISION: ANSWERED BY DEMONSTRATION 2026-08-27/28 — two workflows are ported, shipped in `examples/graphs/` and DRIVEN against a live GLM-5.2: `self-review` (the one that needs a real model) and `review-bench` (33 live runs, one cohort key, $1.59 all in). The whole record is `docs/evolution-loop-2026-08-27.md`. The observable below is what made the question worth asking and is now false. Original reading. (ii) OBSERVABLE: the only run that ever reached durable storage is a one-node graph named "g" with empty inputs that FAILED before running a body; no graph… |
 | `D.2` **The real numbers** — tenants, concurrent runs, runs/day, | open | (i) DECISION: OPEN. (ii) OBSERVABLE: the word 'tenants' has no referent in the running system — `TenantId` is declared and used nowhere, and no tenant column reaches the sqlit… |
 | `D.3` **When a compensation edge fires** — on task failure, on r | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it — today the answer is 'never, on any of the three'. (ii) OBSERVABLE: a live engine run whose tool node throws leaves the compensation target with no Task at… **ANSWERED + BUILT 2026-08-28.** The maintainer's answer was ON RUN FAILURE AND ON REWIND, and both now run: `planCompensation` walks the journal in descending seq and `#compensate` dispatches each undo through `#invokeTool` under the `compensate` effect kind, with three journaled states (compensated / failed / not attempted) rather than two. Two defects found on the way in and fixed: a rewind that hid the record while leaving the effect standing, and a resumed rollback that undid its own undos. |
-| `D.4` **Rate-limit backpressure and admission control** — see A. | partial | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is still OPEN — `E_ADMISSION_REJECTED` is raised by nothing. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `e4e4f01`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
+| `D.4` **Rate-limit backpressure and admission control** — see A. | partial | (i) DECISION: the BACKPRESSURE half is ANSWERED and BUILT 2026-08-28; ADMISSION CONTROL is still OPEN — `E_ADMISSION_REJECTED` was deleted, not left unraised. (ii) OBSERVABLE — DOES A 429 SLEEP INSIDE THE WORKER SLOT? **No longer.** It did: measured through an engine at `e4e4f01`, six 8-second holds inside one leased Task while the journal read `… task.leased policy.decided effect.started` — leased, uncommitted, nothing to reschedule against. `postJson` now reports a 429 instead of holding it and the engine schedules a DEFERRAL that charges no attempt. See §A for the model decision, the bound, and the one row that stays red. |
 | `D.5` **The identity and permission source of truth** for approv | open | (i) DECISION: OPEN. (ii) OBSERVABLE: an approvers list naming a group or a role compiles clean and can never be satisfied, because the runtime check is exact string equality —… |
 | `D.6` which approval callback is mandatory | open | (i) DECISION: OPEN. (ii) OBSERVABLE: of the three DeliveryChannels that ship, exactly one can be answered. `channel.parseCallback !== undefined` IS the answerability test (del… |
 | `D.7` providers required at launch | partial | (i) DECISION: half ANSWERED IN CODE, half OPEN. The launch set is closed and ENFORCED at boot — `PROVIDERS` (cli.ts:815) is exactly {anthropic, openai}, and OpenAIAdapter with… |
@@ -1383,7 +1387,7 @@ Kept because re-deriving these costs more than reading them, and each was a real
 
 ## F · Hard-won facts worth carrying forward
 
-**Re-checked 2026-08-25 — 15 items: 6 DONE · 5 partial · 4 open.**
+**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 16 items: 7 DONE · 5 partial · 4 open.**
 
 | item | verdict | what running it showed |
 |---|---|---|
@@ -1454,11 +1458,11 @@ again. **They are stated as properties to preserve, not as history to honour.**
 
 ## G · From the 2026 field survey — new work the redesign creates
 
-**Re-checked 2026-08-25 — 10 items: 1 DONE · 5 partial · 3 open · 1 WRONG.**
+**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 8 items: 1 DONE · 4 partial · 3 open.**
 
 | item | verdict | what running it showed |
 |---|---|---|
-| `G.2` ~~**Clock bound to the journal (D3).**~~ **DONE for `ctx.n | **WRONG** | The DONE does not hold. The mechanism is half-built: `#bodyClock` (engine.ts:3058-3061) does read `p.tasks[taskId].lease.at`, and projection.ts:720 does fold that from the jou… |
+| `G.2` ~~**Clock bound to the journal (D3).**~~ **DONE for `ctx.n | **DONE 2026-08-28** | SUPERSEDED — the DONE holds now: `replay-clock.test.ts` is 3/3 green and `loom replay` builds its engine with hooks. When this row was written it did not, and what follows is that measurement: The mechanism is half-built: `#bodyClock` (engine.ts:3058-3061) does read `p.tasks[taskId].lease.at`, and projection.ts:720 does fold that from the jou… |
 | `G.3` **The one-line agent surface (D1).** `agent({model, tools, | **DONE** | Verdict it DONE — the bullet is unmarked and should be struck. `packages/core/src/agent.ts` exists, is exported from the public surface (`packages/core/src/index.ts:10  export… |
 | `G.1` ~~**Declared effects (D2).**~~ **DONE for `function` nodes | partial | The DONE holds on all five clauses it names, and BOTH "still open" riders check out. `reachableToolNames` does include function effects (spec.ts:850), which is the single rout… |
 | `G.4` **Divergence must be terminal and loud.** The known failur | partial | TERMINAL AND LOUD: already true for the recorded-effect path, so that half of the bullet is stale as a work item. `E_REPLAY_DIVERGENCE` is in `RUN_FATAL_CODES` (engine.ts:265-… |
@@ -1482,7 +1486,7 @@ Each traces to a decision in `DESIGN.md`.
   synchronously inside `vm.runInContext` and cannot await, so `ctx.effects` is honestly absent
   there rather than broken — giving a sandboxed body effects means an async bridge, which is its
   own design.
-- **Clock bound to the journal (D3). NOT DONE — the strikethrough was removed 2026-08-25.**
+- ~~**Clock bound to the journal (D3). NOT DONE — the strikethrough was removed 2026-08-25.**~~ **CORRECTED 2026-08-28 — it REPRODUCES.** `packages/core/test/run/replay-clock.test.ts` pins it with three paired controls, 3/3 green, and §A0 recorded the fix on 2026-08-25 while this entry went on asserting the opposite for three days. The original reading is kept below because the measurement in it is what made the defect findable; its verdict is not.
   A body's clock does read the task's journaled `task.leased` timestamp (`engine.ts:3058`,
   folded at `projection.ts:720`), and two reads in one body do return the same instant. But it
   **does not reproduce on replay**: the shadow run appends its OWN `task.leased`, stamped by the
@@ -1497,7 +1501,7 @@ Each traces to a decision in `DESIGN.md`.
 - ~~**The one-line agent surface (D1).**~~ **DONE, re-checked 2026-08-25.** `agent({prompt,
   tools, adapter})` compiles to a one-node graph and is exported from the public surface
   (`index.ts:10`); `packages/core/test/agent.test.ts` proves each clause — one-node graph,
-  journal + replay, gates, budget ceiling. The bullet was never struck.
+  journal + replay, gates, budget ceiling. (This once read "the bullet was never struck", three lines under a struck bullet. It is struck.)
 - **Divergence must be terminal and loud.** The known failure mode of every replay-based runtime
   is a silent stall: the task retries forever without entering a failed state. A repeated
   divergence signature with no forward progress needs its own terminal state.
@@ -1516,11 +1520,11 @@ Each traces to a decision in `DESIGN.md`.
 
 ## H · Housekeeping carried into the sweep
 
-**Re-checked 2026-08-25 — 4 items: 1 DONE · 2 partial · 1 open.**
+**Re-checked 2026-08-25; tallied from the table 2026-08-28 — 4 items: 1 DONE · 2 partial · 1 open.**
 
 | item | verdict | what running it showed |
 |---|---|---|
-| `H.1` `packages/eagent/tui` — **deleted** as part of this sweep. | partial | COUNT WRONG: 'two tests that assert the directory exists' is ONE. At 3e5e4bb^ the only existence assertion on the directory is zero-dep.test.ts:140 `assert.ok(existsSync(tuiPk… |
+| `H.1` `packages/eagent/tui` — **deleted** as part of this sweep. | **MOOT 2026-08-28** | The remaining work was a docs sweep inside `packages/eagent/`, which no longer exists. Original finding — COUNT WRONG: 'two tests that assert the directory exists' is ONE. At 3e5e4bb^ the only existence assertion on the directory is zero-dep.test.ts:140 `assert.ok(existsSync(tuiPk… |
 | `H.2` The web frontend was already designed once and closed, and | partial | Accurate, and now sharper than written: the terminal client was dropped 2026-07-27, REBUILT two days later as e9b8701 'feat(phase2): the tui/ package -- Ink + React over the z… |
 | `H.3` `bin/loom` is gitignored and goes stale on any source edit | open | Standing condition, correctly stated, and it bit during this audit — the checked-out binary is already 109s behind src at HEAD. packages/core/test/readme-gaps.test.ts:331-333 … |
 | `H.4` Commits land under the human author's identity only. No as | **DONE** | NOT A BACKLOG ITEM — it is a standing project rule already stated at CLAUDE.md:76-77, so TODO.md:310-311 is a duplicate of a contract file and will drift from it (it already h… |
