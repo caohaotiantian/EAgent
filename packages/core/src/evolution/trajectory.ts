@@ -29,6 +29,20 @@
  * is what a run that failed every assertion scores. `specResolved` is the fold saying which of
  * the two it is; see that field for the two-line reproduction.
  *
+ * A COMMIT HAS TWO MAPS, NOT ONE. `task.committed.writes` holds the values that stayed in the
+ * journal; `task.committed.external` holds `{digest, bytes}` for the channels that did not.
+ * This fold read only the first, so a step whose output was large enough to externalise folded
+ * as a step that wrote nothing. `observed()` is the repair and the ONE place the two are
+ * joined. Two residues it does NOT close, both named rather than assumed:
+ *   - `firstVerdict` reads values, so an evaluator whose verdict channel externalised is a
+ *     signal this fold cannot see. It stays invisible; it does not become a false verdict.
+ *   - a run with a payload store and one without produce different `observationDigest`s for
+ *     the same document, because one digests the value and the other digests the handle. That
+ *     divergence already exists in `stateInHash` / `stateOutHash`, which are copied from
+ *     `state.reduced` and are hashes over handles by construction, so joining it here adds no
+ *     new class of mismatch — but two runs of one graph under different store configurations
+ *     are not comparable step-for-step, and never were.
+ *
  */
 
 import { digest, shapeOf, type Digest } from "../canonical.ts";
@@ -36,6 +50,7 @@ import type { RunGraph } from "../graph/spec.ts";
 import type { NodeType } from "../graph/spec.ts";
 import { compareBranch, decodeBranch, encodeBranch, parseTaskId, type NodeId, type RunId, type TaskId } from "../ids.ts";
 import { isEvent, type JournalEvent } from "../journal/events.ts";
+import { payloadHandle, type PayloadRef } from "../journal/payloads.ts";
 import type { UsageRecord } from "../vocab.ts";
 
 // ---------------------------------------------------------------------------
@@ -242,6 +257,37 @@ interface RawStep {
   actions: TrajectoryAction[];
   status: TrajectoryStep["status"];
   writes: Record<string, unknown>;
+  /**
+   * The channels this commit put in the payload store instead of in `writes`. DISJOINT from
+   * `writes` by construction — `journal/events.ts` says so on the field, and `#externalise`
+   * builds the two maps from one pass.
+   *
+   * Kept beside `writes` rather than merged into it because the two answer different
+   * questions: `observed()` below is what a step PRODUCED and takes both, while
+   * `firstVerdict` needs an actual value and may only look at `writes`.
+   */
+  external: Record<string, PayloadRef>;
+}
+
+/**
+ * WHAT THE STEP PRODUCED — every channel it committed, whether the value stayed in the
+ * journal or left it.
+ *
+ * `payloadHandle` is the same function `run/projection.ts` uses to build `withHandles`, so a
+ * fold of a trajectory and a fold of the run state describe an externalised channel with one
+ * shape rather than two. An externalised channel therefore keeps a content-addressed
+ * observation: the handle carries the digest of the canonical value, so two runs that wrote
+ * the same document still digest alike and two that wrote different ones still differ.
+ *
+ * THE DECLARATION IS THE AUTHORITY, NEVER THE SHAPE. Which channels are handles is read off
+ * `task.committed.external`, written by the executor that did the externalising. A node body
+ * is free to write a literal `{$payload: {...}}` and it stays an ordinary value — sniffing
+ * would let any node that can write a channel name a payload it never produced.
+ */
+function observed(s: RawStep): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...s.writes };
+  for (const [channel, ref] of Object.entries(s.external)) out[channel] = payloadHandle(ref);
+  return out;
 }
 
 export function foldTrajectory(
@@ -349,6 +395,7 @@ export function foldTrajectory(
         actions: [],
         status: "open",
         writes: {},
+        external: {},
       };
       steps.set(id, s);
     }
@@ -491,6 +538,17 @@ export function foldTrajectory(
       s.status = e.payload.status === "succeeded" ? "succeeded" : "failed";
       s.stateOutHash = stateHash;
       s.writes = { ...e.payload.writes };
+      // BOTH MAPS, ALWAYS. A `replace` channel whose canonical value is strictly above
+      // `EXTERNALISE_ABOVE_BYTES` is absent from `writes` and present here, so a fold that
+      // read only `writes` reported a step that moved 300 KB as a step that wrote nothing:
+      // `channelsWritten: []`, `observationDigest` = the digest of `{}` for every such run,
+      // and `score.ts`'s `didWork` — for which a committed channel is the only evidence a
+      // `function`, `tool` or `router` node ever produces — read `delivered: false`.
+      // MEASURED on one Engine, a single `function` node copying its input to a non-output
+      // `replace` channel, everything else identical: a 64-byte document scored 0.4000 and
+      // `delivered: true`; a 300,000-byte one scored 0.0000 and `delivered: false`. The
+      // self-improvement evidence under-counted exactly the runs that did the most work.
+      s.external = { ...e.payload.external };
       if (e.payload.take.length > 0) s.actions.push({ kind: "route", taken: [...e.payload.take] });
       // A RESTATEMENT, CHARGED AS EXCESS — never verbatim. See `spend` above for why the
       // difference is the whole fix: verbatim under-counts, excess recovers a failed
@@ -556,10 +614,11 @@ export function foldTrajectory(
       actions: s.actions,
       status: s.status,
       // NAMES, never values — the values are the digest below. See `channelsWritten`.
-      channelsWritten: Object.keys(s.writes).sort(byCodeUnit),
+      // `observed` because an externalised channel is a channel this step wrote.
+      channelsWritten: Object.keys(observed(s)).sort(byCodeUnit),
       // The payload is REPLACED by its digest. Anything that wants the payload back
       // fetches it from the blob store under this key, subject to that store's rules.
-      observationDigest: digest(s.writes),
+      observationDigest: digest(observed(s)),
     })),
     outcome: extractSignals(canonical, nodeTypes, runStatus),
     usage: {
@@ -830,6 +889,14 @@ function extractSignals(
   return { assertions, humanDecisions, rubrics, selfReported, runStatus };
 }
 
+/**
+ * `writes` ALONE, and never `observed()`. A verdict is a VALUE — `pass` and `score` are read
+ * out of it — and an externalised channel's value is not in the journal to read. Handing this
+ * the handle would change nothing (a `{$payload}` object has neither key, so it is skipped
+ * exactly as an absent channel is), but it would read as though the fold might recover a
+ * verdict from a handle, and it cannot. A verdict channel large enough to externalise is
+ * therefore a signal this fold does not see; see the file header's residue note.
+ */
 function firstVerdict(writes: Readonly<Record<string, unknown>>): Verdict | undefined {
   for (const key of Object.keys(writes).sort()) {
     const v = writes[key];
