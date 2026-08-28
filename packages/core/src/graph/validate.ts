@@ -2290,12 +2290,69 @@ function rule014And019Oversight(
  * unimplemented half is an error, and it becomes supported by deleting a check here.
  */
 function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  // BLOCK GUARD FIRST, and it is not defensive tidying. `approval: null` reached `a.mode` and
+  // crashed the compiler with `E_INTERNAL: TypeError: Cannot read properties of null (reading
+  // 'mode')` — a raw stack instead of a diagnostic naming the node. `approval: 42` and
+  // `approval: []` were worse: they read as `undefined` at every field and the whole function
+  // returned having checked nothing, so a gate whose approval block was a typed-wrong value
+  // compiled clean and raised as a gate naming nobody.
+  const block = objectBlock(
+    n.humanGate?.approval,
+    `human_gate "${n.id}"'s \`approval\``,
+    at,
+    "an approval rule is `{approvers?, separationOfDuties?}` — an array, a number or null names no one and enforces nothing",
+    d,
+  );
+  if (block === undefined) return;
+  // EVERY KEY IS NAMED, because a dropped one here is not a lost setting. `approvres`,
+  // `separationOfDutys` and `delegate` each compiled clean and produced a gate that reads as
+  // supervised and admits anybody. `NESTED_FIELDS.approval` is the enumeration; the near-miss
+  // hint makes the typo cheap to fix rather than cheap to ignore.
+  unknownKeys(block, NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
+  const delegationBlock = objectBlock(
+    block["delegation"],
+    `human_gate "${n.id}"'s \`approval.delegation\``,
+    at,
+    "delegation is `{allowed, maxDepth?, mustStayInGroup?}`",
+    d,
+  );
+  if (delegationBlock !== undefined) {
+    unknownKeys(delegationBlock, NESTED_FIELDS.delegation, `human_gate "${n.id}"'s \`approval.delegation\` block`, at, d);
+  }
   const a = n.humanGate?.approval;
   if (a === undefined) return;
-  const at = { nodeId: n.id };
   const unsupported = (what: string, fix: string): void => {
     d.push({ severity: "error", code: "GRAPH014_APPROVAL_UNSUPPORTED", message: `human_gate "${n.id}" ${what}`, at, fix });
   };
+
+  // `approvers` MUST BE AN ARRAY, and the loop below is why. `for (const who of a.approvers ?? [])`
+  // iterates a STRING's characters, every one of which is a non-empty string, so
+  // `approvers: "u:alice"` passed every per-entry check. At run time the list journals as the
+  // string and `String.prototype.includes` then lets subject `"u"` and subject `"alice"` each
+  // approve. Refused here because the shape is decidable from the spec alone.
+  if (a.approvers !== undefined && !Array.isArray(a.approvers)) {
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVER_INVALID",
+      message: `human_gate "${n.id}" declares approvers ${JSON.stringify(a.approvers)}, which is not a list of subject ids`,
+      at,
+      fix: "approvers is an array of opaque subject strings; a bare string is read character by character and admits every prefix of itself",
+    });
+  } else if (Array.isArray(a.approvers) && a.approvers.length === 0) {
+    // AN EMPTY LIST IS A RULE THAT NAMES NOBODY, and the runtime reads "names nobody" as
+    // permissive. So "this gate deliberately names no one" and "the compiler could not read who
+    // it names" produced the identical value, on the one block oversight exists for. Absent
+    // still means anyone may decide — that asymmetry is the point, and `gate-authorization.test.ts`
+    // records that most gates in this repo name nobody and must keep working.
+    d.push({
+      severity: "error",
+      code: "GRAPH014_APPROVAL_INCOMPLETE",
+      message: `human_gate "${n.id}" declares an EMPTY approvers list, which reads as a rule and names nobody`,
+      at,
+      fix: "omit the field to mean anyone may decide, or list the subjects who must — an empty list is indistinguishable from a list the compiler could not read",
+    });
+  }
 
   if (a.mode !== undefined && a.mode !== "single") {
     unsupported(
@@ -2326,11 +2383,14 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
       fix: "write `separationOfDuties: true` — a truthy string would be read as absent and the gate would enforce nothing",
     });
   }
-  if (a.delegation !== undefined && a.delegation.allowed !== undefined && typeof a.delegation.allowed !== "boolean") {
+  // READ THROUGH THE GUARDED BLOCK, never through `a.delegation` — `delegation: null` reported
+  // GRAPH003_MALFORMED above and then crashed HERE on `.allowed`, so the author got a raw
+  // TypeError instead of the diagnostic that had just been written for them.
+  if (delegationBlock !== undefined && delegationBlock["allowed"] !== undefined && typeof delegationBlock["allowed"] !== "boolean") {
     d.push({
       severity: "error",
       code: "GRAPH014_APPROVAL_INVALID",
-      message: `human_gate "${n.id}" declares delegation.allowed ${JSON.stringify(a.delegation.allowed)}, which is not true or false`,
+      message: `human_gate "${n.id}" declares delegation.allowed ${JSON.stringify(delegationBlock["allowed"])}, which is not true or false`,
       at,
       fix: "write true or false — a truthy string reads as absent, which here means the UNSUPPORTED refusal below never fires",
     });
@@ -2361,7 +2421,13 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // three: the signed-callback route and `loom approve --as` each construct the actor
   // themselves. Refusing the SHAPE at compile time closes it everywhere at once, and
   // closes it for markers nobody has minted yet.
-  for (const who of a.approvers ?? []) {
+  //
+  // ARRAY-GUARDED, because the shape refusal above REPORTS and does not return. Without this the
+  // first version of that refusal pushed a diagnostic and then crashed here — `for…of 42` throws
+  // `TypeError: number 42 is not iterable`, so an author got a raw stack instead of the
+  // diagnostic that had just been written for them. A guard that reports a fault and then trips
+  // over it has reported nothing.
+  for (const who of Array.isArray(a.approvers) ? a.approvers : []) {
     if (typeof who !== "string" || who.trim() === "") {
       d.push({
         severity: "error",
@@ -2390,9 +2456,21 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
  * nobody answered. Everything checkable is therefore checked at compile time.
  */
 function checkSla(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  const block = objectBlock(
+    n.humanGate?.sla,
+    `human_gate "${n.id}"'s \`sla\``,
+    at,
+    "an sla is `{respondWithinMs, onTimeout?, reminders?}` — a non-object declares a clock and gets none",
+    d,
+  );
+  if (block === undefined) return;
+  // `onTimout: "escalate"` compiled clean and the gate silently kept the default `fail`: a graph
+  // that asked for someone else to be paged, and expires instead. That is `checkSla`'s own
+  // argument about `default_action`, one misspelling out.
+  unknownKeys(block, NESTED_FIELDS.sla, `human_gate "${n.id}"'s \`sla\` block`, at, d);
   const sla = n.humanGate?.sla;
   if (sla === undefined) return;
-  const at = { nodeId: n.id };
   const bad = (what: string, fix: string): void => {
     d.push({ severity: "error", code: "GRAPH014_SLA_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
   };
@@ -2547,6 +2625,9 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a batching block that is not an object",
         "batching is {enabled, key, windowMs, maxBatch}; an array, a Map or a Date has no fields the runtime can read and would merge nothing",
       );
+    } else if (unknownKeys(batching, NESTED_FIELDS.batching, `human_gate "${n.id}"'s \`batching\` block`, at, d)) {
+      // An unknown key here is checked BEFORE the value rules, so `windowMz` is reported as the
+      // typo it is rather than as a missing `windowMs` — the author who wrote one is told which.
     } else if (typeof batching["enabled"] !== "boolean") {
       bad(
         `declares batching.enabled ${String(batching["enabled"])}, which is not a boolean`,
@@ -2585,6 +2666,8 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a dedupe block that is not an object",
         "dedupe is {enabled, windowMs}; an array, a Map or a Date has no fields the runtime can read and would collapse nothing",
       );
+    } else if (unknownKeys(dedupe, NESTED_FIELDS.dedupe, `human_gate "${n.id}"'s \`dedupe\` block`, at, d)) {
+      // Same ordering as `batching`, and the same reason.
     } else if (typeof dedupe["enabled"] !== "boolean") {
       bad(
         `declares dedupe.enabled ${String(dedupe["enabled"])}, which is not a boolean`,
@@ -2638,9 +2721,20 @@ interface EscalationTierLike {
  * would be the compiler asserting a semantic the runtime does not have.
  */
 function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
+  const at = { nodeId: n.id };
+  const block = objectBlock(
+    n.humanGate?.delivery,
+    `human_gate "${n.id}"'s \`delivery\``,
+    at,
+    "a delivery block is `{channels, recipients?, redact?, redactAs?, escalation?}` — a non-object reaches nobody",
+    d,
+  );
+  if (block === undefined) return;
+  // `recipiants: []` compiled clean, so the gate was durable and queued and NOBODY WAS TOLD —
+  // the one mode in which "an SLA fired and nobody knew" is possible, reached by one letter.
+  unknownKeys(block, NESTED_FIELDS.delivery, `human_gate "${n.id}"'s \`delivery\` block`, at, d);
   const spec = n.humanGate?.delivery;
   if (spec === undefined) return;
-  const at = { nodeId: n.id };
   const bad = (what: string, fix: string): void => {
     d.push({ severity: "error", code: "GRAPH014_DELIVERY_INVALID", message: `human_gate "${n.id}" ${what}`, at, fix });
   };
@@ -2673,6 +2767,20 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
   const chain = asArray<EscalationTierLike>(spec.escalation);
   for (const [i, tier] of chain.entries()) {
     const where = `delivery.escalation[${i}]`;
+    // EVERY TIER, not the block. A tier is where the escalation chain names NEW people, so an
+    // unread key here is a director who is never told while the graph says they are.
+    const tierBlock = objectBlock(
+      tier as unknown,
+      `human_gate "${n.id}"'s \`${where}\``,
+      at,
+      "a tier is `{afterMs, to?, channels?, action?}`",
+      d,
+    );
+    // MALFORMED TIER, DONE. Continuing past it is what made `escalation: [null]` report
+    // GRAPH003_MALFORMED and then crash on `tier.action` — the diagnostic was written and the
+    // author never saw it.
+    if (tierBlock === undefined) continue;
+    unknownKeys(tierBlock, NESTED_FIELDS.deliveryEscalation, `human_gate "${n.id}"'s \`${where}\``, at, d);
     if (tier.action === "fail") {
       // A TERMINAL TIER ENDS THE CHAIN WHEREVER IT SITS. `nextTier` returns `undefined` at
       // the first `action: "fail"`, so every tier after it is unreachable — a graph naming

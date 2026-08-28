@@ -830,6 +830,36 @@ test("an approver that cannot match anything is refused", () => {
   }
 });
 
+test("AN `approvers` THAT IS NOT A LIST IS REFUSED — a bare string admits every prefix of itself", () => {
+  // `for (const who of a.approvers ?? [])` iterates a STRING's characters, every one of which is
+  // a non-empty string, so every per-entry check above passed. At run time the list journals as
+  // the string and `String.prototype.includes` then lets subject `"u"` and subject `"alice"`
+  // each approve — an audit record that READS supervised and is not.
+  for (const approvers of ["u:alice", 42, {}, null]) {
+    const codes = diagnose(withApproval({ approvers })).map((x) => x.code);
+    assert.ok(codes.includes("GRAPH014_APPROVER_INVALID"), `${JSON.stringify(approvers)} compiled clean`);
+  }
+});
+
+test("AN EMPTY `approvers` IS REFUSED — a rule that names nobody is not the same as no rule", () => {
+  // TODO.md §F.11 verbatim, on the one block oversight exists for: two facts a decision reads —
+  // "this gate names nobody, on purpose" and "the compiler could not read who it names" —
+  // produced the identical empty list, and the runtime is documented to treat the first as
+  // permissive. Driven through the engine with a restart between raise and resolve, the typo
+  // `approvres` journalled `approvers: []`, `u:mallory` approved, and the guarded write landed.
+  const codes = diagnose(withApproval({ approvers: [] })).map((x) => x.code);
+  assert.ok(codes.includes("GRAPH014_APPROVAL_INCOMPLETE"), codes.join(", ") || "(no diagnostics)");
+
+  // OMITTING THE FIELD IS STILL LEGAL, and this row is load-bearing rather than decorative:
+  // most gates in this repo name nobody and must keep compiling. Refusing `[]` while allowing
+  // absence is the right asymmetry — the empty list is the shape a failed read produces.
+  assert.deepEqual(
+    diagnose(withApproval({})).filter((x) => x.severity === "error"),
+    [],
+    "a gate that names nobody must still compile — absent means anyone may decide",
+  );
+});
+
 test("AN APPROVER THAT MATCHES THE WRONG THING IS REFUSED TOO — a synthetic marker is not a subject", () => {
   // The other way to write "this list authorizes everyone", and the worse one, because it
   // MATCHES. `ControlPlane` mints `(unidentified)` for a caller it could not identify and

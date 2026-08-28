@@ -477,6 +477,31 @@ export class HumanGateBroker {
       );
     }
 
+    // AND THE SYMMETRIC ONE FOR `approvers`, at the same door and for the same reason. The
+    // compiler now refuses both shapes on a graph, but the compiler is one of three doors into a
+    // `RunGraph` and this method is the other two: `raise` is public, and an embedder or a
+    // hand-built request reaches it with nothing in between.
+    //
+    // A NON-ARRAY IS THE DANGEROUS ONE. `#authorize` asks whether the list CONTAINS the subject,
+    // and `String.prototype.includes` answers `true` for every substring — so `approvers:
+    // "u:alice"` journals as a string that reads supervised in the audit record and admits
+    // subject `"u"` and subject `"alice"`. An EMPTY array is the other half of the same defect:
+    // "this gate names nobody, on purpose" and "the caller could not read who it names" produce
+    // one value, and the runtime documents the first as permissive. Absent still means anyone
+    // may decide — that asymmetry is deliberate and most gates in this repo rely on it.
+    if (req.approvers !== undefined && !Array.isArray(req.approvers)) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `gate on node "${req.nodeId}" declares approvers that are not a list of subject ids. A bare string is matched character by character and admits every prefix of itself.`,
+      );
+    }
+    if (Array.isArray(req.approvers) && req.approvers.length === 0) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `gate on node "${req.nodeId}" declares an EMPTY approvers list, which reads as a rule and names nobody. Omit the field to mean anyone may decide.`,
+      );
+    }
+
     const raisedEvent: NewEvent = {
       type: "gate.raised",
       payload: {

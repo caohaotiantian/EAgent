@@ -919,11 +919,49 @@ export const EDGE_FIELDS: readonly string[] = [
  * `channel` and `contextProjection` are `ChannelSpec` and `ContextProjection` from
  * `state/channels.ts`, not from this file; the test reads that file too rather than restating them.
  */
-export const NESTED_FIELDS: Readonly<Record<"retry" | "channel" | "contextProjection" | "metadata", readonly string[]>> = {
+export const NESTED_FIELDS: Readonly<
+  Record<
+    | "retry"
+    | "channel"
+    | "contextProjection"
+    | "metadata"
+    | "approval"
+    | "delegation"
+    | "sla"
+    | "delivery"
+    | "deliveryEscalation"
+    | "batching"
+    | "dedupe",
+    readonly string[]
+  >
+> = {
   retry: ["maxAttempts", "backoff", "initialMs", "maxMs", "jitter", "onlyIf"],
   channel: ["type", "reduce", "initial", "classification", "contextProjection", "identityKey", "onConflict"],
   contextProjection: ["fields", "take", "maxTokens", "overflow"],
   metadata: ["name", "project", "version", "description", "labels"],
+  // THE `humanGate` SCOPES, and they are the reason this table is worth its cost. A dropped key
+  // elsewhere is a lost setting; here it is an unsupervised action. Measured on a structurally
+  // valid graph before these six rows existed, every one of these compiled with ZERO gate
+  // diagnostics: `approval:{approvres:[…]}`, `approval:{approvers:"u:alice"}`,
+  // `approval:{approvers:[]}`, `approval:42`, `separationOfDutys:true`,
+  // `delegation:{allowd:true}`, `sla:{…,onTimout:"escalate"}`,
+  // `delivery:{channels:["console"],recipiants:[]}` — and `approval:null` crashed the compiler
+  // with `E_INTERNAL: TypeError: Cannot read properties of null (reading 'mode')`.
+  //
+  // Driven through the engine with a restart between raise and resolve, the typo journals
+  // `approvers: []`, `u:mallory` — named by nobody — approves, and the guarded `fs.write` lands.
+  // `approvers: "u:alice"` journals as the STRING, so the audit record reads supervised while
+  // `String.prototype.includes` lets subject `"u"` and subject `"alice"` each approve.
+  approval: ["mode", "k", "approvers", "separationOfDuties", "delegation"],
+  delegation: ["allowed", "maxDepth", "mustStayInGroup"],
+  sla: ["respondWithinMs", "onTimeout", "reminders"],
+  // `DeliverySpec` and `EscalationTier` are `run/delivery.ts`'s, not this file's — the same
+  // arrangement `channel` and `contextProjection` already have with `state/channels.ts`, and
+  // `allowed-fields.test.ts` reads that file too rather than restating them here.
+  delivery: ["channels", "recipients", "redact", "redactAs", "escalation"],
+  deliveryEscalation: ["afterMs", "to", "channels", "action"],
+  batching: ["enabled", "key", "windowMs", "maxBatch"],
+  dedupe: ["enabled", "windowMs"],
 };
 
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
