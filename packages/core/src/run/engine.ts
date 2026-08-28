@@ -4571,6 +4571,12 @@ export class Engine {
       const shaped = await this.#filterHook(ctx, w.task, "preModel", req);
 
       let recordedProvider = "replay";
+      let servingProvider: string | undefined;
+      // Whether a live stream produced a terminal `done` frame at all. Distinct from
+      // `servingProvider === undefined`, which cannot tell "the adapter named nobody" from
+      // "the adapter never finished" -- and only the first is D.7.6's refusal. An adapter that
+      // yields no `done` frame is a separate question this change does not answer.
+      let sawDoneFrame = false;
       let reservation;
       // THE CEILING THIS TURN WAS SENT UNDER, hoisted out of the reservation because two things
       // need it: the token budget charges against it, and a turn that comes back truncated has
@@ -4776,6 +4782,14 @@ export class Engine {
               assistant = ev.message;
               finish = ev.finishReason;
               turnUsage = ev.usage;
+              // WHO ACTUALLY SERVED IT — D.7.6. Read off the frame rather than off the adapter
+              // this loop is holding, because that adapter is a `RoutingAdapter` in every CLI
+              // deployment and a `FallbackAdapter` may have answered from a tier nobody named.
+              // Left `undefined` when the frame omits it, which only an untyped adapter can do;
+              // the refusal below is what happens then, and it is deliberately NOT a fallback
+              // to `adapter.provider` — that fallback IS the bug this removes.
+              sawDoneFrame = true;
+              servingProvider = typeof ev.provider === "string" && ev.provider !== "" ? ev.provider : undefined;
             }
           }
         }
@@ -4816,7 +4830,13 @@ export class Engine {
                 type: "model.called",
                 payload: {
                   key,
-                  provider: adapter?.provider ?? recordedProvider,
+                  // THE LEAF, THEN THE RECORD, THEN THE WRAPPER — in that order, and the last
+                  // arm is reached only on a live call whose adapter gave no answer, which the
+                  // refusal below then fails. `adapter.provider` is the most this engine
+                  // honestly knows about such a turn, and it is written because the call
+                  // happened and cost money (the FX13 ordering); it is not allowed to stand as
+                  // an answer.
+                  provider: servingProvider ?? (this.#replay === undefined ? adapter?.provider : recordedProvider) ?? recordedProvider,
                   // `shaped`, not `req`: a `preModel` filter may have rewritten the model, and
                   // journaling the pre-filter value records a call nobody made.
                   model: shaped.model,
@@ -4853,6 +4873,33 @@ export class Engine {
             { taskId: w.task.taskId },
           ),
         );
+      }
+
+      // AN ADAPTER THAT WILL NOT SAY WHO SERVED THE TURN — D.7.6, and the same ordering as
+      // the truncation refusal below and for the same reason: the call happened and cost money,
+      // so `model.called` and `effect.completed` record it first, with `adapter.provider` as
+      // the only thing this engine honestly knows. THEN the turn is refused. What it must not
+      // do is accept `adapter.provider` and continue — that is the defect being removed, and
+      // reinstating it here would restore it for exactly the adapters nobody in this repo
+      // wrote. `outputCeilingOf` above is required on `ModelAdapter` and so is this field, so a
+      // well-typed adapter cannot reach this arm; an `--extension-module` one can.
+      //
+      // A SERVED or REPLAYED turn reaches no adapter, so `sawDoneFrame` is false and there is
+      // no frame to have omitted anything -- nothing to refuse.
+      if (sawDoneFrame && servingProvider === undefined) {
+        return {
+          status: "failed",
+          writes: {},
+          usage,
+          error: err.validation(
+            CODES.E_PROVIDER_BAD_REQUEST,
+            `node "${w.node.id}" turn ${String(turn)}: model adapter "${adapter?.provider ?? "(none)"}" ended the turn ` +
+              `without naming the provider that served it — the \`done\` frame's required \`provider\` field was missing ` +
+              `or empty. The journal is the only record of which provider answered, and a wrapper's own name is not that ` +
+              `record. Refusing the turn rather than attributing it to the wrapper.`,
+            { details: { node: w.node.id, turn, adapter: adapter?.provider ?? null } },
+          ),
+        };
       }
 
       // A TURN THAT DID NOT END BECAUSE THE MODEL WAS FINISHED IS NOT AN ANSWER — see

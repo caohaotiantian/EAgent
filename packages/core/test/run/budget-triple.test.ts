@@ -85,6 +85,7 @@ class TimedAdapter implements ModelAdapter {
     this.calls += 1;
     yield {
       type: "done",
+      provider: "timed",
       message: { role: "assistant", content: "ok" },
       finishReason: "stop",
       usage: { ...this.#cost },

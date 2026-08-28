@@ -205,7 +205,11 @@ export class ReplayingAdapter implements ModelAdapter {
         details: { key, known: Object.keys(this.#cassette.entries).length },
       });
     }
-    for (const ev of events) yield ev;
+    // THE TAPE'S OWN ANSWER WINS. A cassette recorded through `RecordingAdapter` carries the
+    // leaf that actually served, and re-attributing it to this adapter would erase the one fact
+    // the recording was made to preserve. A tape cut before `provider` existed on the frame has
+    // no answer, and then this adapter says so as itself rather than inventing a leaf.
+    for (const ev of events) yield ev.type === "done" && ev.provider === undefined ? { ...ev, provider: this.provider } : ev;
   }
 
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {

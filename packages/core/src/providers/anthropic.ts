@@ -40,6 +40,16 @@ export interface AnthropicOptions extends HttpOptions {
   /** USD per million tokens, per model. Pinned by config, never guessed at runtime. */
   readonly prices?: Readonly<Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }>>;
   readonly defaultMaxTokens?: number;
+  /**
+   * What this row calls itself in the journal, defaulting to `"anthropic"`.
+   *
+   * D.7.6. `provider` used to be a hard-coded literal here while `OpenAIAdapter` already took
+   * the option -- the asymmetry that hid the wider defect. Without it, two anthropic rows named
+   * `claude-fast` and `claude-big` are indistinguishable in `model.called` even once the router
+   * stops overwriting them, so the journal cannot say which of the operator's own configured
+   * endpoints served a turn.
+   */
+  readonly provider?: string;
 }
 
 const DEFAULT_PRICES: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }> = {
@@ -49,11 +59,12 @@ const DEFAULT_PRICES: Record<string, { input: number; output: number; cacheRead?
 };
 
 export class AnthropicAdapter implements ModelAdapter {
-  readonly provider = "anthropic";
+  readonly provider: string;
   readonly #opts: AnthropicOptions;
 
   constructor(opts: AnthropicOptions) {
     if (opts.apiKey === "") throw err.policy(CODES.E_PROVIDER_AUTH, "anthropic adapter requires an apiKey");
+    this.provider = opts.provider ?? "anthropic";
     this.#opts = opts;
   }
 
@@ -216,7 +227,7 @@ export class AnthropicAdapter implements ModelAdapter {
       content: text,
       ...(toolCalls.length === 0 || truncated ? {} : { toolCalls }),
     };
-    yield { type: "done", message, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
+    yield { type: "done", message, provider: this.provider, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
   }
 
   /**

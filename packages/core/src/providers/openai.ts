@@ -130,7 +130,7 @@ export class OpenAIAdapter implements ModelAdapter {
       content: text,
       ...(toolCalls.length === 0 || truncated ? {} : { toolCalls }),
     };
-    yield { type: "done", message, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
+    yield { type: "done", message, provider: this.provider, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
   }
 
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {

@@ -498,6 +498,7 @@ function ok(text: string): ModelAdapter {
       yield { type: "text_delta", text };
       yield {
         type: "done",
+        provider: "ok",
         message: { role: "assistant", content: text },
         finishReason: "stop",
         usage: { inputTokens: 1, outputTokens: 1, costUsd: 0.001, wallMs: 0 },

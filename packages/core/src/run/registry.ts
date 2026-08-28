@@ -493,7 +493,34 @@ export type FinishReason = "stop" | "tool_use" | "max_tokens" | "content_filter"
 
 export type ModelEvent =
   | { readonly type: "text_delta"; readonly text: string }
-  | { readonly type: "done"; readonly message: Message; readonly finishReason: FinishReason; readonly usage: UsageRecord };
+  | {
+      readonly type: "done";
+      readonly message: Message;
+      readonly finishReason: FinishReason;
+      readonly usage: UsageRecord;
+      /**
+       * WHO ACTUALLY SERVED THIS TURN — the leaf's own identity, not the wrapper's.
+       *
+       * D.7.6. `model.called.provider` is the journal's only record of which provider answered,
+       * and in every real deployment it read the constant `"routed"`: `openWorkspace` registers
+       * a `RoutingAdapter` as the sole default, the engine journalled `adapter.provider`, and
+       * the leaf that served was never asked. A `FallbackAdapter` call that failed over to
+       * tier 2 was journalled identically to one that did not, so the journal could not say a
+       * fallback had ever fired — the exact evidence a journal-derived circuit breaker would
+       * need. It was already leaking into a shipped surface: `telemetry/spans.ts` emits
+       * `gen_ai.system` from this field, so every OTLP export named the router.
+       *
+       * REQUIRED, and it lives on the `done` frame because the adapter that made the call is
+       * the only thing that knows, and it knows at exactly the moment it reports the outcome.
+       * The composites — `RoutingAdapter`, `FallbackAdapter`, `RecordingAdapter`,
+       * `OneModelAdapter` — forward the leaf's frame unchanged, which they already do
+       * structurally, so the answer arrives without anybody interrogating anybody.
+       *
+       * NO SCHEMA CHANGE PAID FOR IT: `model.called.provider` already existed and was already
+       * `string`. The vocabulary was right; the writer was wrong.
+       */
+      readonly provider: string;
+    };
 
 export interface ModelAdapter {
   readonly provider: string;
@@ -691,6 +718,7 @@ export class MockModelAdapter implements ModelAdapter {
     yield {
       type: "done",
       message,
+      provider: this.provider,
       finishReason: turn.finishReason ?? (turn.toolCalls !== undefined && turn.toolCalls.length > 0 ? "tool_use" : "stop"),
       usage: {
         inputTokens,
