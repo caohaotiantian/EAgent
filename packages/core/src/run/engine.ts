@@ -5685,6 +5685,38 @@ export class Engine {
 
     this.#recordEvidence(ctx, w, outcome);
 
+    // THE RUN MAY HAVE ENDED WHILE THIS TASK WAS IN FLIGHT — and until this line only the
+    // GATE arm above said so. `#cancelTree` already states the property this restores: "`#commit`
+    // returns early on a terminal run, so a Task that was `leased` when the cancel landed stayed
+    // `leased`". It did not; it returned early on one of its four exits, and the other three went
+    // on producing state for a run that was over.
+    //
+    // BOTH POST-OUTCOME ARMS, because both create work the cancel's sweep cannot reach — the
+    // sweep runs against the Tasks that exist WHEN IT RUNS, and everything below post-dates it:
+    //
+    //   - FAILURE: `task.retry_scheduled` + `task.ready`. Measured, on a tool that threw after
+    //     the cancel landed: `9 task.cancelled | 10 run.cancelled | 11 effect.failed |
+    //     12 task.retry_scheduled | 13 task.ready` — a Task in state `ready` inside a
+    //     `cancelled` run, which nothing will lease and nothing will ever end.
+    //   - SUCCESS: `task.committed` + `state.reduced` + the `task.ready` that `#activate`
+    //     emits for every edge this commit takes. A single-node graph cannot see that one;
+    //     with a second node behind a `seq` edge it is the node the operator cancelled the
+    //     run to prevent, readied by the run that was cancelled to prevent it.
+    //
+    // WHAT STOPS IS SCHEDULING, NOT EVIDENCE, and that split is deliberate. `#invokeTool` has
+    // already journaled `tool.called`/`effect.completed` (or `effect.failed`) by the time
+    // control reaches here, and those stay: `run.cancelled.unknownEffects` names this effect as
+    // unaccounted for, so the record of what it actually did is the one thing an operator
+    // reading that field will want. `#recordEvidence` is above this line for the same reason.
+    // Losing either would trade a scheduling defect for an auditing one.
+    //
+    // The lease is released, exactly as the two exits below do it, so the slot is not held by a
+    // Task that will never commit.
+    if (isTerminal(p.status)) {
+      ctx.leases.delete(w.task.taskId);
+      return;
+    }
+
     // A retryable failure with attempts left is rescheduled instead of committed.
     // The slot is released during the backoff, so a retry storm costs queue depth
     // rather than concurrency (D6.3 level 3).
