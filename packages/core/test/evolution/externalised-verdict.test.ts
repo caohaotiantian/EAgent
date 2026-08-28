@@ -27,7 +27,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEFAULT_WEIGHTS, measureCohort, outcomeOf, readSignals, scoreTrajectory } from "../../src/evolution/score.ts";
+import { DEFAULT_WEIGHTS, isGolden, measureCohort, outcomeOf, readSignals, scoreTrajectory } from "../../src/evolution/score.ts";
 import { foldTrajectory, type Trajectory } from "../../src/evolution/trajectory.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
@@ -80,7 +80,7 @@ function spec(): GraphSpec {
 }
 
 /** One run of the graph above. `why` is the only thing that varies, and it varies only in LENGTH. */
-async function run(why: string): Promise<{ trajectory: Trajectory; external: readonly string[] }> {
+async function run(why: string): Promise<{ trajectory: Trajectory; external: readonly string[]; events: JournalEvent[] }> {
   const store = new MemoryStateStore({ now: () => NOW });
   const functions = new FunctionRegistry();
   functions.register("function/emit@stable", () => ({ writes: { out: "done" } }));
@@ -106,7 +106,9 @@ async function run(why: string): Promise<{ trajectory: Trajectory; external: rea
   const events: JournalEvent[] = [];
   for await (const e of store.read(runId, 1)) events.push(e);
   const external = events.flatMap((e) => (e.type === "task.committed" ? Object.keys(e.payload.external ?? {}) : []));
-  return { trajectory: foldTrajectory(events, { graph }), external };
+  // `events` because one test below folds the SAME journal a second time with no graph, and
+  // re-running the engine to get a second copy would be a different run.
+  return { trajectory: foldTrajectory(events, { graph }), external, events };
 }
 
 test("THE DEFECT: padding a failing verdict past the payload threshold used to buy a perfect outcome", async () => {
@@ -226,4 +228,44 @@ test("THE TWO CONDITIONS COMPOSE — an unreadable verdict cannot hide behind a 
   const blind = foldTrajectory(events);
   assert.equal(blind.verdictsResolved, true, "vacuously — no node was known to be an evaluator");
   assert.equal(blind.specResolved, false, "…and the other arm is what refuses");
+});
+
+test("AND THE BLOCKER NAMES THE CAUSE THAT IS TRUE — a run that HAD its graph is not told the graph was missing", async () => {
+  // THE DEFECT THIS ARM CLOSES. `specResolved` became the AND of two facts and `isGolden`
+  // condition 6 kept the sentence written for the first: "NO SPEC — graph <hash> was not
+  // available to the fold". Driven with the graph explicitly passed to `foldTrajectory`, that
+  // string is a false statement about the fold, and it is what a human reads to decide a
+  // promotion. CLAUDE.md: a correction that replaces a false claim with a differently-false one
+  // is worse than the original, because it asserts verified accuracy and is believed harder.
+  const padded = await run(BIG);
+  const small = await run("short");
+
+  const cohort = measureCohort("k", [small.trajectory], { weights: DEFAULT_WEIGHTS });
+  const six = (t: Trajectory): { pass: boolean; detail: string } => {
+    const c = isGolden(t, scoreTrajectory(t, cohort), cohort).conditions.find((x) => x.id === 6);
+    assert.ok(c !== undefined, "condition 6 exists");
+    return { pass: c.pass, detail: c.detail };
+  };
+
+  const bad = six(padded.trajectory);
+  assert.equal(bad.pass, false, "the premise: it still refuses");
+  assert.equal(
+    /not available to the fold|NO SPEC/.test(bad.detail),
+    false,
+    `the graph WAS available, so the blocker must not say otherwise: ${bad.detail}`,
+  );
+  // THE BAR IS THAT AN OPERATOR WHO ACTS ON IT ENDS UP UNSTUCK: the true cause, the size that
+  // decided, and a remedy that is not "republish a graph that is already published".
+  assert.match(bad.detail, /payload handle/, bad.detail);
+  assert.match(bad.detail, /65536 bytes/, "the number the engine actually decided by");
+  assert.match(bad.detail, /outputs/, "…and the way to keep a verdict out of the payload store");
+
+  // THE OTHER ARM IS UNCHANGED, which is what stops this from being the same mistake mirrored.
+  // Same journal, folded a second time with no graph: that fold really did not have one, and is
+  // still told so in those words.
+  const blind = foldTrajectory(padded.events);
+  assert.equal(blind.specResolved, false);
+  assert.match(six(blind).detail, /NO SPEC — graph sha256:/, "the no-graph cause still names itself");
+
+  assert.equal(six(small.trajectory).pass, true, "and a readable run passes");
 });

@@ -25,7 +25,7 @@ import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
-import { filePayloads, type PayloadStore } from "./journal/payloads.ts";
+import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
 import { builtinTools, fsRestore } from "./builtin/tools.ts";
 import { Engine } from "./run/engine.ts";
@@ -4704,13 +4704,45 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // join. `cohortPeers` therefore takes it too, and a test counts the members.
         const bucketInput = bucketFlag(args);
         // `graph` is not optional here any more — the block above returned 1 rather than fold
-        // without it, which is what makes `t.specResolved` true for the judged run by
-        // construction. Peers are a different question; see below.
+        // without it. THAT USED TO BE THE WHOLE OF `t.specResolved`, and this comment said so:
+        // "which is what makes `t.specResolved` true for the judged run by construction". It
+        // stopped being true when `verdictsResolved` was ANDed into the field, and nothing here
+        // noticed — so a run folded WITH its graph could still arrive unmeasured, be scored 0,
+        // and be journaled with a golden blocker announcing a missing graph. Peers are a
+        // different question; see below.
         const t = foldTrajectory(events, {
           promotedGraphHashes,
           graph,
           ...(bucketInput === undefined ? {} : { bucketInput }),
         });
+        // THE OTHER HALF OF "NO SPEC, NO SCORE" — a refusal, not a zero, for the same reason.
+        // With the graph in hand the only remaining way the ladder comes back unreadable is a
+        // verdict that left the journal, and the two deserve the same treatment: `measureCohort`
+        // would drop this run from its own cohort, `isGolden` would refuse it, and the number
+        // journaled beside those facts would still be a 0 that reads as "this run was bad".
+        // Worse, `components` carries no `specResolved`, so the row a `suite freeze` reads back
+        // has `delivered: true` and nothing at all saying nobody measured it — the run enters
+        // the exam as a case, ordered by a score of 0 it did not earn. Appending that row would
+        // put a fiction in the only authoritative state, which is the sentence the no-graph
+        // refusal above already argues.
+        if (!t.verdictsResolved) {
+          const nodes = new Map(graph.spec.nodes.map((n) => [n.id, n.type]));
+          const blind = [
+            ...new Set(t.steps.filter((s) => nodes.get(s.nodeId) === "evaluator").flatMap((s) => s.channelsWritten)),
+          ].sort();
+          process.stderr.write(
+            `run ${runId} ran an evaluator whose channel is a payload handle rather than a value ` +
+              `(${blind.join(", ")}): its canonical form passed ${String(EXTERNALISE_ABOVE_BYTES)} bytes, so the ` +
+              `engine moved it out of the journal and this fold cannot read the verdict it held. Every signal ` +
+              `that evaluator carried would read as absent, and outcome 0 is the same number a run that failed ` +
+              `every assertion earns. Refusing instead: nothing was measured, so nothing is journaled. This run ` +
+              `is not recoverable — the value is not in its journal, and no graph or flag puts it back. ` +
+              `fix: for later runs, keep the evaluator's verdict under that size, or make its channel ineligible ` +
+              `for the payload store by declaring it in the graph's outputs or naming it in an edge or router ` +
+              `expression.\n`,
+          );
+          return 1;
+        }
         const key = cohortKeyOf(t);
         // AND THE PEERS GET IT TOO. A cohort key pins one `graphHash`, so a peer of this run ran
         // these same bytes — the whole point of a CANDIDATE cohort is thirty runs of one
@@ -4740,16 +4772,17 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // `run.submitted`'s hash, so two runs of two different authored graphs that mutate to the
         // same successor share a key and need not share a lookup. Stated rather than asserted:
         // this branch has no end-to-end coverage, and `test/evolution/score.test.ts` covers the
-        // arithmetic it guards.
-        const unmeasured = peers.members.filter((m) => !m.specResolved);
-        if (unmeasured.length > 0) {
-          const hashes = [...new Set(unmeasured.map((m) => m.graphHash))].sort();
-          process.stderr.write(
-            `! ${String(unmeasured.length)} peer run(s) in this cohort folded without their graph ` +
-              `(${hashes.join(", ")}) and are EXCLUDED from the population rather than scored 0 — a peer nobody ` +
-              `could measure would otherwise drag p90Score, and p90Score is the bar this run has to clear. ` +
-              `Publish those graphs in ${join(ws.root, "graphs")} to put them back in the cohort.\n`,
-          );
+        // arithmetic it guards. THE VERDICT HALF IS NOT SO RARE: a peer resolves its graph and
+        // still comes back unmeasured whenever its evaluator's verdict outgrew the journal, which
+        // is why the sentence is chosen by `unmeasuredNotes` and not fixed here.
+        for (const note of unmeasuredNotes(
+          peers.members,
+          join(ws.root, "graphs"),
+          "peer run(s)",
+          `are EXCLUDED from the population rather than scored 0 — a peer nobody could measure would otherwise ` +
+            `drag p90Score, and p90Score is the bar this run has to clear.`,
+        )) {
+          process.stderr.write(note);
         }
         const cohort = measureCohort(key, [t, ...peers.members]);
         const scored = scoreTrajectory(t, cohort);
@@ -5124,6 +5157,57 @@ function lastScore(events: readonly JournalEvent[]): EventPayloads["evolution.sc
   let found: EventPayloads["evolution.scored"] | undefined;
   for (const e of events) if (isEvent(e, "evolution.scored")) found = e.payload;
   return found;
+}
+
+/**
+ * WHY A COHORT SHRANK, SAID IN THE TERMS OF THE THING THAT ACTUALLY WENT WRONG.
+ *
+ * `measureCohort` drops a member whose `specResolved` is false, and two verbs announce that
+ * exclusion rather than let a cohort quietly get smaller. Both of them used to announce it with
+ * one sentence — "folded without their graph … Publish those graphs in graphs/" — because for a
+ * while that was the only way `specResolved` could be false. It stopped being the only way when
+ * `Trajectory.verdictsResolved` was ANDed into the field, and the sentence did not move: a run
+ * whose graph resolved perfectly was reported as missing it, with a remediation that republishes
+ * a graph already on disk and brings nothing back. CLAUDE.md: a correction that replaces a false
+ * claim with a differently-false one is worse than the original, because it asserts verified
+ * accuracy and is believed harder.
+ *
+ * THE TWO CAUSES ARE DISJOINT BY CONSTRUCTION, not by preference. With no graph the fold has no
+ * node types, no step is known to be an `evaluator`, and `verdictsResolved` comes back vacuously
+ * true — so `!verdictsResolved` proves the graph WAS there, and `!specResolved && verdictsResolved`
+ * is exactly the no-graph half. One helper for both call sites so the split cannot drift back.
+ *
+ * `noun` because one caller is looking at peers and the other at a population that includes its
+ * own anchor; `consequence` because the exclusion costs a `score` run its `p90Score` bar and a
+ * `promote` run its pairing, which are different sentences about the same drop.
+ */
+function unmeasuredNotes(
+  members: readonly Trajectory[],
+  graphsDir: string,
+  noun: string,
+  consequence: string,
+): readonly string[] {
+  const hashesOf = (ms: readonly Trajectory[]): string => [...new Set(ms.map((m) => m.graphHash))].sort().join(", ");
+  const notes: string[] = [];
+  const noGraph = members.filter((m) => !m.specResolved && m.verdictsResolved);
+  if (noGraph.length > 0) {
+    notes.push(
+      `! ${String(noGraph.length)} ${noun} in this cohort folded without their graph (${hashesOf(noGraph)}) and ` +
+        `${consequence} Publish those graphs in ${graphsDir} to put them back in the cohort.\n`,
+    );
+  }
+  const noVerdict = members.filter((m) => !m.verdictsResolved);
+  if (noVerdict.length > 0) {
+    notes.push(
+      `! ${String(noVerdict.length)} ${noun} in this cohort folded WITH their graph (${hashesOf(noVerdict)}) but an ` +
+        `evaluator's channel had passed ${String(EXTERNALISE_ABOVE_BYTES)} bytes and left the journal for the ` +
+        `payload store, so no verdict could be read, and ${consequence} Publishing a graph does not bring these ` +
+        `back — the values are not in their journals. To make later runs measurable, keep an evaluator's verdict ` +
+        `under that size, or make its channel ineligible for the payload store by declaring it in the graph's ` +
+        `outputs or naming it in an edge or router expression.\n`,
+    );
+  }
+  return notes;
 }
 
 /** What `--bucket` builds: `FoldTrajectoryOptions["bucketInput"]`, named so it can be passed on. */
@@ -6110,15 +6194,17 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   }
   // Said here for the reason `loom score` says it: `measureCohort` drops a member it could not
   // measure, and a cohort that shrank has to say why or the `n < MIN_COHORT_SIZE` refusal below
-  // blames the operator's corpus for the operator's graphs/ directory.
-  const specless = [anchorT, ...peers.members].filter((m) => !m.specResolved);
-  if (specless.length > 0) {
-    const hashes = [...new Set(specless.map((m) => m.graphHash))].sort();
-    process.stderr.write(
-      `! ${String(specless.length)} run(s) in this cohort folded without their graph (${hashes.join(", ")}) and ` +
-        `are excluded from the population AND from the pairing — an unmeasured baseline scores 0, and pairing ` +
-        `against a 0 hands this candidate that whole score as improvement it did not earn.\n`,
-    );
+  // blames the operator's corpus for the operator's graphs/ directory. WHICH why is the point —
+  // "publish the graph" is a no-op for a member whose graph resolved and whose verdict did not,
+  // so the two causes get their own sentence. See `unmeasuredNotes`.
+  for (const note of unmeasuredNotes(
+    [anchorT, ...peers.members],
+    join(ws.root, "graphs"),
+    "run(s)",
+    `are excluded from the population AND from the pairing — an unmeasured baseline scores 0, and pairing ` +
+      `against a 0 hands this candidate that whole score as improvement it did not earn.`,
+  )) {
+    process.stderr.write(note);
   }
   const cohort = measureCohort(key, [anchorT, ...peers.members]);
   if (cohort.n < MIN_COHORT_SIZE) {

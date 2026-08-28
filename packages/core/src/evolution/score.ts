@@ -123,6 +123,9 @@
 
 import { digest, type Digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
+// The number condition 6 has to quote. Imported rather than restated, so the size named in the
+// refusal and the size the engine decided by cannot drift apart.
+import { EXTERNALISE_ABOVE_BYTES } from "../journal/payloads.ts";
 import type { Trajectory } from "./trajectory.ts";
 
 // ---------------------------------------------------------------------------
@@ -219,8 +222,12 @@ export interface ScoredTrajectory {
     /**
      * `Trajectory.specResolved`, carried through — the THIRD reason a score of 0 can happen,
      * and the only one that is not a verdict on the run at all. `false` means the signal rungs
-     * were unreadable because the fold had no graph, so this row is a failed measurement and
-     * not a measured failure. `isGolden` condition 6 reads it.
+     * were unreadable, so this row is a failed measurement and not a measured failure. TWO
+     * THINGS MAKE IT FALSE — the fold had no graph, or an evaluator's verdict had left the
+     * journal for the payload store — and this flag deliberately does not say which, because
+     * every consumer's decision is the same either way. `isGolden` condition 6 reads
+     * `Trajectory.verdictsResolved` beside it to tell an operator WHICH, and that split exists
+     * because condition 6 used to name the first cause for both.
      */
     readonly specResolved: boolean;
   };
@@ -456,10 +463,10 @@ export const MIN_OUTCOME = 0.8;
  * a run that broke a rule, 4 blocks fitting to noise, 5 blocks self-training on the
  * output of an unpromoted candidate, and 6 blocks learning from a run NOBODY MEASURED.
  *
- * 6 is not a rung and it is not redundant with 1. Without the spec the ladder is unreadable, so
- * 1 fails too — but it fails saying `outcome 0.000`, which reads as "this run was bad" and is
- * the exact confusion `goldenBlockers` exists to prevent. The condition names the cause instead,
- * with the graph hash a reader has to go and find.
+ * 6 is not a rung and it is not redundant with 1. With the ladder unreadable, 1 fails too — but
+ * it fails saying `outcome 0.000`, which reads as "this run was bad" and is the exact confusion
+ * `goldenBlockers` exists to prevent. The condition names the cause instead — and it names the
+ * cause that is actually true, which is the whole reason it branches: see there.
  */
 export function isGolden(
   t: Trajectory,
@@ -503,9 +510,24 @@ export function isGolden(
       name: "the signals were readable",
       pass: scored.components.specResolved,
       detail: scored.components.specResolved
-        ? "the graph was available, so an absent signal is an absent signal"
-        : `NO SPEC — graph ${t.graphHash} was not available to the fold, so no assertion, rubric or ` +
-          `self-report could be read and this score is a failed measurement rather than a measured failure`,
+        ? "the graph was available and every verdict was in the journal, so an absent signal is an absent signal"
+        : // TWO CAUSES, AND THE MESSAGE HAS TO PICK THE RIGHT ONE. `specResolved` is the AND of
+          // "the fold had the graph" and `verdictsResolved`; it used to be the first alone, and
+          // when the second joined it this string went on naming the first — so a run folded WITH
+          // its graph was told its graph was missing. They cannot both be the cause: with no
+          // graph there are no node types, no step is known to be an `evaluator`, and
+          // `verdictsResolved` comes back vacuously true. So a false `verdictsResolved` proves
+          // the graph WAS there, and this branch is exhaustive rather than a preference.
+          !t.verdictsResolved
+          ? `UNREADABLE VERDICT — the graph was available, but an evaluator step's channel is a payload handle ` +
+            `rather than a value: its canonical form passed ${String(EXTERNALISE_ABOVE_BYTES)} bytes, so the engine ` +
+            `moved it out of the journal and the fold cannot read the verdict it held. The score is a failed ` +
+            `measurement rather than a measured failure. Nothing recovers this run — the value is not in its ` +
+            `journal. To make later runs of graph ${t.graphHash} measurable, keep the evaluator's verdict channel ` +
+            `under that size, or make it ineligible for the payload store by declaring it in the graph's outputs ` +
+            `or naming it in an edge or router expression.`
+          : `NO SPEC — graph ${t.graphHash} was not available to the fold, so no assertion, rubric or ` +
+            `self-report could be read and this score is a failed measurement rather than a measured failure`,
     },
   ];
   return { golden: conditions.every((c) => c.pass), conditions };
