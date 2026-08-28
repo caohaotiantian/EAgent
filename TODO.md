@@ -9,10 +9,11 @@ index. 107 items were checked, 106 of them by executing something — 19 DONE, 5
 extensions); 3587 tests passing (core 2040, eagent 1,547); zero-dep and public-surface guards
 green at 524 exports.
 
-**State today (2026-08-28):** 62 source files in `packages/core`, which is the whole runtime;
-2,468 tests passing; four guards green — zero-dep, public surface at 540 exports, and the
+**State today (2026-08-28):** 61 source files in `packages/core`, which is the whole runtime;
+2,442 tests passing; four guards green — zero-dep, public surface at 525 exports, and the
 kernel file list at 10 files carrying 8 declared seams. The account of the 2026-08-27/28
-session is the block below.
+session is the block below. (Was 62 / 2,468 / 540 before `journal/retention.ts` and its
+26-test suite were deleted — §D.14.)
 
 ## State at 2026-08-28 — what the long session closed, and what it left
 
@@ -57,12 +58,16 @@ own reviewers.
 ### §D — the thirteen the implementer must not answer alone
 
 `D.2` **the real numbers** (tenants, concurrent runs, runs/day, retention) is the one to answer
-first: `D.13` (CPU pool), `D.14` (retention tiering), `D.19` (circuit breaker) and the
+first: `D.13` (CPU pool), `D.19` (circuit breaker) and the
 admission-control half of `D.4` all resolve differently depending on it, and `TenantId` is
 declared and used nowhere. Then `D.5` identity source of truth, `D.6` which approval callback
 is mandatory, `D.7` providers at launch (half answered in code), `D.8` what a join timeout
 does, `D.9` whether a function body's output becomes a journaled effect, `D.10` the
 `preAuthorization` envelope, `D.15` quorum and delegation, `D.18` the mailbox.
+
+`D.14` retention tiering was on that list and came OFF it 2026-08-28 without `D.2` being
+answered — it turned out not to depend on the numbers at all. Its row below carries the
+argument; the short form is that the run-rate figure was the LAST reason, not the first.
 
 ### Named residue from this session's lanes, so it is not rediscovered
 
@@ -1018,7 +1023,7 @@ Each was verified against the code, not remembered.
 | `B.2` **`JoinNode.timeoutMs`** — a barrier waits forever however | open | Claim holds. Two omissions: (a) it is now a compile WARNING, so an author is told; (b) a stale comment contradicts this — packages/core/test/run/skeleton.ts:81-82 says a join … |
 | `B.3` **`Budget.tokens` and `Budget.wallMs`** — declared, never  | done | Both bind, at the run ceiling and the node ceiling (e93f874). `tokens` reserves before the call; `wallMs` is settled-only and stops the call AFTER the ceiling is reached, because a duration has no worst case to debit up front. One gap left, named below. |
 | `B.4` **`preAuthorization`** — a whole risk envelope ... is not  | partial | TRUE half: preAuthorization is not a schema field anywhere in the tree. FALSE half: "declaring one is silence" no longer holds. Commits 78a8fcc ("a node block may not carry a … |
-| `B.5` **Retention tiering** — proven by test, zero callers, so a | open | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. |
+| `B.5` **Retention tiering** — proven by test, zero callers, so a | **CLOSED 2026-08-28** | Confirmed, and the enumeration is total: retention.ts exports exactly these 6 value symbols plus types, and none has a caller in src/ outside its own file. **Answered by DELETING the file, its test and its 15 pinned exports** (surface 540 → 525). The mechanism could not do the job its name promised — `archive` pruned nothing from hot, `DEFAULT_RETENTION.cold` was `Infinity`, and the only `TierStore` was an in-process `Map`. See §D.14. |
 | `B.6` ~~**The evolution subsystem is now REACHABLE but not wired.**~~ **CLOSED 2026-08-27/28** — every member named below has callers on the `cli.ts` product path behind shipped verbs (`loom score`, `cohort`, `promote` in both modes, `suite freeze`), and the loop was driven end to end against a live provider. See `B.6` and `docs/evolution-loop-2026-08-27.md`. Original reading:~~ | **CLOSED 2026-08-27/28** | Every member the entry named as "still uncalled" now has a caller on the `cli.ts` product path, and the verbs that call them ship: `loom score`, `loom cohort`, `loom promote` (replayed AND `--against-cohort`), `loom suite freeze`. Counted in cli.ts: measureCohort 15, cohortKeyOf 8, isGolden 9, scoreTrajectory 9, promotionCeiling 3, gateCandidate 11, runEvalSuite 6, freezeSuite 3. `readSignals` and `outcomeOf` have ZERO direct callers there and are reached transitively — `score.ts:398` and `:408`, inside `scoreTrajectory` — which is reachability, not a second zombie. Driven end to end against a live provider: `docs/evolution-loop-2026-08-27.md`. |
 | `B.7` **Quorum, delegation and trust-tier approvals** — delibera | open | Confirmed, all four shapes. "trust-tier" is ApprovalSpec `mode: "tiered"`. The refusals are at graph/validate.ts:1997-2002 (mode), :2003 (k), :2044-2046 (delegation), and each… |
 | `B.8` **The operator intervention surface** — no pause, resume,  | partial | Four of the five named verbs are genuinely absent (pause, resume, steer, kill) and cancel does exist, so that half stands. "redirect" is wrong: a human answering a gate can re… |
@@ -1071,8 +1076,12 @@ believes a feature is present.
   (2026-08-25):** `GRAPH020_UNKNOWN_FIELD` now makes an undeclared key a hard compile error that
   names the field, so declaring one is a refusal, not silence. Note the limit — the check does not
   reach INSIDE `policy` or `budget`; see §A0.
-- **Retention tiering** — proven by test, zero callers, so a journal never leaves the hot tier and
-  grows without bound.
+- ~~**Retention tiering** — proven by test, zero callers, so a journal never leaves the hot tier and
+  grows without bound.~~ **CLOSED 2026-08-28, by deleting the mechanism** (`journal/retention.ts`,
+  its test, 15 pinned exports). The first clause was the whole finding: a mechanism proven by only
+  its own test. The second is now the recorded position rather than a defect — the journal grows
+  monotonically ON PURPOSE, because a terminal run's journal is the corpus `evolution/trajectory.ts`,
+  `score` and `cohort` measure over. See §D.14 for the argument and for what would reopen it.
 - ~~**The evolution subsystem is now REACHABLE but not wired.**~~ **CLOSED 2026-08-27/28** — every member named below has callers on the `cli.ts` product path behind shipped verbs (`loom score`, `cohort`, `promote` in both modes, `suite freeze`), and the loop was driven end to end against a live provider. See `B.6` and `docs/evolution-loop-2026-08-27.md`. Original reading: `agent().trajectory(runId)` folds a
   run into the shape the scorer reads, so capture has a caller for the first time. Still uncalled:
   cohort measurement, promotion ceilings and baselines — and the generator stays deferred, because
@@ -1199,8 +1208,9 @@ is a better view of nothing.
    The prerequisite turned out to be half-true already — see the corrected §A bullet. Two things
    the decision assumed and the build did not do: `task.committed` and `state.reduced` did NOT each
    need a digest FIELD of their own, they needed a per-channel `external` MAP (a digest alone
-   cannot say WHICH channel left); and `run.submitted.inputs` is still inline. Retention tiering is
-   now unblocked. Original text: decided 2026-08-26,
+   cannot say WHICH channel left); and `run.submitted.inputs` is still inline. Retention tiering
+   was unblocked by this and then ANSWERED, 2026-08-28, by deleting it — see §D.14.
+   Original text: decided 2026-08-26,
    and the fork was not about effort. Above a threshold a payload leaves the journal and leaves a
    `{ref, digest}`; **`foldRun` stays pure and synchronous**, and the engine resolves exactly the
    channels a node DECLARED it reads before invoking the body, so `view.get()` stays synchronous
@@ -1220,7 +1230,8 @@ is a better view of nothing.
 
    `effect.completed` already carries a `resultDigest`, so an externalised effect keeps its
    identity for free; `task.committed` and `state.reduced` each need one.
-   **Retention tiering is downstream of this and stays deferred until it lands.**
+   ~~**Retention tiering is downstream of this and stays deferred until it lands.**~~ It landed,
+   and retention tiering was then ANSWERED BY DELETION rather than built — §D.14.
 
 
 **Three were answered 2026-08-25**, and the roadmap in `DESIGN.md` is built on them:
@@ -1255,7 +1266,7 @@ is a better view of nothing.
 | `D.11` token and wall-clock budgets | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it. (ii) OBSERVABLE: the flagship shipped workflow declares a 400k-token and 5-minute ceiling and compiles with ZERO diagnostics — neither binds anything, and … **ANSWERED + BUILT 2026-08-28.** Both bind, at the run ceiling and the node ceiling, through the machinery `costUsd` already used. Two judgements are recorded at the code rather than here: `tokens` is `inputTokens + outputTokens` (a wider sum double-counts cache fields and reasoning tokens), and `wallMs` is PROVIDER time, not elapsed time — so a night suspended on a human gate accrues nothing, proven by a test that moves the clock a full day under a 10,000 ms ceiling. Known limit: `wallMs` is settled-only, so it cannot refuse the call that crosses the ceiling, only the next one. |
 | `D.12` the subgraph span | **DONE** | (i) DECISION: OPEN. (ii) OBSERVABLE: `loom trace <runId>` can print a parent run's tree and has no route into the child's, because the span builder never mentions subgraphs — … **ANSWERED + BUILT 2026-08-28. The answer is TWO ON THE WIRE, ONE ON THE SCREEN.** `spansFrom` stays a pure fold over one journal and can therefore only LINK; `spliceSubgraph` (pure) joins two folds into one tree and `loom trace` does the journal reads between them, breadth-first, cycle-guarded, bounded at `MAX_TRACED_SUBGRAPHS`. Splicing in the fold was refused for two reasons: it needs a store, which falsifies this file's opening claim, and it rewrites the child's `traceId` and parents a span on another run's journal — right in a renderer, wrong in an exporter, where the two runs are two traces a collector joins by the link. `reconstructGraph` was a casualty and is fixed: `graphHash` was LAST-WRITE-WINS over `loom.run` spans, so a spliced trace certified against whichever run sorted last; it now answers `(multiple)` and `conformsToGraph` refuses. `loom trace` computes conformance over the parent's own fold. |
 | `D.13` a CPU worker pool | partial | (i) DECISION: OPEN; the silent half is closed. (ii) OBSERVABLE: `FunctionNode.cpuBound` (spec.ts:88) is read only by the diagnostic that refuses to let an author believe in it… |
-| `D.14` retention tiering | open | (i) DECISION: OPEN. (ii) OBSERVABLE: `TierManager`, `MemoryTierStore` and `tierFor` are exercised only by the test that proves them. Nothing in the engine, the CLI or the cont… |
+| `D.14` retention tiering | **DONE** | (i) DECISION: OPEN. (ii) OBSERVABLE: `TierManager`, `MemoryTierStore` and `tierFor` are exercised only by the test that proves them. Nothing in the engine, the CLI or the cont… **ANSWERED 2026-08-28, by deletion.** `journal/retention.ts` (500 lines), its test (433 lines, 26 tests) and its 15 pinned exports are gone; surface 540 → 525. **The argument is on property 3, not on storage:** a terminal run's journal IS the corpus `evolution/trajectory.ts`, `score` and `cohort` measure over, so it is the evidence "a later run is measurably better because of an earlier one" rests on. Any prune's undecidable case is "will anyone replay or score this run?", which no journaled fact answers — so the fail-closed answer is KEEP, and a `--before <t>` sweep answering the easier question "is the run terminal?" is not the same thing. Three supporting facts: the mechanism could not do the job its name promised (`archive` pruned nothing from hot, `DEFAULT_RETENTION.cold` was `Infinity`, the only `TierStore` was an in-process `Map`, so wiring it in would have DOUBLED a completed run's footprint into RAM and freed zero bytes); it was a second audit vocabulary beside the live `journal/audit.ts`, with no writer at all; and `TierStore` was not an extension seam, because an interface nothing calls cannot be extended by anybody — which is why it must NOT join README's list of six, that list naming capabilities the binary REFUSES. Only then the number, which is a fact and not the argument: one real 8-node run measures 62 events and 94,834 payload bytes, so tens of runs a day is single-digit MB/day. `E_AUDIT_IMMUTABLE` went in the same commit — the WORM `MemoryTierStore` was its only raiser, and `registries.test.ts` caught it. **Reopen on a MEASURED fact, not a calendar:** (1) the journal gets large enough that `loom trace` or `loom audit` is slow, or an operator reports a real cost; (2) `score`/`cohort` grow a durable summary that supersedes the raw journal, making the runs behind it deletable; (3) D.2 changes — a second tenant, a hosted plane, or an erasure mandate (GDPR-out-of-scope was a recorded operator statement, not a property of the software). If it reopens, **do not rebuild tiering as written**: `TierManager.restore` had zero callers, so archiving to cold while pruning hot would make a run UNFOLDABLE — the `foldRun` read-path fallback from hot to cold must land BEFORE any tiering. The narrower build to revisit first is `loom prune --run <id> --yes` for ONE named run, not `--before <date>` for a range: one run an operator points at is a decision the operator made, not one a sweep guessed. |
 | `D.15` quorum and delegation | open | (i) DECISION: OPEN, and deliberately refused rather than silently downgraded. (ii) OBSERVABLE: a graph asking for two approvers fails to compile, so the decision has a price a… |
 | `D.16` `run.cancelled.forced` | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it. (ii) OBSERVABLE: the field is written by exactly one site as a constant `false` and read by nothing — so `run.cancelled` carries a boolean that has never o… **ANSWERED 2026-08-28, by deletion.** The field is gone. Its own docstring said the removal cost three files; it was seven files and nine sites, which is why it kept being deferred. The operator lane separately established that §D.4's definition of `kill` — 'cancel that does not wait' — is FALSIFIED, because `cancel` does not wait: measured in `test/run/cancel-does-not-wait.test.ts`. So the field was not held open for a verb that cannot exist as specified. |
 | `D.17` the operator surface | **DONE** | (i) DECISION: ANSWERED by the maintainer this session, then BUILT. The OPEN reading below is kept verbatim because it is what the code looked like when the question was put, and the answer only means something against it. (ii) OBSERVABLE: the whole operator vocabulary over HTTP is three verbs — cancel, rewind, advance (http.ts:2780-2797) — and five of the words §B names are … **ANSWERED + PARTLY BUILT 2026-08-28.** The maintainer's answer was the full set. `pause` and `resume` ship as journaled facts that survive a restart (`RunProjection.paused`, deliberately separate from `status` so a `gate.decided`'s unconditional `run.resumed` cannot undo an operator's stop), and `steer` ships confined to the compiled edge set. `kill` was NOT built and the reason is measured, not a shortfall: it was specified as 'cancel that does not wait' and `cancel` does not wait, so it would have been a synonym. A steer aimed at a `human_gate` is now REFUSED — it was accepted, journaled and never read, because a gate resumes through `resolveGate` and `#dispatchNode` never sees it. |
@@ -1279,9 +1290,9 @@ than answering them. **The five that change what gets built:**
 
 The rest: which approval callback is mandatory · providers required at launch · what a join timeout
 does · whether a function body's output becomes a journaled effect · the `preAuthorization`
-envelope · token and wall-clock budgets · the subgraph span · a CPU worker pool · retention
-tiering · quorum and delegation · `run.cancelled.forced` · the operator surface · the mailbox · the
-circuit breaker.
+envelope · token and wall-clock budgets · the subgraph span · a CPU worker pool ·
+quorum and delegation · `run.cancelled.forced` · the operator surface · the mailbox · the
+circuit breaker. (Retention tiering was in this list until 2026-08-28; it is answered — §D.14.)
 
 ## E · Deferred on purpose, with the reason — do not silently revive
 
@@ -1513,7 +1524,8 @@ Each traces to a decision in `DESIGN.md`.
   `DESIGN.md` D4 for what would reopen it.
 - **Prompt text into the artifact hash (D7).** A prompt edit currently changes what a resumed run
   does, silently.
-- ~~**Payload externalisation.**~~ **DONE** — see §A. Retention tiering is no longer blocked on it.
+- ~~**Payload externalisation.**~~ **DONE** — see §A. It unblocked retention tiering, which was
+  then answered by deleting it (§D.14), so nothing is waiting on this one any more.
 - **Proposed-API mechanism and a version pin (D5).**
 - **One retry budget per run**, decremented across every layer. Engine retry × provider retry ×
   agent-loop retry currently multiply.

@@ -201,6 +201,42 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
       assert.match(SRC("graph/validate.ts"), /GRAPH014_APPROVER_INVALID|mode.*quorum/, "the unsupported modes must still be refused");
     },
   },
+  {
+    row: "Removing a run from the journal",
+    claims: "Nothing in the tree deletes a journal row or a payload file",
+    // A GAP ROW THAT IS A DECISION, so the probe is the absence itself — §D.14 deleted
+    // `journal/retention.ts` on the argument that a terminal run's journal is the corpus
+    // `score` and `cohort` measure over. The row goes false the moment somebody builds a
+    // prune, which is exactly when the decision needs re-reading rather than the row quietly
+    // becoming a lie.
+    //
+    // WHEN THIS PROBE CANNOT DECIDE IT FAILS. The `unlink` half scans a glob, and a glob that
+    // matched nothing would let a deletion path through silently — the passing value for the
+    // wrong reason. So the file count is asserted FIRST, and a broken scan is a red test.
+    probe: () => {
+      const store = SRC("journal/store.ts");
+      const iface = /export interface StateStore\b[\s\S]*?\n}/.exec(store);
+      assert.ok(iface, "StateStore's declaration moved — this probe reads it by shape");
+      assert.doesNotMatch(iface[0], /^\s*delete\s*\(/m, "StateStore grew a delete — that is the kernel seam §D.14 declined, so it needs a Kernel-seam: trailer and a new decision");
+
+      // WHOLE-TREE, not just `journal/sqlite.ts`. Scoping the SQL scan to today's backend was
+      // the hole this probe had when it was written: a `loom prune` in a NEW file, or raw SQL
+      // from `cli.ts`, would have walked straight past it. The patterns are the STATEMENT
+      // shapes rather than the bare words, because "delete"/"deleted" appear in prose in
+      // dozens of these files and a check that noisy would be turned off within a week.
+      const srcFiles = globSync(fileURLToPath(new URL("../src/**/*.ts", import.meta.url)));
+      assert.ok(srcFiles.length >= 50, `scanned ${srcFiles.length} source files — the scan broke, and an empty scan must not read as "nothing deletes"`);
+      const offenders = srcFiles
+        .map((f) => [f.split("/src/")[1]!, readFileSync(f, "utf8")] as const)
+        .filter(([, text]) => /DELETE\s+FROM|\bVACUUM\b|\bunlink\b/i.test(text))
+        .map(([rel]) => rel);
+      assert.deepEqual(
+        offenders,
+        [],
+        "something now removes a journal row or a payload file — update the row and re-read TODO.md §D.14",
+      );
+    },
+  },
 ];
 
 test("EVERY CHECKABLE CLAIM IN THE README'S GAPS TABLE IS STILL TRUE", () => {
