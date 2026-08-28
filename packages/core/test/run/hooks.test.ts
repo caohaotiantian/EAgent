@@ -384,7 +384,9 @@ test("`postTool` rewrites the result before it becomes durable", async () => {
 /** A tool that always fails retryably, on a node whose policy allows 2 attempts. */
 function flakyRig(hookBody?: HookBody): { engine: Engine; store: MemoryStateStore; calls: () => number; clock: { t: number } } {
   let n = 0;
-  // A MOVABLE CLOCK. A retry sets `retryAfter = now + backoffMs`, and `advance` will not lease a
+  // A MOVABLE CLOCK. A retry sets `retryAfter = now + the policy's backoff curve` — there is no
+  // `backoffMs` field, and this comment named one until `GRAPH020_UNKNOWN_FIELD` reached inside
+  // `retry` and refused the spec below — and `advance` will not lease a
   // task that is still backing off — so a frozen clock plus any backoff spins forever. The first
   // draft of this test hung on exactly that.
   const clock = { t: NOW };
@@ -421,7 +423,7 @@ function flakyRig(hookBody?: HookBody): { engine: Engine; store: MemoryStateStor
 
 function retrySpec(): GraphSpec {
   const s = spec("onError") as unknown as { nodes: Record<string, unknown>[] };
-  s.nodes[0]!["retry"] = { maxAttempts: 3, backoffMs: 1 };
+  s.nodes[0]!["retry"] = { maxAttempts: 3, initialMs: 1 };
   return s as unknown as GraphSpec;
 }
 
