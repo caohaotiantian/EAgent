@@ -83,9 +83,33 @@ export type NodeType =
   | "human_gate"
   | "subgraph";
 
+/**
+ * THERE IS NO `cpuBound` FIELD, and there is no worker pool.
+ *
+ * It was declared here, accepted into `ALLOWED_FIELDS.function`, and read at exactly one site:
+ * the diagnostic whose whole job was to stop an author believing in it. `packages/core/src`
+ * contains no `worker_threads` import — the only occurrence of the word was a comment saying so.
+ * A body declaring it ran on the main thread and blocked the event loop, every other task in the
+ * wave, the gate-SLA sweep, and any `loom serve` plane sharing the process. Measured: two
+ * independent `cpuBound: true` nodes took 2,646 ms against 1,325 ms for one — 1.997x, exactly
+ * serial — and four took 5.989x on a 16-core machine. "Looks parallel, serialises" is the
+ * operational twin of "looks supervised, is not", and across a fan-out an author believed the
+ * declaration was N-way when it was 1-way.
+ *
+ * Declaring one is now `GRAPH020_UNKNOWN_FIELD`. The pool was refused rather than deferred
+ * because a `function` body is RE-EXECUTED on replay while a tool result is SERVED from the
+ * journal: out-of-process work AS A TOOL (`proc.exec`, an MCP tool) needs no second copy of the
+ * determinism vocabulary, and a worker pool needs one — Date/Intl/Math.random/`ctx.now` would
+ * have to be re-established inside the worker, permanently doubling the surface on which
+ * invariant 4 can silently break. Two deleted design documents once promised the thread; the
+ * schema outlived them by keeping the field.
+ *
+ * WHAT DOES NOT CHANGE: a body that burns CPU still blocks the loop. It is bounded by the node's
+ * declared `timeoutMs` or by `resources/functions.ts`'s `opts.callTimeoutMs ?? 30_000` through
+ * `vm`'s per-call timeout, which can enforce it because it terminates synchronous execution.
+ */
 export interface FunctionNode {
   readonly ref: ResourceRef;
-  readonly cpuBound?: boolean;
   /**
    * Tools this body may invoke — DECLARED here, never chosen at run time.
    *
@@ -709,7 +733,7 @@ export const REQUIRED_FIELDS: Readonly<Record<NodeType, readonly (readonly [stri
  * added — a guard that cries wolf on correct code is worse than no guard.
  */
 export const ALLOWED_FIELDS: Readonly<Record<NodeType, readonly string[]>> = {
-  function: ["ref", "cpuBound", "effects"],
+  function: ["ref", "effects"],
   agent: ["profile", "prompt", "outputSchema", "maxTurns", "tools", "canMutate"],
   tool: ["name", "version", "args"],
   router: ["mode", "cases", "fallbackEdge", "profile"],

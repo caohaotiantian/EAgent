@@ -8,7 +8,7 @@
  * The rules exist to make three claims true *before* anything executes:
  *   - the run terminates (bounded by construction, not proved — GRAPH006/007/018)
  *   - concurrent writes are deterministic (GRAPH010)
- *   - oversight cannot be weakened anywhere (GRAPH014, GRAPH019)
+ *   - oversight cannot be weakened anywhere (GRAPH014, GRAPH019_POSTURE_NO_EFFECT)
  *
  */
 
@@ -436,7 +436,6 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
   rule013Reducers(spec, d);
   rule014And019Oversight(spec, idx, ctx, d);
-  rule019InertDeclarations(spec, d);
   rule015Resources(spec, ctx.resolver, d);
   rule016Subgraphs(spec, ctx, expansion, d);
   rule017Capabilities(spec, ctx, d);
@@ -1019,8 +1018,9 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     //
     // NOT `fatal`, on this file's own stated rule: a lost bound costs a limit, not a posture, and
     // no later rule reasons from `retry` — so the author gets this diagnostic alongside the rest
-    // of the graph's faults rather than instead of them. It is still an ERROR: unlike the inert
-    // declarations GRAPH019 warns about, this graph does not mean what it says.
+    // of the graph's faults rather than instead of them. It is still an ERROR: unlike
+    // `GRAPH019_POSTURE_NO_EFFECT`, where the author wrote something real that cannot take
+    // effect, this graph does not mean what it says.
     const retryBlock = objectBlock(
       n.retry,
       `node "${n.id}"'s \`retry\``,
@@ -1076,11 +1076,17 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // the author who wrote it and is not one. `ALLOWED_FIELDS` is the enumeration; see its
     // docstring for why it lives beside `REQUIRED_FIELDS`.
     //
-    // An ERROR rather than a warning. The two other treatments in this family — GRAPH019's inert
-    // declaration and GRAPH013's unknown tool — warn because the graph still means what it says
-    // and the author has merely been told less than they think. An unknown KEY means the author
-    // wrote something the compiler cannot interpret at all, and the nearest-name hint below makes
-    // a typo cheap to fix rather than cheap to ignore.
+    // An ERROR rather than a warning. The other treatments in this family —
+    // `GRAPH019_POSTURE_NO_EFFECT` and GRAPH013's unknown tool — warn because the graph still
+    // means what it says and the author has merely been told less than they think. An unknown
+    // KEY means the author wrote something the compiler cannot interpret at all, and the
+    // nearest-name hint below makes a typo cheap to fix rather than cheap to ignore.
+    //
+    // THIS RULE IS WHERE THE INERT-DECLARATION FAMILY ENDED UP. `GRAPH019_CPUBOUND_NO_EFFECT`
+    // and `GRAPH008_JOIN_TIMEOUT_INERT` were both bespoke warnings for one field each; both
+    // fields were deleted, and the generic refusal here is what an author meets instead. It has
+    // no undecidable case — a key is in `ALLOWED_FIELDS` or the graph is refused — where a
+    // per-field warning had to be argued into existence one field at a time.
     const holder = REQUIRED_BLOCK[n.type];
     const declared = (n as unknown as Record<string, unknown>)[holder as string] as Record<string, unknown> | undefined;
     if (declared !== undefined && typeof declared === "object") {
@@ -1729,43 +1735,6 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
             : `its branches write nothing, so this join can only signal that they finished`,
       });
     }
-  }
-}
-
-// ── GRAPH019: a declaration that changes nothing ─────────────────────────────
-
-/**
- * A field the runtime does not read is reported rather than silently accepted.
- *
- * `FunctionNode.cpuBound` is the case this was written for. Its sibling rule for the join
- * deadline is gone: `JoinNode.timeoutMs` was DELETED rather than warned about, so declaring one
- * is `GRAPH020_UNKNOWN_FIELD` and there is no inert field left to describe. This one is DRIFT:
- * two documents said the opposite of the code, the node
- * table's `function` row ("Runs in a worker thread if `cpuBound: true`") and D3's pool diagram
- * ("worker_threads if cpuBound"), while `packages/core/src` contains no `worker_threads` import
- * at all. Both have been corrected; this is what stops an author believing the old sentence.
- *
- * MEASURED, because "nothing reads it" and "it does not run in parallel" are different claims:
- * two independent `cpuBound: true` function nodes took 2646 ms of compute against 1325 ms for
- * one — 1.997x, exactly serial, on a multi-core machine.
- *
- * A warning and not an error, because nothing SUBSTITUTES — unlike `onBudgetExhausted: "gate"`,
- * which ran something semantically different from what the graph said. The function computes the
- * right answer on the wrong thread. What is lost is isolation: a long body blocks the event loop,
- * and with it every other task in the wave and any `loom serve` plane sharing the process.
- */
-function rule019InertDeclarations(spec: GraphSpec, d: Diagnostic[]): void {
-  if (!Array.isArray(spec.nodes)) return;
-  for (const n of spec.nodes) {
-    if (n?.type !== "function") continue;
-    if ((n.function as { readonly cpuBound?: unknown } | undefined)?.cpuBound !== true) continue;
-    d.push({
-      severity: "warning",
-      code: "GRAPH019_CPUBOUND_NO_EFFECT",
-      message: `function node "${n.id}" declares cpuBound, which nothing reads — the body runs on the main thread and blocks it`,
-      at: { nodeId: n.id },
-      fix: "remove cpuBound, or keep the body short enough to run inline — there is no worker pool",
-    });
   }
 }
 

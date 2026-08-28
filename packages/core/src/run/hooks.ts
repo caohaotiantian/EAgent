@@ -74,9 +74,11 @@ export type HookPoint = (typeof HOOK_POINTS)[number];
  * statement ABOUT that code rather than an input to it, and the two can disagree with nothing
  * going red.
  *
- * Kept and exported rather than deleted, which is the treatment `GRAPH019_CPUBOUND_NO_EFFECT`
- * established for a declaration that binds nothing: say so, do not quietly keep implying a
- * consumer. **If you make a decision from this set, you are its first reader** — and at that
+ * Kept and exported rather than deleted, and the difference from a declaration that binds
+ * nothing is that this one HAS a consumer — the two dispatch helpers — it just is not the input
+ * to them. `FunctionNode.cpuBound`, which had no consumer at all, was deleted; the treatment
+ * that once stood here as precedent, a bespoke warning per inert field, went with it.
+ * **If you make a decision from this set, you are its first reader** — and at that
  * point it needs a test tying it to the dispatch helpers, because until then the only thing
  * keeping them agreed is that one person wrote both.
  */
