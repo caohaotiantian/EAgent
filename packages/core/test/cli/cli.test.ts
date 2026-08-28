@@ -9,18 +9,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { connect, createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { controlPlaneOptions, main, openWorkspace, parseArgs, readChannels, readIdentities, serveUntilInterrupt } from "../../src/cli.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { ControlPlane } from "../../src/server/http.ts";
+import { refusing, serving } from "../deployment/harness.ts";
 
 /** A graph that uses only built-in tools, so nothing needs registering. */
 const GRAPH = {
@@ -1506,115 +1505,31 @@ async function approvalsService(): Promise<{ url: string; next(): Promise<Record
 }
 
 /**
- * `loom serve`, in a CHILD PROCESS, with its boot output read off its pipes.
+ * `serving` and `refusing` LIVE IN `deployment/harness.ts`, and this file's private copies
+ * of them are gone.
  *
- * A child and not an in-process `main(...)` for two reasons, one of which cost an hour:
+ * They were byte-similar and drifted anyway, which is the cost the harness's own header
+ * predicted: "two files owning the same platform probe is how the two answers drift". Both
+ * carried the same false sentence — that `  clock:` is the last line `loom serve` writes to
+ * stdout, so seeing it means the whole banner has landed. `announce` writes `  models:`
+ * after it, so both returned with 60 bytes in flight and every assertion made on `out`
+ * before `stop()` was reading a prefix. Fixing that in one place and not the other is how a
+ * third sighting would have been earned.
+ *
+ * The two reasons these spawn a CHILD rather than calling `main`/`run` in-process are kept
+ * here because they were earned here and they are about THIS file:
  *
  *   - `serve` ends in a promise only a SIGINT resolves, so reading its output in-process
  *     means holding `process.stdout.write` replaced for the whole life of the server. The
  *     node test runner's own reporter writes through that same function, so the capture
  *     swallowed the results of every test that had run before it — 18 of them vanished
  *     from the run and the file reported `tests 3`. A test harness that can silently
- *     delete other tests' results is worse than the gap it was covering.
+ *     delete other tests' results is worse than the gap it was covering. The same applies
+ *     to `refusing`: when a refusal REGRESSES and `serve` binds instead, an in-process
+ *     `run` does not merely fail its own assertion, it hides the rest of the suite.
  *   - it is also the more honest test: this is the entry point the shipped binary uses,
  *     argv parsing, module guard and all.
  */
-async function serving(
-  argv: string[],
-): Promise<{ out: string; err: string; port: number; sigint(): void; stop(): Promise<number | null> }> {
-  const cli = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
-  const child = spawn(process.execPath, [cli, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
-  let out = "";
-  let err = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (c: string) => (out += c));
-  child.stderr.on("data", (c: string) => (err += c));
-  // `close`, not `exit`: `close` is the event that fires once every stdio pipe has been
-  // drained, so a caller that stops the server and then reads `out`/`err` sees everything
-  // it wrote. `exit` can fire with output still in flight, which makes a negative
-  // assertion ("this line was NOT printed") pass for the wrong reason.
-  //
-  // It carries the EXIT CODE, because how `loom serve` ends is a contract too: an
-  // unhandled rejection in the shutdown path ends the process at 1, and a `stop()` that
-  // discarded the code could not tell that from a clean 0.
-  const exited = new Promise<number | null>((r) => child.on("close", (code) => r(code)));
-  // WAIT FOR THE LAST BOOT LINE, NOT THE FIRST. `announce` makes six separate
-  // `process.stdout.write` calls and a pipe delivers them in whatever chunks it likes, so
-  // waiting for `loom listening` — the FIRST line — returned while `gates:` and `clock:`
-  // were still in flight. That failed about one run in three, and only under the full
-  // suite, where the machine is loaded enough for the chunks to split: a test that passes
-  // alone and fails in the suite is the worst shape a flake comes in. `clock:` is the last
-  // thing written to stdout, and a stream delivers in order, so seeing it means the whole
-  // block has landed.
-  // REAPED ON EVERY FAILURE PATH, and that is not defensive tidiness. `stop()` is on the value
-  // this function RETURNS, so anything that throws before the return leaves the child running
-  // forever — a `loom serve` holding a temp workspace with nobody left who knows its pid.
-  //
-  // Found the expensive way: one such orphan, 2h14m old, made `subprocess.test.ts`'s
-  // "A CHILD THAT OUTLIVES SIGKILL" test wait on it — 5s alone became 917s in the suite, and
-  // `npm test` went from 9s to 923s. A leaked process does not fail a test; it taxes every later
-  // run, on a machine, silently.
-  let bound: RegExpExecArray | null = null;
-  try {
-    await until(() => out.includes("  clock:"), `loom serve never finished booting. stdout:\n${out}\nstderr:\n${err}`);
-    bound = /loom listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(out);
-    if (bound?.[1] === undefined) throw new Error(`could not read the bound port from:\n${out}`);
-  } catch (e) {
-    child.kill("SIGKILL");
-    throw e;
-  }
-  return {
-    get out() {
-      return out;
-    },
-    get err() {
-      return err;
-    },
-    port: Number(bound[1]),
-    /** Send Ctrl-C without waiting. A shutdown that can be asked TWICE needs two senders. */
-    sigint: () => {
-      child.kill("SIGINT");
-    },
-    stop: async () => {
-      child.kill("SIGINT");
-      return await exited;
-    },
-  };
-}
-
-/**
- * `loom …`, in a CHILD PROCESS, expected to REFUSE — exit non-zero, having bound nothing.
- *
- * A child and not the in-process `run` helper, for the reason `serving`'s docstring gives
- * at length: `run` holds `process.stdout.write` replaced for the length of the call, and
- * the node test runner's reporter writes through that same function. So when a refusal
- * REGRESSES — `serve` binds a port and waits for a SIGINT that never comes — `run` does not
- * merely fail its own assertion, it swallows the results of every test in the file. A guard
- * whose regression hides the rest of the suite reports less than no guard at all.
- *
- * The deadline is a FAILURE deadline: nothing here asserts how fast a refusal is, only that
- * the process ends by itself. The `SIGKILL` in the `finally` is what makes a regression cost
- * one failed test rather than a hung suite.
- */
-async function refusing(argv: string[]): Promise<{ code: number | null; err: string }> {
-  const cli = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
-  const child = spawn(process.execPath, [cli, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
-  let err = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (c: string) => (err += c));
-  // `close`, not `exit`: it fires once the pipes have drained, so the message asserted on
-  // below is the whole of what the process wrote and not a prefix of it.
-  const exited = new Promise<number | null>((r) => child.on("close", (code) => r(code)));
-  const timer = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`\`loom ${argv.join(" ")}\` never exited. It must refuse, before it binds anything.`)), 10_000).unref();
-  });
-  try {
-    return { code: await Promise.race([exited, timer]), err };
-  } finally {
-    child.kill("SIGKILL");
-  }
-}
 
 /**
  * Poll until a condition holds, failing loudly rather than hanging when it never does.

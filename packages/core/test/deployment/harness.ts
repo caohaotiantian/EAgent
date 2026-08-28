@@ -350,11 +350,84 @@ export async function speak(
   });
 }
 
+/**
+ * The NEWLINE-TERMINATED lines of `text`, and never the unterminated tail.
+ *
+ * A pipe splits where it likes — measured on this machine, `loom serve`'s 405-byte banner
+ * arrived in 2 to 5 chunks under sixteen CPU burners, one of them 17 bytes, i.e. mid-line.
+ * Matching a substring against the ACCUMULATION survives a token split (the accumulation
+ * rejoins it), so that is not the hazard; the hazard is that the match succeeds while the
+ * REST of that line is still in flight, and a caller then reads a value off a prefix. The
+ * worst instance in this file is not hypothetical: `serving` parses the bound port out of
+ * the address line with `/:(\d+)/`, and a boundary inside the digits yields a valid integer
+ * naming the wrong socket. Dropping the tail makes that unreachable.
+ *
+ * Cheap because the streams here are banners, not throughput: it re-splits the whole buffer
+ * per chunk, which is fine for kilobytes and would not be for megabytes.
+ */
+export function completeLines(text: string): readonly string[] {
+  const parts = text.split("\n");
+  parts.pop();
+  return parts;
+}
+
+/**
+ * THE STDOUT BANNER `announce` WRITES, named as a set rather than guessed at by its last member.
+ *
+ * `serving` used to wait for the substring `"  clock:"` and both copies of it wrote the
+ * reason down as a fact — "the LAST stdout line", "seeing it means the whole block has
+ * landed". `announce` writes `  models:` after it, so the fact was false and the conclusion
+ * unsupported: `serving` returned with 60 bytes of banner in flight, every time, and every
+ * assertion a caller made on `out` before `stop()` was reading a prefix that happened to be
+ * long enough. Reproduced deterministically before this change; see `boot-banner.test.ts`.
+ *
+ * A named set can be checked, and `boot-banner.test.ts` checks it against a real child's
+ * drained stdout — so a line added to `announce` and not added here goes RED there instead
+ * of silently re-opening the window. That test is the only thing keeping this list honest;
+ * this list on its own cannot know about a key it does not name.
+ */
+export const BANNER_KEYS = ["data", "graphs", "who", "gates", "clock", "models"] as const;
+
+/**
+ * Wait for a COMPLETE line matching `re` in a buffer that is still filling.
+ *
+ * Extracted from `awaitErr` so the WAITING is checkable on its own: driven against a live
+ * child, a stderr banner has usually already arrived by the time anyone asks for it, and a
+ * test that cannot tell "it waited" from "it was already there" pins nothing.
+ *
+ * WHEN IT CANNOT DECIDE IT REFUSES, with the buffer's contents in the message. The deadline
+ * is a failure deadline and never a measurement: nothing here asserts how fast a line
+ * arrives, only that it does.
+ */
+export async function awaitLine(read: () => string, re: RegExp, what: string, deadlineMs = 15_000): Promise<string> {
+  const giveUp = Date.now() + deadlineMs;
+  for (;;) {
+    const hit = completeLines(read()).find((l) => re.test(l));
+    if (hit !== undefined) return hit;
+    if (Date.now() > giveUp) throw new Error(`no complete ${what} line matched ${re}.\n${what}:\n${read()}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/** Every `  <key>: …` key `loom serve` actually printed, read off complete lines only. */
+export function bannerKeysIn(text: string): readonly string[] {
+  const keys: string[] = [];
+  for (const line of completeLines(text)) {
+    const m = /^ {2}([a-z]+):/.exec(line);
+    if (m?.[1] !== undefined) keys.push(m[1]);
+  }
+  return keys;
+}
+
 export interface Serving {
   readonly out: string;
   readonly err: string;
   readonly host: string;
   readonly port: number;
+  /** Wait for a COMPLETE stderr line matching `re`, or fail saying what stderr held instead. */
+  awaitErr(re: RegExp): Promise<string>;
+  /** Ctrl-C without waiting. A shutdown that can be asked TWICE needs two senders. */
+  sigint(): void;
   stop(): Promise<number | null>;
 }
 
@@ -368,18 +441,44 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (c: string) => (out += c));
+  // DRAINED, AND WAITABLE. Attaching a handler is what keeps a chatty child off a full pipe;
+  // `awaitErr` below is what stops a caller RACING it. Both halves are needed and only the
+  // first was here.
   child.stderr.on("data", (c: string) => (err += c));
   const exited = new Promise<number | null>((r) => child.on("close", (code) => r(code)));
+  // A CRASH AT BOOT IS A FAILURE, NOT A TIMEOUT. Without this the loop below spins the full
+  // 15 s on a child that died in its first 20 ms and then reports "never booted", which sends
+  // the reader looking for a hang. `null` is a signal death, which is also not a boot.
+  let died: number | null | undefined;
+  void exited.then((code) => (died = code));
   try {
-    // `  clock:` and not `loom listening` — the LAST stdout line, not the first. A pipe
-    // splits where it likes, so waiting on the first line returns with the rest in flight
-    // and every negative assertion below would pass for the wrong reason.
+    // WAIT FOR THE WHOLE BANNER, as a NAMED SET of COMPLETE lines — not for one substring
+    // believed to be last. `BANNER_KEYS` says why, and `boot-banner.test.ts` is what keeps
+    // the set equal to what `announce` prints.
+    //
+    // The deadline is a FAILURE deadline and never a measurement: nothing here asserts how
+    // fast a boot is. WHEN IT CANNOT DECIDE IT REFUSES — it names the keys that never
+    // arrived and prints both streams, rather than returning a plane whose banner is a
+    // prefix.
     const deadline = Date.now() + 15_000;
-    while (!out.includes("  clock:")) {
-      if (Date.now() > deadline) throw new Error(`\`loom ${argv.join(" ")}\` never booted.\nstdout:\n${out}\nstderr:\n${err}`);
+    for (;;) {
+      const have = new Set(bannerKeysIn(out));
+      const missing = BANNER_KEYS.filter((k) => !have.has(k));
+      const addressed = completeLines(out).some((l) => /^loom listening on http:\/\//.test(l));
+      if (addressed && missing.length === 0) break;
+      if (died !== undefined) {
+        throw new Error(`\`loom ${argv.join(" ")}\` exited (${died}) before it finished booting.\nstdout:\n${out}\nstderr:\n${err}`);
+      }
+      if (Date.now() > deadline) {
+        throw new Error(
+          `\`loom ${argv.join(" ")}\` never booted — no complete line for: ${missing.join(", ") || "(the address line)"}.\n` +
+            `stdout:\n${out}\nstderr:\n${err}`,
+        );
+      }
       await new Promise((r) => setTimeout(r, 5));
     }
-    const m = /loom listening on http:\/\/(\[[^\]]+\]|[^:\s]+):(\d+)/.exec(out);
+    // Run over COMPLETE lines, so the port cannot be a prefix of itself.
+    const m = /loom listening on http:\/\/(\[[^\]]+\]|[^:\s]+):(\d+)/.exec(completeLines(out).join("\n"));
     if (m?.[1] === undefined || m[2] === undefined) throw new Error(`no address line in:\n${out}`);
     return {
       get out() {
@@ -391,10 +490,26 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
       host: m[1].replace(/^\[/, "").replace(/\]$/, ""),
       port: Number(m[2]),
       /**
+       * WAIT for a stderr line, rather than reading whatever has arrived.
+       *
+       * `announce`'s stderr warnings are written AFTER its last stdout line, so at the
+       * moment boot returns they are in flight: an assertion on `err` here saw the empty
+       * string, measured. The old note told callers to `stop()` first and left the rest to
+       * memory. This is the mechanism instead — and it is for the case where a caller wants
+       * the warning while the plane is still UP, which `stop()` cannot serve.
+       *
+       * Complete lines only, for the reason `completeLines` gives, and a failure deadline
+       * that REFUSES with what stderr actually held.
+       */
+      awaitErr: async (re: RegExp) => await awaitLine(() => err, re, "stderr"),
+      sigint: () => {
+        child.kill("SIGINT");
+      },
+      /**
        * SIGINT, then wait for `close` — the event that fires once every stdio pipe has
-       * DRAINED. Anything asserted about `err` must be read after this: boot returns as soon
-       * as stdout's last line lands, and stderr's warnings are still in flight at that point.
-       * Measured — an assertion on `err` before `stop()` saw the empty string.
+       * DRAINED, so `out`/`err` read after it are everything the process wrote and not a
+       * prefix. Boot no longer returns on a prefix of stdout, but stderr is still written
+       * after the banner, so `stop()` (or `awaitErr`) remains the way to read it.
        */
       stop: async () => {
         child.kill("SIGINT");
@@ -417,6 +532,9 @@ export async function refusing(argv: readonly string[]): Promise<{ code: number 
   let err = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (c: string) => (err += c));
+  // `close`, not `exit`: it fires once the pipes have DRAINED, so `err` below is the whole of
+  // what the process wrote to stderr and not a prefix of it. This one was already right, and
+  // it is the property `serving`'s boot wait was missing.
   const exited = new Promise<number | null>((r) => child.on("close", (code) => r(code)));
   const timer = new Promise<never>((_, reject) => {
     setTimeout(() => reject(new Error(`\`loom ${argv.join(" ")}\` never exited — it must refuse BEFORE it binds anything`)), 15_000).unref();
