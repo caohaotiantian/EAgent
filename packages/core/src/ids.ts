@@ -17,8 +17,15 @@ declare const brand: unique symbol;
 /** A nominal string type. Erased at runtime; the brand exists only for the checker. */
 export type Id<K extends string> = string & { readonly [brand]: K };
 
-export type TenantId = Id<"tenant">;
-export type ProjectId = Id<"project">;
+// `TenantId` and `ProjectId` WERE HERE and are deleted. Both were declared and used by
+// nothing: `/usr/bin/grep -arn TenantId packages/core/ scripts/` returned the declaration,
+// two `scripts/surface.json` entries and two dated audit notes recording that it had no
+// referent — no journal column, no fold, no call site. They were waiting on a question about
+// how many tenants and projects this system serves, and that question has been answered:
+// **one machine, one tenant, the maintainers' own workflows.** A type whose whole content is
+// a brand nobody applies is not a design placeholder, it is a claim the code does not make.
+// `tenantCapabilities` is untouched and unrelated — it is a live process-global grant list in
+// ten places and shares only the word.
 export type RunId = Id<"run">;
 export type NodeId = Id<"node">;
 export type EdgeId = Id<"edge">;
