@@ -783,6 +783,26 @@ function onlyGovernedCrossed(context: object, governed: Record<string, unknown>)
  * `globalThis` at definition time — user code, on the host thread, outside the `vm` timeout that
  * bounds everything else here. That is the hazard `crossedAsThenable` refuses to take for the
  * same reason, and a descriptor read takes none of it.
+ *
+ * THE ONE INPUT THAT STILL GETS THE BRAND, named because "is not the platform's" is a weaker
+ * question than "is reproducible" and this is the gap between them. A body that WRAPS the
+ * platform draw rather than replacing it installs a different function object, so check 3
+ * passes. Measured, through `compileRealm` with no `seedingRandom` wrapper:
+ *
+ *     (function () { var real = Math.random;
+ *                    Math.random = function () { return real(); };
+ *                    return ((a, b) => ({ n: Math.random() })); })()
+ *     branded = true   two calls -> {"n":0.5502795925972663} {"n":0.24002067160838125}
+ *
+ * IT IS NOT REACHABLE ON EITHER PRODUCT PATH, which is why the answer here is a name and not a
+ * fourth check. `functions.ts`'s `seedingRandom` and `hook-loader.ts`'s `denyingRandom` splice
+ * their assignment in as the wrapper's FIRST statement, ahead of any resource text, so a body
+ * loaded from a `ResourceStore` never observes the platform `random` to capture it — that is
+ * `DENY_UNSEEDED`'s own measured claim and the reason it exists. What is exposed is a direct
+ * `compileRealm` caller who supplies neither wrapper, and such a caller has already lost the
+ * brand on check 3 unless it replaces the draw with something of its own. Closing it properly
+ * means the realm OWNING the seeded PRNG instead of trusting each bridge to install one, which
+ * moves a contract and wants its own round.
  */
 function shadowsHeld(context: object, governed: Record<string, unknown>, pristineRandom: unknown): boolean {
   try {
