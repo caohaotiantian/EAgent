@@ -1333,15 +1333,18 @@ boundary" — and that boundary now exists and is proven: a seeded PRNG from a j
 clock bound to a journaled task boundary, `Date` and `Intl` absent, an embedder `globals` seam
 that refuses a governed name. A user-authored reducer would run under exactly the machinery that
 was not there when the deferral was written. Property 2 says extensibility should be unlimited;
-a closed reducer set is one of the six things the audit found still require a fork.
+a closed reducer set is one of the seven things the audit found still require a fork.
 
-**Those six now live in `README.md`, "Extending it, and where that stops"**, beside the eight that
-need no fork, each quoted from the refusal the binary prints. Two of the six moved while being
+**Those seven now live in `README.md`, "Extending it, and where that stops"**, beside the eight
+that need no fork, each quoted from the refusal the binary prints. Two of them moved while being
 written down: an in-process tool needs a fork from the CLI and NOT from a library embedder
 (`ToolRegistry` is pinned in `scripts/surface.json`; `openWorkspace` and `compileRealm` are not),
 and it is a non-webhook delivery TRANSPORT that needs a fork rather than "a delivery channel" —
-any HTTP endpoint is a config row. Do not re-enumerate the set here: one list, in the file a
-stranger opens first.
+any HTTP endpoint is a config row. The count went SIX to SEVEN on 2026-08-28 by being measured
+again: an identity source was on no list at all, while `--identity-file` is the binary's only
+identity door and `IdentitySource`/`startControlPlane` are both pinned, so it carries the same
+library-embedder split the tool row does. Do not re-enumerate the set here: one list, in the file
+a stranger opens first.
 
 
 **Re-checked 2026-08-25 — 8 items: 4 partial · 3 open · 1 n/a.**

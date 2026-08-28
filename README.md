@@ -204,7 +204,7 @@ comment:
 ## Extending it, and where that stops
 
 Read this before you fork, not after. Loom's stated property is *unlimited extensibility*, and the
-honest version of that sentence names its set. **Eight things need no fork. Six do**, and the two
+honest version of that sentence names its set. **Eight things need no fork. Seven do**, and the two
 lists below were each driven through the shipped binary rather than read off a header.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
@@ -220,26 +220,63 @@ lists below were each driven through the shipped binary rather than read off a h
 | a provider | `--models-file` — any OpenAI-wire endpoint at any `baseUrl` | `{"provider":"openai","baseUrl":"http://127.0.0.1:9/v1"}` → `ok`, exit 0 |
 | a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | see the fork list's note on transports |
 
-**Fork required.** Each of these is a CLOSED SET, and the compiler names its members when you miss
-— that is the point of the list, and it is why the refusals below are quoted rather than described:
+**Fork required.** Each of these is a CLOSED SET, and the binary names its members when you miss —
+the compiler for the first three, the flag and config parsers for the rest. That is the point of
+the list, and it is why every refusal below is quoted rather than described: a row nobody can
+reproduce by running the thing does not belong on it.
 
 - **a node type** — `GRAPH020_UNKNOWN_TYPE … fix: use one of function, agent, tool, router, join, evaluator, human_gate, subgraph`
 - **a reducer** — `GRAPH003_UNKNOWN_REDUCER … fix: use one of replace, append_ordered, merge_object, sum, max, min, union_set, last_write_wins_by_ts`
 - **a ninth hook point** — `GRAPH003_UNKNOWN_HOOK_POINT … fix: one of: preNode, preModel, postModel, preTool, postTool, onError, onGate, onComplete`
 - **a wire protocol that is not Anthropic's or OpenAI's** — `E_CONFIG_INVALID: … provider "bedrock", which must be one of: anthropic, openai`. An OpenAI-*compatible* endpoint is not a fork; a genuinely different wire is.
-- **a delivery TRANSPORT that is not an HTTP webhook** — email, SMS, a Slack app rather than a Slack webhook URL. `--channels-file` builds `WebhookChannel` or `SignedWebhookChannel` and nothing else.
+- **a delivery TRANSPORT that is not an HTTP webhook, from the CLI** — email, SMS, a Slack app
+  rather than a Slack webhook URL. `--channels-file` builds `WebhookChannel` or
+  `SignedWebhookChannel` and nothing else. A `{"transport":"smtp"}` entry is refused —
+  `E_CONFIG_INVALID: --channels-file …: entry 0 ("ops-email") needs a non-empty string "url" to
+  deliver to` — but say what that refusal covers, because it is narrower than the row: it checks
+  the FIELD, not the scheme. `{"url":"mailto:ops@example.invalid"}` boots (`gates: ops-email
+  (notify-only)`) and fails at delivery, not at config. The bound is that there is nothing but an
+  HTTP POST behind the row, not that the parser knows what you meant. SPLIT, the same way the
+  tool row below is: `DeliveryChannel` and `GateDispatcher` are both on `scripts/surface.json`,
+  so a LIBRARY EMBEDDER hands a hand-written channel to `new GateDispatcher({channels: […]})` and
+  forks nothing — measured with a stdout channel, which the dispatcher then reports as answerable
+  because it defines `parseCallback`.
+- **an identity source, from the CLI** — OIDC, mTLS, a proxy-set header. `--identity-file` is the
+  only flag that establishes WHO a caller is (`--token` is one shared secret and names nobody),
+  and it is `BearerTokenIdentity`'s options file: an OIDC-shaped one gets `E_CONFIG_INVALID:
+  --identity-file …: must be {"subjects":[{"subject":"u:you","token":"…"}]} with at least one
+  entry`, and there is no module flag to point at anything else — `E_CONFIG_INVALID: unknown flag:
+  --identity-module (did you mean --identity-file?)`. SPLIT again, and the same shape: `IdentitySource`
+  and `startControlPlane` are both on `scripts/surface.json`, so a LIBRARY EMBEDDER passes a
+  header-trusting or OIDC source straight to `startControlPlane({identity})` and forks nothing —
+  measured. This row is a DEBT, not a bound: a CLI seam for an identity source deletes it.
 - **an in-process tool, from the CLI.** This one is split, and the split is the part nobody had
   written down: `ToolRegistry` is on the pinned public surface, so a LIBRARY EMBEDDER registers a
   host-realm tool with no fork at all. The CLI has no seam for one — `openWorkspace` and
   `compileRealm` are not in `scripts/surface.json` and `src/index.ts` re-exports neither — so from
-  the binary, an in-process tool needs a fork and an MCP server does not.
+  the binary, an in-process tool needs a fork and an MCP server does not (`E_CONFIG_INVALID:
+  unknown flag: --tool-module (did you mean --token?)`).
 
-**The reason is replay, not taste.** Every one of those closed sets is journaled vocabulary. A run
+**Three of those seven say "from the CLI", and the count keeps them.** A row that a library
+embedder can walk around is still a fork for the person holding the binary, which is who this
+list is written for; merging the two claims into one number is the compromise, and the split is
+spelled out in each row rather than hidden in it.
+
+**The reason the first four are closed is replay, not taste.** Each of them is journaled
+vocabulary. A run
 is replayed by folding its journal, and a fold can only reproduce a decision whose vocabulary the
 folding binary already knows; a node type or a reducer that arrived from a config file would make
 a recorded run unreadable by anything but the process that wrote it. So the sets are closed on
-purpose, and the tell that a closed set is honest is that its refusal NAMES ITS MEMBERS — every
-one above does.
+purpose, and the tell that a closed set is honest is that its refusal NAMES ITS MEMBERS. The four
+schema and wire-protocol sets above do exactly that. The three CLI rows cannot — a flag parser
+does not know what an identity source is — so they name the door that does exist instead of the
+one you asked for, which is the weaker version and is why each of those three also says which
+pinned type a library embedder would build against.
+
+**The three CLI rows are closed for a weaker reason, and it should stay visible: nobody has built
+the seam.** Replay does not require it — the library already accepts all three, so a run using
+one of them folds fine. That is what makes them debts rather than bounds, and why the honest
+direction for this list is three rows shorter, not a better argument for keeping them.
 
 `TODO.md` carries the entries under active reconsideration; custom reducers are argued on the
 merits there. This list is a bound with a reason, not an apology.

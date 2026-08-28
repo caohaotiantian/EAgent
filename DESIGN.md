@@ -189,7 +189,7 @@ change keeps old behaviour for graphs that declared an older version.
 
 **Unlimited extensibility** — everything not the kernel is an extension against the same declared
 surface. *As shipped that claim covers a named set and not everything:* eight things need no fork
-and six do, enumerated with the binary's own refusal text in `README.md`'s "Extending it, and
+and seven do, enumerated with the binary's own refusal text in `README.md`'s "Extending it, and
 where that stops". The tool-extensibility path is a typed API the model writes code against rather than
 N schemas in the context window. That shape cut one vendor's example workflow from ~150k tokens to
 ~2k. It has a cost this project must state: if tools are reached through generated code, the
