@@ -5910,13 +5910,10 @@ export class Engine {
    * conflates "the provider is busy" with "the work failed", and a `maxAttempts: 3` node then
    * dies of somebody else's traffic.
    *
-   * ONLY `E_PROVIDER_RATE_LIMIT` DEFERS, and the narrowness is the point. It is the one failure
-   * where the remote party has explicitly said *not now*, usually with a number attached, and
-   * where nothing this run did is implicated. An overload (`E_PROVIDER_OVERLOADED`) is a
-   * judgement about capacity that may or may not be about us, and a transport reset says nothing
-   * at all — both stay ordinary retries. `E_BUDGET_EXHAUSTED` shares the `exhausted` CLASS with
-   * a rate limit and must never share this path; it is in `RUN_FATAL_CODES`, checked below, and
-   * the code test above is what keeps the two apart even so.
+   * WHAT DEFERS IS A NAMED SET OF TWO — `DEFERRABLE_CODES`, which carries the argument for each
+   * member and for the narrowness. An overload (`E_PROVIDER_OVERLOADED`) is a judgement about
+   * capacity that may or may not be about us, and a transport reset says nothing at all: both
+   * stay ordinary retries.
    *
    * WHY THIS FUNCTION EXISTS IN THIS SHAPE. Half two of the rate-limit fix failed twice, both
    * times by deleting the transport's in-slot sleep and leaving only the retry arm: the sleep
@@ -5932,7 +5929,8 @@ export class Engine {
    *     the run takes its error edge or surfaces the gap. **A deferral obeys this too**: it
    *     re-enters the node body exactly as a retry does, so the bell can ring twice for
    *     exactly the same reason. This is the one row of the old failure table a deferral does
-   *     not rescue, and it fails closed rather than quietly.
+   *     not rescue, and it fails closed rather than quietly. It is asked ONCE and shared by
+   *     both arms, because it reads the journal.
    *   - and for a deferral only, `DEFERRAL_BUDGET_MS`: past it the rate limit stops being a
    *     deferral and falls through to the retry arm, which will usually fail the Task. Nothing
    *     here can wait forever.
@@ -5968,10 +5966,14 @@ export class Engine {
     const honoured =
       typeof asked === "number" && Number.isFinite(asked) && asked > 0 ? Math.min(asked, RETRY_AFTER_CEILING_MS) : 0;
 
+    // ASKED ONCE, SHARED BY BOTH ARMS. It reads the journal, and the case where both arms want
+    // it — a rate limit whose deferral budget is spent — would otherwise read it twice.
+    if (await this.#mayHaveRungABell(ctx, p, w)) return undefined;
+
     // A DEFERRAL, decided before the policy is consulted at all — that ordering IS the fix.
     const task = p.tasks[w.task.taskId];
     const deferrable = DEFERRABLE_CODES.has(error.code) && (task?.deferredMs ?? 0) < DEFERRAL_BUDGET_MS;
-    if (deferrable && !(await this.#mayHaveRungABell(ctx, p, w))) {
+    if (deferrable) {
       const curve = Math.min(DEFERRAL_INITIAL_MS * 2 ** (task?.deferrals ?? 0), DEFERRAL_MAX_MS);
       // The attempt is REPEATED, not advanced: `task.retry_scheduled` is the event that moves
       // the budget, so writing the same number is what "not charged" means durably.
@@ -5982,7 +5984,6 @@ export class Engine {
     const attempt = w.task.attempt + 1;
     if (attempt >= policy.maxAttempts) return undefined;
     if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
-    if (await this.#mayHaveRungABell(ctx, p, w)) return undefined;
 
     const initial = policy.initialMs ?? 500;
     const max = policy.maxMs ?? 30_000;
