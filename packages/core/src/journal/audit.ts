@@ -304,6 +304,41 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     return key !== undefined && startedBeforeTheEnd.has(key);
   };
 
+  /**
+   * THE SECOND SHAPE, and it is the opposite of an advance: a ROLLBACK of a run that has ended.
+   *
+   * A parent that fails compensates its children, and a child is already terminal by then — so
+   * `Engine.#compensate` dispatches the undo into the CHILD's log and its `effect.started`,
+   * `tool.called` and `effect.completed` land after that child's `run.completed`. Measured
+   * through the binary before this arm existed: `loom audit <childRunId>` reported
+   * `3 violation(s)` on a rollback the product had just performed correctly, while the PARENT's
+   * own journal was `ok` — the asymmetry being that a parent compensates BEFORE its `run.failed`
+   * and a child cannot.
+   *
+   * Undoing is not advancing, which is why this is an exemption and not a relaxation. The rule's
+   * own reason is "a second writer doing new work"; a compensation performs no new work by
+   * definition — it exists to remove the effects of work already recorded, and the child's
+   * journal is where those effects are keyed, so it is the only place the undo can honestly go.
+   *
+   * NARROW, AND THE NARROWNESS IS THE POINT. Only `effect.started` whose `kind` is literally
+   * `compensate` opens the exemption, and only settlements keyed to one of those keys ride on
+   * it. An ordinary `effect.started` after the end is still a violation. A `compensate` effect
+   * is one the engine's own `#invokeTool` writes under `effectKind: "compensate"`; nothing an
+   * author declares reaches this value.
+   */
+  const compensationKeys = new Set<string>();
+  const isCompensationAfterTheEnd = (e: JournalEvent): boolean => {
+    const payload = obj(e.payload);
+    const key = str(payload?.["key"]);
+    if (e.type === "effect.started") {
+      if (str(payload?.["kind"]) !== "compensate") return false;
+      if (key !== undefined) compensationKeys.add(key);
+      return true;
+    }
+    if (e.type !== "tool.called" && e.type !== "effect.completed" && e.type !== "effect.failed") return false;
+    return key !== undefined && compensationKeys.has(key);
+  };
+
   for (const e of live) {
     const seq = Number(e.seq);
 
@@ -322,7 +357,12 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           `the run already ended at seq ${String(terminalAt.seq)} with ${terminalAt.type}, and ends again here with ${e.type} — a run reaches a terminal state once`,
         );
       }
-    } else if (terminalAt !== undefined && ADVANCES_A_RUN.has(e.type) && !settlesAnEffectStartedBefore(e)) {
+    } else if (
+      terminalAt !== undefined &&
+      ADVANCES_A_RUN.has(e.type) &&
+      !settlesAnEffectStartedBefore(e) &&
+      !isCompensationAfterTheEnd(e)
+    ) {
       saw.add("run.terminal-is-last-and-once");
       add(
         "run.terminal-is-last-and-once",

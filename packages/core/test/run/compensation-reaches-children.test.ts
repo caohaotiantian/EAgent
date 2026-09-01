@@ -27,6 +27,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import type { RunId, Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
+import { auditRun } from "../../src/journal/audit.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
 const NOW = 1_700_000_000_000;
@@ -279,6 +280,18 @@ test("A FAILED RUN UNDOES WHAT ITS CHILDREN DID, IN THE PARENT'S OWN ORDER", asy
     ["db.insert", "db.insert"],
     "and the parent's journal stays the size of the parent",
   );
+
+  // AND BOTH JOURNALS STILL AUDIT CLEAN, which this file did not check and which the rollback
+  // broke. A child is already terminal when the parent fails, so its undo lands AFTER its own
+  // `run.completed` — three events that are all in `ADVANCES_A_RUN`. Driven through the binary
+  // before `audit.ts` learned about rollback: `loom audit <childRunId>` reported
+  // `3 violation(s)` on a rollback the engine had just performed correctly, while the parent
+  // was `ok` — a parent compensates BEFORE its `run.failed` and a child cannot. Undoing is not
+  // advancing, and the exemption is narrow: only `effect.started{kind:"compensate"}` opens it.
+  for (const [label, id] of [["parent", runId], ["child", childId]] as const) {
+    const report = auditRun(await eventsOf(store, id));
+    assert.deepEqual(report.violations, [], `${label} journal: ${JSON.stringify(report.violations)}`);
+  }
 });
 
 /**

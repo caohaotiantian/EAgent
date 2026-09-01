@@ -447,6 +447,24 @@ export interface EventPayloads {
     readonly outcome: "compensated" | "failed" | "not_attempted";
     /** Why. Required for everything except a plain success, where there is nothing to say. */
     readonly reason?: string;
+    /**
+     * Whether a LATER pass could get further — set only on `not_attempted`, whose reasons are
+     * two different things wearing one word.
+     *
+     * A step blocked because the tool declares no compensation, or names an undo the registry
+     * does not carry, reads the same on every future pass: settling it is right, and re-planning
+     * it would loop. A step blocked because a child run's GRAPH could not be rebuilt in this
+     * process is transient, and its own reason string tells the operator to attach it and rewind.
+     * `planCompensation` settled both, so following that advice produced a zero-step plan and an
+     * effect that still stood — measured, `steps= 0  settled= [8]`. The guard recorded an effect
+     * as handled when nothing had handled it.
+     *
+     * OPTIONAL, AND ABSENT MEANS NOT RETRYABLE. That is the fail-closed reading and it is what
+     * every row written before this field says, so an old journal settles exactly as it always
+     * did — the same shape `RecordedModelTurn.provider` uses one file over, and for the same
+     * reason: a fold must tighten, never throw.
+     */
+    readonly retryable?: boolean;
     /** What triggered the rollback — a failed run, or an operator's rewind. */
     readonly trigger: "run_failed" | "rewind";
   };

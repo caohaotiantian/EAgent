@@ -117,7 +117,7 @@ import { digestOf } from "../canonical.ts";
 import { redactAttributes } from "../security/redact.ts";
 import { effectKey } from "../ids.ts";
 import type { EdgeId, NodeId, RunId, TaskId } from "../ids.ts";
-import { isEvent, type JournalEvent } from "../journal/events.ts";
+import { isEvent, type EventPayloads, type JournalEvent } from "../journal/events.ts";
 import type { GraphSpec } from "../graph/spec.ts";
 import { isHardToUndo, type Classification, type IrreversibilityClass } from "../vocab.ts";
 
@@ -811,9 +811,11 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // follow. The three NAME literals stay inline on `name:` for the reason below.
       //
       // THREE ARMS OVER SIX KINDS, AND THE SIX ARE A CLOSED LIST — `effect.started.kind` in
-      // `journal/events.ts` is `model | tool | subgraph | summarize | random | compensate`,
-      // so this partition is total by construction rather than by hope, and a seventh kind
-      // would not typecheck against it without being placed.
+      // `journal/events.ts` is `model | tool | subgraph | summarize | random | compensate`. The
+      // partition is total because `Unplaced` below is checked against that union, NOT because
+      // three arms happen to cover it today: a reviewer falsified the earlier wording of this
+      // sentence by appending a seventh kind, which compiled clean and landed on `loom.effect`
+      // in silence.
       //
       // The partition was TWO arms and it put three kinds in the wrong one. `modelish` was
       // right; its negation was not, because `!modelish` is not `tool`. Measured by driving a
@@ -844,6 +846,26 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // carries `tool.name` and `tool.version` like any other.
       const modelish = e.payload.kind === "model" || e.payload.kind === "summarize";
       const toolish = e.payload.kind === "tool" || e.payload.kind === "compensate";
+      // AND THE THIRD ARM IS NAMED, so the partition is total by CONSTRUCTION rather than by a
+      // sentence claiming to be. The claim above used to say "a seventh kind would not typecheck
+      // against it without being placed", and that was false: the `name:` ternary below ends in
+      // an untyped `else`, so appending `| "sleep"` to `effect.started.kind` compiled clean and
+      // landed silently on `loom.effect`. Driven, and it is why this line exists.
+      //
+      // `Exclude` over the union is what holds the claim: a seventh kind that is in none of the
+      // three lists makes `_Unplaced` non-empty and this assignment stops compiling, naming the
+      // kind nobody placed. Costs one line and no runtime.
+      const otherish = e.payload.kind === "subgraph" || e.payload.kind === "random";
+      type Placed = "model" | "summarize" | "tool" | "compensate" | "subgraph" | "random";
+      type Unplaced = Exclude<EventPayloads["effect.started"]["kind"], Placed>;
+      // `[X] extends [never]` and not `X extends never`: the bare form is a DISTRIBUTIVE
+      // conditional, which over `never` distributes across nothing and yields `never` rather
+      // than `true`. And not `const u: Unplaced[] = []` either, which was the first attempt and
+      // is vacuous — an empty array is assignable to every array type, so it accepted a seventh
+      // kind in silence exactly as the untyped `else` had. Measured both ways by appending
+      // `| "sleep"` to the union and re-running `tsc`.
+      const allKindsArePlaced: [Unplaced] extends [never] ? true : false = true;
+      void allKindsArePlaced;
       start(id, {
         // `summarize` rides with `model` because it IS a model call — the journal now says
         // so honestly. The literals stay on this line on purpose, and the reason has OUTLIVED
@@ -858,7 +880,7 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
         // `loom.tool` — the mis-classification itself — and now says `loom.effect`, which is
         // the name that arm should always have had. A lookup table would hide all nine. So:
         // the literal, on the `name:` line, still.
-        name: modelish ? "loom.model" : toolish ? "loom.tool" : "loom.effect",
+        name: modelish ? "loom.model" : toolish ? "loom.tool" : otherish ? "loom.effect" : "loom.effect",
         kind: "client",
         start: ts,
         parent: taskSpan,

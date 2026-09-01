@@ -156,7 +156,21 @@ export function planCompensation(input: CompensationInput): CompensationPlan {
 
   for (const e of input.events) {
     if (e.type === "compensation.recorded") {
-      settled.add(e.payload.compensatesSeq);
+      // OUTCOME-AWARE, because `not_attempted` is not one thing. `compensated` and a
+      // `not_attempted` whose reason is STRUCTURAL — no compensation declared, an unregistered
+      // tool — will read the same on every future pass, so settling them is right and re-planning
+      // them would loop. But `not_attempted` is also written when the block is TRANSIENT: a child
+      // run whose graph could not be rebuilt in this process, whose own reason string tells the
+      // operator to "attach it and rewind". Settling that seq made the advice impossible —
+      // measured, planning over the child journal after such a row gave
+      // `steps= 0  settled= [8]`, so the operator who did exactly what the row said got a
+      // zero-step plan and an effect that still stands.
+      //
+      // `retryable` is the discriminant and it is written at the append rather than inferred
+      // here, so this fold does not have to parse a reason string. Absent means NOT retryable,
+      // which is the fail-closed reading for every row written before the field existed: those
+      // settle exactly as they always did.
+      if (e.payload.retryable !== true) settled.add(e.payload.compensatesSeq);
       continue;
     }
     if (e.type !== "tool.called") continue;

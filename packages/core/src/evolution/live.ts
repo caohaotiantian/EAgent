@@ -424,7 +424,15 @@ export function pairedCostRatio(pairs: readonly LivePair[]): PairedCost {
   const ratios = pairs
     .map((p) => (p.baselineCostUsd > 0 ? p.candidateCostUsd / p.baselineCostUsd : p.candidateCostUsd > 0 ? Number.POSITIVE_INFINITY : 1))
     .sort((a, b) => a - b);
-  const median = ratios.length === 0 ? undefined : ratios[Math.floor((ratios.length - 1) / 2)]!;
+  // THE UPPER MEDIAN AT EVEN `n`, and the choice is the gate rather than a convention. The lower
+  // median (`(length - 1) / 2`) is index 2 of 6 — the permissive side of the middle — so at six
+  // pairs THREE could go from a $0 baseline to a paying candidate and the check still passed.
+  // Measured through `gateCandidateLive` on six pairs with an honest score win: `3 x $0 -> $100`
+  // plus `3 x $1 -> $1` reported `median pair cost ratio 1.00x` and PROMOTED, while its own
+  // passing detail line printed `totals 303.000000 vs 3.000000`. That is the exact shape this
+  // check was changed to catch, closed at 6-of-6 and left open at 3-of-6. `Infinity` sorts last,
+  // so the upper median is what makes "half the pairs went from free to paid" actually refuse.
+  const median = ratios.length === 0 ? undefined : ratios[Math.floor(ratios.length / 2)]!;
   return {
     n: pairs.length,
     unbounded: pairs.filter((p) => p.baselineCostUsd <= 0 && p.candidateCostUsd > 0).length,

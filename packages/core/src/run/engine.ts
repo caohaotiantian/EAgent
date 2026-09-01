@@ -455,7 +455,11 @@ interface Wave {
  */
 function compensationRecord(
   step: CompensationStep,
-  outcome: { readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string },
+  outcome: {
+    readonly outcome: "compensated" | "failed" | "not_attempted";
+    readonly reason?: string;
+    readonly retryable?: boolean;
+  },
   trigger: "run_failed" | "rewind",
 ): NewEvent {
   return {
@@ -467,6 +471,7 @@ function compensationRecord(
       ...(step.undo === undefined ? {} : { undo: step.undo }),
       outcome: outcome.outcome,
       ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+      ...(outcome.retryable === undefined ? {} : { retryable: outcome.retryable }),
       trigger,
     },
     actor: SYSTEM_ACTOR("compensator"),
@@ -1346,16 +1351,36 @@ export class Engine {
     const log = this.#logFor(child.runId);
     for await (const ev of log.read(1 as Seq)) events.push(ev);
     const plan = planCompensation({ events, tools: this.tools });
-    if (plan.steps.length === 0) return none;
     const why =
       `the graph for child run ${child.runId} cannot be rebuilt from "${child.ref}", so this engine ` +
       `cannot dispatch an undo in it — attach it and rewind, or the effect stands`;
     for (const step of plan.steps) {
       await this.#serialize(() =>
-        log.append([compensationRecord(step, { outcome: "not_attempted", reason: why }, trigger)]),
+        // `retryable: true` — this block is a fact about THIS PROCESS, not about the step. The
+        // reason string tells the operator to attach and rewind, and `planCompensation` settled
+        // the seq either way, so following that advice produced a zero-step plan and an effect
+        // that still stood. Structural blocks (no compensation declared, an unregistered undo)
+        // stay unretryable and still settle.
+        log.append([compensationRecord(step, { outcome: "not_attempted", reason: why, retryable: true }, trigger)]),
       );
     }
-    return { compensated: 0, failed: 0, notAttempted: plan.steps.length };
+    let notAttempted = plan.steps.length;
+    // AND IT DESCENDS ANYWAY. Returning here journaled the child's own steps and stopped, so a
+    // GRANDCHILD's effects were left standing with nothing in any journal saying so — the exact
+    // silence this method's docstring claims to have closed, closed one level deep only. Not
+    // being able to dispatch in the child says nothing about the grandchild: it has its own
+    // journal and may well have its own rebuildable graph. Measured before this, on a two-level
+    // fixture with the child's context forced absent: the grandchild's `db.insert` stood and no
+    // `compensation.recorded` existed anywhere for it.
+    for (const ev of events) {
+      if (ev.type !== "subgraph.started") continue;
+      const grandchild = ev.payload.childRunId;
+      if (depth + 1 > COMPENSATION_MAX_DEPTH || seen.has(grandchild)) continue;
+      seen.add(grandchild);
+      const below = await this.#compensateChild(parent, { runId: grandchild, ref: ev.payload.ref }, trigger, depth + 1, seen);
+      notAttempted += below.compensated + below.failed + below.notAttempted;
+    }
+    return { compensated: 0, failed: 0, notAttempted };
   }
 
   /**
