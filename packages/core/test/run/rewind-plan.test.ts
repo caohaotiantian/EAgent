@@ -180,8 +180,14 @@ async function ran(via: "subgraph" | "tool"): Promise<Ran> {
 }
 
 /** Every `compensation.recorded` under a run, parent and children, tagged with its journal. */
-async function records(store: MemoryStateStore, runId: RunId): Promise<{ readonly run: string; readonly compensatesSeq: number; readonly undo?: string }[]> {
-  const out: { readonly run: string; readonly compensatesSeq: number; readonly undo?: string }[] = [];
+async function records(
+  store: MemoryStateStore,
+  runId: RunId,
+): Promise<{ readonly run: string; readonly compensatesSeq: number; readonly undo?: string; readonly outcome: string }[]> {
+  // `outcome` is on the payload and was simply not in this projection — which is why the file
+  // could assert `undo` (present for every outcome) and never notice it was asserting nothing
+  // about what happened.
+  const out: { readonly run: string; readonly compensatesSeq: number; readonly undo?: string; readonly outcome: string }[] = [];
   const journals: RunId[] = [runId];
   for (let i = 0; i < journals.length; i++) {
     for await (const ev of store.read(journals[i]!, 1 as Seq)) {
@@ -227,6 +233,23 @@ test("THE PREVIEW IS THE LIST THAT DISPATCHES — INCLUDING WHEN THE WORK WAS DE
     assert.equal(rows[0]!.undo, "pay.refund", `${via}: and it is the undo the operator saw`);
     assert.equal(rows[0]!.compensatesSeq, plan.steps[0]!.seq, `${via}: on the same effect, identified the same way`);
     assert.equal(rows[0]!.run, plan.steps[0]!.runId, `${via}: in the journal the plan said it would be`);
+
+    // AND WHAT ACTUALLY HAPPENED TO THE WORLD, which is the assertion this file was missing and
+    // the reason it gave A.8 no protection at all. Every check above passes whether the outcome
+    // is `compensated` or `failed` — a `compensation.recorded` row carries `undo` either way — so
+    // the suite would have stayed green if somebody flipped `#compensateOne`'s `nodeApproved` for
+    // `trigger === "rewind"`, which is precisely the change A.8 is about and precisely this path.
+    //
+    // TODAY IT IS `failed` AND NO REFUND RUNS: `#invokeTool` gets `nodeApproved: false`, policy
+    // answers `gate`, and the undo is refused — "pay.refund is reversible_write and requires human
+    // approval this turn cannot request". That is the DESIGNED behaviour and it is why
+    // `RewindPlan.dispatch` is documented as "will be attempted" rather than "will run".
+    //
+    // **This pair is the fixture A.8's row says does not exist.** It does now, and flipping that
+    // argument moves both of these — `refunds` to `[amount]` and the outcome to `compensated` —
+    // so the change A.8 contemplates can no longer land silently in either direction.
+    assert.deepEqual(r.refunds, [], `${via}: an undo policy refuses must not reach the world`);
+    assert.equal(rows[0]!.outcome, "failed", `${via}: and the refusal is journaled, not swallowed`);
   }
 });
 

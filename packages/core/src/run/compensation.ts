@@ -309,7 +309,27 @@ export interface RewindPlan {
   readonly atSeq: number;
   /** Reverse order of what happened, across the whole run tree. The dispatch order. */
   readonly steps: readonly RewindPlanStep[];
-  /** Steps that will run an undo tool. */
+  /**
+   * Steps this engine will ATTEMPT an undo tool for — **not** steps whose undo is certain to run.
+   *
+   * THE DISTINCTION IS NOT PEDANTRY, and getting it wrong is how this preview over-promises in
+   * exactly the direction it exists to prevent. `#compensateOne` dispatches through `#invokeTool`
+   * with `nodeApproved: false`, always — a rollback is not a human's yes to anything, the human
+   * approved the action being UNDONE — so `PolicyEngine.decide` can still answer `gate`, and that
+   * answer is a refusal journaled `compensation.recorded{outcome: "failed"}`. Measured on both
+   * legs of `rewind-plan.test.ts`'s own fixture: `dispatch=1`, `refunds=[]`, outcome `failed`,
+   * *"pay.refund is reversible_write and requires human approval this turn cannot request"*.
+   *
+   * WHY THIS IS NOT PREDICTED HERE, which is a choice rather than an omission. The refusal
+   * depends on `effectivePosture` — the run's ceiling and taint as well as the undo's class — so
+   * a class-based guess would be wrong in both directions, and the fixture above is the proof: a
+   * `reversible_write` undo gated. A preview that guessed would sometimes say "will not run"
+   * about an undo that runs, which is worse than a number that names what it means.
+   *
+   * So an operator reads this as "this many will be tried", and the outcome of each is on the
+   * journal afterwards as `compensated` / `failed` / `not_attempted`. Nothing is silent; the
+   * count is simply upstream of the policy decision rather than downstream of it.
+   */
   readonly dispatch: number;
   /** Steps nothing will attempt, for either reason — `blocked` or `undispatchable`. */
   readonly blocked: number;

@@ -3017,8 +3017,8 @@ export class Engine {
   async planRewind(runId: RunId, atSeq: Seq, by: HumanActor): Promise<RewindPlan> {
     this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
     const { p, live, ctx } = await this.#rewindRefusals(runId, atSeq);
-    const plan = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
-    await this.#journalPlanShown(ctx, plan);
+    const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+    await this.#journalPlanShown(ctx, plan, by);
     return plan;
   }
 
@@ -3058,7 +3058,7 @@ export class Engine {
     p: RunProjection,
     live: RunContext | undefined,
     ctx: { readonly log: RunLog },
-  ): Promise<RewindPlan> {
+  ): Promise<{ readonly plan: RewindPlan; readonly walk: readonly RollbackWalkStep[] }> {
     const walk = await this.#planRollback({ runId, log: ctx.log, ...(live === undefined ? {} : { ctx: live }), p, sinceSeq: atSeq });
     const steps: RewindPlanStep[] = walk.map((item) => ({
       runId: String(item.runId),
@@ -3076,7 +3076,7 @@ export class Engine {
     }));
     const dispatch = steps.filter((s) => s.undo !== undefined && s.undispatchable === undefined).length;
     const header = { runId: String(runId), atSeq: atSeq as number, attached: live !== undefined, steps };
-    return { ...header, dispatch, blocked: steps.length - dispatch, planHash: digest(header) };
+    return { plan: { ...header, dispatch, blocked: steps.length - dispatch, planHash: digest(header) }, walk };
   }
 
   /**
@@ -3105,14 +3105,19 @@ export class Engine {
    * different, so "the last `rewind.plan` on this log carries this hash" is the exact condition
    * under which a second row would say nothing new. Derived, never a nonce.
    */
-  async #journalPlanShown(ctx: { readonly log: RunLog }, plan: RewindPlan): Promise<void> {
-    let last: string | undefined;
+  async #journalPlanShown(ctx: { readonly log: RunLog }, plan: RewindPlan, by: HumanActor): Promise<void> {
+    // EVERY PRIOR HASH, NOT THE LAST ONE. Comparing against only the most recent row made this
+    // idempotent for a console that previews ONE boundary and non-idempotent for anything else:
+    // measured, 25 alternating previews of `atSeq` 1 and 2 wrote 25 rows and took the journal
+    // from 18 to 43. `planRewind` re-reads the whole journal on every call, so the cost of the
+    // previews compounded with the rows they wrote. A `Set` is the same loop and the same read.
+    const seen = new Set<string>();
     for await (const e of ctx.log.read(1 as Seq)) {
       if (!isEvent(e, "operator.command") || e.payload.kind !== "rewind.plan") continue;
       const hash = e.payload.args["planHash"];
-      if (typeof hash === "string") last = hash;
+      if (typeof hash === "string") seen.add(hash);
     }
-    if (last === plan.planHash) return;
+    if (seen.has(plan.planHash)) return;
     await this.#serialize(() =>
       ctx.log.append([
         {
@@ -3121,7 +3126,11 @@ export class Engine {
             kind: "rewind.plan",
             args: { atSeq: plan.atSeq, planHash: plan.planHash, attached: plan.attached, dispatch: plan.dispatch, blocked: plan.blocked, steps: plan.steps },
           },
-          actor: SYSTEM_ACTOR("operator"),
+          // THE PERSON WHO ASKED, not `SYSTEM_ACTOR`. This route requires a human precisely
+          // because enumerating a run's undoable effects is sensitive; recording WHAT was shown
+          // and not WHO asked to see it loses the half that makes the row an audit record. The
+          // authorization row already carried `by`; this one did not.
+          actor: by,
         },
       ]),
     );
@@ -3422,7 +3431,15 @@ export class Engine {
     // twice, so "they agree" is not a property a test has to establish — the only way they can
     // differ is that the WORLD moved between the two reads, which is exactly what the hash below
     // is for.
-    const current = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+    // DESTRUCTURED, AND THE WALK IS WHAT DISPATCHES. The comment above used to say the two
+    // lists are "one function's output read twice"; they were one function CALLED twice, and
+    // `#compensate` re-planned from a fresh read before dispatching. A reviewer drove the gap:
+    // with the undo tool disposed between the hash check and that second plan, the rewind was
+    // ACCEPTED and the journaled authorization asserted `pay.refundable->pay.refund` while
+    // `compensation.recorded` said `not_attempted, names a compensation that is not a registered
+    // tool`. The audit artifact this design exists for was describing a dispatch that did not
+    // happen. Threading the hashed walk through makes the claim literal instead of nearly true.
+    const { plan: current, walk } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
 
     // THE PLAN THE OPERATOR SAW, OR NOTHING HAPPENS.
     //
@@ -3544,7 +3561,9 @@ export class Engine {
     // have no `undo` to be unable to run. It is no longer invisible, because `planRewind` shows
     // them to the operator before they authorize; it is still unwritten afterwards.
     if (live !== undefined) {
-      await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
+      // `walk`, NOT `#compensate` — the walk whose digest the operator authorized, rather than a
+      // fresh plan computed after the check. See the destructure above.
+      await this.#dispatchRollback(walk, "rewind");
     }
 
     // THE MARKER AND THE AUTHORIZATION, IN ONE APPEND, IN THAT ORDER.
