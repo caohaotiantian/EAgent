@@ -753,19 +753,47 @@ Each traces to a decision in `DESIGN.md`.
   runtime is a silent stall: the task retries forever without entering a failed state.
   `E_REPLAY_DIVERGENCE` is fatal, so the recorded-effect path is covered. **A repeated divergence
   signature with no forward progress still needs its own terminal state.**
-- **G.4 · Two-axis labels (D4): unlabelled ⇒ untrusted.** Both axes now exist — `tainted`/
-  `applyTaint` for integrity, `carriesSecret`/`applySecretFlow` for confidentiality. **The
-  valuable half is the one this codebase does not have**: a tool that is not `isExternal` writing
-  data from anywhere is untainted today. Branch-coordinate scoping was built and reverted; see
-  `DESIGN.md` D4 for what would reopen it.
+- **G.4 · Two-axis labels (D4): unlabelled ⇒ untrusted. DONE on the integrity axis, 2026-09-01.**
+  Both axes exist — `tainted`/`applyTaint` for integrity, `carriesSecret`/`applySecretFlow` for
+  confidentiality — and `isExternal` no longer defaults to trusted. It is now a named set of pure
+  types (`router`, `join`, `human_gate`) plus two label reads: a `function` is untrusted unless it
+  declares `effects: []`, and an `evaluator` splits on `kind`. `agent` is unconditionally
+  untrusted, which widened the old `tools: []` arm. Reproduction and the label's limits (it
+  declares ORIGINATION and never launders) are in `test/run/unlabelled-is-untrusted.test.ts`.
+  **What is left is the CONFIDENTIALITY axis**: `applySecretFlow` still reads the declared
+  classification, so an unclassified channel carrying a secret is still trusted by default, and
+  the fix there is not symmetric — there is no `effects: []` equivalent, and marking every
+  unclassified channel sensitive is the constant-gate failure that arm's docstring already
+  refuses. Branch-coordinate scoping was built and reverted; see `DESIGN.md` D4.
 - **G.5 · Prompt text into the artifact hash (D7).** `graphHash` digests the spec, so a ref'd
   prompt's text is not in it — **a prompt edit currently changes what a resumed run does,
   silently.**
 - **G.6 · Proposed-API mechanism and a version pin (D5).** Both halves unbuilt: no proposed-API
   declaration file, no opt-in, no publish-time refusal for an extension that uses one, and no
   runtime version pin.
-- **G.7 · One retry budget per run**, decremented across every layer. Engine retry × provider
-  retry × agent-loop retry currently multiply, and nothing decrements across them.
+- **G.7 · One retry budget per run. THE MULTIPLICATION IS GONE; THE BUDGET WAS NOT BUILT, AND
+  that is the decision rather than the omission.** The rationale named three layers and there
+  were two: the agent loop ADDS rather than multiplies (a completed turn is served from the
+  journal under `<taskId>:model:<turn>`), and a 429 never multiplied either because `postJson`
+  rethrows it without a hold. What did multiply was engine node retry × provider transport retry,
+  measured through the engine on one agent node against a permanent 503:
+  `{requests: 9, retriesScheduled: 2}`.
+
+  A fourth `Budget` dimension would have touched `graph/spec.ts`, `run/policy.ts` and
+  `run/engine.ts` — three kernel files, so a `feat` needing a seam — to buy what deleting the
+  duplicate layer buys for nothing. `HttpOptions.maxAttempts` now defaults to 1, so the engine's
+  journaled curve is the only one: `{requests: 3, retriesScheduled: 2}`, same journal, a third of
+  the traffic. Pinned both ways in `test/run/retry-does-not-multiply.test.ts`.
+
+  **What that cost, named.** An embedder driving an adapter with no engine above it loses two
+  silent pre-response retries and gets the retryable error instead; `maxAttempts: 3` restores the
+  old curve exactly. Nothing about a mid-stream failure moves — `postJson` never retried past the
+  first byte. The one shape that genuinely loses a retry is a `RunGraph` whose `plans` a caller
+  assembled WITHOUT the compiler: `#retryDecision` returns on `policy === undefined`, and the
+  transport was the only retry such a graph had.
+
+  **Reopen a run-scoped budget if fan-out width turns out to be the real multiplier** — it is
+  still a free variable, and 3 requests × a wide fan-out is the same arithmetic one level up.
 
 ---
 

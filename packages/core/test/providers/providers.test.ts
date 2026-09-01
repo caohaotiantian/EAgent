@@ -424,21 +424,51 @@ test("a tool round-trip serialises back into provider shape", async () => {
 
 // ── retry / transport ────────────────────────────────────────────────────────
 
-test("a 529 is retried, then succeeds", async () => {
-  // THIS TEST USED TO SAY 429, and the status is the whole point of the edit rather than a
-  // fixture detail. Everything retryable that is not a rate limit is still absorbed here, on
-  // the operator's own bounded curve; a rate limit is now reported instead — see the next test
-  // and `postJson`'s docstring for why the two are no longer the same case.
-  let calls = 0;
-  const fetchFn = async (): Promise<Response> => {
-    calls++;
-    if (calls === 1) return new Response("{}", { status: 529, headers: { "retry-after": "0" } });
-    return new Response(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n`, { status: 200 });
+test("a 529 IS NOT RETRIED BY DEFAULT, and `maxAttempts` is how an embedder asks for one", async () => {
+  // THIS TEST USED TO SAY 429, and then it used to say the 529 was absorbed here. Both edits
+  // are the same correction arriving in stages: a retry inside the transport is only free when
+  // nobody above is retrying, and under an engine somebody always is — every provider-calling
+  // node carries `DEFAULT_PROVIDER_RETRY`, so the two curves multiplied to 3 x 3 requests per
+  // model turn with two thirds of them in no journal. See `providers/http.ts`'s header.
+  //
+  // The curve did not disappear, it moved to the layer that can show its work. What is left
+  // here is an OPT-IN for an embedder driving an adapter with no engine above it, and the two
+  // arms below are the same 529 one option apart.
+  const twice = (): (() => Promise<Response>) => {
+    let calls = 0;
+    return async () => {
+      calls++;
+      if (calls === 1) return new Response("{}", { status: 529, headers: { "retry-after": "0" } });
+      return new Response(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n`, { status: 200 });
+    };
   };
-  const a = new AnthropicAdapter({ apiKey: "k", fetch: fetchFn, sleep: async () => undefined });
-  const done = (await collect(a.stream(REQ, ac()))).at(-1)!;
-  assert.equal(done.type, "done");
-  assert.equal(calls, 2);
+
+  const counted = (): { fetch: () => Promise<Response>; calls: () => number } => {
+    const inner = twice();
+    let calls = 0;
+    return {
+      fetch: async () => {
+        calls++;
+        return await inner();
+      },
+      calls: () => calls,
+    };
+  };
+
+  const d = counted();
+  const byDefault = new AnthropicAdapter({ apiKey: "k", fetch: d.fetch, sleep: async () => undefined });
+  await assert.rejects(
+    () => collect(byDefault.stream(REQ, ac())),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_PROVIDER_OVERLOADED,
+    "the default must hand the caller a retryable error rather than spend a second request on it",
+  );
+  assert.equal(d.calls(), 1, "one request: the transport no longer retries somebody else's retry");
+
+  const o = counted();
+  const optedIn = new AnthropicAdapter({ apiKey: "k", fetch: o.fetch, sleep: async () => undefined, maxAttempts: 3 });
+  const done = (await collect(optedIn.stream(REQ, ac()))).at(-1)!;
+  assert.equal(done.type, "done", "an embedder that asked for the curve must still get it");
+  assert.equal(o.calls(), 2);
 });
 
 test("A 429 IS REPORTED ON THE FIRST RESPONSE, with the provider's advice, and is never held", async () => {
