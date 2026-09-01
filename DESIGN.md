@@ -320,26 +320,49 @@ fails today; an item that cannot fail is a wish and gets cut* — was applied to
 
 | item | command re-run | verdict |
 |---|---|---|
-| 9 · a rewind does not run the child's undo | the driver below, rebuilt and re-run | **still fails** — `charges [ 42 ]  refunds []` |
-| 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **still fails** — its `THE HOLE THIS DOES NOT CLOSE` pin is green, which is the item failing |
+| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3/3, and the item is still OPEN** — `charges [ 42 ] refunds []` is now PINNED by the third case rather than produced by an ad-hoc driver. See §9 |
+| 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **PASSES — 13/13. Item 10 is DONE** — the pin was renamed `THE HOLE THIS CLOSES` and asserts the refusal |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
-| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **PASSES — 15/15. Item 12 is DONE**, and the two `--*-module` flags are still `unknown flag` on purpose |
-| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **PASSES — 5/5, and the pin is now its opposite. Item 13's first half is DONE** |
+| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **PASSES — 18/18. Item 12 is DONE**, and the two `--*-module` flags are still `unknown flag` on purpose |
+| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **PASSES — 6/6, and the pin is now its opposite. Item 13's first half is DONE** |
 
-**Two of those verdicts are worth stating as a method and not just a result.** Items 10 and 13
-"fail" by way of a test that PASSES: each has a pinned residual whose green is the item's red, and
-each pin's own body says it must be deleted when the item lands. That is the shape a roadmap item
-should have — a claim that cannot quietly become true — and it is why neither could be marked done
-by reading a changelog. **Item 11 is the counter-example that proves the list is honest:** it is
+**THIS TABLE WENT STALE AGAINST ITS OWN SECTIONS, and that is worth more than the corrections.**
+The row `10 · still fails` was written in `8e98d6c`; `a8d62fb` headed §10 **DONE 2026-09-01** nine
+commits ago and the row did not move, so for nine commits this document said both. `TODO.md` then
+copied the table's half and said items 9, 10, 12 and 13 all fail — a third copy, wrong for three
+of the four. **A summary table that names a command but is not re-run is a second copy of a fact,
+and the second copy is the one that rots.** Every row above was re-run 2026-09-01; where a count
+moved because the suite grew since, the row says so rather than leaving a reader to discover it by
+disagreeing.
+
+**The method behind those verdicts is worth stating, and it is now items 9 and 10 that show it.**
+When this table was first written, items 10 and 13 "failed" by way of a test that PASSED: each had
+a pinned residual whose green was the item's red, and each pin's body said it must be deleted when
+the item landed. Both have since landed and both pins were duly turned over — 10's is now
+`THE HOLE THIS CLOSES` and 13's reaches the runs the ceiling hid. **Item 9 is the one still in
+that shape**, and it moved into it deliberately: `charges [ 42 ] refunds []` used to come out of
+an ad-hoc driver and now comes out of `rewind-through-subgraph.test.ts`'s third case, which
+asserts the refusal and its reason. That is what a roadmap item should look like — a claim that
+cannot quietly become true — and it is why none of these could be marked done by reading a
+changelog. **Item 11 is the counter-example that proves the list is honest:** it is
 the only one whose command flipped, and it flipped because two named lines landed
 (`Engine.#functionBody` calling `bodyEntered` at FETCH, and `resources/functions.ts` carrying the
 realm brand onto the wrapper), exactly the pair the item said would be needed and neither of which
 would have worked alone.
 
-**THE SEAM COST DID NOT MOVE, and the estimate held.** `node scripts/check-kernel.mjs` reports
-`10 files pinned, 8 declared seams` (the guard also prints a commit count, which moves with every commit including this one — the SEAM count is the number that must not move) — still **8**. Item 11 predicted it
-would cost nothing because it is a `fix` of a guard that already exists, and it cost nothing. The
-price of what remains is unchanged at two trailers, for items 10 and 13.
+**THE SEAM COST HAD NOT MOVED WHEN THIS WAS WRITTEN, and the estimate held.** `node
+scripts/check-kernel.mjs` reported **8** declared seams (the guard also prints a commit count,
+which moves with every commit — the SEAM count is the number that must not move by accident).
+Item 11 predicted it would cost nothing because it is a `fix` of a guard that already exists, and
+it cost nothing. The price of what remained was two trailers, for items 10 and 13.
+
+**BOTH WERE SPENT, AS PREDICTED, AND THE CENSUS IS 10.** Re-measured 2026-09-01 at `e8d59c4`:
+`kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` — `<N>` written
+out because it moves with every commit including this one, and `git log
+--grep='^Kernel-seam:' --oneline | wc -l` agrees on the ten. `a8d62fb` is item 10's (`quote` needed
+`journal/events.ts` and `run/replay.ts`); `3762a0e` is item 13's (`RunFilter.after` needed
+`journal/store.ts`). The estimate was right about the count AND about which two items would pay
+it, which is the only reason this paragraph is kept rather than replaced.
 
 **THE ORDERING ARGUMENT, because "what the three properties need" has to be an argument and not a
 preference.** Items 9, 10 and 11 are one defect class wearing three costumes, and it is the class
@@ -353,10 +376,16 @@ exist, a `truncated: true` on every tick and a stderr banner at boot. **Silent-a
 loud-and-missing**, and that is the whole ordering.
 
 **WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** The seam census
-was **8** when this was written and is **8** now — `git log --grep='^Kernel-seam:' --oneline | wc -l`
-says 8, and `node scripts/check-kernel.mjs` prints `10 files pinned, a commit count that moves with every commit — the seam count, 8, is the one that must not,
-8 declared seams` (it said 164 commits when this paragraph was written; the commit count moves
-and the seam count is the number that must not) and then lists every one with its reason.
+was **8** when this was written and is **10** now, which is exactly what the rest of this
+paragraph predicted it would become. Measured 2026-09-01 at `e8d59c4`:
+`git log --grep='^Kernel-seam:' --oneline | wc -l` says 10, and `node scripts/check-kernel.mjs`
+prints `kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` and then
+lists every one with its reason. `<N>` is written out rather than transcribed: it moves with every
+commit including the one carrying this sentence, so a copy of it is stale before the commit lands.
+The seam count is the field that must not move by accident. **This paragraph carried `8` for the nine commits since
+`a8d62fb`, and it did so while quoting a `check-kernel.mjs` line the guard has never printed** —
+a quotation is the strongest-looking kind of evidence on a page and it was the invented part, so
+paste the guard's real output or cite nothing.
 Items 10 and 13 are each a `feat` that must touch
 a pinned kernel file — `journal/events.ts`
 for a seventh `effect.started.kind`, `journal/store.ts` for a listing cursor — so each costs one
@@ -365,8 +394,9 @@ guards that already exist and do not hold; `fix` may touch the kernel freely, wh
 kernel is for. Item 12 touches `cli.ts`, which is not kernel. **Two trailers is the price of this
 list, it is not hidden in it, and a maintainer who thinks the census has grown fast enough should
 cut 13 first** — its argument is the weakest, and §13 says so itself. *Item 11 has since landed
-as a `fix` and cost nothing, which is the first evidence this paragraph's method produces a
-number that survives contact.*
+as a `fix` and cost nothing, and items 10 and 13 have since landed as `a8d62fb` and `3762a0e`,
+one trailer each, touching exactly the two files named above. The method produced a number that
+survived contact — three predictions, three hits.*
 
 ### 9 · A rewind is permitted BECAUSE a compensation exists, then does not run it
 
@@ -404,14 +434,20 @@ harness with a refund recorder added, and printed:
 `#uncompensatedIrreversible` descends into child runs, so the PERMISSION crosses the boundary —
 that was already true. `#compensate` descends into child runs since `7c8b89c`, splicing each
 child's plan into the parent's reverse walk at the seq of the parent's `subgraph.started`, so the
-PROMISE can now be kept. What sits between them is one condition, `engine.ts:2980`:
+PROMISE can now be kept. What sat between them was one condition, at `engine.ts:2980` when this
+was written:
 
     if (plan.steps.length > 0 && live !== undefined) {
       await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
     }
 
 `plan` is `planCompensation` over the parent's own events. A parent that delegated has **zero**
-steps of its own, so the descent that exists is never entered. **Widening that condition is necessary and NOT sufficient, measured rather than reasoned.** An
+steps of its own, so the descent that exists was never entered. **THAT HALF HAS SINCE LANDED and
+this paragraph is kept as the before-state:** the pre-check is deleted rather than widened —
+`engine.ts` now reads `if (live !== undefined)`, with the reason at the call that `#compensate` is
+the only thing that can answer the tree-wide question because answering it means walking the tree,
+and a second copy of the descent at the call site would be the drift hazard.
+**Widening that condition was necessary and NOT sufficient, measured rather than reasoned.** An
 auditor applied a superset of the prescribed change — deleting the guard outright — and the
 result was unchanged: `charges [ 42 ]  refunds []`. Probes show the descent does now run, so the
 condition is correctly identified, and a second blocker sits behind it:
@@ -438,6 +474,20 @@ returns `not_attempted` with a reason naming the missing record. **One residue o
 sibling survives and it is smaller than the original:** a record that EXISTS but carries no
 `details` still yields `args = {}` at `engine.ts:1450`, because `effect.completed.result` is typed
 `unknown`. That is `TODO.md` §A.30's, not this item's.
+
+**THE ITEM'S OUTPUT IS PINNED IN THE TREE NOW, which is the only change to its status.**
+`rewind-through-subgraph.test.ts`'s third case — `A REWIND IS NOT A HUMAN'S YES TO THE UNDO — THE
+STEP IS JOURNALED failed AND THE MONEY STAYS TAKEN` — asserts `charges [ 42 ]`, `refunds []`, and
+a `compensation.recorded` in the CHILD's journal whose outcome is `failed` and whose reason names
+the approval it could not request. It carries a control: the same `pay.refund` on a `tool` node,
+same registry and grant, where the chain CAN suspend and a human answers — and there it
+dispatches. So "the refund did not run" has exactly one explanation left, and the item's red is a
+green test that says out loud what is not happening. `node --test
+packages/core/test/run/rewind-through-subgraph.test.ts` → 3 pass. **What still closes the item is
+unchanged:** the rewind door has no approval floor of its own — `Engine.rewind` defaults `by` to a
+system actor and checks nothing — so an undo inheriting "the operator already approved this" would
+be an automated path granting itself approval. Until that floor exists, refusing is the only
+answer oversight permits.
 
 **Not in scope, and the reason is recorded so it is not re-litigated:** `#edgesToTake` still has
 `case "compensation": break;`. A rollback names a CALL and an edge names a NODE; traversing the
@@ -641,8 +691,20 @@ case in `run-clock-window.test.ts` that pinned the two unreachable runs is now i
 same journal, same numbers, both reached — which is what a pinned residual is supposed to do when
 the item lands.
 
-    node --test packages/core/test/deployment/run-clock-window.test.ts   # 5 pass
-    node --test packages/core/test/journal/store.test.ts                 # 88 pass
+Re-run 2026-09-01, and the second count in this pair was WRONG when it was written:
+
+    node --test packages/core/test/deployment/run-clock-window.test.ts   # 6 pass
+    node --test packages/core/test/journal/store.test.ts                 # 76 pass
+
+`store.test.ts` said `# 88 pass` and prints `tests 76 / pass 76` — run three times, same number
+each time, and `store.test.ts` is untouched since `e8d59c4`. The file has 14 `test(` calls of its
+own and takes the rest from `runConformance`, which generates a case per backend; 76 is what the
+command produces and no re-reading of the file reaches 88. The lesson is narrower than a wrong
+count: **a number written beside a command is evidence only if somebody ran the command.** These
+two sat one line apart, one of them run and one of them not, and the unrun one looked exactly as
+authoritative. `run-clock-window.test.ts` says 6 rather than 5 because the traversal grew a sixth
+case since: a store that accepts `after` and ignores it is REFUSED, which the paging loop needed
+once `StateStore` became something a stranger writes.
 
 **WHAT THE COST NOW IS, because the ceiling bought something and this gives it back.** A tick
 reads `N` `run_head` rows to measure the listing where it used to read `min(N, 10 000)` and give

@@ -358,8 +358,13 @@ yield is likely to be, and why widening the benchmark until it passes would be c
 
 `extensions/bedrock-converse.mjs` is the answer to "my provider is not on the OpenAI wire". It is
 a plain module that imports nothing from `@loom/core`: `loom` hands its default export
-`{models, tools}` — this process's `ModelRegistry` and `ToolRegistry` — before any configuration
-is read, and whatever it registers is what the run uses.
+`{models, tools, channels, identity}` — this process's `ModelRegistry` and `ToolRegistry`, plus
+the two seams added on 2026-09-01: `channels.register(channel)` for a delivery transport that is
+not an HTTP webhook, and `identity.register(source)` for who a caller is — before any
+configuration is read, and whatever it registers is what the run uses. **The object grew and this
+line said `{models, tools}` for a wave afterwards**, which is the first thing a stranger building
+an extension reads. This example destructures only `models`; all four are driven in
+`packages/core/test/cli/extension-module.test.ts`.
 
 ```bash
 cat > models.json <<'JSON'

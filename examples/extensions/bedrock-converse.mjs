@@ -3,12 +3,12 @@
  *
  * WHY THIS FILE EXISTS: to be the thing a stranger copies. `--models-file` speaks two wires,
  * Anthropic's and OpenAI's, and `provider` is a closed set of exactly those two. Everything
- * else is this file. It imports NOTHING from `@loom/core` — it is handed the two registries
- * and hands back an object with four members — which is the shape of the claim that the
- * runtime has no privileged built-ins.
+ * else is this file. It imports NOTHING from `@loom/core` — it is handed four registries and
+ * registers a plain object into one of them — which is the shape of the claim that the runtime
+ * has no privileged built-ins.
  *
  * **WHAT HAS ACTUALLY BEEN DRIVEN, and what has not.** Say it here rather than let a reader
- * assume: the CONTRACT below — default export, `{models, tools}`, `provider`, `stream`,
+ * assume: the CONTRACT below — default export, `{models, tools, channels, identity}`, `provider`, `stream`,
  * `priceOf`, `estimateOf`, the `text_delta`/`done` frames, the route table rewriting
  * `req.model` — is exercised end to end by `packages/core/test/cli/extension-module.test.ts`,
  * through `loom run` and then `loom replay` against an EMPTY registry. What has NOT been
@@ -130,9 +130,18 @@ class BedrockConverseAdapter {
 }
 
 /**
- * THE CONTRACT: a default export that is a function, called once with `{models, tools}`
- * before any configuration is read. Registering nothing is a refusal to boot — a module that
- * silently did nothing would be a deployment the operator believes is extended and is not.
+ * THE CONTRACT: a default export that is a function, called once with
+ * `{models, tools, channels, identity}` before any configuration is read. Registering nothing is
+ * a refusal to boot — a module that silently did nothing would be a deployment the operator
+ * believes is extended and is not.
+ *
+ * FOUR SEAMS, AND THIS MODULE DESTRUCTURES ONE. `tools.register(tool)` adds an in-process
+ * tool; `channels.register(channel)` adds a delivery transport that is not an HTTP webhook, so a
+ * plane can have channels with no `--channels-file` at all; `identity.register(source)` decides
+ * who a caller is, and a source registered here is a credential — a plane carrying one binds a
+ * non-loopback `--host` with no `--token` and no `--identity-file`. A second identity source, or
+ * one beside `--identity-file`, is refused: a chain would accept the UNION of two credential
+ * sets, which is oversight loosened by load order.
  */
 export default ({ models }) => {
   models.register(new BedrockConverseAdapter());
