@@ -295,16 +295,31 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * a certificate. A candidate that does MORE than the recording is untouched — it serves every
  * recorded effect and adds its own.
  *
- * WHAT THIS STILL DOES NOT CATCH, so nobody reads it as more than it is. A candidate that lowers
- * a node's `policy.budget` is invisible, and a REFUSAL WAS TRIED AND MEASURED RATHER THAN
- * ARGUED. Replay reaches no adapter, so `Engine.#runAgent`'s `adapter?.estimateOf(shaped) ?? 0`
- * makes the reservation zero: the ceiling is still compared against spend the task accumulated
- * from the recording, but the reserve-worst-case half — the half that refuses a call BEFORE it
- * is made — is never exercised. So a candidate that lowers a ceiling to just above the
- * recording's spend replays clean here and would refuse on the first turn live.
+ * WHAT THIS USED NOT TO CATCH, AND NOW DOES BY ITSELF. A candidate that lowers a node's
+ * `policy.budget` was invisible: replay reached no adapter, so `Engine.#runAgent`'s
+ * `adapter?.estimateOf(shaped) ?? 0` made the reservation zero and the reserve-worst-case half —
+ * the half that refuses a call BEFORE it is made — was never exercised. A candidate that lowered
+ * a ceiling to just above the recording's spend replayed clean here and would have refused on the
+ * first turn live.
  *
- * The obvious fail-closed answer is to refuse any different-graph candidate that declares a
- * budget, and it costs far more than a refusal. `test/run/skeleton.ts`'s own `summarize` node
+ * The `quote` effect ended that. The adapter's `estimateOf`/`outputCeilingOf` answers are now
+ * journaled under `effectKey(taskId, "quote", turn)` and replay serves them, so the candidate's
+ * ceiling is compared against the number the recording really reserved. DRIVEN, one agent node,
+ * a recording with no ceiling at all, `onGraphChange: "allow"`:
+ *
+ *     candidate budget.tokens  500      -> replay failed E_BUDGET_EXHAUSTED, match false
+ *                                          `1041 estimated for this turn`  (was 17, and clean)
+ *     candidate budget.costUsd 0.0005   -> replay failed E_BUDGET_EXHAUSTED, match false
+ *                                          `$0.0010 estimated for this turn` (was $0, and clean)
+ *
+ * THE RESIDUAL, stated so this is not read as more than it is: the check fires because a lowered
+ * ceiling is crossed by the RECORDING's own quote. A candidate that lowers a ceiling to somewhere
+ * above that number is still not distinguishable from one that kept it, for the reason below —
+ * and a recording written before the `quote` effect existed carries no row to serve, so it
+ * reserves the old unpadded number and this paragraph does not apply to it.
+ *
+ * The blanket fail-closed answer was tried and MEASURED RATHER THAN ARGUED, and it costs far more
+ * than a refusal. `test/run/skeleton.ts`'s own `summarize` node
  * declares `policy.budget.costUsd: 0.15`, and so does a node in each of the two graphs the loop
  * is actually driven on — `examples/graphs/review-bench.json` and `examples/graphs/self-review.json`.
  * The compiler's `GRAPH009_UNBOUNDED_NODE` tells authors to ADD that field to a spending node, so
@@ -313,12 +328,13 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * body still promotes", the only candidate class the gate can judge without spending a model
  * call. A guard that cannot be satisfied is not strict, it is absent.
  *
- * The narrower refusal is not available either: the recording's SPEC is not in the journal
+ * The narrower refusal is still not available: the recording's SPEC is not in the journal
  * (`run.compiled` carries node counts — TODO A.24), so nothing here can tell "the candidate
  * lowered the ceiling" from "the candidate kept it and changed a body". `loom promote
- * --against-cohort` sees it because it RUNS the candidate, and TODO A.23 closes on replay being
- * able to serve an adapter's answers, which is A.1's seam. Until then this is a stated blind
- * spot rather than a silent one.
+ * --against-cohort` sees it because it RUNS the candidate. A.1's seam — replay serving the
+ * adapter's answers — has landed, which is what turned the paragraph above from a blind spot into
+ * a refusal; whether that is enough to close TODO A.23's budget half has not been measured here,
+ * and this file claims only the two rows it drove.
  */
 function unexercised(report: ReplayReport): string[] {
   const out: string[] = [];

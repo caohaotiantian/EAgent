@@ -443,7 +443,36 @@ sibling survives and it is smaller than the original:** a record that EXISTS but
 `case "compensation": break;`. A rollback names a CALL and an edge names a NODE; traversing the
 edge would run a node, which is a different feature.
 
-### 10 · Three token and cost ceilings cannot be re-derived by a replay
+### 10 · ~~Three token and cost ceilings cannot be re-derived by a replay~~ — **DONE 2026-09-01**
+
+**CLOSED by the `quote` effect — a seventh member of `effect.started.kind`, written at
+`Engine.#quoteEffect` under `effectKey(taskId, "quote", turn)` and served by `ReplayEffects`
+like every other recorded effect.** The section below is kept verbatim because its prediction
+held in both directions and its numbers are the before column:
+
+    LIVE   E_BUDGET_EXHAUSTED | node "ask" would exceed its 500-token budget
+                                (0 spent by this task, 1041 estimated for this turn)
+    REPLAY E_BUDGET_EXHAUSTED | node "ask" would exceed its 500-token budget
+                                (0 spent by this task, 1041 estimated for this turn)
+    MATCH  true
+
+All three members are driven with a control each in `test/run/replay-fidelity.test.ts` — the
+control strips the quote rows out of the same recording and shows the old answer coming back.
+`THE HOLE THIS DOES NOT CLOSE` was NOT deleted, as its own body suggested: it is now `THE HOLE
+THIS CLOSES` and asserts the refusal, which is the assertion this section said would fail.
+
+**The `match: true` half was fixed too, and it had to be**: `compare()` weighed `status` alone,
+so a replay that failed for an unrelated reason scored green. It now weighs the error code,
+and the frame reads `expected failed:E_BUDGET_EXHAUSTED, got failed:E_REPLAY_DIVERGENCE`. The
+MESSAGE is still not graded — that is TODO A.2, and it is untouched.
+
+**What is left, and it is confined to old journals.** A recording written before the `quote`
+effect has no row to serve. It falls back to `ceiling ?? 0`, which is a LOWER bound: such a
+replay can fail to reproduce a refusal, and can never invent one. Both directions are pinned,
+and the residual now announces itself through the error-code frame instead of scoring green.
+
+---
+
 
 CLAUDE.md's first non-negotiable is that a value a decision reads must be reconstructable by
 folding the journal, "including across a restart". These three are not: the node `tokens` ceiling,

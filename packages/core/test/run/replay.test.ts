@@ -860,9 +860,15 @@ test("A REPLAY THAT NEVER SERVED A RECORDED EFFECT DOES NOT REPORT `match: true`
       // Listed rather than filtered out: this assertion is the fixture's inventory, and an
       // inventory that quietly skips a kind stops noticing when a kind appears.
       "start@root#0:random:0",
+      // ONE QUOTE PER MODEL TURN, ahead of the turn it prices — what `estimateOf` and
+      // `outputCeilingOf` answered about the request that was about to be sent. It sits under its
+      // own kind rather than on the `model` key because a turn a budget then refuses makes no
+      // model call at all, so the two are different facts.
+      "summarize@root/e0[0]#0:quote:0",
       MODEL_0,
       TOOL_0,
       TOOL_1,
+      "summarize@root/e0[0]#0:quote:1",
       "summarize@root/e0[0]#0:model:1",
       "merge@root#0:random:0",
       "write@root#0:tool:0",

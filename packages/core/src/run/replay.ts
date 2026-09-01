@@ -1207,12 +1207,29 @@ function compare(original: RunProjection, replayed: RunProjection, effects: Repl
     actual: JSON.stringify(replayed.channels),
   });
 
+  // WHY IT ENDED, NOT ONLY THAT IT DID. This weighed `status` alone, so two runs that failed for
+  // unrelated reasons scored `match: true` — and that is not hypothetical, it is the thing that
+  // kept the `budget.tokens` replay hole quiet for as long as it existed. Measured, one agent
+  // node with `budget.tokens: 500`: the recording failed `E_BUDGET_EXHAUSTED` before any model
+  // call, the replay could not re-derive that refusal, went on to a model effect the recording
+  // never made, and died `E_REPLAY_DIVERGENCE` — two different runs, both `failed`, reported as a
+  // faithful reproduction. `loom replay`'s exit code and `evolution/gate.ts`'s promotion decision
+  // both read this verdict.
+  //
+  // THE CODE AND NOT THE MESSAGE. A message carries numbers that legitimately differ between a
+  // recording and its replay (`spent`, `estimated`, an adapter name), so comparing it would
+  // report divergence for runs that agree; the code is the classification the run reached.
+  //
+  // `(no code)` is a failed projection with no `error` — a journal fragment, or a `run.failed`
+  // written by hand. It compares as itself rather than matching everything, which is the same
+  // direction every other frame here fails in.
+  const why = (p: RunProjection): string => (p.status === "failed" ? `failed:${p.error?.code ?? "(no code)"}` : p.status);
   frames.push({
     seq: seq++,
     kind: original.status === "failed" ? "run.failed" : "run.completed",
-    match: original.status === replayed.status,
-    expected: original.status,
-    actual: replayed.status,
+    match: why(original) === why(replayed),
+    expected: why(original),
+    actual: why(replayed),
   });
 
   return frames;
