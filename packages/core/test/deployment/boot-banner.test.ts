@@ -16,20 +16,34 @@
  * long enough.
  *
  * TODO.md A.20 records "a rare suite flake, four sightings, never reproduced … the test
- * helper waits for a known-last line on stdout and for nothing on stderr". This file does
- * not reproduce the sighting — see the report; ten loops of the spawned suites under
- * sixteen CPU burners are green. It fixes the part that is decidable at a sha: whether the
- * helper's stated invariant is true, and whether it can be satisfied by a prefix.
+ * helper waits for a known-last line on stdout and for nothing on stderr". That is the
+ * paragraph above; a fifth sighting, on `s.err` after `await s.stop()`, gave A.20 its cause,
+ * and the last two tests here are it.
  *
- * The three claims below are each a property of the HELPER, not of the product, except the
- * first — which is the product fact the helper is built on, and is therefore the one that
- * has to be measured against a real child rather than asserted in a comment.
+ * **THE STDOUT FIX WAS NOT THE WHOLE FIX, and the shape of what was left is the lesson.** The
+ * banner wait above answers "has the child finished WRITING", and the question `stop()` needs
+ * answered is "can the child be STOPPED" — a strictly later instant, because `serve` installs
+ * its SIGINT handler only after `announce` returns. Measured at 0.28–0.32 ms. Inside it SIGINT
+ * has its DEFAULT disposition and the kernel kills the child where it stands, so `stop()` is
+ * not a stop, it is a kill, and every line `announce` had left to write is never written.
+ * `awaitStoppable` closes it; `stopVerdict` is what refuses if it ever reopens.
+ *
+ * The other hypothesis — that `close` can fire before stderr has drained — was ELIMINATED,
+ * not assumed away: 30 children, 4 MB of stderr each, a deliberately starved parent, 0/30.
+ * `harness.ts`'s `stop` records that.
+ *
+ * The claims below are each a property of the HELPER, not of the product, except the third —
+ * which is the product fact the helper is built on, and is therefore the one that has to be
+ * measured against a real child rather than asserted in a comment. The two A.20 tests are
+ * hand-driven for a reason this file already argues once and which is sharper the second
+ * time: a 0.3 ms window is not something a real child can be asked about, and 144 boots under
+ * 12-way load are 144 greens either way.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { BANNER_KEYS, awaitBanner, awaitLine, bannerKeysIn, bannerMissing, completeLines, deployment, serving } from "./harness.ts";
+import { BANNER_KEYS, awaitBanner, awaitLine, awaitStoppable, bannerKeysIn, bannerMissing, completeLines, deployment, serving, stopVerdict } from "./harness.ts";
 
 /** The banner `announce` writes, as bytes, so a test can deliver it in pieces of its choosing. */
 const FULL_BANNER = `loom listening on http://127.0.0.1:58955\n${BANNER_KEYS.map((k) => `  ${k}: value\n`).join("")}`;
@@ -105,7 +119,9 @@ test("THE BANNER-KEY SET `serving` WAITS FOR IS THE WHOLE BANNER — measured ag
   const d = deployment();
   try {
     const s = await serving(["serve", "--workspace", d.dir, "--port", "0"]);
-    await s.stop();
+    // STOPPED, NOT KILLED — the distinction A.20 turned on, asserted on the real child rather
+    // than assumed. `stopVerdict` throws on a signal death, so this pins the code as well.
+    assert.equal(await s.stop(), 0, `a SIGINT the child HANDLED, so \`out\` below is the whole banner.\nstderr:\n${s.err}`);
     assert.deepEqual(
       [...bannerKeysIn(s.out)].sort(),
       [...BANNER_KEYS].sort(),
@@ -178,6 +194,80 @@ test("`awaitLine` REFUSES when it cannot decide — it never answers with the pa
   );
   // And a line that is present but UNTERMINATED is not a match — the whole point.
   await assert.rejects(() => awaitLine(() => "! NO TOKEN — every call", /NO TOKEN/, "stderr", 50), /no complete stderr line matched/);
+});
+
+test("`awaitStoppable` WAITS — a listening plane is not yet a stoppable one (A.20)", async () => {
+  // THE FIFTH SIGHTING'S CAUSE, driven by hand — and by hand for the reason the first test in
+  // this file already argues, only more so. The window between the last banner line and
+  // `serveUntilInterrupt`'s SIGINT handler measures 0.28–0.32 ms (ten boots, an external
+  // `--import` hook timestamping each write and the handler install), so a real child cannot
+  // tell a correct wait from a wrong one: 144 boots under 12-way load were 144 green. Held
+  // still — the same hook busy-waiting 60 ms after `! CALLBACK ROUTE OPEN` — the unfixed
+  // helper is 10/10 `code=null signal=SIGINT` with stderr ending exactly at that line, which
+  // is the sighting; with this wait in front of the stop it is 0/10.
+  //
+  // Sleeps here are SEQUENCING, not measurement: `awaitStoppable` polls every 5 ms, so 40 ms
+  // is eight opportunities to return early. Nothing below asserts how long anything took.
+  let answers = 0;
+  let returned = false;
+  const done = awaitStoppable(
+    async () => (answers++ < 3 ? { error: "ECONNREFUSED" } : { status: 401 }),
+    () => null,
+    (last) => `never answered (${last})`,
+    5_000,
+  ).then(() => {
+    returned = true;
+  });
+  await new Promise((r) => setTimeout(r, 40));
+  await done;
+  assert.equal(returned, true);
+  // FOUR probes and not one: a wait that returned on the first look would be the defect
+  // wearing the fix's name, and it is the only failure mode this test exists to exclude.
+  assert.equal(answers, 4, "it must keep asking until the child ANSWERS, not ask once and assume");
+
+  // ANY status is an answer, 401 included — the claim is that the child's event loop turned,
+  // which is what proves the handler is on; it is not a claim about authorization. A wait
+  // that demanded 200 would hang forever against a tokened plane, which every spawned test
+  // in this tree starts.
+  await awaitStoppable(async () => ({ status: 401 }), () => null, () => "unused", 5_000);
+
+  // WHEN IT CANNOT DECIDE IT REFUSES, naming the last errno rather than returning and letting
+  // the stop become a kill.
+  await assert.rejects(
+    () => awaitStoppable(async () => ({ error: "ECONNREFUSED" }), () => null, (last) => `never answered (${last})`, 50),
+    /never answered \(ECONNREFUSED\)/,
+  );
+  // And a child that died while it was being waited for is a failure, not a timeout.
+  await assert.rejects(
+    () => awaitStoppable(async () => ({ error: "ECONNREFUSED" }), () => "it exited (1)", () => "unused", 5_000),
+    /it exited \(1\)/,
+  );
+});
+
+test("A KILLED CHILD IS NEVER REPORTED AS A STOPPED ONE — `stopVerdict` fails closed (A.20)", async () => {
+  // The net under the wait above, and the reason it is worth having even once the window is
+  // shut: that wait's proof rests on a fact about ANOTHER FILE's control flow — `announce`
+  // and `process.on("SIGINT", …)` run in one synchronous stretch in `cli.ts`, so an answered
+  // request implies the handler exists. Put an `await` between them and the proof is void
+  // with nothing here able to see it.
+  //
+  // What that regression cost the last five times is not the kill, it is the SILENCE:
+  // `close`'s first argument is `null` for a signal death and `stop()` returned it unread, so
+  // a child that had been shot mid-banner was indistinguishable from one that stopped, and
+  // the failure surfaced hundreds of lines away as a missing stderr line.
+  assert.equal(stopVerdict(["serve"], 0, null, ""), 0);
+  assert.equal(stopVerdict(["serve"], 1, null, ""), 1, "a non-zero EXIT is a verdict the caller may assert on, not a refusal");
+  assert.throws(
+    () => stopVerdict(["serve", "--port", "0"], null, "SIGINT", "! CALLBACK ROUTE OPEN — …\n"),
+    (e: Error) =>
+      /was KILLED by SIGINT, not stopped by it/.test(e.message) &&
+      /PREFIX of what it meant to write/.test(e.message) &&
+      /TODO A\.20/.test(e.message) &&
+      /CALLBACK ROUTE OPEN/.test(e.message),
+    "it must name the race and hand back what stderr actually held",
+  );
+  // Not only SIGINT: any signal death means the same thing about `out` and `err`.
+  assert.throws(() => stopVerdict(["serve"], null, "SIGKILL", ""), /was KILLED by SIGKILL/);
 });
 
 test("STDERR IS WAITED ON, NOT RACED — `awaitErr` resolves on a complete line", async () => {

@@ -1217,8 +1217,17 @@ test("`loom serve` SAYS which perimeter it has, including the second hole", asyn
     });
     // Stopped BEFORE asserting: `stop` waits for the child's pipes to drain, so what is
     // read below is everything the process wrote and not a prefix of it.
+    //
+    // **THAT SENTENCE WAS TRUE AND IT WAS NOT SUFFICIENT — this assertion is A.20's fifth
+    // sighting.** `close` really does mean drained (30 children x 4 MB, 0/30 truncated), so
+    // the missing `NO CALLBACK BASE URL` was never lost in the pipe: the child was KILLED
+    // before it wrote the line, by this `stop()`'s own SIGINT landing in the 0.3 ms before
+    // `serveUntilInterrupt` installed a handler for it. `harness.ts`'s `awaitStoppable` is
+    // what makes that unreachable and `stopVerdict` is what refuses if it ever is not, so
+    // the exit code is asserted here rather than dropped — a killed child must not reach
+    // the four assertions below looking like a stopped one.
     const s = await serving(["serve", "--workspace", d.dir, "--port", "0", "--token", "s3cret", "--channels-file", file]);
-    await s.stop();
+    assert.equal(await s.stop(), 0, `stopped, not killed — otherwise stderr below is a prefix.\nstderr:\n${s.err}`);
     assert.match(s.out, /gates:.*slack \(answerable\).*pager \(notify-only\)/);
     assert.match(s.err, /CALLBACK ROUTE OPEN/);
     assert.match(s.err, /WITHOUT the bearer token/);
