@@ -298,20 +298,21 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   `trigger === "rewind"`, because the operator has passed a floor against the specific undos. It
   still needs its own fixture, since the whole suite is green with the guard flipped.
 
-- **A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests it.**
-  `engine.ts:1199` argues it at length — an undo that policy answers `gate` must be REFUSED, or
-  compensation becomes the back door that performs an irreversible action a gate would have
-  stopped. **Re-measured 2026-09-01, and it got WORSE rather than going stale**: flipping the
-  seventh argument at `engine.ts:1457` (`#compensateOne`'s single `#invokeTool` call) from `false`
-  to `true` and running the WHOLE suite — not just `run/`, which is what the earlier reading of
-  this row did — leaves **2,708/2,708 green**. The original number was 1047/1047 over
-  `packages/core/test/run/*.test.ts`; that directory is 1061 tests now and the wider run says the
-  guard is unobserved everywhere, not merely in its own neighbourhood. A guard nothing would
-  notice the deletion of is not yet a guard. **Closes when** a fixture drives a rollback whose
-  undo tool policy answers `gate`, and asserts `compensation.recorded {failed}` rather than a
-  performed undo. **The two line numbers in this row moved once already** — they were `1153` and
-  `1273` — which is the argument for citing the SYMBOL (`#compensateOne`, the `nodeApproved`
-  paragraph above `#compensate`) beside the line, and it is now done.
+- **A.8 · ~~The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests
+  it.~~ THE FIXTURE EXISTS NOW; the DECISION is what is left.** `test/run/rewind-plan.test.ts`
+  asserts, on both the direct and the delegated leg, that a refused undo reaches neither the world
+  (`refunds` is empty) nor a false record (`compensation.recorded.outcome` is `failed`).
+  Mutation-checked: flipping the seventh argument at `#compensateOne` turns
+  *"an undo policy refuses must not reach the world"* red. Before this the file asserted only
+  `undo === "pay.refund"`, which a row carries whatever its outcome — so the suite drove A.8's
+  exact path and would have stayed green through the flip.
+  **What remains is not coverage, it is the question:** should a rewind's undos run with
+  `nodeApproved: true`? A.35 delivered the operator seeing and authorizing the specific list, which
+  is the floor that made the question askable at all. It is still not obviously yes: the human
+  authorized *this plan*, and `#compensateOne`'s own docstring argues the opposite — "a rollback is
+  not a human's yes to anything: the human, if there was one, approved the action being undone".
+  **Closes when** somebody decides that, with the argument written down; the fixture will hold
+  whichever way it goes, which is the whole reason to have built it first.
 
 - **A.10 · An async body cannot be bounded by any deadline, so it is refused.** `vm`'s timeout
   covers synchronous execution only. The refusal is correct and is stated once at the seam
