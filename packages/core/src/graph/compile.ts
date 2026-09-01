@@ -22,7 +22,6 @@ import { CLASSIFICATION_POSTURE_FLOOR, CLASS_DEFAULT_POSTURE, maxPosture, type P
 import {
   DEFAULT_EXPANSION,
   dataFloorOf,
-  reachableToolNames,
   type ExpansionBudget,
   type GraphSpec,
   type NodePlan,
@@ -32,7 +31,7 @@ import {
   type RunGraph,
   observedChannels,
 } from "./spec.ts";
-import { indexGraph, validateGraph, type Diagnostic, type ValidationContext } from "./validate.ts";
+import { indexGraph, reachableToolNamesThrough, validateGraph, type Diagnostic, type ValidationContext } from "./validate.ts";
 
 /**
  * The retry policy a provider-calling node gets when its author declared none.
@@ -276,6 +275,12 @@ export function compile(input: CompileInput): CompileResult {
 
   const plans: Record<NodeId, NodePlan> = {};
   const layoutRanks = computeLayoutRanks(spec, idx);
+  // HOISTED ABOVE THE PLAN LOOP, because the class floor now reads it. This is the same map the
+  // `RunGraph` carries and `Engine.#runSubgraph` executes from, so the floor a `subgraph` node is
+  // given at compile is computed from exactly the child bytes the run will use — not from a
+  // second resolver call that could answer differently.
+  const subgraphs = resolveSubgraphs(input, expansion);
+  const childSpec = (ref: string): GraphSpec | undefined => subgraphs[ref] ?? input.resolver.subgraph?.(ref);
 
   for (const n of spec.nodes) {
     // `max` over every tool the node can reach. An agent node names no tool, so keying
@@ -290,7 +295,10 @@ export function compile(input: CompileInput): CompileResult {
             // compiler cannot see should floor the node is a separate question from which
             // tools the node can reach, and answering it here would gate every graph
             // compiled against a partial manifest map.
-            ...reachableToolNames(n).flatMap((name) => {
+            // THROUGH A SUBGRAPH TOO. A `subgraph` node names no tool, so it was floored at `out`
+            // however irreversible its child was — see `reachableToolNamesThrough` for the three
+            // things folding the child in actually buys, and for what it does NOT claim.
+            ...reachableToolNamesThrough(n, childSpec, expansion.maxDepth).flatMap((name) => {
               const entry = input.tools[name];
               return entry === undefined ? [] : [CLASS_DEFAULT_POSTURE[entry.irreversibility]];
             }),
@@ -335,7 +343,7 @@ export function compile(input: CompileInput): CompileResult {
     terminalNodes: idx.terminalNodes,
     resolutionManifest: manifest,
     documents: resolveDocuments(input, manifest),
-    subgraphs: resolveSubgraphs(input, expansion),
+    subgraphs,
     expansion,
   };
 

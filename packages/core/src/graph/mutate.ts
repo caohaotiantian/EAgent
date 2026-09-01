@@ -20,9 +20,8 @@
 import { CODES, err, type LoomError } from "../errors.ts";
 import type { NodeId, TaskId } from "../ids.ts";
 import { compile, type CompileInput } from "./compile.ts";
-import { reachableToolNames } from "./spec.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
-import { indexGraph, type Diagnostic } from "./validate.ts";
+import { indexGraph, reachableToolNamesThrough, type Diagnostic } from "./validate.ts";
 import { isHardToUndo } from "../vocab.ts";
 
 export interface GraphMutation {
@@ -190,12 +189,26 @@ export function compileMutation(input: MutateInput): MutationResult {
   // A mutation that introduces a hard-to-undo action gates BEFORE that node runs,
   // whatever the run's posture — a graph that grew a new irreversible step at runtime
   // is exactly the case where "somebody should look" is not negotiable.
+  // THE COMPILED TREE FIRST, the live resolver second. `result.graph.subgraphs` is what the
+  // executor will run, and it already covers every ref the merged spec can reach — but a
+  // mutation that ADDS a `subgraph` node naming a ref the base never mentioned is exactly the
+  // case this rule exists for, and `resolveSubgraphs` walks the merged spec, so it is in there.
+  // The fallback is the older-`RunGraph` guard `#runSubgraph` uses, not a second policy.
+  const childSpec = (ref: string): GraphSpec | undefined => result.graph.subgraphs?.[ref] ?? input.resolver.subgraph?.(ref);
   const gatedNodes = mutation.addNodes
     .filter((n) =>
       // Reachable, not named. A proposed `agent` node names no tool, so keying on
       // `n.tool` let a mutation that hands a model an irreversible tool through with
       // `requiresGate: false` — the one case this rule calls non-negotiable.
-      reachableToolNames(n).some((name) => {
+      //
+      // AND THROUGH A SUBGRAPH, for the same reason one step further out: a proposed `subgraph`
+      // node names no tool either, so a mutation that delegates an irreversible action to a
+      // child came back `requiresGate: false` and the parent journal recorded no
+      // `policy.escalated{rule: mutation_introduced_irreversible}` at all. The child still
+      // gated on its own floor, so this is not an oversight hole — what it fixes is a parent
+      // trajectory that could not be read, and a human asked after the child had already done
+      // reversible work.
+      reachableToolNamesThrough(n, childSpec, result.graph.expansion.maxDepth).some((name) => {
         const manifest = input.tools[name];
         // `isHardToUndo`, never the two names spelled out: the positive form falls through as
         // EASY for a class this binary cannot read, which is the one direction a gate may not

@@ -254,6 +254,24 @@ async function parkedOnDelegation(levels: number): Promise<{
 
   const runIds: RunId[] = [runId];
   for (let i = 0; i < levels; i++) runIds.push(`${runIds[i]!}~delegate@root#0` as RunId);
+
+  // EACH DELEGATOR NOW ASKS BEFORE IT DELEGATES, and that is the shape under test's cost, not
+  // its subject. A `subgraph` node's compile floor folds in the tools its CHILD can reach, so
+  // every `delegate` node above the leaf reaches `pay.charge` and stands at posture `in` — the
+  // human is asked before the child starts rather than at the innermost call. To park the LEAF
+  // on the gate this file is about, those `levels` delegation gates have to be answered first.
+  for (let i = 0; i < levels; i++) {
+    const id = runIds[i]!;
+    const parked = (await r.engine.projection(id))!;
+    if (parked.status !== "awaiting_gate") continue;
+    await r.engine.resolveGate(id, {
+      gateId: openOf(parked).gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: SECURITY_LEAD, via: "console" },
+      idempotencyKey: `delegate-${i}`,
+    });
+    await r.engine.advance(runIds[0]!);
+  }
   return { r, runIds, graph };
 }
 

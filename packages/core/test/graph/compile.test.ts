@@ -112,6 +112,70 @@ test("EVERY NODE THAT CAN BLOCK CARRIES A DEADLINE, and the author's own always 
   );
 });
 
+/**
+ * A parent whose entire body is one delegation, over a child that applies an irreversible tool.
+ *
+ * TWO LEVELS DEEP, because the descent has to be a walk rather than a peek: `k8s.apply` sits in
+ * the GRANDCHILD, so a one-level fold would answer `out` here exactly as no fold at all does.
+ */
+function delegatingTree(parentCaps?: readonly string[]): Parameters<typeof compile>[0] {
+  const graph = (name: string, nodes: readonly NodeSpec[], caps: readonly string[]): GraphSpec => ({
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name, project: "test", version: 1 },
+    policy: { posture: "out", capabilities: [...caps], expansion: { maxNodes: 16, maxDepth: 3, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { inp: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["inp"],
+    outputs: ["out"],
+    nodes: [...nodes],
+    edges: [],
+  });
+  const delegate = (ref: string): NodeSpec => ({
+    id: "delegate" as NodeId,
+    type: "subgraph",
+    reads: ["inp"],
+    writes: ["out"],
+    subgraph: { ref, inputs: { inp: "inp" }, outputs: { out: "out" } },
+    unhandled: true,
+  });
+  const grandchild = graph("grandchild", [
+    { id: "act" as NodeId, type: "tool", reads: ["inp"], writes: ["out"], tool: { name: "k8s.apply", version: "3.0", args: {} }, unhandled: true },
+  ], ["k8s:write"]);
+  const child = graph("child", [delegate("subgraph/grandchild@stable")], ["k8s:write"]);
+  const parent = graph("parent", [delegate("subgraph/child@stable")], parentCaps ?? ["k8s:write"]);
+  return base(parent, {
+    resolver: stubResolver({ subgraphs: { "subgraph/child@stable": child, "subgraph/grandchild@stable": grandchild } }),
+    tenantCapabilities: ["k8s:write"],
+  });
+}
+
+test("A SUBGRAPH NODE IS CLASSIFIED BY WHAT ITS CHILD CAN REACH, not by the tools it names", () => {
+  // A `subgraph` node names no tool, so the `max` fold saw nothing and floored it at `out`
+  // however irreversible the child was — measured, `plans.delegate.posture` was `out` over a
+  // child that charges a card. It is NOT an oversight hole (every irreversible call still gates
+  // on the CHILD's own floor), which is why the claim here is about WHERE the human is asked:
+  // at `in` the parent asks BEFORE the child starts doing reversible work, rather than at the
+  // innermost call several runs down.
+  const g = compileOrThrow(delegatingTree());
+  assert.equal(g.plans["delegate" as NodeId]?.posture, "in", "the grandchild's `k8s.apply` reaches the parent's floor");
+
+  // AND THE FIFTH EXCLUDED TYPE from the deadline set, checked where a subgraph node exists:
+  // `#runSubgraph`'s body is `advance(child)`, so a constant here would bound a whole child RUN.
+  assert.equal(g.plans["delegate" as NodeId]?.timeoutMs, undefined, "a subgraph node gets no default deadline");
+});
+
+test("…and the parent's capability CEILING descends with it", () => {
+  // The refusal used to arrive as a run-time `E_CAP_DENIED`, which is the "compiles, then fails
+  // at run time" the compile stage exists to prevent. The child and grandchild each declare
+  // `k8s:write` for themselves, so nothing below the parent refuses on its own.
+  const r = compile(delegatingTree([]));
+  assert.equal(r.ok, false, "a parent declaring `capabilities: []` must not compile over this tree");
+  const d = r.diagnostics.filter((x) => x.code === "GRAPH017_CAPABILITY_NOT_DECLARED");
+  assert.equal(d.length, 1, JSON.stringify(r.diagnostics));
+  assert.match(d[0]!.message, /tool "k8s\.apply" used by subgraph "subgraph\/child@stable" under node "delegate"/);
+  assert.equal(compile(delegatingTree(["k8s:write"])).ok, true, "declaring it is how you delegate it");
+});
+
 test("a system floor of `in` raises every node, and nothing can lower it", () => {
   const g = compileOrThrow(base(incidentTriage(), { systemPostureFloor: "in" }));
   for (const plan of Object.values(g.plans)) assert.equal(plan.posture, "in");

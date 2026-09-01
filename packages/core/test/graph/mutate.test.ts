@@ -297,6 +297,64 @@ test("a mutation adding only reversible work needs no gate", () => {
   assert.equal(r.requiresGate, false);
 });
 
+test("AND A MUTATION THAT DELEGATES THE IRREVERSIBLE ACTION TO A CHILD GATES TOO", () => {
+  // The same rule one level of indirection out. A proposed `subgraph` node names no tool, so
+  // `reachableToolNames` answered with nothing and the mutation came back `requiresGate: false,
+  // gatedNodes: []` however irreversible the child was.
+  //
+  // WHAT THIS IS NOT: an oversight hole. The child's own compile floors `email.send` at `in` and
+  // gates there, so the action was never unsupervised. What was missing is the PARENT's record —
+  // no `policy.escalated{rule: mutation_introduced_irreversible}` was ever appended, so a
+  // trajectory consumer counting that rule saw a run that grew a delegated irreversible step and
+  // reported nothing at all.
+  const child: GraphSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "sender", project: "demo", version: 1 },
+    policy: { posture: "out", capabilities: CAPS },
+    channels: { plan: { type: "object", reduce: "replace" }, detail: { type: "string", reduce: "replace" } },
+    inputs: ["plan"],
+    outputs: ["detail"],
+    nodes: [
+      {
+        id: n("send"),
+        type: "tool",
+        reads: ["plan"],
+        writes: ["detail"],
+        tool: { name: "email.send", version: "1.0", args: { to: "a@b.c" } },
+        unhandled: true,
+      },
+    ],
+    edges: [],
+  };
+  const withChild: ResourceResolver = { ...resolver(), subgraph: (ref) => (ref === "subgraph/sender@stable" ? child : undefined) };
+  const m = mutation({
+    addNodes: [
+      {
+        id: n("delegate"),
+        type: "subgraph",
+        reads: ["plan"],
+        writes: ["detail"],
+        subgraph: { ref: "subgraph/sender@stable", inputs: { plan: "plan" }, outputs: { detail: "detail" } },
+        unhandled: true,
+      },
+    ],
+    addEdges: [{ id: e("m0"), from: n("plan"), to: n("delegate"), kind: "seq" }],
+  });
+  const r = compileMutation({
+    base: compileBase(),
+    mutation: m,
+    budget: { consumedNodes: 0, expansion: compileBase().expansion },
+    resolver: withChild,
+    tools: TOOLS,
+    tenantCapabilities: CAPS,
+  });
+
+  assert.ok(r.ok, r.ok ? "" : r.error.message);
+  assert.equal(r.requiresGate, true);
+  assert.deepEqual(r.gatedNodes, ["delegate"], "the delegating node is what a human is asked about");
+});
+
 test("A CLASS THE VOCABULARY CANNOT READ GATES — the unreadable case is the strongest, not the weakest", () => {
   // This gate read `=== "irreversible" || === "externally_visible"` — a positive list, so a
   // class this binary cannot parse matched neither name and fell through as EASY. Measured

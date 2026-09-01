@@ -107,6 +107,72 @@ export interface ValidationContext {
   readonly expanding?: readonly ResourceRef[];
 }
 
+/**
+ * Every tool a node can reach INCLUDING THROUGH A SUBGRAPH, as `reachableToolNames` would answer
+ * if it could see the child.
+ *
+ * WHY IT EXISTS. `reachableToolNames` reads one `NodeSpec`, so a `subgraph` node is classified by
+ * the tools it names directly — none — however irreversible its child graph is. Measured on a
+ * parent whose only node delegates to a child that calls an `irreversible` `pay.charge`:
+ * `plans.s.posture` was `out`, and a parent declaring `policy.capabilities: []` compiled clean.
+ *
+ * WHAT IT IS AND IS NOT. It is NOT an oversight hole — every irreversible call inside the child
+ * still gates at `in` on the CHILD's own compile floor, and under a human de-escalation the
+ * subgraph route is strictly STRICTER than the direct one. Three things it does buy, each
+ * measured:
+ *   1. the `policy.escalated{rule: mutation_introduced_irreversible}` record that was missing
+ *      from the PARENT journal, so a trajectory consumer counting that rule saw nothing;
+ *   2. the human is asked BEFORE the child does reversible work — the direct route asks first,
+ *      the subgraph route let a `note.append` land first;
+ *   3. an `E_CAP_DENIED` that killed the run at RUN time becomes a COMPILE diagnostic, which is
+ *      the failure the compile stage exists to prevent.
+ *
+ * NOT A CHANGE TO `reachableToolNames`, deliberately. That is a kernel export over a single node,
+ * and giving it a resolver argument would buy nothing: `RunGraph.subgraphs` is frozen at compile
+ * and carries the whole tree, so every caller already has the child specs in hand. The three
+ * callers that need the deep answer — `compile.ts`'s class floor, this file's GRAPH014 floor and
+ * GRAPH017 ceiling, and `mutate.ts`'s gated-node set — pass their own lookup.
+ *
+ * AN UNRESOLVABLE REF CONTRIBUTES NOTHING, and that does not loosen anything: GRAPH015 already
+ * REFUSES a `subgraph` ref that does not resolve, so a graph this function could not descend
+ * into is a graph that never compiles. The same is not true of an unknown TOOL name, which is
+ * why that one is a warning and is handled by the callers exactly as before.
+ *
+ * DEPTH-BOUNDED AND CYCLE-GUARDED like `rule016Subgraphs`, whose two refusals this mirrors: a
+ * ref already on the path is not re-entered, and the walk stops at `expansion.maxDepth`. Stopping
+ * short can only UNDER-report, and under-reporting is the state this function was written to
+ * improve on rather than a regression it introduces.
+ */
+export function reachableToolNamesThrough(
+  node: NodeSpec,
+  childSpec: (ref: ResourceRef) => GraphSpec | undefined,
+  maxDepth: number,
+): readonly string[] {
+  const out = [...reachableToolNames(node)];
+  const root = node.subgraph?.ref;
+  if (root === undefined) return out;
+
+  const seen = new Set<ResourceRef>();
+  const walk = (spec: GraphSpec, depth: number): void => {
+    for (const n of spec.nodes) {
+      for (const name of reachableToolNames(n)) if (!out.includes(name)) out.push(name);
+      const ref = n.subgraph?.ref;
+      if (ref === undefined || seen.has(ref) || depth + 1 > maxDepth) continue;
+      const child = childSpec(ref);
+      if (child === undefined) continue;
+      seen.add(ref);
+      walk(child, depth + 1);
+    }
+  };
+
+  const first = childSpec(root);
+  if (first !== undefined) {
+    seen.add(root);
+    walk(first, 1);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Graph index — computed once, reused by every rule
 // ---------------------------------------------------------------------------
@@ -436,10 +502,10 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   checkToolNames(spec, ctx.tools, d);
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
   rule013Reducers(spec, d);
-  rule014And019Oversight(spec, idx, ctx, d);
+  rule014And019Oversight(spec, idx, ctx, expansion, d);
   rule015Resources(spec, ctx.resolver, d);
   rule016Subgraphs(spec, ctx, expansion, d);
-  rule017Capabilities(spec, ctx, d);
+  rule017Capabilities(spec, ctx, expansion, d);
 
   return d;
 }
@@ -2179,6 +2245,7 @@ function rule014And019Oversight(
   spec: GraphSpec,
   idx: GraphIndex,
   ctx: ValidationContext,
+  expansion: ExpansionBudget,
   d: Diagnostic[],
 ): void {
   const systemFloor = ctx.systemPostureFloor ?? "out";
@@ -2190,6 +2257,10 @@ function rule014And019Oversight(
     // The floor a node's own nature asserts, before any declaration. `max` over every
     // tool the node can REACH: an agent node names none, so keying on `n.tool` floored
     // every agent at `out` regardless of what its model could call.
+    //
+    // THROUGH A SUBGRAPH TOO — see `reachableToolNamesThrough`. A `subgraph` node names no tool
+    // either, so it was floored at `out` however irreversible its child was, and the human was
+    // asked at the innermost call inside the child rather than before the child started.
     const classFloor: Posture =
       n.type === "human_gate"
         ? "in"
@@ -2197,7 +2268,7 @@ function rule014And019Oversight(
             "out",
             // An unknown name contributes nothing, exactly as before — see the matching
             // comment in `compile.ts`.
-            ...reachableToolNames(n).flatMap((name) => {
+            ...reachableToolNamesThrough(n, (ref) => ctx.resolver.subgraph?.(ref), expansion.maxDepth).flatMap((name) => {
               const m = ctx.tools[name];
               return m === undefined ? [] : [CLASS_DEFAULT_POSTURE[m.irreversibility]];
             }),
@@ -3042,7 +3113,7 @@ function rule016Subgraphs(
 
 // ── GRAPH017 ─────────────────────────────────────────────────────────────────
 
-function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, d: Diagnostic[]): void {
+function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, expansion: ExpansionBudget, d: Diagnostic[]): void {
   const tenant = ctx.tenantCapabilities;
   if (tenant === undefined) return;
 
@@ -3087,14 +3158,25 @@ function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, d: Diagnos
 
   for (const n of spec.nodes) {
     check(n.policy?.capabilities, { nodeId: n.id }, `node "${n.id}"`);
-    for (const name of reachableToolNames(n)) {
+    // THE CEILING DESCENDS, and only the ceiling. `withinGraph` is THIS graph's own allowlist,
+    // and a `subgraph` node named no tool, so a parent declaring `capabilities: []` compiled
+    // clean over a child that calls `pay.charge` and the refusal arrived at RUN time as
+    // `E_CAP_DENIED`. The TENANT half below is deliberately NOT descended: `rule016Subgraphs`
+    // recurses `validateGraph` into the child with the same `ctx`, so the child runs the
+    // identical tenant check on its own nodes and a second copy here would only duplicate the
+    // diagnostic. The graph ceiling is the half that is genuinely per-level.
+    const direct = reachableToolNames(n);
+    for (const name of reachableToolNamesThrough(n, (ref) => ctx.resolver.subgraph?.(ref), expansion.maxDepth)) {
+      // SAY WHICH ONE, because the two have different fixes: a name this node writes down can be
+      // dropped from the node, a name that arrived through the child cannot.
+      const where = direct.includes(name) ? `node "${n.id}"` : `subgraph "${n.subgraph?.ref}" under node "${n.id}"`;
       for (const cap of ctx.tools[name]?.capabilities ?? []) {
         if (withinGraph(cap)) continue;
         d.push({
           severity: "error",
           code: "GRAPH017_CAPABILITY_NOT_DECLARED",
           message:
-            `tool "${name}" used by node "${n.id}" needs capability "${cap}", which is outside ` +
+            `tool "${name}" used by ${where} needs capability "${cap}", which is outside ` +
             `this graph's declared \`policy.capabilities\``,
           at: { nodeId: n.id },
           fix: `add "${cap}" to the graph's policy.capabilities, or stop using "${name}" here`,
