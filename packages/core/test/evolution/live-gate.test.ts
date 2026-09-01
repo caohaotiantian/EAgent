@@ -25,6 +25,12 @@
  *    cannot express. Two fixtures show the two are genuinely different rules — one where the
  *    totals pass and the median refuses, one the other way round — and the $0 baseline that
  *    once made this "reported, not gated" is now a stated rule rather than a hole.
+ * 6. THE IMPROVEMENT BOUND DOES NOT REST ON THE SHAPE OF SIX NUMBERS. `L1` requires the t bound
+ *    AND a Wilcoxon signed-rank bound, whose critical value is derived here rather than
+ *    tabulated — so the derivation is checked against the published table at seventeen sample
+ *    sizes, and the eighteenth disagreement is shown to be the table being loose. Two fixtures
+ *    show each bound binding where the other does not, which is what makes the conjunction a
+ *    rule rather than a decoration.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -33,6 +39,7 @@ import {
   MIN_PAIRED_RUNS,
   gateCandidateLive,
   pairedCostRatio,
+  wilcoxonLowerBound,
   pairedDifference,
   type LivePair,
   type LivePromotionInput,
@@ -285,4 +292,90 @@ test("THE MEDIAN PAIR GATES COST, AND A $0 BASELINE IS UNBOUNDED RATHER THAN UND
   // CONTROL — an ordinary priced cohort still promotes.
   const priced = Array.from({ length: 6 }, (_, i) => pair(i, 0.4, 0.5, 0.01, 0.01));
   assert.equal(gateCandidateLive(input(priced)).promote, true, "control: a decidable ratio still promotes");
+});
+
+// ── 6 · the bound does not rest on the shape of six numbers ──────────────────
+
+test("THE SIGNED-RANK CRITICAL VALUE IS DERIVED, AND IT AGREES WITH THE PUBLISHED TABLE", () => {
+  // `wilcoxonLowerBound` computes its own null distribution — a subset-sum count over the ranks
+  // 1…n — rather than carrying a table, because a table is a page of numbers nobody can check
+  // and this is a convolution anybody can. So the check is that the derivation reproduces the
+  // published one.
+  //
+  // A signed-rank table is printed as "reject when T ≤ t"; the same region is `W⁺ ≥ M − t` with
+  // `M = n(n+1)/2`. The bound is the `(M − c + 1)`-th smallest Walsh average, so recovering `c`
+  // from the bound is a matter of finding which order statistic came back — which needs the
+  // Walsh averages to be DISTINCT, or the index is ambiguous. Differences 1…n are not enough:
+  // `(1+4)/2` and `(2+3)/2` are both 2.5, and reading the first index back gives the wrong `c`.
+  // Powers of two are, because `2ⁱ + 2ʲ` for `i ≤ j` is distinct by its binary representation.
+  const criticalOf = (n: number): number => {
+    const diffs = Array.from({ length: n }, (_, i) => 2 ** i);
+    const walsh: number[] = [];
+    for (let i = 0; i < n; i++) for (let j = i; j < n; j++) walsh.push((diffs[i]! + diffs[j]!) / 2);
+    walsh.sort((a, b) => a - b);
+    const bound = wilcoxonLowerBound(diffs);
+    const M = (n * (n + 1)) / 2;
+    return M - walsh.indexOf(bound);
+  };
+
+  // One-sided α = 0.05, as "reject when T ≤ t".
+  const published: Readonly<Record<number, number>> = {
+    5: 0, 6: 2, 7: 3, 8: 5, 9: 8, 10: 10, 11: 13, 12: 17, 13: 21,
+    14: 25, 15: 30, 16: 35, 17: 41, 18: 47, 19: 53, 20: 60, 25: 100,
+  };
+  for (const [key, t] of Object.entries(published)) {
+    const n = Number(key);
+    const M = (n * (n + 1)) / 2;
+    assert.equal(criticalOf(n), M - t, `n = ${key}: derived critical W⁺ disagrees with the table`);
+  }
+
+  // THE ONE ROW LEFT OUT, and it is left out because the DERIVATION is right and the table is
+  // loose. Tables commonly print t = 152 at n = 30; the exact tail is P(T ≤ 152) = 0.050199,
+  // which is over α, while P(T ≤ 151) = 0.048051 is under it. The derivation returns the strict
+  // value, and strictness is the only direction a promotion gate may round.
+  assert.equal(criticalOf(30), 465 - 151);
+
+  // AT n = 4 NO BOUND EXISTS AT ALL — the exact null tops out at 1/16 = 0.0625, the same wall
+  // `MIN_PAIRED_RUNS` is argued from — and 0 is returned, which cannot pass `> 0`.
+  assert.equal(wilcoxonLowerBound([0.1, 0.2, 0.3, 0.4]), 0, "four pairs cannot reach α");
+  assert.ok(wilcoxonLowerBound([0.1, 0.2, 0.3, 0.4, 0.5]) > 0, "five can, on a clean sweep");
+});
+
+test("BOTH BOUNDS HAVE TO CLEAR 0, AND EACH BINDS WHERE THE OTHER DOES NOT", () => {
+  // A.26's complaint: at n = 6 the t bound assumes roughly normal differences and six
+  // observations cannot check that. The answer is to require the evidence to survive without the
+  // assumption, not to argue the assumption is harmless — so these two fixtures are the point.
+  // If either bound were dropped, one of them would promote.
+
+  // ONE INPUT CARRIED IT. Six wins, but five of them by 0.01 and one by 0.9. The t bound is
+  // wrecked by the variance and refuses; the distribution-free bound, which uses order rather
+  // than magnitude of the deviation, says the pseudomedian is above 0.01.
+  const carried = pairedDifference([0.01, 0.01, 0.01, 0.01, 0.01, 0.9]);
+  assert.ok(carried.lower95 < 0, `t bound refuses: ${carried.lower95}`);
+  assert.ok(carried.wilcoxonLower95 > 0, `Wilcoxon passes: ${carried.wilcoxonLower95}`);
+  assert.equal(
+    gateCandidateLive(input([0.01, 0.01, 0.01, 0.01, 0.01, 0.9].map((d, i) => pair(i, 0.4, 0.4 + d)))).promote,
+    false,
+    "the conjunction refuses it",
+  );
+
+  // AND THE MIRROR, which is the one that makes the Wilcoxon conjunct load-bearing rather than
+  // decorative: two inputs barely improved, one got WORSE by more than either gained, three
+  // improved a lot. The mean says yes and its bound clears 0 by 0.0016; the distribution-free
+  // bound says the typical input's evidence is not there.
+  const thin = pairedDifference([0.01, 0.02, 0.2, 0.2, 0.2, -0.05]);
+  assert.ok(thin.lower95 > 0, `t bound passes: ${thin.lower95}`);
+  assert.ok(thin.wilcoxonLower95 < 0, `Wilcoxon refuses: ${thin.wilcoxonLower95}`);
+  assert.equal(
+    gateCandidateLive(input([0.01, 0.02, 0.2, 0.2, 0.2, -0.05].map((d, i) => pair(i, 0.4, 0.4 + d)))).promote,
+    false,
+    "…and the conjunction refuses this one too, which the t bound alone would have promoted",
+  );
+
+  // CONTROL — a candidate that wins tightly on every input clears both, so the conjunction is a
+  // bar and not a wall.
+  const tight = [0.05, 0.06, 0.05, 0.07, 0.05, 0.06];
+  const t = pairedDifference(tight);
+  assert.ok(t.lower95 > 0 && t.wilcoxonLower95 > 0, JSON.stringify(t));
+  assert.equal(gateCandidateLive(input(tight.map((d, i) => pair(i, 0.4, 0.4 + d)))).promote, true);
 });

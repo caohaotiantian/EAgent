@@ -100,11 +100,25 @@ export interface Unmeasured {
  * positive mean was carried by one outlier.
  *
  * WHAT THE t BOUND ASSUMES, said out loud because it is the weakest link at this sample size:
- * that the differences are roughly symmetric. Scores are bounded on [0, 1] so differences are
+ * that the differences are roughly normal. Scores are bounded on [0, 1] so differences are
  * bounded on [-1, 1], and a candidate that is much better on hard inputs and level on easy ones
- * produces a skewed set. At n = 6 there is no way to check that from the data. The honest
- * summary is that this rule is a real bar — far stronger than a point estimate — and not a
- * substitute for a corpus large enough to run McNemar's.
+ * produces a skewed set. At n = 6 there is no central limit theorem to lean on and no way to
+ * check the shape from the data.
+ *
+ * SO THE RULE DOES NOT REST ON IT. `wilcoxonLower95` is the same one-sided 95 % bound with the
+ * shape assumption removed — its null distribution is a subset-sum count over the ranks, exact
+ * for any sign-symmetric differences — and `L1-paired-improvement` requires BOTH bounds to clear
+ * zero. The two really are different rules and each binds where the other does not: on
+ * `[0.01, 0.01, 0.01, 0.01, 0.01, 0.9]` the t bound reads −0.1406 and refuses while the Wilcoxon
+ * reads 0.0100, and on `[0.01, 0.02, 0.2, 0.2, 0.2, −0.05]` the t bound reads 0.0016 and passes
+ * while the Wilcoxon reads −0.0150 and refuses. Requiring both only ever refuses more, which is
+ * the direction a promotion gate may move on its own.
+ *
+ * WHAT IS STILL NOT REMOVED, because the tempting overclaim sits right here: the signed-rank
+ * null IS sign symmetry, so this buys freedom from NORMALITY and not from symmetry. What A.26
+ * asked for and this does not have is the second strengthening — repeated runs per input, so
+ * within-input model variance separates from between-graph difference. Neither bound can see
+ * that, and no statistic computed from one run per input can.
  */
 export interface PairedDifference {
   readonly n: number;
@@ -118,6 +132,20 @@ export interface PairedDifference {
    * cannot pass `> 0`, so the undecidable case fails closed rather than promoting on one run.
    */
   readonly lower95: number;
+  /**
+   * THE SAME BOUND WITHOUT THE NORMALITY ASSUMPTION — Hodges–Lehmann, by inverting the Wilcoxon
+   * signed-rank test. See `wilcoxonLowerBound` for the derivation; it is derived here rather
+   * than tabulated, so a reader can check it.
+   *
+   * It is a bound on the PSEUDOMEDIAN rather than on the mean, which is a different parameter
+   * and is why this is reported beside `lower95` and not instead of it. `L1-paired-improvement`
+   * requires BOTH to clear 0: a candidate whose evidence survives only under an assumption
+   * about the shape of six numbers is a candidate whose evidence is that assumption.
+   *
+   * 0 when no bound exists — n < 2, or n ≤ 4 where the exact null cannot reach α at all. Same
+   * fail-closed convention as `lower95`: 0 cannot pass `> 0`.
+   */
+  readonly wilcoxonLower95: number;
   readonly wins: number;
   readonly losses: number;
   readonly ties: number;
@@ -180,15 +208,127 @@ function signTestP(wins: number, losses: number): number {
   return round6(Math.min(1, sum));
 }
 
+/**
+ * The one-sided level this file decides at, in one place. `T95` is tabulated at it too.
+ */
+const ALPHA = 0.05;
+
+/**
+ * Above this many pairs the signed-rank critical value is approximated rather than enumerated.
+ *
+ * The exact computation is `O(n · n(n+1)/2)`, so it is 4M steps at 200 and 500M at 1000 — a gate
+ * that takes a minute to decide is a gate nobody runs. 250 costs about 8M steps. Every live pair
+ * is a real model run against a real provider, so a cohort of 250 is already far past anything
+ * this mode has met; the approximation exists so the number is defined rather than because it is
+ * expected to be reached.
+ */
+const EXACT_SIGNED_RANK_MAX = 250;
+
+/**
+ * The smallest `c` with `P(W⁺ ≥ c) ≤ 0.05` under the signed-rank null, or `undefined` when no
+ * such `c` is attainable.
+ *
+ * DERIVED RATHER THAN TABULATED, which is the whole reason this function exists and the reason
+ * it can be checked. Under the null the differences are symmetric about 0, so each one's SIGN is
+ * ±1 with probability ½ independently of its magnitude. `W⁺ = Σᵢ Zᵢ·i` with `Zᵢ` iid Bernoulli(½)
+ * over the ranks `1…n` — a sum of independent terms whose distribution is therefore the
+ * convolution of `n` two-point distributions, and `counts[s]` below is exactly that convolution,
+ * computed as the subset-sum count over `{1…n}`. There is no incomplete beta and no table.
+ *
+ * `counts[s]` is the NUMBER OF SIGN ASSIGNMENTS giving `W⁺ = s`, out of `2ⁿ`. Float64 holds `2ⁿ`
+ * exactly up to n = 1024 and holds each count well inside that, since every count is at most the
+ * total.
+ *
+ * Worked at n = 6, which is `MIN_PAIRED_RUNS` and the size this mode was built for: the ranks are
+ * 1…6, `M = 21`, and `2⁶ = 64` assignments. `P(W⁺ ≥ 21) = 1/64 = 0.0156`, `≥ 20` adds the one
+ * assignment summing to 20 for `2/64 = 0.031`, `≥ 19` adds one more for `3/64 = 0.047`, and
+ * `≥ 18` adds the two summing to 18 for `5/64 = 0.078`, which is over. So `c = 19`.
+ *
+ * ABOVE `EXACT_SIGNED_RANK_MAX` the normal approximation, whose two moments are derivable from
+ * the same statement: `E[W⁺] = ½Σi = n(n+1)/4` and `Var[W⁺] = ¼Σi² = n(n+1)(2n+1)/24`. The
+ * `+ 0.5` is the continuity correction and the CEILING is the strict direction — a larger `c`
+ * takes a lower Walsh average as the bound, which narrows the interval and can only refuse more.
+ */
+function signedRankCritical(n: number): number | undefined {
+  const M = (n * (n + 1)) / 2;
+  if (n < 1) return undefined;
+  if (n > EXACT_SIGNED_RANK_MAX) {
+    const mu = (n * (n + 1)) / 4;
+    const sigma = Math.sqrt((n * (n + 1) * (2 * n + 1)) / 24);
+    const c = Math.ceil(mu + 1.6449 * sigma + 0.5);
+    return c > M ? undefined : c;
+  }
+  const counts = new Float64Array(M + 1);
+  counts[0] = 1;
+  for (let r = 1; r <= n; r++) {
+    for (let s = M; s >= r; s--) counts[s] = counts[s]! + counts[s - r]!;
+  }
+  const total = Math.pow(2, n);
+  let tail = 0;
+  for (let c = M; c >= 0; c--) {
+    tail += counts[c]!;
+    // The first c whose tail spills over α is one too small, so the answer is the one above it.
+    if (tail / total > ALPHA) return c + 1 > M ? undefined : c + 1;
+  }
+  return 0;
+}
+
+/**
+ * A ONE-SIDED 95 % DISTRIBUTION-FREE LOWER BOUND on the pseudomedian of the differences —
+ * the Hodges–Lehmann bound obtained by inverting the Wilcoxon signed-rank test.
+ *
+ * WHAT IT BUYS OVER `lower95`, stated narrowly because the tempting overclaim is right next to
+ * it. The t bound needs the differences to be roughly NORMAL — at n = 6 there is no central
+ * limit theorem to lean on, so that is an assumption about shape and nothing more. This bound
+ * needs no shape at all: its null distribution is a subset-sum count over the ranks, valid for
+ * any symmetric distribution, discrete or continuous. **It does NOT remove the symmetry
+ * assumption** — the signed-rank null IS sign symmetry — which is the honest reading and is why
+ * the docstring on `PairedDifference` keeps saying so. What it removes is normality, and it uses
+ * the MAGNITUDES, which is what separates it from the sign test.
+ *
+ * THE INVERSION, derived. For any candidate centre θ, `W⁺` computed on `dᵢ − θ` equals the number
+ * of Walsh averages `(dᵢ + dⱼ)/2, i ≤ j` that exceed θ — the standard identity, and it holds
+ * because `(dᵢ + dⱼ)/2 > θ` iff `(dᵢ − θ) + (dⱼ − θ) > 0`, which is exactly the pairwise
+ * comparison the rank sum accumulates. The test rejects `θ` from below when that count reaches
+ * `c`, so the θ it does NOT reject are those with fewer than `c` Walsh averages above them, and
+ * the smallest such θ is the `(M − c + 1)`-th smallest Walsh average. That is the bound.
+ *
+ * At n = 6: `M = 21`, `c = 19`, so the bound is the 3rd smallest of the 21 Walsh averages — it
+ * is positive exactly when at most two of them are ≤ 0. At n = 4 no `c ≤ M` reaches α at all
+ * (`1/16 = 0.0625`), so no bound exists, which is the same wall `MIN_PAIRED_RUNS` was argued
+ * from — and 0 is returned, which cannot pass `> 0`, so the undecidable case fails closed
+ * exactly as `lower95` does at n < 2.
+ *
+ * ZEROS ARE KEPT HERE, unlike in the sign test. A zero difference is only a zero relative to
+ * θ = 0; for any other candidate centre it is an observation like the others, and the inversion
+ * ranges over all centres. Dropping them would be answering a different question at every θ.
+ */
+export function wilcoxonLowerBound(diffs: readonly number[]): number {
+  const n = diffs.length;
+  if (n < 2) return 0;
+  const c = signedRankCritical(n);
+  const M = (n * (n + 1)) / 2;
+  if (c === undefined || c > M || c < 1) return 0;
+  const walsh: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i; j < n; j++) walsh.push((diffs[i]! + diffs[j]!) / 2);
+  }
+  walsh.sort((a, b) => a - b);
+  // `W_(M − c + 1)`, one-indexed, which is index `M − c` zero-indexed.
+  return round6(walsh[M - c]!);
+}
+
 export function pairedDifference(diffs: readonly number[]): PairedDifference {
   const n = diffs.length;
   const wins = diffs.filter((d) => d > 0).length;
   const losses = diffs.filter((d) => d < 0).length;
   const ties = n - wins - losses;
-  if (n === 0) return { n: 0, mean: 0, sd: 0, lower95: 0, wins: 0, losses: 0, ties: 0, signTestP: 1 };
+  if (n === 0) {
+    return { n: 0, mean: 0, sd: 0, lower95: 0, wilcoxonLower95: 0, wins: 0, losses: 0, ties: 0, signTestP: 1 };
+  }
   const mean = diffs.reduce((a, b) => a + b, 0) / n;
   if (n < 2) {
-    return { n, mean: round6(mean), sd: 0, lower95: 0, wins, losses, ties, signTestP: signTestP(wins, losses) };
+    return { n, mean: round6(mean), sd: 0, lower95: 0, wilcoxonLower95: 0, wins, losses, ties, signTestP: signTestP(wins, losses) };
   }
   const sd = Math.sqrt(diffs.reduce((a, d) => a + (d - mean) ** 2, 0) / (n - 1));
   // sd === 0 is not a hole: it means every paired difference was identical, and with n ≥ 2 the
@@ -200,6 +340,7 @@ export function pairedDifference(diffs: readonly number[]): PairedDifference {
     mean: round6(mean),
     sd: round6(sd),
     lower95: round6(lower95),
+    wilcoxonLower95: wilcoxonLowerBound(diffs),
     wins,
     losses,
     ties,
@@ -383,15 +524,30 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
   // promoted over them because it MEASURABLY BEAT the baseline", and a bound that merely clears
   // −margin certifies that nothing got worse. A strictly positive lower bound is the difference
   // between "we could not detect harm" and "we detected an improvement".
+  //
+  // TWO BOUNDS, AND BOTH HAVE TO CLEAR 0. A.26's complaint about this rule was that at n = 6 the
+  // t bound assumes roughly symmetric — really, roughly normal — differences, and six
+  // observations cannot check that. The answer is not to argue the assumption is harmless; it is
+  // to require the evidence to survive without it. `wilcoxonLower95` is the same 95 % one-sided
+  // bound with the shape assumption removed, derived from a subset-sum count over the ranks
+  // rather than a t table (see `wilcoxonLowerBound`), and a candidate that clears one bound and
+  // not the other is a candidate whose evidence IS the assumption. Requiring both only ever
+  // refuses more, which is the direction a promotion gate may move on its own.
+  //
+  // It is not a substitute for the t bound and does not replace it: the two bound different
+  // parameters — the mean and the pseudomedian — and both are journaled so a reader can see
+  // which one was tight.
   checks.push({
     id: "L1-paired-improvement",
     ran: paired.n >= 2,
-    pass: paired.n >= 2 && paired.lower95 > 0,
+    pass: paired.n >= 2 && paired.lower95 > 0 && paired.wilcoxonLower95 > 0,
     detail:
       paired.n < 2
         ? `only ${String(paired.n)} pair(s) — no dispersion is estimable, so no bound exists to clear`
         : `paired mean Δscore ${paired.mean.toFixed(4)} (sd ${paired.sd.toFixed(4)}, n ${String(paired.n)}), ` +
-          `one-sided 95% lower bound ${paired.lower95.toFixed(4)} — needs > 0. ` +
+          `one-sided 95% lower bound ${paired.lower95.toFixed(4)} on the mean (Student's t) and ` +
+          `${paired.wilcoxonLower95.toFixed(4)} on the pseudomedian (Wilcoxon signed-rank, no shape assumption) ` +
+          `— both need > 0. ` +
           `Sign test ${String(paired.wins)}W/${String(paired.losses)}L/${String(paired.ties)}T, p ${paired.signTestP.toFixed(4)}`,
   });
 
