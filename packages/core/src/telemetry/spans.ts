@@ -808,21 +808,57 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // Hoisted out of the `name:` ternary because the ATTRIBUTES need the same answer: a
       // `tool.*` key belongs on a `loom.tool` span and nowhere else, which is the rule
       // `tool.name` / `tool.version` / `tool.irreversibility` / `tool.idempotent` already
-      // follow. The two NAME literals stay inline on `name:` for the reason below.
+      // follow. The three NAME literals stay inline on `name:` for the reason below.
+      //
+      // THREE ARMS OVER SIX KINDS, AND THE SIX ARE A CLOSED LIST — `effect.started.kind` in
+      // `journal/events.ts` is `model | tool | subgraph | summarize | random | compensate`,
+      // so this partition is total by construction rather than by hope, and a seventh kind
+      // would not typecheck against it without being placed.
+      //
+      // The partition was TWO arms and it put three kinds in the wrong one. `modelish` was
+      // right; its negation was not, because `!modelish` is not `tool`. Measured by driving a
+      // `function` body containing `Math.random()` through `Engine` — the engine journals the
+      // PRNG seed as `effect.started {kind: "random"}` under `effectKey(task, "random", 0)`,
+      // and this fold turned it into:
+      //
+      //     loom.tool  effect.kind=random  tool.name=undefined
+      //
+      // A seed draw, in a trace, named a tool call. The same negation sent `subgraph` to
+      // `loom.tool`, which `cli.ts`'s trace renderer already had to paper over by printing
+      // the kind in parentheses — its comment says adding a name "would be a taxonomy change,
+      // which is a design decision and is recorded as one rather than taken here". This is
+      // that decision, taken: TODO C.1 registers `loom.effect` as designed-and-unbuilt, and
+      // it is exactly the name for an effect that is neither a model call nor a tool call.
+      //
+      // WHY NOT A GENERIC PARENT OVER ALL FOUR, which is the other reading of `loom.effect`:
+      // it would either mint a second span per effect (doubling the row count this file's
+      // header explicitly budgets — "~500 task spans, not 2,500") or rename `loom.model` and
+      // `loom.tool` out of existence, losing the `gen_ai.*` and `tool.*` groupings that are
+      // the reason those two names are worth having. A parent whose only content is the union
+      // of its children is not a taxonomy, it is an indirection. So `loom.effect` is the
+      // REMAINDER arm — the kinds with no more specific span — and the specific names keep
+      // meaning exactly what they say.
+      //
+      // `compensate` is a tool call and stays one: `#callTool` takes `effectKind: "tool" |
+      // "compensate"` and journals `tool.called` on both paths, so a compensation span
+      // carries `tool.name` and `tool.version` like any other.
       const modelish = e.payload.kind === "model" || e.payload.kind === "summarize";
+      const toolish = e.payload.kind === "tool" || e.payload.kind === "compensate";
       start(id, {
         // `summarize` rides with `model` because it IS a model call — the journal now says
-        // so honestly, and this keeps the span taxonomy at the eight D9.1 documents rather
-        // than growing it as a side effect of correcting a durable field. The literals stay
-        // on this line on purpose, and the reason has OUTLIVED the guard that used to be
-        // named here: `docs-drift.test.ts` went with the design corpus at `f975f9f` and
-        // `git ls-files | grep -a docs-drift` returns nothing at HEAD, so citing it was
-        // pointing at a check that cannot run. What survives is the READING —
-        // `/usr/bin/grep -an 'name: "loom\.' packages/core/src/telemetry/spans.ts` is how
-        // the built span-name set is counted (TODO C.1 does exactly that), it returns seven,
-        // and `loom.model` is the eighth precisely because this ternary hides it. A lookup
-        // table would hide all eight. So: the literal, on the `name:` line, still.
-        name: modelish ? "loom.model" : "loom.tool",
+        // so honestly. The literals stay on this line on purpose, and the reason has OUTLIVED
+        // the guard that used to be named here: `docs-drift.test.ts` went with the design
+        // corpus at `f975f9f` and `git ls-files | grep -a docs-drift` returns nothing at HEAD,
+        // so citing it was pointing at a check that cannot run. What survives is the READING —
+        // `/usr/bin/grep -an 'name: "loom\.' packages/core/src/telemetry/spans.ts` is how the
+        // built span-name set is counted (TODO C.1 does exactly that). It returns seven, and
+        // this ternary hides TWO of the nine rather than one: `loom.model` and `loom.tool`.
+        // The count is still right by accident and for a different reason than it was, because
+        // the seventh literal it does see used to be the `subgraph.started` arm saying
+        // `loom.tool` — the mis-classification itself — and now says `loom.effect`, which is
+        // the name that arm should always have had. A lookup table would hide all nine. So:
+        // the literal, on the `name:` line, still.
+        name: modelish ? "loom.model" : toolish ? "loom.tool" : "loom.effect",
         kind: "client",
         start: ts,
         parent: taskSpan,
@@ -839,11 +875,18 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
           // model turn's attempt is therefore still dropped; that is a naming gap in C.2's
           // table, not a claim that the value is unavailable.
           //
+          // `toolish`, NOT `!modelish` — and this was the same defect as the name above,
+          // wearing the same disguise. The negation put `tool.attempt` on the `random` and
+          // `compensate` spans too, so the very rule this comment states was broken by the
+          // line enforcing it: a `tool.*` key sat on a PRNG seed draw. `compensate` keeps it
+          // because a compensation IS a tool call; `random` and `subgraph` lose it because
+          // they are not, which is the same partition the name uses and deliberately so.
+          //
           // EVERY WRITER IN `run/engine.ts` PASSES THE LITERAL `1` — all five sites, measured
           // — so this reads a constant against today's engine. It is a faithful read of a
           // journaled field rather than a derivation, so a journal that ever carries a second
           // attempt renders it without this file changing again.
-          ...(modelish ? {} : { "tool.attempt": e.payload.attempt }),
+          ...(toolish ? { "tool.attempt": e.payload.attempt } : {}),
         },
         links: [],
         events: [],
@@ -918,7 +961,14 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       subgraphSpanOf.set(child, id);
       subgraphSpanIds.add(id);
       start(id, {
-        name: "loom.tool",
+        // THE SAME NAME THE `effect.started` ARM WOULD GIVE IT, and it has to be: `start` is a
+        // no-op on an open id, so whichever of the two arms fires first names the span for
+        // good. This one normally wins (`subgraph.started` is journaled at submit, the effect
+        // pair only after the child finished), and the other one covers a journal that lost
+        // the start — so if these two literals ever disagree, the span's name would depend on
+        // which events a read happened to contain. They agree: `subgraph` is in this file's
+        // `loom.effect` arm above, for the reason stated there.
+        name: "loom.effect",
         kind: "client",
         start: ts,
         parent: taskSpan,

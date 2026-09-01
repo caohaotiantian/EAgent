@@ -1732,3 +1732,47 @@ test("THREE JOURNALED FIELDS THE FOLD READ AND THREW AWAY — capability, gate.b
   // `tool.*` on a `loom.tool` span and nowhere else — the rule `tool.name` already follows.
   assert.ok(!("tool.attempt" in named("loom.model")[0]!.attributes), "a tool.* key on a model span is a spelling this file invented");
 });
+
+test("EVERY EFFECT KIND LANDS ON THE SPAN THAT NAMES IT, and `!modelish` was not `tool`", () => {
+  // The partition was two arms over six kinds, so `!modelish` swept up three things that are
+  // not tool calls. The one that shows it worst is `random`: the engine journals a PRNG seed
+  // as `effect.started {kind: "random"}` so a body's `Math.random()` can be replayed, and this
+  // fold named that span `loom.tool` with no `tool.name` on it — a seed draw sitting in a trace
+  // beside real tool calls, and in the `undefined` bucket of any collector grouping `loom.tool`
+  // by `tool.name`. Reproduced by DRIVING one — a `function` body of
+  // `() => ({ writes: { out: [Math.random(), Math.random()].join(",") } })` through `Engine`
+  // journals exactly `effect.started {key: "draw@root#0:random:0", kind: "random", attempt: 1}`
+  // and folded to `loom.tool  effect.kind=random  tool.name=undefined`. That measurement is
+  // what licenses the hand-written rows below to stand in for the engine's own; the fixture is
+  // hand-written because no single run produces all six kinds, and the partition is only
+  // checkable with all six side by side.
+  //
+  // ALL SIX KINDS IN ONE JOURNAL, which is what makes this a claim rather than a sample:
+  // `effect.started.kind` in `journal/events.ts` is a closed union of exactly these six, so the
+  // case list here IS the vocabulary and a seventh kind cannot be added without landing on one
+  // of these three names or failing to typecheck.
+  const kinds = ["model", "summarize", "tool", "compensate", "subgraph", "random"] as const;
+  const journal: JournalEvent[] = [
+    submitted,
+    ready,
+    ...kinds.map((k, i) => ev(3 + i, "effect.started", { key: `approve@#0:${k}:0`, kind: k, attempt: 3 })),
+    ev(3 + kinds.length, "run.completed", { usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }, { taskId: null }),
+  ];
+
+  const effects = spansFrom(journal).filter((s) => typeof s.attributes["effect.kind"] === "string");
+  const byKind = new Map(effects.map((s) => [s.attributes["effect.kind"] as string, s] as const));
+  assert.equal(byKind.size, kinds.length, "six effects are six spans, one per kind");
+
+  const nameOf = (k: string): unknown => byKind.get(k)?.name;
+  assert.equal(nameOf("model"), "loom.model");
+  assert.equal(nameOf("summarize"), "loom.model", "a summarize IS a model call");
+  assert.equal(nameOf("tool"), "loom.tool");
+  assert.equal(nameOf("compensate"), "loom.tool", "a compensation is a tool call — #callTool journals tool.called for it");
+  assert.equal(nameOf("subgraph"), "loom.effect", "a child run is not a tool");
+  assert.equal(nameOf("random"), "loom.effect", "a PRNG seed draw is not a tool");
+
+  // The same partition decides the attribute, and the negation broke the very rule the comment
+  // above it states: a `tool.*` key sat on the seed draw.
+  const attempt = (k: string): boolean => "tool.attempt" in (byKind.get(k)?.attributes ?? {});
+  assert.deepEqual(kinds.filter(attempt), ["tool", "compensate"], "`tool.attempt` belongs on the spans that are tool calls and on no others");
+});
