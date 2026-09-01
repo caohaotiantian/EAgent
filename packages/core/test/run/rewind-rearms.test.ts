@@ -23,10 +23,10 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import type { RunId, Seq } from "../../src/ids.ts";
+import { OPERATOR } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const NOW = 1_700_000_000_000;
-const OPERATOR = { kind: "human", subject: "u:alice", via: "console" } as const;
 
 function spec(): GraphSpec {
   return {

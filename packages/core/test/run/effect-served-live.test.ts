@@ -25,9 +25,9 @@ import type { RunId, Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type MockScript, type ToolDefinition } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
+import { OPERATOR } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
-const OPERATOR = { kind: "human", subject: "u:alice", via: "console" } as const;
 
 const CHARGE_MANIFEST = {
   name: "pay.charge",
