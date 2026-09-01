@@ -111,8 +111,6 @@
  * length; what changed is only how far the BACKSTOP looks. The declared path —
  * `ATTRIBUTE_CLASSES`, and the deliberately narrow set of payload fields this fold reads at
  * all — is unaffected, which is where the real protection was already stated to live.
- *
- * is never redacted.
  */
 
 import { digestOf } from "../canonical.ts";
@@ -578,6 +576,26 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
           // The dispute itself is settled inside the boundary: `gate.id` is right here in
           // the clear, and the journal holds the real digest against it.
           "gate.content_digest": e.payload.contentDigest,
+          // WHICH BATCH ONE CLICK WOULD CLOSE — present iff this gate joined one, which is
+          // this file's usual "absent means absent" (see `subgraph.budget_usd` and
+          // `branch.item_channel`). A boolean would answer "was it batched?" and lose the
+          // question a reader of a saturated queue actually asks, which is WHICH gates merged;
+          // the value is the founder's gateId, so grouping on it is a filter rather than a
+          // scan and "was it batched?" is still `present`.
+          //
+          // THE ID AND NOTHING ELSE OFF THAT PAYLOAD, and the omission is the load-bearing
+          // half. `batch.deliveryDigest` is `digest(the founder's DeliverySpec)` — its
+          // recipients and its redact list — which is `gate.content_digest`'s confirmation
+          // oracle over a domain SMALLER than a gate payload: a handful of channels and a
+          // recipient list are guessable in the way this file's header says a company
+          // directory is. It stays in the journal, where `gate.id` reaches it. `windowMs` and
+          // `maxBatch` are the batch's governance and disclose nothing, but they are not in
+          // C.2's documented set and a span attribute nobody asked for is still a vocabulary
+          // this file has to keep.
+          //
+          // NO `ATTRIBUTE_CLASSES` ENTRY, deliberately: a gateId is not a digest and not a
+          // person, and `gate.id` two lines up is already in the clear on this very span.
+          ...(typeof e.payload.batch?.id === "string" ? { "gate.batched": e.payload.batch.id } : {}),
         },
         links: [],
         events: [],
@@ -765,6 +783,19 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
           "policy.posture": e.payload.posture,
           "policy.reasons": claimedList(e.payload.reasons),
           "irreversibility.class": e.payload.irreversibility,
+          // THE CAPABILITY THE DECISION WAS ABOUT — optional on the payload, so absent here
+          // when absent there rather than rendered as `undefined`, which is what
+          // `exactOptionalPropertyTypes` and an OTLP exporter both distinguish.
+          //
+          // AND IT IS ABSENT ON EVERY JOURNAL THIS BINARY WRITES, WHICH IS A FACT ABOUT
+          // `run/engine.ts` AND NOT ABOUT THIS FOLD. Both of its `policy.decided` appends
+          // build the payload literally and neither includes `capability`, although
+          // `PolicyEngine.decide` is handed `capabilities: this.#capabilitiesOf(node)` one
+          // statement earlier — measured on a driven `two-person-approval` run, three
+          // `policy.decided` rows, none carrying the key. So this reads a field the
+          // vocabulary declares and the writer forgot; it is the fold's half of C.2 and it
+          // does not close that row on its own.
+          ...(typeof e.payload.capability === "string" ? { capability: e.payload.capability } : {}),
         },
         links: [],
         events: [],
@@ -774,18 +805,46 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     }
     if (isEvent(e, "effect.started")) {
       const id = spanId(runId, "effect", e.payload.key);
+      // Hoisted out of the `name:` ternary because the ATTRIBUTES need the same answer: a
+      // `tool.*` key belongs on a `loom.tool` span and nowhere else, which is the rule
+      // `tool.name` / `tool.version` / `tool.irreversibility` / `tool.idempotent` already
+      // follow. The two NAME literals stay inline on `name:` for the reason below.
+      const modelish = e.payload.kind === "model" || e.payload.kind === "summarize";
       start(id, {
         // `summarize` rides with `model` because it IS a model call — the journal now says
         // so honestly, and this keeps the span taxonomy at the eight D9.1 documents rather
         // than growing it as a side effect of correcting a durable field. The literals stay
-        // on this line on purpose: `docs-drift` reads a span name as a `loom.*` literal
-        // following `name:` ON THE SAME LINE, so a lookup table hides every one of them and
-        // the guard loses its ability to check the design against the code.
-        name: e.payload.kind === "model" || e.payload.kind === "summarize" ? "loom.model" : "loom.tool",
+        // on this line on purpose, and the reason has OUTLIVED the guard that used to be
+        // named here: `docs-drift.test.ts` went with the design corpus at `f975f9f` and
+        // `git ls-files | grep -a docs-drift` returns nothing at HEAD, so citing it was
+        // pointing at a check that cannot run. What survives is the READING —
+        // `/usr/bin/grep -an 'name: "loom\.' packages/core/src/telemetry/spans.ts` is how
+        // the built span-name set is counted (TODO C.1 does exactly that), it returns seven,
+        // and `loom.model` is the eighth precisely because this ternary hides it. A lookup
+        // table would hide all eight. So: the literal, on the `name:` line, still.
+        name: modelish ? "loom.model" : "loom.tool",
         kind: "client",
         start: ts,
         parent: taskSpan,
-        attributes: { "loom.effect.key": e.payload.key, "effect.kind": e.payload.kind },
+        attributes: {
+          "loom.effect.key": e.payload.key,
+          "effect.kind": e.payload.kind,
+          // WHICH ATTEMPT PERFORMED THIS EFFECT — journaled on every `effect.started` and,
+          // until now, the one third of that payload this fold read and threw away. The span
+          // is downstream of the journal and may be poorer than it (invariant 8), but being
+          // poorer for no reason is not a decision anybody made here.
+          //
+          // ON THE `loom.tool` ARM ONLY, because the documented key is `tool.attempt` and a
+          // `tool.*` key on a `loom.model` span would be a spelling this file invented. A
+          // model turn's attempt is therefore still dropped; that is a naming gap in C.2's
+          // table, not a claim that the value is unavailable.
+          //
+          // EVERY WRITER IN `run/engine.ts` PASSES THE LITERAL `1` — all five sites, measured
+          // — so this reads a constant against today's engine. It is a faithful read of a
+          // journaled field rather than a derivation, so a journal that ever carries a second
+          // attempt renders it without this file changing again.
+          ...(modelish ? {} : { "tool.attempt": e.payload.attempt }),
+        },
         links: [],
         events: [],
       });

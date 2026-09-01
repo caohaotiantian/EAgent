@@ -1656,3 +1656,79 @@ test("A runId THAT IS NOT A STRING DOES NOT TAKE THE WHOLE TRACE WITH IT", () =>
   const b = spansFrom([{ ...submitted, runId: "run-b" } as unknown as JournalEvent])[0]!.traceId;
   assert.notEqual(a, b);
 });
+
+test("THREE JOURNALED FIELDS THE FOLD READ AND THREW AWAY — capability, gate.batched, tool.attempt", () => {
+  // C.2's claim is that eleven documented attributes are set on no built span. EIGHT of the
+  // eleven are not in the journal at all — `budget.cost_usd`, `trigger.kind`, `node.type`,
+  // `gen_ai.request.max_tokens`, `loom.replayed` (its two spans), `tool.source`, `reducers`,
+  // and `gate.posture`, which is journaled only as `policy.decided.posture` and fixed at
+  // `"in"` for every gate by `run/policy.ts`. A fold that emitted one of those would be
+  // INVENTING it, which is the one thing this file may not do; the commit body carries the
+  // measurement behind each.
+  //
+  // These three are different in kind: every one is a field the payload DECLARES and whose
+  // event this fold already reads. A span may be poorer than the journal (invariant 8);
+  // being poorer by accident is not a decision anybody made.
+  //
+  //   - `policy.decided.capability` — declared optional, dropped by the `loom.policy` arm;
+  //   - `gate.raised.batch` — journaled so "which gates would one click close?" survives a
+  //     restart, and invisible on `loom.gate`;
+  //   - `effect.started.attempt` — one third of a payload the `effect.started` arm reads.
+  //
+  // ABSENCE IS ASSERTED TOO, and that is half of it: each key is optional or arm-scoped, so
+  // a fix that emitted `undefined`, or put `tool.attempt` on a model span, would pass a
+  // presence-only check while breaking what `exactOptionalPropertyTypes` and an OTLP
+  // exporter both rely on.
+  const task = "save@#0" as TaskId;
+  const at = (seq: number, type: string, payload: unknown): JournalEvent =>
+    ({
+      runId: RUN,
+      seq,
+      ts: 1_000 + seq * 10,
+      type,
+      payload,
+      actor: SYSTEM_ACTOR("test"),
+      taskId: task,
+      classification: "internal",
+    }) as unknown as JournalEvent;
+
+  const journal: readonly JournalEvent[] = [
+    submitted,
+    at(2, "task.ready", { nodeId: "save", branchPath: "", edgesIn: [] }),
+    at(3, "policy.decided", { effect: "gate", posture: "in", irreversibility: "irreversible", reasons: ["r"], capability: "fs:write" }),
+    at(4, "policy.decided", { effect: "allow", posture: "on", irreversibility: "read_only", reasons: ["r"] }),
+    at(5, "gate.raised", {
+      gateId: GATE,
+      nodeId: "save",
+      policyRef: "p",
+      contentDigest: "sha256:abc",
+      // `deliveryDigest` is in the fixture deliberately and off the span deliberately: it is
+      // `digest(the founder's DeliverySpec)`, i.e. the `gate.content_digest` oracle over a
+      // domain SMALLER than a gate payload — a recipient list and a redact list. Asserted.
+      batch: { id: "gate-0", key: "save|p", windowMs: 1_000, maxBatch: 5, deliveryDigest: "sha256:deadbeef" },
+    }),
+    at(6, "gate.raised", { gateId: "gate-2" as GateId, nodeId: "save", policyRef: "p", contentDigest: "sha256:def" }),
+    at(7, "effect.started", { key: "save@#0:tool:0", kind: "tool", attempt: 3 }),
+    at(8, "effect.started", { key: "save@#0:model:0", kind: "model", attempt: 2 }),
+    cancelledRun,
+  ];
+
+  const spans = spansFrom(journal);
+  const named = (name: string): Span[] => spans.filter((s) => s.name === name);
+
+  const policy = named("loom.policy");
+  assert.equal(policy.length, 2);
+  assert.equal(policy[0]!.attributes["capability"], "fs:write", "policy.decided.capability was journaled and dropped");
+  assert.ok(!("capability" in policy[1]!.attributes), "a decision with no capability must not carry the key at all");
+
+  const gates = named("loom.gate");
+  assert.equal(gates.length, 2);
+  assert.equal(gates[0]!.attributes["gate.batched"], "gate-0", "the batch one click would close is invisible on the span");
+  assert.ok(!("gate.batched" in gates[1]!.attributes), "an unbatched gate must not carry the key");
+  assert.ok(!JSON.stringify(gates[0]!.attributes).includes("deadbeef"), "the batch's deliveryDigest reached a collector");
+
+  const tool = named("loom.tool")[0]!;
+  assert.equal(tool.attributes["tool.attempt"], 3, "effect.started.attempt was read and discarded");
+  // `tool.*` on a `loom.tool` span and nowhere else — the rule `tool.name` already follows.
+  assert.ok(!("tool.attempt" in named("loom.model")[0]!.attributes), "a tool.* key on a model span is a spelling this file invented");
+});
