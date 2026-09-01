@@ -222,10 +222,19 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   which is why it ships. **Closes when** the CLI waits on a journal predicate rather than a wait
   count.
 
-- **A.14 · `run.submitted.inputs` is the last inline copy of a payload, and the largest one left.**
-  Externalisation is built and flat at 1.01–1.02x over a chain; that residual is this. Inputs
-  arrive before any node has run, so there is nothing yet to point at. **Closes when** `submit`
-  can reach a payload store — which it cannot today.
+- ~~**A.14 · `run.submitted.inputs` is the last inline copy of a payload.**~~ **CLOSED**
+  (`6d830d7`, `eba2a63`). The stated blocker — "`submit` cannot reach a payload store" — was
+  false: the store is `Engine`'s own field, and what looked like an access problem was an ORDER
+  one. `run.submitted.external` now names which inputs left the journal, and the trajectory fold
+  puts them back as HANDLES rather than dropping them, which matters for a reason that is not
+  obvious: `defaultBucket` digests `shapeOf(inputs)`, so an input silently missing from that map
+  would change a run's COHORT — two runs of one workflow would bucket apart on nothing but
+  whether a document crossed 64 KiB.
+  **HOW THIS NEARLY DID NOT LAND, which is the durable part.** The lane renamed its own branch,
+  so the orchestrator's merge-by-expected-name took an earlier state and reported success. It was
+  found only by auditing `git worktree list` at cleanup, three waves later. **A merge that
+  reports MERGED is not evidence the work arrived**; `git merge-base --is-ancestor <commit> loom`
+  is, and it is one command per lane.
 
 - **A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual, and two planes duplicating one window — both want
   the same cursor.** A run past 10,000 is reached by no lap and `RunClockTick.truncated` is the
