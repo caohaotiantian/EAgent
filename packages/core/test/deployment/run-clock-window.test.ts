@@ -36,6 +36,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runClockTick } from "../../src/cli.ts";
+import { CODES, isLoomError } from "../../src/errors.ts";
 import type { RunId } from "../../src/ids.ts";
 import type { RunFilter, RunSummary } from "../../src/journal/store.ts";
 import { deployment, fillRuns } from "./harness.ts";
@@ -192,6 +193,48 @@ test("THE DEGENERATE INPUTS, where a tick must fold the first page rather than n
     assert.deepEqual([...(await runClockTick(ws, 2, -1, LAP)).visited], newestFirst.slice(0, 2), "a negative instant is page 0, not NaN");
     assert.deepEqual([...(await runClockTick(ws, 2, 3 * LAP, 0)).visited], newestFirst.slice(0, 2), "and so is a zero period");
     assert.deepEqual([...(await runClockTick(ws, 0, 0, LAP)).visited], [], "a page size of zero is no clock, never an unbounded walk");
+  } finally {
+    ws.close();
+    d.dispose();
+  }
+});
+
+test("A STORE WHOSE CURSOR DOES NOT ADVANCE IS REFUSED — the walk must not be unbounded", async () => {
+  // THE ONLY THING THAT ENDS THE TRAVERSAL IS THE STORE. Every exit in `runClockTick`'s loop is
+  // a property of the PAGE — empty, or shorter than `limit` — so a `listRuns` that accepts
+  // `after` and drops it hands back the same full page forever and the tick never returns.
+  // `startRunClock`'s `running` latch is then stuck true for the life of the process: the clock
+  // stops advancing backed-off runs AND stops being able to say so, because its failure line is
+  // on the promise's rejection path and the promise never settles.
+  //
+  // NOTHING IN-TREE HITS THIS. Both shipped backends implement `after` as an exclusive keyset
+  // cursor and `test/journal/conformance.ts` pins it against each. `StateStore` is an extension
+  // point, so this is a store a stranger can write — and "a guard that cannot decide fails
+  // closed" makes a REFUSAL the required answer rather than a stall.
+  const d = deployment();
+  const ws = d.open();
+  try {
+    await fillRuns(ws.store, 12, T0);
+
+    // The non-conforming backend in one line: the filter is taken and not applied. Shadowed over
+    // the real SQLite store, so every row returned is a row a deployment would have read.
+    const real = ws.store.listRuns.bind(ws.store);
+    let calls = 0;
+    (ws.store as unknown as { listRuns: unknown }).listRuns = async (limit?: number): Promise<readonly RunSummary[]> => {
+      calls++;
+      // THE HANG, MADE INTO A FAILURE. Without the boundary check this loop does not terminate,
+      // and a test that hangs reports less than no test at all — so the walk is capped here, in
+      // the fixture, where a cap is a test device rather than a silent re-ceiling of the tick.
+      assert.ok(calls < 100, "the traversal ran unbounded against a store that ignores `after`");
+      return real(limit);
+    };
+
+    await assert.rejects(
+      () => runClockTick(ws, 5, 0, LAP),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /cursor does not advance/.test(e.message),
+      "a non-conforming store must be refused by name, not folded as a truncated view of the journal",
+    );
+    assert.equal(calls, 2, "refused on the first repeat — one page, then the page that proves the cursor did not move");
   } finally {
     ws.close();
     d.dispose();

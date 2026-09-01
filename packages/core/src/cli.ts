@@ -3729,9 +3729,11 @@ export interface RunClockTick {
  * THE TICK NOW TRAVERSES THE LISTING WITH A CURSOR: `listRuns(limit, { after })`, page after
  * page, to the end. Three things follow, and only the first is the item:
  *
- *   1. THERE IS NO CEILING. The traversal holds one page plus one run id per page, so its
- *      memory does not grow with the journal and there is nothing left to cap. Every run is
- *      reachable at every N.
+ *   1. THERE IS NO CEILING. The traversal holds one page plus one run id per page — twice, in
+ *      an array and a set, both referencing the same string — so its memory does not grow with
+ *      the journal and there is nothing left to cap. Every run is reachable at every N. The set
+ *      is the termination check: see it at the loop for why a walk whose only exit is a property
+ *      of the page has to have one.
  *   2. THE POSITION IS A PAGE INDEX, `floor(now / lapMs) mod pages`, and the coverage argument
  *      is the one the ring had: consecutive ticks take consecutive pages, so a given run is in
  *      view once per `pages` ticks and `pages` is `ceil(N / limit)`. Nothing is remembered, so
@@ -3810,6 +3812,7 @@ export async function runClockTick(
   // machine, tens of runs a day) `pages` is 1, `at` is 0, and this whole loop is exactly the one
   // `listRuns` the tick made before — of `limit` rows rather than ten thousand.
   const boundaries: RunId[] = [];
+  const seen = new Set<RunId>();
   let head: readonly RunSummary[] = [];
   let cursor: RunId | undefined;
   for (;;) {
@@ -3817,6 +3820,34 @@ export async function runClockTick(
     if (page.length === 0) break;
     if (boundaries.length === 0) head = page;
     cursor = page[page.length - 1]!.runId;
+    // THE ONLY THING THAT ENDS THIS LOOP IS THE STORE, AND `StateStore` IS AN EXTENSION POINT.
+    // Both shipped backends implement `after` as an exclusive keyset cursor and
+    // `test/journal/conformance.ts` pins that for each, so nothing in-tree reaches this line —
+    // but a third-party store that accepts `after` and IGNORES it returns the same full page
+    // forever, and every exit above is a property of the page rather than of the walk. Driven
+    // against such a store the tick never returned; `startRunClock`'s `running` latch then held
+    // true for the life of the process, so the clock stopped advancing runs AND stopped saying
+    // anything, which is the one failure mode this whole file is written to prevent.
+    //
+    // A REPEATED BOUNDARY IS THE DECIDABLE FORM OF "THE CURSOR DID NOT MOVE". The listing is
+    // strictly ordered and `after` is exclusive, so a conforming store can never hand back a run
+    // id this walk has already taken as a boundary — which makes this a refusal with no false
+    // positive rather than a heuristic bound on page count. The set costs one id per page, the
+    // same order `boundaries` already holds, so it does not give back the memory argument above.
+    //
+    // IT THROWS RATHER THAN TRUNCATING. Stopping the walk here would silently reinstate the scan
+    // ceiling this traversal exists to remove — a bounded view of an unbounded journal, quietly
+    // — and a guard that cannot decide fails closed. The rejection reaches `startRunClock`'s
+    // failure handler, which prints `RUN CLOCK STOPPED ADVANCING` followed by this message.
+    if (seen.has(cursor)) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `the StateStore in use returned run "${cursor}" twice as a page boundary while paging listRuns(${limit}, { after }), ` +
+          `so its cursor does not advance — listRuns must treat "after" as an EXCLUSIVE position in its own ordering and ` +
+          `return only runs that sort after it. Refusing rather than folding a truncated view of the journal.`,
+      );
+    }
+    seen.add(cursor);
     boundaries.push(cursor);
     // A SHORT PAGE IS THE END OF THE LISTING, and taking it as such saves the empty page that
     // would otherwise prove it. A page of exactly `limit` at the end costs that extra call,
