@@ -1,5 +1,5 @@
 /**
- * THE OLDEST RUN IS NOT STARVED BY THE 200-RUN WINDOW.
+ * NO RUN IS OUT OF THE RUN CLOCK'S REACH — AT ANY NUMBER OF RUNS.
  *
  * `startRunClock` is the only thing that comes back to a run whose retry backoff has elapsed
  * when nothing else is driving it — a run submitted over HTTP, or one a restarted plane
@@ -11,26 +11,38 @@
  * MEASURED, and it is what the first assertion below pins: 201 run heads in a
  * `SqliteStateStore`, `listRuns(200)` returns 200, the newest present and the oldest absent.
  *
- * The clock ROTATES its window, and these three tests pin the ROTATION rather than only the
- * property, so replacing the mechanism has to move them deliberately. It has been replaced
- * once already: the offset used to be a counter in the clock's closure, which reset to 0 at
- * every boot and is why `run-clock-survives-restart.test.ts` exists. It is now derived from
- * `now`, so every test here advances the clock between ticks instead of holding a `rot`.
+ * THIS FILE PINNED THE OPPOSITE OF ITS OWN TITLE UNTIL NOW, and that is the history worth
+ * keeping. The first fix rotated a window over `listRuns(RUN_CLOCK_SCAN_CEILING)` — ten
+ * thousand summary rows, indexed into by arithmetic — and the third test here asserted, green,
+ * that the two runs below the ceiling were reached by NO lap and that `truncated` was "the only
+ * reason anyone knows". A green test can pin a starvation as readily as it pins a fix; the
+ * question a reader has to keep asking is which of the two it is looking at. That case is now
+ * its opposite: the runs past where the ceiling stood are reached, and the ceiling is gone.
  *
- * What the rotation does not promise, and this file does not test, is fairness against a
- * stream of NEW submissions: a run pushed down the listing while the window is above it waits
+ * WHAT REPLACED IT is a cursor traversal — `listRuns(limit, { after })`, page after page to
+ * the end of the listing — so what one tick materialises is one page and what it can REACH is
+ * everything. These tests pin the TRAVERSAL and not only the property, so replacing the
+ * mechanism again has to move them deliberately. It has been replaced twice already: the
+ * position was a counter in the clock's closure (which reset at every boot, and is why
+ * `run-clock-survives-restart.test.ts` exists), then an offset derived from `now` into a capped
+ * array. It is a PAGE INDEX derived from `now` now, so every test here advances the clock
+ * between ticks instead of holding state across them.
+ *
+ * What the traversal does not promise, and this file does not test, is fairness against a
+ * stream of NEW submissions: a run pushed down the listing while the scan is above it waits
  * for the next lap.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RUN_CLOCK_SCAN_CEILING, runClockTick, runClockWindow } from "../../src/cli.ts";
+import { runClockTick } from "../../src/cli.ts";
 import type { RunId } from "../../src/ids.ts";
+import type { RunFilter, RunSummary } from "../../src/journal/store.ts";
 import { deployment, fillRuns } from "./harness.ts";
 
 const LIMIT = 200;
 const T0 = 1_700_000_000_000;
-/** The tick period these tests drive at, and therefore the lap the window advances by. */
+/** The tick period these tests drive at, and therefore the page the traversal advances by. */
 const LAP = 1_000;
 
 test("EVERY RUN IS REACHED, INCLUDING THE ONE PAST THE WINDOW", async () => {
@@ -51,8 +63,9 @@ test("EVERY RUN IS REACHED, INCLUDING THE ONE PAST THE WINDOW", async () => {
     const seen = new Set<RunId>();
     let ticks = 0;
     while (!seen.has(oldest) && ticks < 4) {
-      const tick = await runClockTick(ws, LIMIT, ticks * LAP, RUN_CLOCK_SCAN_CEILING, LAP);
+      const tick = await runClockTick(ws, LIMIT, ticks * LAP, LAP);
       assert.ok(tick.visited.length <= LIMIT, `a tick must fold at most ${LIMIT} runs, not ${tick.visited.length}`);
+      assert.equal(tick.pages, 2, "ceil(201/200), which is also how many ticks a full lap takes");
       for (const id of tick.visited) seen.add(id);
       ticks++;
     }
@@ -65,87 +78,122 @@ test("EVERY RUN IS REACHED, INCLUDING THE ONE PAST THE WINDOW", async () => {
   }
 });
 
-test("the rotation wraps, so a run is visited again on the next lap", async () => {
-  // A rotation that reached the end and stopped would starve the NEWEST runs instead, which
-  // is the same defect with the sign flipped: the clock has to come back. It wraps AROUND
-  // rather than resetting, so no tick is short and no tick is empty — the seam a
-  // reset-to-zero left is what made a 5-run store spend a third of its ticks folding one row.
+test("the traversal wraps, so a run is visited again on the next lap", async () => {
+  // A scan that reached the end and stopped would starve the NEWEST runs instead, which is the
+  // same defect with the sign flipped: the clock has to come back.
   const d = deployment();
   const ws = d.open();
   try {
     const ids = await fillRuns(ws.store, 5, T0);
     const laps: RunId[][] = [];
-    for (let i = 0; i < 3; i++) laps.push([...(await runClockTick(ws, 2, i * LAP, RUN_CLOCK_SCAN_CEILING, LAP)).visited]);
+    for (let i = 0; i < 3; i++) laps.push([...(await runClockTick(ws, 2, i * LAP, LAP)).visited]);
     assert.deepEqual(
       laps.map((l) => l.length),
-      [2, 2, 2],
-      "windows of 2 over 5 runs: every tick folds a full window, because the ring has no seam",
+      [2, 2, 1],
+      "pages of 2 over 5 runs: the last page of a lap is SHORT, because a page is a place in the listing " +
+        "rather than a slot in a ring. The rotation this replaces folded [2, 2, 2] and got there by " +
+        "visiting one run twice a lap; a lap of pages visits each run exactly once.",
     );
     assert.deepEqual(new Set(laps.flat()).size, 5, "and three ticks of 2 cover all five");
-    // Positions 0, 2, 4 then 1, 3 — a stride of 2 around a ring of 5 closes after FIVE steps,
-    // not after three. Asserted where it actually closes, because "it wraps" and "it wraps
-    // where I guessed" are different claims and only the second one is checkable.
-    const sixth = (await runClockTick(ws, 2, 5 * LAP, RUN_CLOCK_SCAN_CEILING, LAP)).visited;
-    assert.deepEqual([...sixth], laps[0], "the ring closes: the sixth tick sees exactly what the first saw");
-    assert.deepEqual([...laps[0]!], ids.slice(-2).reverse(), "and lap 0 is the newest two");
+    // Pages 0, 1, 2 then back to 0 — `ceil(5/2)` is 3, so the lap closes on the FOURTH tick,
+    // asserted where it actually closes rather than where it would be convenient.
+    const fourth = (await runClockTick(ws, 2, 3 * LAP, LAP)).visited;
+    assert.deepEqual([...fourth], laps[0], "the lap closes: the fourth tick sees exactly what the first saw");
+    assert.deepEqual([...laps[0]!], ids.slice(-2).reverse(), "and page 0 is the newest two");
   } finally {
     ws.close();
     d.dispose();
   }
 });
 
-test("the scan is bounded, and a deployment past the bound is TOLD", async () => {
-  // The ceiling is the part that is still a BOUND rather than a fix, so the one thing it may
-  // not be is silent — that is the whole complaint against the 200 it replaces. Driven with an
-  // injected ceiling of 10 rather than by journaling ten thousand runs; the shipped constant
-  // is the same code path with a bigger number.
-  const CEILING = 10;
+test("THE RUNS THAT USED TO BE PAST THE CEILING ARE REACHED", async () => {
+  // THE OPPOSITE OF WHAT THIS CASE USED TO ASSERT, on the same journal and the same numbers.
+  // It was: twelve runs, an injected ceiling of ten, two ticks of five, and the two oldest
+  // "past the ceiling and stay there" — a starvation with a test holding it in place, and
+  // `RunClockTick.truncated` the only report of it. There is no ceiling to inject now.
   const d = deployment();
   const ws = d.open();
   try {
     const ids = await fillRuns(ws.store, 12, T0);
-    const first = await runClockTick(ws, 5, 0, CEILING, LAP);
-    assert.equal(first.truncated, true, "twelve runs against a ceiling of ten must say so on EVERY tick");
-    const second = await runClockTick(ws, 5, LAP, CEILING, LAP);
-    assert.notDeepEqual([...second.visited], [...first.visited], "and the window moves between them");
-
-    // THE RESIDUAL HOLE, pinned rather than papered over: the two oldest of twelve are past a
-    // ceiling of ten, and no lap reaches them. `truncated` is the only reason anyone knows.
-    const reached = new Set([...first.visited, ...second.visited]);
-    assert.equal(reached.size, 10);
-    assert.equal(reached.has(ids[0]!), false, "the oldest run is past the ceiling and stays there");
-    assert.equal(reached.has(ids[1]!), false);
-
-    // AND A LISTING WELL INSIDE THE CEILING HIDES NOTHING — the negative half, without which
-    // `truncated` could be hard-coded `true` and every assertion above would still hold.
-    const roomy = await runClockTick(ws, 5, 0, 100, LAP);
-    assert.equal(roomy.truncated, false);
+    const reached = new Set<RunId>();
+    let pages = 0;
+    for (let i = 0; i < 3; i++) {
+      const t = await runClockTick(ws, 5, i * LAP, LAP);
+      assert.ok(t.visited.length <= 5, "one page per tick, still");
+      pages = t.pages;
+      for (const id of t.visited) reached.add(id);
+    }
+    assert.equal(pages, 3, "ceil(12/5) pages — the count that used to be capped at the ceiling");
+    assert.equal(reached.size, 12, "one lap reaches every run");
+    assert.equal(reached.has(ids[0]!), true, "including the oldest, which the ceiling put out of reach of every lap");
+    assert.equal(reached.has(ids[1]!), true);
   } finally {
     ws.close();
     d.dispose();
   }
 });
 
-test("THE WINDOW IS ARITHMETIC, and this is where the numbers go in directly", () => {
-  // `runClockWindow` is separated from the tick so the rotation's argument can be checked
-  // without a store in the way. Positions are `limit` apart around a ring of `n`.
-  assert.deepEqual(runClockWindow(5, 2, 0, LAP), [0, 1]);
-  assert.deepEqual(runClockWindow(5, 2, LAP, LAP), [2, 3]);
-  assert.deepEqual(runClockWindow(5, 2, 2 * LAP, LAP), [4, 0], "it wraps AROUND rather than stopping short");
-  assert.deepEqual(runClockWindow(5, 2, 5 * LAP, LAP), [0, 1], "and the ring closes after n/gcd steps");
+test("THE TRAVERSAL COSTS ONE LISTING PER PAGE, and does not re-walk", async () => {
+  // The cost that replaced the ceiling, counted rather than reasoned about. The ceiling bought
+  // a bound on rows per tick by giving up on the runs below it; this pays a `run_head` scan for
+  // reaching them, and the thing that must not regress is the scan happening TWICE — a walk to
+  // measure the listing and a second walk to reach the page. It re-fetches the chosen page by
+  // CURSOR instead, which is one call.
+  //
+  // Counted by shadowing the instance method, so the store under it is the real SQLite one and
+  // every row these calls return is a row a deployment would have read.
+  const d = deployment();
+  const ws = d.open();
+  try {
+    await fillRuns(ws.store, 12, T0);
+    const calls: (RunFilter | undefined)[] = [];
+    const real = ws.store.listRuns.bind(ws.store);
+    (ws.store as unknown as { listRuns: unknown }).listRuns = async (
+      limit?: number,
+      filter?: RunFilter,
+    ): Promise<readonly RunSummary[]> => {
+      calls.push(filter);
+      return real(limit, filter);
+    };
 
-  // THE COVERAGE ARGUMENT, run rather than asserted: every row of a 201-listing at limit 200
-  // is inside one of the first ceil(201/200) windows, from ANY starting instant.
-  for (const start of [0, 7 * LAP, 1_000_003 * LAP]) {
-    const seen = new Set<number>();
-    for (let t = 0; t < 2; t++) for (const i of runClockWindow(201, 200, start + t * LAP, LAP)) seen.add(i);
-    assert.equal(seen.size, 201, `two ticks from ${start} must cover all 201 positions, saw ${seen.size}`);
+    // PAGE 0: the walk is 3 pages (5, 5, 2 — the last short, which ends it), and the page the
+    // tick folds is the one it already holds. No fourth call.
+    await runClockTick(ws, 5, 0, LAP);
+    assert.equal(calls.length, 3, "three pages walked, and page 0 is not fetched twice");
+    assert.deepEqual(calls.map((f) => f?.after === undefined), [true, false, false], "one uncursored call, then cursors");
+
+    // PAGE 1: the same walk, plus exactly one cursored re-fetch of the page it landed on.
+    calls.length = 0;
+    await runClockTick(ws, 5, LAP, LAP);
+    assert.equal(calls.length, 4, "the walk, plus ONE call to fetch the chosen page — not a second walk");
+  } finally {
+    ws.close();
+    d.dispose();
   }
+});
 
-  // THE DEGENERATE INPUTS, because a clock handed one of these must fold the first window
-  // rather than silently fold nothing — `(x % 0)` is NaN and `Array.from({length: NaN})` is [].
-  assert.deepEqual(runClockWindow(0, 200, 5 * LAP, LAP), [], "no runs is no window");
-  assert.deepEqual(runClockWindow(3, 200, 5 * LAP, LAP), [0, 1, 2], "a limit wider than the listing takes all of it");
-  assert.deepEqual(runClockWindow(5, 2, -1, LAP), [0, 1], "a negative instant is the first window, not NaN");
-  assert.deepEqual(runClockWindow(5, 2, 3 * LAP, 0), [0, 1], "and so is a zero period");
+test("THE DEGENERATE INPUTS, where a tick must fold the first page rather than nothing", async () => {
+  // `runClockWindow` used to hold this arithmetic and could be handed numbers directly. The
+  // page index is three lines inside the tick now, so these go in through a store — which is
+  // the honest place for them anyway: two of the four are about what the LISTING answers.
+  const d = deployment();
+  const ws = d.open();
+  try {
+    assert.deepEqual((await runClockTick(ws, 5, 5 * LAP, LAP)).visited, [], "no runs is no page");
+    assert.equal((await runClockTick(ws, 5, 5 * LAP, LAP)).pages, 0);
+
+    const ids = await fillRuns(ws.store, 3, T0);
+    const newestFirst = [...ids].reverse();
+    assert.deepEqual(
+      [...(await runClockTick(ws, 200, 5 * LAP, LAP)).visited],
+      newestFirst,
+      "a page wider than the listing takes all of it, and the lap is one page long",
+    );
+    assert.deepEqual([...(await runClockTick(ws, 2, -1, LAP)).visited], newestFirst.slice(0, 2), "a negative instant is page 0, not NaN");
+    assert.deepEqual([...(await runClockTick(ws, 2, 3 * LAP, 0)).visited], newestFirst.slice(0, 2), "and so is a zero period");
+    assert.deepEqual([...(await runClockTick(ws, 0, 0, LAP)).visited], [], "a page size of zero is no clock, never an unbounded walk");
+  } finally {
+    ws.close();
+    d.dispose();
+  }
 });

@@ -14,7 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { CODES } from "../../src/errors.ts";
-import { ROOT_BRANCH, taskId, type NodeId, type RunId } from "../../src/ids.ts";
+import { ROOT_BRANCH, taskId, type GateId, type NodeId, type RunId } from "../../src/ids.ts";
 import { SYSTEM_ACTOR, type NewEvent } from "../../src/journal/events.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 
@@ -42,6 +42,14 @@ function submitted(subject?: string): NewEvent {
       ...(subject === undefined ? {} : { submittedBy: { kind: "human" as const, subject, method: "test" } }),
     },
     actor: SYSTEM_ACTOR("control-plane"),
+  };
+}
+
+function raised(): NewEvent {
+  return {
+    type: "gate.raised",
+    payload: { gateId: "g" as GateId, nodeId: "n" as NodeId, policyRef: "p", contentDigest: "d" },
+    actor: SYSTEM_ACTOR("test"),
   };
 }
 
@@ -353,6 +361,119 @@ export function runConformance(factory: StoreFactory): void {
       // how often OTHER principals submit.
       const oneOfMine = await s.listRuns(2, { submittedByOrUnowned: "u:alice" });
       assert.equal(oneOfMine.length, 2, "two runs match; the limit cuts the matches, not the candidates");
+    });
+  });
+
+  // ── the cursor ───────────────────────────────────────────────────────────────
+  //
+  // `RunFilter.after` is the widening DESIGN item 13 needed, and the reason it is pinned HERE
+  // rather than in either store's own tests is that a cursor is a claim about ORDER. Both
+  // stores already agreed on the ordering and both were wrong about it once — `MAX(seq)` where
+  // `MAX(ts)` was meant — and neither store's own suite could have found it. A keyset cursor
+  // restates the ordering a second time, in a second language (a `WHERE` predicate in SQL, an
+  // array index in memory), so it is exactly the kind of change that makes two backends drift.
+
+  /** Five runs, newest id last, so `ids.at(-1)` is the head of a `run_id DESC` listing. */
+  const FIVE = ["01JRUNA", "01JRUNB", "01JRUNC", "01JRUND", "01JRUNE"].map((p) => `${p}0000000000000000000` as RunId);
+
+  test(`[${factory.name}] after is EXCLUSIVE, and two pages abut exactly`, async () => {
+    await withStore(async (s) => {
+      for (const id of FIVE) await s.append({ runId: id, expectedSeq: 0, events: [started()] });
+      const all = (await s.listRuns(10)).map((r) => r.runId);
+      assert.deepEqual(all, [...FIVE].reverse(), "the precondition: newest run id first");
+
+      const first = await s.listRuns(2);
+      const second = await s.listRuns(2, { after: first.at(-1)!.runId });
+      assert.deepEqual(
+        [...first, ...second].map((r) => r.runId),
+        all.slice(0, 4),
+        "page 2 starts one PAST the cursor: nothing repeated, nothing skipped",
+      );
+      assert.equal(
+        second.some((r) => r.runId === first.at(-1)!.runId),
+        false,
+        "the cursor row itself is not served again — an inclusive boundary is a walk that never advances",
+      );
+    });
+  });
+
+  test(`[${factory.name}] a full walk by cursor visits every run exactly once, and terminates`, async () => {
+    // THE PROPERTY THE RUN CLOCK RESTS ON. `listRuns(limit)` alone can only reach the newest
+    // `limit`; a walk has to be total or the scan ceiling it replaces was not a ceiling but a
+    // policy. Pages of 2 over 5 runs also exercises the SHORT final page, which is how a walker
+    // learns it has reached the end.
+    await withStore(async (s) => {
+      for (const id of FIVE) await s.append({ runId: id, expectedSeq: 0, events: [started()] });
+      const seen: RunId[] = [];
+      let cursor: RunId | undefined;
+      let pages = 0;
+      for (;;) {
+        const page = await s.listRuns(2, cursor === undefined ? undefined : { after: cursor });
+        if (page.length === 0) break;
+        pages++;
+        for (const r of page) seen.push(r.runId);
+        if (page.length < 2) break;
+        cursor = page.at(-1)!.runId;
+      }
+      assert.deepEqual(seen, [...FIVE].reverse(), "every run, in listing order, once");
+      assert.equal(new Set(seen).size, 5);
+      assert.equal(pages, 3, "ceil(5/2) pages, the last of them short");
+    });
+  });
+
+  test(`[${factory.name}] a cursor this listing does not admit is REFUSED, not restarted`, async () => {
+    await withStore(async (s) => {
+      await s.append({ runId: RUN, expectedSeq: 0, events: [submitted("u:alice")] });
+      const hers = "01JRUN2222222222222222222" as RunId;
+      await s.append({ runId: hers, expectedSeq: 0, events: [submitted("u:bob")] });
+
+      // 1 · A RUN NOBODY EVER JOURNALED — the cursor from another store, or from a journal that
+      //     is not this one. Restarting from the top here is how a truncated walk looks exactly
+      //     like a complete one.
+      await expectLoomError(() => s.listRuns(10, { after: "01JRUNZZZZZZZZZZZZZZZZZZZ" as RunId }), CODES.E_RUN_NOT_FOUND);
+
+      // 2 · A RUN THAT EXISTS BUT THIS FILTER DOES NOT ADMIT. Same refusal, same code — which is
+      //     what stops `after` from answering "does bob have a run with this id?" for a caller
+      //     that may not list bob's runs.
+      await expectLoomError(
+        () => s.listRuns(10, { submittedByOrUnowned: "u:alice", after: hers }),
+        CODES.E_RUN_NOT_FOUND,
+      );
+      // The control: the SAME cursor is fine once the filter admits the run, so the refusal
+      // above is about the filter and not about the id.
+      assert.deepEqual(
+        (await s.listRuns(10, { after: hers })).map((r) => r.runId),
+        [RUN],
+        "…and unfiltered the SAME id is a position, not an error: the refusal is about the filter, not the id",
+      );
+
+      // 3 · A RUN WITH NO POSITION IN THIS ORDER AT ALL. `raisedAGate` orders by the most recent
+      //     `gate.raised`; a run that never gated is not in that listing, so it cannot be a place
+      //     in it to resume from.
+      await expectLoomError(() => s.listRuns(10, { raisedAGate: true, after: RUN }), CODES.E_RUN_NOT_FOUND);
+    });
+  });
+
+  test(`[${factory.name}] the cursor walks the GATE order, not the run-id order`, async () => {
+    // The one case where the two orders disagree, and the one a keyset predicate can get wrong
+    // by comparing the id alone: the run with the NEWEST id gated FIRST, so it is last in the
+    // gated listing. A cursor that compared `run_id` would hand back an empty page here.
+    await withStore(async (s) => {
+      const older = "01JRUNAAAAAAAAAAAAAAAAAAA" as RunId;
+      const newer = "01JRUNBBBBBBBBBBBBBBBBBBB" as RunId;
+      clock.t = 1000;
+      await s.append({ runId: newer, expectedSeq: 0, events: [started(), raised()] });
+      clock.t = 2000;
+      await s.append({ runId: older, expectedSeq: 0, events: [started(), raised()] });
+
+      const gated = (await s.listRuns(10, { raisedAGate: true })).map((r) => r.runId);
+      assert.deepEqual(gated, [older, newer], "newest GATE first, which is the opposite of newest id first");
+      const next = await s.listRuns(10, { raisedAGate: true, after: older });
+      assert.deepEqual(
+        next.map((r) => r.runId),
+        [newer],
+        "the page after the newest gate is the older gate — a run-id keyset would return nothing",
+      );
     });
   });
 

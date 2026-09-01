@@ -27,6 +27,7 @@ import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
+import type { RunSummary } from "./journal/store.ts";
 import { builtinTools, fsRestore } from "./builtin/tools.ts";
 import { Engine } from "./run/engine.ts";
 import type { BudgetLimits } from "./run/policy.ts";
@@ -3273,53 +3274,46 @@ function httpHost(args: Args): string {
 export const DEFAULT_RUN_CLOCK_LIMIT = 200;
 
 /**
- * HOW DEEP THE ROTATION MAY REACH, and the honest name for what is left of the old bound.
+ * HOW LONG ONE PAGE OF THE SCAN LASTS, in milliseconds of wall clock.
  *
- * The window rotates now, so `limit` no longer decides WHICH runs are reachable — only how
- * many are folded per tick. Something still has to, because `listRuns` takes a count and no
- * cursor: reaching offset N costs a listing of N+limit summary rows, and "no ceiling" is a
- * tick whose cost grows with the number of runs a deployment has ever journaled.
- *
- * 10 000 is a choice, not a measurement: it is two orders above the per-tick fold budget, it
- * is a row scan of `run_head` rather than of the journal, and a deployment with more than
- * that many runs whose graphs this process holds has a coordinator-shaped problem (TODO §E.2)
- * that a call-site rotation should not pretend to solve. What is NOT acceptable is reaching
- * it silently, which is exactly how the old 200 shipped — so `RunClockTick.truncated` carries
- * it out and `startRunClock` says it on stderr, once.
- */
-export const RUN_CLOCK_SCAN_CEILING = 10_000;
-
-/**
- * HOW LONG ONE POSITION OF THE WINDOW LASTS, in milliseconds of wall clock.
- *
- * The window used to be a counter in the clock's own closure — `const rot = { offset: 0 }`,
- * built fresh by `startRunClock` at every boot. It is a period instead, because the offset is
- * now DERIVED from `now` rather than remembered, and a derivation needs a unit. `serve` passes
- * its own `--sweep-ms`, so one tick advances the window by exactly one lap and the coverage
- * argument is the one the counter had. This default exists for a caller that has no period of
- * its own; nothing in `src/` takes it.
+ * The tick's position used to be a counter in the clock's own closure — `const rot = { offset: 0 }`,
+ * built fresh by `startRunClock` at every boot. It is a period instead, because the position is
+ * DERIVED from `now` rather than remembered, and a derivation needs a unit. `serve` passes its
+ * own `--sweep-ms`, so one tick advances by exactly one page and the coverage argument is the
+ * one the counter had. This default exists for a caller that has no period of its own; nothing
+ * in `src/` takes it.
  */
 export const RUN_CLOCK_LAP_MS = 1_000;
 
 /**
- * What one tick saw. TWO FIELDS, BOTH READ — `startRunClock` acts on `truncated` and
- * `test/deployment/run-clock-window.test.ts` asserts on `visited`. A tick that also reported
- * what it ADVANCED would be the natural third, and it is left out until something reads it:
- * this file has enough declared-and-unread surface in its history already.
+ * What one tick saw. TWO FIELDS, BOTH READ — `test/deployment/run-clock-window.test.ts` asserts
+ * on `visited` and pins the traversal's cost through `pages`. A tick that also reported what it
+ * ADVANCED would be the natural third, and it is left out until something reads it: this file
+ * has enough declared-and-unread surface in its history already.
+ *
+ * THE FIELD THAT IS GONE IS `truncated`, and its absence is the item being closed. It said "a
+ * run older than the scan ceiling exists and this clock will never reach it" — an honest report
+ * of a starvation rather than a fix for one. There is no ceiling left for it to report.
  */
 export interface RunClockTick {
-  /** The runs this tick's window covered, in listing order. */
+  /** The runs this tick's page covered, in listing order. */
   readonly visited: readonly RunId[];
   /**
-   * The window ran into the scan ceiling, so a run older than it — IF there is one — is out
-   * of reach of this clock entirely. Conservative at the exact boundary: a store holding
-   * precisely `ceiling` runs reports `true` and is hiding nothing.
+   * How many pages the traversal walked to measure the listing — `ceil(N / limit)`, and
+   * therefore also how many ticks a full lap takes.
+   *
+   * IT IS THE COST THAT REPLACED THE CEILING, which is why it is reported rather than kept
+   * private: the ceiling bought a bound on rows-per-tick by giving up on the runs beyond it,
+   * and this trades that back. A test that asserts on it is asserting on the number of
+   * `run_head` scans a tick makes, which is the thing that would regress if somebody made the
+   * traversal re-walk.
    */
-  readonly truncated: boolean;
+  readonly pages: number;
 }
 
 /**
- * ONE TICK OF THE RUN CLOCK: advance the runs whose backoff has elapsed, over a ROTATING window.
+ * ONE TICK OF THE RUN CLOCK: advance the runs whose backoff has elapsed, over ONE PAGE of a
+ * cursor traversal that has no ceiling.
  *
  * THE CLOCK ITSELF, first, because it did not exist either. `Engine.advance` RETURNS while a
  * Task is in backoff, so something has to come back once the clock has moved. `loom run` does
@@ -3372,84 +3366,78 @@ export interface RunClockTick {
  * `{"kind":"advance"}` to it by hand — and `TODO.md` §E.2 still records "which runs a worker
  * considers" as an open question, which it was not: it had already shipped as starvation.
  *
- * SO THE WINDOW MOVES — AND IT MOVES BY THE CLOCK, NOT BY A COUNTER. This is the second
- * defect and it hid inside the fix for the first. The rotation was `const rot = { offset: 0 }`
- * built by `startRunClock`, mutated in place, and reconstructed by nothing: a value a decision
- * reads that the journal cannot rebuild across a restart, which is CLAUDE.md's first
- * non-negotiable and the class `oversight-survives-restart.test.ts` names. Measured on a
- * 250-run journal at `limit` 200, with the control beside it:
+ * SO THE VIEW MOVES — AND IT MOVES BY THE CLOCK, NOT BY A COUNTER. This is the second defect
+ * and it hid inside the fix for the first. The first fix was `const rot = { offset: 0 }` built
+ * by `startRunClock`, mutated in place, and reconstructed by nothing: a value a decision reads
+ * that the journal cannot rebuild across a restart, which is CLAUDE.md's first non-negotiable
+ * and the class `oversight-survives-restart.test.ts` names. Measured on a 250-run journal at
+ * `limit` 200, with the control beside it:
  *
  *     CONTROL long-lived rot: oldest run reached on tick 1
  *     RESTARTED rot:          oldest run reached on boot -1     (never, over 20 boots)
  *
  * So the 200-run starvation was fixed for a plane that stays up and unfixed for one that
- * restarts — which is the shape a crash-looping or frequently-redeployed plane always has,
- * and the one nothing could see: all three tests in `run-clock-window.test.ts` held ONE `rot`
- * across every tick.
+ * restarts — which is the shape a crash-looping or frequently-redeployed plane always has.
+ * The position is DERIVED from `now`, never remembered, and that has not changed here.
  *
- * The offset is now `(floor(now / lapMs) * limit) mod N`, wrapping at the end of the listing
- * rather than resetting. Nothing is remembered, so a plane that restarts between every tick
- * computes the same window a plane that stayed up would have, and two planes over one store
- * agree without coordinating. Work per tick is unchanged — at most `limit` projections.
+ * WHAT HAS CHANGED IS HOW THE POSITION IS REACHED, and it is the third defect: the derivation
+ * used to be an index into an array. The tick asked `listRuns(RUN_CLOCK_SCAN_CEILING)`, got up
+ * to ten thousand summary rows, and took `(floor(now / lapMs) * limit) mod N` of them. So the
+ * ceiling was a bound on how many rows one tick would MATERIALISE, and a run below row ten
+ * thousand was reached by no lap of any rotation — `RunClockTick.truncated` was the only reason
+ * anyone knew. That is DESIGN item 13, and it is what this closes.
  *
- * WHY THAT REACHES EVERY RUN, and it is arithmetic rather than a hope: consecutive positions
- * are exactly `limit` apart around a ring of `N`, and a given run sits inside a window for
- * `limit` consecutive positions, so one of any `ceil(N / limit)` successive ticks contains it.
- * That is the same guarantee the counter had, and it now survives a restart.
+ * THE TICK NOW TRAVERSES THE LISTING WITH A CURSOR: `listRuns(limit, { after })`, page after
+ * page, to the end. Three things follow, and only the first is the item:
+ *
+ *   1. THERE IS NO CEILING. The traversal holds one page plus one run id per page, so its
+ *      memory does not grow with the journal and there is nothing left to cap. Every run is
+ *      reachable at every N.
+ *   2. THE POSITION IS A PAGE INDEX, `floor(now / lapMs) mod pages`, and the coverage argument
+ *      is the one the ring had: consecutive ticks take consecutive pages, so a given run is in
+ *      view once per `pages` ticks and `pages` is `ceil(N / limit)`. Nothing is remembered, so
+ *      a plane that restarts between every tick computes the page a plane that stayed up would
+ *      have. `run-clock-survives-restart.test.ts` is that property and it is unchanged.
+ *   3. THE COST MOVED RATHER THAN VANISHING, and this is the honest half. A tick reads `N`
+ *      `run_head` rows to measure the listing where it used to read `min(N, 10 000)` and give
+ *      up past that. Rows, not journals: the expensive half — one `projection` fold per run in
+ *      view — is still capped at `limit` and is untouched. A deployment where the row scan
+ *      itself is the problem has the coordinator-shaped problem TODO §E.2 names, which a
+ *      call-site scan should not pretend to solve; what it must not do is pretend the runs
+ *      below its own bound do not exist, which is what the ceiling did.
+ *
+ * WHY A KEYSET CURSOR AND NOT AN OFFSET, since an offset would have removed the ceiling too:
+ * new runs land at the HEAD of a `run_id DESC` listing, so a submission landing between two
+ * pages shifts every later row down one and an offset walk SKIPS a run. The skip would be
+ * silent and intermittent and would look exactly like the starvation this is closing. A key is
+ * a position in the ORDER: a run inserted above the cursor is not in this walk at all, and the
+ * page fetched after the walk is the same page the walk measured.
  *
  * WHAT IT DOES NOT PROMISE, said plainly because a fairness claim that overstates itself is
  * worse than the bound it replaced:
  *
  *   - Nothing here is fair against a STREAM of new submissions. New runs land at the head, so
- *     a run can be pushed below a window that has already passed it and wait a further lap.
+ *     a run can be pushed below a page that has already passed it and wait a further lap.
  *     Bounded-lap fairness, not FIFO.
  *   - The guarantee is over TICKS THAT ADVANCE `now` BY `lapMs`. A clock whose ticks arrive at
  *     an exact multiple of `lapMs` steps by that multiple, and a step that shares a factor with
- *     `N / limit` visits a subset of the positions — `startRunClock` passes its OWN period as
- *     `lapMs` precisely so the ordinary step is one.
- *   - A run past the ceiling is not reached at all, and `truncated` is how a deployment finds
- *     that out. THE REAL FIX IS A CURSOR — `listRuns(after)`, so a tick can page rather than
- *     re-scan — and it belongs in `StateStore` with a conformance test behind it. When that
- *     lands, this rotation is the thing to delete.
- *   - Two processes rotating over one store do not coordinate — they now agree, which is not
- *     the same thing and is not better: they scan the same window and duplicate the folds.
- *     Every write a tick causes still compare-and-swaps on the seq its decision was taken at,
- *     so the loser writes nothing. That is the same argument `GateSweeper` makes for itself.
+ *     `pages` visits a subset of them — `startRunClock` passes its OWN period as `lapMs`
+ *     precisely so the ordinary step is one.
+ *   - Two processes scanning one store do not coordinate — they agree, which is not the same
+ *     thing and is not better: they take the same page and duplicate the folds. Every write a
+ *     tick causes still compare-and-swaps on the seq its decision was taken at, so the loser
+ *     writes nothing. That is the same argument `GateSweeper` makes for itself. A cursor does
+ *     not fix this and was never going to: dividing the listing between two planes needs a
+ *     fact that spans runs, and `journal/store.ts` says why there is nowhere to keep one.
  *
  * `now` is a parameter for the reason every clock in this codebase is: a tick that read
  * `Date.now()` internally could not be driven by a test that has not slept. It is load-bearing
- * twice over here — it is also what the window is derived FROM.
+ * twice over here — it is also what the page index is derived FROM.
  */
-/**
- * Which rows of a listing of `n` this instant's window covers — the whole of the rotation.
- *
- * SEPARATE FROM THE TICK because it is the part with an argument in it, and an argument
- * belongs somewhere a test can put numbers into directly rather than through a store.
- *
- * IT WRAPS RATHER THAN RESETTING, and that is not cosmetic. A window that stopped at the end
- * of the listing would spend `laps - 1` ticks out of every `laps` doing nothing on a
- * deployment whose run count is not a multiple of `limit`; wrapping means every tick folds a
- * full window and the ring has no seam. Returned as INDICES so the caller keeps the rows.
- */
-export function runClockWindow(n: number, limit: number, now: number, lapMs: number): readonly number[] {
-  if (n <= 0 || limit <= 0) return [];
-  if (limit >= n) return Array.from({ length: n }, (_, i) => i);
-  // `Math.max(0, now)` and `Math.max(1, lapMs)`: a clock that has been handed a negative
-  // instant or a zero period is a caller's bug, and the answer to it is the first window
-  // rather than a NaN that silently folds nothing.
-  const lap = Math.floor(Math.max(0, now) / Math.max(1, lapMs));
-  const offset = (lap * limit) % n;
-  return Array.from({ length: limit }, (_, i) => (offset + i) % n);
-}
-
 export async function runClockTick(
   ws: Workspace,
   limit: number,
   now: number = Date.now(),
-  /** Injected for the same reason `now` is: the shipped value cannot be reached by a test
-   * that is not willing to journal ten thousand runs, and an untested bound is a bound
-   * nobody knows the behaviour of. */
-  ceiling: number = RUN_CLOCK_SCAN_CEILING,
   lapMs: number = RUN_CLOCK_LAP_MS,
   /**
    * WHERE A RUN IS HANDED OFF, and it must not block this loop.
@@ -3469,20 +3457,47 @@ export async function runClockTick(
     await ws.engine.advance(runId);
   },
 ): Promise<RunClockTick> {
-  // THE WHOLE REACHABLE SET, IN ONE LISTING, and it is not the cost it looks like. `LIMIT` is
-  // a cap and not a fetch count: a store holding three runs answers `listRuns(10_000)` with
-  // three rows. The old shape asked for `offset + limit` and paid the same worst case on its
-  // deepest lap; what it bought by paying less on shallow laps was an offset it had to
-  // REMEMBER, which is the defect. This asks once and derives.
-  const rows = await ws.store.listRuns(ceiling);
-  // A LISTING THAT FILLED THE CEILING means there may be runs below it this clock cannot see,
-  // which is the one thing an operator has to be told about. Conservative at the exact
-  // boundary: a store holding precisely `ceiling` runs reports `true` and is hiding nothing.
-  const truncated = rows.length >= ceiling;
-  const window = runClockWindow(rows.length, limit, now, lapMs);
-  const visible = window.map((i) => rows[i]!);
+  // A LIMIT OF ZERO IS NO CLOCK, which is what the rotation answered too and is the only safe
+  // reading of a mistyped knob: fewer runs folded, never more, and never a walk whose page size
+  // makes the traversal not terminate.
+  if (limit <= 0) return { visited: [], pages: 0 };
 
-  // LAZY, because the rotation makes this run more often and `graphsByHash` re-reads and
+  // THE TRAVERSAL. One page at a time, each cursored on the last row of the one before, to the
+  // end of the listing. What is kept is one page and one run id PER PAGE — so the memory this
+  // costs is `ceil(N / limit)` ids and not `N` summary rows, which is the whole reason the
+  // ceiling is gone rather than merely raised.
+  //
+  // THE FIRST PAGE IS KEPT because it is the one the common deployment folds: under §D.2 (one
+  // machine, tens of runs a day) `pages` is 1, `at` is 0, and this whole loop is exactly the one
+  // `listRuns` the tick made before — of `limit` rows rather than ten thousand.
+  const boundaries: RunId[] = [];
+  let head: readonly RunSummary[] = [];
+  let cursor: RunId | undefined;
+  for (;;) {
+    const page = cursor === undefined ? await ws.store.listRuns(limit) : await ws.store.listRuns(limit, { after: cursor });
+    if (page.length === 0) break;
+    if (boundaries.length === 0) head = page;
+    cursor = page[page.length - 1]!.runId;
+    boundaries.push(cursor);
+    // A SHORT PAGE IS THE END OF THE LISTING, and taking it as such saves the empty page that
+    // would otherwise prove it. A page of exactly `limit` at the end costs that extra call,
+    // which is the price of not guessing.
+    if (page.length < limit) break;
+  }
+  const pages = boundaries.length;
+  if (pages === 0) return { visited: [], pages: 0 };
+
+  // `Math.max(0, now)` and `Math.max(1, lapMs)`: a clock handed a negative instant or a zero
+  // period is a caller's bug, and the answer to it is the first page rather than a NaN that
+  // silently folds nothing.
+  const at = Math.floor(Math.max(0, now) / Math.max(1, lapMs)) % pages;
+  // RE-FETCHED BY CURSOR RATHER THAN REMEMBERED. Holding every page would put `N` summary rows
+  // back in this process, which is the cost the traversal exists to avoid. Re-fetching is exact
+  // rather than approximate because the cursor is a key: runs submitted since the walk land
+  // ABOVE `boundaries[at - 1]` and cannot shift this page.
+  const visible = at === 0 ? head : await ws.store.listRuns(limit, { after: boundaries[at - 1]! });
+
+  // LAZY, because the traversal makes this run more often and `graphsByHash` re-reads and
   // RE-COMPILES every graph in the workspace. A tick with nothing due should cost a listing
   // and a fold per run in view, and no compiles at all.
   let index: ReadonlyMap<string, RunGraph> | undefined;
@@ -3524,7 +3539,7 @@ export async function runClockTick(
     await ws.engine.rehydrateGates(row.runId);
     await drive(row.runId);
   }
-  return { visited: visible.map((r) => r.runId), truncated };
+  return { visited: visible.map((r) => r.runId), pages };
 }
 
 /**
@@ -3562,10 +3577,12 @@ export async function runClockTick(
  *       direction — fewer runs at once, never more — and costs a re-fold. Its docstring names
  *       the set that claim covers and the one it does not.
  *   6 · `providerNotice`'s `down`. Its own docstring says memo and says why. MEMO.
- *   7 · `startRunClock`'s `running`, `failing`, `toldAboutCeiling`. Memos over what to SAY;
- *       losing them costs a repeated line. The exception in this producer was `rot.offset`,
- *       which decided WHICH RUNS RAN and is gone — `run-clock-survives-restart.test.ts` is
- *       the defect it was, and is why this producer is the one already swept.
+ *   7 · `startRunClock`'s `running` and `failing`. Memos over what to SAY; losing them costs a
+ *       repeated line. The exception in this producer was `rot.offset`, which decided WHICH
+ *       RUNS RAN and is gone — `run-clock-survives-restart.test.ts` is the defect it was, and
+ *       is why this producer is the one already swept. `toldAboutCeiling` was a third memo
+ *       here and went with the scan ceiling itself; a cursor traversal reaches every run, so
+ *       there is nothing left for it to have latched.
  *   8 · `startGateClock`'s `running`, `failing`. The same latch, the same cost.
  *   9 · `armForeignGates`'s `armed`, built by `startGateClock`. A memo on `headSeq`. Losing
  *       it makes the plane do MORE work and never less: one re-fold per gated run in view.
@@ -3798,29 +3815,21 @@ export function providerNotice(
 function startRunClock(ws: Workspace, everyMs: number, limit: number, drive?: (runId: RunId) => void): { stop(): void } {
   let running = false;
   let failing = false;
-  // NOTHING IS CARRIED ACROSS TICKS ANY MORE, and that is the point. This closure used to hold
+  // NOTHING IS CARRIED ACROSS TICKS, and that is the point. This closure used to hold
   // `const rot = { offset: 0 }` — process memory that decided which runs got advanced, rebuilt
-  // at every boot, reconstructed by nothing. `toldAboutCeiling` and `failing` below are memos
-  // over what to SAY, not over what to do: losing them costs a repeated line, not a starved run.
-  let toldAboutCeiling = false;
+  // at every boot, reconstructed by nothing. `failing` below is a memo over what to SAY, not
+  // over what to do: losing it costs a repeated line, not a starved run.
+  //
+  // `toldAboutCeiling` used to sit here beside it, latching the one line an operator got when
+  // the scan ceiling hid their oldest runs. It is gone with the ceiling: a traversal reaches
+  // every run, so there is no size at which this process starts quietly skipping work and
+  // nothing left for that line to warn about.
   const tick = (): void => {
     if (running) return;
     running = true;
     void (async () => {
-      // ITS OWN PERIOD AS THE LAP, so one tick advances the window by exactly one window.
-      const t = await runClockTick(ws, limit, Date.now(), RUN_CLOCK_SCAN_CEILING, everyMs, drive);
-      // ONCE, for the reason the outage lines above are once: a deployment big enough to hit
-      // the ceiling hits it every lap, and a line per tick is how an operator learns to stop
-      // reading stderr. It is not an outage — nothing is failing — so it does not use the
-      // `failing` latch, and it is not retracted either: the condition is a size, not a fault.
-      if (t.truncated && !toldAboutCeiling) {
-        toldAboutCeiling = true;
-        process.stderr.write(
-          `! RUN CLOCK SCAN CEILING REACHED (${RUN_CLOCK_SCAN_CEILING} runs) — runs older than that are NOT being\n` +
-            `  advanced by this process. Their journals are intact; they resume when a caller POSTs\n` +
-            `  {"kind":"advance"}, or when their runs are archived out of the window.\n`,
-        );
-      }
+      // ITS OWN PERIOD AS THE LAP, so one tick advances the traversal by exactly one page.
+      await runClockTick(ws, limit, Date.now(), everyMs, drive);
     })().then(
       () => {
         if (failing) {

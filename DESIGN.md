@@ -324,7 +324,7 @@ fails today; an item that cannot fail is a wish and gets cut* — was applied to
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **still fails** — its `THE HOLE THIS DOES NOT CLOSE` pin is green, which is the item failing |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
 | 12 · the fork ledger's two DEBT rows | `node packages/core/src/cli.ts serve --identity-module ./oidc.mjs` and `--channels-module ./smtp.mjs` | **still fails** — both still `E_CONFIG_INVALID: unknown flag` |
-| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **still fails** — 4/4 green *including* the case that pins the two unreachable runs |
+| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **PASSES — 5/5, and the pin is now its opposite. Item 13's first half is DONE** |
 
 **Two of those verdicts are worth stating as a method and not just a result.** Items 10 and 13
 "fail" by way of a test that PASSES: each has a pinned residual whose green is the item's red, and
@@ -567,46 +567,47 @@ day any of this becomes loadable from a config file, a resource ref or the data 
 decides what code a process holding `fs:write` runs, and the seam has to move behind a process
 boundary. Ledger 5 → 3, and the three that remain are bounds with reasons rather than debts.
 
-### 13 · A run past the scan ceiling is reached by no lap
+### 13 · A run past the scan ceiling is reached by no lap — DONE, and the item was two items
 
-`startRunClock` is the only thing that comes back to a run nothing else is driving. It rotates a
-window over `listRuns(limit)`, derived from the clock so a plane that restarts computes the same
-window one that stayed up would — which is what makes the rotation reconstructable rather than a
+`startRunClock` is the only thing that comes back to a run nothing else is driving. It rotated a
+window over `listRuns(limit)`, derived from the clock so a plane that restarts computed the same
+window one that stayed up would — which is what made the rotation reconstructable rather than a
 counter in a closure, the defect that preceded it. Above `RUN_CLOCK_SCAN_CEILING` (10,000) the
-listing is truncated and the rotation cannot reach past it. Driven with an injected ceiling of 10,
-twelve runs, twenty laps:
+listing was truncated and the rotation could not reach past it. Driven with an injected ceiling of
+10, twelve runs, twenty laps:
 
     reached 10 of 12 — missing: [ '01HF7YAT01QJJ2TPQP9P9KK72A', '01HF7YAT02EKAYZM0J8A3KFSR4' ]
     ✖ EVERY RUN IN A JOURNAL LARGER THAN THE SCAN CEILING IS REACHED BY SOME LAP
 
-*Fails today:* that assertion. `runClockTick`'s own docstring names the fix — "THE REAL FIX IS A
-CURSOR — `listRuns(after)`, so a tick can page rather than re-scan — and it belongs in
-`StateStore` with a conformance test behind it. When that lands, this rotation is the thing to
-delete." `run-clock-window.test.ts`'s bounded-scan case pins the residual and goes with it.
+**Closed by the cursor `runClockTick`'s docstring named.** `RunFilter.after` is a keyset cursor on
+`StateStore.listRuns` — exclusive, in the listing's own order, refusing a cursor the same filter
+does not admit — implemented by both backends and pinned by four cases in
+`test/journal/conformance.ts` that run against each. The tick TRAVERSES with it: pages of `limit`
+to the end of the listing, a page index derived from `now`, no cap. `RUN_CLOCK_SCAN_CEILING`,
+`RunClockTick.truncated`, `runClockWindow` and `startRunClock`'s ceiling banner are all gone. The
+case in `run-clock-window.test.ts` that pinned the two unreachable runs is now its opposite —
+same journal, same numbers, both reached — which is what a pinned residual is supposed to do when
+the item lands.
 
-The same cursor answers the second open hole on that axis: two planes over one store now AGREE on
-a window rather than dividing it, which is correct (every write compare-and-swaps on its seq, so
-the loser writes nothing) and wasteful (both pay the fold, and with the widened `due` predicate
-both may pay the model call).
+    node --test packages/core/test/deployment/run-clock-window.test.ts   # 5 pass
+    node --test packages/core/test/journal/store.test.ts                 # 88 pass
 
-**WHY THIS IS LAST, and it is the D.2 answer doing work rather than a shrug.** Tens of runs a day
-against a ceiling of 10,000 is a horizon of a year, the deployment is one plane, and the failure
-is LOUD: `runClockTick` returns `truncated: true` on every tick that hits it, and `serve` writes a
-three-line banner to stderr naming the ceiling and what to do about it. That banner is printed
-ONCE and not per tick — deliberately, and its comment says why ("a line per tick is how an
-operator learns to stop reading stderr") — so "loud" here means loud at boot, not loud forever.
-This is the item on the list most likely to be right to defer again; what it must not be is
-forgotten, which is why it is here with a command rather than in a comment.
+**WHAT THE COST NOW IS, because the ceiling bought something and this gives it back.** A tick
+reads `N` `run_head` rows to measure the listing where it used to read `min(N, 10 000)` and give
+up past that; it holds one page and one run id per page, so its memory does not grow with the
+journal. The expensive half — one `projection` fold per run in view — is unchanged at `limit`.
+Under D.2 that is one `listRuns` of 200 rows per tick, which is strictly less than the ten
+thousand the ceiling asked for.
 
----
+**AND THE ITEM'S SECOND HALF IS NOT CLOSED, which building the first half is what established.**
+This entry, and `TODO.md` §A.15, both said two planes duplicating one window "wants the same
+cursor". They do not. A cursor is a position a caller holds; dividing one listing BETWEEN two
+processes needs a fact that spans runs and outlives both of them, and `journal/store.ts`'s header
+is the standing argument for why there is nowhere in this system to keep one. It is §E.2's
+coordinator and nothing smaller, and it is recorded there rather than behind a seam that cannot
+reach it. The duplication remains correct and wasteful: every write compare-and-swaps on its seq,
+so the loser writes nothing.
 
-## The record — items 1 to 8, all closed
-
-Everything from here to "Deliberately not sequenced" is history, kept verbatim and still numbered
-1–8 because `TODO.md` and the items themselves cite each other by number. It is not a plan and
-nothing in it is outstanding; each item's own text says what it cost and, where the estimate was
-wrong, what it got wrong. Two of them (2 and 5) have had one paragraph corrected since — each
-correction is marked where it sits and says what it replaces.
 
 ### 1 · Oversight correctness — this gates everything below it
 
@@ -675,12 +676,14 @@ was true when written and stale within the week, which is exactly what "state th
 the measurement" is for. The invariant is the lane's, not the count's: everything here is
 restart, scale, or a second machine, and nothing here can be checked in one process.
 
-*Fails today:* nothing on this axis. The two open holes are **now Sequence item 13**, where they
-carry a command that fails: `RUN_CLOCK_SCAN_CEILING`'s residual — a run past the ceiling is
-reached by no lap, and `truncated` is the only reason anyone knows — and two planes AGREEING on a
-window rather than dividing it, which is correct and wasteful. Both want the cursor
-`runClockTick`'s docstring names: `listRuns(after)` in `StateStore`, with a conformance test
-behind it.
+*Fails today:* nothing on this axis. One open hole is left of the two that were **Sequence item
+13**, and building the other is what separated them. `RUN_CLOCK_SCAN_CEILING` is gone —
+`StateStore.listRuns` grew the cursor and the tick traverses instead of indexing into a capped
+array, so no run is out of reach at any N. Two planes AGREEING on a window rather than dividing
+it is NOT closed by that cursor and never could have been: dividing one listing between two
+processes needs a fact that spans runs, and `journal/store.ts`'s header is the reason there is
+nowhere to keep one. It is §E.2's coordinator, and it is filed there now rather than behind a
+seam that cannot reach it.
 
 
 ### 3 · Finish realm determinism (D3)
