@@ -150,6 +150,19 @@ export interface EventPayloads {
      * that is the `run_head` owner column, which is NOT built yet.
      */
     readonly submittedBy?: SubmittedBy;
+    /**
+     * Input channels whose value is NOT in `inputs` — it is in the payload store under this
+     * digest. Same shape, same rule and same reason as `task.committed.external`: the fact is
+     * DECLARED by the writer, never sniffed out of a value's shape, because a caller who could
+     * name a payload by writing `{$payload: …}` into `inputs` could name one it never produced.
+     *
+     * THIS EVENT IS THE ONE A REPLAY RE-SUBMITS FROM, which is the obligation the other two
+     * externalising events do not carry. `run/replay.ts` seeds its shadow run from `inputs`,
+     * and `loom evolve --live` re-runs a candidate on them; both must resolve these back into
+     * values before submitting, because the shadow and the candidate are DIFFERENT runIds and
+     * a `PayloadRef` is scoped to the run that stored it.
+     */
+    readonly external?: Readonly<Record<string, PayloadRef>>;
   };
   "run.compiled": {
     readonly graphHash: string;
