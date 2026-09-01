@@ -173,7 +173,9 @@ test("A SPEC THAT MOVED IS STILL REPORTED AS THE GRAPH HASH", async () => {
  *
  * THE FIELD IS TRI-STATE, AND THE THIRD TEST BELOW IS WHY. `""` is a frame that arrived and named
  * nobody, which refuses; ABSENT is no terminal frame at all, which the live path allows — and
- * absent is also what every journal written before this field says, so collapsing the two would
+ * absent is what journals written before `e6d00f2` say — not every journal written before the
+ * field, because D.7.6's refusal existed in the window `e6d00f2..633e265^` while nothing wrote
+ * it, and a journal from that window replays a refusal as a SUCCESS. Collapsing the two would
  * make an old recording replay as a refusal of a run that succeeded.
  */
 

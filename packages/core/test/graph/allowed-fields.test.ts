@@ -479,6 +479,7 @@ test("EVERY FIELD THESE FOUR INTERFACES DECLARE IS ALLOWED — the guard must no
   const IFACE: Readonly<Record<keyof typeof NESTED_FIELDS, readonly [string, string]>> = {
     approval: ["ApprovalSpec", SPEC_SRC],
     sla: ["GateSlaSpec", SPEC_SRC],
+    slaReminder: ["GateReminderSpec", SPEC_SRC],
     delivery: ["DeliverySpec", DELIVERY_SRC],
     deliveryEscalation: ["EscalationTier", DELIVERY_SRC],
     batching: ["BatchingSpec", SPEC_SRC],

@@ -2491,7 +2491,7 @@ function checkSla(n: NodeSpec, d: Diagnostic[]): void {
     );
   }
 
-  checkReminders(n, sla, bad);
+  checkReminders(n, sla, bad, at, d);
 }
 
 /**
@@ -2512,7 +2512,13 @@ function checkSla(n: NodeSpec, d: Diagnostic[]): void {
  * expired (nobody left to nudge), so it is a schedule that outlives what it was written
  * for.
  */
-function checkReminders(n: NodeSpec, sla: GateSlaSpecLike, bad: (what: string, fix: string) => void): void {
+function checkReminders(
+  n: NodeSpec,
+  sla: GateSlaSpecLike,
+  bad: (what: string, fix: string) => void,
+  at: Diagnostic["at"],
+  d: Diagnostic[],
+): void {
   const declared: unknown = sla.reminders;
   if (declared === undefined) return;
   if (!Array.isArray(declared)) {
@@ -2530,7 +2536,14 @@ function checkReminders(n: NodeSpec, sla: GateSlaSpecLike, bad: (what: string, f
     return;
   }
   let previous = 0;
-  for (const entry of declared as readonly unknown[]) {
+  for (const [i, entry] of (declared as readonly unknown[]).entries()) {
+    // THE SCOPE THAT WAS MISSING. Every other `humanGate` block refuses an unknown key; this one
+    // did not, so `{afterMs: 1000, evrey: true}` compiled clean while `sla: {..., nonsenseKey}`
+    // one level up was refused. Driven with that control, so the silence was the scope rather
+    // than a short-circuit.
+    if (isPlainRecord(entry)) {
+      unknownKeys(entry, NESTED_FIELDS.slaReminder, `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
+    }
     const afterMs: unknown = isPlainRecord(entry) ? entry["afterMs"] : undefined;
     if (!isPositiveMs(afterMs)) {
       bad(

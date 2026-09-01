@@ -4584,12 +4584,20 @@ export class Engine {
       // alone, so the record has to carry it: `RecordedModelTurn.provider`.
       //
       //   `undefined`  no terminal `done` frame at all. Nothing named anything, so there is
-      //                nothing to refuse -- and it is also what a journal written before this
-      //                field says, which reads correctly rather than by luck: the run such a
+      //                nothing to refuse -- and it is also what a journal written before
+      //                `e6d00f2` says, which reads correctly rather than by luck: the run such a
       //                journal records did not refuse here either, so neither does its replay.
       //                Replay reproduces what happened; it does not re-judge old runs under new
       //                rules. (`""` and `undefined` are therefore NOT interchangeable here, and
       //                that is the whole reason the empty string is written rather than omitted.)
+      //                THE SET IS THE WINDOW, NOT "BEFORE THE FIELD", and the difference is one
+      //                real window of journals: between `e6d00f2` and `633e265^` this refusal
+      //                EXISTED and nothing wrote the field, so a journal from that range replays
+      //                a provider refusal as a SUCCESS with the refused string on the channel.
+      //                Driven, base engine recording and fixed engine replaying: `BASE LIVE
+      //                failed E_PROVIDER_BAD_REQUEST` -> `FIXED REPLAY succeeded`. Not a code
+      //                defect -- the value genuinely is not in those journals and no fix can
+      //                invent it -- so naming the window IS the remedy.
       //   `""`         a frame arrived and named nobody. THAT is the refusal.
       //   a name       the leaf that served it -- read off the frame rather than off the adapter
       //                this loop is holding, because that adapter is a `RoutingAdapter` in every
@@ -4982,14 +4990,23 @@ export class Engine {
       // exists to condemn — a faithfully recorded refusal replayed `match: false` with
       // `state.reduced` carrying the exact string the live run had refused.
       if (framedProvider === "") {
-        const who = adapter === undefined ? "the recorded turn" : `model adapter "${adapter.provider}"`;
+        // PATH-INDEPENDENT WORDING, deliberately. This message used to open with
+        // `model adapter "<name>"` live and `the recorded turn` in replay, because `adapter` is
+        // undefined on the replay path — so a faithfully recorded refusal replayed with a
+        // DIFFERENT message and nothing said so: `compare()` has no message frame, so `match`
+        // stayed `true`. The adapter's name is still on `details.adapter` for anyone who wants
+        // it, which is where a value a reader might branch on belongs anyway.
+        //
+        // STILL OPEN, and this fix does not reach it: `run/replay.ts` grades statuses, writes
+        // and effects, and grades no MESSAGE. Any other refusal whose text depends on the live
+        // path diverges silently the same way. That is the general fix and it is larger.
         return {
           status: "failed",
           writes: {},
           usage,
           error: err.validation(
             CODES.E_PROVIDER_BAD_REQUEST,
-            `node "${w.node.id}" turn ${String(turn)}: ${who} ended the turn ` +
+            `node "${w.node.id}" turn ${String(turn)}: the turn ended ` +
               `without naming the provider that served it — the \`done\` frame's required \`provider\` field was missing ` +
               `or empty. The journal is the only record of which provider answered, and a wrapper's own name is not that ` +
               `record. Refusing the turn rather than attributing it to the wrapper.`,
@@ -7396,8 +7413,8 @@ interface RecordedModelTurn {
    *
    * OPTIONAL, AND THE THREE STATES ARE NOT TWO. A name is the leaf that served the turn; `""` is
    * a frame that arrived and named nobody, which `#runAgent` refuses; ABSENT is "no terminal
-   * frame at all", which it does not — and absent is also what every journal written before this
-   * field says, so an old recording replays as the run it actually was rather than being
+   * frame at all", which it does not — and absent is what journals written before `e6d00f2` — NOT every journal written before this field. D.7.6's refusal existed in the window `e6d00f2..633e265^` while nothing wrote the field, so a journal from that window replays a provider refusal as a SUCCESS, with the refused string on the channel. No fix can invent a value the journal does not hold; naming the window is the whole remedy.
+   * Outside that window an old recording replays as the run it actually was rather than being
    * re-judged under a rule its binary never had. `model.called.provider` beside it is not a
    * substitute: that field falls back to the wrapper's own name, so it cannot tell a turn nobody
    * claimed from one the router served.

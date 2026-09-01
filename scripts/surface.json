@@ -139,6 +139,7 @@
   "GateDoors",
   "GateId",
   "GateRecord",
+  "GateReminderSpec",
   "GateRequest",
   "GateSlaSpec",
   "GateSummary",

@@ -388,6 +388,22 @@ export interface ApprovalSpec {
  *     `default_action` either — the type refuses it, and `checkSla` refuses it again for a
  *     graph that arrived as JSON.
  */
+/**
+ * One nudge before a gate's deadline.
+ *
+ * NAMED RATHER THAN INLINE, and the naming is the fix. It was
+ * `readonly { readonly afterMs: number }[]`, and an anonymous type cannot be read by
+ * `test/graph/allowed-fields.test.ts`, which checks every `NESTED_FIELDS` row against the
+ * interface it claims to cover. So this was the one `humanGate` scope with no unknown-key check
+ * while its six siblings had one: `{afterMs: 1000, evrey: true}` compiled clean, because the
+ * sweep reads `afterMs` and ignores the rest. Giving the shape a name put it back inside the
+ * drift guard, which is what makes the new row checkable rather than merely present.
+ */
+export interface GateReminderSpec {
+  /** Milliseconds from the journaled raise. Strictly increasing, and inside `respondWithinMs`. */
+  readonly afterMs: number;
+}
+
 export interface GateSlaSpec {
   /** How long the first tier has, in ms, measured from the journaled raise. */
   readonly respondWithinMs: number;
@@ -422,7 +438,7 @@ export interface GateSlaSpec {
    * written for. `checkSla` refuses a list that breaks any of those, and
    * `usableReminders` in `run/gates.ts` refuses it again for a broker driven directly.
    */
-  readonly reminders?: readonly { readonly afterMs: number }[];
+  readonly reminders?: readonly GateReminderSpec[];
 }
 
 /**
@@ -937,6 +953,7 @@ export const NESTED_FIELDS: Readonly<
     | "metadata"
     | "approval"
     | "sla"
+    | "slaReminder"
     | "delivery"
     | "deliveryEscalation"
     | "batching"
@@ -963,6 +980,13 @@ export const NESTED_FIELDS: Readonly<
   // `String.prototype.includes` lets subject `"u"` and subject `"alice"` each approve.
   approval: ["approvers", "separationOfDuties"],
   sla: ["respondWithinMs", "onTimeout", "reminders"],
+  // EACH ENTRY OF `sla.reminders`, and it is here rather than inline in `validate.ts` for the
+  // reason every other row is: `allowed-fields.test.ts` reads this table against the interfaces
+  // and fails when they drift. `GateSlaSpec.reminders` is `readonly {afterMs: number}[]` — an
+  // anonymous inline type, which is why this row could not simply be derived, and why the scope
+  // sat unguarded while its six siblings were closed. A typo'd key here is silently dropped: the
+  // sweep reads `afterMs` and nothing else, so `{afterMs: 1000, evrey: true}` compiles clean.
+  slaReminder: ["afterMs"],
   // `DeliverySpec` and `EscalationTier` are `run/delivery.ts`'s, not this file's — the same
   // arrangement `channel` and `contextProjection` already have with `state/channels.ts`, and
   // `allowed-fields.test.ts` reads that file too rather than restating them here.

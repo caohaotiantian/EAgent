@@ -289,9 +289,14 @@ export class ReplayEffects {
    *
    * `bounded` is `isRealmBounded(body)` and nothing else — a fact about where the body came
    * from, decided by an unforgeable brand `resources/realm.ts` stamps and no caller can name.
-   * A `false` is what an embedder's hand-registered host closure gives, and what a realm built
-   * over a non-empty `RealmOptions.globals` gives, because those two are the cases the runtime
-   * genuinely cannot decide.
+   * THE PROPERTY, NOT A LIST: `false` means *this module did not make the realm this body came
+   * from, or could not finish vouching for it*. Stated as a property because the list version
+   * went stale — it named a hand-registered host closure and a non-empty `RealmOptions.globals`
+   * "because those two are the cases", and by then `compileRealm`'s checks had been widened to
+   * refuse the brand for a body that un-shadows `Date` or `Intl` at definition time, one that
+   * swaps `Math`, a `Date` installed as an accessor, and a realm whose `Math.random` was never
+   * replaced. Six members where the sentence claimed two. `resources/realm.ts` holds the current
+   * set beside the checks that decide it, which is the only place it can be right.
    *
    * CALLED AT FETCH TIME, BEFORE INVOCATION, so a body that throws, is terminated at its
    * deadline, or is aborted still counts. The count can therefore be too HIGH and never too
@@ -403,9 +408,10 @@ export interface ReplayReport {
   readonly unservedEffects: readonly string[];
   /**
    * Tasks whose `function` or `evaluator{assertion}` body this replay RE-EXECUTED without being
-   * able to vouch for it — a hand-registered host closure, or a realm built over embedder
-   * globals. See `ReplayEffects.bodyEntered`, which decides it, and `liveBodies`, which explains
-   * why the answer is about provenance rather than about purity.
+   * able to vouch for it — meaning `resources/realm.ts` did not make that realm, or could not
+   * finish vouching for it. Stated as the property rather than as members: this sentence used to
+   * name two cases and the refusal set had grown to six. `ReplayEffects.bodyEntered` decides it
+   * and carries the argument for why the answer is about provenance rather than about purity.
    *
    * Surfaced as the list and not folded into the boolean, because "not hermetic" without the
    * taskIds sends its reader to the wrong file — the same argument `unservedEffects` makes one
