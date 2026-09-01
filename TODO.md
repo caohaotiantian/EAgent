@@ -944,10 +944,28 @@ is a better view of nothing.
   are journaled for every task and `spans.ts` attaches `task.leased` as a span event, so the p99
   is a fold over what is already emitted. What is missing is scheduler-level behaviour.
 
-- **C.4 · There is no OTLP exporter in the repo and no HTTP trace endpoint**, so
-  `SpanLink.traceId` has no consumer outside the splice. The subgraph link is built and
-  `loom trace` follows it; nothing off this machine can. **Closes when** an exporter exists — and
-  it belongs outside the core, which takes no runtime dependencies.
+- ~~**C.4 · There is no OTLP exporter in the repo and no HTTP trace endpoint**, so
+  `SpanLink.traceId` has no consumer outside the splice.~~ **CLOSED — both halves exist.**
+  `telemetry/otlp.ts` is `otlpTraceRequest`, a pure `Span[] → ExportTraceServiceRequest`
+  encoder for **OTLP/HTTP with the JSON encoding** (the stable `v1` proto shape; its header
+  names the five encoding rules the payload depends on, so a reader can check it against the
+  spec), plus `OtlpHttpExporter`, which POSTs one to `{endpoint}/v1/traces`.
+  `GET /runs/:id/trace` on the control plane is the pull half, with `?format=otlp` answering
+  the collector's own bytes from that same encoder.
+  **The row's "it belongs outside the core" was answered rather than obeyed:** there is one
+  package, and the reason for keeping an exporter out — dependencies — does not apply, because
+  OTLP/JSON over the platform `fetch` takes none. `check-zero-dep.mjs` is green at 62 files.
+  `SpanLink.traceId` now has its consumer: a subgraph link becomes an OTLP
+  `Link{traceId, spanId}`, so the join `spliceSubgraph` does in-process is done by the
+  COLLECTOR instead, and the route deliberately does not splice for that reason.
+  Three things the tests pin rather than assume — the encoder is downstream of `spansFrom`'s
+  redactor and never reads a `JournalEvent` (a credential in the journal is absent from the POST
+  body); the ids need no conversion, since `spans.ts` already mints 32- and 16-char lowercase
+  hex, which is exactly OTLP's two widths; and `export` never throws, whatever the collector or
+  the options bag does. Driven: `test/telemetry/otlp.test.ts` 16/16,
+  `test/server/trace-endpoint.test.ts` 5/5.
+  **Left undone and named:** nothing calls the exporter from `cli.ts` yet — `loom trace` still
+  only prints — so a deployment wires it as a library embedder today.
 
 - ~~**C.5 · The span taxonomy was NOT grown for subgraphs: a subgraph renders as `loom.tool`.**~~
   **CLOSED by `aaa4a9a`, and NOT by adding a name — §D.2 was answered "no ninth name".** The
