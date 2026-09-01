@@ -236,6 +236,7 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
   return {
     runId: "run_1" as RunId,
     graphHash: "h",
+    authoredGraphHash: "h",
     cohort: { workflow: "w", graphHash: "h", tenantTier: "default", inputBucket: "b" },
     steps: [],
     outcome: { assertions: [], humanDecisions: [], rubrics: [], selfReported: false, runStatus: "succeeded" },
@@ -257,6 +258,11 @@ const cohort = (over: Partial<CohortStats> = {}): CohortStats => ({
   p50Wall: 1000,
   p50Gates: 1,
   p90Score: 0.5,
+  // A HAND-BUILT COHORT IS RANKABLE BY DEFAULT. `outcomeSpread` 0 makes `isGolden` condition 2
+  // refuse outright (a saturated ladder ranks price), and every fixture below that is about some
+  // OTHER condition would then be testing this one instead. The tests that mean to exercise the
+  // refusal set it to 0 by name.
+  outcomeSpread: 0.5,
   weightsDigest: digest(DEFAULT_WEIGHTS),
   ...over,
 });

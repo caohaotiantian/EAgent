@@ -150,6 +150,23 @@ export interface CohortKey {
 export interface Trajectory {
   readonly runId: RunId;
   readonly graphHash: string;
+  /**
+   * THE HASH THE RUN WAS SUBMITTED UNDER, which is not always `graphHash` above.
+   *
+   * `graphHash` folds `graph.mutated.newHash` when there is one, because a mutated run is a
+   * different strategy from the graph it started as and the cohort key has to say so. This one
+   * does not move: it is the hash of the AUTHORED graph, and it is the coordinate a spec is
+   * looked up by — `cohortPeers` reads `run.submitted.graphHash` and nothing else.
+   *
+   * The two coming apart is why this field exists rather than being derivable. A run that
+   * mutated joins the successor's cohort while its spec lives under its own hash, so a caller
+   * that could not resolve the spec has to name THIS hash to be actionable: telling an operator
+   * to publish `graphHash` names a graph that may already be published, and in the one state
+   * that reaches `loom score`'s no-graph note it always is — it is the judged run's own.
+   * Measured before this field existed: the note named `sha256:71eb5ad4…`, the successor, and
+   * the graph the operator actually needed was the parent.
+   */
+  readonly authoredGraphHash: string;
   readonly cohort: CohortKey;
   readonly steps: readonly TrajectoryStep[];
   readonly outcome: OutcomeSignals;
@@ -354,6 +371,9 @@ export function foldTrajectory(
   let runId = "" as RunId;
   let workflow = "";
   let graphHash = "";
+  // Never overwritten by `graph.mutated`. See `Trajectory.authoredGraphHash` for why the two
+  // have to be told apart: one is the cohort coordinate, the other is the lookup key.
+  let authoredGraphHash = "";
   let inputs: Readonly<Record<string, unknown>> = {};
   let runStatus: OutcomeSignals["runStatus"] = "incomplete";
   let violations = 0;
@@ -461,6 +481,7 @@ export function foldTrajectory(
     if (isEvent(e, "run.submitted")) {
       workflow = e.payload.workflow;
       graphHash = e.payload.graphHash;
+      authoredGraphHash = e.payload.graphHash;
       inputs = e.payload.inputs;
       continue;
     }
@@ -651,6 +672,7 @@ export function foldTrajectory(
   return {
     runId,
     graphHash,
+    authoredGraphHash,
     cohort: {
       workflow,
       graphHash,

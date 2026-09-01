@@ -100,11 +100,25 @@ export interface Unmeasured {
  * positive mean was carried by one outlier.
  *
  * WHAT THE t BOUND ASSUMES, said out loud because it is the weakest link at this sample size:
- * that the differences are roughly symmetric. Scores are bounded on [0, 1] so differences are
+ * that the differences are roughly normal. Scores are bounded on [0, 1] so differences are
  * bounded on [-1, 1], and a candidate that is much better on hard inputs and level on easy ones
- * produces a skewed set. At n = 6 there is no way to check that from the data. The honest
- * summary is that this rule is a real bar — far stronger than a point estimate — and not a
- * substitute for a corpus large enough to run McNemar's.
+ * produces a skewed set. At n = 6 there is no central limit theorem to lean on and no way to
+ * check the shape from the data.
+ *
+ * SO THE RULE DOES NOT REST ON IT. `wilcoxonLower95` is the same one-sided 95 % bound with the
+ * shape assumption removed — its null distribution is a subset-sum count over the ranks, exact
+ * for any sign-symmetric differences — and `L1-paired-improvement` requires BOTH bounds to clear
+ * zero. The two really are different rules and each binds where the other does not: on
+ * `[0.01, 0.01, 0.01, 0.01, 0.01, 0.9]` the t bound reads −0.1406 and refuses while the Wilcoxon
+ * reads 0.0100, and on `[0.01, 0.02, 0.2, 0.2, 0.2, −0.05]` the t bound reads 0.0016 and passes
+ * while the Wilcoxon reads −0.0150 and refuses. Requiring both only ever refuses more, which is
+ * the direction a promotion gate may move on its own.
+ *
+ * WHAT IS STILL NOT REMOVED, because the tempting overclaim sits right here: the signed-rank
+ * null IS sign symmetry, so this buys freedom from NORMALITY and not from symmetry. What A.26
+ * asked for and this does not have is the second strengthening — repeated runs per input, so
+ * within-input model variance separates from between-graph difference. Neither bound can see
+ * that, and no statistic computed from one run per input can.
  */
 export interface PairedDifference {
   readonly n: number;
@@ -118,6 +132,20 @@ export interface PairedDifference {
    * cannot pass `> 0`, so the undecidable case fails closed rather than promoting on one run.
    */
   readonly lower95: number;
+  /**
+   * THE SAME BOUND WITHOUT THE NORMALITY ASSUMPTION — Hodges–Lehmann, by inverting the Wilcoxon
+   * signed-rank test. See `wilcoxonLowerBound` for the derivation; it is derived here rather
+   * than tabulated, so a reader can check it.
+   *
+   * It is a bound on the PSEUDOMEDIAN rather than on the mean, which is a different parameter
+   * and is why this is reported beside `lower95` and not instead of it. `L1-paired-improvement`
+   * requires BOTH to clear 0: a candidate whose evidence survives only under an assumption
+   * about the shape of six numbers is a candidate whose evidence is that assumption.
+   *
+   * 0 when no bound exists — n < 2, or n ≤ 4 where the exact null cannot reach α at all. Same
+   * fail-closed convention as `lower95`: 0 cannot pass `> 0`.
+   */
+  readonly wilcoxonLower95: number;
   readonly wins: number;
   readonly losses: number;
   readonly ties: number;
@@ -180,15 +208,127 @@ function signTestP(wins: number, losses: number): number {
   return round6(Math.min(1, sum));
 }
 
+/**
+ * The one-sided level this file decides at, in one place. `T95` is tabulated at it too.
+ */
+const ALPHA = 0.05;
+
+/**
+ * Above this many pairs the signed-rank critical value is approximated rather than enumerated.
+ *
+ * The exact computation is `O(n · n(n+1)/2)`, so it is 4M steps at 200 and 500M at 1000 — a gate
+ * that takes a minute to decide is a gate nobody runs. 250 costs about 8M steps. Every live pair
+ * is a real model run against a real provider, so a cohort of 250 is already far past anything
+ * this mode has met; the approximation exists so the number is defined rather than because it is
+ * expected to be reached.
+ */
+const EXACT_SIGNED_RANK_MAX = 250;
+
+/**
+ * The smallest `c` with `P(W⁺ ≥ c) ≤ 0.05` under the signed-rank null, or `undefined` when no
+ * such `c` is attainable.
+ *
+ * DERIVED RATHER THAN TABULATED, which is the whole reason this function exists and the reason
+ * it can be checked. Under the null the differences are symmetric about 0, so each one's SIGN is
+ * ±1 with probability ½ independently of its magnitude. `W⁺ = Σᵢ Zᵢ·i` with `Zᵢ` iid Bernoulli(½)
+ * over the ranks `1…n` — a sum of independent terms whose distribution is therefore the
+ * convolution of `n` two-point distributions, and `counts[s]` below is exactly that convolution,
+ * computed as the subset-sum count over `{1…n}`. There is no incomplete beta and no table.
+ *
+ * `counts[s]` is the NUMBER OF SIGN ASSIGNMENTS giving `W⁺ = s`, out of `2ⁿ`. Float64 holds `2ⁿ`
+ * exactly up to n = 1024 and holds each count well inside that, since every count is at most the
+ * total.
+ *
+ * Worked at n = 6, which is `MIN_PAIRED_RUNS` and the size this mode was built for: the ranks are
+ * 1…6, `M = 21`, and `2⁶ = 64` assignments. `P(W⁺ ≥ 21) = 1/64 = 0.0156`, `≥ 20` adds the one
+ * assignment summing to 20 for `2/64 = 0.031`, `≥ 19` adds one more for `3/64 = 0.047`, and
+ * `≥ 18` adds the two summing to 18 for `5/64 = 0.078`, which is over. So `c = 19`.
+ *
+ * ABOVE `EXACT_SIGNED_RANK_MAX` the normal approximation, whose two moments are derivable from
+ * the same statement: `E[W⁺] = ½Σi = n(n+1)/4` and `Var[W⁺] = ¼Σi² = n(n+1)(2n+1)/24`. The
+ * `+ 0.5` is the continuity correction and the CEILING is the strict direction — a larger `c`
+ * takes a lower Walsh average as the bound, which narrows the interval and can only refuse more.
+ */
+function signedRankCritical(n: number): number | undefined {
+  const M = (n * (n + 1)) / 2;
+  if (n < 1) return undefined;
+  if (n > EXACT_SIGNED_RANK_MAX) {
+    const mu = (n * (n + 1)) / 4;
+    const sigma = Math.sqrt((n * (n + 1) * (2 * n + 1)) / 24);
+    const c = Math.ceil(mu + 1.6449 * sigma + 0.5);
+    return c > M ? undefined : c;
+  }
+  const counts = new Float64Array(M + 1);
+  counts[0] = 1;
+  for (let r = 1; r <= n; r++) {
+    for (let s = M; s >= r; s--) counts[s] = counts[s]! + counts[s - r]!;
+  }
+  const total = Math.pow(2, n);
+  let tail = 0;
+  for (let c = M; c >= 0; c--) {
+    tail += counts[c]!;
+    // The first c whose tail spills over α is one too small, so the answer is the one above it.
+    if (tail / total > ALPHA) return c + 1 > M ? undefined : c + 1;
+  }
+  return 0;
+}
+
+/**
+ * A ONE-SIDED 95 % DISTRIBUTION-FREE LOWER BOUND on the pseudomedian of the differences —
+ * the Hodges–Lehmann bound obtained by inverting the Wilcoxon signed-rank test.
+ *
+ * WHAT IT BUYS OVER `lower95`, stated narrowly because the tempting overclaim is right next to
+ * it. The t bound needs the differences to be roughly NORMAL — at n = 6 there is no central
+ * limit theorem to lean on, so that is an assumption about shape and nothing more. This bound
+ * needs no shape at all: its null distribution is a subset-sum count over the ranks, valid for
+ * any symmetric distribution, discrete or continuous. **It does NOT remove the symmetry
+ * assumption** — the signed-rank null IS sign symmetry — which is the honest reading and is why
+ * the docstring on `PairedDifference` keeps saying so. What it removes is normality, and it uses
+ * the MAGNITUDES, which is what separates it from the sign test.
+ *
+ * THE INVERSION, derived. For any candidate centre θ, `W⁺` computed on `dᵢ − θ` equals the number
+ * of Walsh averages `(dᵢ + dⱼ)/2, i ≤ j` that exceed θ — the standard identity, and it holds
+ * because `(dᵢ + dⱼ)/2 > θ` iff `(dᵢ − θ) + (dⱼ − θ) > 0`, which is exactly the pairwise
+ * comparison the rank sum accumulates. The test rejects `θ` from below when that count reaches
+ * `c`, so the θ it does NOT reject are those with fewer than `c` Walsh averages above them, and
+ * the smallest such θ is the `(M − c + 1)`-th smallest Walsh average. That is the bound.
+ *
+ * At n = 6: `M = 21`, `c = 19`, so the bound is the 3rd smallest of the 21 Walsh averages — it
+ * is positive exactly when at most two of them are ≤ 0. At n = 4 no `c ≤ M` reaches α at all
+ * (`1/16 = 0.0625`), so no bound exists, which is the same wall `MIN_PAIRED_RUNS` was argued
+ * from — and 0 is returned, which cannot pass `> 0`, so the undecidable case fails closed
+ * exactly as `lower95` does at n < 2.
+ *
+ * ZEROS ARE KEPT HERE, unlike in the sign test. A zero difference is only a zero relative to
+ * θ = 0; for any other candidate centre it is an observation like the others, and the inversion
+ * ranges over all centres. Dropping them would be answering a different question at every θ.
+ */
+export function wilcoxonLowerBound(diffs: readonly number[]): number {
+  const n = diffs.length;
+  if (n < 2) return 0;
+  const c = signedRankCritical(n);
+  const M = (n * (n + 1)) / 2;
+  if (c === undefined || c > M || c < 1) return 0;
+  const walsh: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i; j < n; j++) walsh.push((diffs[i]! + diffs[j]!) / 2);
+  }
+  walsh.sort((a, b) => a - b);
+  // `W_(M − c + 1)`, one-indexed, which is index `M − c` zero-indexed.
+  return round6(walsh[M - c]!);
+}
+
 export function pairedDifference(diffs: readonly number[]): PairedDifference {
   const n = diffs.length;
   const wins = diffs.filter((d) => d > 0).length;
   const losses = diffs.filter((d) => d < 0).length;
   const ties = n - wins - losses;
-  if (n === 0) return { n: 0, mean: 0, sd: 0, lower95: 0, wins: 0, losses: 0, ties: 0, signTestP: 1 };
+  if (n === 0) {
+    return { n: 0, mean: 0, sd: 0, lower95: 0, wilcoxonLower95: 0, wins: 0, losses: 0, ties: 0, signTestP: 1 };
+  }
   const mean = diffs.reduce((a, b) => a + b, 0) / n;
   if (n < 2) {
-    return { n, mean: round6(mean), sd: 0, lower95: 0, wins, losses, ties, signTestP: signTestP(wins, losses) };
+    return { n, mean: round6(mean), sd: 0, lower95: 0, wilcoxonLower95: 0, wins, losses, ties, signTestP: signTestP(wins, losses) };
   }
   const sd = Math.sqrt(diffs.reduce((a, d) => a + (d - mean) ** 2, 0) / (n - 1));
   // sd === 0 is not a hole: it means every paired difference was identical, and with n ≥ 2 the
@@ -200,6 +340,7 @@ export function pairedDifference(diffs: readonly number[]): PairedDifference {
     mean: round6(mean),
     sd: round6(sd),
     lower95: round6(lower95),
+    wilcoxonLower95: wilcoxonLowerBound(diffs),
     wins,
     losses,
     ties,
@@ -220,6 +361,78 @@ export function pairedDifference(diffs: readonly number[]): PairedDifference {
  * verdict says so by carrying `n` and `signTestP` into the journal.
  */
 export const MIN_PAIRED_RUNS = 6;
+
+/**
+ * The per-pair cost comparison, and the answer to "does the median gate?" — it does.
+ *
+ * D10.d asks for a ratio of MEDIANS. The replayed gate divides TOTALS and its own docstring says
+ * so, for a reason that is about expressibility rather than preference: `EvalReport` carries no
+ * median, so the stricter reading is not merely unimplemented there, it cannot be written down.
+ * **Pairing removes that reason.** Every input is measured on both graphs, so the per-pair ratio
+ * exists, and with it the statistic D10.d actually named. This mode computed it, journaled it,
+ * and gated on the totals anyway — reported, not gated — and the argument for that was one
+ * sentence: a pair whose baseline cost $0 makes the ratio undefined, and "a check that sometimes
+ * has no answer is worse than one clear rule".
+ *
+ * That objection is answered by making the rule TOTAL rather than by declining to take it:
+ *
+ * | pair | ratio | why |
+ * |---|---|---|
+ * | `baseline > 0` | `candidate / baseline` | the ordinary case |
+ * | `baseline == 0`, `candidate == 0` | 1 | neither side spent; cost did not increase |
+ * | `baseline == 0`, `candidate > 0` | UNBOUNDED | a free input became a paid one, and no finite ceiling contains that |
+ *
+ * The third row is the one that used to be "undefined", and calling it unbounded is not a
+ * convention — it is the limit of `candidate / baseline` as the baseline goes to zero with the
+ * candidate held positive. Making it a value rather than a hole is what lets the check always
+ * have an answer, and it is the FAIL-CLOSED direction: the previous code answered that case `1`,
+ * the passing value, until this lane's reviewer drove six pairs at `$0` baseline and `$100`
+ * candidate through it and watched them promote at "cost ratio 1.00×".
+ *
+ * A median never has to do arithmetic on an unbounded value — it is an order statistic, so an
+ * unbounded pair sorts last and participates by position. The check fails only when the median
+ * ITSELF is unbounded, which takes half the pairs having gone from free to paid.
+ *
+ * WHY THE MEDIAN IS THE BETTER GATE, and not merely the one the roadmap named. A ratio of totals
+ * is dominated by the most expensive input on either side, so it fails in both directions: one
+ * expensive pair hides behind a cheap one, and one expensive pair sinks a candidate that is
+ * cheaper on five of six inputs. The median asks "did the typical input get dearer", which is the
+ * question a cost ceiling is for. The total is still REPORTED in the check's detail — the two
+ * numbers disagreeing is a fact a reader should see — so this reverses which one is the gate and
+ * loses nothing off the page.
+ *
+ * `medianRatio` is `null` when the median is unbounded and when there are no pairs at all. Those
+ * are different facts and `n`/`unbounded` separate them; `null` rather than `Infinity` because a
+ * verdict is journaled and canonical form has no infinity to write.
+ */
+export interface PairedCost {
+  readonly n: number;
+  /** Pairs whose baseline spent nothing while the candidate spent something. */
+  readonly unbounded: number;
+  /** The median per-pair ratio; `null` when that median is unbounded, or when `n` is 0. */
+  readonly medianRatio: number | null;
+  readonly baselineTotalUsd: number;
+  readonly candidateTotalUsd: number;
+}
+
+export function pairedCostRatio(pairs: readonly LivePair[]): PairedCost {
+  const baselineTotalUsd = pairs.reduce((a, p) => a + p.baselineCostUsd, 0);
+  const candidateTotalUsd = pairs.reduce((a, p) => a + p.candidateCostUsd, 0);
+  // `Number.POSITIVE_INFINITY` sorts last under `a - b`, which is the whole use of it here: the
+  // value is picked by POSITION and never added, divided or rounded, so it never reaches a
+  // journal or a `toFixed`.
+  const ratios = pairs
+    .map((p) => (p.baselineCostUsd > 0 ? p.candidateCostUsd / p.baselineCostUsd : p.candidateCostUsd > 0 ? Number.POSITIVE_INFINITY : 1))
+    .sort((a, b) => a - b);
+  const median = ratios.length === 0 ? undefined : ratios[Math.floor((ratios.length - 1) / 2)]!;
+  return {
+    n: pairs.length,
+    unbounded: pairs.filter((p) => p.baselineCostUsd <= 0 && p.candidateCostUsd > 0).length,
+    medianRatio: median === undefined || !Number.isFinite(median) ? null : round6(median),
+    baselineTotalUsd: round6(baselineTotalUsd),
+    candidateTotalUsd: round6(candidateTotalUsd),
+  };
+}
 
 /**
  * One promotion criterion. `ran` is the field the replayed gate's `PromotionVerdict` does not
@@ -245,7 +458,11 @@ export interface LivePromotionVerdict {
 }
 
 export interface LiveCriteria {
-  /** Candidate total cost must be ≤ this multiple of baseline total. Default 1.1, as `3-cost`. */
+  /**
+   * The MEDIAN pair's cost ratio must be ≤ this. Default 1.1, the same number `3-cost` uses —
+   * but a different statistic from the replayed gate's, which divides totals because
+   * `EvalReport` has no median to divide. See `pairedCostRatio`.
+   */
   readonly maxCostRatio?: number;
   /** Prompt byte growth ceiling, unless the paired mean gains `bloatOffset`. Default 0.15. */
   readonly maxPromptGrowth?: number;
@@ -274,9 +491,19 @@ export interface LivePromotionInput {
  * Nine criteria. Eight run; one cannot, and says so.
  *
  * The ids are chosen so a reader can tell at a glance which rules are shared with the replayed
- * gate and which are new. `3-cost`, `5-prompt-size` and `6-oversight-diff` keep their numbers
- * because they are the SAME RULE evaluated on live evidence — `6-oversight-diff` is literally
- * the same `compile` call with the same `baselinePostures`. Everything an `L` prefixes is new
+ * gate and which are new. `5-prompt-size` and `6-oversight-diff` keep their numbers because they
+ * are the SAME RULE evaluated on live evidence — `6-oversight-diff` is literally the same
+ * `compile` call with the same `baselinePostures`.
+ *
+ * `3-cost` KEEPS ITS NUMBER AND IS NOT THE SAME RULE, which is the one place that mapping is
+ * loose and is said here rather than left for a reader to trip on. It is D10.d's cost criterion
+ * in both modes, at the same default ceiling — but the replayed gate divides suite TOTALS
+ * because `EvalReport` has no median to divide, and pairing makes the median expressible, so
+ * here the MEDIAN PAIR gates and the total is reported beside it. Two certificates carrying
+ * `3-cost` are answering the same question with different arithmetic; `mode` on the journaled
+ * row is what tells them apart. See `pairedCostRatio`.
+ *
+ * Everything an `L` prefixes is new
  * or measured differently, and `8-determinism` keeps its number precisely so that its
  * `ran: false` is legible next to the mode that can run it.
  *
@@ -297,15 +524,30 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
   // promoted over them because it MEASURABLY BEAT the baseline", and a bound that merely clears
   // −margin certifies that nothing got worse. A strictly positive lower bound is the difference
   // between "we could not detect harm" and "we detected an improvement".
+  //
+  // TWO BOUNDS, AND BOTH HAVE TO CLEAR 0. A.26's complaint about this rule was that at n = 6 the
+  // t bound assumes roughly symmetric — really, roughly normal — differences, and six
+  // observations cannot check that. The answer is not to argue the assumption is harmless; it is
+  // to require the evidence to survive without it. `wilcoxonLower95` is the same 95 % one-sided
+  // bound with the shape assumption removed, derived from a subset-sum count over the ranks
+  // rather than a t table (see `wilcoxonLowerBound`), and a candidate that clears one bound and
+  // not the other is a candidate whose evidence IS the assumption. Requiring both only ever
+  // refuses more, which is the direction a promotion gate may move on its own.
+  //
+  // It is not a substitute for the t bound and does not replace it: the two bound different
+  // parameters — the mean and the pseudomedian — and both are journaled so a reader can see
+  // which one was tight.
   checks.push({
     id: "L1-paired-improvement",
     ran: paired.n >= 2,
-    pass: paired.n >= 2 && paired.lower95 > 0,
+    pass: paired.n >= 2 && paired.lower95 > 0 && paired.wilcoxonLower95 > 0,
     detail:
       paired.n < 2
         ? `only ${String(paired.n)} pair(s) — no dispersion is estimable, so no bound exists to clear`
         : `paired mean Δscore ${paired.mean.toFixed(4)} (sd ${paired.sd.toFixed(4)}, n ${String(paired.n)}), ` +
-          `one-sided 95% lower bound ${paired.lower95.toFixed(4)} — needs > 0. ` +
+          `one-sided 95% lower bound ${paired.lower95.toFixed(4)} on the mean (Student's t) and ` +
+          `${paired.wilcoxonLower95.toFixed(4)} on the pseudomedian (Wilcoxon signed-rank, no shape assumption) ` +
+          `— both need > 0. ` +
           `Sign test ${String(paired.wins)}W/${String(paired.losses)}L/${String(paired.ties)}T, p ${paired.signTestP.toFixed(4)}`,
   });
 
@@ -409,38 +651,37 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
   });
 
   // REAL MONEY, ON BOTH SIDES. The baseline half is what those recordings actually cost when
-  // they ran; the candidate half is what this command just spent. Same formula and same default
-  // as `3-cost`, and the same weakness: it divides TOTALS where D10.d says medians, so one
-  // expensive input can hide behind a cheap one. The per-pair median is REPORTED by the caller
-  // for a reader to check it against; it is not gated, because a pair whose baseline cost 0
-  // makes the ratio undefined and a check that sometimes has no answer is worse than one clear
-  // rule.
-  const baseCost = input.pairs.reduce((a, p) => a + p.baselineCostUsd, 0);
-  const candCost = input.pairs.reduce((a, p) => a + p.candidateCostUsd, 0);
-  // A RATIO OVER A ZERO BASELINE IS NOT 1, IT IS UNDECIDABLE — and the first version answered
-  // it `1`, which is the passing value. Driven by this lane's reviewer: six pairs at
-  // `baselineCostUsd: 0` and `candidateCostUsd: 100` promoted, reporting "cost ratio 1.00× —
-  // $600.000000 vs $0.000000". A check that invents its own passing answer for the case it
-  // cannot compute is the permissive-branch shape this tree has been caught by repeatedly, and
-  // it sits one function away from the unpriced-route refusal that exists to stop exactly this.
+  // they ran; the candidate half is what this command just spent.
   //
-  // Reported the way `8-determinism` is, and for the same reason: `ran: false` with
-  // `pass: false`, never a bare pass. A consumer folding `checks.every(c => c.pass)` must not
-  // read "I could not measure this" as "this is fine", and the decision is taken over the
-  // checks that RAN, so an undecidable cost does not by itself refuse a promotion the rest of
-  // the gate approves — it refuses to certify a comparison nobody made.
-  const costDecidable = input.pairs.length > 0 && baseCost > 0;
-  const costRatio = baseCost === 0 ? Number.NaN : candCost / baseCost;
+  // THE MEDIAN GATES HERE, WHICH IS THE ONE THING THE REPLAYED `3-cost` CANNOT DO. See
+  // `pairedCostRatio` for the rule and for why every pair now has an answer, the $0-baseline
+  // one included. The total is reported beside it because the two disagreeing is a fact worth
+  // seeing, and because the replayed gate's number is the total — a reader comparing two
+  // certificates should be able to find both.
+  const cost = pairedCostRatio(input.pairs);
+  const totals = `totals ${cost.candidateTotalUsd.toFixed(6)} vs ${cost.baselineTotalUsd.toFixed(6)}`;
+  const unboundedNote =
+    cost.unbounded === 0
+      ? ""
+      : ` ${String(cost.unbounded)} of ${String(cost.n)} pair(s) had a $0 baseline and a paying candidate, which is ` +
+        `an unbounded increase and sorts above every ceiling`;
   checks.push({
     id: "3-cost",
-    ran: costDecidable,
-    pass: costDecidable && costRatio <= maxCost,
+    // `ran` is now decided by whether there is a pair, not by whether the arithmetic worked. A
+    // check that sometimes has no answer is worse than one clear rule — the rule is in
+    // `pairedCostRatio`, and it is total.
+    ran: cost.n > 0,
+    pass: cost.n > 0 && cost.medianRatio !== null && cost.medianRatio <= maxCost,
     detail:
-      input.pairs.length === 0
+      cost.n === 0
         ? "no pair was measured, so nothing was spent to compare"
-        : baseCost === 0
-          ? `DID NOT RUN — the baseline pairs cost $0.000000, so there is no ratio to take. The candidate spent ${candCost.toFixed(6)}. A live cohort that spent nothing is a cohort that called no priced provider; check the models file rather than reading this as a pass`
-          : `cost ratio ${costRatio.toFixed(2)}× (max ${String(maxCost)}×) — ${candCost.toFixed(6)} vs ${baseCost.toFixed(6)}`,
+        : cost.medianRatio === null
+          ? `the MEDIAN pair went from a $0 baseline to a paying candidate, so the typical input's cost ratio is ` +
+            `unbounded and no ceiling contains it (max ${String(maxCost)}×).${unboundedNote}. ${totals}. A live ` +
+            `cohort whose baselines spent nothing is a cohort that called no priced provider; check the models ` +
+            `file rather than reading this as a candidate that got dear`
+          : `median pair cost ratio ${cost.medianRatio.toFixed(2)}× over ${String(cost.n)} pair(s) ` +
+            `(max ${String(maxCost)}×) — ${totals}.${unboundedNote}`,
   });
 
   // The paired MEAN is what buys prompt growth here, where the replayed gate uses its pass-rate

@@ -84,7 +84,7 @@ import {
   scoreTrajectory,
 } from "./evolution/score.ts";
 import { gateCandidate, runEvalSuite, type EvalCase, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
-import { gateCandidateLive, MIN_PAIRED_RUNS, type LivePair, type Unmeasured } from "./evolution/live.ts";
+import { gateCandidateLive, MIN_PAIRED_RUNS, pairedCostRatio, type LivePair, type Unmeasured } from "./evolution/live.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -5058,9 +5058,17 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // is a peer that reached this key by a DIFFERENT route: `foldTrajectory` takes its
         // `graphHash` from `graph.mutated` when there is one, while the spec is looked up by
         // `run.submitted`'s hash, so two runs of two different authored graphs that mutate to the
-        // same successor share a key and need not share a lookup. Stated rather than asserted:
-        // this branch has no end-to-end coverage, and `test/evolution/score.test.ts` covers the
-        // arithmetic it guards. THE VERDICT HALF IS NOT SO RARE: a peer resolves its graph and
+        // same successor share a key and need not share a lookup.
+        //
+        // NO LONGER STATED — DRIVEN. This comment used to end "this branch has no end-to-end
+        // coverage", and the fixture that closed that (`test/cli/evolution-score.test.ts`, "A
+        // PEER CAN REACH THIS COHORT BY MUTATION AND NOT BY PUBLICATION") found the branch
+        // reachable AND its message wrong: it printed the peer's folded hash, which in this
+        // state is the judged run's own published graph, and told the operator to publish it.
+        // The route is real and narrow — `compileMutation` on a graph that is a prefix of
+        // another produces the other's hash exactly, so a run of the unpublished parent adopts
+        // the published child's hash and joins its cohort. `unmeasuredNotes` names the AUTHORED
+        // hash now. THE VERDICT HALF IS NOT SO RARE: a peer resolves its graph and
         // still comes back unmeasured whenever its evaluator's verdict outgrew the journal, which
         // is why the sentence is chosen by `unmeasuredNotes` and not fixed here.
         for (const note of unmeasuredNotes(
@@ -5085,6 +5093,19 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           process.stderr.write(
             `! run ${runId} is "${t.outcome.runStatus}", not succeeded — its outcome is 0 because it has not finished, ` +
               `which is a different fact from having finished badly. Re-score it once it is terminal.\n`,
+          );
+        }
+        // A SATURATED COHORT IS NOT A BAD SCORE, IT IS AN ABSENT RANKING, and the person at the
+        // terminal is reading a number. `goldenBlockers` carries condition 2's full sentence into
+        // the journal, so this adds no fact the row does not have — it puts the fact where it is
+        // read, the same bargain the `!completed` note above makes.
+        if (cohort.n > 0 && cohort.outcomeSpread === 0) {
+          process.stderr.write(
+            `! this cohort's ${String(cohort.n)} member(s) all scored the same on the signal ladder, so p90Score ` +
+              `${cohort.p90Score.toFixed(3)} ranks cost, latency and gates and nothing else — every one of which ` +
+              `pays a run for doing LESS work. The golden verdict refuses the rank rather than crowning the ` +
+              `cheapest run; the score itself is still the measured one. fix: give this workflow a signal that ` +
+              `varies — an evaluator{kind:"assertion"} node scores k/n rather than pass/fail.\n`,
           );
         }
         const payload: EventPayloads["evolution.scored"] = {
@@ -5479,9 +5500,25 @@ function unmeasuredNotes(
   const notes: string[] = [];
   const noGraph = members.filter((m) => !m.specResolved && m.verdictsResolved);
   if (noGraph.length > 0) {
+    // THE HASH A READER CAN ACT ON IS THE AUTHORED ONE, and this line used to print the other.
+    // A spec is looked up by `run.submitted.graphHash`; `Trajectory.graphHash` folds
+    // `graph.mutated` over it. In the ONE state that reaches this branch those two differ by
+    // construction — a peer joins this cohort by mutating INTO its graphHash, which is why its
+    // own spec was never looked for under that name — so the note named a graph the operator
+    // has, and told them to publish it. Measured on the fixture in
+    // `test/cli/evolution-score.test.ts`: the peer's authored hash was the parent and the line
+    // printed `sha256:71eb5ad4…`, the successor, which is the JUDGED RUN'S OWN published graph.
+    const authored = [...new Set(noGraph.map((m) => m.authoredGraphHash))].sort().join(", ");
+    const mutated = noGraph.filter((m) => m.authoredGraphHash !== m.graphHash);
     notes.push(
-      `! ${String(noGraph.length)} ${noun} in this cohort folded without their graph (${hashesOf(noGraph)}) and ` +
-        `${consequence} Publish those graphs in ${graphsDir} to put them back in the cohort.\n`,
+      `! ${String(noGraph.length)} ${noun} in this cohort folded without their graph (${authored}) and ` +
+        `${consequence} Publish those graphs in ${graphsDir} to put them back in the cohort.` +
+        (mutated.length === 0
+          ? ""
+          : ` ${String(mutated.length)} of them reached this cohort by MUTATING into it — they were submitted ` +
+            `under the hash above and appended graph.mutated, so the cohort's own ${hashesOf(mutated)} is the ` +
+            `SUCCESSOR and is not what to publish.`) +
+        `\n`,
     );
   }
   const noVerdict = members.filter((m) => !m.verdictsResolved);
@@ -6336,13 +6373,6 @@ function gateShapeOf(events: readonly JournalEvent[]): { status: string; decided
   return { status: p.status, decidedNodes, unresolved };
 }
 
-/** The middle value, or `null` when there is nothing to take a median of. */
-function medianOf(xs: readonly number[]): number | null {
-  if (xs.length === 0) return null;
-  const sorted = [...xs].sort((a, b) => a - b);
-  return sorted[Math.floor((sorted.length - 1) / 2)]!;
-}
-
 /**
  * JUDGE A CANDIDATE BY RUNNING IT, on inputs that predate it.
  *
@@ -6630,10 +6660,14 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     process.stdout.write(`${c.ran ? (c.pass ? "✓" : "✗") : "⊘"} ${c.id.padEnd(26)} ${c.detail}\n`);
   }
 
-  // REPORTED, NOT GATED — see `3-cost` in `evolution/live.ts`. D10.d asks for a ratio of
-  // MEDIANS and the replayed gate cannot express one; pairing makes it expressible, and it is
-  // put on the page for a reader to check the gated ratio of totals against.
-  const medianCostRatio = medianOf(pairs.filter((p) => p.baselineCostUsd > 0).map((p) => p.candidateCostUsd / p.baselineCostUsd));
+  // GATED, NOT MERELY REPORTED — and it is `3-cost` in `evolution/live.ts` that gates it, which
+  // is why this line no longer computes a median of its own. It used to: the same statistic was
+  // derived here for the journal row and derived again nowhere for the decision, with a filter
+  // (`baselineCostUsd > 0`) silently dropping the pairs that had no answer. `pairedCostRatio` is
+  // the single definition, its rule covers those pairs instead of dropping them, and the row and
+  // the verdict now cannot disagree because they are the same call.
+  const cost = pairedCostRatio(pairs);
+  const medianCostRatio = cost.medianRatio;
 
   const decision = {
     // THE FIRST FIELD, AND THE ONE THAT STOPS A LIVE VERDICT IMPERSONATING A REPLAYED ONE.

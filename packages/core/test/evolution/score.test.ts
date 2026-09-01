@@ -57,6 +57,7 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
   return {
     runId: "run_1" as RunId,
     graphHash: "h",
+    authoredGraphHash: "h",
     cohort: { workflow: "w", graphHash: "h", tenantTier: "default", inputBucket: "b" },
     steps: [],
     outcome: signals(),
@@ -79,6 +80,11 @@ const cohort = (over: Partial<CohortStats> = {}): CohortStats => ({
   p50Wall: 250,
   p50Gates: 0,
   p90Score: 0.5,
+  // A HAND-BUILT COHORT IS RANKABLE BY DEFAULT. `outcomeSpread` 0 makes `isGolden` condition 2
+  // refuse outright (a saturated ladder ranks price), and every fixture below that is about some
+  // OTHER condition would then be testing this one instead. The tests that mean to exercise the
+  // refusal set it to 0 by name.
+  outcomeSpread: 0.5,
   weightsDigest: digest(DEFAULT_WEIGHTS),
   ...over,
 });
@@ -425,13 +431,76 @@ test("AN UNMEASURED PEER IS NOT A MEMBER — it neither counts toward n nor sets
     false,
     "condition 4 refuses the cohort rather than certifying it against a bar of zero",
   );
+  // THIS ASSERTION USED TO READ 30 AND SAY "it has to be condition 4 that stops it, because a
+  // bar of zero is one every member ties". That was true of the code as it stood and is no
+  // longer: condition 2 now refuses an UNRANKABLE cohort by name instead of comparing against a
+  // bar nobody set, and an empty population is the extreme of unrankable. Condition 4 is still
+  // the one that refuses the SIZE — the two are not redundant, they answer different questions —
+  // but 2 no longer certifies a tie against zero on its way past.
   assert.equal(
     specless.filter((m) => isGolden(m, scoreTrajectory(m, none), none).conditions.find((x) => x.id === 2)!.pass).length,
-    30,
-    "…and it has to be condition 4 that stops it, because a bar of zero is one every member ties",
+    0,
+    "a bar of zero is not a bar, and condition 2 says so rather than letting all thirty tie it",
   );
 
   const mixed = measureCohort("k", [...measured.slice(0, 15), ...specless.slice(15)]);
   assert.equal(mixed.n, 15, "n counts runs that were measured, not journal rows");
   assert.equal(Number(mixed.p50Cost.toFixed(4)), 0.008, "and the medians are medians of those");
+});
+
+// ── the rank, and when it stops being one ────────────────────────────────────
+
+test("A SATURATED LADDER RANKS PRICE, AND CONDITION 2 REFUSES RATHER THAN CROWNING THE CHEAPEST", () => {
+  // A.28's own fixture, driven: five runs sharing a cohort, every one approved by a human and
+  // differing only in spend. Measured before the refusal existed —
+  //
+  //     cost      outcome   score
+  //   $0.001         1      0.780   ← condition 2 PASSED: this run is golden for being cheap
+  //   $0.002         1      0.760
+  //   $0.010         1      0.600   ← `costNormalized` clamps at the cohort median, so these
+  //   $0.020         1      0.600     three do not merely rank low, they are indistinguishable
+  //   $0.050         1      0.600
+  //
+  // The ladder said the same thing about all five. What separated them was the 0.4 of the score
+  // that is cost, latency and gates, and every one of those pays a run for doing less.
+  const member = (i: number, costUsd: number): Trajectory =>
+    trajectory({
+      runId: `run_${i}` as RunId,
+      outcome: signals({ humanDecisions: [{ nodeId: n("gate"), decision: "approve", latencyMs: 5 }] }),
+      usage: { costUsd, tokens: 100, wallMs: 1000, modelCalls: 1, toolCalls: 0, subgraphRuns: 0 },
+      policy: { escalations: [], violations: 0, gatesRaised: 1 },
+    });
+  const saturated = [0.001, 0.002, 0.01, 0.02, 0.05].map((c, i) => member(i, c));
+
+  const c = measureCohort("k", saturated);
+  assert.equal(c.outcomeSpread, 0, "every member scored the same on the ladder — that is the fact");
+  const scores = saturated.map((m) => scoreTrajectory(m, c));
+  assert.deepEqual(
+    scores.map((s) => Number(s.score.toFixed(3))),
+    [0.78, 0.76, 0.6, 0.6, 0.6],
+    "the scores are unchanged: the score is not what is wrong, the rank is",
+  );
+  assert.equal(
+    scores.filter((s, i) => isGolden(saturated[i]!, s, c).conditions.find((x) => x.id === 2)!.pass).length,
+    0,
+    "the cheapest run does not get the crown by being cheapest",
+  );
+  assert.match(
+    isGolden(saturated[0]!, scores[0]!, c).conditions.find((x) => x.id === 2)!.detail,
+    /UNRANKABLE/,
+    "and the verdict says WHY, because a refusal nobody can read is a silent pass in slow motion",
+  );
+
+  // AND THE REFUSAL IS ABOUT SATURATION, NOT ABOUT S2. The same five runs with an assertion node
+  // that scores k/n spread over the ladder, and the rank is a rank again.
+  const varied = saturated.map((m, i) => ({
+    ...m,
+    outcome: signals({ assertions: [{ nodeId: n("v"), pass: true }, { nodeId: n("w"), pass: i % 2 === 0 }] }),
+  }));
+  const vc = measureCohort("k", varied);
+  assert.ok(vc.outcomeSpread > 0, `a k/n signal spreads the ladder, got ${vc.outcomeSpread}`);
+  assert.ok(
+    varied.some((m) => isGolden(m, scoreTrajectory(m, vc), vc).conditions.find((x) => x.id === 2)!.pass),
+    "with a signal that varies, somebody clears the bar",
+  );
 });
