@@ -277,17 +277,21 @@ export function compile(input: CompileInput): CompileResult {
   const idx = indexGraph(spec);
   const expansion: ExpansionBudget = { ...DEFAULT_EXPANSION, ...(spec.policy?.expansion ?? {}) };
 
-  // Resolve every ref exactly once, deduped, and sorted — the manifest is part of
-  // the RunGraph, so a stable order keeps two compiles of one spec identical.
-  const manifest = resolveManifest(input);
-
   const plans: Record<NodeId, NodePlan> = {};
   const layoutRanks = computeLayoutRanks(spec, idx);
   // HOISTED ABOVE THE PLAN LOOP, because the class floor now reads it. This is the same map the
   // `RunGraph` carries and `Engine.#runSubgraph` executes from, so the floor a `subgraph` node is
   // given at compile is computed from exactly the child bytes the run will use — not from a
   // second resolver call that could answer differently.
+  //
+  // AND ABOVE THE MANIFEST, which is the newer reason and the load-bearing one — see
+  // `resolveManifest`. The manifest pins the refs of these child specs too, so it cannot be
+  // built until they are collected.
   const subgraphs = resolveSubgraphs(input, expansion);
+
+  // Resolve every ref exactly once, deduped, and sorted — the manifest is part of
+  // the RunGraph, so a stable order keeps two compiles of one spec identical.
+  const manifest = resolveManifest(input, subgraphs);
   const childSpec = (ref: string): GraphSpec | undefined => subgraphs[ref] ?? input.resolver.subgraph?.(ref);
 
   for (const n of spec.nodes) {
@@ -417,15 +421,13 @@ function resolveSubgraphs(input: CompileInput, expansion: ExpansionBudget): Read
   return out;
 }
 
-function resolveManifest(input: CompileInput): readonly ResolvedRef[] {
-  const seen = new Map<string, ResolvedRef>();
-  const push = (ref: string | undefined): void => {
-    if (ref === undefined || seen.has(ref)) return;
-    const resolved = input.resolver.resolve(ref);
-    if (resolved !== undefined) seen.set(ref, resolved);
-  };
-
-  for (const n of input.spec.nodes) {
+/**
+ * Every ref this spec's own nodes name, in one place so the root and a frozen child are walked
+ * identically. The seven sites are `validate.ts`'s `collectRefs` list; the two must agree, or a
+ * ref the validator insisted exists is one the manifest never pinned.
+ */
+function pushRefsOf(spec: GraphSpec, push: (ref: string | undefined) => void): void {
+  for (const n of spec.nodes) {
     push(n.function?.ref);
     push(n.agent?.profile);
     push(n.agent?.prompt);
@@ -437,9 +439,48 @@ function resolveManifest(input: CompileInput): readonly ResolvedRef[] {
   // Guarded like `collectRefs`'s copy: `hooks: {beforeNode: 42}` is caller data, and iterating it
   // returned `E_INTERNAL: TypeError: refs is not iterable` from the compiler. The VALIDATOR
   // refuses that shape, but this runs on the manifest path and must not crash on the way there.
-  for (const refs of Object.values(input.spec.hooks ?? {})) {
+  for (const refs of Object.values(spec.hooks ?? {})) {
     if (Array.isArray(refs)) for (const ref of refs) push(ref);
   }
+}
+
+/**
+ * The pinning rule's own artifact: every ref this Run may read, frozen to a digest.
+ *
+ * **THE CHILD SPECS ARE WALKED TOO, and leaving them out was D7 one level down.** This used to
+ * take `input.spec` alone while `resolveSubgraphs` walked children recursively, so the two
+ * disagreed about what the Run could reach: a parent naming `subgraph/child@stable` pinned that
+ * ref and nothing inside it. The child's own `prompt/…` and `function/…` refs were in neither
+ * the manifest nor `documents`, and `Engine.#compileChild` — which runs during `advance`, while
+ * the parent's Task is executing — falls through `frozenFirst` to the LIVE resolver for anything
+ * the freeze does not hold. Reproduced end to end in ONE process with no restart: a parent
+ * compiled against `prompt/inner@stable` = "INNER PROMPT v1", a `publish` + `promote` to v2
+ * after `submit`, and the model received v2 on a run that reported `succeeded`. Nothing refused,
+ * because nothing was bound — `run.compiled.resolutionManifest` named only the subgraph ref, so
+ * `#assertBound` had no digest to find moved.
+ *
+ * Walking them makes `frozenFirst` serve those refs from the parent's own freeze, which closes
+ * it in `compile.ts` alone. It does NOT touch `graphHash` — that is `digest(spec)` and stays
+ * so — which is the point: the RUN is pinned and the cohort key is not. `evolution/score.ts`'s
+ * `cohortKeyOf` keys on `graphHash`, so two runs of one workflow across a prompt edit stay
+ * comparable, which is what lets the evolution loop measure a prompt candidate at all.
+ *
+ * BOUNDED BY WHAT `resolveSubgraphs` COLLECTED, deliberately, rather than by a second walk of
+ * its own. That map is already the root's `expansion.maxDepth` truncation of the tree, and it is
+ * the exact set of child specs the `RunGraph` carries — so the manifest pins the refs of the
+ * children the Run will actually execute from, and a deeper child that `#compileChild` falls
+ * back to the live resolver for is one this compile never froze either.
+ */
+function resolveManifest(input: CompileInput, subgraphs: Readonly<Record<string, GraphSpec>>): readonly ResolvedRef[] {
+  const seen = new Map<string, ResolvedRef>();
+  const push = (ref: string | undefined): void => {
+    if (ref === undefined || seen.has(ref)) return;
+    const resolved = input.resolver.resolve(ref);
+    if (resolved !== undefined) seen.set(ref, resolved);
+  };
+
+  pushRefsOf(input.spec, push);
+  for (const child of Object.values(subgraphs)) pushRefsOf(child, push);
 
   return [...seen.values()].sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0));
 }

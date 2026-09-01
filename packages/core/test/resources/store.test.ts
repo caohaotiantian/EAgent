@@ -12,6 +12,11 @@ import assert from "node:assert/strict";
 import { ResourceStore, parseRef } from "../../src/resources/store.ts";
 import { EVOLUTION_ACTOR, type PolicyActor } from "../../src/run/policy.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
+import type { GraphSpec } from "../../src/graph/spec.ts";
+import { Engine } from "../../src/run/engine.ts";
+import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { InProcessEventBus } from "../../src/bus.ts";
+import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { DOCS, SKELETON_TOOLS, SKELETON_TENANT_CAPS, harness, skeletonSpec } from "../run/skeleton.ts";
 
 const HUMAN: PolicyActor = { kind: "human", id: "u:alice" };
@@ -333,6 +338,125 @@ test("THE PINNING RULE — publishing and promoting mid-run cannot affect an in-
   // A NEW compile picks up the new version — that is the whole point of a selector.
   const next = compileOrThrow({ spec: skeletonSpec(), resolver: s, tools: SKELETON_TOOLS, tenantCapabilities: SKELETON_TENANT_CAPS });
   assert.equal(next.resolutionManifest.find((r) => r.ref === "prompt/summarize-file@stable")?.digest, v2.digest);
+});
+
+/**
+ * THE SAME RULE ONE LEVEL DOWN, which is where it did not hold — D7 / G.5.
+ *
+ * The test above pins a ref the ROOT spec names. `resolveManifest` used to walk only that spec
+ * while `resolveSubgraphs` walked children recursively, so the two disagreed about what the Run
+ * could reach: a parent naming `subgraph/child@stable` pinned that ref and nothing inside it.
+ *
+ * That is not a gap that waits for a restart. `Engine.#compileChild` runs during `advance`,
+ * while the parent's Task is executing, and `frozenFirst` falls through to the LIVE resolver for
+ * any ref the freeze does not hold — so a promotion landing between `submit` and `advance`
+ * reached a running node. Measured before the fix: the model was sent v2 and the run reported
+ * `succeeded`. Nothing refused, and nothing could have: `run.compiled.resolutionManifest` named
+ * only the subgraph ref, so `#assertBound` had no moved digest to find.
+ *
+ * The assertion that matters is the LAST one — what the model was actually sent. The manifest
+ * check above it is the mechanism; the prompt is the consequence, and only the consequence says
+ * the run did what it was compiled to do.
+ */
+test("THE PINNING RULE REACHES INTO A SUBGRAPH — a child's prompt is frozen with the parent's", async () => {
+  const s = store();
+  const v1 = s.publish({ kind: "prompt", name: "inner", content: "INNER v1", actor: HUMAN });
+  s.promote(v1, "canary", HUMAN);
+  s.promote(v1, "stable", HUMAN);
+
+  const childSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "child", project: "pinning", version: 1 },
+    channels: { t: { type: "string", reduce: "replace" }, d: { type: "string", reduce: "replace" } },
+    inputs: ["t"],
+    outputs: ["d"],
+    nodes: [
+      {
+        id: "inner",
+        type: "agent",
+        reads: ["t"],
+        writes: ["d"],
+        agent: { profile: "agent_profile/default@stable", prompt: "prompt/inner@stable" },
+      },
+    ],
+    edges: [],
+  } as unknown as GraphSpec;
+  const sub = s.publish({ kind: "subgraph", name: "child", content: childSpec, actor: HUMAN });
+  s.promote(sub, "canary", HUMAN);
+  s.promote(sub, "stable", HUMAN);
+
+  const parentSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "parent", project: "pinning", version: 1 },
+    channels: { t: { type: "string", reduce: "replace" }, d: { type: "string", reduce: "replace" } },
+    inputs: ["t"],
+    outputs: ["d"],
+    nodes: [
+      {
+        id: "call",
+        type: "subgraph",
+        reads: ["t"],
+        writes: ["d"],
+        subgraph: { ref: "subgraph/child@stable", inputs: { t: "t" }, outputs: { d: "d" } },
+      },
+    ],
+    edges: [],
+  } as unknown as GraphSpec;
+
+  const graph = compileOrThrow({ spec: parentSpec, resolver: s, tools: {}, tenantCapabilities: [] });
+  // THE MECHANISM: the parent's own manifest names the child's ref, so `frozenFirst` can serve
+  // it and `#compileChild` never reaches the live store for it.
+  assert.equal(
+    graph.resolutionManifest.find((r) => r.ref === "prompt/inner@stable")?.digest,
+    v1.digest,
+    "a child's prompt belongs to the parent's manifest — it is a ref the Run reads",
+  );
+  assert.equal(graph.documents["prompt/inner@stable"], "INNER v1", "and its bytes travel with the pin");
+
+  const sent: string[] = [];
+  const models = new ModelRegistry();
+  models.register(
+    new MockModelAdapter({
+      script: (req) => {
+        sent.push(req.system ?? "");
+        return { text: JSON.stringify({ d: "done" }), finishReason: "stop" };
+      },
+      pricePerMTok: 0,
+    }),
+    true,
+  );
+  const now = (): number => 1_700_000_000_000;
+  const journal = new MemoryStateStore({ now });
+  const engine = new Engine({
+    store: journal,
+    bus: new InProcessEventBus({ store: journal }),
+    tools: new ToolRegistry(),
+    functions: new FunctionRegistry(),
+    models,
+    now,
+    resolver: s,
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 100 } },
+  });
+
+  const runId = await engine.submit({ graph, inputs: { t: "hello" } });
+
+  // The world moves on AFTER the run is journalled and BEFORE the child is compiled.
+  const v2 = s.publish({ kind: "prompt", name: "inner", content: "INNER v2 — EDITED", actor: HUMAN });
+  s.promote(v2, "canary", HUMAN);
+  s.promote(v2, "stable", HUMAN);
+  assert.equal(s.resolve("prompt/inner@stable")?.digest, v2.digest, "the selector moved");
+
+  const p = await engine.advance(runId); // `#compileChild` runs HERE
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+
+  // THE CONSEQUENCE. Before the fix this read "INNER v2 — EDITED".
+  assert.equal(sent.length, 1);
+  assert.ok(
+    sent[0]!.startsWith("INNER v1"),
+    `the child ran on the promoted prompt: ${JSON.stringify(sent[0])}`,
+  );
 });
 
 test("cache invalidation is a non-problem: digests are immutable, so entries are never stale", () => {
