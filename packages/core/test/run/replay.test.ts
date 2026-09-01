@@ -104,7 +104,15 @@ test("replay consumes every recorded effect — nothing left over", async () => 
     engine: { tools: h.engine.tools, functions: h.engine.functions, models: h.engine.models, policy: { granted: ["fs:read", "fs:write"] } },
   });
   assert.deepEqual(report.unservedEffects, [], "an unserved effect means the graph changed");
-  assert.equal(report.hermetic, true);
+  // `hermetic` is FALSE here and that is the honest answer, not a regression: this harness
+  // hand-registers its `function` bodies as host closures, so the runtime cannot vouch for what
+  // they do when a replay re-executes them, and `liveBodies` names them. It read `true` until
+  // `Engine.#functionBody` gained its `bodyEntered` call, because the third conjunct had no
+  // producer. The subject of THIS test is `unservedEffects`; the two conjuncts it does own are
+  // named directly, so a report going non-hermetic for some OTHER reason would still be caught:
+  // `liveBodies` has to be the thing that is non-empty.
+  assert.equal(report.liveBodies.length > 0, true, "a hand-registered body must be named in liveBodies");
+  assert.equal(report.hermetic, false);
 });
 
 test("replay serves the recorded human decision rather than re-asking", async () => {
@@ -608,9 +616,12 @@ test("A MODIFIED GRAPH DOES NOT REPLAY GREEN — the recorded results belong to 
   const report = await replayRun({ store: h.store, runId, graph: tampered, engine: REPLAY_ENGINE(h) });
 
   // Everything that used to be the whole verdict still says "fine": every recorded effect
-  // was consumed, every outcome was known, and every task and channel matched.
+  // was consumed, every outcome was known, and every task and channel matched. `hermetic` is
+  // false only because this harness hand-registers its bodies — see the note in "replay consumes
+  // every recorded effect" — so the conjuncts THIS test is about are asserted directly, and the
+  // point stands: nothing in the effect ledger noticed that the graph had been swapped.
   assert.deepEqual(report.unservedEffects, [], "the changed graph consumed the same effect keys");
-  assert.equal(report.hermetic, true);
+  assert.equal(report.liveBodies.length > 0, true, "hermetic is false for the body reason, not the graph one");
 
   assert.equal(report.match, false, "a replay against a graph that did not produce these results is a divergence");
   assert.equal(report.graph.recorded, graph.graphHash);

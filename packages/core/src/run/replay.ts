@@ -411,7 +411,9 @@ export interface ReplayReport {
    * taskIds sends its reader to the wrong file — the same argument `unservedEffects` makes one
    * field up, and the reason `loom replay` prints frames rather than a verdict.
    *
-   * ALWAYS EMPTY IN THIS TREE. Nothing calls `bodyEntered` yet; see `hermetic` below.
+   * `Engine.#functionBody` is the sole producer and records at FETCH, before the body runs, so a
+   * body that throws still counts as having run. `test/run/hermetic-names-the-live-bodies.test.ts`
+   * pins that there is exactly one caller.
    */
   readonly liveBodies: readonly string[];
   /**
@@ -434,19 +436,17 @@ export interface ReplayReport {
    * guard answering its undecidable case with the passing value, inside the one field the replay
    * thesis is quoted by. "A body ran live" was not expressible over the terms the report had.
    *
-   * AND IT IS STILL NOT FALSIFIABLE ON THIS TREE, WHICH IS WHY THE ADMISSION STAYS. The term
-   * exists and the brand behind it exists (`resources/realm.ts`'s `isRealmBounded`), but nothing
-   * in `src/` calls `ReplayEffects.bodyEntered`, so `liveBodies` is `[]` on every run and this
-   * field means exactly what it meant before: `function` and assertion bodies never appear in
-   * `unknownOutcomes` and `hermetic` stays true while they re-execute — measured alongside
-   * `match: false` on a body calling `Math.random()`. Two lines, both outside this change, close
-   * it: `Engine.#functionBody` must call `bodyEntered(taskId, isRealmBounded(body))` at fetch
-   * time, and `resources/functions.ts` must carry the brand onto the `FunctionBody` it wraps
-   * around `compileRealm`'s `RealmCall` — measured, `isRealmBounded` is `true` on the realm call
-   * and `false` on the loader's wrapper, so today every function body would read as unvouched-for.
-   * Publishing the field early is deliberate: `test/run/hermetic-names-the-live-bodies.test.ts`
-   * pins the un-wired state, so the day either line lands the census goes red and its author is
-   * sent here to delete this paragraph rather than left to discover it.
+   * IT IS FALSIFIABLE NOW, and the two lines this paragraph used to name are both written.
+   * `Engine.#functionBody` calls `bodyEntered(taskId, isRealmBounded(body))` at fetch, and
+   * `resources/functions.ts` carries the realm's brand onto the wrapper it returns — without the
+   * second, `isRealmBounded` was `true` on the `RealmCall` and `false` on the closure the engine
+   * actually holds, so every body read as unvouched-for and a term false for everything
+   * distinguishes nothing. The device worked as designed: the census in
+   * `test/run/hermetic-names-the-live-bodies.test.ts` asserted the un-wired state, went red the
+   * moment the wiring landed, and sent its author here. It now asserts one caller, and the paired
+   * proving test beside it drives both answers from real runs — a hand-registered host closure
+   * replays `hermetic: false` naming its taskId, and the same graph loaded from a `ResourceStore`
+   * replays `hermetic: true`.
    *
    * WHAT `hermetic: true` WILL MEAN, once wired, and it is narrower than it reads: "no body ran
    * that the runtime could not vouch for", not "nothing nondeterministic happened". A branded

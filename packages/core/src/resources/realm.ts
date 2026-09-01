@@ -914,6 +914,31 @@ export function isRealmBounded(fn: unknown): boolean {
 }
 
 /**
+ * Carry an existing brand onto a wrapper. **It cannot mint one**, and that is the whole design.
+ *
+ * A loader does not hand the engine the `RealmCall` this module branded — it hands back a
+ * closure wrapping it, to translate a vm timeout into `E_TASK_TIMEOUT` and to build the payload.
+ * So `isRealmBounded` was `true` on the realm call and `false` on the thing the engine actually
+ * invokes, and every function body read as unvouched-for. That is the fail-closed direction and
+ * therefore survivable, but it makes the answer useless: a term that is false for everything
+ * distinguishes nothing.
+ *
+ * `from` must ALREADY be in the set. There is no argument to this function that adds a value to
+ * `REALM_BOUND` on its own, so the only way in is still `compileRealm` deciding it, and a
+ * wrapper is bounded exactly when the thing it wraps is. `REALM_BOUND` stays module-private and
+ * the brand stays unforgeable — the property `hermetic` rests on, since a body that could brand
+ * itself could vouch for itself.
+ *
+ * Returns `to` so it reads as a pass-through at the call site.
+ */
+export function carryRealmBrand<T>(from: unknown, to: T): T {
+  if (typeof from === "function" && REALM_BOUND.has(from) && typeof to === "function") {
+    REALM_BOUND.add(to as unknown as object);
+  }
+  return to;
+}
+
+/**
  * `intoHostRealm` — rebuild a value using the HOST's intrinsics, or refuse it. This block is the
  * argument for both halves; the machinery follows it.
  *

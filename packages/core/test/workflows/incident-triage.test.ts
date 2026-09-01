@@ -385,7 +385,18 @@ test("the whole run replays with ZERO model calls and zero side effects", async 
   });
 
   assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match).slice(0, 3), null, 2));
-  assert.equal(report.hermetic, true, "no unknown-outcome effect, so the replay is exact");
+  // `hermetic` is FALSE, and the reason is a fact about this rig rather than about the replay:
+  // `rig()` hand-registers every `function` body as a host closure, so the runtime cannot vouch
+  // for what they do when the replay re-executes them and `liveBodies` names them. The claim this
+  // line was making — "no unknown-outcome effect, so the replay is exact" — is about the effect
+  // ledger, and that is asserted directly below and by `unservedEffects`.
+  //
+  // WORTH KNOWING, because it is what this assertion moving revealed: the flagship workflow test
+  // does NOT exercise the product's own function-loading path. A graph run from `examples/` gets
+  // its bodies from a `ResourceStore`, which brands them, and replays `hermetic: true`; this rig
+  // substitutes closures for speed. Both are legitimate, but only one is the path a user takes.
+  assert.equal(report.liveBodies.length > 0, true, "the hand-registered bodies must be named");
+  assert.equal(report.hermetic, false, "hermetic must be false for the body reason, not another");
   assert.deepEqual(report.unservedEffects, [], "every recorded effect was consumed");
   assert.deepEqual(shadow.restarts, [], "the pod was NOT restarted a second time");
   assert.deepEqual(shadow.calls, [], "and no tool body ran at all — every result came from the journal");

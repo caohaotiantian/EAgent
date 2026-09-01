@@ -293,14 +293,14 @@ test("AND NO SYMBOL A CALLER CAN NAME BUYS IT EITHER — the `Symbol.for` route 
   assert.equal(isRealmBounded(spoof), false, "a symbol a caller can name bought the brand");
 });
 
-test("THE LOADER'S WRAPPER IS NOT BRANDED — measured, and it is why the wiring is unfinished", () => {
-  // This is the second of the two missing lines, asserted rather than asserted-about. D.9's shape
-  // says to stamp "the body it returns", but `compileRealm` returns a `RealmCall` and both loaders
-  // return a CLOSURE OVER it — which is the object `Engine.#functionBody` holds. So the brand does
-  // not reach the call site that would read it.
+test("THE LOADER'S WRAPPER CARRIES THE BRAND — the last hop, which is the one that was missing", () => {
+  // `compileRealm` brands a `RealmCall`; both loaders return a CLOSURE OVER it, and that closure
+  // is what `Engine.#functionBody` holds. So the brand stopped one hop short of the only site
+  // that reads it, and every function body answered `false` — fail-closed, and useless, because
+  // a term false for everything distinguishes nothing.
   //
-  // When `functions.ts` carries the brand across, this assertion flips and its author is sent to
-  // `ReplayReport.hermetic` to delete the paragraph that says the field is still inert.
+  // `carryRealmBrand` propagates and cannot mint: `body` is bounded exactly when `call` is, and
+  // `REALM_BOUND` stays module-private, so the unforgeability the tests above pin is untouched.
   const store = new ResourceStore({ now: () => 1 });
   const ref = store.publish({ kind: "function", name: "b", content: `(v, c) => ({})`, actor: ACTOR });
   store.promote(ref, "canary", ACTOR);
@@ -309,8 +309,8 @@ test("THE LOADER'S WRAPPER IS NOT BRANDED — measured, and it is why the wiring
   assert.ok(body !== undefined);
   assert.equal(
     isRealmBounded(body),
-    false,
-    "functions.ts now carries the brand onto its wrapper — rewrite ReplayReport.hermetic's docstring",
+    true,
+    "the loader's wrapper lost the brand — every function body would read as unvouched-for again",
   );
 });
 
@@ -357,13 +357,10 @@ test("A REPLAY THAT RE-EXECUTED AN UNVOUCHED-FOR BODY REPORTS `hermetic: false` 
   // model as the fix certifies the model, not the mechanism. This one reads `hermetic` off a
   // report `replayRun` produced, so the mutation goes red.
   //
-  // WHAT IS REAL AND WHAT IS A STAND-IN, stated because the difference is the remaining gap.
-  // Real: the run, the journal, the graph, the `replayRun` call, the body (a host closure), its
-  // `taskId` (taken from the recorded projection), the `isRealmBounded` answer, and the
-  // `hermetic` expression under test. A stand-in: the CALL SITE. Nothing in `src/` calls
-  // `bodyEntered` yet — the census below pins that — so the one thing this test supplies is the
-  // invocation `Engine.#functionBody` will make, with both of its arguments computed for real.
-  // When that line lands, delete the `fromStore` patch and this test keeps its assertions.
+  // NOTHING IS A STAND-IN ANY MORE. This test used to patch `ReplayEffects.fromStore` to supply
+  // the call `Engine.#functionBody` would one day make; that line has landed, so the patch is
+  // gone and the assertions are unchanged — which is the outcome the old comment predicted and
+  // the reason it was written that way.
   const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
   const resources = new ResourceStore({ now: () => 1 });
   const body: FunctionBody = () => ({ writes: { out: "constant" } });
@@ -394,37 +391,55 @@ test("A REPLAY THAT RE-EXECUTED AN UNVOUCHED-FOR BODY REPORTS `hermetic: false` 
 
   const opts = { store, runId, graph, engine: { tools: new ToolRegistry(), functions, models: new ModelRegistry() } };
 
-  // THE CONTROL, FIRST AND FROM THE SAME JOURNAL. Without it "hermetic is false" is satisfiable
-  // by a replay that diverged for some other reason, and the claim "because of the body" would
-  // rest on nothing.
-  const control = await replayRun(opts);
-  assert.equal(control.match, true, JSON.stringify(control.frames.filter((f) => !f.match)));
-  assert.deepEqual(control.liveBodies, []);
-  assert.equal(control.hermetic, true, "the baseline replay was already non-hermetic");
+  const report = await replayRun(opts);
 
-  const original = ReplayEffects.fromStore;
-  let entered: string | undefined;
-  ReplayEffects.fromStore = async (s, r) => {
-    const e = await original.call(ReplayEffects, s, r);
-    // Both arguments computed, not asserted: the body is the one the replay's own registry will
-    // hand the engine, and the taskId is the one the recording holds.
-    entered = taskIds[0]!;
-    e.bodyEntered(entered, isRealmBounded(functions.require("function/host@stable")));
-    return e;
-  };
-  let report;
-  try {
-    report = await replayRun(opts);
-  } finally {
-    ReplayEffects.fromStore = original;
-  }
-
-  // EVERYTHING ELSE AGREED. Same journal, same graph, same registry as the control — so `match`
-  // is still true and `hermetic` moved for exactly one reason, which is the reason it names.
+  // EVERYTHING ELSE AGREED — same journal, same graph, same registry — so `hermetic` moved for
+  // exactly one reason, which is the reason it names.
   assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match)));
   assert.deepEqual(report.unservedEffects, []);
-  assert.deepEqual(report.liveBodies, [entered], "the report did not name the body it could not vouch for");
+  assert.deepEqual(report.liveBodies, taskIds, "the report did not name the body it could not vouch for");
   assert.equal(report.hermetic, false, "a body the runtime could not vouch for did not falsify hermetic");
+});
+
+test("AND THE PAIR: the same graph loaded from a ResourceStore replays `hermetic: true`", async () => {
+  // THE OTHER HALF, and without it the test above is satisfiable by a `hermetic` that is simply
+  // always false. Identical in every respect except that no body is hand-registered, so the
+  // loader supplies one and `carryRealmBrand` has put the realm's brand on it.
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const resources = new ResourceStore({ now: () => 1 });
+  const published = resources.publish({
+    kind: "function",
+    name: "host",
+    content: `(v, c) => ({ writes: { out: "constant" } })`,
+    actor: ACTOR,
+  });
+  resources.promote(published, "canary", ACTOR);
+  resources.promote(published, "stable", ACTOR);
+  const loader = createFunctionLoader({ store: resources });
+  const functions = new FunctionRegistry({ loader: (ref) => loader.load(ref) });
+  const graph = compileOrThrow({ spec: oneFunctionNode(), resolver: resources, tools: {}, tenantCapabilities: [] });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus(),
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    resolver: resources,
+    now: () => 1_700_000_000_000,
+  });
+  const runId = await engine.submit({ graph, inputs: {} });
+  const recorded = await engine.advance(runId);
+  assert.equal(recorded.status, "succeeded", JSON.stringify(recorded.error ?? {}));
+
+  const report = await replayRun({
+    store,
+    runId,
+    graph,
+    engine: { tools: new ToolRegistry(), functions, models: new ModelRegistry() },
+  });
+  assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match)));
+  assert.deepEqual(report.liveBodies, [], "a loader-supplied body should carry the realm's brand");
+  assert.equal(report.hermetic, true, "a branded body made the replay report non-hermetic");
 });
 
 test("ONE UNVOUCHED-FOR BODY IS ENOUGH — the conjunct is an AND, not a majority", () => {
@@ -463,22 +478,23 @@ function code(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 }
 
-test("NOTHING IN `src/` CALLS `bodyEntered` YET — so `hermetic`'s third term is inert", () => {
-  // Read this failing as GOOD NEWS and then finish the job: the term now has a producer, so
-  // `ReplayReport.hermetic` and `ReplayEffects.liveBodies` both carry a paragraph saying it does
-  // not, and both are now false. Delete them, and replace this census with D.9's pair — a
-  // hand-registered body giving `hermetic: false` with its taskId in `liveBodies`, and the same
-  // graph loaded from a `ResourceStore` giving `hermetic: true`.
+test("`bodyEntered` HAS EXACTLY ONE CALLER IN `src/`, and it is the fetch site", () => {
+  // THIS CENSUS FIRED, WHICH IS WHAT IT WAS FOR. It used to assert the set was EMPTY and to say
+  // "read this failing as good news and then finish the job" — naming the two lines to write and
+  // the two paragraphs to delete. All four landed, and the paired proving test above replaced the
+  // `fromStore` patch this file used to need. Kept, inverted, because the question is still worth
+  // asking: `hermetic` means "no body ran that the runtime could not vouch for", and a SECOND
+  // caller would be a second definition of what "ran" means. One site, at fetch, before the body
+  // is invoked — so a body that throws still counts as having run, which is the honest reading.
   //
   // The declaration in `run/replay.ts` is not a call, so it is excluded by matching the call
-  // shape `bodyEntered(` preceded by a `.` — which is how every caller must spell it.
+  // shape `.bodyEntered(` — which is how every caller must spell it.
   const callers = sources()
     .filter(([, text]) => /\.bodyEntered\s*\(/.test(code(text)))
     .map(([rel]) => rel);
   assert.deepEqual(
     callers,
-    [],
-    "bodyEntered now has a caller — rewrite ReplayReport.hermetic and ReplayEffects.liveBodies, " +
-      "and replace this census with the paired proving test D.9 names",
+    ["run/engine.ts"],
+    "the producer for hermetic's third conjunct moved, or gained a second definition of `ran`",
   );
 });

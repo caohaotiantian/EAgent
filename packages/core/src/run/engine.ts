@@ -137,6 +137,7 @@ import {
   type TaskRecord,
   type TaskState,
 } from "./projection.ts";
+import { isRealmBounded } from "../resources/realm.ts";
 import {
   FunctionRegistry,
   ModelRegistry,
@@ -4145,18 +4146,25 @@ export class Engine {
    *   - a hand-registered body — host code, no realm, nothing to bound. Returned unchanged, and
    *     `timeoutMs` bounds its Task's outcome and not the body. That is A13.
    */
-  #functionBody(ref: string, node: NodeSpec): FunctionBody {
+  #functionBody(ref: string, node: NodeSpec, taskId: TaskId): FunctionBody {
     const body = this.functions.require(ref);
     const rebind = (body as Rebindable)[REBIND_DEADLINE];
     // `> 0` and not `!== undefined`: `vm` rejects a non-positive timeout outright, and a graph
     // that declared one would lose the 30s default as well.
     const ms = node.timeoutMs;
-    if (rebind === undefined || ms === undefined || !(ms > 0)) return body;
-    return rebind(ms);
+    const bound = rebind === undefined || ms === undefined || !(ms > 0) ? body : rebind(ms);
+    // THE PRODUCER FOR `ReplayReport.hermetic`'s THIRD CONJUNCT, and it is recorded HERE — at
+    // fetch, before the body runs — because the question is "what did this replay re-execute
+    // that it could not vouch for", and a body that throws still ran. `replay.ts` wrote this
+    // wiring down as the two lines that would close it; this is one, and the loader carrying
+    // the brand onto its wrapper is the other. `#replay` is undefined on a live run, so nothing
+    // outside a replay pays for it.
+    this.#replay?.bodyEntered(String(taskId), isRealmBounded(bound));
+    return bound;
   }
 
   async #runFunction(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
-    const body = this.#functionBody(w.node.function!.ref, w.node);
+    const body = this.#functionBody(w.node.function!.ref, w.node, w.task.taskId);
     const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
     const raw = (await body(view, {
       taskId: w.task.taskId,
@@ -4356,7 +4364,7 @@ export class Engine {
   async #runEvaluator(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> {
     const ev = w.node.evaluator!;
     if (ev.kind === "assertion") {
-      const body = this.#functionBody(ev.ref, w.node);
+      const body = this.#functionBody(ev.ref, w.node, w.task.taskId);
       const view = viewFor(p, ctx.graph.spec.channels, w.task.branch, w.node.reads ?? []);
       // THE SAME CONTRACT, THE SAME CHECK. An `assertion` evaluator's ref IS a function body,
       // and this arm read `out.writes` exactly as `#runFunction` did — so the identical authoring

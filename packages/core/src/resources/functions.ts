@@ -118,7 +118,7 @@
  */
 
 import { CODES, err } from "../errors.ts";
-import { compileRealm, sourceOf } from "./realm.ts";
+import { carryRealmBrand, compileRealm, sourceOf } from "./realm.ts";
 import type { Digest } from "../canonical.ts";
 import type { FunctionBody } from "../run/registry.ts";
 import type { ResourceRef } from "../graph/spec.ts";
@@ -531,6 +531,10 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
     const rebind: Rebindable[typeof REBIND_DEADLINE] = (ms) =>
       ms === callTimeoutMs ? body : compile(digest, source, label, ms);
     Object.defineProperty(body, REBIND_DEADLINE, { value: rebind, enumerable: false });
+    // The engine invokes THIS, not `call`, so the brand has to travel the last hop or every
+    // function body reads as unvouched-for and `hermetic`'s third term distinguishes nothing.
+    // `carryRealmBrand` propagates and cannot mint: `body` is bounded exactly when `call` is.
+    carryRealmBrand(call, body);
     cache.set(key, body);
     return body;
   };
